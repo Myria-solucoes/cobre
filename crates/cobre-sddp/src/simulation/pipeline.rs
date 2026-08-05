@@ -235,9 +235,11 @@ fn build_row_lower_unscaled<'a>(
 
 /// Stage identifiers bundled for `solve_simulation_stage`.
 struct SimStageIds {
-    /// Stage index (0-based).
+    /// Stage index (0-based) — seeds and array indexing key off this.
     t: usize,
-    /// Stage index as `u32` for result records and error messages.
+    /// Declared study `stage_id` (domain id) stamped into result records and
+    /// error messages; resolved by position from the ordered study stage ids,
+    /// never the positional index `t`.
     stage_id_u32: u32,
     /// Scenario ID for error messages.
     scenario_id: u32,
@@ -245,6 +247,9 @@ struct SimStageIds {
     /// stage `t` — the pool/node-id resolution site, never `t` itself once a
     /// stage carries more than one alive node.
     node: usize,
+    /// Declared id of `node` (`node_graph.node_ids[node]`), resolved once at
+    /// construction and reused by the solve context and result extraction.
+    node_id: i32,
 }
 
 /// Load-path inputs bundled for `solve_simulation_stage`.
@@ -436,7 +441,7 @@ fn solve_simulation_stage<S: SolverInterface>(
             iteration: None, // disables the k1 window → every cut a candidate
             // Simulation solves one LP per (stage, scenario): always fresh.
             continue_carry: false,
-            node_id: training_ctx.node_graph.node_ids[node],
+            node_id: ids.node_id,
         };
         // Disjoint borrows of `ws`: `solver`, `dcs_initial_resident` (shared), and
         // `dcs_solve` (mut) are distinct fields.
@@ -473,7 +478,7 @@ fn solve_simulation_stage<S: SolverInterface>(
             stage_index: t,
             scenario_index: ids.scenario_id as usize,
             iteration: None, // simulation has no iteration counter
-            node_id: training_ctx.node_graph.node_ids[node],
+            node_id: ids.node_id,
         };
 
         let view = run_stage_solve(ws, &inputs).map_err(|e| map_sim_solver_error(e, ids))?;
@@ -744,6 +749,7 @@ fn extract_sim_stage_result(
             study_stage_ids: ctx.study_stage_ids,
         },
         ids.stage_id_u32,
+        ids.node_id,
         hydro_lookup,
         &lookups.thermal,
     );
@@ -868,13 +874,24 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
 
     #[allow(clippy::needless_range_loop)] // t indexes load_spec, ctx arrays, and SimStageIds
     for t in 0..ids.num_stages {
-        #[allow(clippy::cast_possible_truncation)]
-        let stage_id_u32 = t as u32;
+        // Seeds key off the positional stage index `t` (unchanged — a re-key here
+        // would perturb the noise/transition draws); the output stage_id is the
+        // declared domain id, resolved by position from the ordered study ids.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let stage_seed = t as u32;
+        // Domain id by position; falls back to the positional index only if a
+        // caller supplies a short study_stage_ids (never in production, where it
+        // has one entry per study stage).
+        let output_stage_id = ctx
+            .study_stage_ids
+            .get(t)
+            .copied()
+            .unwrap_or_else(|| i32::try_from(t).unwrap_or(i32::MAX));
         let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
         let noise = ids.sampler.sample(SampleRequest {
             iteration: SIMULATION_ITERATION,
             scenario: ids.global_scenario,
-            stage: stage_id_u32,
+            stage: stage_seed,
             stage_idx: t,
             noise_buf: ids.raw_noise_buf,
             perm_scratch: ids.perm_scratch,
@@ -895,9 +912,11 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             output,
             &SimStageIds {
                 t,
-                stage_id_u32,
+                #[allow(clippy::cast_sign_loss)]
+                stage_id_u32: output_stage_id as u32,
                 scenario_id: ids.scenario_id,
                 node,
+                node_id: node_graph.node_ids[node],
             },
             lookups,
             raw_noise,
@@ -911,7 +930,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
         stage_results.push(result);
 
         if t + 1 < ids.num_stages {
-            node = advance_simulation_node(training_ctx, node, stage_id_u32, ids.global_scenario);
+            node = advance_simulation_node(training_ctx, node, stage_seed, ids.global_scenario);
         }
     }
     Ok((total_cost, stage_results))

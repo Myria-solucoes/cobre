@@ -758,6 +758,7 @@ mod anticipated_pre_horizon_seed_delivery {
     //! and that the observed cost stays under a per-K analytical upper bound. Each
     //! K's derivation and cost bound live on its test function.
 
+    use cobre_core::HorizonGraph;
     use cobre_core::entities::{
         bus::DeficitSegment,
         hydro::{HydroGenerationModel, HydroPenalties},
@@ -765,7 +766,7 @@ mod anticipated_pre_horizon_seed_delivery {
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     };
     use cobre_core::{
@@ -1134,7 +1135,7 @@ mod anticipated_pre_horizon_seed_delivery {
             past_defluences: vec![],
         };
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
@@ -2895,7 +2896,7 @@ mod anticipated_closed_form_lb_k1_single_thermal {
     //!   The past must be zero so that any non-zero anticipated
     //!   delivery observed at stage 1 is attributable to the stage-0 decision.
     //! - 1 deterministic opening per stage.
-    //! - Default `PolicyGraph::annual_discount_rate = 0.0`, so every
+    //! - Default `HorizonGraph::annual_discount_rate = 0.0`, so every
     //!   `discount_factors[t] = 1.0` and `cumulative_discount_factors[t] = 1.0`.
     //!
     //! ## Closed-form derivation
@@ -3815,6 +3816,7 @@ mod anticipated_numerical_reconciliation_k2 {
     use cobre_io::config::{SimulationSelection, TrainingSelection};
     use std::sync::mpsc;
 
+    use cobre_core::HorizonGraph;
     use cobre_core::entities::{
         bus::DeficitSegment,
         hydro::{HydroGenerationModel, HydroPenalties},
@@ -3822,7 +3824,7 @@ mod anticipated_numerical_reconciliation_k2 {
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     };
     use cobre_core::{
@@ -4148,10 +4150,10 @@ mod anticipated_numerical_reconciliation_k2 {
             past_defluences: vec![],
         };
 
-        // Set explicitly (not relying on `PolicyGraph::default()`) so a future
+        // Set explicitly (not relying on `HorizonGraph::default()`) so a future
         // default change cannot silently introduce NPV scaling into the analytical
         // derivation.
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
@@ -4378,6 +4380,7 @@ mod anticipated_bridge_st_cruz_nova_k1 {
     use cobre_io::config::{SimulationSelection, TrainingSelection};
     use std::sync::mpsc;
 
+    use cobre_core::HorizonGraph;
     use cobre_core::entities::{
         bus::DeficitSegment,
         hydro::{HydroGenerationModel, HydroPenalties},
@@ -4385,7 +4388,7 @@ mod anticipated_bridge_st_cruz_nova_k1 {
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     };
     use cobre_core::{
@@ -4711,7 +4714,7 @@ mod anticipated_bridge_st_cruz_nova_k1 {
             past_defluences: vec![],
         };
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
@@ -5415,10 +5418,11 @@ mod a1b_value_cut_identity_anchor {
     //! anticipated-ring cuts. This module pins that equivalence end-to-end
     //! (train + simulate) as the A-1(b) value/cut-identity anchor.
 
+    use cobre_core::HorizonGraph;
     use cobre_core::entities::{bus::DeficitSegment, thermal::AnticipatedConfig};
     use cobre_core::scenario::LoadModel;
     use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     };
     use cobre_core::{
@@ -5679,7 +5683,7 @@ mod a1b_value_cut_identity_anchor {
             past_defluences: vec![],
         };
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,

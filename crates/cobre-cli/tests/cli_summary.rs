@@ -28,7 +28,7 @@ fn local_distribution() -> DistributionInfo {
         backend: "local".to_string(),
         world_size: 1,
         ranks_participated: 1,
-        num_nodes: 1,
+        num_hosts: 1,
         threads_per_rank: 1,
         mpi_library: None,
         mpi_standard: None,
@@ -87,6 +87,7 @@ fn write_training_fixture(dir: &Path) {
             final_lower_bound: 48_500.0,
             final_upper_bound: Some(49_000.0),
             final_upper_bound_std: Some(250.0),
+            final_upper_bound_kind: "statistical".to_string(),
         },
         solve_stats: MetadataTrainingSolveStats {
             total_lp_solves: Some(840),

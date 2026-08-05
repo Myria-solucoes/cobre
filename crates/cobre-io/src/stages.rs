@@ -1,7 +1,7 @@
 //! Parsing for `stages.json` — temporal structure and policy graph.
 //!
 //! [`parse_stages`] reads `stages.json` from the case directory root and returns a
-//! [`StagesData`] struct containing the sorted `Vec<Stage>` and the [`PolicyGraph`].
+//! [`StagesData`] struct containing the sorted `Vec<Stage>` and the [`HorizonGraph`].
 //!
 //! Scenario source configuration has moved to `config.json`
 //! (`training.scenario_source` / `simulation.scenario_source`). If a `stages.json`
@@ -45,10 +45,10 @@
 //! block hours sum equals stage duration) is deferred to the semantic layer.
 
 use chrono::{Datelike, NaiveDate};
+use cobre_core::HorizonGraph;
 use cobre_core::temporal::{
-    Block, BlockMode, Node, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
-    SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
-    Transition,
+    Block, BlockMode, Node, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, SeasonCycleType,
+    SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig, Transition,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -430,7 +430,7 @@ pub struct StagesData {
     /// Pre-study stages have negative IDs; study stages have non-negative IDs.
     pub stages: Vec<Stage>,
     /// Policy graph with transitions, horizon type, discount rate, and season map.
-    pub policy_graph: PolicyGraph,
+    pub policy_graph: HorizonGraph,
     /// Study stage ids whose `num_openings` was declared; lets the semantic layer
     /// distinguish an absent count from a present one after conversion collapses it
     /// into `ScenarioSourceConfig::branching_factor`.
@@ -838,7 +838,7 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
     })
 }
 
-fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<PolicyGraph, LoadError> {
+fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<HorizonGraph, LoadError> {
     let graph_type = convert_policy_graph_type(raw.graph_type, path)?;
 
     let transitions: Vec<Transition> = raw
@@ -864,7 +864,7 @@ fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<PolicyGraph,
         .collect();
     nodes.sort_by_key(|n| n.id);
 
-    Ok(PolicyGraph {
+    Ok(HorizonGraph {
         graph_type,
         annual_discount_rate: raw.annual_discount_rate,
         transitions,
@@ -937,7 +937,7 @@ fn normalize_weights(weights: &mut [f64]) -> Result<(), WeightSumError> {
 /// [`LoadError::SchemaError`] naming the source node whose out-edge sum is zero or
 /// non-finite.
 pub(crate) fn normalize_out_edge_probabilities(
-    graph: &mut PolicyGraph,
+    graph: &mut HorizonGraph,
     path: &Path,
 ) -> Result<(), LoadError> {
     let mut by_source: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
@@ -2640,8 +2640,8 @@ mod tests {
         }
     }
 
-    fn graph_with(transitions: Vec<Transition>) -> PolicyGraph {
-        PolicyGraph {
+    fn graph_with(transitions: Vec<Transition>) -> HorizonGraph {
+        HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions,
@@ -2651,7 +2651,7 @@ mod tests {
         }
     }
 
-    fn prob(graph: &PolicyGraph, source_id: i32, target_id: i32) -> f64 {
+    fn prob(graph: &HorizonGraph, source_id: i32, target_id: i32) -> f64 {
         graph
             .transitions
             .iter()

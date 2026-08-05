@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn build_cut_row_batch_one_cut_correct_structure() {
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 5.0, &[2.0]);
+        fcf.add_cut(0, 0, 0, 0, 5.0, &[2.0]);
         let state = state_layout(1, 0);
         let batch = build_cut_row_batch(&fcf, 0, &state, &cut_state(&state), &[]);
 
@@ -440,8 +440,8 @@ mod tests {
     #[test]
     fn build_cut_row_batch_two_cuts_correct_row_starts() {
         let mut fcf = FutureCostFunction::new(2, 2, 1, 10, &[0; 2]);
-        fcf.add_cut(1, 0, 0, 10.0, &[1.0, 3.0]);
-        fcf.add_cut(1, 1, 0, 20.0, &[2.0, 4.0]);
+        fcf.add_cut(0, 1, 0, 0, 10.0, &[1.0, 3.0]);
+        fcf.add_cut(0, 1, 1, 0, 20.0, &[2.0, 4.0]);
         let state = state_layout(1, 1);
         let batch = build_cut_row_batch(&fcf, 1, &state, &cut_state(&state), &[]);
 
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn build_cut_row_batch_zero_coefficient_state_variable() {
         let mut fcf = FutureCostFunction::new(1, 2, 1, 5, &[0; 1]);
-        fcf.add_cut(0, 0, 0, 3.0, &[0.0, 7.0]);
+        fcf.add_cut(0, 0, 0, 0, 3.0, &[0.0, 7.0]);
         let state = state_layout(1, 1);
         let batch = build_cut_row_batch(&fcf, 0, &state, &cut_state(&state), &[]);
 
@@ -587,8 +587,8 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
-        fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
+        fcf.add_cut(0, 0, 0, 0, 10.0, &[1.0]); // slot 0
+        fcf.add_cut(0, 0, 1, 0, 20.0, &[3.0]); // slot 1
 
         let state = state_layout(1, 0);
         let mut row_map = CutRowMap::new(10, 5);
@@ -618,8 +618,8 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
-        fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
+        fcf.add_cut(0, 0, 0, 0, 10.0, &[1.0]); // slot 0
+        fcf.add_cut(0, 0, 1, 0, 20.0, &[3.0]); // slot 1
 
         let state = state_layout(1, 0);
         let mut row_map = CutRowMap::new(10, 5);
@@ -652,8 +652,8 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
-        fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
+        fcf.add_cut(0, 0, 0, 0, 10.0, &[1.0]); // slot 0
+        fcf.add_cut(0, 0, 1, 0, 20.0, &[3.0]); // slot 1
 
         let state = state_layout(1, 0);
 
@@ -695,7 +695,7 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 10.0, &[1.0]);
+        fcf.add_cut(0, 0, 0, 0, 10.0, &[1.0]);
 
         let state = state_layout(1, 0);
         // col_scale must have at least theta+1 = 4 entries.

@@ -94,7 +94,7 @@ pub struct DistributionInfo {
     /// Number of processes that actually participated in computation.
     pub ranks_participated: u32,
     /// Number of distinct physical hosts.
-    pub num_nodes: u32,
+    pub num_hosts: u32,
     /// Rayon threads per process.
     pub threads_per_rank: u32,
     /// MPI implementation version, e.g. `"Open MPI v4.1.6"`.
@@ -201,8 +201,20 @@ pub struct MetadataBounds {
     pub final_lower_bound: f64,
     /// Final upper bound estimate (`null` when upper-bound evaluation is disabled).
     pub final_upper_bound: Option<f64>,
-    /// Standard deviation of the final upper-bound estimate (`null` when unavailable).
+    /// Standard deviation of the final upper-bound estimate (`null` when
+    /// unavailable or the bound is exact).
     pub final_upper_bound_std: Option<f64>,
+    /// Upper-bound regime: `"statistical"` (sampled forward) or `"exact"`
+    /// (enumerated forward). `#[serde(default)]` reads pre-exact metadata as
+    /// `"statistical"`.
+    #[serde(default = "default_upper_bound_kind")]
+    pub final_upper_bound_kind: String,
+}
+
+/// The pre-exact-regime default for [`MetadataBounds::final_upper_bound_kind`].
+#[must_use]
+pub fn default_upper_bound_kind() -> String {
+    "statistical".to_string()
 }
 
 /// Default bounds (`final_lower_bound` `0.0`, absent upper bounds) used when
@@ -213,6 +225,7 @@ pub fn default_bounds() -> MetadataBounds {
         final_lower_bound: 0.0,
         final_upper_bound: None,
         final_upper_bound_std: None,
+        final_upper_bound_kind: default_upper_bound_kind(),
     }
 }
 
@@ -545,7 +558,7 @@ mod tests {
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: 1,
             mpi_library: None,
             mpi_standard: None,
@@ -601,6 +614,7 @@ mod tests {
                 final_lower_bound: 48_500.0,
                 final_upper_bound: Some(49_000.0),
                 final_upper_bound_std: Some(250.0),
+                final_upper_bound_kind: "statistical".to_string(),
             },
             solve_stats: MetadataTrainingSolveStats {
                 total_lp_solves: Some(84_000),
@@ -783,7 +797,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#;
@@ -832,7 +846,7 @@ mod tests {
             "backend": "local",
             "world_size": 1,
             "ranks_participated": 1,
-            "num_nodes": 1,
+            "num_hosts": 1,
             "threads_per_rank": 1
         }"#;
 
@@ -850,6 +864,7 @@ mod tests {
                 final_lower_bound: 48_500.0,
                 final_upper_bound: Some(49_000.0),
                 final_upper_bound_std: Some(250.0),
+                final_upper_bound_kind: "statistical".to_string(),
             },
             ..make_training_metadata()
         };
@@ -941,7 +956,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#;
@@ -1022,7 +1037,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#;
@@ -1130,7 +1145,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#;

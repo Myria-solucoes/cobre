@@ -14,6 +14,7 @@ use cobre_io::SimulationOutput;
 use cobre_io::now_iso8601;
 use cobre_io::output::simulation_writer::ScenarioWritePayload;
 use cobre_io::output::simulation_writer::SimulationParquetWriter;
+use cobre_io::output::simulation_writer::SimulationPathRecord;
 use cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
@@ -137,6 +138,11 @@ pub(super) fn run_simulation_phase(
     #[allow(clippy::cast_possible_truncation)]
     let sim_time_ms = sim_start.elapsed().as_millis() as u64;
 
+    // Grab the node-path rows before `finalize` consumes the writer; they are
+    // gathered across ranks below (paths.parquet is one unpartitioned run-level
+    // file, so it needs every rank's scenarios).
+    let local_path_rows: Vec<SimulationPathRecord> = sim_writer.path_rows().to_vec();
+
     let mut local_sim_output = sim_writer.finalize(sim_time_ms);
     local_sim_output.failed = write_failures;
 
@@ -148,6 +154,8 @@ pub(super) fn run_simulation_phase(
 
     let (global_agg, global_scenario_stats) =
         aggregate_simulation_solver_stats(&ctx.comm, &sim_run_result.solver_stats)?;
+
+    let global_path_rows = aggregate_simulation_paths(&ctx.comm, &local_path_rows)?;
 
     // Aggregate across all ranks so the printed mean/std/CI95 reflect every
     // scenario, not just rank 0's.
@@ -198,6 +206,7 @@ pub(super) fn run_simulation_phase(
             sim_started_at,
             &merged_sim_output,
             &global_scenario_stats,
+            &global_path_rows,
         )?;
     }
 
@@ -211,6 +220,7 @@ fn write_sim_outputs_on_root(
     sim_started_at: String,
     merged_sim_output: &SimulationOutput,
     global_scenario_stats: &[(u32, SolverStatsDelta)],
+    global_path_rows: &[SimulationPathRecord],
 ) -> Result<(), CliError> {
     let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
     let sim_ctx = OutputContext {
@@ -227,6 +237,7 @@ fn write_sim_outputs_on_root(
         output_dir: &ctx.output_dir,
         sim_output: merged_sim_output,
         sim_solver_stats: global_scenario_stats,
+        sim_path_rows: global_path_rows,
         output_ctx: &sim_ctx,
         quiet: ctx.quiet,
         stderr: &ctx.stderr,
@@ -339,6 +350,61 @@ fn merge_simulation_metadata<C: Communicator>(
         cost: None,
         solve_stats: MetadataSimulationSolveStats::default(),
     })
+}
+
+/// Gather every rank's `(scenario_id, stage_id, node_id)` path rows for the
+/// run-level, unpartitioned `paths.parquet`.
+///
+/// Rows serialize to three `i32`s each and ride the same allgatherv-of-lengths-
+/// then-payload pattern the other per-scenario gathers use. Order is irrelevant:
+/// `write_paths` fixes the canonical `(scenario_id, stage_id)` order, so the file
+/// is identical across rank shapes (the rank-invariance contract).
+#[allow(clippy::cast_possible_truncation)]
+fn aggregate_simulation_paths<C: Communicator>(
+    comm: &C,
+    local: &[SimulationPathRecord],
+) -> Result<Vec<SimulationPathRecord>, CliError> {
+    let mut local_buf: Vec<i32> = Vec::with_capacity(local.len() * 3);
+    for r in local {
+        local_buf.push(r.scenario_id);
+        local_buf.push(r.stage_id);
+        local_buf.push(r.node_id);
+    }
+
+    let n_ranks = comm.size();
+    let send_len = [local_buf.len() as u64];
+    let mut all_lens = vec![0u64; n_ranks];
+    let len_counts: Vec<usize> = vec![1; n_ranks];
+    let len_displs: Vec<usize> = (0..n_ranks).collect();
+    comm.allgatherv(&send_len, &mut all_lens, &len_counts, &len_displs)
+        .map_err(|e| CliError::Internal {
+            message: format!("simulation path length exchange error: {e}"),
+        })?;
+
+    let recv_counts: Vec<usize> = all_lens.iter().map(|&l| l as usize).collect();
+    let recv_displs: Vec<usize> = recv_counts
+        .iter()
+        .scan(0usize, |acc, &c| {
+            let d = *acc;
+            *acc += c;
+            Some(d)
+        })
+        .collect();
+    let total: usize = recv_counts.iter().sum();
+    let mut all_buf = vec![0i32; total];
+    comm.allgatherv(&local_buf, &mut all_buf, &recv_counts, &recv_displs)
+        .map_err(|e| CliError::Internal {
+            message: format!("simulation path gather error: {e}"),
+        })?;
+
+    Ok(all_buf
+        .chunks_exact(3)
+        .map(|c| SimulationPathRecord {
+            scenario_id: c[0],
+            stage_id: c[1],
+            node_id: c[2],
+        })
+        .collect())
 }
 
 /// Aggregate simulation solver statistics across all MPI ranks.

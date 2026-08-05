@@ -15,10 +15,13 @@ use crate::simulation::types::{
     SimulationTransitBucketResult,
 };
 
-impl From<SimulationCostResult> for CostWriteRecord {
-    fn from(s: SimulationCostResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationCostResult {
+    type Record = CostWriteRecord;
+    fn into_write_record(self, node_id: i32) -> CostWriteRecord {
+        let s = self;
+        CostWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             total_cost: s.total_cost,
             immediate_cost: s.immediate_cost,
@@ -49,10 +52,13 @@ impl From<SimulationCostResult> for CostWriteRecord {
     }
 }
 
-impl From<SimulationHydroResult> for HydroWriteRecord {
-    fn from(s: SimulationHydroResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationHydroResult {
+    type Record = HydroWriteRecord;
+    fn into_write_record(self, node_id: i32) -> HydroWriteRecord {
+        let s = self;
+        HydroWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             hydro_id: s.hydro_id,
             turbined_m3s: s.turbined_m3s,
@@ -89,10 +95,13 @@ impl From<SimulationHydroResult> for HydroWriteRecord {
     }
 }
 
-impl From<SimulationHydroBusResult> for HydroBusWriteRecord {
-    fn from(s: SimulationHydroBusResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationHydroBusResult {
+    type Record = HydroBusWriteRecord;
+    fn into_write_record(self, node_id: i32) -> HydroBusWriteRecord {
+        let s = self;
+        HydroBusWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             hydro_id: s.hydro_id,
             bus_id: s.bus_id,
@@ -102,10 +111,13 @@ impl From<SimulationHydroBusResult> for HydroBusWriteRecord {
     }
 }
 
-impl From<SimulationThermalResult> for ThermalWriteRecord {
-    fn from(s: SimulationThermalResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationThermalResult {
+    type Record = ThermalWriteRecord;
+    fn into_write_record(self, node_id: i32) -> ThermalWriteRecord {
+        let s = self;
+        ThermalWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             thermal_id: s.thermal_id,
             generation_mw: s.generation_mw,
@@ -118,10 +130,13 @@ impl From<SimulationThermalResult> for ThermalWriteRecord {
     }
 }
 
-impl From<SimulationExchangeResult> for ExchangeWriteRecord {
-    fn from(s: SimulationExchangeResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationExchangeResult {
+    type Record = ExchangeWriteRecord;
+    fn into_write_record(self, node_id: i32) -> ExchangeWriteRecord {
+        let s = self;
+        ExchangeWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             line_id: s.line_id,
             direct_flow_mw: s.direct_flow_mw,
@@ -132,10 +147,13 @@ impl From<SimulationExchangeResult> for ExchangeWriteRecord {
     }
 }
 
-impl From<SimulationBusResult> for BusWriteRecord {
-    fn from(s: SimulationBusResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationBusResult {
+    type Record = BusWriteRecord;
+    fn into_write_record(self, node_id: i32) -> BusWriteRecord {
+        let s = self;
+        BusWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             bus_id: s.bus_id,
             load_mw: s.load_mw,
@@ -146,10 +164,13 @@ impl From<SimulationBusResult> for BusWriteRecord {
     }
 }
 
-impl From<SimulationPumpingResult> for PumpingWriteRecord {
-    fn from(s: SimulationPumpingResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationPumpingResult {
+    type Record = PumpingWriteRecord;
+    fn into_write_record(self, node_id: i32) -> PumpingWriteRecord {
+        let s = self;
+        PumpingWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             pumping_station_id: s.pumping_station_id,
             pumped_flow_m3s: s.pumped_flow_m3s,
@@ -160,10 +181,13 @@ impl From<SimulationPumpingResult> for PumpingWriteRecord {
     }
 }
 
-impl From<SimulationContractResult> for ContractWriteRecord {
-    fn from(s: SimulationContractResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationContractResult {
+    type Record = ContractWriteRecord;
+    fn into_write_record(self, node_id: i32) -> ContractWriteRecord {
+        let s = self;
+        ContractWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             contract_id: s.contract_id,
             power_mw: s.power_mw,
@@ -174,10 +198,13 @@ impl From<SimulationContractResult> for ContractWriteRecord {
     }
 }
 
-impl From<SimulationNonControllableResult> for NonControllableWriteRecord {
-    fn from(s: SimulationNonControllableResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationNonControllableResult {
+    type Record = NonControllableWriteRecord;
+    fn into_write_record(self, node_id: i32) -> NonControllableWriteRecord {
+        let s = self;
+        NonControllableWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             non_controllable_id: s.non_controllable_id,
             generation_mw: s.generation_mw,
@@ -189,10 +216,13 @@ impl From<SimulationNonControllableResult> for NonControllableWriteRecord {
     }
 }
 
-impl From<SimulationInflowLagResult> for InflowLagWriteRecord {
-    fn from(s: SimulationInflowLagResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationInflowLagResult {
+    type Record = InflowLagWriteRecord;
+    fn into_write_record(self, node_id: i32) -> InflowLagWriteRecord {
+        let s = self;
+        InflowLagWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             hydro_id: s.hydro_id,
             lag_index: s.lag_index,
             inflow_m3s: s.inflow_m3s,
@@ -200,10 +230,13 @@ impl From<SimulationInflowLagResult> for InflowLagWriteRecord {
     }
 }
 
-impl From<SimulationTransitBucketResult> for TransitBucketWriteRecord {
-    fn from(s: SimulationTransitBucketResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationTransitBucketResult {
+    type Record = TransitBucketWriteRecord;
+    fn into_write_record(self, node_id: i32) -> TransitBucketWriteRecord {
+        let s = self;
+        TransitBucketWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             hydro_id: s.hydro_id,
             lag: s.lag,
             in_transit_volume_hm3: s.in_transit_volume_hm3,
@@ -212,10 +245,13 @@ impl From<SimulationTransitBucketResult> for TransitBucketWriteRecord {
     }
 }
 
-impl From<SimulationGenericViolationResult> for GenericViolationWriteRecord {
-    fn from(s: SimulationGenericViolationResult) -> Self {
-        Self {
+impl IntoWriteRecord for SimulationGenericViolationResult {
+    type Record = GenericViolationWriteRecord;
+    fn into_write_record(self, node_id: i32) -> GenericViolationWriteRecord {
+        let s = self;
+        GenericViolationWriteRecord {
             stage_id: s.stage_id,
+            node_id,
             block_id: s.block_id,
             constraint_id: s.constraint_id,
             slack_value: s.slack_value,
@@ -224,26 +260,43 @@ impl From<SimulationGenericViolationResult> for GenericViolationWriteRecord {
     }
 }
 
+/// Convert a `Simulation*Result` into its cobre-io write record, stamping the
+/// stage's `node_id` (the source carries no node axis).
+///
+/// A local trait rather than `From<(S, i32)>`: the orphan rule forbids
+/// implementing the foreign `From` for a foreign write-record type keyed on a
+/// tuple, but a local trait may be implemented on the local source types.
+trait IntoWriteRecord {
+    type Record;
+    fn into_write_record(self, node_id: i32) -> Self::Record;
+}
+
+/// Broadcast the stage's `node_id` onto every record while converting it.
+fn with_node<S: IntoWriteRecord>(records: Vec<S>, node_id: i32) -> Vec<S::Record> {
+    records
+        .into_iter()
+        .map(|r| r.into_write_record(node_id))
+        .collect()
+}
+
 impl From<SimulationStageResult> for StageWritePayload {
     fn from(src: SimulationStageResult) -> Self {
+        let node_id = src.node_id;
         Self {
             stage_id: src.stage_id,
-            costs: src.costs.into_iter().map(Into::into).collect(),
-            hydros: src.hydros.into_iter().map(Into::into).collect(),
-            hydro_bus_generation: src
-                .hydro_bus_generation
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            thermals: src.thermals.into_iter().map(Into::into).collect(),
-            exchanges: src.exchanges.into_iter().map(Into::into).collect(),
-            buses: src.buses.into_iter().map(Into::into).collect(),
-            pumping_stations: src.pumping_stations.into_iter().map(Into::into).collect(),
-            contracts: src.contracts.into_iter().map(Into::into).collect(),
-            non_controllables: src.non_controllables.into_iter().map(Into::into).collect(),
-            inflow_lags: src.inflow_lags.into_iter().map(Into::into).collect(),
-            transit_buckets: src.transit_buckets.into_iter().map(Into::into).collect(),
-            generic_violations: src.generic_violations.into_iter().map(Into::into).collect(),
+            node_id,
+            costs: with_node(src.costs, node_id),
+            hydros: with_node(src.hydros, node_id),
+            hydro_bus_generation: with_node(src.hydro_bus_generation, node_id),
+            thermals: with_node(src.thermals, node_id),
+            exchanges: with_node(src.exchanges, node_id),
+            buses: with_node(src.buses, node_id),
+            pumping_stations: with_node(src.pumping_stations, node_id),
+            contracts: with_node(src.contracts, node_id),
+            non_controllables: with_node(src.non_controllables, node_id),
+            inflow_lags: with_node(src.inflow_lags, node_id),
+            transit_buckets: with_node(src.transit_buckets, node_id),
+            generic_violations: with_node(src.generic_violations, node_id),
         }
     }
 }
@@ -451,6 +504,7 @@ mod tests {
     fn make_stage(stage_id: u32) -> SimulationStageResult {
         SimulationStageResult {
             stage_id,
+            node_id: stage_id as i32,
             costs: vec![make_cost(stage_id, 0)],
             hydros: vec![make_hydro(stage_id, 0)],
             hydro_bus_generation: vec![make_hydro_bus(stage_id, 0)],

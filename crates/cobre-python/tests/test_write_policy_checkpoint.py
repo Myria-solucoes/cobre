@@ -16,14 +16,10 @@ import pytest
 
 
 def _make_metadata(cost_scale_factor: Optional[float] = 2_500_000.0) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        "cobre_version": "0.13.0",
-        "created_at": "2026-07-30T00:00:00Z",
+    producer: dict[str, Any] = {
         "completed_iterations": 5,
         "final_lower_bound": 123.45,
         "best_upper_bound": 130.0,
-        "state_dimension": 3,
-        "num_stages": 1,
         "max_iterations": 10,
         "forward_passes": 4,
         "warm_start_cuts": 0,
@@ -34,8 +30,15 @@ def _make_metadata(cost_scale_factor: Optional[float] = 2_500_000.0) -> dict[str
         "training_block_mode_per_stage": [],
     }
     if cost_scale_factor is not None:
-        metadata["cost_scale_factor"] = cost_scale_factor
-    return metadata
+        producer["cost_scale_factor"] = cost_scale_factor
+    # The neutral core: format_version defaults when omitted; the graph manifest
+    # is optional (a checkpoint authored from raw records carries none).
+    return {
+        "cobre_version": "0.13.0",
+        "created_at": "2026-07-30T00:00:00Z",
+        "num_stages": 1,
+        "producer": producer,
+    }
 
 
 def _make_stage_cuts() -> list[dict[str, Any]]:
@@ -81,13 +84,16 @@ def test_write_policy_checkpoint_round_trip(tmp_path: pathlib.Path) -> None:
 
     loaded = cobre.results.load_policy(str(tmp_path))
 
-    assert loaded["metadata"]["cost_scale_factor"] == pytest.approx(2_500_000.0)
-    assert loaded["metadata"]["completed_iterations"] == 5
-    assert loaded["metadata"]["state_dimension"] == 3
+    assert loaded["metadata"]["format_version"] == 1
+    assert loaded["metadata"]["producer"]["cost_scale_factor"] == pytest.approx(
+        2_500_000.0
+    )
+    assert loaded["metadata"]["producer"]["completed_iterations"] == 5
 
     assert len(loaded["stage_cuts"]) == 1
     stage = loaded["stage_cuts"][0]
     assert stage["stage_id"] == 0
+    assert stage["state_dimension"] == 3
     assert stage["capacity"] == 10
     assert stage["populated_count"] == 2, "populated_count must default to len(cuts)"
 
@@ -116,7 +122,7 @@ def test_write_policy_checkpoint_cost_scale_factor_omitted_reads_as_none(
     )
 
     loaded = cobre.results.load_policy(str(tmp_path))
-    assert loaded["metadata"]["cost_scale_factor"] is None
+    assert loaded["metadata"]["producer"]["cost_scale_factor"] is None
 
 
 def test_write_policy_checkpoint_coefficient_length_mismatch_raises(

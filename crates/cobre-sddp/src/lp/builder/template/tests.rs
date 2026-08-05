@@ -1810,7 +1810,7 @@ fn stage_templates_empty_is_all_empty_with_n_hydros() {
 /// global rate, so the postprocessed per-stage factors are all < 1.0 and the
 /// cumulative vector compounds below the 1.0 placeholder.
 fn discounted_multi_stage_system() -> cobre_core::System {
-    use cobre_core::{PolicyGraph, PolicyGraphType};
+    use cobre_core::{HorizonGraph, PolicyGraphType};
 
     let n_stages = 3_usize;
     let thermals = vec![Thermal {
@@ -1914,7 +1914,7 @@ fn discounted_multi_stage_system() -> cobre_core::System {
         },
     );
 
-    let policy_graph = PolicyGraph {
+    let policy_graph = HorizonGraph {
         stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.10,

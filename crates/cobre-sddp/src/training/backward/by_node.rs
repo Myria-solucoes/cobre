@@ -375,6 +375,7 @@ pub(crate) fn by_node_finish<S: SolverInterface>(
     probabilities: &[f64],
     risk_measure: &RiskMeasure,
     fcf: &mut FutureCostFunction,
+    node_id: i32,
     pool: usize,
     iteration: u64,
     fwd_offset: usize,
@@ -438,6 +439,7 @@ pub(crate) fn by_node_finish<S: SolverInterface>(
         );
         #[allow(clippy::cast_possible_truncation)]
         fcf.add_cut(
+            node_id,
             pool,
             iteration,
             node_relative_index as u32,

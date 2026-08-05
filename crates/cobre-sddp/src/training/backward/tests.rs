@@ -927,7 +927,7 @@ fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
 #[test]
 fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     // Acceptance criterion: iteration=2, forward_passes=3, global
-    // trial point m=1 → fcf.add_cut(stage=0, iteration=2, fpi=1, ...).
+    // trial point m=1 → fcf.add_cut(0,stage=0, iteration=2, fpi=1, ...).
     // slot = warm_start + 2*3 + 1 = 7.
     let n_stages = 2_usize;
     let n_openings = 2_usize;
@@ -1838,7 +1838,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
 #[allow(clippy::too_many_lines)]
 fn forward_pass_index_matches_global_scenario_index() {
     // Acceptance criterion: when a cut is generated for global trial point
-    // m=5, then `fcf.add_cut(stage, iteration, 5, ...)` is called with
+    // m=5, then `fcf.add_cut(0,stage, iteration, 5, ...)` is called with
     // forward_pass_index = m = 5.
     //
     // Setup: iteration=2, forward_passes=6 (6 scenarios on 1 rank), 1 opening.
@@ -5095,7 +5095,7 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
     let mut fcf = FutureCostFunction::new(3, state.n_state, 1, 10, &[0; 3]);
     let mut coefficients = vec![0.0_f64; state.n_state];
     coefficients[state.anticipated_slots_out.start] = 7.5;
-    fcf.add_cut(1, 0, 0, 0.0, &coefficients);
+    fcf.add_cut(0, 1, 0, 0, 0.0, &coefficients);
 
     let mut batch = RowBatch {
         num_rows: 0,
@@ -5187,9 +5187,9 @@ fn dcs_core_template() -> StageTemplate {
 fn dcs_two_stage_fcf() -> FutureCostFunction {
     let n_stages = 2;
     let mut fcf = FutureCostFunction::new(n_stages, 1, 8, 10, &vec![0; n_stages]);
-    fcf.add_cut(1, 0, 0, 1.0, &[0.0]);
-    fcf.add_cut(1, 0, 1, 0.0, &[2.0]);
-    fcf.add_cut(1, 0, 2, 3.0, &[0.0]);
+    fcf.add_cut(0, 1, 0, 0, 1.0, &[0.0]);
+    fcf.add_cut(0, 1, 0, 1, 0.0, &[2.0]);
+    fcf.add_cut(0, 1, 0, 2, 3.0, &[0.0]);
     // Seed metadata: slots 0 and 2 are "recently active"; the binding slot 1
     // is stale so the k2 window excludes it (forcing the lazy add). All were
     // generated before the current iteration so none is current-iteration
@@ -5197,6 +5197,7 @@ fn dcs_two_stage_fcf() -> FutureCostFunction {
     let meta = |generated: u64, last: u64| CutMetadata {
         iteration_generated: generated,
         forward_pass_index: 0,
+        node: 0,
         active_count: 0,
         last_active_iter: last,
     };

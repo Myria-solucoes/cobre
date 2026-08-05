@@ -1264,7 +1264,12 @@ fn extract_buses(
 ///
 /// Builds the reverse-lookup tables on every call. On the hot path use
 /// `extract_stage_result_with_lookups` with pre-built lookups instead.
+///
+/// The visited node id defaults to `stage_id` — the chain-degenerate node id
+/// (`node_graph.node_ids[t] == t` on a chain). A branching walk supplies its own
+/// node id through [`extract_stage_result_with_lookups`] (the hot path).
 #[must_use]
+#[allow(clippy::cast_possible_wrap)]
 pub fn extract_stage_result(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1274,7 +1279,14 @@ pub fn extract_stage_result(
     let n_thermals = spec.entity_counts.thermal_ids.len();
     let hydro_lookup = HydroReverseLookup::build(spec.geometry, spec.hydro_cell_index, n_hydros);
     let thermal_lookup = ThermalReverseLookup::build(spec.study_dims, n_thermals);
-    extract_stage_result_with_lookups(view, spec, stage_id, &hydro_lookup, &thermal_lookup)
+    extract_stage_result_with_lookups(
+        view,
+        spec,
+        stage_id,
+        stage_id as i32,
+        &hydro_lookup,
+        &thermal_lookup,
+    )
 }
 
 /// Extract a [`SimulationStageResult`] using pre-built reverse-lookup tables.
@@ -1297,6 +1309,7 @@ pub(crate) fn extract_stage_result_with_lookups(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
     stage_id: u32,
+    node_id: i32,
     hydro_lookup: &HydroReverseLookup,
     thermal_lookup: &ThermalReverseLookup,
 ) -> SimulationStageResult {
@@ -1361,6 +1374,7 @@ pub(crate) fn extract_stage_result_with_lookups(
 
     SimulationStageResult {
         stage_id,
+        node_id,
         costs,
         hydros: extract_hydros(view, spec, stage_id, hydro_lookup),
         hydro_bus_generation: extract_hydro_bus_generation(view, spec, stage_id, hydro_lookup),

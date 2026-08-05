@@ -309,15 +309,15 @@ mod tests {
     use std::collections::BTreeMap;
 
     use cobre_core::{
-        EntityId,
+        EntityId, HorizonGraph,
         entities::{Bus, HydroGenerationModel, HydroPenalties},
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
             CorrelationScheduleEntry,
         },
         temporal::{
-            Block, BlockMode, NoiseMethod, PolicyGraph, ScenarioSourceConfig, Stage,
-            StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+            StageStateConfig,
         },
     };
 
@@ -570,7 +570,7 @@ mod tests {
             stages: StagesData {
                 openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage(0), make_stage(1)],
-                policy_graph: PolicyGraph::default(),
+                policy_graph: HorizonGraph::default(),
             },
             initial_conditions: InitialConditions {
                 storage: vec![],
@@ -924,7 +924,7 @@ mod tests {
         data.stages = StagesData {
             openings_declared: std::collections::HashSet::new(),
             stages: vec![make_pre_study_stage(-1), make_stage(0), make_stage(1)],
-            policy_graph: PolicyGraph::default(),
+            policy_graph: HorizonGraph::default(),
         };
 
         data.hydros = vec![make_hydro(

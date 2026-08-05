@@ -1448,22 +1448,25 @@ fn d12_checkpoint_round_trip() {
     let n_stages = fcf.pools.len();
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
     let policy_metadata = PolicyCheckpointMetadata {
+        format_version: cobre_io::FORMAT_VERSION,
         cobre_version: env!("CARGO_PKG_VERSION").to_string(),
         created_at: "2026-03-16T00:00:00Z".to_string(),
-        completed_iterations: result.iterations as u32,
-        final_lower_bound: result.final_lb,
-        best_upper_bound: Some(result.final_ub),
-        state_dimension: fcf.state_dimension as u32,
         num_stages: n_stages as u32,
-        max_iterations: 100,
-        forward_passes: 1,
-        warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
-        warm_start_counts,
-        rng_seed: 42,
-        total_visited_states: 0,
-        training_block_mode: "parallel".to_string(),
-        training_block_mode_per_stage: vec![],
-        cost_scale_factor: None,
+        graph_manifest: cobre_io::GraphManifest::default(),
+        producer: cobre_io::ProducerBlock {
+            completed_iterations: result.iterations as u32,
+            final_lower_bound: result.final_lb,
+            best_upper_bound: Some(result.final_ub),
+            max_iterations: 100,
+            forward_passes: 1,
+            warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
+            warm_start_counts,
+            rng_seed: 42,
+            total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
+        },
     };
 
     write_policy_checkpoint(
@@ -1483,8 +1486,8 @@ fn d12_checkpoint_round_trip() {
         "D12: checkpoint must have 2 stages"
     );
     assert_eq!(
-        checkpoint.metadata.state_dimension, 1,
-        "D12: checkpoint must have state_dimension == 1 (one hydro = one storage state)"
+        checkpoint.stage_cuts[0].state_dimension, 1,
+        "D12: checkpoint must have per-pool state_dimension == 1 (one hydro = one storage state)"
     );
     assert!(
         !checkpoint.stage_cuts.is_empty(),
@@ -1494,11 +1497,8 @@ fn d12_checkpoint_round_trip() {
     let metadata_path = policy_dir.join("metadata.json");
     assert!(metadata_path.is_file(), "D12: metadata.json must exist");
 
-    let stage_bin_path = policy_dir.join("cuts/stage_000.bin");
-    assert!(
-        stage_bin_path.is_file(),
-        "D12: cuts/stage_000.bin must exist"
-    );
+    let stage_bin_path = policy_dir.join("cuts/000.bin");
+    assert!(stage_bin_path.is_file(), "D12: cuts/000.bin must exist");
 
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
@@ -6296,7 +6296,7 @@ mod chronological_telescoping {
         let mut setup2 = build_setup_in_code(build_system(load_mode), &config);
 
         let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
-            checkpoint.metadata.state_dimension,
+            checkpoint.stage_cuts[0].state_dimension,
             checkpoint.metadata.num_stages,
         );
         let warm_fcf = FutureCostFunction::new_with_warm_start(
@@ -6974,8 +6974,12 @@ mod nonzero_stage_fpha_override_regression {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nonzero_stage_fpha_override")
     }
 
-    /// Return hydro `hydro_id`'s result at study position `position`. The fixture
-    /// trains and simulates exactly one scenario, so exactly one match is expected.
+    /// Return hydro `hydro_id`'s result at study `position`. The stage results are
+    /// emitted in ascending study order, so the position is the ordinal index —
+    /// NOT the `stage_id` column value, which now carries the (non-0-based) domain
+    /// id after the output-axis re-key. The fixture trains and simulates exactly
+    /// one scenario, so the flattened stage list is that single scenario's ordered
+    /// stages.
     fn hydro_result_at(
         scenario_results: &[SimulationScenarioResult],
         position: u32,
@@ -6984,7 +6988,7 @@ mod nonzero_stage_fpha_override_regression {
         scenario_results
             .iter()
             .flat_map(|s| &s.stages)
-            .find(|s| s.stage_id == position)
+            .nth(position as usize)
             .unwrap_or_else(|| panic!("no stage at position {position}"))
             .hydros
             .iter()
@@ -7011,6 +7015,21 @@ mod nonzero_stage_fpha_override_regression {
     fn fpha_override_resolves_by_domain_stage_id_end_to_end() {
         let dir = case_dir();
         let (_result, scenario_results, _summary) = super::run_with_simulation(&dir);
+
+        // The output re-key stamps the DOMAIN stage id (not the 0-based position)
+        // into every result row: the stage at study position 1 carries stage_id 11.
+        let stage_at_override = scenario_results
+            .iter()
+            .flat_map(|s| &s.stages)
+            .nth(OVERRIDE_STAGE_POSITION as usize)
+            .expect("override stage present");
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            assert_eq!(
+                stage_at_override.stage_id as i32, OVERRIDE_DOMAIN_STAGE_ID,
+                "output stage_id must carry the declared domain id, not the study position"
+            );
+        }
 
         let at_override =
             hydro_result_at(&scenario_results, OVERRIDE_STAGE_POSITION, FPHA_HYDRO_ID);
@@ -7790,14 +7809,14 @@ mod enumerated_external {
     use chrono::NaiveDate;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
-        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, System, SystemBuilder,
-        ThermalBlockBounds, ThermalStageBounds,
+        EntityId, HorizonGraph, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, System,
+        SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
         entities::hydro::HydroGenerationModel,
         scenario::{ExternalScenarioRow, InflowModel, LoadModel, SamplingScheme, ScenarioSource},
         temporal::{
-            Node as PolicyNode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
+            Node as PolicyNode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig,
             StageStateConfig, Transition,
         },
     };
@@ -7955,7 +7974,7 @@ mod enumerated_external {
                 annual_discount_rate_override: None,
             })
             .collect();
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions,

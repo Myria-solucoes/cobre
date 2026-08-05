@@ -13,6 +13,7 @@
 //! [`FutureCostFunction::from_deserialized`]: crate::FutureCostFunction::from_deserialized
 
 use cobre_io::EntitySlot;
+use cobre_io::GraphManifest;
 use cobre_io::OwnedPolicyBasisRecord;
 use cobre_io::OwnedPolicyCutRecord;
 use cobre_io::PolicyCheckpointMetadata;
@@ -49,16 +50,16 @@ pub(crate) fn resolve_warm_start_counts(
     metadata: &PolicyCheckpointMetadata,
     num_stages: usize,
 ) -> Result<Vec<u32>, SddpError> {
-    if metadata.warm_start_counts.is_empty() {
-        Ok(vec![metadata.warm_start_cuts; num_stages])
-    } else if metadata.warm_start_counts.len() != num_stages {
+    if metadata.producer.warm_start_counts.is_empty() {
+        Ok(vec![metadata.producer.warm_start_cuts; num_stages])
+    } else if metadata.producer.warm_start_counts.len() != num_stages {
         Err(SddpError::Validation(format!(
             "warm_start_counts length mismatch: checkpoint has {}, current system has {} stages",
-            metadata.warm_start_counts.len(),
+            metadata.producer.warm_start_counts.len(),
             num_stages,
         )))
     } else {
-        Ok(metadata.warm_start_counts.clone())
+        Ok(metadata.producer.warm_start_counts.clone())
     }
 }
 
@@ -143,8 +144,14 @@ pub struct PolicyStageManifest<'a> {
     pub state_dimension: u32,
     /// Number of stages in the study.
     pub num_stages: u32,
+    /// Number of storage pools (the pool-set size) — the pool-count analogue of
+    /// `num_stages`, checked only under [`FullFcf`].
+    pub n_pools: u32,
     /// Per-slot entity identity, in state-vector order.
     pub slots: &'a [EntitySlot],
+    /// Graph manifest (node list, edges, node → pool map). Checked for identity
+    /// only under [`FullFcf`]; a [`BoundaryInjection`] load ignores it.
+    pub graph: &'a GraphManifest,
 }
 
 mod sealed {
@@ -159,26 +166,33 @@ mod sealed {
 pub trait PolicyLoadKind: sealed::Sealed {
     /// Whether `num_stages` equality is hard-rejected for this kind.
     const CHECK_NUM_STAGES: bool;
+    /// Whether the pool count and graph-manifest identity are hard-rejected for
+    /// this kind. The pool-count analogue of [`Self::CHECK_NUM_STAGES`].
+    const CHECK_N_POOLS: bool;
 }
 
 /// Full future-cost-function load (warm-start, resume, simulation-only):
-/// `num_stages` must match `current` exactly.
+/// `num_stages`, the pool count, and the graph manifest must match `current`
+/// exactly.
 #[derive(Debug, Clone, Copy)]
 pub struct FullFcf;
 
 impl sealed::Sealed for FullFcf {}
 impl PolicyLoadKind for FullFcf {
     const CHECK_NUM_STAGES: bool = true;
+    const CHECK_N_POOLS: bool = true;
 }
 
-/// Single-stage boundary-cut injection into the terminal pool: `num_stages`
-/// is unchecked (a monthly source may feed a weekly+monthly current study).
+/// Single-stage boundary-cut injection into the terminal pool: `num_stages`,
+/// the pool count, and the graph manifest are unchecked (a monthly source may
+/// feed a weekly+monthly current study on a different graph).
 #[derive(Debug, Clone, Copy)]
 pub struct BoundaryInjection;
 
 impl sealed::Sealed for BoundaryInjection {}
 impl PolicyLoadKind for BoundaryInjection {
     const CHECK_NUM_STAGES: bool = false;
+    const CHECK_N_POOLS: bool = false;
 }
 
 /// Unforgeable, kind-typed evidence that [`validate_policy_load`] accepted a
@@ -227,10 +241,21 @@ pub fn validate_policy_load<K: PolicyLoadKind>(
         )));
     }
 
+    if K::CHECK_N_POOLS && source.n_pools != current.n_pools {
+        return Err(SddpError::Validation(format!(
+            "policy n_pools mismatch: policy has {}, current system has {}",
+            source.n_pools, current.n_pools
+        )));
+    }
+
     let mut warnings = Vec::new();
     compare_manifest_slot_identity(source.slots, current.slots, &mut |msg| {
         warnings.push(msg.to_string());
     })?;
+
+    if K::CHECK_N_POOLS {
+        compare_graph_manifest_identity(source.graph, current.graph)?;
+    }
 
     Ok(PolicyLoadProof {
         warnings,
@@ -238,21 +263,93 @@ pub fn validate_policy_load<K: PolicyLoadKind>(
     })
 }
 
+/// Compare two graph manifests for structural identity: pool-set size, per-node
+/// `(id, stage_id, pool_id)`, and per-edge `(source_id, target_id)`.
+///
+/// A [`FullFcf`] resume/warm-start continues the SAME node topology, so a
+/// divergence means the loaded value function attaches to a different graph and
+/// is REJECTED. An empty manifest on either side (a graph-less artifact — e.g.
+/// one authored from raw records) cannot be verified: silently skip, leaving the
+/// `state_dimension`/`num_stages`/`n_pools` checks standing.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] on a pool-count, node, or edge divergence.
+pub fn compare_graph_manifest_identity(
+    source: &GraphManifest,
+    current: &GraphManifest,
+) -> Result<(), SddpError> {
+    if source.nodes.is_empty() || current.nodes.is_empty() {
+        return Ok(());
+    }
+
+    if source.n_pools != current.n_pools {
+        return Err(SddpError::Validation(format!(
+            "graph manifest n_pools mismatch: source has {}, current study has {}",
+            source.n_pools, current.n_pools
+        )));
+    }
+
+    if source.nodes.len() != current.nodes.len() {
+        return Err(SddpError::Validation(format!(
+            "graph manifest node-count mismatch: source has {} nodes, current study has {}",
+            source.nodes.len(),
+            current.nodes.len()
+        )));
+    }
+
+    for (i, (src, cur)) in source.nodes.iter().zip(&current.nodes).enumerate() {
+        if (src.id, src.stage_id, src.pool_id) != (cur.id, cur.stage_id, cur.pool_id) {
+            return Err(SddpError::Validation(format!(
+                "graph manifest node {i} mismatch: source (id={}, stage_id={}, pool_id={}) != \
+                 current (id={}, stage_id={}, pool_id={})",
+                src.id, src.stage_id, src.pool_id, cur.id, cur.stage_id, cur.pool_id
+            )));
+        }
+    }
+
+    if source.edges.len() != current.edges.len() {
+        return Err(SddpError::Validation(format!(
+            "graph manifest edge-count mismatch: source has {} edges, current study has {}",
+            source.edges.len(),
+            current.edges.len()
+        )));
+    }
+
+    for (i, (src, cur)) in source.edges.iter().zip(&current.edges).enumerate() {
+        if (src.source_id, src.target_id) != (cur.source_id, cur.target_id) {
+            return Err(SddpError::Validation(format!(
+                "graph manifest edge {i} mismatch: source ({} -> {}) != current ({} -> {})",
+                src.source_id, src.target_id, cur.source_id, cur.target_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Build a basis cache from deserialized checkpoint basis records.
 ///
-/// Returns a `Vec<Option<CapturedBasis>>`, one entry per stage; stages without a
-/// matching record get `None`. `u8` status codes decode via `from_discriminant_code`,
-/// the mirror of `convert_basis_cache`'s export-side `to_discriminant_code`; a
-/// pre-existing checkpoint (bytes `0..=4`) decodes identically, since that range
-/// means the same in the canonical and `HiGHS` code spaces.
+/// Returns a `Vec<Option<CapturedBasis>>` of length `n_nodes` (`== node_ids.len()`),
+/// one entry per canonical node position; nodes without a matching record get
+/// `None`. Each basis record is keyed by its own node ordinal (its `stage_id`),
+/// so leaves sharing a pool land in distinct node slots — no `>= num_stages`
+/// drop, no cross-node collision, both of which the pre-branching per-stage
+/// sizing produced once `n_nodes > n_stages`. `u8` status codes decode via
+/// `from_discriminant_code`, the mirror of `convert_basis_cache`'s export-side
+/// `to_discriminant_code`; a pre-existing checkpoint (bytes `0..=4`) decodes
+/// identically, since that range means the same in the canonical and `HiGHS`
+/// code spaces.
 ///
 /// # Cut-slot reconstruction
 ///
 /// `row_status` is `[template rows…, cut rows…]`, the trailing `num_cut_rows` in
 /// capture-time [`CutPool::active_cuts`](crate::cut::pool::CutPool::active_cuts)
-/// order (active slots, increasing). Slot identity is recovered by matching each
-/// basis record to its [`StageCutsReadResult`] by
-/// `stage_id` and taking the active records' `slot_index` in increasing order, so
+/// order (active slots, increasing). A node's cut records live in its OWN pool's
+/// [`StageCutsReadResult`] (`sc.stage_id == node_pools[node]`), never the record
+/// whose pool id happens to equal the node ordinal — the two diverge once
+/// `n_pools != n_nodes` on a branching graph. Slot identity is recovered from
+/// that pool's active records' `slot_index` in increasing order, so
 /// `reconstruct_basis` preserves stored cut-row statuses across cut-set churn.
 ///
 /// # Graceful fallback
@@ -262,22 +359,23 @@ pub fn validate_policy_load<K: PolicyLoadKind>(
 /// all-template behavior (empty `cut_row_slots`; every cut row reconstructs
 /// BASIC). This changes only the warm-start solve path, never the optimum.
 ///
-/// `node_ids` (the CURRENT study's `NodeGraph::node_ids`, one entry per stage)
-/// tags each reconstructed basis's `node_id`: a checkpoint resume/warm-start
-/// continues the same node topology, so the node at a checkpoint stage is the
-/// current study's node at that stage — never a value recovered from the
-/// checkpoint itself (the checkpoint wire carries no node id).
+/// `node_ids` / `node_pools` are the CURRENT study's `NodeGraph::node_ids` and
+/// `NodeGraph::node_pool_ids` (both length `n_nodes`): a resume/warm-start
+/// continues the SAME node topology, so each reconstructed basis's `node_id` is
+/// `node_ids[node]` and its owning pool is `node_pools[node]` — never a value
+/// recovered from the checkpoint itself (the checkpoint wire carries no node id).
 #[must_use]
 pub fn build_basis_cache_from_checkpoint(
-    num_stages: usize,
     stage_bases: &[OwnedPolicyBasisRecord],
     stage_cuts: &[StageCutsReadResult],
     node_ids: &[i32],
+    node_pools: &[usize],
 ) -> Vec<Option<CapturedBasis>> {
-    let mut cache: Vec<Option<CapturedBasis>> = vec![None; num_stages];
+    let n_nodes = node_ids.len();
+    let mut cache: Vec<Option<CapturedBasis>> = vec![None; n_nodes];
     for record in stage_bases {
-        let stage = record.stage_id as usize;
-        if stage >= num_stages {
+        let node = record.stage_id as usize;
+        if node >= n_nodes {
             continue;
         }
         let col_status: Vec<BasisStatus> = record
@@ -292,9 +390,10 @@ pub fn build_basis_cache_from_checkpoint(
             .collect();
 
         let num_cut = record.num_cut_rows as usize;
+        let pool = node_pools[node];
         let active_slots: Option<Vec<u32>> = stage_cuts
             .iter()
-            .find(|sc| sc.stage_id == record.stage_id)
+            .find(|sc| sc.stage_id as usize == pool)
             .map(|sc| {
                 sc.cuts
                     .iter()
@@ -316,7 +415,7 @@ pub fn build_basis_cache_from_checkpoint(
              cut-row count for the CapturedBasis invariant",
         );
 
-        cache[stage] = Some(CapturedBasis {
+        cache[node] = Some(CapturedBasis {
             basis: Basis {
                 col_status,
                 row_status,
@@ -324,7 +423,7 @@ pub fn build_basis_cache_from_checkpoint(
             base_row_count,
             cut_row_slots,
             state_at_capture: Vec::new(),
-            node_id: node_ids[stage],
+            node_id: node_ids[node],
         });
     }
     cache
@@ -459,14 +558,41 @@ pub fn load_boundary_cuts(
         ))
     })?;
 
-    let stage_result = checkpoint
-        .stage_cuts
-        .iter()
-        .find(|sr| sr.stage_id == source_stage)
+    // Resolve `source_stage` to its pool THROUGH the graph manifest (a node
+    // references one pool), rejecting a multi-node stage: boundary injection
+    // requires a single-node source and the frozen `policy.boundary` config
+    // offers no node selector. A graph-less artifact (empty manifest) falls back
+    // to keying by `source_stage` directly — the chain identity where
+    // stage == pool.
+    let manifest = &checkpoint.metadata.graph_manifest;
+    let resolved_pool: Option<u32> = if manifest.nodes.is_empty() {
+        Some(source_stage)
+    } else {
+        let source_stage_i32 = i32::try_from(source_stage).map_err(|_| {
+            SddpError::Validation(format!(
+                "boundary policy: source_stage {source_stage} overflows the stage id space"
+            ))
+        })?;
+        let mut at_stage = manifest
+            .nodes
+            .iter()
+            .filter(|n| n.stage_id == source_stage_i32);
+        let first = at_stage.next();
+        if at_stage.next().is_some() {
+            return Err(SddpError::Validation(format!(
+                "boundary policy: source_stage {source_stage} names a multi-node stage; boundary \
+                 injection requires a single-node source"
+            )));
+        }
+        first.map(|n| n.pool_id)
+    };
+
+    let stage_result = resolved_pool
+        .and_then(|pool| checkpoint.stage_cuts.iter().find(|sr| sr.stage_id == pool))
         .ok_or_else(|| {
             SddpError::Validation(format!(
                 "boundary policy: source_stage {} not found in checkpoint \
-                 (available stages: {:?})",
+                 (available pools: {:?})",
                 source_stage,
                 checkpoint
                     .stage_cuts
@@ -490,15 +616,22 @@ pub fn load_boundary_cuts(
         }
     }
 
+    // `BoundaryInjection` checks neither `n_pools` nor the graph manifest, so
+    // these unchecked fields carry placeholders.
+    let empty_graph = GraphManifest::default();
     let source = PolicyStageManifest {
         state_dimension: stage_result.state_dimension,
         num_stages: checkpoint.metadata.num_stages,
+        n_pools: 0,
         slots: &stage_result.entity_manifest,
+        graph: &empty_graph,
     };
     let current = PolicyStageManifest {
         state_dimension: current_state_dimension,
         num_stages: checkpoint.metadata.num_stages,
+        n_pools: 0,
         slots: current_manifest,
+        graph: &empty_graph,
     };
     let proof = validate_policy_load::<BoundaryInjection>(&source, &current)?;
     for warning in &proof.warnings {
@@ -508,7 +641,7 @@ pub fn load_boundary_cuts(
     let mut records = stage_result.cuts.clone();
     rescale_cut_records_for_load(
         &mut records,
-        checkpoint.metadata.cost_scale_factor,
+        checkpoint.metadata.producer.cost_scale_factor,
         loading_cost_scale_factor,
     );
 
@@ -579,7 +712,10 @@ pub fn inject_boundary_cuts(setup: &mut StudySetup, boundary_cuts: &ValidatedBou
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 mod tests {
-    use cobre_io::{EntitySlot, PolicyCheckpointMetadata, StageCutsPayload};
+    use cobre_io::{
+        EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCheckpointMetadata,
+        ProducerBlock, StageCutsPayload,
+    };
 
     use super::{
         BoundaryInjection, FullFcf, PolicyStageManifest, compare_manifest_slot_identity,
@@ -593,6 +729,66 @@ mod tests {
     /// `Result`.
     fn ignore_warnings() -> impl FnMut(&str) {
         |_| {}
+    }
+
+    /// A minimal producer block for artifact-writing test helpers.
+    fn producer_block() -> ProducerBlock {
+        ProducerBlock {
+            completed_iterations: 10,
+            final_lower_bound: 0.0,
+            best_upper_bound: None,
+            max_iterations: 50,
+            forward_passes: 1,
+            warm_start_cuts: 0,
+            warm_start_counts: vec![],
+            rng_seed: 0,
+            total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
+        }
+    }
+
+    /// A 1:1 chain graph manifest over `n_stages` nodes (node id == stage id ==
+    /// pool id) — the shape a chain-degenerate study writes.
+    fn chain_manifest(n_stages: u32) -> GraphManifest {
+        let nodes = (0..n_stages)
+            .map(|t| ManifestNode {
+                id: i32::try_from(t).unwrap(),
+                stage_id: i32::try_from(t).unwrap(),
+                pool_id: t,
+            })
+            .collect();
+        let edges = (0..n_stages.saturating_sub(1))
+            .map(|t| ManifestEdge {
+                source_id: i32::try_from(t).unwrap(),
+                target_id: i32::try_from(t + 1).unwrap(),
+                probability: 1.0,
+            })
+            .collect();
+        GraphManifest {
+            n_pools: n_stages,
+            nodes,
+            edges,
+        }
+    }
+
+    /// A shared empty graph manifest for `validate_policy_load` unit tests that
+    /// exercise only the `state_dimension`/`num_stages`/slot-identity checks —
+    /// an empty graph makes the graph-identity check a silent no-op.
+    static EMPTY_GRAPH: std::sync::LazyLock<GraphManifest> =
+        std::sync::LazyLock::new(GraphManifest::default);
+
+    /// Build a [`PolicyStageManifest`] with `n_pools == num_stages` and the shared
+    /// [`EMPTY_GRAPH`] (graph identity skipped) — for the pure validate tests.
+    fn psm(state_dimension: u32, num_stages: u32, slots: &[EntitySlot]) -> PolicyStageManifest<'_> {
+        PolicyStageManifest {
+            state_dimension,
+            num_stages,
+            n_pools: num_stages,
+            slots,
+            graph: &EMPTY_GRAPH,
+        }
     }
 
     /// Write a minimal policy checkpoint to `dir` with `n_stages` stages each
@@ -658,22 +854,12 @@ mod tests {
             .collect();
 
         let metadata = PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
             cobre_version: "0.4.0".to_string(),
             created_at: "2026-04-14T00:00:00Z".to_string(),
-            completed_iterations: 10,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
-            state_dimension,
             num_stages: n_stages,
-            max_iterations: 50,
-            forward_passes: 1,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
+            graph_manifest: chain_manifest(n_stages),
+            producer: producer_block(),
         };
 
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
@@ -713,22 +899,15 @@ mod tests {
             entity_manifest: &[],
         };
         let metadata = PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
             cobre_version: "0.11.0".to_string(),
             created_at: "2026-07-20T00:00:00Z".to_string(),
-            completed_iterations: 10,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
-            state_dimension,
             num_stages: stage_id + 1,
-            max_iterations: 50,
-            forward_passes: 1,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor,
+            graph_manifest: chain_manifest(stage_id + 1),
+            producer: ProducerBlock {
+                cost_scale_factor,
+                ..producer_block()
+            },
         };
         cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
     }
@@ -1134,7 +1313,7 @@ mod tests {
             entity_id: id,
             subindex: 0,
             was_active: true,
-            delivery_anchor: cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            delivery_date: cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         }
     }
 
@@ -1146,7 +1325,7 @@ mod tests {
             entity_id: id,
             subindex: lag,
             was_active: true,
-            delivery_anchor: cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            delivery_date: cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         }
     }
 
@@ -1158,7 +1337,7 @@ mod tests {
             entity_id: id,
             subindex: lag_depth,
             was_active: true,
-            delivery_anchor: cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            delivery_date: cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         }
     }
 
@@ -1467,6 +1646,132 @@ mod tests {
         );
     }
 
+    // ── load_boundary_cuts manifest resolution (0.14 pool-keyed artifact) ─────
+
+    /// Write a single-pool checkpoint whose one cut pool is keyed by `pool_id`
+    /// (the payload `stage_id` field) and whose graph manifest declares the nodes
+    /// in `graph_nodes` (`(node_id, stage_id, pool_id)`) — so `load_boundary_cuts`
+    /// must resolve `source_stage` to `pool_id` THROUGH the manifest, not by a
+    /// stage == pool coincidence.
+    fn write_checkpoint_pool_keyed(
+        dir: &std::path::Path,
+        pool_id: u32,
+        graph_nodes: &[(i32, i32, u32)],
+        intercepts: &[f64],
+    ) {
+        let coefficients = vec![1.0_f64, 1.0];
+        let cuts: Vec<cobre_io::PolicyCutRecord<'_>> = intercepts
+            .iter()
+            .enumerate()
+            .map(|(i, &intercept)| cobre_io::PolicyCutRecord {
+                cut_id: i as u64,
+                slot_index: i as u32,
+                iteration: 0,
+                forward_pass_index: 0,
+                intercept,
+                coefficients: &coefficients,
+                is_active: true,
+            })
+            .collect();
+        let active: Vec<u32> = (0..intercepts.len() as u32).collect();
+        let payload = StageCutsPayload {
+            stage_id: pool_id,
+            state_dimension: 2,
+            capacity: intercepts.len() as u32,
+            warm_start_count: 0,
+            cuts: &cuts,
+            active_cut_indices: &active,
+            populated_count: intercepts.len() as u32,
+            entity_manifest: &[],
+        };
+        let nodes = graph_nodes
+            .iter()
+            .map(|&(id, stage_id, pool_id)| ManifestNode {
+                id,
+                stage_id,
+                pool_id,
+            })
+            .collect();
+        let n_pools = graph_nodes
+            .iter()
+            .map(|&(_, _, p)| p + 1)
+            .max()
+            .unwrap_or(0);
+        let metadata = PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
+            cobre_version: "0.14.0".to_string(),
+            created_at: "2026-08-04T00:00:00Z".to_string(),
+            num_stages: 6,
+            graph_manifest: GraphManifest {
+                n_pools,
+                nodes,
+                edges: vec![],
+            },
+            producer: producer_block(),
+        };
+        cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
+    }
+
+    /// A `source_stage` naming a stage with more than one node is rejected: the
+    /// frozen `policy.boundary` config offers no node selector, so a multi-node
+    /// source is a named `SddpError::Validation` (no remedy field).
+    #[test]
+    fn load_boundary_cuts_multi_node_source_stage_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Two nodes at stage 3 (ids 30, 31) → stage 3 is multi-node.
+        write_checkpoint_pool_keyed(tmp.path(), 2, &[(30, 3, 2), (31, 3, 2)], &[10.0, 20.0]);
+
+        let result = load_boundary_cuts(
+            tmp.path(),
+            3,
+            2,
+            &[],
+            None,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
+
+        assert!(result.is_err(), "a multi-node source_stage must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("multi-node"),
+            "rejection must name the stage as multi-node: {msg}"
+        );
+        assert!(
+            msg.contains("source_stage 3"),
+            "rejection must name the stage: {msg}"
+        );
+    }
+
+    /// A single-node `source_stage` resolves THROUGH the manifest to that node's
+    /// pool, even when the pool id differs from the stage id (node at stage 5 →
+    /// pool 2): the cuts loaded are pool 2's.
+    #[test]
+    fn load_boundary_cuts_single_node_resolves_through_manifest_to_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        // One node at stage 5 mapped to pool 2 (stage != pool).
+        write_checkpoint_pool_keyed(tmp.path(), 2, &[(50, 5, 2)], &[10.0, 20.0, 30.0]);
+
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            5,
+            2,
+            &[],
+            None,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        )
+        .expect("single-node source must resolve through the manifest");
+
+        assert_eq!(
+            cuts.len(),
+            3,
+            "must load all of pool 2's cuts, resolved from stage 5 via the manifest"
+        );
+        let intercepts: Vec<f64> = cuts.iter().map(|c| c.intercept).collect();
+        assert_eq!(intercepts, vec![10.0, 20.0, 30.0]);
+    }
+
     // ── compare_manifest_slot_identity tests ──────────────────────────────────
 
     /// Two same-length manifests differing only at slot 0's `entity_id` (7 vs 9)
@@ -1583,16 +1888,8 @@ mod tests {
     #[test]
     fn validate_policy_load_full_fcf_identical_oks_without_warning() {
         let slots = storage_manifest(1, 2);
-        let source = PolicyStageManifest {
-            state_dimension: 2,
-            num_stages: 12,
-            slots: &slots,
-        };
-        let current = PolicyStageManifest {
-            state_dimension: 2,
-            num_stages: 12,
-            slots: &slots,
-        };
+        let source = psm(2, 12, &slots);
+        let current = psm(2, 12, &slots);
 
         let report = validate_policy_load::<FullFcf>(&source, &current).unwrap();
 
@@ -1609,16 +1906,8 @@ mod tests {
     #[test]
     fn validate_policy_load_full_fcf_state_dimension_mismatch_rejects() {
         let slots = storage_manifest(1, 2);
-        let source = PolicyStageManifest {
-            state_dimension: 10,
-            num_stages: 12,
-            slots: &slots,
-        };
-        let current = PolicyStageManifest {
-            state_dimension: 8,
-            num_stages: 12,
-            slots: &slots,
-        };
+        let source = psm(10, 12, &slots);
+        let current = psm(8, 12, &slots);
 
         let result = validate_policy_load::<FullFcf>(&source, &current);
 
@@ -1638,16 +1927,8 @@ mod tests {
     #[test]
     fn validate_policy_load_num_stages_mismatch_rejects_full_fcf_oks_boundary() {
         let slots = storage_manifest(1, 2);
-        let source = PolicyStageManifest {
-            state_dimension: 10,
-            num_stages: 12,
-            slots: &slots,
-        };
-        let current = PolicyStageManifest {
-            state_dimension: 10,
-            num_stages: 24,
-            slots: &slots,
-        };
+        let source = psm(10, 12, &slots);
+        let current = psm(10, 24, &slots);
 
         let full_fcf_result = validate_policy_load::<FullFcf>(&source, &current);
         assert!(
@@ -1672,16 +1953,8 @@ mod tests {
     #[test]
     fn validate_policy_load_full_fcf_both_dimensions_mismatched_rejects() {
         let slots = storage_manifest(1, 2);
-        let source = PolicyStageManifest {
-            state_dimension: 10,
-            num_stages: 12,
-            slots: &slots,
-        };
-        let current = PolicyStageManifest {
-            state_dimension: 8,
-            num_stages: 24,
-            slots: &slots,
-        };
+        let source = psm(10, 12, &slots);
+        let current = psm(8, 24, &slots);
 
         let result = validate_policy_load::<FullFcf>(&source, &current);
 
@@ -1699,16 +1972,8 @@ mod tests {
     fn validate_policy_load_full_fcf_slot_mismatch_rejects() {
         let source_slots = storage_manifest(7, 2);
         let current_slots = storage_manifest(9, 2);
-        let source = PolicyStageManifest {
-            state_dimension: 2,
-            num_stages: 12,
-            slots: &source_slots,
-        };
-        let current = PolicyStageManifest {
-            state_dimension: 2,
-            num_stages: 12,
-            slots: &current_slots,
-        };
+        let source = psm(2, 12, &source_slots);
+        let current = psm(2, 12, &current_slots);
 
         let result = validate_policy_load::<FullFcf>(&source, &current);
 
@@ -1731,16 +1996,8 @@ mod tests {
     fn validate_policy_load_boundary_injection_slot_mismatch_rejects() {
         let source_slots = storage_manifest(7, 2);
         let current_slots = storage_manifest(9, 2);
-        let source = PolicyStageManifest {
-            state_dimension: 2,
-            num_stages: 12,
-            slots: &source_slots,
-        };
-        let current = PolicyStageManifest {
-            state_dimension: 2,
-            num_stages: 6,
-            slots: &current_slots,
-        };
+        let source = psm(2, 12, &source_slots);
+        let current = psm(2, 6, &current_slots);
 
         let result = validate_policy_load::<BoundaryInjection>(&source, &current);
 
@@ -1755,16 +2012,8 @@ mod tests {
     #[test]
     fn validate_policy_load_full_fcf_empty_manifest_oks_with_warning() {
         let current_slots = storage_manifest(1, 2);
-        let source = PolicyStageManifest {
-            state_dimension: 2,
-            num_stages: 12,
-            slots: &[],
-        };
-        let current = PolicyStageManifest {
-            state_dimension: 2,
-            num_stages: 12,
-            slots: &current_slots,
-        };
+        let source = psm(2, 12, &[]);
+        let current = psm(2, 12, &current_slots);
 
         let report = validate_policy_load::<FullFcf>(&source, &current).unwrap();
 
@@ -1789,22 +2038,16 @@ mod tests {
             warm_start_counts.len() as u32
         };
         PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
             cobre_version: "0.4.0".to_string(),
             created_at: "2026-04-01T00:00:00Z".to_string(),
-            completed_iterations: 10,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
-            state_dimension: 2,
             num_stages,
-            max_iterations: 50,
-            forward_passes: 1,
-            warm_start_cuts,
-            warm_start_counts,
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
+            graph_manifest: chain_manifest(num_stages),
+            producer: ProducerBlock {
+                warm_start_cuts,
+                warm_start_counts,
+                ..producer_block()
+            },
         }
     }
 
@@ -1923,7 +2166,8 @@ mod tests {
         let buf = serialize_stage_basis(&record);
         let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
 
-        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&owned), &[], &[0]);
+        let cache =
+            build_basis_cache_from_checkpoint(std::slice::from_ref(&owned), &[], &[0], &[0]);
         let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
 
         assert_eq!(
@@ -1962,7 +2206,8 @@ mod tests {
         let buf = serialize_stage_basis(&record);
         let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
 
-        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&owned), &[], &[0]);
+        let cache =
+            build_basis_cache_from_checkpoint(std::slice::from_ref(&owned), &[], &[0], &[0]);
         let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
 
         let expected_col: Vec<BasisStatus> = col_bytes
@@ -1981,5 +2226,125 @@ mod tests {
             recovered.basis.row_status, expected_row,
             "old-file bytes must load to the old HiGHS-space row statuses"
         );
+    }
+
+    // ── branching-graph basis-cache keying ────────────────────────────────────
+
+    use cobre_io::{OwnedPolicyBasisRecord, StageCutsReadResult};
+
+    /// An active cut record at LP slot `slot`.
+    fn active_cut(slot: u32) -> OwnedPolicyCutRecord {
+        OwnedPolicyCutRecord {
+            cut_id: u64::from(slot),
+            slot_index: slot,
+            iteration: 0,
+            forward_pass_index: 0,
+            intercept: 0.0,
+            coefficients: vec![0.0],
+            is_active: true,
+        }
+    }
+
+    /// A pool-keyed cut collection (`stage_id` is the pool id) holding the given
+    /// active slots.
+    fn pool_cuts(pool: u32, slots: &[u32]) -> StageCutsReadResult {
+        StageCutsReadResult {
+            stage_id: pool,
+            state_dimension: 1,
+            capacity: 8,
+            warm_start_count: 0,
+            populated_count: slots.len() as u32,
+            cuts: slots.iter().copied().map(active_cut).collect(),
+            entity_manifest: Vec::new(),
+        }
+    }
+
+    /// A node-keyed basis record (`stage_id` is the node ordinal) with
+    /// `num_cut` trailing cut rows over `3` template rows.
+    fn node_basis(node: u32, num_cut: usize) -> OwnedPolicyBasisRecord {
+        OwnedPolicyBasisRecord {
+            stage_id: node,
+            iteration: 0,
+            column_status: vec![1_u8, 1_u8],
+            row_status: vec![1_u8; 3 + num_cut],
+            num_cut_rows: num_cut as u32,
+        }
+    }
+
+    /// A branching (K-fan) checkpoint where `n_nodes (7) > num_stages`: nodes
+    /// 0/1/2 are interior (pools 0/1/2), leaves 3..=6 share pool 3. The cache is
+    /// sized by `n_nodes`, every node lands in its own slot (no `>= num_stages`
+    /// drop, no cross-node collision), each carries its own `node_id`, and the
+    /// cut-slot reconstruction resolves through the node's OWN pool
+    /// (`node_pools[node]`) — never the pool whose id equals the node ordinal,
+    /// which for leaves 4/5/6 names no pool at all.
+    #[test]
+    fn build_basis_cache_from_checkpoint_keys_branching_graph_by_node() {
+        use super::build_basis_cache_from_checkpoint;
+
+        let node_ids: Vec<i32> = vec![10, 11, 12, 13, 14, 15, 16];
+        let node_pools: Vec<usize> = vec![0, 1, 2, 3, 3, 3, 3];
+        let stage_cuts = vec![
+            pool_cuts(0, &[0]),
+            pool_cuts(1, &[1]),
+            pool_cuts(2, &[2]),
+            pool_cuts(3, &[5, 7]),
+        ];
+        let stage_bases = vec![
+            node_basis(0, 1),
+            node_basis(1, 1),
+            node_basis(2, 1),
+            node_basis(3, 2),
+            node_basis(4, 2),
+            node_basis(5, 2),
+            node_basis(6, 2),
+        ];
+
+        let cache =
+            build_basis_cache_from_checkpoint(&stage_bases, &stage_cuts, &node_ids, &node_pools);
+
+        assert_eq!(cache.len(), 7, "cache is sized by n_nodes, not num_stages");
+        for (node, slot) in cache.iter().enumerate() {
+            let cb = slot
+                .as_ref()
+                .unwrap_or_else(|| panic!("node {node} must not be dropped"));
+            assert_eq!(
+                cb.node_id, node_ids[node],
+                "node {node} must carry its own node_id (no cross-node collision)"
+            );
+        }
+
+        // Interior node 2 (pool 2) recovers pool 2's single active slot.
+        assert_eq!(cache[2].as_ref().unwrap().cut_row_slots, vec![2_u32]);
+        // Every leaf (nodes 3..=6) recovers the SHARED pool 3's active slots,
+        // keyed by node_pools[node] == 3 — a node-ordinal key would drop 4/5/6.
+        for (node, slot) in cache.iter().enumerate().skip(3) {
+            assert_eq!(
+                slot.as_ref().unwrap().cut_row_slots,
+                vec![5_u32, 7_u32],
+                "leaf node {node} must recover shared pool 3's active slots"
+            );
+        }
+    }
+
+    /// Chain degeneracy: `node_pools` is the identity (`node_pools[t] == t`), so
+    /// node-keyed sizing and pool-keyed cut matching reduce exactly to the
+    /// pre-branching per-stage behavior — one basis per stage, keyed by ordinal.
+    #[test]
+    fn build_basis_cache_from_checkpoint_chain_is_identity_keyed() {
+        use super::build_basis_cache_from_checkpoint;
+
+        let node_ids: Vec<i32> = vec![0, 1, 2];
+        let node_pools: Vec<usize> = vec![0, 1, 2];
+        let stage_cuts = vec![pool_cuts(0, &[0]), pool_cuts(1, &[3]), pool_cuts(2, &[9])];
+        let stage_bases = vec![node_basis(0, 1), node_basis(1, 1), node_basis(2, 1)];
+
+        let cache =
+            build_basis_cache_from_checkpoint(&stage_bases, &stage_cuts, &node_ids, &node_pools);
+
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache[0].as_ref().unwrap().cut_row_slots, vec![0_u32]);
+        assert_eq!(cache[1].as_ref().unwrap().cut_row_slots, vec![3_u32]);
+        assert_eq!(cache[2].as_ref().unwrap().cut_row_slots, vec![9_u32]);
     }
 }

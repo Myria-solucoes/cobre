@@ -1492,7 +1492,7 @@ mod tests {
         IterationRecord {
             iteration,
             lower_bound: 0.0,
-            upper_bound_mean: 0.0,
+            upper_bound: 0.0,
             upper_bound_std: 0.0,
             gap_percent: None,
             cuts_added: 0,

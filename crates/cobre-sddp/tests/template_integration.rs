@@ -3918,10 +3918,11 @@ fn build_hydro_one_ant_system(
     annual_discount_rate: f64,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
+    use cobre_core::HorizonGraph;
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     };
 
@@ -4117,7 +4118,7 @@ fn build_hydro_one_ant_system(
         },
     );
 
-    let policy_graph = PolicyGraph {
+    let policy_graph = HorizonGraph {
         stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate,

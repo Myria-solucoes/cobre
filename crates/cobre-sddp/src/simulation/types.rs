@@ -418,6 +418,11 @@ pub struct SimulationGenericViolationResult {
 pub struct SimulationStageResult {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared id of the `NodeGraph` node this scenario's sampled walk visits at
+    /// this stage (`node_graph.node_ids[node]`). On a chain this is the
+    /// degenerate per-stage node id; it is never gated on whether `nodes[]` was
+    /// declared. Broadcast onto every entity row written for the stage.
+    pub node_id: i32,
     /// Cost breakdown results for this stage (one entry per block).
     pub costs: Vec<SimulationCostResult>,
     /// Hydro plant results for this stage.
@@ -981,6 +986,7 @@ mod tests {
     fn stage_result_empty_optional_vecs() {
         let stage = SimulationStageResult {
             stage_id: 0,
+            node_id: 0,
             costs: vec![],
             hydros: vec![],
             hydro_bus_generation: vec![],
@@ -1014,6 +1020,7 @@ mod tests {
         let stages: Vec<SimulationStageResult> = (0..12)
             .map(|i| SimulationStageResult {
                 stage_id: i,
+                node_id: i as i32,
                 costs: vec![],
                 hydros: vec![],
                 hydro_bus_generation: vec![],

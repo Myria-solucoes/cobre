@@ -34,8 +34,9 @@ use crate::solver_stats::SolverStatsDelta;
 /// (`run_stage_solve`, `lazy_solve_preloaded`) treat a stored basis whose
 /// `node_id` differs from the node being solved as cold, never warm-started
 /// from it — a resampled path visiting a different node than the one that
-/// captured the basis. Not part of the broadcast wire (see
-/// [`CapturedBasis::to_broadcast_payload`]).
+/// captured the basis. Carried on the broadcast wire (see
+/// [`CapturedBasis::to_broadcast_payload`]), so the decode side is
+/// self-describing rather than positionally filled.
 #[derive(Clone, Debug)]
 pub struct CapturedBasis {
     /// The underlying solver basis (row and column statuses).
@@ -59,17 +60,18 @@ pub struct CapturedBasis {
 /// the presence sentinel (`1_i32`). Bump this constant and update
 /// `try_from_broadcast_payload` whenever the field layout changes.
 ///
-/// Version 1 carries: column statuses, template-row statuses, cut-row statuses,
-/// `cut_row_slots`, and `state_at_capture`. `cut_row_slots` is the load-bearing
-/// reconstruction key — `build_slot_lookup` binds stored cut-row statuses to
-/// target-LP cut rows by slot id. `state_at_capture` is not read by any current
-/// reconstruction reader; it is retained for diagnostics and to allow
-/// re-introducing a state-dependent reuse policy without a wire-format change.
-/// The DCS arm captures no basis by design (a captured basis would describe the
-/// frozen layout, not the DCS resident subset — see
-/// `StageOpeningSolver::solve_lazy`), so there the field is never part of a
-/// consumed warm-start.
-pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 1;
+/// Version 2 carries: the generating/capture `node_id` (making each entry
+/// self-describing rather than positionally filled by the caller), column
+/// statuses, template-row statuses, cut-row statuses, `cut_row_slots`, and
+/// `state_at_capture`. `cut_row_slots` is the load-bearing reconstruction key —
+/// `build_slot_lookup` binds stored cut-row statuses to target-LP cut rows by
+/// slot id. `state_at_capture` is not read by any current reconstruction
+/// reader; it is retained for diagnostics and to allow re-introducing a
+/// state-dependent reuse policy without a wire-format change. The DCS arm
+/// captures no basis by design (a captured basis would describe the frozen
+/// layout, not the DCS resident subset — see `StageOpeningSolver::solve_lazy`),
+/// so there the field is never part of a consumed warm-start.
+pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 2;
 
 /// Widens [`BasisStatus::to_discriminant_code`] to the `i32` the broadcast payload
 /// carries; that method is the single owner of the numeric mapping (injective, so
@@ -129,6 +131,8 @@ impl CapturedBasis {
     /// Pushes the following into `i32_buf` in order:
     /// - `1_i32` sentinel (present)
     /// - [`BASIS_BROADCAST_WIRE_VERSION`] as `i32` (wire version)
+    /// - `node_id` as `i32` (the generating/capture node — self-describing
+    ///   header, so the decode side no longer fills it positionally)
     /// - `col_status.len()` as `i32`
     /// - `row_status.len()` as `i32`
     /// - `base_row_count` as `i32`
@@ -147,6 +151,7 @@ impl CapturedBasis {
     pub fn to_broadcast_payload(&self, i32_buf: &mut Vec<i32>, f64_buf: &mut Vec<f64>) {
         i32_buf.push(1_i32);
         i32_buf.push(BASIS_BROADCAST_WIRE_VERSION);
+        i32_buf.push(self.node_id);
         i32_buf.push(self.basis.col_status.len() as i32);
         i32_buf.push(self.basis.row_status.len() as i32);
         i32_buf.push(self.base_row_count as i32);
@@ -179,6 +184,8 @@ impl CapturedBasis {
     /// Reads from `i32_buf` in order:
     /// - `1_i32` sentinel (present)
     /// - [`BASIS_BROADCAST_WIRE_VERSION`] as `i32` (wire version)
+    /// - `node_id` as `i32` (the generating/capture node, read straight into
+    ///   the reconstructed [`CapturedBasis::node_id`])
     /// - `col_status.len()` as `i32`
     /// - `row_status.len()` as `i32`
     /// - `base_row_count` as `i32`
@@ -194,10 +201,10 @@ impl CapturedBasis {
     ///
     /// Returns `SddpError::Validation` if the `i32_buf` or
     /// `f64_buf` is truncated at any of the bounded reads
-    /// (sentinel, version, five length fields, `col_status`, `row_status`,
-    /// `cut_row_slots`, `state_at_capture`), or if the version field does
-    /// not match [`BASIS_BROADCAST_WIRE_VERSION`]. The error message names
-    /// the affected stage and the expected vs. available byte count.
+    /// (sentinel, version, `node_id` + five length fields, `col_status`,
+    /// `row_status`, `cut_row_slots`, `state_at_capture`), or if the version
+    /// field does not match [`BASIS_BROADCAST_WIRE_VERSION`]. The error message
+    /// names the affected stage and the expected vs. available byte count.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
@@ -240,11 +247,14 @@ impl CapturedBasis {
             )));
         }
 
-        if *i32_cursor + 5 > i32_buf.len() {
+        if *i32_cursor + 6 > i32_buf.len() {
             return Err(Validation(format!(
-                "try_from_broadcast_payload: buffer truncated reading lengths at stage {stage}"
+                "try_from_broadcast_payload: buffer truncated reading node_id + lengths at stage \
+                 {stage}"
             )));
         }
+        let node_id = i32_buf[*i32_cursor];
+        *i32_cursor += 1;
         let col_len = i32_buf[*i32_cursor] as usize;
         *i32_cursor += 1;
         let row_len = i32_buf[*i32_cursor] as usize;
@@ -315,9 +325,7 @@ impl CapturedBasis {
             base_row_count,
             cut_row_slots,
             state_at_capture,
-            // node_id is not on the wire; broadcast_basis_cache fills it
-            // out-of-band from the per-stage node mapping after this call.
-            node_id: 0,
+            node_id,
         }))
     }
 }
@@ -2005,11 +2013,12 @@ mod tests {
         assert_eq!(f64_cursor, f64_buf.len(), "f64_cursor must be at end");
     }
 
-    /// Manually overwrite the version field (offset 1) to `2_i32` and assert
-    /// that `try_from_broadcast_payload` returns `Err(SddpError::Validation)`
-    /// whose message contains `"unsupported wire version 2"`.
+    /// Manually overwrite the version field (offset 1) to `1_i32` (the removed
+    /// v1 format) and assert that `try_from_broadcast_payload` returns
+    /// `Err(SddpError::Validation)` whose message contains
+    /// `"unsupported wire version 1"`.
     ///
-    /// AC2: future-version peer detection.
+    /// AC2: stale-version peer detection.
     #[test]
     fn try_from_broadcast_payload_rejects_wrong_version() {
         use crate::SddpError;
@@ -2039,8 +2048,9 @@ mod tests {
         let mut f64_buf: Vec<f64> = Vec::new();
         cb.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
 
-        // Corrupt the version field (offset 1) to simulate a future-version peer.
-        i32_buf[1] = 2_i32;
+        // Corrupt the version field (offset 1) to the removed v1 to simulate a
+        // stale-version peer.
+        i32_buf[1] = 1_i32;
 
         let mut i32_cursor = 0_usize;
         let mut f64_cursor = 0_usize;
@@ -2056,8 +2066,8 @@ mod tests {
         match err {
             SddpError::Validation(ref msg) => {
                 assert!(
-                    msg.contains("unsupported wire version 2"),
-                    "error must contain 'unsupported wire version 2', got: {msg}"
+                    msg.contains("unsupported wire version 1"),
+                    "error must contain 'unsupported wire version 1', got: {msg}"
                 );
             }
             other => panic!("expected SddpError::Validation, got {other:?}"),
@@ -2126,13 +2136,12 @@ mod tests {
         assert_eq!(f64_cursor, f64_buf.len(), "f64_cursor must be at end");
     }
 
-    /// `node_id` is in-memory-only metadata: `to_broadcast_payload` does not
-    /// serialize it and `try_from_broadcast_payload` cannot recover the
-    /// original value. Adding it to the wire would break `mpi_wire.rs`'s
-    /// byte-parity gate — this test pins the exclusion so a future reader does
-    /// not "fix" a perceived missing field.
+    /// `node_id` rides the wire (version 2): it is written at a fixed header
+    /// slot and recovered by `try_from_broadcast_payload`, so the caller no
+    /// longer fills it out-of-band. A distinct `node_id` changes exactly one
+    /// wire word (the byte count is unchanged), and the value round-trips.
     #[test]
-    fn captured_basis_node_id_is_not_carried_by_the_wire() {
+    fn captured_basis_node_id_round_trips_on_the_wire() {
         let original = CapturedBasis {
             basis: Basis {
                 col_status: vec![BasisStatus::Lower],
@@ -2155,14 +2164,14 @@ mod tests {
         let mut f64_buf2: Vec<f64> = Vec::new();
         other.to_broadcast_payload(&mut i32_buf2, &mut f64_buf2);
 
-        assert_eq!(
+        assert_ne!(
             i32_buf, i32_buf2,
-            "the payload must be byte-identical regardless of node_id"
+            "a distinct node_id must change the payload (it is on the wire)"
         );
         assert_eq!(
             bytes_with_node_id,
             i32_buf2.len(),
-            "node_id must not change the wire byte count"
+            "node_id is one fixed-width word; it must not change the wire byte count"
         );
 
         let mut i32_cursor = 0_usize;
@@ -2177,10 +2186,9 @@ mod tests {
         .expect("round-trip must not fail")
         .expect("sentinel is 1; must return Some");
 
-        assert_ne!(
+        assert_eq!(
             recovered.node_id, original.node_id,
-            "node_id does not round-trip through the wire; the caller \
-             (broadcast_basis_cache) fills it out-of-band"
+            "node_id must round-trip through the wire (version 2)"
         );
     }
 
@@ -2290,14 +2298,15 @@ mod tests {
         small.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
         // i32_buf layout (Some path):
         //   [0] = 1 (sentinel)
-        //   [1] = BASIS_BROADCAST_WIRE_VERSION = 1
-        //   [2] = col_len = 4
-        //   [3] = row_len = 3
-        //   [4] = base_row_count = 2
-        //   [5] = cut_slot_count = 0
-        //   [6] = state_len = 6   <-- AC-3
+        //   [1] = BASIS_BROADCAST_WIRE_VERSION = 2
+        //   [2] = node_id = 0
+        //   [3] = col_len = 4
+        //   [4] = row_len = 3
+        //   [5] = base_row_count = 2
+        //   [6] = cut_slot_count = 0
+        //   [7] = state_len = 6   <-- AC-3
         assert_eq!(
-            i32_buf[6], 6_i32,
+            i32_buf[7], 6_i32,
             "state_at_capture length field must be 6 for N=2 L=1 A=1 K=2"
         );
 
@@ -2316,7 +2325,7 @@ mod tests {
         let mut f64_buf2: Vec<f64> = Vec::new();
         empty_state.to_broadcast_payload(&mut i32_buf2, &mut f64_buf2);
         assert_eq!(
-            i32_buf2[6], 0_i32,
+            i32_buf2[7], 0_i32,
             "state_at_capture length field must be 0 for empty state"
         );
 
@@ -2337,7 +2346,7 @@ mod tests {
         let mut f64_buf3: Vec<f64> = Vec::new();
         large.to_broadcast_payload(&mut i32_buf3, &mut f64_buf3);
         assert_eq!(
-            i32_buf3[6], 15_i32,
+            i32_buf3[7], 15_i32,
             "state_at_capture length field must be 15 for N=3 L=2 A=2 K=3"
         );
 
@@ -2472,10 +2481,10 @@ mod tests {
         );
     }
 
-    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 1: widening the anticipated
+    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 2: widening the anticipated
     /// ring does not bump the wire version.
     #[test]
-    fn test_basis_broadcast_wire_version_stays_one_with_state_out_column() {
+    fn test_basis_broadcast_wire_version_stays_stable_with_state_out_column() {
         use super::BASIS_BROADCAST_WIRE_VERSION;
 
         // Representative basis with enough col_status entries to include the
@@ -2498,19 +2507,20 @@ mod tests {
         // i32_buf layout per workspace.rs to_broadcast_payload:
         //   [0]: sentinel (1)
         //   [1]: BASIS_BROADCAST_WIRE_VERSION
-        //   [2]: col_status.len()
-        //   [3]: row_status.len()
-        //   [4]: base_row_count
-        //   [5]: cut_row_slots.len()
-        //   [6]: state_at_capture.len()
-        //   [7..]: col_status elements, then row_status, then cut_row_slots
+        //   [2]: node_id
+        //   [3]: col_status.len()
+        //   [4]: row_status.len()
+        //   [5]: base_row_count
+        //   [6]: cut_row_slots.len()
+        //   [7]: state_at_capture.len()
+        //   [8..]: col_status elements, then row_status, then cut_row_slots
         assert_eq!(i32_buf[0], 1, "sentinel must be 1");
         assert_eq!(
             i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
-            "wire version field must equal BASIS_BROADCAST_WIRE_VERSION (= 1)"
+            "wire version field must equal BASIS_BROADCAST_WIRE_VERSION (= 2)"
         );
         assert_eq!(
-            BASIS_BROADCAST_WIRE_VERSION, 1,
+            BASIS_BROADCAST_WIRE_VERSION, 2,
             "broadcast wire-format version constant must remain stable across releases"
         );
 

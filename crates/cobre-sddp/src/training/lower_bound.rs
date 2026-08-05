@@ -3213,10 +3213,10 @@ mod tests {
         // the resolved pool is observable through the built batch's row count.
         let mut fcf = make_fcf(2, n_state);
         let coeff = vec![0.0_f64; n_state];
-        fcf.add_cut(root_pool, 1, 0, 0.0, &coeff);
-        fcf.add_cut(root_pool, 1, 1, 0.0, &coeff);
-        fcf.add_cut(root_pool, 2, 0, 0.0, &coeff);
-        fcf.add_cut(leaf_pool, 1, 0, 0.0, &coeff);
+        fcf.add_cut(0, root_pool, 1, 0, 0.0, &coeff);
+        fcf.add_cut(0, root_pool, 1, 1, 0.0, &coeff);
+        fcf.add_cut(0, root_pool, 2, 0, 0.0, &coeff);
+        fcf.add_cut(0, leaf_pool, 1, 0, 0.0, &coeff);
         assert_eq!(fcf.pools[root_pool].active_count(), 3);
         assert_eq!(fcf.pools[leaf_pool].active_count(), 1);
 

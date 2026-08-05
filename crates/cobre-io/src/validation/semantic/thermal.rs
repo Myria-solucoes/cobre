@@ -521,8 +521,10 @@ pub(super) fn check_thermal_bounds_override_stage_range(
     clippy::cast_sign_loss
 )]
 mod tests {
-    use cobre_core::temporal::{Block, PolicyGraph, PolicyGraphType, Stage};
-    use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, Thermal};
+    use cobre_core::temporal::{Block, PolicyGraphType, Stage};
+    use cobre_core::{
+        AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, HorizonGraph, Thermal,
+    };
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
@@ -589,7 +591,7 @@ mod tests {
         let stages_data = StagesData {
             openings_declared: std::collections::HashSet::new(),
             stages,
-            policy_graph: PolicyGraph {
+            policy_graph: HorizonGraph {
                 stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,

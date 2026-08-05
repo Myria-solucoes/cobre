@@ -27,7 +27,7 @@
 //! assert_eq!(fcf.pools.len(), 3);
 //!
 //! let coeffs = vec![1.0, 0.0, 0.0, 0.0];
-//! fcf.add_cut(1, 0, 0, 5.0, &coeffs);
+//! fcf.add_cut(0,1, 0, 0, 5.0, &coeffs);
 //!
 //! let cuts: Vec<_> = fcf.active_cuts(1).collect();
 //! assert_eq!(cuts.len(), 1);
@@ -283,8 +283,13 @@ impl FutureCostFunction {
         })
     }
 
-    /// Insert a Benders cut at the given (0-based) pool id. `coefficients` is the
-    /// state gradient; length must be `state_dimension`.
+    /// Insert a Benders cut at the given (0-based) pool id, generated at node
+    /// `node_id` (`NodeGraph::node_ids`). `coefficients` is the state gradient;
+    /// length must be `state_dimension`.
+    ///
+    /// `node_id` is recorded as provenance (the generating node, distinct per
+    /// node even when several nodes share `pool`) and never affects which slot
+    /// the cut lands in — the append-only, slot-identity contract is unchanged.
     ///
     /// # Panics (debug builds only)
     ///
@@ -292,6 +297,7 @@ impl FutureCostFunction {
     /// state_dimension`.
     pub fn add_cut(
         &mut self,
+        node_id: i32,
         pool: usize,
         iteration: u64,
         forward_pass_index: u32,
@@ -303,7 +309,13 @@ impl FutureCostFunction {
             "pool id {pool} is out of bounds (num_pools = {})",
             self.pools.len()
         );
-        self.pools[pool].add_cut(iteration, forward_pass_index, intercept, coefficients);
+        self.pools[pool].add_cut(
+            node_id,
+            iteration,
+            forward_pass_index,
+            intercept,
+            coefficients,
+        );
     }
 
     /// Iterate over active cuts at the given (0-based) pool id as
@@ -534,7 +546,7 @@ mod tests {
     fn add_cut_and_active_cuts_round_trip_at_specific_pool() {
         let mut fcf = FutureCostFunction::new(5, 2, 1, 10, &[0; 5]);
         let coeffs = [3.0, 7.0];
-        fcf.add_cut(2, 0, 0, 42.0, &coeffs);
+        fcf.add_cut(0, 2, 0, 0, 42.0, &coeffs);
 
         let active: Vec<_> = fcf.active_cuts(2).collect();
         assert_eq!(active.len(), 1);
@@ -546,7 +558,7 @@ mod tests {
     #[test]
     fn active_cuts_at_other_pool_returns_empty() {
         let mut fcf = FutureCostFunction::new(5, 2, 1, 10, &[0; 5]);
-        fcf.add_cut(2, 0, 0, 42.0, &[1.0, 2.0]);
+        fcf.add_cut(0, 2, 0, 0, 42.0, &[1.0, 2.0]);
 
         let active: Vec<_> = fcf.active_cuts(3).collect();
         assert!(active.is_empty());
@@ -555,9 +567,9 @@ mod tests {
     #[test]
     fn add_cut_multiple_pools_are_independent() {
         let mut fcf = FutureCostFunction::new(4, 1, 1, 10, &[0; 4]);
-        fcf.add_cut(0, 0, 0, 1.0, &[1.0]);
-        fcf.add_cut(1, 0, 0, 2.0, &[2.0]);
-        fcf.add_cut(3, 0, 0, 4.0, &[4.0]);
+        fcf.add_cut(0, 0, 0, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 1, 0, 0, 2.0, &[2.0]);
+        fcf.add_cut(0, 3, 0, 0, 4.0, &[4.0]);
 
         assert_eq!(fcf.active_cuts(0).count(), 1);
         assert_eq!(fcf.active_cuts(1).count(), 1);
@@ -569,9 +581,9 @@ mod tests {
     fn evaluate_at_state_delegates_to_correct_pool() {
         let mut fcf = FutureCostFunction::new(3, 2, 1, 10, &[0; 3]);
         // pool 1: cut with intercept=10, coeffs=[1,0]
-        fcf.add_cut(1, 0, 0, 10.0, &[1.0, 0.0]);
+        fcf.add_cut(0, 1, 0, 0, 10.0, &[1.0, 0.0]);
         // pool 2: cut with intercept=5, coeffs=[0,2]
-        fcf.add_cut(2, 0, 0, 5.0, &[0.0, 2.0]);
+        fcf.add_cut(0, 2, 0, 0, 5.0, &[0.0, 2.0]);
 
         // pool 1: 10 + 1*3 + 0*4 = 13
         assert_eq!(fcf.evaluate_at_state(1, &[3.0, 4.0]), 13.0);
@@ -584,10 +596,10 @@ mod tests {
     #[test]
     fn total_active_cuts_sums_across_pools() {
         let mut fcf = FutureCostFunction::new(4, 1, 1, 20, &[0; 4]);
-        fcf.add_cut(0, 0, 0, 1.0, &[1.0]);
-        fcf.add_cut(1, 0, 0, 2.0, &[2.0]);
-        fcf.add_cut(1, 1, 0, 3.0, &[3.0]);
-        fcf.add_cut(3, 0, 0, 4.0, &[4.0]);
+        fcf.add_cut(0, 0, 0, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 1, 0, 0, 2.0, &[2.0]);
+        fcf.add_cut(0, 1, 1, 0, 3.0, &[3.0]);
+        fcf.add_cut(0, 3, 0, 0, 4.0, &[4.0]);
 
         // pool 0: 1, pool 1: 2, pool 2: 0, pool 3: 1 → total = 4
         assert_eq!(fcf.total_active_cuts(), 4);
@@ -596,9 +608,9 @@ mod tests {
     #[test]
     fn total_active_cuts_reflects_deactivation() {
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 1.0, &[1.0]); // slot 0
-        fcf.add_cut(0, 1, 0, 2.0, &[2.0]); // slot 1
-        fcf.add_cut(1, 0, 0, 3.0, &[3.0]); // slot 0
+        fcf.add_cut(0, 0, 0, 0, 1.0, &[1.0]); // slot 0
+        fcf.add_cut(0, 0, 1, 0, 2.0, &[2.0]); // slot 1
+        fcf.add_cut(0, 1, 0, 0, 3.0, &[3.0]); // slot 0
 
         assert_eq!(fcf.total_active_cuts(), 3);
         fcf.deactivate(0, &[0]);
@@ -614,8 +626,8 @@ mod tests {
         }
         // With base 1, iteration 1 maps to slot 0: no reserved leading block
         // (base 0 would place these at slots 2,3 with populated_count 4).
-        fcf.add_cut(0, 1, 0, 1.0, &[1.0]);
-        fcf.add_cut(0, 1, 1, 2.0, &[1.0]);
+        fcf.add_cut(0, 0, 1, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 0, 1, 1, 2.0, &[1.0]);
         assert_eq!(fcf.pools[0].populated(), 2);
         assert_eq!(fcf.pools[0].generated_count, 2);
     }
@@ -623,9 +635,9 @@ mod tests {
     #[test]
     fn deactivate_delegates_to_correct_pool() {
         let mut fcf = FutureCostFunction::new(3, 1, 1, 10, &[0; 3]);
-        fcf.add_cut(1, 0, 0, 10.0, &[1.0]); // slot 0 of pool[1]
-        fcf.add_cut(1, 1, 0, 20.0, &[2.0]); // slot 1 of pool[1]
-        fcf.add_cut(2, 0, 0, 30.0, &[3.0]); // slot 0 of pool[2]
+        fcf.add_cut(0, 1, 0, 0, 10.0, &[1.0]); // slot 0 of pool[1]
+        fcf.add_cut(0, 1, 1, 0, 20.0, &[2.0]); // slot 1 of pool[1]
+        fcf.add_cut(0, 2, 0, 0, 30.0, &[3.0]); // slot 0 of pool[2]
 
         fcf.deactivate(1, &[0]);
 
@@ -645,7 +657,7 @@ mod tests {
     fn ac_active_cuts_at_pool_with_cut_yields_it() {
         let mut fcf = FutureCostFunction::new(5, 3, 1, 10, &[0; 5]);
         let coeffs = [1.0, 2.0, 3.0];
-        fcf.add_cut(2, 0, 0, 99.0, &coeffs);
+        fcf.add_cut(0, 2, 0, 0, 99.0, &coeffs);
 
         let active: Vec<_> = fcf.active_cuts(2).collect();
         assert_eq!(active.len(), 1);
@@ -654,7 +666,7 @@ mod tests {
     #[test]
     fn ac_active_cuts_at_different_pool_yields_none() {
         let mut fcf = FutureCostFunction::new(5, 3, 1, 10, &[0; 5]);
-        fcf.add_cut(2, 0, 0, 99.0, &[1.0, 2.0, 3.0]);
+        fcf.add_cut(0, 2, 0, 0, 99.0, &[1.0, 2.0, 3.0]);
 
         let active: Vec<_> = fcf.active_cuts(3).collect();
         assert!(active.is_empty());
@@ -663,10 +675,10 @@ mod tests {
     #[test]
     fn ac_total_active_cuts_is_sum_across_pools() {
         let mut fcf = FutureCostFunction::new(5, 1, 1, 10, &[0; 5]);
-        fcf.add_cut(0, 0, 0, 1.0, &[1.0]);
-        fcf.add_cut(1, 0, 0, 2.0, &[2.0]);
-        fcf.add_cut(1, 1, 0, 3.0, &[3.0]);
-        fcf.add_cut(4, 0, 0, 4.0, &[4.0]);
+        fcf.add_cut(0, 0, 0, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 1, 0, 0, 2.0, &[2.0]);
+        fcf.add_cut(0, 1, 1, 0, 3.0, &[3.0]);
+        fcf.add_cut(0, 4, 0, 0, 4.0, &[4.0]);
 
         assert_eq!(fcf.total_active_cuts(), 4);
     }
@@ -674,7 +686,7 @@ mod tests {
     #[test]
     fn fcf_derives_debug_and_clone() {
         let mut fcf = FutureCostFunction::new(2, 2, 1, 5, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 7.0, &[1.0, 2.0]);
+        fcf.add_cut(0, 0, 0, 0, 7.0, &[1.0, 2.0]);
 
         let cloned = fcf.clone();
         assert_eq!(cloned.total_active_cuts(), 1);
@@ -764,9 +776,9 @@ mod tests {
     fn from_deserialized_evaluate_at_state_matches_original() {
         // Build original FCF with known cuts, then reconstruct via deserialized.
         let mut original = FutureCostFunction::new(2, 2, 1, 10, &[0; 2]);
-        original.add_cut(0, 0, 0, 10.0, &[1.0, 0.0]);
-        original.add_cut(0, 1, 0, 5.0, &[0.0, 2.0]);
-        original.add_cut(1, 0, 0, 3.0, &[1.0, 1.0]);
+        original.add_cut(0, 0, 0, 0, 10.0, &[1.0, 0.0]);
+        original.add_cut(0, 0, 1, 0, 5.0, &[0.0, 2.0]);
+        original.add_cut(0, 1, 0, 0, 3.0, &[1.0, 1.0]);
 
         let state = [3.0, 4.0];
         let orig_val_s0 = original.evaluate_at_state(0, &state);
@@ -854,9 +866,9 @@ mod tests {
         let mut fcf = FutureCostFunction::new_with_warm_start(&proof, &stages, 2, 5).unwrap();
         // warm_start_count = 1, forward_passes = 2
         // Training cut at iteration=0, fwd_idx=0: slot = 1 + 0*2 + 0 = 1
-        fcf.add_cut(0, 0, 0, 20.0, &[2.0]);
+        fcf.add_cut(0, 0, 0, 0, 20.0, &[2.0]);
         // Training cut at iteration=0, fwd_idx=1: slot = 1 + 0*2 + 1 = 2
-        fcf.add_cut(0, 0, 1, 30.0, &[3.0]);
+        fcf.add_cut(0, 0, 0, 1, 30.0, &[3.0]);
 
         assert_eq!(fcf.total_active_cuts(), 3);
         assert_eq!(fcf.pools[0].populated(), 3);
@@ -907,9 +919,9 @@ mod tests {
     fn fcf_set_active_delegates_to_pool() {
         let mut fcf = FutureCostFunction::new(3, 1, 1, 10, &[0; 3]);
         // Add 3 cuts to stage 1: slots 0, 1, 2
-        fcf.add_cut(1, 0, 0, 10.0, &[1.0]);
-        fcf.add_cut(1, 1, 0, 20.0, &[2.0]);
-        fcf.add_cut(1, 2, 0, 30.0, &[3.0]);
+        fcf.add_cut(0, 1, 0, 0, 10.0, &[1.0]);
+        fcf.add_cut(0, 1, 1, 0, 20.0, &[2.0]);
+        fcf.add_cut(0, 1, 2, 0, 30.0, &[3.0]);
         let prior = fcf.total_active_cuts();
 
         fcf.set_active(1, 0, false);

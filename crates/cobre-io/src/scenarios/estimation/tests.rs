@@ -2579,7 +2579,7 @@ fn build_monthly_system_with_conditioning(
     recent_observations: Vec<cobre_core::RecentObservation>,
 ) -> System {
     use cobre_core::{
-        Bus, DeficitSegment, InitialConditions, PolicyGraph, PolicyGraphType, SystemBuilder,
+        Bus, DeficitSegment, HorizonGraph, InitialConditions, PolicyGraphType, SystemBuilder,
     };
 
     let bus_id = EntityId(10);
@@ -2595,7 +2595,7 @@ fn build_monthly_system_with_conditioning(
     };
     let h1 = EntityId(1);
     let stages = make_monthly_stages_for_annual(n_years);
-    let policy_graph = PolicyGraph {
+    let policy_graph = HorizonGraph {
         stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.0,

@@ -37,14 +37,11 @@
 #
 # Explicitly excluded files:
 #
-#   cobre-io/src/output/policy/{mod,records,codec,checkpoint}.rs — These files
-#     serialise the policy checkpoint format (FlatBuffers schema SS3.1). The
-#     schema field names (cut_id, cut_intercept, PolicyCutRecord,
-#     StageCutsPayload, etc.) are part of the persisted binary format and
-#     cannot be renamed without a format-version bump. Renaming is deferred
-#     tech debt: it requires a policy format-version bump (FlatBuffers SS3.1).
-#     Until that work is done, all files in the output/policy/ directory module
-#     are excluded from this gate.
+#   None. The output/policy/ files formerly sat here pending a
+#   value-function-artifact format-version bump; that bump landed (the
+#   FlatBuffers table speaks affine-piece vocabulary and the standalone-"cut"
+#   identifiers are gone), so the exemption is retired and the directory module
+#   is scanned like every other infra source file.
 #
 # Exit codes:
 #   0 — No violations found.
@@ -72,19 +69,9 @@ SCAN_DIRS=(
 
 # Files to explicitly exclude from the scan (relative to REPO_ROOT).
 #
-# The output/policy/ directory serialises the policy checkpoint format
-# (FlatBuffers schema SS3.1). The schema field names (cut_id, cut_intercept,
-# PolicyCutRecord, StageCutsPayload, etc.) are part of the persisted binary
-# format and cannot be renamed without a format-version bump. Renaming is
-# deferred tech debt: it requires a policy format-version bump. Until that
-# work is done, all four submodule files in output/policy/ are
-# excluded from this gate.
-EXCLUDED_FILES=(
-    "crates/cobre-io/src/output/policy/mod.rs"
-    "crates/cobre-io/src/output/policy/records.rs"
-    "crates/cobre-io/src/output/policy/codec.rs"
-    "crates/cobre-io/src/output/policy/checkpoint.rs"
-)
+# Empty: the value-function-artifact format break retired the former
+# output/policy/ exemption. Add an entry here only with owner sign-off.
+EXCLUDED_FILES=()
 
 # Build the grep ERE pattern.
 # \b is a word boundary — supported by grep -E but NOT by awk's ERE when

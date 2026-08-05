@@ -9,7 +9,9 @@
 )]
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
-use cobre_sddp::{FutureCostFunction, SddpError, cut_sync::CutSyncBuffers};
+use cobre_sddp::{
+    FutureCostFunction, SddpError, cut::wire::CutWireTuple, cut_sync::CutSyncBuffers,
+};
 
 /// Stub 2-rank cluster from rank 0's perspective. `allreduce` copies send to
 /// recv — no aggregation is needed because `sync_cuts` validates the cut count
@@ -83,8 +85,8 @@ fn sync_cuts_invariant_rejected_when_cut_count_mismatches() {
     // 2 cuts vs the expected per_rank_cuts[0] == 3 — the mismatch under test.
     let coeffs_a = [1.0_f64, 2.0_f64];
     let coeffs_b = [3.0_f64, 4.0_f64];
-    let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-        &[(0, 1, 0, 10.0, &coeffs_a), (0, 1, 1, 20.0, &coeffs_b)];
+    let local_cuts: &[CutWireTuple<'_>] =
+        &[(0, 0, 1, 0, 10.0, &coeffs_a), (0, 0, 1, 1, 20.0, &coeffs_b)];
 
     let result = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm);
 

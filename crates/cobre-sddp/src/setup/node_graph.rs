@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use cobre_core::temporal::PolicyGraph;
+use cobre_core::HorizonGraph;
 use cobre_io::StageIdResolver;
 use cobre_stochastic::StochasticContext;
 
@@ -123,7 +123,18 @@ pub struct NodeGraph {
     pub pool_stage: Vec<usize>,
 }
 
-/// Build the runtime node graph from the validated, normalized `PolicyGraph`.
+impl NodeGraph {
+    /// Node → pool map, one entry per canonical node position
+    /// (`nodes[i].pool_id`). The load-path basis reconstruction
+    /// ([`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint))
+    /// keys each node's cut records through this.
+    #[must_use]
+    pub fn node_pool_ids(&self) -> Vec<usize> {
+        self.nodes.iter().map(|n| n.pool_id).collect()
+    }
+}
+
+/// Build the runtime node graph from the validated, normalized `HorizonGraph`.
 ///
 /// MUST run after `build_scenario_libraries`: an `External`-bound node's
 /// Ω addresses the standardized library's raw scenario axis, so binding
@@ -135,7 +146,7 @@ pub struct NodeGraph {
 /// resolves to no declared node/stage — unreachable given upstream
 /// structural validation, asserted rather than silently ignored.
 pub(crate) fn build_node_graph(
-    graph: &PolicyGraph,
+    graph: &HorizonGraph,
     n_stages: usize,
     resolver: &StageIdResolver,
     stochastic: &StochasticContext,
@@ -153,7 +164,7 @@ pub(crate) fn build_node_graph(
 /// per-stage cumulative discount arrays untouched (this function never reads
 /// or writes them).
 fn build_chain_node_graph(
-    graph: &PolicyGraph,
+    graph: &HorizonGraph,
     n_stages: usize,
     resolver: &StageIdResolver,
     stochastic: &StochasticContext,
@@ -193,7 +204,7 @@ fn build_chain_node_graph(
 /// `normalize_out_edge_probabilities` at load time, when declared); `1.0`
 /// when no transition departs the stage — the fully-implicit chain, where a
 /// single deterministic out-edge is structurally required.
-fn chain_transition_probability(graph: &PolicyGraph, resolver: &StageIdResolver, t: usize) -> f64 {
+fn chain_transition_probability(graph: &HorizonGraph, resolver: &StageIdResolver, t: usize) -> f64 {
     let Some(stage_id) = resolver.id_at(t) else {
         return 1.0;
     };
@@ -216,7 +227,7 @@ fn chain_transition_probability(graph: &PolicyGraph, resolver: &StageIdResolver,
 /// Returns [`SddpError::Validation`] on a duplicate node id, or on a transition
 /// / node naming an id that resolves to no declared node/stage.
 fn build_declared_node_graph(
-    graph: &PolicyGraph,
+    graph: &HorizonGraph,
     resolver: &StageIdResolver,
     stochastic: &StochasticContext,
 ) -> Result<NodeGraph, SddpError> {
@@ -902,8 +913,8 @@ mod tests {
         }
     }
 
-    fn empty_graph() -> PolicyGraph {
-        PolicyGraph {
+    fn empty_graph() -> HorizonGraph {
+        HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: Vec::new(),
@@ -1201,7 +1212,7 @@ mod tests {
     fn k_fan_leaves_share_one_pool_id_non_leaf_owns_its_own() {
         // Root at stage 0 (id 0), K=4 leaves at stage 1 (ids 1..4).
         let stochastic = stochastic_context(2, 1, 4);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![
                 node(0, 0, None),
                 node(1, 1, None),
@@ -1243,7 +1254,7 @@ mod tests {
         // Two nodes declared with the same id 1; the basis apply-guard keys on
         // node id, so a duplicate must be rejected before any solve.
         let stochastic = stochastic_context(2, 1, 2);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![node(0, 0, None), node(1, 1, None), node(1, 1, None)],
             transitions: vec![transition(0, 1, 1.0)],
             ..empty_graph()
@@ -1269,7 +1280,7 @@ mod tests {
         // Root (stage 0, own pool) fans into two interior nodes at stage 1 (each
         // its own pool) with two leaves each at stage 2 (shared leaf pool).
         let stochastic = stochastic_context(3, 1, 2);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![
                 node(0, 0, None),
                 node(1, 1, None),
@@ -1322,7 +1333,7 @@ mod tests {
         // A 2-stage chain-like fan where stage 1 also has ITS OWN successor
         // (stage 2) — stage-1 node must own its own pool, not share.
         let stochastic = stochastic_context(3, 1, 2);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![node(0, 0, None), node(1, 1, None), node(2, 2, None)],
             transitions: vec![transition(0, 1, 1.0), transition(1, 2, 1.0)],
             ..empty_graph()
@@ -1351,7 +1362,7 @@ mod tests {
         // shuffled order; the runtime successor list must still come out
         // ascending by child node id.
         let stochastic = stochastic_context(2, 1, 3);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             // Nodes declared out of id order (5, 0, 3, 1).
             nodes: vec![
                 node(5, 1, None),
@@ -1415,7 +1426,7 @@ mod tests {
     #[test]
     fn external_node_omega_is_a_degenerate_view_at_scenario_id() {
         let stochastic = stochastic_context(1, 1, 1);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![node(0, 0, Some(7))],
             transitions: vec![],
             ..empty_graph()
@@ -1436,7 +1447,7 @@ mod tests {
     #[test]
     fn node_opening_range_external_is_scenario_column_generated_is_offset_len() {
         let stochastic = stochastic_context(2, 1, 6);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![node(0, 0, Some(4)), node(1, 1, None)],
             transitions: vec![transition(0, 1, 1.0)],
             ..empty_graph()
@@ -1459,7 +1470,7 @@ mod tests {
     #[test]
     fn node_pinned_scenario_external_pins_declared_column_generated_none() {
         let stochastic = stochastic_context(2, 1, 6);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![node(0, 0, Some(4)), node(1, 1, None)],
             transitions: vec![transition(0, 1, 1.0)],
             ..empty_graph()
@@ -1490,7 +1501,7 @@ mod tests {
         // is consulted here and no agreement check is performed (there is
         // nothing to agree over: one shared index).
         let stochastic = stochastic_context(2, 1, 2);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![node(0, 0, None), node(1, 1, None), node(2, 1, None)],
             transitions: vec![transition(0, 1, 0.5), transition(0, 2, 0.5)],
             ..empty_graph()
@@ -1516,7 +1527,7 @@ mod tests {
         // results.
         let stochastic_a = stochastic_context(3, 2, 3);
         let stochastic_b = stochastic_context(3, 2, 3);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![
                 node(0, 0, None),
                 node(1, 1, None),
@@ -1623,7 +1634,7 @@ mod tests {
         // The same chain, declared explicitly (one node per stage, a single
         // successor at probability 1.0 each) rather than synthesized from an
         // empty `nodes[]`.
-        let declared = PolicyGraph {
+        let declared = HorizonGraph {
             nodes: vec![node(0, 0, None), node(1, 1, None), node(2, 2, None)],
             transitions: vec![transition(0, 1, 1.0), transition(1, 2, 1.0)],
             ..empty_graph()
@@ -1646,7 +1657,7 @@ mod tests {
         // node's own opening count exactly 1, so each root->leaf path
         // contributes exactly 1.
         let stochastic = stochastic_context(2, 1, 1);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![
                 node(0, 0, None),
                 node(1, 1, None),
@@ -1704,7 +1715,7 @@ mod tests {
         // K-fan (branching_factor=1): duality holds with every leaf's own
         // contribution at 1.
         let stochastic_kfan = stochastic_context(2, 1, 1);
-        let graph_kfan = PolicyGraph {
+        let graph_kfan = HorizonGraph {
             nodes: vec![node(0, 0, None), node(1, 1, None), node(2, 1, None)],
             transitions: vec![transition(0, 1, 0.5), transition(0, 2, 0.5)],
             ..empty_graph()
@@ -1719,7 +1730,7 @@ mod tests {
         // count -- the case that distinguishes the prefix-product formula
         // from a bare per-node count.
         let stochastic_branchy = stochastic_context(2, 1, 3);
-        let graph_branchy = PolicyGraph {
+        let graph_branchy = HorizonGraph {
             nodes: vec![node(0, 0, None), node(1, 1, None), node(2, 1, None)],
             transitions: vec![transition(0, 1, 0.5), transition(0, 2, 0.5)],
             ..empty_graph()
@@ -1756,7 +1767,7 @@ mod tests {
         // own two leaves at stage 2). The stage-1 level therefore carries two
         // cut-generating nodes; the leaves generate none.
         let stochastic = stochastic_context(3, 1, 2);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes: vec![
                 node(0, 0, None),
                 node(1, 1, None),
@@ -1842,7 +1853,7 @@ mod tests {
             transitions.push(transition(0, fan, (i as f64) / total));
             transitions.push(transition(fan, leaf, 1.0));
         }
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             nodes,
             transitions,
             ..empty_graph()

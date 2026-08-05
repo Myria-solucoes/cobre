@@ -671,7 +671,7 @@ fn train_simulate_write_cycle() {
 
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
 
-    let training_output = build_training_output(&result.result, &events, &fcf);
+    let training_output = build_training_output(&result.result, &events, &fcf, false);
 
     assert_eq!(training_output.convergence_records.len(), 3);
 
@@ -728,22 +728,25 @@ fn train_simulate_write_cycle() {
 
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
     let policy_metadata = PolicyCheckpointMetadata {
+        format_version: cobre_io::FORMAT_VERSION,
         cobre_version: env!("CARGO_PKG_VERSION").to_string(),
         created_at: "2026-03-08T00:00:00Z".to_string(),
-        completed_iterations: result.result.iterations as u32,
-        final_lower_bound: result.result.final_lb,
-        best_upper_bound: Some(result.result.final_ub),
-        state_dimension: fcf.state_dimension as u32,
         num_stages: fx.n_stages as u32,
-        max_iterations: 3,
-        forward_passes: 1,
-        warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
-        warm_start_counts,
-        rng_seed: 42,
-        total_visited_states: 0,
-        training_block_mode: "parallel".to_string(),
-        training_block_mode_per_stage: vec![],
-        cost_scale_factor: None,
+        graph_manifest: cobre_io::GraphManifest::default(),
+        producer: cobre_io::ProducerBlock {
+            completed_iterations: result.result.iterations as u32,
+            final_lower_bound: result.result.final_lb,
+            best_upper_bound: Some(result.result.final_ub),
+            max_iterations: 3,
+            forward_passes: 1,
+            warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
+            warm_start_counts,
+            rng_seed: 42,
+            total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
+        },
     };
 
     write_policy_checkpoint(
@@ -895,7 +898,7 @@ fn train_simulate_write_cycle() {
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: 1,
             mpi_library: None,
             mpi_standard: None,
@@ -968,10 +971,10 @@ fn train_simulate_write_cycle() {
         let content = std::fs::read_to_string(&policy_meta_path).unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&content).expect("policy/metadata.json must be valid JSON");
-        assert_eq!(value["completed_iterations"].as_u64(), Some(3));
+        assert_eq!(value["producer"]["completed_iterations"].as_u64(), Some(3));
     }
 
-    let stage_bin_path = policy_dir.join("cuts/stage_000.bin");
+    let stage_bin_path = policy_dir.join("cuts/000.bin");
     assert!(stage_bin_path.is_file());
     {
         let metadata = std::fs::metadata(&stage_bin_path).unwrap();

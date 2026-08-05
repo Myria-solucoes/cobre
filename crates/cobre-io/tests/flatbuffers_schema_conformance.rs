@@ -16,13 +16,18 @@
 //! ```
 
 #![cfg(feature = "flatc-conformance")]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreadable_literal
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
     PolicyBasisRecord, PolicyCutRecord, StageCutsReadResult, StageStatesPayload,
     StageStatesReadResult, deserialize_stage_basis, deserialize_stage_cuts,
     deserialize_stage_states, serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
@@ -205,9 +210,9 @@ fn assert_manifest_json_matches(manifest_json: &Value, expected: &[EntitySlot]) 
         );
         // flatc omits a scalar equal to its default (0); an absent field is 0.
         assert_eq!(
-            i64_or(obj, "delivery_anchor", 0),
-            i64::from(slot.delivery_anchor),
-            "slot {i} delivery_anchor"
+            i64_or(obj, "delivery_date", 0),
+            i64::from(slot.delivery_date),
+            "slot {i} delivery_date"
         );
     }
 }
@@ -221,21 +226,21 @@ fn conformance_manifest() -> Vec<EntitySlot> {
             entity_id: 7,
             subindex: 1,
             was_active: true,
-            delivery_anchor: 2024 * 12 + 5,
+            delivery_date: 20240501,
         },
         EntitySlot {
             entity_type: 1,
             entity_id: -1,
             subindex: 3,
             was_active: false,
-            delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         },
         EntitySlot {
             entity_type: 3,
             entity_id: 42,
             subindex: 2,
             was_active: true,
-            delivery_anchor: 2020 * 12,
+            delivery_date: 20200101,
         },
     ]
 }
@@ -284,21 +289,16 @@ fn stage_cuts_writer_matches_schema() {
     assert_eq!(cuts_json.len(), 2);
 
     let c0 = &cuts_json[0];
-    assert_eq!(as_u64(c0, "cut_id"), 7);
+    assert_eq!(as_u64(c0, "piece_id"), 7);
     assert_eq!(as_u64(c0, "slot_index"), 0);
     assert_eq!(as_u64(c0, "iteration"), 1);
     assert_eq!(as_u64(c0, "forward_pass_index"), 0);
     assert!((as_f64(c0, "intercept") - 100.5).abs() < 1e-12);
     assert_eq!(get(c0, "coefficients"), &json!([1.0, 2.0, 3.0, 4.0]));
     assert!(as_bool(c0, "is_active"));
-    // Presence of the deprecated `domination_count` would mean the schema lost the `deprecated` attribute or the writer re-emits the slot.
-    assert!(
-        c0.get("domination_count").is_none(),
-        "deprecated domination_count must not appear in flatc-decoded JSON: {c0}"
-    );
 
     let c1 = &cuts_json[1];
-    assert_eq!(as_u64(c1, "cut_id"), 8);
+    assert_eq!(as_u64(c1, "piece_id"), 8);
     assert_eq!(as_u64(c1, "slot_index"), 1);
     assert!((as_f64(c1, "intercept") - (-42.0)).abs() < 1e-12);
     assert!(!as_bool(c1, "is_active"));
@@ -315,7 +315,7 @@ fn stage_cuts_reader_consumes_flatc_buffer() {
         "active_cut_indices": [0],
         "cuts": [
             {
-                "cut_id": 99,
+                "piece_id": 99,
                 "slot_index": 0,
                 "iteration": 4,
                 "forward_pass_index": 2,
@@ -379,14 +379,14 @@ fn reduced_storage_manifest() -> Vec<EntitySlot> {
             entity_id: 1,
             subindex: 0,
             was_active: true,
-            delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         },
         EntitySlot {
             entity_type: 0,
             entity_id: 2,
             subindex: 0,
             was_active: true,
-            delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         },
     ]
 }
@@ -438,7 +438,7 @@ fn stage_cuts_reduced_dimension_reader_consumes_flatc_buffer() {
         "active_cut_indices": [0],
         "cuts": [
             {
-                "cut_id": 42,
+                "piece_id": 42,
                 "slot_index": 0,
                 "iteration": 2,
                 "forward_pass_index": 0,
@@ -567,99 +567,70 @@ fn stage_states_reader_consumes_flatc_buffer() {
     assert_eq!(result.entity_manifest[1].entity_id, 5);
 }
 
-// ─── Legacy / deprecated-slot regression ─────────────────────────────────────
+// ─── Schema neutrality (0.14 value-function artifact) ────────────────────────
 
-/// The reader must tolerate the deprecated `domination_count` slot present in
-/// legacy policy files. flatc cannot emit a `deprecated` field, so the test
-/// rewrites the schema without `deprecated` to force a value into the slot, then
-/// asserts the hand-rolled reader still decodes the buffer.
+/// The published schema speaks affine-piece vocabulary: no standalone `Cut`
+/// table, no `state_at_generation` field, no live (non-deprecated)
+/// `domination_count` slot, and the header names the `src/output/policy/`
+/// directory module. A text inspection of `schemas/policy.fbs`.
 #[test]
-fn legacy_domination_count_slot_is_ignored_by_reader() {
-    let schema_with_legacy = "
-namespace Cobre.IO.Policy;
-
-table Cut {
-  cut_id:uint64 (id: 0);
-  slot_index:uint32 (id: 1);
-  iteration:uint32 (id: 2);
-  forward_pass_index:uint32 (id: 3);
-  domination_count:uint32 (id: 4);
-  intercept:float64 (id: 5);
-  coefficients:[float64] (id: 6);
-  state_at_generation:[float64] (id: 7);
-  is_active:bool (id: 8);
-}
-
-table StageCuts {
-  stage_id:uint32 (id: 0);
-  state_dimension:uint32 (id: 1);
-  capacity:uint32 (id: 2);
-  warm_start_count:uint32 (id: 3);
-  cuts:[Cut] (id: 4);
-  active_cut_indices:[uint32] (id: 5);
-  populated_count:uint32 (id: 6);
-}
-";
-    let dir = TempDir::new().unwrap();
-    let legacy_schema = dir.path().join("legacy.fbs");
-    std::fs::write(&legacy_schema, schema_with_legacy).unwrap();
-
-    let document = json!({
-        "stage_id": 1,
-        "state_dimension": 2,
-        "capacity": 4,
-        "warm_start_count": 0,
-        "populated_count": 1,
-        "active_cut_indices": [0],
-        "cuts": [
-            {
-                "cut_id": 1,
-                "slot_index": 0,
-                "iteration": 1,
-                "forward_pass_index": 0,
-                "domination_count": 99999,
-                "intercept": 1.0,
-                "coefficients": [1.0, 2.0],
-                "is_active": true
-            }
-        ]
-    });
-    let json_path = dir.path().join("doc.json");
-    std::fs::write(&json_path, serde_json::to_vec(&document).unwrap()).unwrap();
-
-    let status = flatc_command()
-        .arg("-b")
-        .arg("--root-type")
-        .arg(qualified("StageCuts"))
-        .arg("-o")
-        .arg(dir.path())
-        .arg(&legacy_schema)
-        .arg(&json_path)
-        .status()
-        .expect("run flatc -b on legacy schema");
-    assert!(status.success(), "flatc -b on legacy schema failed");
-    let buf = std::fs::read(dir.path().join("doc.bin")).unwrap();
-
-    let result =
-        deserialize_stage_cuts(&buf).expect("hand-rolled reader must accept legacy buffer");
-    assert_eq!(result.cuts.len(), 1);
-    let cut = &result.cuts[0];
-    assert_eq!(cut.cut_id, 1);
-    assert_eq!(cut.coefficients, vec![1.0, 2.0]);
-    assert!(cut.is_active);
+fn schema_carries_no_algorithm_vocabulary() {
+    let schema = std::fs::read_to_string(schema_path()).expect("read policy.fbs");
     assert!(
-        result.entity_manifest.is_empty(),
-        "a buffer lacking the entity_manifest field must deserialize to an empty manifest"
+        !schema.contains("table Cut "),
+        "the schema must not declare a `Cut` table (renamed to AffinePiece)"
+    );
+    assert!(
+        schema.contains("table AffinePiece"),
+        "the schema must declare the neutral `AffinePiece` table"
+    );
+    assert!(
+        !schema.contains("state_at_generation"),
+        "the deleted `state_at_generation` field must not appear"
+    );
+    // A reclaimed id-4 field named `intercept` — not a live `domination_count`.
+    assert!(
+        !schema.contains("domination_count:uint32 (id: 4);"),
+        "no live domination_count slot may survive the id-4 reclaim"
+    );
+    assert!(
+        schema.contains("src/output/policy/"),
+        "the header must name the src/output/policy/ directory module"
     );
 }
 
-// ─── EntitySlot delivery_anchor (id: 4) round-trip + forward-compat ───────────
-
-/// §E6 round-trip: an `EntitySlot` carrying a non-sentinel `delivery_anchor`
-/// survives the hand-rolled writer → hand-rolled reader path, and the same
-/// buffer decodes through `flatc` with the anchor at slot id 4.
+/// The 0.14 `EntitySlot` change: id 4 is a burned `deprecated` placeholder, the
+/// `YYYYMMDD` `delivery_date` sits at id 5, and the artifact declares the
+/// `CBVF` `file_identifier` plus a `file_extension`. A text inspection of
+/// `schemas/policy.fbs`.
 #[test]
-fn entity_slot_delivery_anchor_round_trips() {
+fn schema_burns_delivery_anchor_and_declares_file_identifier() {
+    let schema = std::fs::read_to_string(schema_path()).expect("read policy.fbs");
+    assert!(
+        schema.contains("delivery_anchor:int32 (id: 4, deprecated);"),
+        "EntitySlot id 4 must be the burned, deprecated delivery_anchor placeholder"
+    );
+    assert!(
+        schema.contains("delivery_date:int32 (id: 5);"),
+        "the YYYYMMDD delivery_date must sit at id 5"
+    );
+    assert!(
+        schema.contains("file_identifier \"CBVF\";"),
+        "the schema must declare the CBVF file_identifier"
+    );
+    assert!(
+        schema.contains("file_extension"),
+        "the schema must declare a file_extension"
+    );
+}
+
+// ─── EntitySlot delivery_date (id: 5) round-trip + forward-compat ─────────────
+
+/// §E6 round-trip: an `EntitySlot` carrying a non-sentinel `delivery_date`
+/// survives the hand-rolled writer → hand-rolled reader path, and the same
+/// buffer decodes through `flatc` with the date at slot id 5.
+#[test]
+fn entity_slot_delivery_date_round_trips() {
     let coeffs = [1.0, 2.0];
     let cuts = [PolicyCutRecord {
         cut_id: 1,
@@ -676,14 +647,14 @@ fn entity_slot_delivery_anchor_round_trips() {
             entity_id: 7,
             subindex: 1,
             was_active: true,
-            delivery_anchor: 2024 * 12 + 5,
+            delivery_date: 20240501,
         },
         EntitySlot {
             entity_type: 0,
             entity_id: 1,
             subindex: 0,
             was_active: true,
-            delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         },
     ];
     let buf = serialize_stage_cuts(3, 2, 8, 0, &cuts, &[0], 1, &manifest);
@@ -691,10 +662,10 @@ fn entity_slot_delivery_anchor_round_trips() {
     let result: StageCutsReadResult =
         deserialize_stage_cuts(&buf).expect("hand-rolled reader must consume its own buffer");
     assert_eq!(result.entity_manifest.len(), 2);
-    assert_eq!(result.entity_manifest[0].delivery_anchor, 2024 * 12 + 5);
+    assert_eq!(result.entity_manifest[0].delivery_date, 20240501);
     assert_eq!(
-        result.entity_manifest[1].delivery_anchor,
-        ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL
+        result.entity_manifest[1].delivery_date,
+        ENTITY_SLOT_DELIVERY_DATE_SENTINEL
     );
 
     let json = flatc_decode(&buf, "StageCuts");
@@ -702,25 +673,27 @@ fn entity_slot_delivery_anchor_round_trips() {
         .as_array()
         .expect("entity_manifest is an array")
         .clone();
+    assert_eq!(i64_or(&arr[0], "delivery_date", 0), i64::from(20240501));
     assert_eq!(
-        i64_or(&arr[0], "delivery_anchor", 0),
-        i64::from(2024 * 12 + 5)
-    );
-    assert_eq!(
-        i64_or(&arr[1], "delivery_anchor", 0),
-        i64::from(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL)
+        i64_or(&arr[1], "delivery_date", 0),
+        i64::from(ENTITY_SLOT_DELIVERY_DATE_SENTINEL)
     );
 }
 
-/// §E6 forward-compat (the reject-role for the `FlatBuffers` `policy/codec.rs`
-/// row): a buffer written against a pre-`id:4` `EntitySlot` schema (no
-/// `delivery_anchor` field) must deserialize with every slot's anchor at the
+/// §E6 forward-compat (the schema-evolution half of the reject-role for the
+/// `FlatBuffers` `policy/codec.rs` row; the identifier rejection is the codec
+/// unit test): a buffer written against a pre-`id:5` `EntitySlot` schema (no
+/// `delivery_date` field) must deserialize with every slot's date at the
 /// sentinel and no error. flatc cannot emit a field the schema lacks, so the
-/// buffer is built from a rewritten schema that stops at `was_active (id: 3)`.
+/// buffer is built from a rewritten schema that stops at `was_active (id: 3)`;
+/// that schema still declares the `CBVF` `file_identifier`, so the buffer clears
+/// the read-path identifier gate that a genuine pre-0.14 buffer would fail.
 #[test]
-fn pre_anchor_entity_slot_reads_as_sentinel() {
-    let schema_pre_anchor = "
+fn pre_delivery_date_entity_slot_reads_as_sentinel() {
+    let schema_pre_delivery_date = "
 namespace Cobre.IO.Policy;
+
+file_identifier \"CBVF\";
 
 enum EntityType : byte {
   HydroStorage = 0,
@@ -736,16 +709,15 @@ table EntitySlot {
   was_active:bool (id: 3);
 }
 
-table Cut {
-  cut_id:uint64 (id: 0);
+table AffinePiece {
+  piece_id:uint64 (id: 0);
   slot_index:uint32 (id: 1);
   iteration:uint32 (id: 2);
   forward_pass_index:uint32 (id: 3);
-  domination_count:uint32 (id: 4, deprecated);
-  intercept:float64 (id: 5);
-  coefficients:[float64] (id: 6);
-  state_at_generation:[float64] (id: 7);
-  is_active:bool (id: 8);
+  intercept:float64 (id: 4);
+  coefficients:[float64] (id: 5);
+  is_active:bool (id: 6);
+  reserved_7:[float64] (id: 7, deprecated);
 }
 
 table StageCuts {
@@ -753,15 +725,15 @@ table StageCuts {
   state_dimension:uint32 (id: 1);
   capacity:uint32 (id: 2);
   warm_start_count:uint32 (id: 3);
-  cuts:[Cut] (id: 4);
+  cuts:[AffinePiece] (id: 4);
   active_cut_indices:[uint32] (id: 5);
   populated_count:uint32 (id: 6);
   entity_manifest:[EntitySlot] (id: 7);
 }
 ";
     let dir = TempDir::new().unwrap();
-    let pre_anchor_schema = dir.path().join("pre_anchor.fbs");
-    std::fs::write(&pre_anchor_schema, schema_pre_anchor).unwrap();
+    let pre_delivery_date_schema = dir.path().join("pre_delivery_date.fbs");
+    std::fs::write(&pre_delivery_date_schema, schema_pre_delivery_date).unwrap();
 
     let document = json!({
         "stage_id": 1,
@@ -772,7 +744,7 @@ table StageCuts {
         "active_cut_indices": [0],
         "cuts": [
             {
-                "cut_id": 1,
+                "piece_id": 1,
                 "slot_index": 0,
                 "iteration": 1,
                 "forward_pass_index": 0,
@@ -795,20 +767,23 @@ table StageCuts {
         .arg(qualified("StageCuts"))
         .arg("-o")
         .arg(dir.path())
-        .arg(&pre_anchor_schema)
+        .arg(&pre_delivery_date_schema)
         .arg(&json_path)
         .status()
-        .expect("run flatc -b on pre-anchor schema");
-    assert!(status.success(), "flatc -b on pre-anchor schema failed");
+        .expect("run flatc -b on pre-delivery_date schema");
+    assert!(
+        status.success(),
+        "flatc -b on pre-delivery_date schema failed"
+    );
     let buf = std::fs::read(dir.path().join("doc.bin")).unwrap();
 
-    let result =
-        deserialize_stage_cuts(&buf).expect("hand-rolled reader must accept pre-anchor buffer");
+    let result = deserialize_stage_cuts(&buf)
+        .expect("hand-rolled reader must accept pre-delivery_date buffer");
     assert_eq!(result.entity_manifest.len(), 2);
     for (i, slot) in result.entity_manifest.iter().enumerate() {
         assert_eq!(
-            slot.delivery_anchor, ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
-            "pre-anchor slot {i} must read back as the sentinel"
+            slot.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "pre-delivery_date slot {i} must read back as the sentinel"
         );
     }
 }

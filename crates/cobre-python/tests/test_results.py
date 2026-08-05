@@ -167,8 +167,9 @@ def test_load_convergence_dict_keys(run_output: pathlib.Path) -> None:
     required_keys = {
         "iteration",
         "lower_bound",
-        "upper_bound_mean",
+        "upper_bound",
         "upper_bound_std",
+        "upper_bound_kind",
         "gap_percent",
         "cuts_added",
         "cuts_removed",
@@ -196,8 +197,12 @@ def test_load_convergence_value_types(run_output: pathlib.Path) -> None:
     row = rows[0]
     assert isinstance(row["iteration"], int), "iteration must be int"
     assert isinstance(row["lower_bound"], float), "lower_bound must be float"
-    assert isinstance(row["upper_bound_mean"], float), "upper_bound_mean must be float"
-    assert isinstance(row["upper_bound_std"], float), "upper_bound_std must be float"
+    assert isinstance(row["upper_bound"], float), "upper_bound must be float"
+    # upper_bound_std is None under an exact bound, else float.
+    assert row["upper_bound_std"] is None or isinstance(
+        row["upper_bound_std"], float
+    ), "upper_bound_std must be float or None"
+    assert isinstance(row["upper_bound_kind"], str), "upper_bound_kind must be str"
     # gap_percent may be None or float
     assert row["gap_percent"] is None or isinstance(row["gap_percent"], float), (
         "gap_percent must be float or None"

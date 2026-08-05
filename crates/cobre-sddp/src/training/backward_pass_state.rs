@@ -1122,6 +1122,10 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
     let successor_node = training_ctx.node_graph.successors[node_pos][0].child;
     let pool_id = training_ctx.node_graph.nodes[node_pos].pool_id;
     let successor_pool_id = training_ctx.node_graph.nodes[successor_node].pool_id;
+    // Declared id of the GENERATING node — carried as cut provenance so a
+    // shared-leaf pool's cuts stay distinguishable by node. Canonical
+    // (declaration-order-invariant); on a chain it equals the stage.
+    let node_id = training_ctx.node_graph.node_ids[node_pos];
     let cut_state_projection = &training_ctx.cut_state_layouts[pool_id];
 
     state.worker_stats_before.clear();
@@ -1256,6 +1260,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
             &state.probabilities_buf,
             &inputs.risk_measures[node_stage],
             inputs.fcf,
+            node_id,
             pool_id,
             inputs.iteration,
             inputs.fwd_offset,
@@ -1313,6 +1318,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
                     "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
                 );
                 inputs.fcf.add_cut(
+                    node_id,
                     pool_id,
                     inputs.iteration,
                     cut.forward_pass_index,
@@ -1361,6 +1367,8 @@ struct ReplicatedAggregate {
     my_rank: usize,
     /// The node's own cut pool.
     pool_id: usize,
+    /// Declared id of the generating node (cut provenance).
+    node_id: i32,
     /// Global offset of this rank's trial points.
     fwd_offset: usize,
     /// Current training iteration.
@@ -1407,6 +1415,7 @@ fn run_backward_node_replicated<S: SolverInterface + Send, C: Communicator>(
         n_ranks,
         my_rank,
         pool_id,
+        node_id,
         fwd_offset,
         iteration,
     } = agg;
@@ -1466,7 +1475,7 @@ fn run_backward_node_replicated<S: SolverInterface + Send, C: Communicator>(
         &mut coeffs,
         &mut risk_scratch,
     );
-    fcf.add_cut(pool_id, iteration, 0, intercept, &coeffs);
+    fcf.add_cut(node_id, pool_id, iteration, 0, intercept, &coeffs);
     Ok(1)
 }
 
@@ -2392,7 +2401,8 @@ mod tests {
     /// produce byte-identical cut counts.
     #[test]
     fn backward_pass_state_run_over_k_fan_is_invariant_to_per_trial_leaf_node_id() {
-        use cobre_core::temporal::{Node, PolicyGraph, PolicyGraphType, Transition};
+        use cobre_core::HorizonGraph;
+        use cobre_core::temporal::{Node, PolicyGraphType, Transition};
         use cobre_io::StageIdResolver;
 
         use crate::setup::node_graph::build_node_graph;
@@ -2419,7 +2429,7 @@ mod tests {
         let stochastic = make_stochastic_context(n_stages, n_openings);
         let study_stage_ids = [0_i32, 1_i32];
         let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             nodes: vec![node(0, 0), node(1, 1), node(2, 1), node(3, 1)],
@@ -2685,7 +2695,8 @@ mod tests {
     /// backward schedulers must route identically.
     #[test]
     fn backward_pass_state_routes_trial_states_to_the_visited_nodes_pool() {
-        use cobre_core::temporal::{Node, PolicyGraph, PolicyGraphType, Transition};
+        use cobre_core::HorizonGraph;
+        use cobre_core::temporal::{Node, PolicyGraphType, Transition};
         use cobre_io::StageIdResolver;
 
         use crate::setup::node_graph::build_node_graph;
@@ -2714,7 +2725,7 @@ mod tests {
         let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
         // Root (stage 0) → two INTERIOR nodes (stage 1, distinct pools) → four
         // leaves (stage 2, one shared pool). backward_cut_levels == [[1, 2], [0]].
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             nodes: vec![
@@ -3132,11 +3143,12 @@ mod tests {
         // FCF with two cuts at the successor stage, both generated at `g` and
         // last active at `g` (stale). Slot 1 is the one that will bind at `i`.
         let mut fcf = FutureCostFunction::new(n_stages, n_state, 8, 10, &vec![0; n_stages]);
-        fcf.add_cut(successor, g, 0, 1.0, &[0.0]);
-        fcf.add_cut(successor, g, 1, 0.0, &[2.0]);
+        fcf.add_cut(0, successor, g, 0, 1.0, &[0.0]);
+        fcf.add_cut(0, successor, g, 1, 0.0, &[2.0]);
         let meta = |generated: u64, last: u64| CutMetadata {
             iteration_generated: generated,
             forward_pass_index: 0,
+            node: 0,
             active_count: 0,
             last_active_iter: last,
         };

@@ -16,10 +16,10 @@ use cobre_core::scenario::{InflowModel, LoadModel, SamplingScheme};
 use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, Transition};
 use cobre_core::{
     Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology,
-    ContractBlockBounds, DeficitSegment, EntityId, Hydro, HydroBlockBounds, HydroGenerationModel,
-    HydroPenalties, HydroStageBounds, HydroStagePenalties, HydroStorage, HydroUnitGroup,
-    InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
-    PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraph, PumpingBlockBounds, ResolvedBounds,
+    ContractBlockBounds, DeficitSegment, EntityId, HorizonGraph, Hydro, HydroBlockBounds,
+    HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties, HydroStorage,
+    HydroUnitGroup, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+    NoiseMethod, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
     ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
     ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, System,
     SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -698,10 +698,13 @@ pub fn study_dims_for(dims: &GeometryDims) -> StudyDimensions {
 // identity comparison with a warning, never an error).
 #[must_use]
 pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLoadProof<FullFcf> {
+    let graph = cobre_io::GraphManifest::default();
     let manifest = PolicyStageManifest {
         state_dimension,
         num_stages,
+        n_pools: num_stages,
         slots: &[],
+        graph: &graph,
     };
     validate_policy_load::<FullFcf>(&manifest, &manifest)
         .expect("trivial matching manifest cannot fail validate_policy_load")
@@ -812,7 +815,7 @@ pub fn trial_state_records(states: &[Vec<f64>], n_stages: usize) -> Vec<Trajecto
 /// Never in practice — see the rationale below.
 #[allow(clippy::expect_used)]
 // Rationale: build_node_graph only returns Err for a transition/node naming
-// an undeclared id; PolicyGraph::default() carries no nodes/transitions at
+// an undeclared id; HorizonGraph::default() carries no nodes/transitions at
 // all, so that error path is unreachable here.
 #[must_use]
 pub fn chain_node_graph(stochastic: &StochasticContext) -> NodeGraph {
@@ -820,7 +823,7 @@ pub fn chain_node_graph(stochastic: &StochasticContext) -> NodeGraph {
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
     let study_stage_ids: Vec<i32> = (0..n_stages as i32).collect();
     let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
-    build_node_graph(&PolicyGraph::default(), n_stages, &resolver, stochastic)
+    build_node_graph(&HorizonGraph::default(), n_stages, &resolver, stochastic)
         .expect("chain_node_graph: build_node_graph never errors for an empty nodes[] graph")
 }
 
@@ -855,7 +858,7 @@ const K_FAN_LEAF_STAGE_ID: i32 = 2;
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation
 )]
-fn k_fan_policy_graph(k: usize, reversed: bool) -> PolicyGraph {
+fn k_fan_policy_graph(k: usize, reversed: bool) -> HorizonGraph {
     debug_assert!(k >= 2, "k_fan_policy_graph: k must be >= 2 (DECOMP shape)");
     let mut nodes = Vec::with_capacity(1 + 2 * k);
     let mut transitions = Vec::with_capacity(2 * k);
@@ -901,7 +904,7 @@ fn k_fan_policy_graph(k: usize, reversed: bool) -> PolicyGraph {
         nodes.reverse();
         transitions.reverse();
     }
-    PolicyGraph {
+    HorizonGraph {
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.0,
         transitions,
@@ -970,7 +973,7 @@ fn k_fan_system(k: usize, reversed: bool) -> System {
 /// declared K-fan (`n_stages == 3`) or, with an empty graph, the chain
 /// degeneracy the enumerated engine's single-path (count-1) 2-rank stub needs.
 #[allow(clippy::too_many_lines, clippy::expect_used)]
-fn fan_or_chain_system(n_stages: usize, policy_graph: PolicyGraph) -> System {
+fn fan_or_chain_system(n_stages: usize, policy_graph: HorizonGraph) -> System {
     let bus_id = EntityId(1);
     let hydro_id = EntityId(2);
 
@@ -1278,7 +1281,7 @@ pub fn k_fan_setup_enumerated_reversed(k: usize, max_iterations: u32) -> KFanFix
 #[allow(clippy::expect_used)]
 #[must_use]
 pub fn single_path_enumerated_setup(max_iterations: u32) -> StudySetup {
-    let system = fan_or_chain_system(2, PolicyGraph::default());
+    let system = fan_or_chain_system(2, HorizonGraph::default());
     let config = k_fan_config_enumerated(max_iterations);
     let stochastic = build_stochastic_context(
         &system,

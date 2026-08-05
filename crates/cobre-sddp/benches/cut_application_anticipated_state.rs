@@ -57,7 +57,7 @@ fn build_fcf(state_dimension: usize) -> FutureCostFunction {
     let mut fcf = FutureCostFunction::new(1, state_dimension, NUM_CUTS, 1, &[0]);
     let coefficients: Vec<f64> = (0..state_dimension).map(|j| 1.0 + j as f64).collect();
     for fp in 0..NUM_CUTS {
-        fcf.add_cut(0, 0, fp, f64::from(fp), &coefficients);
+        fcf.add_cut(0, 0, 0, fp, f64::from(fp), &coefficients);
     }
     fcf
 }

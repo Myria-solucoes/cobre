@@ -69,6 +69,12 @@ pub struct CutMetadata {
     /// Forward pass index that generated this cut.
     pub forward_pass_index: u32,
 
+    /// Declared id (`NodeGraph::node_ids`) of the node that generated this cut;
+    /// carried onto the MPI cut wire ([`crate::cut::wire::serialize_cut`]) so a
+    /// shared-leaf pool's records stay distinguishable by generating node. Not
+    /// read by the value-based selection logic.
+    pub node: i32,
+
     /// Cumulative number of times this cut was binding at an LP solution. Used
     /// by budget enforcement and diagnostics, NOT by the value-based selection
     /// logic.
@@ -250,8 +256,8 @@ impl CutSelectionStrategy {
     ///
     /// let strategy = CutSelectionStrategy::Level1 { check_frequency: 5, tie_tolerance: 1e-10 };
     /// let mut pool = CutPool::new(2, 1, 1, 0);
-    /// pool.add_cut(0, 0, 1.0, &[1.0]);
-    /// pool.add_cut(1, 0, 2.0, &[2.0]);
+    /// pool.add_cut(0,0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(0,1, 0, 2.0, &[2.0]);
     /// // Empty visited_states returns empty updates.
     /// let deact = strategy.select(&pool, &[], 10);
     /// assert!(deact.deactivation_indices().is_empty());
@@ -585,6 +591,7 @@ mod tests {
         CutMetadata {
             iteration_generated: 1,
             forward_pass_index: 0,
+            node: 0,
             active_count,
             last_active_iter,
         }
@@ -597,7 +604,7 @@ mod tests {
         let mut pool = CutPool::new(n, 1, 1, 0);
         // Populate dummy cuts so populated_count advances.
         for i in 0..n {
-            pool.add_cut(0, i as u32, 0.0, &[0.0]);
+            pool.add_cut(0, 0, i as u32, 0.0, &[0.0]);
         }
         pool.replace_selection(metadata, active);
         pool
@@ -668,9 +675,9 @@ mod tests {
             tie_tolerance: 0.0,
         };
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 5.0, &[0.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0]);
         // All from iteration 1, current_iteration=10 → all eligible.
         let deact = strategy.select(&pool, &[0.0], 10);
         let mut deact_idx = deact.deactivation_indices();
@@ -691,9 +698,9 @@ mod tests {
             tie_tolerance: 1e-10,
         };
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 5.0, &[0.0]);
-        pool.add_cut(1, 0, 5.0, &[0.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
         assert_eq!(
             deact.deactivation_indices(),
@@ -713,8 +720,8 @@ mod tests {
         // Two cuts with equal values at state [1.0]:
         // cut0: 1.0 + 2.0*1.0 = 3.0, cut1: 3.0 + 0.0*1.0 = 3.0 → tied, both survive.
         let mut pool = CutPool::new(2, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[2.0]);
-        pool.add_cut(1, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[2.0]);
+        pool.add_cut(0, 1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[1.0], 10);
         assert!(
             deact.deactivation_indices().is_empty(),
@@ -734,9 +741,9 @@ mod tests {
         // cut2=2 < 2.5 → not selected. cut0=1 < 2.5 → not selected. cut1=3 >= 2.5 → selected.
         // Deactivate: cut0, cut2.
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 3.0, &[0.0]);
-        pool.add_cut(2, 0, 2.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 2.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
         let mut deact_idx = deact.deactivation_indices();
         deact_idx.sort_unstable();
@@ -762,9 +769,9 @@ mod tests {
             tie_tolerance: 1e-10,
         };
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 5.0, &[0.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[], 10);
         assert!(deact.deactivation_indices().is_empty());
         assert!(deact.reactivation_indices().is_empty());
@@ -783,9 +790,9 @@ mod tests {
             tie_tolerance: 1e-10,
         };
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 5.0, &[0.0]);
-        pool.add_cut(1, 0, 5.0, &[0.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
         let mut deact_idx = deact.deactivation_indices();
         deact_idx.sort_unstable();
@@ -808,9 +815,9 @@ mod tests {
             tie_tolerance: 1e-10,
         };
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 2.0, &[0.0]); // constant 2
-        pool.add_cut(1, 0, 0.0, &[3.0]); // 3x
-        pool.add_cut(2, 0, 0.5, &[0.0]); // constant 0.5 (never at max)
+        pool.add_cut(0, 0, 0, 2.0, &[0.0]); // constant 2
+        pool.add_cut(0, 1, 0, 0.0, &[3.0]); // 3x
+        pool.add_cut(0, 2, 0, 0.5, &[0.0]); // constant 0.5 (never at max)
         let deact = strategy.select(&pool, &[0.0, 1.0], 10);
         assert_eq!(
             deact.deactivation_indices(),
@@ -841,8 +848,8 @@ mod tests {
             tie_tolerance: 1e-10,
         };
         let mut pool = CutPool::new(2, 1, 1, 0);
-        pool.add_cut(0, 0, 3.0, &[0.0]);
-        pool.add_cut(1, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
         // Both tied → oldest (cut 0) selected → cut 1 deactivated.
         assert_eq!(
@@ -861,9 +868,9 @@ mod tests {
         };
         // cut0=5, cut1=4, cut2=5 (tied). Oldest at max = cut0.
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 5.0, &[0.0]);
-        pool.add_cut(1, 0, 4.0, &[0.0]);
-        pool.add_cut(2, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 4.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 5.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
         let mut deact_idx = deact.deactivation_indices();
         deact_idx.sort_unstable();
@@ -888,9 +895,9 @@ mod tests {
         // state [2.0]: values=[1,4,3] → max=4, oldest at max = cut1
         // Union: cut1 and cut2 selected → cut0 deactivated.
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 0.0, &[2.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 0.0, &[2.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0, 2.0], 10);
         assert_eq!(
             deact.deactivation_indices(),
@@ -907,8 +914,8 @@ mod tests {
             tie_tolerance: 1e-10,
         };
         let mut pool = CutPool::new(2, 1, 1, 0);
-        pool.add_cut(0, 0, 5.0, &[0.0]);
-        pool.add_cut(1, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[], 10);
         assert!(deact.deactivation_indices().is_empty());
         assert!(deact.reactivation_indices().is_empty());
@@ -924,8 +931,8 @@ mod tests {
         // cut0: value=1 at state [0]. cut1: value=3 at state [0].
         // max=3, cutoff=3. cut0(1<3) not selected → deactivated.
         let mut pool = CutPool::new(2, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
         assert!(deact.deactivation_indices().contains(&0));
     }
@@ -940,8 +947,8 @@ mod tests {
         // cut0: value=5 at state [0]. cut1: value=3 at state [0].
         // Oldest at max = cut0. cut1 deactivated.
         let mut pool = CutPool::new(2, 1, 1, 0);
-        pool.add_cut(0, 0, 5.0, &[0.0]);
-        pool.add_cut(1, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 20);
         assert!(deact.deactivation_indices().contains(&1));
     }
@@ -1004,9 +1011,9 @@ mod tests {
         // max=5 (from cut2, which is eligible), cutoff=5.
         // cut1(1<5) not selected → deactivated. cut0 is not eligible → unchanged.
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 1.0, &[0.0]);
-        pool.add_cut(2, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 5.0, &[0.0]);
         pool.set_iteration_generated_for_test(0, 10); // current iteration
         pool.set_iteration_generated_for_test(1, 5);
         pool.set_iteration_generated_for_test(2, 5);
@@ -1031,6 +1038,7 @@ mod tests {
             &[CutMetadata {
                 iteration_generated: 10,
                 forward_pass_index: 0,
+                node: 0,
                 active_count: 0,
                 last_active_iter: 10,
             }],
@@ -1063,11 +1071,11 @@ mod tests {
         // state [1.0]: values=[1,2,2,3,2] → max=3 (cut3). Oldest at max: cut3 again.
         // Union: only cut3 selected → cuts 0,1,2,4 deactivated.
         let mut pool = CutPool::new(5, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 2.0, &[0.0]);
-        pool.add_cut(2, 0, 0.0, &[2.0]);
-        pool.add_cut(3, 0, 3.0, &[0.0]);
-        pool.add_cut(4, 0, 1.0, &[1.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 0.0, &[2.0]);
+        pool.add_cut(0, 3, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 4, 0, 1.0, &[1.0]);
         let deact = strategy.select_for_stage(&pool, &[0.0, 1.0], 10, 0);
         let mut deact_idx = deact.deactivation_indices();
         deact_idx.sort_unstable();
@@ -1094,9 +1102,9 @@ mod tests {
         // cut2: intercept=1, active=true
         // max=5 (cut0). cut0 selected → reactivate. cut1,cut2 not selected → deactivate.
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 5.0, &[0.0]);
-        pool.add_cut(1, 0, 3.0, &[0.0]);
-        pool.add_cut(2, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 1.0, &[0.0]);
         // Manually deactivate cut 0.
         pool.set_active(0, false);
         assert_eq!(pool.active_count(), 2);
@@ -1127,8 +1135,8 @@ mod tests {
         // cut1: intercept=5, active (also at max, but younger than cut0)
         // Oldest at max = cut0 (slot 0 < slot 1). cut1 not selected → deactivate.
         let mut pool = CutPool::new(2, 1, 1, 0);
-        pool.add_cut(0, 0, 5.0, &[0.0]);
-        pool.add_cut(1, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[0.0]);
         pool.set_active(0, false);
 
         let result = strategy.select(&pool, &[0.0], 10);
@@ -1152,9 +1160,9 @@ mod tests {
             tie_tolerance: 1e-10,
         };
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 5.0, &[0.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0]);
         // All from current iteration.
         pool.set_iteration_generated_for_test(0, 10);
         pool.set_iteration_generated_for_test(1, 10);
@@ -1196,8 +1204,8 @@ mod tests {
             is_active: true,
         }];
         let mut pool = CutPool::new_with_warm_start(1, 1, 2, &warm_start_records);
-        pool.add_cut(0, 0, 1.0, &[0.0]); // slot 1
-        pool.add_cut(1, 0, 3.0, &[0.0]); // slot 2
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]); // slot 1
+        pool.add_cut(0, 1, 0, 3.0, &[0.0]); // slot 2
 
         let result = strategy.select(&pool, &[0.0], 10);
         // Warm-start slot 0 must not appear in deactivations.
@@ -1219,9 +1227,9 @@ mod tests {
     #[test]
     fn select_skips_already_inactive_slots() {
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]); // slot 0: value=1
-        pool.add_cut(1, 0, 5.0, &[0.0]); // slot 1: value=5 (max)
-        pool.add_cut(2, 0, 3.0, &[0.0]); // slot 2: value=3
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]); // slot 0: value=1
+        pool.add_cut(0, 1, 0, 5.0, &[0.0]); // slot 1: value=5 (max)
+        pool.add_cut(0, 2, 0, 3.0, &[0.0]); // slot 2: value=3
         assert_eq!(pool.active_count(), 3);
 
         // Manually deactivate slot 0 before selection.
@@ -1255,8 +1263,8 @@ mod tests {
     #[test]
     fn select_for_stage_returns_cut_activity_updates_with_deactivations() {
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]); // value=1
-        pool.add_cut(1, 0, 2.0, &[0.0]); // value=2 (max)
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]); // value=1
+        pool.add_cut(0, 1, 0, 2.0, &[0.0]); // value=2 (max)
 
         let strategy = CutSelectionStrategy::Level1 {
             check_frequency: 1,
@@ -1297,30 +1305,35 @@ mod tests {
             CutMetadata {
                 iteration_generated: 1,
                 forward_pass_index: 0,
+                node: 0,
                 active_count: 0,
                 last_active_iter: 1,
             },
             CutMetadata {
                 iteration_generated: 1,
                 forward_pass_index: 1,
+                node: 0,
                 active_count: 0,
                 last_active_iter: 2,
             },
             CutMetadata {
                 iteration_generated: 1,
                 forward_pass_index: 2,
+                node: 0,
                 active_count: 3,
                 last_active_iter: 3,
             },
             CutMetadata {
                 iteration_generated: 1,
                 forward_pass_index: 3,
+                node: 0,
                 active_count: 5,
                 last_active_iter: 10,
             },
             CutMetadata {
                 iteration_generated: 1,
                 forward_pass_index: 4,
+                node: 0,
                 active_count: 5,
                 last_active_iter: 10,
             },
@@ -1552,7 +1565,7 @@ mod tests {
         let mut pool = CutPool::new(n, state_dim, 1, 0);
         for i in 0..n {
             // Use add_cut to advance populated_count correctly.
-            pool.add_cut(0, i as u32, intercepts[i], &coefficients[i]);
+            pool.add_cut(0, 0, i as u32, intercepts[i], &coefficients[i]);
         }
         pool.replace_selection(metadata, active);
         pool
@@ -1562,6 +1575,7 @@ mod tests {
         CutMetadata {
             iteration_generated: iter,
             forward_pass_index: 0,
+            node: 0,
             active_count: 0,
             last_active_iter: iter,
         }
@@ -1851,8 +1865,8 @@ mod tests {
             tie_tolerance: 1e-10,
         };
         let mut pool = CutPool::new(2, 1, 1, 0);
-        pool.add_cut(0, 0, 10.0, &[0.0]); // higher value
-        pool.add_cut(1, 0, 1.0, &[0.0]); // lower value
+        pool.add_cut(0, 0, 0, 10.0, &[0.0]); // higher value
+        pool.add_cut(0, 1, 0, 1.0, &[0.0]); // lower value
         // Slot 0 from current iteration → ineligible. Slot 1 eligible.
         pool.set_iteration_generated_for_test(0, 10); // current_iteration
         pool.set_iteration_generated_for_test(1, 5);
@@ -1883,7 +1897,7 @@ mod tests {
             let intercept = (i % 7) as f64;
             let slope = ((i + 3) % 5) as f64 - 2.0;
             #[allow(clippy::cast_possible_truncation)]
-            pool.add_cut(0, i as u32, intercept, &[slope]);
+            pool.add_cut(0, 0, i as u32, intercept, &[slope]);
             // Make every cut eligible (iteration_generated < current_iteration in
             // the tests below).
             pool.set_iteration_generated_for_test(i, 1);
@@ -2291,9 +2305,9 @@ mod tests {
             start_iteration: 2,
         };
         let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 5.0, &[0.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0]);
 
         let result = strategy.select_for_stage(&pool, &[0.0], 10, 4);
         assert!(

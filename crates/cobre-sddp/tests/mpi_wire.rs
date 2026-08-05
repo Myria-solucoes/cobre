@@ -193,7 +193,7 @@ mod test_mpi_wire_format_version {
             "version field must equal BASIS_BROADCAST_WIRE_VERSION before corruption"
         );
 
-        i32_buf[1] = 2;
+        i32_buf[1] = 1;
 
         let mut i32_cursor = 0_usize;
         let mut f64_cursor = 0_usize;
@@ -208,12 +208,12 @@ mod test_mpi_wire_format_version {
         match result {
             Err(SddpError::Validation(ref msg)) => {
                 assert!(
-                    msg.contains("unsupported wire version 2"),
-                    "error must contain 'unsupported wire version 2'; got: {msg}"
+                    msg.contains("unsupported wire version 1"),
+                    "error must contain 'unsupported wire version 1'; got: {msg}"
                 );
             }
             other => panic!(
-                "expected Err(SddpError::Validation(_)) containing 'unsupported wire version 2', \
+                "expected Err(SddpError::Validation(_)) containing 'unsupported wire version 1', \
                  got: {other:?}"
             ),
         }
@@ -232,6 +232,7 @@ mod test_mpi_wire_format_version {
         serialize_cut(
             &mut buf,
             /* slot_index */ 0,
+            /* node_id */ 0,
             /* iteration */ 1,
             /* forward_pass_index */ 0,
             /* intercept */ 99.0,
@@ -294,7 +295,9 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
             base_row_count,
             cut_slot_capacity,
             n_state,
-            0,
+            // Distinct per basis so the wire-carried node_id is exercised
+            // (negative to also pin signedness).
+            -(seed as i32),
         );
 
         for i in 0..num_cols {
@@ -336,6 +339,7 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
             a.state_at_capture, b.state_at_capture,
             "{label}: state_at_capture mismatch"
         );
+        assert_eq!(a.node_id, b.node_id, "{label}: node_id mismatch");
     }
 
     #[test]
@@ -360,8 +364,8 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
 
         stage2_basis.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
 
-        // A Some stage's i32 layout: [1 (sentinel), VERSION, col_len, row_len,
-        // base_row_count, cut_slot_count, state_len, ...].
+        // A Some stage's i32 layout: [1 (sentinel), VERSION, node_id, col_len,
+        // row_len, base_row_count, cut_slot_count, state_len, ...].
         assert_eq!(i32_buf[0], 1, "stage 0 sentinel must be 1");
         assert_eq!(
             i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,

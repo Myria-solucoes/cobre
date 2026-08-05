@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
-    ExternalNcsRow, ExternalScenarioRow, GenericConstraint, Hydro, InflowHistoryRow, InflowModel,
-    InitialConditions, Line, LoadModel, NcsModel, NetworkTopology, NonControllableSource,
-    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
+    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
+    NonControllableSource, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
     ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
 };
 
@@ -88,7 +88,7 @@ pub struct System {
     /// Ordered list of stages (study + pre-study), sorted by `id` (canonical order).
     stages: Vec<Stage>,
     /// Policy graph defining stage transitions, horizon type, and discount rate.
-    policy_graph: PolicyGraph,
+    policy_graph: HorizonGraph,
 
     #[cfg_attr(feature = "serde", serde(skip))]
     stage_index: HashMap<i32, usize>,
@@ -151,7 +151,7 @@ struct SystemRepr {
     cascade: CascadeTopology,
     network: NetworkTopology,
     stages: Vec<Stage>,
-    policy_graph: PolicyGraph,
+    policy_graph: HorizonGraph,
     penalties: ResolvedPenalties,
     bounds: ResolvedBounds,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
@@ -381,7 +381,7 @@ impl System {
 
     /// Returns a reference to the policy graph.
     #[must_use]
-    pub fn policy_graph(&self) -> &PolicyGraph {
+    pub fn policy_graph(&self) -> &HorizonGraph {
         &self.policy_graph
     }
 
@@ -1566,7 +1566,7 @@ mod tests {
         use crate::temporal::PolicyGraphType;
 
         let stages = vec![make_stage(0), make_stage(1)];
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
@@ -1749,7 +1749,7 @@ mod tests {
         let stage0 = make_stage(0);
         let stage1 = make_stage(1);
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::Cyclic,
             annual_discount_rate: 0.08,

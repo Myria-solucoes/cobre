@@ -757,7 +757,7 @@ bound is structural padding even when `t + slot_idx` itself still lands
 inside the horizon — the multi-plant heterogeneous-lead case, where two
 plants sharing one `k_max`-wide ring have different per-plant reachable
 widths. `policy::policy_export::build_stage_entity_manifest` applies this
-same bound before populating `EntitySlot::delivery_anchor`, never a depth- or
+same bound before populating `EntitySlot::delivery_date`, never a depth- or
 decider-only check: `AnticipatedResolution::decision_sets`/`depth` count only
 within-study-decided commitments and silently exclude a still-draining
 pre-study seed, undercounting a ring position that legitimately holds one. The

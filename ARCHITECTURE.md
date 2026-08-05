@@ -17,9 +17,10 @@ CLI usage, see the [unified docs site](https://docs.cobre-rs.dev/).
 
 - **[`cobre-core`](crates/cobre-core/README.md)** — The shared power-system
   data model: buses, lines, hydro/thermal/pumping/contract/non-controllable-source
-  entities, network and cascade topology, the temporal (stage/block/policy-graph)
-  model, pre-resolved penalty and bound tables, and the immutable `System`
-  container built by `SystemBuilder`. Carries no solver, I/O, or algorithm
+  entities, network and cascade topology, the temporal (stage/block) model, the
+  horizon graph (`HorizonGraph`) declaring the study's node/transition topology,
+  pre-resolved penalty and bound tables, and the immutable `System` container
+  built by `SystemBuilder`. Carries no solver, I/O, or algorithm
   dependencies — every other crate in the workspace consumes `System` by
   shared reference. Enforces declaration-order invariance (entities sort into
   canonical order at construction) so results never depend on input ordering.
@@ -222,8 +223,8 @@ they do not reach those crates only transitively through `cobre-sddp`.
 
 ## Links
 
-| Resource              | URL                                                        |
-| --------------------- | ---------------------------------------------------------- |
-| Repository            | <https://github.com/cobre-rs/cobre>                        |
-| Unified docs site     | <https://docs.cobre-rs.dev/>                               |
-| CHANGELOG             | <https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md> |
+| Resource          | URL                                                        |
+| ----------------- | ---------------------------------------------------------- |
+| Repository        | <https://github.com/cobre-rs/cobre>                        |
+| Unified docs site | <https://docs.cobre-rs.dev/>                               |
+| CHANGELOG         | <https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md> |

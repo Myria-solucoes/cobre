@@ -36,7 +36,7 @@
 //! assert_eq!(pool.active_count(), 0);
 //!
 //! let coeffs = vec![1.0; 9];
-//! pool.add_cut(0, 0, 5.0, &coeffs);
+//! pool.add_cut(0,0, 0, 5.0, &coeffs);
 //! assert_eq!(pool.active_count(), 1);
 //! assert_eq!(pool.cuts_in_lp(), 1);
 //! ```
@@ -137,6 +137,7 @@ impl CutPool {
         let default_meta = CutMetadata {
             iteration_generated: 0,
             forward_pass_index: 0,
+            node: 0,
             active_count: 0,
             last_active_iter: 0,
         };
@@ -206,13 +207,22 @@ impl CutPool {
     /// use cobre_sddp::cut::pool::CutPool;
     ///
     /// let mut pool = CutPool::new(20, 3, 5, 0);
-    /// pool.add_cut(1, 2, 10.0, &[1.0, 2.0, 3.0]);
+    /// pool.add_cut(0,1, 2, 10.0, &[1.0, 2.0, 3.0]);
     /// // slot = 0 + 1*5 + 2 = 7
     /// assert!(pool.is_active(7));
     /// assert_eq!(pool.intercept(7), 10.0);
     /// ```
+    ///
+    /// `node_id` is the declared id of the generating node
+    /// (`NodeGraph::node_ids`), recorded in the slot's [`CutMetadata::node`] and
+    /// later carried onto the MPI cut wire. It is provenance only — it never
+    /// affects the slot the cut lands in (the append-only, slot-identity
+    /// contract is independent of `node_id`).
+    ///
+    /// [`CutMetadata::node`]: crate::cut_selection::CutMetadata::node
     pub fn add_cut(
         &mut self,
+        node_id: i32,
         iteration: u64,
         forward_pass_index: u32,
         intercept: f64,
@@ -244,6 +254,7 @@ impl CutPool {
         self.metadata[slot] = CutMetadata {
             iteration_generated: iteration,
             forward_pass_index,
+            node: node_id,
             active_count: 0,
             last_active_iter: iteration,
         };
@@ -262,8 +273,8 @@ impl CutPool {
     /// use cobre_sddp::cut::pool::CutPool;
     ///
     /// let mut pool = CutPool::new(10, 2, 1, 0);
-    /// pool.add_cut(0, 0, 3.0, &[1.0, 2.0]);
-    /// pool.add_cut(1, 0, 7.0, &[3.0, 4.0]);
+    /// pool.add_cut(0,0, 0, 3.0, &[1.0, 2.0]);
+    /// pool.add_cut(0,1, 0, 7.0, &[3.0, 4.0]);
     ///
     /// let active: Vec<_> = pool.active_cuts().collect();
     /// assert_eq!(active.len(), 2);
@@ -341,7 +352,7 @@ impl CutPool {
     ///
     /// let mut pool = CutPool::new(10, 1, 1, 0);
     /// assert_eq!(pool.active_count(), 0);
-    /// pool.add_cut(0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(0,0, 0, 1.0, &[1.0]);
     /// assert_eq!(pool.active_count(), 1);
     /// ```
     #[must_use]
@@ -372,8 +383,8 @@ impl CutPool {
     /// use cobre_sddp::cut::pool::CutPool;
     ///
     /// let mut pool = CutPool::new(10, 1, 1, 0);
-    /// pool.add_cut(0, 0, 1.0, &[1.0]);
-    /// pool.add_cut(1, 0, 2.0, &[2.0]);
+    /// pool.add_cut(0,0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(0,1, 0, 2.0, &[2.0]);
     /// assert_eq!(pool.cuts_in_lp(), 2);
     ///
     /// // Deactivation does not change the LP-row count.
@@ -519,8 +530,8 @@ impl CutPool {
     /// use cobre_sddp::cut::pool::CutPool;
     ///
     /// let mut pool = CutPool::new(10, 1, 1, 0);
-    /// pool.add_cut(0, 0, 1.0, &[1.0]);
-    /// pool.add_cut(1, 0, 2.0, &[2.0]);
+    /// pool.add_cut(0,0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(0,1, 0, 2.0, &[2.0]);
     /// pool.deactivate(&[0]);
     /// assert_eq!(pool.active_count(), 1);
     /// assert!(!pool.is_active(0));
@@ -548,9 +559,9 @@ impl CutPool {
     /// use cobre_sddp::cut_selection::CutActivityUpdates;
     ///
     /// let mut pool = CutPool::new(10, 1, 1, 0);
-    /// pool.add_cut(0, 0, 1.0, &[1.0]);
-    /// pool.add_cut(1, 0, 2.0, &[2.0]);
-    /// pool.add_cut(2, 0, 3.0, &[3.0]);
+    /// pool.add_cut(0,0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(0,1, 0, 2.0, &[2.0]);
+    /// pool.add_cut(0,2, 0, 3.0, &[3.0]);
     ///
     /// // Deactivate slot 1, then reactivate it via apply_updates.
     /// pool.deactivate(&[1]);
@@ -593,12 +604,13 @@ impl CutPool {
     /// use cobre_sddp::cut_selection::CutMetadata;
     ///
     /// let mut pool = CutPool::new(10, 1, 1, 0);
-    /// pool.add_cut(0, 0, 1.0, &[1.0]);
-    /// pool.add_cut(1, 0, 2.0, &[2.0]);
+    /// pool.add_cut(0,0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(0,1, 0, 2.0, &[2.0]);
     ///
     /// let meta = CutMetadata {
     ///     iteration_generated: 0,
     ///     forward_pass_index: 0,
+    ///     node: 0,
     ///     active_count: 0,
     ///     last_active_iter: 0,
     /// };
@@ -629,9 +641,9 @@ impl CutPool {
     /// use cobre_sddp::cut::pool::CutPool;
     ///
     /// let mut pool = CutPool::new(10, 1, 1, 0);
-    /// pool.add_cut(0, 0, 1.0, &[1.0]);
-    /// pool.add_cut(1, 0, 2.0, &[2.0]);
-    /// pool.add_cut(2, 0, 3.0, &[3.0]);
+    /// pool.add_cut(0,0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(0,1, 0, 2.0, &[2.0]);
+    /// pool.add_cut(0,2, 0, 3.0, &[3.0]);
     ///
     /// pool.set_active(1, false);
     /// assert_eq!(pool.active_count(), 2);
@@ -672,8 +684,8 @@ impl CutPool {
     /// use cobre_sddp::cut::pool::CutPool;
     ///
     /// let mut pool = CutPool::new(10, 2, 1, 0);
-    /// pool.add_cut(0, 0, 10.0, &[1.0, 0.0]);
-    /// pool.add_cut(1, 0,  5.0, &[0.0, 2.0]);
+    /// pool.add_cut(0,0, 0, 10.0, &[1.0, 0.0]);
+    /// pool.add_cut(0,1, 0,  5.0, &[0.0, 2.0]);
     ///
     /// // max(10 + 1*3 + 0*4, 5 + 0*3 + 2*4) = max(13, 13) = 13
     /// assert_eq!(pool.evaluate_at_state(&[3.0, 4.0]), 13.0);
@@ -710,8 +722,8 @@ impl CutPool {
     /// use cobre_sddp::cut::pool::CutPool;
     ///
     /// let mut pool = CutPool::new(10, 3, 1, 0);
-    /// pool.add_cut(0, 0, 1.0, &[1.0, 0.0, 2.0]);
-    /// pool.add_cut(1, 0, 2.0, &[0.0, 0.0, 3.0]);
+    /// pool.add_cut(0,0, 0, 1.0, &[1.0, 0.0, 2.0]);
+    /// pool.add_cut(0,1, 0, 2.0, &[0.0, 0.0, 3.0]);
     ///
     /// let report = pool.sparsity_report();
     /// assert_eq!(report.total_coefficients, 6);   // 2 cuts * 3 dims
@@ -804,6 +816,9 @@ impl CutPool {
             metadata.push(CutMetadata {
                 iteration_generated: u64::from(record.iteration),
                 forward_pass_index: record.forward_pass_index,
+                // Checkpoint records carry no generating-node id; the reload path
+                // never re-emits these cuts on the MPI wire, so 0 is inert.
+                node: 0,
                 active_count: 0,
                 last_active_iter: u64::from(record.iteration),
             });
@@ -866,6 +881,7 @@ impl CutPool {
         let default_meta = CutMetadata {
             iteration_generated: 0,
             forward_pass_index: 0,
+            node: 0,
             active_count: 0,
             last_active_iter: 0,
         };
@@ -896,6 +912,9 @@ impl CutPool {
             metadata[i] = CutMetadata {
                 iteration_generated: WARM_START_ITERATION,
                 forward_pass_index: record.forward_pass_index,
+                // Warm-start cuts are WARM_START_ITERATION-filtered out of cut-sync
+                // packing, so their generating node never reaches the wire; 0 is inert.
+                node: 0,
                 active_count: 0,
                 last_active_iter: u64::from(record.iteration),
             };
@@ -938,7 +957,7 @@ impl CutPool {
     /// use cobre_sddp::cut::pool::CutPool;
     ///
     /// let mut pool = CutPool::new(2, 2, 1, 0);
-    /// pool.add_cut(0, 0, 5.0, &[1.0, 2.0]);
+    /// pool.add_cut(0,0, 0, 5.0, &[1.0, 2.0]);
     /// pool.grow(10);
     /// assert_eq!(pool.capacity, 10);
     /// assert!(pool.is_active(0));
@@ -958,6 +977,7 @@ impl CutPool {
             CutMetadata {
                 iteration_generated: 0,
                 forward_pass_index: 0,
+                node: 0,
                 active_count: 0,
                 last_active_iter: 0,
             },
@@ -1108,7 +1128,7 @@ mod tests {
     fn add_cut_at_slot_zero_stores_intercept_coefficients_and_active_flag() {
         let mut pool = CutPool::new(100, 9, 10, 0);
         let coeffs = vec![1.0; 9];
-        pool.add_cut(0, 0, 5.0, &coeffs);
+        pool.add_cut(0, 0, 0, 5.0, &coeffs);
 
         assert_eq!(pool.active_count(), 1);
         assert!(pool.active[0]);
@@ -1124,10 +1144,10 @@ mod tests {
         // slot = 0 + iteration * forward_passes + forward_pass_index
         let mut pool = CutPool::new(200, 2, 10, 0);
 
-        pool.add_cut(0, 0, 1.0, &[1.0, 2.0]); // slot = 0
-        pool.add_cut(0, 3, 2.0, &[3.0, 4.0]); // slot = 3
-        pool.add_cut(1, 0, 3.0, &[5.0, 6.0]); // slot = 10
-        pool.add_cut(2, 5, 4.0, &[7.0, 8.0]); // slot = 25
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 2.0]); // slot = 0
+        pool.add_cut(0, 0, 3, 2.0, &[3.0, 4.0]); // slot = 3
+        pool.add_cut(0, 1, 0, 3.0, &[5.0, 6.0]); // slot = 10
+        pool.add_cut(0, 2, 5, 4.0, &[7.0, 8.0]); // slot = 25
 
         assert!(pool.active[0]);
         assert_eq!(pool.intercepts[0], 1.0);
@@ -1147,7 +1167,7 @@ mod tests {
         // slot = 5 + 0*10 + 0 = 5
         let mut pool = CutPool::new(100, 9, 10, 5);
         let coeffs = vec![0.0; 9];
-        pool.add_cut(0, 0, 42.0, &coeffs);
+        pool.add_cut(0, 0, 0, 42.0, &coeffs);
 
         assert!(pool.active[5]);
         assert_eq!(pool.intercepts[5], 42.0);
@@ -1157,7 +1177,7 @@ mod tests {
     #[test]
     fn add_cut_metadata_initialized_correctly() {
         let mut pool = CutPool::new(50, 3, 5, 0);
-        pool.add_cut(3, 2, 7.0, &[1.0, 2.0, 3.0]);
+        pool.add_cut(0, 3, 2, 7.0, &[1.0, 2.0, 3.0]);
         // slot = 0 + 3*5 + 2 = 17
         let meta = &pool.metadata[17];
         assert_eq!(meta.iteration_generated, 3);
@@ -1170,13 +1190,13 @@ mod tests {
     fn populated_count_tracks_high_water_mark() {
         let mut pool = CutPool::new(50, 1, 5, 0);
 
-        pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0 → populated_count = 1
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]); // slot 0 → populated_count = 1
         assert_eq!(pool.populated_count, 1);
 
-        pool.add_cut(1, 0, 2.0, &[2.0]); // slot 5 → populated_count = 6
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]); // slot 5 → populated_count = 6
         assert_eq!(pool.populated_count, 6);
 
-        pool.add_cut(0, 2, 3.0, &[3.0]); // slot 2 → no change (2 < 6)
+        pool.add_cut(0, 0, 2, 3.0, &[3.0]); // slot 2 → no change (2 < 6)
         assert_eq!(pool.populated_count, 6);
     }
 
@@ -1186,10 +1206,10 @@ mod tests {
         // (0 here), so 1-based iterations leave no reserved leading block.
         let mut pool = CutPool::new(30, 1, 3, 0);
         pool.set_iteration_base(1);
-        pool.add_cut(1, 0, 1.0, &[1.0]); // slot 0
-        pool.add_cut(1, 1, 2.0, &[1.0]); // slot 1
-        pool.add_cut(1, 2, 3.0, &[1.0]); // slot 2
-        pool.add_cut(2, 0, 4.0, &[1.0]); // slot 3
+        pool.add_cut(0, 1, 0, 1.0, &[1.0]); // slot 0
+        pool.add_cut(0, 1, 1, 2.0, &[1.0]); // slot 1
+        pool.add_cut(0, 1, 2, 3.0, &[1.0]); // slot 2
+        pool.add_cut(0, 2, 0, 4.0, &[1.0]); // slot 3
         assert!(pool.active[0] && pool.active[1] && pool.active[2] && pool.active[3]);
         assert_eq!(pool.populated_count, 4, "dense packing leaves no gap");
         assert_eq!(pool.generated_count, 4);
@@ -1201,9 +1221,9 @@ mod tests {
     #[test]
     fn active_cuts_returns_only_active_cuts() {
         let mut pool = CutPool::new(20, 2, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0, 2.0]); // slot 0
-        pool.add_cut(1, 0, 2.0, &[3.0, 4.0]); // slot 1
-        pool.add_cut(2, 0, 3.0, &[5.0, 6.0]); // slot 2
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 2.0]); // slot 0
+        pool.add_cut(0, 1, 0, 2.0, &[3.0, 4.0]); // slot 1
+        pool.add_cut(0, 2, 0, 3.0, &[5.0, 6.0]); // slot 2
 
         pool.deactivate(&[1]);
 
@@ -1226,9 +1246,9 @@ mod tests {
     #[test]
     fn active_count_is_correct_after_add_and_deactivate() {
         let mut pool = CutPool::new(20, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0
-        pool.add_cut(1, 0, 2.0, &[2.0]); // slot 1
-        pool.add_cut(2, 0, 3.0, &[3.0]); // slot 2
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]); // slot 0
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]); // slot 1
+        pool.add_cut(0, 2, 0, 3.0, &[3.0]); // slot 2
 
         assert_eq!(pool.active_count(), 3);
         pool.deactivate(&[1]);
@@ -1238,9 +1258,9 @@ mod tests {
     #[test]
     fn deactivate_sets_flags_correctly() {
         let mut pool = CutPool::new(20, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0
-        pool.add_cut(1, 0, 2.0, &[2.0]); // slot 1
-        pool.add_cut(2, 0, 3.0, &[3.0]); // slot 2
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]); // slot 0
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]); // slot 1
+        pool.add_cut(0, 2, 0, 3.0, &[3.0]); // slot 2
 
         pool.deactivate(&[1]);
 
@@ -1253,9 +1273,9 @@ mod tests {
     #[test]
     fn deactivate_multiple_indices() {
         let mut pool = CutPool::new(20, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0
-        pool.add_cut(1, 0, 2.0, &[2.0]); // slot 1
-        pool.add_cut(2, 0, 3.0, &[3.0]); // slot 2
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]); // slot 0
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]); // slot 1
+        pool.add_cut(0, 2, 0, 3.0, &[3.0]); // slot 2
 
         pool.deactivate(&[0, 2]);
 
@@ -1268,7 +1288,7 @@ mod tests {
     #[test]
     fn deactivate_empty_slice_is_noop() {
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]);
         pool.deactivate(&[]);
         assert_eq!(pool.active_count(), 1);
     }
@@ -1283,8 +1303,8 @@ mod tests {
     #[cfg(not(debug_assertions))]
     fn deactivate_duplicate_index_is_silently_skipped() {
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]);
-        pool.add_cut(1, 0, 2.0, &[2.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]);
         assert_eq!(pool.active_count(), 2);
         pool.deactivate(&[0, 0, 0]);
         assert_eq!(
@@ -1304,8 +1324,8 @@ mod tests {
         // cut 1:  5 + 0*3 + 2*4 = 13
         // max = 13
         let mut pool = CutPool::new(10, 2, 1, 0);
-        pool.add_cut(0, 0, 10.0, &[1.0, 0.0]);
-        pool.add_cut(1, 0, 5.0, &[0.0, 2.0]);
+        pool.add_cut(0, 0, 0, 10.0, &[1.0, 0.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[0.0, 2.0]);
 
         let result = pool.evaluate_at_state(&[3.0, 4.0]);
         assert_eq!(result, 13.0);
@@ -1317,8 +1337,8 @@ mod tests {
         // cut 1: intercept=5, coeffs=[2] → at state [10]: 5 + 20 = 25
         // max = 25
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 2.0, &[1.0]);
-        pool.add_cut(1, 0, 5.0, &[2.0]);
+        pool.add_cut(0, 0, 0, 2.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[2.0]);
 
         let result = pool.evaluate_at_state(&[10.0]);
         assert_eq!(result, 25.0);
@@ -1333,7 +1353,7 @@ mod tests {
     #[test]
     fn evaluate_at_state_all_deactivated_returns_neg_infinity() {
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 100.0, &[1.0]);
+        pool.add_cut(0, 0, 0, 100.0, &[1.0]);
         pool.deactivate(&[0]);
         assert_eq!(pool.evaluate_at_state(&[5.0]), f64::NEG_INFINITY);
     }
@@ -1343,8 +1363,8 @@ mod tests {
         // slot 0: active, intercept=10, coeff=[1]  → at state [3]: 13
         // slot 1: INACTIVE, intercept=100, coeff=[1] → would be 103, but ignored
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 10.0, &[1.0]);
-        pool.add_cut(1, 0, 100.0, &[1.0]);
+        pool.add_cut(0, 0, 0, 10.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 100.0, &[1.0]);
         pool.deactivate(&[1]);
 
         assert_eq!(pool.evaluate_at_state(&[3.0]), 13.0);
@@ -1356,7 +1376,7 @@ mod tests {
         // then the cut is stored at slot 0 and active_count() returns 1.
         let mut pool = CutPool::new(100, 9, 10, 0);
         let coeffs = vec![0.0; 9];
-        pool.add_cut(0, 0, 5.0, &coeffs);
+        pool.add_cut(0, 0, 0, 5.0, &coeffs);
 
         assert!(pool.active[0]);
         assert_eq!(pool.active_count(), 1);
@@ -1367,9 +1387,9 @@ mod tests {
         // Given a pool with 3 cuts at slots 0, 1, 2, when deactivate(&[1]) is
         // called, then active_count() returns 2 and slot 1 is inactive.
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]);
-        pool.add_cut(1, 0, 2.0, &[2.0]);
-        pool.add_cut(2, 0, 3.0, &[3.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[3.0]);
 
         pool.deactivate(&[1]);
 
@@ -1382,8 +1402,8 @@ mod tests {
         // cuts: (intercept=10, coeffs=[1,0]) and (intercept=5, coeffs=[0,2])
         // state=[3,4] → max(10+3, 5+8) = max(13, 13) = 13
         let mut pool = CutPool::new(10, 2, 1, 0);
-        pool.add_cut(0, 0, 10.0, &[1.0, 0.0]);
-        pool.add_cut(1, 0, 5.0, &[0.0, 2.0]);
+        pool.add_cut(0, 0, 0, 10.0, &[1.0, 0.0]);
+        pool.add_cut(0, 1, 0, 5.0, &[0.0, 2.0]);
 
         assert_eq!(pool.evaluate_at_state(&[3.0, 4.0]), 13.0);
     }
@@ -1394,7 +1414,7 @@ mod tests {
         // then slot = 5 + 0*10 + 0 = 5.
         let mut pool = CutPool::new(100, 9, 10, 5);
         let coeffs = vec![0.0; 9];
-        pool.add_cut(0, 0, 1.0, &coeffs);
+        pool.add_cut(0, 0, 0, 1.0, &coeffs);
 
         assert!(pool.active[5]);
         assert!(!pool.active[0]);
@@ -1410,7 +1430,7 @@ mod tests {
     #[test]
     fn cut_pool_derives_debug_and_clone() {
         let mut pool = CutPool::new(5, 2, 1, 0);
-        pool.add_cut(0, 0, 3.0, &[1.0, 2.0]);
+        pool.add_cut(0, 0, 0, 3.0, &[1.0, 2.0]);
 
         let cloned = pool.clone();
         assert_eq!(cloned.active_count(), 1);
@@ -1435,8 +1455,8 @@ mod tests {
     #[test]
     fn sparsity_report_all_nonzero() {
         let mut pool = CutPool::new(10, 3, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0, 2.0, 3.0]);
-        pool.add_cut(1, 0, 2.0, &[4.0, 5.0, 6.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 2.0, 3.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[4.0, 5.0, 6.0]);
 
         let report = pool.sparsity_report();
         assert_eq!(report.total_coefficients, 6);
@@ -1448,8 +1468,8 @@ mod tests {
     #[test]
     fn sparsity_report_all_zero() {
         let mut pool = CutPool::new(10, 3, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0, 0.0, 0.0]);
-        pool.add_cut(1, 0, 2.0, &[0.0, 0.0, 0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0, 0.0, 0.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[0.0, 0.0, 0.0]);
 
         let report = pool.sparsity_report();
         assert_eq!(report.total_coefficients, 6);
@@ -1461,8 +1481,8 @@ mod tests {
     #[test]
     fn sparsity_report_mixed() {
         let mut pool = CutPool::new(10, 3, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0, 0.0, 2.0]);
-        pool.add_cut(1, 0, 2.0, &[0.0, 0.0, 3.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 0.0, 2.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[0.0, 0.0, 3.0]);
 
         let report = pool.sparsity_report();
         assert_eq!(report.total_coefficients, 6);
@@ -1474,8 +1494,8 @@ mod tests {
     #[test]
     fn sparsity_report_excludes_inactive_cuts() {
         let mut pool = CutPool::new(10, 2, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0, 0.0]); // all zero, then deactivate
-        pool.add_cut(1, 0, 2.0, &[1.0, 2.0]); // all non-zero
+        pool.add_cut(0, 0, 0, 1.0, &[0.0, 0.0]); // all zero, then deactivate
+        pool.add_cut(0, 1, 0, 2.0, &[1.0, 2.0]); // all non-zero
         pool.deactivate(&[0]);
 
         let report = pool.sparsity_report();
@@ -1489,11 +1509,11 @@ mod tests {
     fn sparsity_report_per_dimension_zeros_correct() {
         let mut pool = CutPool::new(10, 4, 1, 0);
         // Cut 0: dims 0,2 are zero
-        pool.add_cut(0, 0, 1.0, &[0.0, 1.0, 0.0, 3.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0, 1.0, 0.0, 3.0]);
         // Cut 1: dims 0,3 are zero
-        pool.add_cut(1, 0, 2.0, &[0.0, 2.0, 4.0, 0.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[0.0, 2.0, 4.0, 0.0]);
         // Cut 2: no zeros
-        pool.add_cut(2, 0, 3.0, &[5.0, 6.0, 7.0, 8.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[5.0, 6.0, 7.0, 8.0]);
 
         let report = pool.sparsity_report();
         assert_eq!(report.total_coefficients, 12);
@@ -1569,8 +1589,8 @@ mod tests {
     #[test]
     fn enforce_budget_noop_when_under_budget() {
         let mut pool = CutPool::new(100, 2, 10, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0, 2.0]);
-        pool.add_cut(0, 1, 2.0, &[3.0, 4.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 2.0]);
+        pool.add_cut(0, 0, 1, 2.0, &[3.0, 4.0]);
         assert_eq!(pool.active_count(), 2);
         let result = pool.enforce_budget(5, 1, 10);
         assert_eq!(result.evicted_count, 0);
@@ -1583,7 +1603,7 @@ mod tests {
         let mut pool = CutPool::new(100, 2, 10, 0);
         // Add 5 cuts at iterations 0-4
         for iter in 0..5_u64 {
-            pool.add_cut(iter, 0, 1.0, &[1.0, 0.0]);
+            pool.add_cut(0, iter, 0, 1.0, &[1.0, 0.0]);
             // Set last_active_iter to make older cuts staler
             pool.metadata[pool.populated_count - 1].last_active_iter = iter;
         }
@@ -1604,10 +1624,10 @@ mod tests {
     fn enforce_budget_tiebreaks_by_active_count() {
         let mut pool = CutPool::new(100, 2, 10, 0);
         // Two cuts with same last_active_iter but different active_count
-        pool.add_cut(0, 0, 1.0, &[1.0, 0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 0.0]);
         pool.metadata[0].last_active_iter = 1;
         pool.metadata[0].active_count = 5;
-        pool.add_cut(0, 1, 2.0, &[0.0, 1.0]);
+        pool.add_cut(0, 0, 1, 2.0, &[0.0, 1.0]);
         pool.metadata[1].last_active_iter = 1;
         pool.metadata[1].active_count = 2;
         assert_eq!(pool.active_count(), 2);
@@ -1622,11 +1642,11 @@ mod tests {
     fn enforce_budget_protects_current_iteration() {
         let mut pool = CutPool::new(100, 2, 10, 0);
         // 3 cuts: 2 from iteration 0, 1 from iteration 1 (current)
-        pool.add_cut(0, 0, 1.0, &[1.0, 0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 0.0]);
         pool.metadata[0].last_active_iter = 0;
-        pool.add_cut(0, 1, 2.0, &[0.0, 1.0]);
+        pool.add_cut(0, 0, 1, 2.0, &[0.0, 1.0]);
         pool.metadata[1].last_active_iter = 0;
-        pool.add_cut(1, 0, 3.0, &[1.0, 1.0]);
+        pool.add_cut(0, 1, 0, 3.0, &[1.0, 1.0]);
         pool.metadata[10].last_active_iter = 1;
         assert_eq!(pool.active_count(), 3);
         // Budget = 1, current_iteration = 1 → can only evict iter-0 cuts
@@ -1640,9 +1660,9 @@ mod tests {
     fn enforce_budget_all_current_iteration_no_eviction() {
         let mut pool = CutPool::new(100, 2, 10, 0);
         // All cuts from current iteration
-        pool.add_cut(5, 0, 1.0, &[1.0, 0.0]);
-        pool.add_cut(5, 1, 2.0, &[0.0, 1.0]);
-        pool.add_cut(5, 2, 3.0, &[1.0, 1.0]);
+        pool.add_cut(0, 5, 0, 1.0, &[1.0, 0.0]);
+        pool.add_cut(0, 5, 1, 2.0, &[0.0, 1.0]);
+        pool.add_cut(0, 5, 2, 3.0, &[1.0, 1.0]);
         assert_eq!(pool.active_count(), 3);
         // Budget = 1, current_iteration = 5 → no candidates, no eviction
         let result = pool.enforce_budget(1, 5, 10);
@@ -1653,9 +1673,9 @@ mod tests {
     #[test]
     fn enforce_budget_result_fields() {
         let mut pool = CutPool::new(100, 2, 10, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0, 0.0]);
-        pool.add_cut(1, 0, 2.0, &[0.0, 1.0]);
-        pool.add_cut(2, 0, 3.0, &[1.0, 1.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 0.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[0.0, 1.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[1.0, 1.0]);
         assert_eq!(pool.active_count(), 3);
         let result = pool.enforce_budget(1, 3, 10);
         assert_eq!(result.active_before, 3);
@@ -1682,7 +1702,7 @@ mod tests {
         let mut pool = CutPool::new(100, 2, 1, 0);
 
         // Add a cut at slot 0 (iteration 0, fp 0).
-        pool.add_cut(0, 0, 5.0, &[1.0, 2.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[1.0, 2.0]);
 
         // Manually populate a further 99 slots as inactive to extend
         // populated_count to 100 without going through add_cut (which marks
@@ -1716,7 +1736,7 @@ mod tests {
         // Add cuts spread across several iterations so there are always
         // eviction candidates regardless of current_iteration.
         for iter in 0..5_u64 {
-            pool.add_cut(iter, 0, 1.0, &[1.0, 0.0]);
+            pool.add_cut(0, iter, 0, 1.0, &[1.0, 0.0]);
         }
         assert_eq!(pool.active_count(), 5);
 
@@ -1733,16 +1753,16 @@ mod tests {
         // new pool to keep slot arithmetic simple.
         let mut pool2 = CutPool::new(100, 2, 10, 0);
         for iter in 0..5_u64 {
-            pool2.add_cut(iter, 0, 1.0, &[1.0, 0.0]);
+            pool2.add_cut(0, iter, 0, 1.0, &[1.0, 0.0]);
         }
         pool2.enforce_budget(3, 5, 10);
         let cap_after_first2 = pool2.candidates_buf.capacity();
 
         // Second call on the same pool2 — re-add some cuts first.
         // Since slots 0, 10, 20, 30, 40 are now inactive, add at iter 6..=8.
-        pool2.add_cut(6, 0, 2.0, &[0.0, 1.0]);
-        pool2.add_cut(7, 0, 2.0, &[0.0, 1.0]);
-        pool2.add_cut(8, 0, 2.0, &[0.0, 1.0]);
+        pool2.add_cut(0, 6, 0, 2.0, &[0.0, 1.0]);
+        pool2.add_cut(0, 7, 0, 2.0, &[0.0, 1.0]);
+        pool2.add_cut(0, 8, 0, 2.0, &[0.0, 1.0]);
         pool2.enforce_budget(2, 9, 10);
         let cap_after_second2 = pool2.candidates_buf.capacity();
 
@@ -1759,9 +1779,9 @@ mod tests {
     #[test]
     fn set_active_false_decrements_active_count() {
         let mut pool = CutPool::new(10, 4, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
-        pool.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
 
         pool.set_active(1, false);
 
@@ -1773,9 +1793,9 @@ mod tests {
     #[test]
     fn set_active_true_reactivates_deactivated_slot() {
         let mut pool = CutPool::new(10, 4, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
-        pool.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
         pool.deactivate(&[1]);
 
         pool.set_active(1, true);
@@ -1788,9 +1808,9 @@ mod tests {
     #[test]
     fn set_active_idempotent_when_state_unchanged() {
         let mut pool = CutPool::new(10, 4, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
-        pool.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
-        pool.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
 
         // slot 1 is already active — second call must be a no-op
         pool.set_active(1, true);
@@ -1802,15 +1822,15 @@ mod tests {
     #[test]
     fn deactivate_delegates_to_set_active() {
         let mut pool_a = CutPool::new(10, 4, 1, 0);
-        pool_a.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
-        pool_a.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
-        pool_a.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+        pool_a.add_cut(0, 0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool_a.add_cut(0, 1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool_a.add_cut(0, 2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
         pool_a.deactivate(&[1, 2]);
 
         let mut pool_b = CutPool::new(10, 4, 1, 0);
-        pool_b.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
-        pool_b.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
-        pool_b.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+        pool_b.add_cut(0, 0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool_b.add_cut(0, 1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool_b.add_cut(0, 2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
         pool_b.set_active(1, false);
         pool_b.set_active(2, false);
 
@@ -1821,8 +1841,8 @@ mod tests {
     #[test]
     fn cuts_in_lp_returns_populated_count() {
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]);
-        pool.add_cut(1, 0, 2.0, &[2.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]);
 
         assert_eq!(pool.cuts_in_lp(), 2);
         assert_eq!(pool.cuts_in_lp(), pool.populated_count);
@@ -1845,10 +1865,10 @@ mod tests {
         use crate::cut_selection::CutActivityUpdates;
 
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0 active
-        pool.add_cut(1, 0, 2.0, &[2.0]); // slot 1 active
-        pool.add_cut(2, 0, 3.0, &[3.0]); // slot 2 active
-        pool.add_cut(3, 0, 4.0, &[4.0]); // slot 3 active
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]); // slot 0 active
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]); // slot 1 active
+        pool.add_cut(0, 2, 0, 3.0, &[3.0]); // slot 2 active
+        pool.add_cut(0, 3, 0, 4.0, &[4.0]); // slot 3 active
 
         // Pre-deactivate slot 2 so the reactivation has something to flip.
         pool.deactivate(&[2]);
@@ -1880,9 +1900,9 @@ mod tests {
         use crate::cut_selection::CutActivityUpdates;
 
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]);
-        pool.add_cut(1, 0, 2.0, &[2.0]);
-        pool.add_cut(2, 0, 3.0, &[3.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[3.0]);
 
         // Pre-deactivate slot 1 so the reactivation has something to flip.
         pool.deactivate(&[1]);
@@ -1922,8 +1942,8 @@ mod tests {
         use crate::cut_selection::CutActivityUpdates;
 
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]);
-        pool.add_cut(1, 0, 2.0, &[2.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]);
         let active_before = pool.active.clone();
         let count_before = pool.active_count();
 
@@ -1947,10 +1967,10 @@ mod tests {
 
         let build_pool = || {
             let mut pool = CutPool::new(10, 1, 1, 0);
-            pool.add_cut(0, 0, 1.0, &[1.0]);
-            pool.add_cut(1, 0, 2.0, &[2.0]);
-            pool.add_cut(2, 0, 3.0, &[3.0]);
-            pool.add_cut(3, 0, 4.0, &[4.0]);
+            pool.add_cut(0, 0, 0, 1.0, &[1.0]);
+            pool.add_cut(0, 1, 0, 2.0, &[2.0]);
+            pool.add_cut(0, 2, 0, 3.0, &[3.0]);
+            pool.add_cut(0, 3, 0, 4.0, &[4.0]);
             pool.deactivate(&[2]); // pre-deactivate so reactivation flips a bit
             pool
         };
@@ -1984,9 +2004,9 @@ mod tests {
     #[test]
     fn accessors_match_direct_field_reads() {
         let mut pool = CutPool::new(10, 3, 1, 0);
-        pool.add_cut(0, 0, 10.0, &[1.0, 2.0, 3.0]);
-        pool.add_cut(1, 0, 20.0, &[4.0, 5.0, 6.0]);
-        pool.add_cut(2, 0, 30.0, &[7.0, 8.0, 9.0]);
+        pool.add_cut(0, 0, 0, 10.0, &[1.0, 2.0, 3.0]);
+        pool.add_cut(0, 1, 0, 20.0, &[4.0, 5.0, 6.0]);
+        pool.add_cut(0, 2, 0, 30.0, &[7.0, 8.0, 9.0]);
         pool.deactivate(&[1]);
 
         assert_eq!(pool.populated(), pool.populated_count);
@@ -2035,14 +2055,15 @@ mod tests {
         use crate::cut_selection::CutMetadata;
 
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]);
-        pool.add_cut(1, 0, 2.0, &[2.0]);
-        pool.add_cut(2, 0, 3.0, &[3.0]);
-        pool.add_cut(3, 0, 4.0, &[4.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]);
+        pool.add_cut(0, 2, 0, 3.0, &[3.0]);
+        pool.add_cut(0, 3, 0, 4.0, &[4.0]);
 
         let meta = |iteration_generated: u64| CutMetadata {
             iteration_generated,
             forward_pass_index: 0,
+            node: 0,
             active_count: 0,
             last_active_iter: iteration_generated,
         };
@@ -2070,13 +2091,14 @@ mod tests {
         use crate::cut_selection::CutMetadata;
 
         let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]);
-        pool.add_cut(1, 0, 2.0, &[2.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 2.0, &[2.0]);
         assert_eq!(pool.active_count(), 2);
 
         let meta = CutMetadata {
             iteration_generated: 0,
             forward_pass_index: 0,
+            node: 0,
             active_count: 0,
             last_active_iter: 0,
         };
@@ -2090,8 +2112,8 @@ mod tests {
     #[test]
     fn grow_preserves_populated_slot_positions_and_values() {
         let mut pool = CutPool::new(2, 2, 1, 0);
-        pool.add_cut(0, 0, 5.0, &[1.0, 2.0]);
-        pool.add_cut(1, 0, 6.0, &[3.0, 4.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[1.0, 2.0]);
+        pool.add_cut(0, 1, 0, 6.0, &[3.0, 4.0]);
 
         pool.grow(10);
 
@@ -2108,11 +2130,11 @@ mod tests {
     #[test]
     fn grow_new_slots_are_writable_via_add_cut() {
         let mut pool = CutPool::new(2, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0
+        pool.add_cut(0, 0, 0, 1.0, &[1.0]); // slot 0
         pool.grow(5);
         // slot = 0 + 1*1 + 0 = 1 is already populated; grow one more forward
         // pass worth of stride to reach a genuinely new slot at iteration 4.
-        pool.add_cut(4, 0, 9.0, &[7.0]); // slot 4, beyond the original capacity
+        pool.add_cut(0, 4, 0, 9.0, &[7.0]); // slot 4, beyond the original capacity
         assert!(pool.is_active(4));
         assert_eq!(pool.intercept(4), 9.0);
         assert_eq!(pool.coefficient_row(4), &[7.0]);

@@ -53,7 +53,9 @@ use cobre_io::TrainingOutput;
 use cobre_io::get_hostname;
 use cobre_io::now_iso8601;
 use cobre_io::output::policy::read_policy_checkpoint;
-use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
+use cobre_io::output::simulation_writer::{
+    ScenarioWritePayload, SimulationParquetWriter, write_paths,
+};
 use cobre_io::output::write_evaporation_models;
 use cobre_io::output::write_fpha_deviation_points;
 use cobre_io::output::write_fpha_hyperplanes;
@@ -519,7 +521,7 @@ pub(crate) fn write_training_artifacts(
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: u32::try_from(n_threads).unwrap_or(u32::MAX),
             mpi_library: None,
             mpi_standard: None,
@@ -675,6 +677,12 @@ pub(crate) fn run_simulation_phase_py(
     #[allow(clippy::cast_possible_truncation)]
     let sim_time_ms = sim_start.elapsed().as_millis() as u64;
 
+    // Single-process: the writer already holds every scenario's node-path rows,
+    // so no cross-rank gather (unlike the CLI). Written before `finalize`
+    // consumes the writer.
+    write_paths(output_dir, sim_writer.path_rows().to_vec())
+        .map_err(|e| format!("output write error: simulation paths output: {e}"))?;
+
     let mut sim_out = sim_writer.finalize(sim_time_ms);
     sim_out.failed = write_failures;
 
@@ -708,13 +716,24 @@ pub(crate) fn run_simulation_phase_py(
         parallelism: Some(parallelism),
     };
 
-    // Single-process: opening, rank, and worker_id are all None.
+    // Single-process: simulation fills scenario_id (not iteration); stage/opening/
+    // rank/worker_id are all None.
     if !sim_run_result.solver_stats.is_empty() {
         let rows: Vec<SolverStatsRow> = sim_run_result
             .solver_stats
             .iter()
             .map(|(scenario_id, _opening, delta)| {
-                delta_to_stats_row(*scenario_id, "simulation", -1, None, None, None, delta)
+                #[allow(clippy::cast_possible_wrap)]
+                delta_to_stats_row(
+                    None,
+                    Some(*scenario_id as i32),
+                    "simulation",
+                    None,
+                    None,
+                    None,
+                    None,
+                    delta,
+                )
             })
             .collect();
         write_simulation_solver_stats(output_dir, &rows)
@@ -735,7 +754,7 @@ pub(crate) fn run_simulation_phase_py(
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: u32::try_from(n_threads).unwrap_or(u32::MAX),
             mpi_library: None,
             mpi_standard: None,
@@ -961,7 +980,7 @@ fn validate_loaded_policy(
 ) -> Result<PolicyLoadProof<FullFcf>, String> {
     rescale_checkpoint_cuts_for_load(
         &mut checkpoint.stage_cuts,
-        checkpoint.metadata.cost_scale_factor,
+        checkpoint.metadata.producer.cost_scale_factor,
         setup.stage_data.stage_templates.cost_scale_factor,
     );
 
@@ -975,16 +994,26 @@ fn validate_loaded_policy(
         .stage_cuts
         .last()
         .map_or(&[], |s| s.entity_manifest.as_slice());
+    let source_state_dim = checkpoint
+        .stage_cuts
+        .last()
+        .map_or(0, |s| s.state_dimension);
+    let source_graph = &checkpoint.metadata.graph_manifest;
+    let current_graph = setup.build_graph_manifest();
 
     let source = PolicyStageManifest {
-        state_dimension: checkpoint.metadata.state_dimension,
+        state_dimension: source_state_dim,
         num_stages: checkpoint.metadata.num_stages,
+        n_pools: source_graph.n_pools,
         slots: checkpoint_terminal_manifest,
+        graph: source_graph,
     };
     let current = PolicyStageManifest {
         state_dimension: state_dim,
         num_stages: n_stages,
+        n_pools: current_graph.n_pools,
         slots: &current_manifest,
+        graph: &current_graph,
     };
     let proof = validate_policy_load::<FullFcf>(&source, &current)
         .map_err(|e| format!("policy validation error: {e}"))?;
@@ -1045,10 +1074,10 @@ pub(crate) fn apply_training_policy_mode(
         // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
             let basis_cache = build_basis_cache_from_checkpoint(
-                setup.stage_data.stage_templates.templates.len(),
                 &checkpoint.stage_bases,
                 &checkpoint.stage_cuts,
                 &setup.node_graph.node_ids,
+                &setup.node_graph.node_pool_ids(),
             );
             setup.set_warm_start_basis_cache(basis_cache);
         }
@@ -1066,7 +1095,7 @@ pub(crate) fn apply_training_policy_mode(
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
         let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
-        let completed = u64::from(checkpoint.metadata.completed_iterations);
+        let completed = u64::from(checkpoint.metadata.producer.completed_iterations);
 
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
@@ -1083,10 +1112,10 @@ pub(crate) fn apply_training_policy_mode(
         // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
             let basis_cache = build_basis_cache_from_checkpoint(
-                setup.stage_data.stage_templates.templates.len(),
                 &checkpoint.stage_bases,
                 &checkpoint.stage_cuts,
                 &setup.node_graph.node_ids,
+                &setup.node_graph.node_pool_ids(),
             );
             setup.set_warm_start_basis_cache(basis_cache);
         }
@@ -1162,21 +1191,22 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         .map_err(|e| format!("FCF reconstruction error: {e}"))?;
 
     let basis_cache = build_basis_cache_from_checkpoint(
-        setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
         &checkpoint.stage_cuts,
         &setup.node_graph.node_ids,
+        &setup.node_graph.node_pool_ids(),
     );
 
     let training_result = TrainingResult::new(
-        checkpoint.metadata.final_lower_bound,
+        checkpoint.metadata.producer.final_lower_bound,
         checkpoint
             .metadata
+            .producer
             .best_upper_bound
             .unwrap_or(f64::INFINITY),
         0.0,
         0.0,
-        checkpoint.metadata.completed_iterations.into(),
+        checkpoint.metadata.producer.completed_iterations.into(),
         "loaded from checkpoint".to_string(),
         0,
         basis_cache,
@@ -2176,7 +2206,7 @@ mod tests {
 
         // The completed-iteration count recorded in the on-disk checkpoint.
         let checkpoint = read_policy_checkpoint(&policy_dir).expect("read policy checkpoint");
-        let expected_iterations: u64 = checkpoint.metadata.completed_iterations.into();
+        let expected_iterations: u64 = checkpoint.metadata.producer.completed_iterations.into();
 
         let (fcf, training_result) =
             reconstruct_policy_from_checkpoint(&loaded.setup, &loaded.system, &policy_dir)

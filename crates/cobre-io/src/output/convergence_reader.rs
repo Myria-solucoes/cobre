@@ -19,9 +19,10 @@ pub struct ConvergenceSummary {
     pub total_time_ms: u64,
     /// Lower bound value from the final iteration (0.0 when no rows).
     pub final_lower_bound: f64,
-    /// Mean upper bound estimate from the final iteration (0.0 when no rows).
-    pub final_upper_bound_mean: f64,
-    /// Standard deviation of the upper bound from the final iteration (0.0 when no rows).
+    /// Upper bound estimate from the final iteration (0.0 when no rows).
+    pub final_upper_bound: f64,
+    /// Standard deviation of the upper bound from the final iteration (0.0 when no
+    /// rows or the bound is exact, where the column is NULL).
     pub final_upper_bound_std: f64,
     /// Relative gap from the final iteration, or `None` when no rows or gap was undefined.
     pub final_gap_percent: Option<f64>,
@@ -67,7 +68,7 @@ struct BatchTotals {
     total_lp_solves: i64,
     total_time_ms: i64,
     final_lower_bound: f64,
-    final_upper_bound_mean: f64,
+    final_upper_bound: f64,
     final_upper_bound_std: f64,
     final_gap_percent: Option<f64>,
     has_rows: bool,
@@ -80,7 +81,7 @@ impl BatchTotals {
                 total_lp_solves: 0,
                 total_time_ms: 0,
                 final_lower_bound: 0.0,
-                final_upper_bound_mean: 0.0,
+                final_upper_bound: 0.0,
                 final_upper_bound_std: 0.0,
                 final_gap_percent: None,
             };
@@ -90,7 +91,7 @@ impl BatchTotals {
             total_lp_solves: self.total_lp_solves.max(0) as u64,
             total_time_ms: self.total_time_ms.max(0) as u64,
             final_lower_bound: self.final_lower_bound,
-            final_upper_bound_mean: self.final_upper_bound_mean,
+            final_upper_bound: self.final_upper_bound,
             final_upper_bound_std: self.final_upper_bound_std,
             final_gap_percent: self.final_gap_percent,
         }
@@ -180,8 +181,14 @@ fn accumulate_batch(batch: &RecordBatch, totals: &mut BatchTotals) -> Result<(),
     let last = batch.num_rows() - 1;
 
     totals.final_lower_bound = get_f64_column(batch, "lower_bound")?.value(last);
-    totals.final_upper_bound_mean = get_f64_column(batch, "upper_bound_mean")?.value(last);
-    totals.final_upper_bound_std = get_f64_column(batch, "upper_bound_std")?.value(last);
+    totals.final_upper_bound = get_f64_column(batch, "upper_bound")?.value(last);
+    // upper_bound_std is NULL under an exact bound; report 0.0 there.
+    let std_arr = get_f64_column(batch, "upper_bound_std")?;
+    totals.final_upper_bound_std = if std_arr.is_valid(last) {
+        std_arr.value(last)
+    } else {
+        0.0
+    };
 
     let gap_arr = get_f64_column(batch, "gap_percent")?;
     // gap_percent is nullable — is_valid distinguishes null from a real 0.0.
@@ -216,7 +223,7 @@ mod tests {
         IterationRecord {
             iteration,
             lower_bound: f64::from(iteration) * 10.0,
-            upper_bound_mean: f64::from(iteration) * 10.0 + 2.0,
+            upper_bound: f64::from(iteration) * 10.0 + 2.0,
             upper_bound_std: 0.5,
             gap_percent: Some(1.0),
             cuts_added: 5,
@@ -255,6 +262,7 @@ mod tests {
             final_upper_bound: Some(101.0),
             final_gap_percent: Some(1.51),
             final_upper_bound_std: Some(0.5),
+            final_upper_bound_kind: "statistical".to_string(),
             iterations_completed: n,
             converged: true,
             termination_reason: "gap tolerance reached".to_string(),
@@ -336,7 +344,7 @@ mod tests {
                 backend: "local".to_string(),
                 world_size: 1,
                 ranks_participated: 1,
-                num_nodes: 1,
+                num_hosts: 1,
                 threads_per_rank: 1,
                 mpi_library: None,
                 mpi_standard: None,
@@ -422,8 +430,8 @@ mod tests {
             "final_lower_bound must be 0.0 for empty file"
         );
         assert_eq!(
-            summary.final_upper_bound_mean, 0.0,
-            "final_upper_bound_mean must be 0.0 for empty file"
+            summary.final_upper_bound, 0.0,
+            "final_upper_bound must be 0.0 for empty file"
         );
         assert_eq!(
             summary.final_upper_bound_std, 0.0,
@@ -459,7 +467,7 @@ mod tests {
         assert_eq!(summary.total_lp_solves, 40);
         assert_eq!(summary.total_time_ms, 300);
         assert_eq!(summary.final_lower_bound, 10.0);
-        assert_eq!(summary.final_upper_bound_mean, 12.0);
+        assert_eq!(summary.final_upper_bound, 12.0);
         assert_eq!(summary.final_upper_bound_std, 0.5);
         assert_eq!(summary.final_gap_percent, Some(1.0));
     }

@@ -917,7 +917,7 @@ mod tests {
     /// Insert a cut at `slot` with `intercept` and `coeffs`, and set its
     /// `iteration_generated`. Returns nothing; mutates `pool`.
     fn add(pool: &mut CutPool, slot: u32, intercept: f64, coeffs: &[f64], iter_generated: u64) {
-        pool.add_cut(0, slot, intercept, coeffs);
+        pool.add_cut(0, 0, slot, intercept, coeffs);
         pool.set_iteration_generated_for_test(slot as usize, iter_generated);
     }
 
@@ -1356,7 +1356,7 @@ mod tests {
         for slot in 0..cap {
             let intercept = draw_f64(&mut state);
             let coeffs = [draw_f64(&mut state), draw_f64(&mut state)];
-            pool.add_cut(0, slot as u32, intercept, &coeffs);
+            pool.add_cut(0, 0, slot as u32, intercept, &coeffs);
             // iteration_generated in [1, 12].
             let gen_iter = 1 + (splitmix64(&mut state) % 12);
             pool.set_iteration_generated_for_test(slot, gen_iter);
@@ -1777,9 +1777,9 @@ mod tests {
     /// All-cuts optimum: theta = 5.0, objective = 5.0; binding slot = 2.
     fn make_three_cut_pool() -> CutPool {
         let mut pool = CutPool::new(16, 1, 16, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(0, 1, 0.0, &[1.0]);
-        pool.add_cut(0, 2, 5.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 0, 1, 0.0, &[1.0]);
+        pool.add_cut(0, 0, 2, 5.0, &[0.0]);
         for slot in 0..3 {
             pool.set_iteration_generated_for_test(slot, 1);
         }
@@ -1795,10 +1795,10 @@ mod tests {
     /// (floor 20). Used to exercise the opening-reuse continue path.
     fn make_four_cut_pool() -> CutPool {
         let mut pool = CutPool::new(16, 1, 16, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(0, 1, 0.0, &[1.0]);
-        pool.add_cut(0, 2, 5.0, &[0.0]);
-        pool.add_cut(0, 3, 0.0, &[2.0]);
+        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 0, 1, 0.0, &[1.0]);
+        pool.add_cut(0, 0, 2, 5.0, &[0.0]);
+        pool.add_cut(0, 0, 3, 0.0, &[2.0]);
         for slot in 0..4 {
             pool.set_iteration_generated_for_test(slot, 1);
         }
@@ -2614,7 +2614,7 @@ mod tests {
         let indexer = lazy_indexer();
         // One cut: intercept 5, coeff [0] → floor 5.0 at x0 = 2.
         let mut pool = CutPool::new(16, 1, 16, 0);
-        pool.add_cut(0, 0, 5.0, &[0.0]);
+        pool.add_cut(0, 0, 0, 5.0, &[0.0]);
         pool.set_iteration_generated_for_test(0, 1);
 
         // Primal layout: [x0, c1, c2, theta]. First solve reports theta = 0
@@ -2664,10 +2664,11 @@ mod tests {
         let mut metadata = Vec::with_capacity(n);
         let mut active = Vec::with_capacity(n);
         for (i, &(is_active, iteration_generated, last_active_iter)) in specs.iter().enumerate() {
-            pool.add_cut(0, i as u32, 0.0, &[0.0]);
+            pool.add_cut(0, 0, i as u32, 0.0, &[0.0]);
             metadata.push(CutMetadata {
                 iteration_generated,
                 forward_pass_index: i as u32,
+                node: 0,
                 active_count: 0,
                 last_active_iter,
             });

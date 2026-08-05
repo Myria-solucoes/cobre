@@ -13,8 +13,9 @@
 //! is needed. Buffers pre-allocated in [`CutSyncBuffers::new`] are reused so the
 //! per-stage exchange is allocation-free.
 //!
-//! Serialization/version handling is delegated to [`cut::wire`] (wire version 1);
-//! the version-reject contract lives there, not here.
+//! Serialization/version handling is delegated to [`cut::wire`]; the
+//! version-reject contract (and the per-record generating-node key) lives
+//! there, not here.
 //!
 //! [`cut::wire`]: crate::cut::wire
 
@@ -22,7 +23,10 @@ use cobre_comm::Communicator;
 
 use crate::{
     FutureCostFunction, SddpError,
-    cut::wire::{CutWireHeader, cut_wire_size, deserialize_cuts_from_buffer_into, serialize_cut},
+    cut::wire::{
+        CutWireHeader, CutWireTuple, cut_wire_size, deserialize_cuts_from_buffer_into,
+        serialize_cut,
+    },
 };
 
 /// Pre-allocated byte buffers for gathering cut wire records across all MPI
@@ -43,6 +47,7 @@ use crate::{
 /// use cobre_comm::LocalBackend;
 /// use cobre_sddp::cut_sync::CutSyncBuffers;
 /// use cobre_sddp::cut::fcf::FutureCostFunction;
+/// use cobre_sddp::cut::wire::CutWireTuple;
 ///
 /// // Single rank, 2 state dimensions, 2 cuts per rank.
 /// // max_cuts_per_rank must equal the number of cuts actually passed to
@@ -52,9 +57,9 @@ use crate::{
 /// let mut fcf = FutureCostFunction::new(2, 2, 2, 10, &[0; 2]);
 /// let comm = LocalBackend;
 ///
-/// let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[
-///     (0, 1, 0, 10.0, &[1.0, 2.0]),
-///     (0, 1, 1, 20.0, &[3.0, 4.0]),
+/// let local_cuts: &[CutWireTuple<'_>] = &[
+///     (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+///     (0, 0, 1, 1, 20.0, &[3.0, 4.0]),
 /// ];
 ///
 /// let remote_count = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
@@ -195,10 +200,11 @@ impl CutSyncBuffers {
     /// # Arguments
     ///
     /// - `pool` — 0-based pool id for which cuts are being synchronized.
-    /// - `local_cuts` — locally generated cuts as `(slot_index, iteration,
-    ///   forward_pass_index, intercept, coefficients)` tuples. The backward
-    ///   pass has already inserted these cuts into the FCF; they are serialized
-    ///   here to send to remote ranks, but are **not** re-inserted locally.
+    /// - `local_cuts` — locally generated cuts as `(slot_index, node_id,
+    ///   iteration, forward_pass_index, intercept, coefficients)` tuples, where
+    ///   `node_id` is the generating node. The backward pass has already
+    ///   inserted these cuts into the FCF; they are serialized here to send to
+    ///   remote ranks, but are **not** re-inserted locally.
     /// - `fcf` — Future Cost Function to receive remote cuts.
     /// - `comm` — communicator for the `allgatherv` call.
     ///
@@ -228,7 +234,7 @@ impl CutSyncBuffers {
     pub fn sync_cuts<C: Communicator>(
         &mut self,
         pool: usize,
-        local_cuts: &[(u32, u32, u32, f64, &[f64])],
+        local_cuts: &[CutWireTuple<'_>],
         fcf: &mut FutureCostFunction,
         comm: &C,
     ) -> Result<usize, SddpError> {
@@ -261,7 +267,7 @@ impl CutSyncBuffers {
             self.send_buf.len()
         );
 
-        for (i, &(slot_index, iteration, forward_pass_index, intercept, coefficients)) in
+        for (i, &(slot_index, node_id, iteration, forward_pass_index, intercept, coefficients)) in
             local_cuts.iter().enumerate()
         {
             debug_assert!(
@@ -273,6 +279,7 @@ impl CutSyncBuffers {
             serialize_cut(
                 &mut self.send_buf[start..start + record_size],
                 slot_index,
+                node_id,
                 iteration,
                 forward_pass_index,
                 intercept,
@@ -326,6 +333,7 @@ impl CutSyncBuffers {
             for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
                 let coeff_start = i * pool_n_state;
                 fcf.add_cut(
+                    header.node_id,
                     pool,
                     u64::from(header.iteration),
                     header.forward_pass_index,
@@ -410,6 +418,7 @@ impl CutSyncBuffers {
             serialize_cut(
                 &mut self.send_buf[start..start + record_size],
                 slot as u32,
+                meta.node,
                 iteration as u32,
                 meta.forward_pass_index,
                 cut_pool.intercept(slot),
@@ -531,6 +540,7 @@ impl CutSyncBuffers {
             for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
                 let coeff_start = i * pool_n_state;
                 fcf.add_cut(
+                    header.node_id,
                     pool,
                     u64::from(header.iteration),
                     header.forward_pass_index,
@@ -686,6 +696,7 @@ impl CutSyncBuffers {
                 for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
                     let coeff_start = i * pool_n_state;
                     fcf.add_cut(
+                        header.node_id,
                         pool,
                         u64::from(header.iteration),
                         header.forward_pass_index,
@@ -808,7 +819,7 @@ mod tests {
         SddpError,
         cut::{
             fcf::FutureCostFunction,
-            wire::{cut_wire_size, deserialize_cuts_from_buffer, serialize_cut},
+            wire::{CutWireTuple, cut_wire_size, deserialize_cuts_from_buffer, serialize_cut},
         },
     };
 
@@ -840,11 +851,11 @@ mod tests {
 
     #[test]
     fn new_recv_buf_capacity_is_max_cuts_times_num_ranks_times_record_size() {
-        // 10 * 4 * cut_wire_size(3) = 40 * 49 = 1960
+        // 10 * 4 * cut_wire_size(3) = 40 * 53 = 2120
         let bufs = CutSyncBuffers::new(3, 10, 4);
         let expected = 10 * 4 * cut_wire_size(3);
         assert_eq!(bufs.recv_capacity(), expected);
-        assert_eq!(expected, 1960);
+        assert_eq!(expected, 2120);
     }
 
     #[test]
@@ -871,31 +882,34 @@ mod tests {
     }
 
     #[test]
-    fn new_n_state_zero_record_size_is_25() {
-        // Edge case: n_state = 0, record_size = 25.
+    fn new_n_state_zero_record_size_is_29() {
+        // Edge case: n_state = 0, record_size = 29.
         let bufs = CutSyncBuffers::new(0, 5, 1);
-        assert_eq!(bufs.send_capacity(), 5 * 25);
-        assert_eq!(bufs.recv_capacity(), 5 * 25);
+        assert_eq!(bufs.send_capacity(), 5 * 29);
+        assert_eq!(bufs.recv_capacity(), 5 * 29);
     }
 
     #[test]
     fn send_buf_serialization_round_trip_two_cuts() {
         let mut bufs = CutSyncBuffers::new(2, 2, 1);
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 10.0, &[1.0, 2.0]), (1, 1, 1, 20.0, &[3.0, 4.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (1, 0, 1, 1, 20.0, &[3.0, 4.0]),
+        ];
 
         let record_size = cut_wire_size(2);
         let send_len = local_cuts.len() * record_size;
-        assert_eq!(send_len, 82);
+        assert_eq!(send_len, 90);
 
         // Serialize manually into send_buf using the same logic as sync_cuts.
-        for (i, &(slot_index, iteration, forward_pass_index, intercept, coefficients)) in
+        for (i, &(slot_index, node_id, iteration, forward_pass_index, intercept, coefficients)) in
             local_cuts.iter().enumerate()
         {
             let start = i * record_size;
             serialize_cut(
                 &mut bufs.send_buf[start..start + record_size],
                 slot_index,
+                node_id,
                 iteration,
                 forward_pass_index,
                 intercept,
@@ -923,13 +937,13 @@ mod tests {
 
     #[test]
     fn counts_and_displs_computation_for_various_cut_counts() {
-        // 2 local cuts, n_state=2: per_rank_bytes = 2 * 41 = 82; 3 ranks →
-        // counts = [82, 82, 82], displs = [0, 82, 164].
+        // 2 local cuts, n_state=2: per_rank_bytes = 2 * 45 = 90; 3 ranks →
+        // counts = [90, 90, 90], displs = [0, 90, 180].
         let mut bufs = CutSyncBuffers::new(2, 5, 3);
 
         let n_local = 2usize;
-        let record_size = cut_wire_size(2); // 41
-        let per_rank = n_local * record_size; // 82
+        let record_size = cut_wire_size(2); // 45
+        let per_rank = n_local * record_size; // 90
 
         // Simulate what sync_cuts does to counts and displs.
         for r in 0..3 {
@@ -937,8 +951,8 @@ mod tests {
             bufs.displs[r] = r * per_rank;
         }
 
-        assert_eq!(bufs.counts, vec![82, 82, 82]);
-        assert_eq!(bufs.displs, vec![0, 82, 164]);
+        assert_eq!(bufs.counts, vec![90, 90, 90]);
+        assert_eq!(bufs.displs, vec![0, 90, 180]);
     }
 
     // ── Integration tests (round-trip with LocalBackend) ──────────────────────
@@ -954,8 +968,10 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 2, 2, 10, &[0; 2]);
         let comm = LocalBackend;
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 10.0, &[1.0, 2.0]), (0, 1, 1, 20.0, &[3.0, 4.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (0, 0, 1, 1, 20.0, &[3.0, 4.0]),
+        ];
 
         let result = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
         assert_eq!(result, 0, "expected zero remote cuts in single-rank mode");
@@ -967,8 +983,10 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 2, 2, 10, &[0; 2]);
         let comm = LocalBackend;
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 10.0, &[1.0, 2.0]), (0, 1, 1, 20.0, &[3.0, 4.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (0, 0, 1, 1, 20.0, &[3.0, 4.0]),
+        ];
 
         bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
 
@@ -987,9 +1005,9 @@ mod tests {
         let comm = LocalBackend;
 
         // The backward pass inserts this rank's own cut before sync_cuts runs.
-        fcf.add_cut(0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(0, 0, 1, 0, 10.0, &[1.0, 2.0]);
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[(0, 1, 0, 10.0, &[1.0, 2.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[(0, 0, 1, 0, 10.0, &[1.0, 2.0])];
 
         let remote_inserted = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
 
@@ -1065,7 +1083,7 @@ mod tests {
         let mut bufs = CutSyncBuffers::new(2, 1, 1);
         let mut fcf = FutureCostFunction::new(2, 2, 1, 10, &[0; 2]);
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[(0, 1, 0, 5.0, &[1.0, 2.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[(0, 0, 1, 0, 5.0, &[1.0, 2.0])];
 
         let result = bufs.sync_cuts(0, local_cuts, &mut fcf, &FailingComm);
         assert!(
@@ -1132,9 +1150,9 @@ mod tests {
         }
 
         let n_state = 2;
-        let record_size = cut_wire_size(n_state); // 41
+        let record_size = cut_wire_size(n_state); // 45
         let n_local = 2;
-        let per_rank_bytes = n_local * record_size; // 82
+        let per_rank_bytes = n_local * record_size; // 90
 
         // FCF: 1 stage, n_state=2, forward_passes=6, max_iterations=10,
         // warm_start=0 → capacity = 0 + 10*6 = 60 slots.
@@ -1142,11 +1160,12 @@ mod tests {
         let mut bufs = CutSyncBuffers::new(n_state, n_local, 3);
 
         // Pre-populate recv_buf with remote rank data at the exact offsets
-        // that sync_cuts will compute (displs[1] = 82, displs[2] = 164).
-        let r1_start = per_rank_bytes; // 82
+        // that sync_cuts will compute (displs[1] = 90, displs[2] = 180).
+        let r1_start = per_rank_bytes; // 90
         serialize_cut(
             &mut bufs.recv_buf[r1_start..r1_start + record_size],
             10,
+            0,
             1,
             10,
             100.0,
@@ -1155,16 +1174,18 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[r1_start + record_size..r1_start + 2 * record_size],
             11,
+            0,
             1,
             11,
             200.0,
             &[3.0, 4.0],
         );
 
-        let r2_start = 2 * per_rank_bytes; // 164
+        let r2_start = 2 * per_rank_bytes; // 180
         serialize_cut(
             &mut bufs.recv_buf[r2_start..r2_start + record_size],
             20,
+            0,
             1,
             20,
             300.0,
@@ -1173,14 +1194,17 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[r2_start + record_size..r2_start + 2 * record_size],
             21,
+            0,
             1,
             21,
             400.0,
             &[7.0, 8.0],
         );
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 50.0, &[0.1, 0.2]), (1, 1, 1, 60.0, &[0.3, 0.4])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 50.0, &[0.1, 0.2]),
+            (1, 0, 1, 1, 60.0, &[0.3, 0.4]),
+        ];
 
         let remote_inserted = bufs
             .sync_cuts(0, local_cuts, &mut fcf, &ThreeRankComm)
@@ -1270,18 +1294,19 @@ mod tests {
         let remote_iteration = 1u64;
 
         // Pool 0 (dimension 2).
-        let s0_record_size = cut_wire_size(dims[0]); // 41
-        fcf.add_cut(0, remote_iteration, 0, 50.0, &[0.1, 0.2]);
-        fcf.add_cut(0, remote_iteration, 1, 60.0, &[0.3, 0.4]);
+        let s0_record_size = cut_wire_size(dims[0]); // 45
+        fcf.add_cut(0, 0, remote_iteration, 0, 50.0, &[0.1, 0.2]);
+        fcf.add_cut(0, 0, remote_iteration, 1, 60.0, &[0.3, 0.4]);
         let s0_packed = bufs.pack_local_records(&fcf, 0, remote_iteration);
         assert_eq!(s0_packed, 2, "pool 0 should pack both local cuts");
 
-        // Remote ranks at the per-pool stride (per_rank_bytes = 2 * 41 = 82).
+        // Remote ranks at the per-pool stride (per_rank_bytes = 2 * 45 = 90).
         let s0_per_rank_bytes = n_local * s0_record_size;
         let s0_r1 = s0_per_rank_bytes;
         serialize_cut(
             &mut bufs.recv_buf[s0_r1..s0_r1 + s0_record_size],
             10,
+            0,
             remote_iteration as u32,
             10,
             100.0,
@@ -1290,6 +1315,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s0_r1 + s0_record_size..s0_r1 + 2 * s0_record_size],
             11,
+            0,
             remote_iteration as u32,
             11,
             200.0,
@@ -1299,6 +1325,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s0_r2..s0_r2 + s0_record_size],
             20,
+            0,
             remote_iteration as u32,
             20,
             300.0,
@@ -1307,6 +1334,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s0_r2 + s0_record_size..s0_r2 + 2 * s0_record_size],
             21,
+            0,
             remote_iteration as u32,
             21,
             400.0,
@@ -1334,9 +1362,9 @@ mod tests {
         assert_eq!(s0_recovered_r1[0].1[1].to_bits(), 2.0_f64.to_bits());
 
         // Pool 1 (dimension 5).
-        let s1_record_size = cut_wire_size(dims[1]); // 65
-        fcf.add_cut(1, remote_iteration, 0, 70.0, &[1.1, 1.2, 1.3, 1.4, 1.5]);
-        fcf.add_cut(1, remote_iteration, 1, 80.0, &[2.1, 2.2, 2.3, 2.4, 2.5]);
+        let s1_record_size = cut_wire_size(dims[1]); // 69
+        fcf.add_cut(0, 1, remote_iteration, 0, 70.0, &[1.1, 1.2, 1.3, 1.4, 1.5]);
+        fcf.add_cut(0, 1, remote_iteration, 1, 80.0, &[2.1, 2.2, 2.3, 2.4, 2.5]);
         let s1_packed = bufs.pack_local_records(&fcf, 1, remote_iteration);
         assert_eq!(s1_packed, 2, "pool 1 should pack both local cuts");
 
@@ -1347,6 +1375,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s1_r1..s1_r1 + s1_record_size],
             30,
+            0,
             remote_iteration as u32,
             30,
             500.0,
@@ -1355,6 +1384,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s1_r1 + s1_record_size..s1_r1 + 2 * s1_record_size],
             31,
+            0,
             remote_iteration as u32,
             31,
             600.0,
@@ -1366,6 +1396,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s1_r2..s1_r2 + s1_record_size],
             40,
+            0,
             remote_iteration as u32,
             40,
             700.0,
@@ -1374,6 +1405,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s1_r2 + s1_record_size..s1_r2 + 2 * s1_record_size],
             41,
+            0,
             remote_iteration as u32,
             41,
             800.0,
@@ -1430,8 +1462,8 @@ mod tests {
 
         let c0 = [1.0, 2.0, 3.0, 4.0];
         let c1 = [5.0, 6.0, 7.0, 8.0];
-        fcf.add_cut(0, 1, 0, 10.0, &c0);
-        fcf.add_cut(0, 1, 1, 20.0, &c1);
+        fcf.add_cut(0, 0, 1, 0, 10.0, &c0);
+        fcf.add_cut(0, 0, 1, 1, 20.0, &c1);
 
         let packed = bufs.pack_local_records(&fcf, 0, 1);
         assert_eq!(packed, 2);
@@ -1440,10 +1472,11 @@ mod tests {
         // each cut's deterministic pool slot as slot_index: with forward_passes=2
         // and iteration=1, slots are 1*2+0=2 and 1*2+1=3.
         let mut reference = vec![0u8; 2 * record_size];
-        serialize_cut(&mut reference[0..record_size], 2, 1, 0, 10.0, &c0);
+        serialize_cut(&mut reference[0..record_size], 2, 0, 1, 0, 10.0, &c0);
         serialize_cut(
             &mut reference[record_size..2 * record_size],
             3,
+            0,
             1,
             1,
             20.0,
@@ -1467,7 +1500,7 @@ mod tests {
         let comm = LocalBackend;
 
         let coeffs = [7.5_f64, -3.25_f64];
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[(5, 3, 2, 99.0, &coeffs)];
+        let local_cuts: &[CutWireTuple<'_>] = &[(5, 0, 3, 2, 99.0, &coeffs)];
 
         bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
 
@@ -1487,6 +1520,51 @@ mod tests {
         assert_eq!(rec_coeffs[1].to_bits(), coeffs[1].to_bits());
     }
 
+    /// K-fan shared-leaf pool: two cuts inserted into ONE pool but generated at
+    /// DISTINCT nodes (7 and 9) must each carry their own generating node on the
+    /// wire — never the shared pool id. Packs through the production
+    /// `pack_local_records` path (reads `CutMetadata::node`) and asserts the
+    /// deserialized records recover the distinct generating nodes. The pool is
+    /// still append-only and slot-addressed exactly as before — `node_id` is
+    /// provenance only.
+    #[test]
+    fn shared_leaf_pool_cuts_carry_distinct_generating_node_ids() {
+        let n_state = 2usize;
+        // One pool (the shared leaf), forward_passes = 2.
+        let mut fcf = FutureCostFunction::new(1, n_state, 2, 10, &[0; 1]);
+        // Both cuts land in pool 0 but are generated at distinct nodes.
+        fcf.add_cut(7, 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(9, 0, 1, 1, 20.0, &[3.0, 4.0]);
+        // Append-only: two distinct slots, both active.
+        assert_eq!(fcf.pools[0].populated(), 4);
+        assert_eq!(fcf.pools[0].active_count(), 2);
+
+        let mut bufs = CutSyncBuffers::new(n_state, 2, 1);
+        let packed = bufs.pack_local_records(&fcf, 0, 1);
+        assert_eq!(packed, 2);
+
+        let record_size = cut_wire_size(n_state);
+        let recovered =
+            deserialize_cuts_from_buffer(&bufs.send_buf[..packed * record_size], n_state).unwrap();
+        assert_eq!(recovered.len(), 2);
+
+        // Packed in ascending slot order: slot 2 (node 7), slot 3 (node 9).
+        assert_eq!(recovered[0].0.slot_index, 2);
+        assert_eq!(
+            recovered[0].0.node_id, 7,
+            "cut at slot 2 carries generating node 7"
+        );
+        assert_eq!(recovered[1].0.slot_index, 3);
+        assert_eq!(
+            recovered[1].0.node_id, 9,
+            "cut at slot 3 carries generating node 9"
+        );
+        assert_ne!(
+            recovered[0].0.node_id, recovered[1].0.node_id,
+            "distinct generating nodes sharing one pool keep distinct wire node_ids"
+        );
+    }
+
     // ── Invariant check tests ─────────────────────────────────────────────────
 
     #[test]
@@ -1496,10 +1574,10 @@ mod tests {
         let mut fcf = FutureCostFunction::new(1, 2, 3, 10, &[0; 1]);
         let comm = LocalBackend;
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[
-            (0, 1, 0, 10.0, &[1.0, 2.0]),
-            (1, 1, 1, 20.0, &[3.0, 4.0]),
-            (2, 1, 2, 30.0, &[5.0, 6.0]),
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (1, 0, 1, 1, 20.0, &[3.0, 4.0]),
+            (2, 0, 1, 2, 30.0, &[5.0, 6.0]),
         ];
 
         let result = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
@@ -1561,8 +1639,10 @@ mod tests {
         let mut fcf = FutureCostFunction::new(1, 2, 6, 10, &[0; 1]);
 
         // Only 2 cuts; expected 3 per per_rank_cuts[0].
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 10.0, &[1.0, 2.0]), (1, 1, 1, 20.0, &[3.0, 4.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (1, 0, 1, 1, 20.0, &[3.0, 4.0]),
+        ];
 
         let result = bufs.sync_cuts(0, local_cuts, &mut fcf, &TwoRankStubComm);
         match result {
@@ -1837,8 +1917,8 @@ mod tests {
         let dims = [2usize, 3usize];
         let mut fcf = FutureCostFunction::new_per_pool(&dims, 3, 1, 10, &[0; 2], &[6; 2]);
         let mut bufs = CutSyncBuffers::new(3, 1, 1);
-        fcf.add_cut(0, 1, 0, 10.0, &[1.0, 2.0]);
-        fcf.add_cut(1, 1, 0, 20.0, &[3.0, 4.0, 5.0]);
+        fcf.add_cut(0, 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(0, 1, 1, 0, 20.0, &[3.0, 4.0, 5.0]);
 
         let (local, remote) = bufs
             .sync_level_records(&[0, 1], &mut fcf, 1, &LocalBackend)

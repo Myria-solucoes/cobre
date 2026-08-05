@@ -1,6 +1,6 @@
 //! Template post-processing: discount factors, LP scaling, and noise pre-scaling.
 
-use cobre_core::{PolicyGraph, Stage, System};
+use cobre_core::{HorizonGraph, Stage, System};
 
 use crate::indexer::StateSpace;
 use crate::scaling_report::ScalingReport;
@@ -13,12 +13,12 @@ use crate::{lp_builder, lp_builder::StageTemplates};
 /// Compute per-stage one-step discount factors from study stages and a policy graph.
 ///
 /// `discount_factors[t] = 1 / (1 + r_t)^(Dt / 365.25)` where `r_t` is the annual
-/// discount rate for stage `t` (`PolicyGraph::stage_discount_rate_overrides` keyed
+/// discount rate for stage `t` (`HorizonGraph::stage_discount_rate_overrides` keyed
 /// by `Stage::id`, else the global `annual_discount_rate`) and `Dt` is the stage
 /// duration in days. When `rate == 0.0`, the factor is `1.0` (no discounting).
 pub(crate) fn compute_per_stage_discount_factors(
     study_stages: &[&Stage],
-    pg: &PolicyGraph,
+    pg: &HorizonGraph,
 ) -> Vec<f64> {
     study_stages
         .iter()
@@ -170,9 +170,10 @@ pub(crate) fn postprocess_templates(
 mod tests {
     use super::{compute_cumulative_discount_factors, compute_per_stage_discount_factors};
     use chrono::NaiveDate;
+    use cobre_core::HorizonGraph;
     use cobre_core::temporal::{
-        BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
-        StageRiskConfig, StageStateConfig,
+        BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
     };
     use std::collections::HashMap;
 
@@ -198,7 +199,7 @@ mod tests {
     }
 
     /// A `stages[].annual_discount_rate_override` (carried on
-    /// `PolicyGraph::stage_discount_rate_overrides`) sets that stage's rate,
+    /// `HorizonGraph::stage_discount_rate_overrides`) sets that stage's rate,
     /// overriding the global `annual_discount_rate` (B2).
     #[test]
     fn stage_discount_override_is_read_off_the_stage() {
@@ -206,7 +207,7 @@ mod tests {
         let days = f64::from((stage.end_date - stage.start_date).num_days() as i32);
         let mut overrides = HashMap::new();
         overrides.insert(0, 0.10);
-        let pg = PolicyGraph {
+        let pg = HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![],
@@ -234,7 +235,7 @@ mod tests {
     fn stage_without_override_uses_global_rate() {
         let stage = one_year_stage(0);
         let days = f64::from((stage.end_date - stage.start_date).num_days() as i32);
-        let pg = PolicyGraph {
+        let pg = HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![],

@@ -119,7 +119,9 @@ def _collect_buses_parquet(output_dir: pathlib.Path) -> list[pathlib.Path]:
 def _read_buses(output_dir: pathlib.Path) -> pa.Table:
     """Concatenate all buses parquet partitions into a single Arrow table."""
     parquets = _collect_buses_parquet(output_dir)
-    tables = [pq.read_table(p) for p in parquets]
+    # ParquetFile (not read_table): scenario_id is both the Hive partition key and
+    # an in-file column, so read_table's dataset path would try to merge them.
+    tables = [pq.ParquetFile(p).read() for p in parquets]
     return pa.concat_tables(tables)
 
 

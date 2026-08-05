@@ -1990,12 +1990,13 @@ mod dcs_simulation {
     /// omits the binding slot 1 (stale `last_active_iter`).
     fn sim_pool() -> FutureCostFunction {
         let mut fcf = FutureCostFunction::new(1, 1, 8, 10, &[0]);
-        fcf.add_cut(0, 0, 0, 1.0, &[0.0]);
-        fcf.add_cut(0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
-        fcf.add_cut(0, 0, 2, 3.0, &[0.0]);
+        fcf.add_cut(0, 0, 0, 0, 1.0, &[0.0]);
+        fcf.add_cut(0, 0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
+        fcf.add_cut(0, 0, 0, 2, 3.0, &[0.0]);
         let meta = |generated: u64, last: u64| CutMetadata {
             iteration_generated: generated,
             forward_pass_index: 0,
+            node: 0,
             active_count: 0,
             last_active_iter: last,
         };
@@ -2167,6 +2168,7 @@ mod dcs_simulation {
             stage_id_u32: 0,
             scenario_id: 0,
             node: 0,
+            node_id: 0,
         };
         let load_spec = SimStageLoadSpec {
             frozen_template: frozen,
@@ -2611,6 +2613,7 @@ mod anticipated_ring_matches_forward_propagation {
                 stage_id_u32: t as u32,
                 scenario_id: 0,
                 node: t,
+                node_id: t as i32,
             };
             let load_spec = SimStageLoadSpec {
                 frozen_template: template,

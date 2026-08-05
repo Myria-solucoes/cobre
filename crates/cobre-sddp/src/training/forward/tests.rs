@@ -3150,11 +3150,11 @@ fn test_build_delta_single_iteration_filter() {
     // emits only the iteration-2 cut.
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     // iteration=1, fwd_idx=0: slot = 0 + 1*1 + 0 = 1
-    fcf.add_cut(0, 1, 0, 10.0, &[1.0]);
+    fcf.add_cut(0, 0, 1, 0, 10.0, &[1.0]);
     // iteration=2, fwd_idx=0: slot = 0 + 2*1 + 0 = 2
-    fcf.add_cut(0, 2, 0, 20.0, &[2.0]);
+    fcf.add_cut(0, 0, 2, 0, 20.0, &[2.0]);
     // iteration=3, fwd_idx=0: slot = 0 + 3*1 + 0 = 3
-    fcf.add_cut(0, 3, 0, 30.0, &[3.0]);
+    fcf.add_cut(0, 0, 3, 0, 30.0, &[3.0]);
 
     let state = test_support::state_layout(1, 0);
     let _indexer = test_support::geom(1, 0);
@@ -3183,9 +3183,9 @@ fn test_build_delta_skips_deactivated_cuts() {
     // iteration-1 cuts are emitted.
     let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
     // iteration=1, fwd_idx=0: slot = 0 + 1*2 + 0 = 2
-    fcf.add_cut(0, 1, 0, 10.0, &[1.0]);
+    fcf.add_cut(0, 0, 1, 0, 10.0, &[1.0]);
     // iteration=1, fwd_idx=1: slot = 0 + 1*2 + 1 = 3
-    fcf.add_cut(0, 1, 1, 20.0, &[2.0]);
+    fcf.add_cut(0, 0, 1, 1, 20.0, &[2.0]);
 
     // Deactivate slot 2 (the first iteration-1 cut).
     fcf.pools[0].deactivate(&[2]);
@@ -3227,7 +3227,7 @@ fn test_build_delta_excludes_warm_start_cuts() {
     let mut pool = CutPool::new_with_warm_start(1, 2, 10, &[warm_record]);
     // Now add a training cut at iteration=1, fwd_idx=0:
     // slot = warm_start_count(1) + 1*2 + 0 = 3
-    pool.add_cut(1, 0, 7.0, &[1.0]);
+    pool.add_cut(0, 1, 0, 7.0, &[1.0]);
 
     // Build an FCF with 2 stages (n_state=1, 2 fwd passes, 10 max iters).
     let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
@@ -3259,9 +3259,9 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
     // full builders must produce byte-identical output.
     let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
     // iteration=1, fwd_idx=0: slot = 1*2+0 = 2
-    fcf.add_cut(0, 1, 0, 10.0, &[1.0]);
+    fcf.add_cut(0, 0, 1, 0, 10.0, &[1.0]);
     // iteration=1, fwd_idx=1: slot = 1*2+1 = 3
-    fcf.add_cut(0, 1, 1, 20.0, &[3.0]);
+    fcf.add_cut(0, 0, 1, 1, 20.0, &[3.0]);
 
     let state = test_support::state_layout(1, 0);
     let _indexer = test_support::geom(1, 0);
@@ -3325,7 +3325,7 @@ fn test_build_delta_sparse_path() {
     }
 
     let mut fcf = FutureCostFunction::new(2, state.n_state, 1, 10, &[0; 2]);
-    fcf.add_cut(0, 1, 0, 5.0, &vec![1.0; state.n_state]);
+    fcf.add_cut(0, 0, 1, 0, 5.0, &vec![1.0; state.n_state]);
 
     let mut batch = empty_delta_batch();
     build_delta_cut_row_batch_into(
@@ -3348,8 +3348,8 @@ fn test_build_delta_reuses_out_buffer() {
     // Call twice; second call must produce correct output even when `batch`
     // had stale data from the first call.
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-    fcf.add_cut(0, 1, 0, 11.0, &[1.0]);
-    fcf.add_cut(0, 2, 0, 22.0, &[2.0]);
+    fcf.add_cut(0, 0, 1, 0, 11.0, &[1.0]);
+    fcf.add_cut(0, 0, 2, 0, 22.0, &[2.0]);
 
     let state = test_support::state_layout(1, 0);
     let _indexer = test_support::geom(1, 0);
@@ -3387,7 +3387,7 @@ fn test_build_delta_reuses_out_buffer() {
 fn test_build_delta_clears_row_starts() {
     // batch.row_starts[0] must be 0 regardless of prior state.
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-    fcf.add_cut(0, 1, 0, 5.0, &[1.0]);
+    fcf.add_cut(0, 0, 1, 0, 5.0, &[1.0]);
 
     let state = test_support::state_layout(1, 0);
     let _indexer = test_support::geom(1, 0);
@@ -3437,7 +3437,7 @@ fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
     let mut pool = CutPool::new_with_warm_start(1, 1, 10, &[ws_record]);
     // One iteration-1 cut at slot 1 (warm_start_count=1, so slot = 1+1*1+0 = 2,
     // but new_with_warm_start sets warm_start_count=1 → slot = 1+1*1+0 = 2).
-    pool.add_cut(1, 0, 7.0, &[1.0]);
+    pool.add_cut(0, 1, 0, 7.0, &[1.0]);
 
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     fcf.pools[0] = pool;
@@ -3590,12 +3590,13 @@ mod dcs_forward {
     /// initial set omits the binding slot 1 (stale `last_active_iter`).
     fn fwd_pool() -> FutureCostFunction {
         let mut fcf = FutureCostFunction::new(1, 1, 8, 10, &[0]);
-        fcf.add_cut(0, 0, 0, 1.0, &[0.0]);
-        fcf.add_cut(0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
-        fcf.add_cut(0, 0, 2, 3.0, &[0.0]);
+        fcf.add_cut(0, 0, 0, 0, 1.0, &[0.0]);
+        fcf.add_cut(0, 0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
+        fcf.add_cut(0, 0, 0, 2, 3.0, &[0.0]);
         let meta = |generated: u64, last: u64| CutMetadata {
             iteration_generated: generated,
             forward_pass_index: 0,
+            node: 0,
             active_count: 0,
             last_active_iter: last,
         };

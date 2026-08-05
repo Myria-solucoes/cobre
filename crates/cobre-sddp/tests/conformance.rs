@@ -550,6 +550,7 @@ mod cut_conformance {
         let coefficients = [1.0_f64, 2.0, 3.0];
 
         let slot_index = 7_u32;
+        let node_id = -5_i32;
         let iteration = 2_u32;
         let forward_pass_index = 1_u32;
 
@@ -557,6 +558,7 @@ mod cut_conformance {
         serialize_cut(
             &mut buf,
             slot_index,
+            node_id,
             iteration,
             forward_pass_index,
             intercept,
@@ -569,6 +571,7 @@ mod cut_conformance {
             header,
             CutWireHeader {
                 slot_index,
+                node_id,
                 iteration,
                 forward_pass_index,
                 intercept,
@@ -597,9 +600,9 @@ mod cut_conformance {
     fn cut_pool_add_then_active_cuts_returns_correct_data() {
         let mut pool = CutPool::new(10, 1, 1, 0);
 
-        pool.add_cut(0, 0, 10.0, &[1.0]);
-        pool.add_cut(1, 0, 20.0, &[2.0]);
-        pool.add_cut(2, 0, 30.0, &[3.0]);
+        pool.add_cut(0, 0, 0, 10.0, &[1.0]);
+        pool.add_cut(0, 1, 0, 20.0, &[2.0]);
+        pool.add_cut(0, 2, 0, 30.0, &[3.0]);
 
         let active: Vec<(usize, f64, &[f64])> = pool.active_cuts().collect();
         assert_eq!(active.len(), 3, "must return all 3 active cuts");

@@ -15,33 +15,39 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 use super::super::error::OutputError;
 use super::records::{
-    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
     PolicyBasisRecord, PolicyCutRecord, StageCutsReadResult, StageStatesPayload,
     StageStatesReadResult,
 };
 
 use std::path::Path;
 
+/// `FlatBuffers` `file_identifier` for every policy artifact (`schemas/policy.fbs`).
+/// Written by `finish(root, Some(POLICY_FILE_IDENTIFIER))` and required on read:
+/// a buffer lacking it (a pre-0.14 `finish_minimal` artifact) is rejected.
+const POLICY_FILE_IDENTIFIER: &str = "CBVF";
+
 // ── FlatBuffers vtable slot offsets ──────────────────────────────────────────
 //
-// The slot 12 gap on `Cut` is the deprecated `domination_count` field; it MUST
-// NOT be reused — `flatc` keeps the slot reserved, so reusing it diverges the
-// hand-written layout from the schema.
+// slot = (id + 2) * 2. Two slots are permanently burned and never read or
+// written here — reusing either would diverge the hand-written layout from the
+// schema's `deprecated` placeholder: `AffinePiece` id 7 (slot 18), the former
+// `state_at_generation`; and `EntitySlot` id 4 (slot 12), the former
+// month-integer `delivery_anchor` replaced by `delivery_date` at id 5 (slot 14).
 
 const CUT_FIELD_CUT_ID: u16 = 4;
 const CUT_FIELD_SLOT_INDEX: u16 = 6;
 const CUT_FIELD_ITERATION: u16 = 8;
 const CUT_FIELD_FORWARD_PASS_IDX: u16 = 10;
-const CUT_FIELD_INTERCEPT: u16 = 14;
-const CUT_FIELD_COEFFICIENTS: u16 = 16;
-const CUT_FIELD_STATE_AT_GENERATION: u16 = 18;
-const CUT_FIELD_IS_ACTIVE: u16 = 20;
+const CUT_FIELD_INTERCEPT: u16 = 12;
+const CUT_FIELD_COEFFICIENTS: u16 = 14;
+const CUT_FIELD_IS_ACTIVE: u16 = 16;
 
 const ENTITY_SLOT_FIELD_ENTITY_TYPE: u16 = 4;
 const ENTITY_SLOT_FIELD_ENTITY_ID: u16 = 6;
 const ENTITY_SLOT_FIELD_SUBINDEX: u16 = 8;
 const ENTITY_SLOT_FIELD_WAS_ACTIVE: u16 = 10;
-const ENTITY_SLOT_FIELD_DELIVERY_ANCHOR: u16 = 12;
+const ENTITY_SLOT_FIELD_DELIVERY_DATE: u16 = 14;
 
 const STAGE_CUTS_FIELD_STAGE_ID: u16 = 4;
 const STAGE_CUTS_FIELD_STATE_DIMENSION: u16 = 6;
@@ -66,26 +72,24 @@ const STATES_FIELD_COUNT: u16 = 8;
 const STATES_FIELD_DATA: u16 = 10;
 const STATES_FIELD_ENTITY_MANIFEST: u16 = 12;
 
-/// All nested objects (coefficient vector, `state_at_generation` vector) must be
-/// created before the `start_table`/`end_table` pair — `FlatBuffers` requires
-/// nested objects to precede the enclosing table in the buffer.
+/// The coefficient vector must be created before the `start_table`/`end_table`
+/// pair — `FlatBuffers` requires nested objects to precede the enclosing table
+/// in the buffer.
 fn build_cut_table(
     builder: &mut FlatBufferBuilder<'_>,
-    cut: &PolicyCutRecord<'_>,
+    piece: &PolicyCutRecord<'_>,
 ) -> WIPOffset<flatbuffers::TableFinishedWIPOffset> {
-    let coefficients_vec = builder.create_vector(cut.coefficients);
-    let state_at_gen_vec = builder.create_vector::<f64>(&[]);
+    let coefficients_vec = builder.create_vector(piece.coefficients);
 
     let tab = builder.start_table();
 
-    builder.push_slot_always::<u64>(CUT_FIELD_CUT_ID, cut.cut_id);
-    builder.push_slot_always::<u32>(CUT_FIELD_SLOT_INDEX, cut.slot_index);
-    builder.push_slot_always::<u32>(CUT_FIELD_ITERATION, cut.iteration);
-    builder.push_slot_always::<u32>(CUT_FIELD_FORWARD_PASS_IDX, cut.forward_pass_index);
-    builder.push_slot_always::<f64>(CUT_FIELD_INTERCEPT, cut.intercept);
+    builder.push_slot_always::<u64>(CUT_FIELD_CUT_ID, piece.cut_id);
+    builder.push_slot_always::<u32>(CUT_FIELD_SLOT_INDEX, piece.slot_index);
+    builder.push_slot_always::<u32>(CUT_FIELD_ITERATION, piece.iteration);
+    builder.push_slot_always::<u32>(CUT_FIELD_FORWARD_PASS_IDX, piece.forward_pass_index);
+    builder.push_slot_always::<f64>(CUT_FIELD_INTERCEPT, piece.intercept);
     builder.push_slot_always(CUT_FIELD_COEFFICIENTS, coefficients_vec);
-    builder.push_slot_always(CUT_FIELD_STATE_AT_GENERATION, state_at_gen_vec);
-    builder.push_slot_always::<bool>(CUT_FIELD_IS_ACTIVE, cut.is_active);
+    builder.push_slot_always::<bool>(CUT_FIELD_IS_ACTIVE, piece.is_active);
 
     builder.end_table(tab)
 }
@@ -102,9 +106,31 @@ fn build_entity_slot_table(
     builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_ENTITY_ID, slot.entity_id);
     builder.push_slot_always::<u32>(ENTITY_SLOT_FIELD_SUBINDEX, slot.subindex);
     builder.push_slot_always::<bool>(ENTITY_SLOT_FIELD_WAS_ACTIVE, slot.was_active);
-    builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_DELIVERY_ANCHOR, slot.delivery_anchor);
+    builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_DELIVERY_DATE, slot.delivery_date);
 
     builder.end_table(tab)
+}
+
+/// Reject a buffer whose leading `file_identifier` is not [`POLICY_FILE_IDENTIFIER`].
+///
+/// `finish(root, Some(id))` writes the 4-byte identifier at bytes `4..8` (right
+/// after the 4-byte root uoffset), so a pre-0.14 `finish_minimal` buffer carries
+/// none and is rejected here before any field is decoded.
+///
+/// # Errors
+///
+/// Returns [`OutputError::SerializationError`] when the identifier is absent or wrong.
+fn check_file_identifier(buf: &[u8], ctx: &str) -> Result<(), OutputError> {
+    if buf.get(4..8) == Some(POLICY_FILE_IDENTIFIER.as_bytes()) {
+        Ok(())
+    } else {
+        Err(OutputError::serialization(
+            ctx,
+            format!(
+                "missing FlatBuffers file_identifier {POLICY_FILE_IDENTIFIER:?}; not a 0.14+ policy artifact"
+            ),
+        ))
+    }
 }
 
 // ── Serializers ───────────────────────────────────────────────────────────────
@@ -120,7 +146,7 @@ fn build_entity_slot_table(
 /// ```
 /// use cobre_io::{PolicyCutRecord, serialize_stage_cuts};
 ///
-/// let cut = PolicyCutRecord {
+/// let piece = PolicyCutRecord {
 ///     cut_id: 1,
 ///     slot_index: 5,
 ///     iteration: 3,
@@ -129,7 +155,7 @@ fn build_entity_slot_table(
 ///     coefficients: &[1.0, 2.0, 3.0],
 ///     is_active: true,
 /// };
-/// let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1, &[]);
+/// let buf = serialize_stage_cuts(0, 3, 100, 0, &[piece], &[0], 1, &[]);
 /// assert!(!buf.is_empty());
 /// ```
 #[must_use]
@@ -176,7 +202,7 @@ pub fn serialize_stage_cuts(
     builder.push_slot_always(STAGE_CUTS_FIELD_ENTITY_MANIFEST, manifest_vec);
 
     let root_offset = builder.end_table(root);
-    builder.finish_minimal(root_offset);
+    builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
 
     builder.finished_data().to_vec()
 }
@@ -225,7 +251,7 @@ pub fn serialize_stage_basis(record: &PolicyBasisRecord<'_>) -> Vec<u8> {
     builder.push_slot_always::<u32>(BASIS_FIELD_NUM_CUT_ROWS, record.num_cut_rows);
 
     let root_offset = builder.end_table(root);
-    builder.finish_minimal(root_offset);
+    builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
 
     builder.finished_data().to_vec()
 }
@@ -256,7 +282,7 @@ pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
     builder.push_slot_always(STATES_FIELD_ENTITY_MANIFEST, manifest_vec);
 
     let root_offset = builder.end_table(root);
-    builder.finish_minimal(root_offset);
+    builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
 
     builder.finished_data().to_vec()
 }
@@ -267,8 +293,9 @@ pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
 // errors without panicking. The `resolve_*` functions follow the FlatBuffers
 // specification exactly:
 //
-//   Buffer layout (finish_minimal):
+//   Buffer layout (finish with file_identifier):
 //     bytes[0..4]  = u32 LE root_offset — byte offset from position 0 to root table
+//     bytes[4..8]  = 4-byte file_identifier ("CBVF"), checked before any decode
 //     ...builder data (written right-to-left)...
 //     vtable  = [u16 vtable_size][u16 table_size][u16 field0][u16 field1]...
 //     table   = [i32 soffset_to_vtable][...inline field data...]
@@ -494,23 +521,23 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
     .and_then(|p| read_bool_byte(buf, p))
     .unwrap_or(false);
 
-    // Absent in a pre-`id:4` buffer (FlatBuffers graceful absence): default to
-    // the sentinel, not zero — zero is a valid calendar anchor.
-    let delivery_anchor = field_pos(
+    // Absent in a pre-`id:5` buffer (FlatBuffers graceful absence): default to
+    // the sentinel, not zero — zero is a valid calendar date.
+    let delivery_date = field_pos(
         buf,
         slot_table_pos,
         vtable_pos,
-        ENTITY_SLOT_FIELD_DELIVERY_ANCHOR,
+        ENTITY_SLOT_FIELD_DELIVERY_DATE,
     )
     .and_then(|p| read_i32_le(buf, p))
-    .unwrap_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL);
+    .unwrap_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
 
     Some(EntitySlot {
         entity_type,
         entity_id,
         subindex,
         was_active,
-        delivery_anchor,
+        delivery_date,
     })
 }
 
@@ -528,7 +555,7 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
 /// ```
 /// use cobre_io::{PolicyCutRecord, serialize_stage_cuts, deserialize_stage_cuts};
 ///
-/// let cut = PolicyCutRecord {
+/// let piece = PolicyCutRecord {
 ///     cut_id: 7,
 ///     slot_index: 5,
 ///     iteration: 3,
@@ -537,7 +564,7 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
 ///     coefficients: &[1.0, 2.0, 3.0],
 ///     is_active: true,
 /// };
-/// let buf = serialize_stage_cuts(2, 3, 100, 0, &[cut], &[0], 1, &[]);
+/// let buf = serialize_stage_cuts(2, 3, 100, 0, &[piece], &[0], 1, &[]);
 /// let result = deserialize_stage_cuts(&buf).expect("round-trip must succeed");
 /// assert_eq!(result.stage_id, 2);
 /// assert_eq!(result.cuts.len(), 1);
@@ -546,6 +573,7 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
 /// ```
 pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputError> {
     let ctx = "stage_cuts";
+    check_file_identifier(buf, ctx)?;
 
     let table_pos = resolve_root(buf)
         .ok_or_else(|| OutputError::serialization(ctx, "buffer too short for root offset"))?;
@@ -589,11 +617,14 @@ pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputE
         })?;
 
         let mut out = Vec::with_capacity(nested_positions.len());
-        for (idx, &cut_table_pos) in nested_positions.iter().enumerate() {
-            let cut = deserialize_cut_table(buf, cut_table_pos).ok_or_else(|| {
-                OutputError::serialization(ctx, format!("cut table {idx} truncated or corrupt"))
+        for (idx, &piece_table_pos) in nested_positions.iter().enumerate() {
+            let piece = deserialize_cut_table(buf, piece_table_pos).ok_or_else(|| {
+                OutputError::serialization(
+                    ctx,
+                    format!("affine-piece table {idx} truncated or corrupt"),
+                )
             })?;
-            out.push(cut);
+            out.push(piece);
         }
         out
     } else {
@@ -693,6 +724,7 @@ fn deserialize_cut_table(buf: &[u8], cut_table_pos: usize) -> Option<OwnedPolicy
 /// ```
 pub fn deserialize_stage_basis(buf: &[u8]) -> Result<OwnedPolicyBasisRecord, OutputError> {
     let ctx = "stage_basis";
+    check_file_identifier(buf, ctx)?;
 
     let table_pos = resolve_root(buf)
         .ok_or_else(|| OutputError::serialization(ctx, "buffer too short for root offset"))?;
@@ -753,6 +785,7 @@ pub fn deserialize_stage_basis(buf: &[u8]) -> Result<OwnedPolicyBasisRecord, Out
 /// has an invalid wire format.
 pub fn deserialize_stage_states(buf: &[u8]) -> Result<StageStatesReadResult, OutputError> {
     let ctx = "stage_states";
+    check_file_identifier(buf, ctx)?;
 
     let table_pos = resolve_root(buf)
         .ok_or_else(|| OutputError::serialization(ctx, "buffer too short for root offset"))?;
@@ -833,4 +866,43 @@ where
         results.push(record);
     }
     Ok(results)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// The reject-old-version half of the dual-owned wire-format checklist: a
+    /// buffer without the `CBVF` `file_identifier` (a pre-0.14 `finish_minimal`
+    /// artifact) is rejected by the read path before any field is decoded, so no
+    /// stale month-integer anchor is ever decoded as a `YYYYMMDD` date.
+    #[test]
+    fn deserialize_rejects_buffer_without_cbvf_identifier() {
+        let coeffs = [1.0_f64, 2.0];
+        let cut = PolicyCutRecord {
+            cut_id: 1,
+            slot_index: 0,
+            iteration: 1,
+            forward_pass_index: 0,
+            intercept: 3.0,
+            coefficients: &coeffs,
+            is_active: true,
+        };
+        let mut buf = serialize_stage_cuts(0, 2, 8, 0, &[cut], &[0], 1, &[]);
+        assert_eq!(
+            buf.get(4..8),
+            Some(POLICY_FILE_IDENTIFIER.as_bytes()),
+            "a freshly written buffer must carry the CBVF identifier"
+        );
+
+        // Strip the identifier to mimic a pre-0.14 `finish_minimal` buffer.
+        buf[4..8].copy_from_slice(&[0, 0, 0, 0]);
+        let err = deserialize_stage_cuts(&buf)
+            .expect_err("a buffer without the CBVF identifier must be rejected");
+        assert!(
+            err.to_string().contains(POLICY_FILE_IDENTIFIER),
+            "rejection must name the expected identifier: {err}"
+        );
+    }
 }

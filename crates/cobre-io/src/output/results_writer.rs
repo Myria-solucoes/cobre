@@ -100,6 +100,7 @@ pub fn write_training_results(
             final_lower_bound: training_output.final_lower_bound,
             final_upper_bound: training_output.final_upper_bound,
             final_upper_bound_std: training_output.final_upper_bound_std,
+            final_upper_bound_kind: training_output.final_upper_bound_kind.clone(),
         },
         solve_stats: training_output.training_solve_stats.clone(),
         setup: ctx.setup.clone(),
@@ -205,7 +206,7 @@ mod tests {
         IterationRecord {
             iteration,
             lower_bound: 1.0,
-            upper_bound_mean: 2.0,
+            upper_bound: 2.0,
             upper_bound_std: 0.1,
             gap_percent: Some(50.0),
             cuts_added: 10,
@@ -244,6 +245,7 @@ mod tests {
             final_upper_bound: Some(101.0),
             final_gap_percent: Some(1.51),
             final_upper_bound_std: Some(0.5),
+            final_upper_bound_kind: "statistical".to_string(),
             iterations_completed: n_records as u32,
             converged: true,
             termination_reason: "gap tolerance reached".to_string(),
@@ -337,7 +339,7 @@ mod tests {
                 backend: "local".to_string(),
                 world_size: 1,
                 ranks_participated: 1,
-                num_nodes: 1,
+                num_hosts: 1,
                 threads_per_rank: 1,
                 mpi_library: None,
                 mpi_standard: None,
@@ -556,8 +558,8 @@ mod tests {
         assert_eq!(total_rows, 0, "empty training must produce 0 rows");
         assert_eq!(
             schema.fields().len(),
-            14,
-            "convergence schema must have 14 columns"
+            15,
+            "convergence schema must have 15 columns"
         );
 
         assert!(
@@ -821,6 +823,98 @@ mod tests {
             Some(10),
             "configuration.max_iterations must be extracted from stopping rules"
         );
+    }
+
+    /// Read the sole `upper_bound_kind` value and the `upper_bound_std` null-count
+    /// from a written `training/convergence.parquet`.
+    fn read_convergence_kind_and_std_nulls(dir: &std::path::Path) -> (String, usize) {
+        use arrow::array::{Array, Float64Array, StringArray};
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let path = dir.join("training/convergence.parquet");
+        let file = std::fs::File::open(&path).unwrap();
+        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        let kind = batch
+            .column_by_name("upper_bound_kind")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .to_string();
+        let std_nulls = batch
+            .column_by_name("upper_bound_std")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .null_count();
+        (kind, std_nulls)
+    }
+
+    #[test]
+    fn exact_bound_writes_exact_kind_and_null_std_in_both_artifacts() {
+        use crate::output::manifest::read_training_metadata;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut training = make_training_output(3);
+        training.final_upper_bound_kind = "exact".to_string();
+        training.final_upper_bound_std = None;
+
+        write_training_results(
+            tmp.path(),
+            &training,
+            &make_system(),
+            &make_config(),
+            &make_output_context(),
+        )
+        .expect("write must succeed");
+
+        // convergence.parquet: kind "exact", std all-NULL.
+        let (kind, std_nulls) = read_convergence_kind_and_std_nulls(tmp.path());
+        assert_eq!(kind, "exact", "convergence upper_bound_kind must be exact");
+        assert_eq!(
+            std_nulls, 3,
+            "every upper_bound_std must be NULL under exact"
+        );
+
+        // metadata.json.bounds: same kind, std None.
+        let metadata = read_training_metadata(&tmp.path().join("training/metadata.json")).unwrap();
+        assert_eq!(metadata.bounds.final_upper_bound_kind, "exact");
+        assert_eq!(metadata.bounds.final_upper_bound_std, None);
+    }
+
+    #[test]
+    fn statistical_bound_writes_statistical_kind_and_populated_std_in_both_artifacts() {
+        use crate::output::manifest::read_training_metadata;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut training = make_training_output(3);
+        training.final_upper_bound_kind = "statistical".to_string();
+        training.final_upper_bound_std = Some(0.5);
+
+        write_training_results(
+            tmp.path(),
+            &training,
+            &make_system(),
+            &make_config(),
+            &make_output_context(),
+        )
+        .expect("write must succeed");
+
+        // convergence.parquet: kind "statistical", std populated (no NULLs).
+        let (kind, std_nulls) = read_convergence_kind_and_std_nulls(tmp.path());
+        assert_eq!(kind, "statistical");
+        assert_eq!(
+            std_nulls, 0,
+            "upper_bound_std must be populated under statistical"
+        );
+
+        // metadata.json.bounds: same kind, std Some.
+        let metadata = read_training_metadata(&tmp.path().join("training/metadata.json")).unwrap();
+        assert_eq!(metadata.bounds.final_upper_bound_kind, "statistical");
+        assert_eq!(metadata.bounds.final_upper_bound_std, Some(0.5));
     }
 
     #[test]

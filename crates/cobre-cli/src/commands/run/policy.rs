@@ -54,7 +54,7 @@ fn load_and_validate_checkpoint(
     })?;
     rescale_checkpoint_cuts_for_load(
         &mut checkpoint.stage_cuts,
-        checkpoint.metadata.cost_scale_factor,
+        checkpoint.metadata.producer.cost_scale_factor,
         setup.stage_data.stage_templates.cost_scale_factor,
     );
 
@@ -68,21 +68,33 @@ fn load_and_validate_checkpoint(
 
     // The terminal pool is always full-config, so its manifest witnesses every
     // state family's slot identity — a terminal-only comparison covers all stages.
+    // `state_dimension` is per-pool now (the global metadata copy is gone), so the
+    // source dimension is the terminal pool payload's own.
     let current_manifest = setup.build_terminal_entity_manifest(system);
     let checkpoint_terminal_manifest: &[EntitySlot] = checkpoint
         .stage_cuts
         .last()
         .map_or(&[], |s| s.entity_manifest.as_slice());
+    let source_state_dim = checkpoint
+        .stage_cuts
+        .last()
+        .map_or(0, |s| s.state_dimension);
+    let source_graph = &checkpoint.metadata.graph_manifest;
+    let current_graph = setup.build_graph_manifest();
 
     let source = PolicyStageManifest {
-        state_dimension: checkpoint.metadata.state_dimension,
+        state_dimension: source_state_dim,
         num_stages: checkpoint.metadata.num_stages,
+        n_pools: source_graph.n_pools,
         slots: checkpoint_terminal_manifest,
+        graph: source_graph,
     };
     let current = PolicyStageManifest {
         state_dimension: state_dim,
         num_stages: n_stages,
+        n_pools: current_graph.n_pools,
         slots: &current_manifest,
+        graph: &current_graph,
     };
     let proof = validate_policy_load::<FullFcf>(&source, &current).map_err(CliError::from)?;
 
@@ -116,10 +128,10 @@ fn load_checkpoint_into_setup(
     // cold-starts.
     if !checkpoint.stage_bases.is_empty() {
         let basis_cache = build_basis_cache_from_checkpoint(
-            setup.stage_data.stage_templates.templates.len(),
             &checkpoint.stage_bases,
             &checkpoint.stage_cuts,
             &setup.node_graph.node_ids,
+            &setup.node_graph.node_pool_ids(),
         );
         setup.set_warm_start_basis_cache(basis_cache);
     }
@@ -182,7 +194,7 @@ pub(super) fn apply_training_policy(
             }
             let (checkpoint, proof) =
                 load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
-            let completed = u64::from(checkpoint.metadata.completed_iterations);
+            let completed = u64::from(checkpoint.metadata.producer.completed_iterations);
             if completed >= setup.loop_params.max_iterations && ctx.is_root && !ctx.quiet {
                 let _ = ctx.stderr.write_line(&format!(
                     "WARNING: Checkpoint already completed {completed} iterations \
@@ -276,21 +288,22 @@ pub(super) fn load_policy_for_simulation(
     setup.replace_fcf(loaded_fcf);
 
     let basis_cache = build_basis_cache_from_checkpoint(
-        setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
         &checkpoint.stage_cuts,
         &setup.node_graph.node_ids,
+        &setup.node_graph.node_pool_ids(),
     );
 
     Ok(TrainingResult::new(
-        checkpoint.metadata.final_lower_bound,
+        checkpoint.metadata.producer.final_lower_bound,
         checkpoint
             .metadata
+            .producer
             .best_upper_bound
             .unwrap_or(f64::INFINITY),
         0.0,
         0.0,
-        checkpoint.metadata.completed_iterations.into(),
+        checkpoint.metadata.producer.completed_iterations.into(),
         "loaded from checkpoint".to_string(),
         0,
         basis_cache,

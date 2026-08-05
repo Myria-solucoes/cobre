@@ -65,7 +65,7 @@ const LEGACY_TRAINING_JSON: &str = r#"{
     "backend": "local",
     "world_size": 1,
     "ranks_participated": 1,
-    "num_nodes": 1,
+    "num_hosts": 1,
     "threads_per_rank": 1
   }
 }"#;
@@ -90,7 +90,7 @@ const LEGACY_SIM_JSON: &str = r#"{
     "backend": "local",
     "world_size": 1,
     "ranks_participated": 1,
-    "num_nodes": 1,
+    "num_hosts": 1,
     "threads_per_rank": 1
   }
 }"#;
@@ -100,7 +100,7 @@ const MULTI_NODE_DISTRIBUTION_JSON: &str = r#"{
   "backend": "mpi",
   "world_size": 8,
   "ranks_participated": 8,
-  "num_nodes": 2,
+  "num_hosts": 2,
   "threads_per_rank": 4,
   "mpi_library": "Open MPI v4.1.6",
   "mpi_standard": "MPI 4.0",
@@ -173,7 +173,7 @@ fn legacy_training_fixture_omits_new_keys() {
         "legacy training fixture must omit the `solve_stats` key to exercise back-compat"
     );
     assert!(
-        !LEGACY_TRAINING_JSON.contains("hosts"),
+        !LEGACY_TRAINING_JSON.contains("\"hosts\""),
         "legacy training fixture must omit the `hosts` key to exercise back-compat"
     );
     assert!(
@@ -197,7 +197,7 @@ fn legacy_simulation_fixture_omits_new_keys() {
         "legacy simulation fixture must omit the `solve_stats` key to exercise back-compat"
     );
     assert!(
-        !LEGACY_SIM_JSON.contains("hosts"),
+        !LEGACY_SIM_JSON.contains("\"hosts\""),
         "legacy simulation fixture must omit the `hosts` key to exercise back-compat"
     );
 }
@@ -211,7 +211,7 @@ fn multi_node_distribution_deserializes_with_correct_rank_lists() {
 
     assert_eq!(decoded.backend, "mpi");
     assert_eq!(decoded.world_size, 8);
-    assert_eq!(decoded.num_nodes, 2);
+    assert_eq!(decoded.num_hosts, 2);
     assert_eq!(decoded.hosts.len(), 2);
 
     assert_eq!(decoded.hosts[0].hostname, "node01");
@@ -227,7 +227,7 @@ fn fully_populated_distribution() -> DistributionInfo {
         backend: "mpi".to_string(),
         world_size: 8,
         ranks_participated: 8,
-        num_nodes: 2,
+        num_hosts: 2,
         threads_per_rank: 4,
         mpi_library: Some("Open MPI v4.1.6".to_string()),
         mpi_standard: Some("MPI 4.0".to_string()),
@@ -292,6 +292,7 @@ fn fully_populated_training_metadata() -> TrainingMetadata {
             final_lower_bound: 48_500.0,
             final_upper_bound: Some(49_000.0),
             final_upper_bound_std: Some(250.0),
+            final_upper_bound_kind: "statistical".to_string(),
         },
         solve_stats: MetadataTrainingSolveStats {
             total_lp_solves: Some(84_000),

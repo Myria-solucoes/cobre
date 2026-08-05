@@ -21,7 +21,7 @@ use crate::{
 
 use super::StudySetup;
 use crate::dcs::DcsParams;
-use crate::policy_export::build_stage_entity_manifest;
+use crate::policy_export::{build_graph_manifest, build_stage_entity_manifest};
 
 impl StudySetup {
     /// Replace the FCF with a pre-loaded policy.
@@ -118,11 +118,15 @@ impl StudySetup {
     #[must_use]
     pub fn build_terminal_entity_manifest(&self, system: &System) -> Vec<EntitySlot> {
         let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        // `terminal_idx` is a pool ordinal (`== n_pools - 1`); its owning stage
+        // resolves through `pool_stage`, never `study_stage_ids[terminal_idx]`,
+        // which is OOB once `n_pools > n_stages` on a branching graph.
+        let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx]];
         build_stage_entity_manifest(
             system,
             &self.stage_data.state,
             &self.stage_data.cut_state_layouts[terminal_idx],
-            self.study_stage_ids[terminal_idx],
+            stage_id,
         )
     }
 
@@ -130,6 +134,17 @@ impl StudySetup {
     #[must_use]
     pub fn num_stages(&self) -> usize {
         self.methodology.horizon.num_stages()
+    }
+
+    /// Build the value-function artifact's graph manifest for the current study
+    /// — node list, edges, and node → pool map — from the runtime node graph.
+    ///
+    /// Delegates to [`build_graph_manifest`], the single owner shared with the
+    /// checkpoint writer, so the manifest written into an artifact and the one
+    /// the full-FCF load path validates against can never diverge.
+    #[must_use]
+    pub fn build_graph_manifest(&self) -> cobre_io::GraphManifest {
+        build_graph_manifest(&self.node_graph, &self.study_stage_ids)
     }
 
     /// Per-stage stochastic-NCS dormancy mask, reconstructed for the out-of-crate

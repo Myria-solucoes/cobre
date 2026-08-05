@@ -14,7 +14,7 @@
 
 use chrono::NaiveDate;
 use cobre_core::{
-    CorrelationGroup, CorrelationModel, EntityId, SeasonMap,
+    CorrelationGroup, CorrelationModel, EntityId, HorizonGraph, SeasonMap,
     entities::{
         Bus, DeficitSegment, Hydro, HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line,
         Thermal,
@@ -22,7 +22,7 @@ use cobre_core::{
     initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
     temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     },
 };
@@ -190,7 +190,7 @@ pub(super) fn make_stages(ids: Vec<i32>) -> StagesData {
     StagesData {
         openings_declared: std::collections::HashSet::new(),
         stages: ids.into_iter().map(make_stage).collect(),
-        policy_graph: PolicyGraph {
+        policy_graph: HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
@@ -663,7 +663,7 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
     StagesData {
         openings_declared: std::collections::HashSet::new(),
         stages,
-        policy_graph: PolicyGraph {
+        policy_graph: HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,

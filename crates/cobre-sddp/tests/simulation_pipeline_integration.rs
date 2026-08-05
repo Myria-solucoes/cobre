@@ -2825,9 +2825,9 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     //   add_cut(iter=1, fwd=0) → slot 11
     //   add_cut(iter=2, fwd=0) → slot 12
     let mut fcf = FutureCostFunction::new(n_stages, 1, 1, 5, &[10]);
-    fcf.pools[0].add_cut(0, 0, 50.0, &[1.0]);
-    fcf.pools[0].add_cut(1, 0, 60.0, &[1.0]);
-    fcf.pools[0].add_cut(2, 0, 70.0, &[1.0]);
+    fcf.pools[0].add_cut(0, 0, 0, 50.0, &[1.0]);
+    fcf.pools[0].add_cut(0, 1, 0, 60.0, &[1.0]);
+    fcf.pools[0].add_cut(0, 2, 0, 70.0, &[1.0]);
     assert_eq!(
         fcf.pools[0].active_count(),
         3,

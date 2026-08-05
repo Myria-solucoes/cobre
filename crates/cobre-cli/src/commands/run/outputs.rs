@@ -14,6 +14,7 @@ use cobre_io::ParquetWriterConfig;
 use cobre_io::SimulationOutput;
 use cobre_io::SolverStatsRow;
 use cobre_io::TrainingOutput;
+use cobre_io::output::simulation_writer::{SimulationPathRecord, write_paths};
 use cobre_io::write_evaporation_models;
 use cobre_io::write_fpha_deviation_points;
 use cobre_io::write_fpha_hyperplanes;
@@ -145,6 +146,7 @@ pub(super) struct WriteSimulationArgs<'a> {
     pub(super) output_dir: &'a Path,
     pub(super) sim_output: &'a SimulationOutput,
     pub(super) sim_solver_stats: &'a [(u32, SolverStatsDelta)],
+    pub(super) sim_path_rows: &'a [SimulationPathRecord],
     pub(super) output_ctx: &'a OutputContext,
     pub(super) quiet: bool,
     pub(super) stderr: &'a Term,
@@ -162,17 +164,30 @@ pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result
     write_simulation_results(args.output_dir, args.sim_output, args.output_ctx)
         .map_err(CliError::from)?;
 
-    // Simulation has no opening/rank/worker dimension; those fields are all None.
+    // Simulation fills scenario_id (not iteration) and has no stage/opening/rank/
+    // worker dimension; those axes are all None.
     if !args.sim_solver_stats.is_empty() {
         let rows: Vec<SolverStatsRow> = args
             .sim_solver_stats
             .iter()
             .map(|(scenario_id, delta)| {
-                delta_to_stats_row(*scenario_id, "simulation", -1, None, None, None, delta)
+                #[allow(clippy::cast_possible_wrap)]
+                delta_to_stats_row(
+                    None,
+                    Some(*scenario_id as i32),
+                    "simulation",
+                    None,
+                    None,
+                    None,
+                    None,
+                    delta,
+                )
             })
             .collect();
         write_simulation_solver_stats(args.output_dir, &rows).map_err(CliError::from)?;
     }
+
+    write_paths(args.output_dir, args.sim_path_rows.to_vec()).map_err(CliError::from)?;
 
     if !args.quiet {
         let write_secs = write_start.elapsed().as_secs_f64();

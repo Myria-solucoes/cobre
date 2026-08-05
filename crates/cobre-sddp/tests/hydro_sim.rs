@@ -97,27 +97,35 @@ mod simulation_only {
             build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
 
         let (basis_col_u8, basis_row_u8) = convert_basis_cache(&training_result);
-        let stage_bases =
-            build_stage_basis_records(fcf, &training_result, &basis_col_u8, &basis_row_u8);
+        let stage_bases = build_stage_basis_records(
+            fcf,
+            &training_result,
+            &setup.node_graph,
+            &basis_col_u8,
+            &basis_row_u8,
+        );
 
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
         let metadata = cobre_io::PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
             cobre_version: env!("CARGO_PKG_VERSION").to_string(),
             created_at: "2026-03-29T00:00:00Z".to_string(),
-            completed_iterations: training_result.iterations as u32,
-            final_lower_bound: training_result.final_lb,
-            best_upper_bound: Some(training_result.final_ub),
-            state_dimension: state_dim as u32,
             num_stages: n_stages as u32,
-            max_iterations: setup.loop_params.max_iterations as u32,
-            forward_passes: setup.loop_params.forward_passes,
-            warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
-            warm_start_counts,
-            rng_seed: 42,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
+            graph_manifest: setup.build_graph_manifest(),
+            producer: cobre_io::ProducerBlock {
+                completed_iterations: training_result.iterations as u32,
+                final_lower_bound: training_result.final_lb,
+                best_upper_bound: Some(training_result.final_ub),
+                max_iterations: setup.loop_params.max_iterations as u32,
+                forward_passes: setup.loop_params.forward_passes,
+                warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
+                warm_start_counts,
+                rng_seed: 42,
+                total_visited_states: 0,
+                training_block_mode: "parallel".to_string(),
+                training_block_mode_per_stage: vec![],
+                cost_scale_factor: None,
+            },
         };
 
         write_policy_checkpoint(&policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
@@ -126,8 +134,8 @@ mod simulation_only {
         let checkpoint = read_policy_checkpoint(&policy_dir).expect("read checkpoint");
 
         assert_eq!(
-            checkpoint.metadata.state_dimension, state_dim as u32,
-            "state_dimension must round-trip"
+            checkpoint.stage_cuts[0].state_dimension, state_dim as u32,
+            "per-pool state_dimension must round-trip"
         );
         assert_eq!(
             checkpoint.metadata.num_stages, n_stages as u32,
@@ -140,7 +148,7 @@ mod simulation_only {
         );
 
         let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
-            checkpoint.metadata.state_dimension,
+            checkpoint.stage_cuts[0].state_dimension,
             checkpoint.metadata.num_stages,
         );
         let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
@@ -161,15 +169,15 @@ mod simulation_only {
         }
 
         let loaded_basis_cache = build_basis_cache_from_checkpoint(
-            n_stages,
             &checkpoint.stage_bases,
             &checkpoint.stage_cuts,
             &setup.node_graph.node_ids,
+            &setup.node_graph.node_pool_ids(),
         );
         assert_eq!(
             loaded_basis_cache.len(),
             n_stages,
-            "basis cache length must match"
+            "basis cache length must match (chain: n_nodes == n_stages)"
         );
         let has_basis = loaded_basis_cache.iter().any(Option::is_some);
         assert!(has_basis, "at least one stage should have basis data");
@@ -869,7 +877,7 @@ mod sparse_dense {
 
         let mut fcf = FutureCostFunction::new(2, n_state, 1, 1, &[0; 2]);
         let coeffs = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
-        fcf.add_cut(0, 0, 0, 50.0, &coeffs);
+        fcf.add_cut(0, 0, 0, 0, 50.0, &coeffs);
 
         let col_scale: Vec<f64> = Vec::new();
 
@@ -966,25 +974,29 @@ mod decomp_integration {
         let stage_cuts =
             build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, stage_manifests);
         let (basis_col, basis_row) = convert_basis_cache(result);
-        let stage_bases = build_stage_basis_records(fcf, result, &basis_col, &basis_row);
+        let stage_bases =
+            build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
         let metadata = cobre_io::PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
             cobre_version: env!("CARGO_PKG_VERSION").to_string(),
             created_at: "2026-04-14T00:00:00Z".to_string(),
-            completed_iterations: result.iterations as u32,
-            final_lower_bound: result.final_lb,
-            best_upper_bound: Some(result.final_ub),
-            state_dimension: fcf.state_dimension as u32,
             num_stages: fcf.pools.len() as u32,
-            max_iterations: setup.loop_params.max_iterations as u32,
-            forward_passes: setup.loop_params.forward_passes,
-            warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
-            warm_start_counts,
-            rng_seed: seed,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
+            graph_manifest: setup.build_graph_manifest(),
+            producer: cobre_io::ProducerBlock {
+                completed_iterations: result.iterations as u32,
+                final_lower_bound: result.final_lb,
+                best_upper_bound: Some(result.final_ub),
+                max_iterations: setup.loop_params.max_iterations as u32,
+                forward_passes: setup.loop_params.forward_passes,
+                warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
+                warm_start_counts,
+                rng_seed: seed,
+                total_visited_states: 0,
+                training_block_mode: "parallel".to_string(),
+                training_block_mode_per_stage: vec![],
+                cost_scale_factor: None,
+            },
         };
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");

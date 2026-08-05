@@ -2,7 +2,7 @@
 //!
 //! [`HorizonMode`] controls how the training loop traverses stages and
 //! determines terminal conditions. Discount factors are computed from the
-//! [`PolicyGraph`](cobre_core::PolicyGraph) at setup time and stored in
+//! [`HorizonGraph`](cobre_core::HorizonGraph) at setup time and stored in
 //! `StageTemplates`.
 
 use crate::SddpError;

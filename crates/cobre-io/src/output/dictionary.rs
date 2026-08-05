@@ -21,8 +21,8 @@ use crate::output::schemas::{
     buses_schema, contracts_schema, convergence_schema, costs_schema, exchanges_schema,
     generic_violations_schema, hydro_bus_generation_schema, hydro_energy_productivity_schema,
     hydros_schema, in_transit_schema, inflow_lags_schema, iteration_timing_schema,
-    non_controllables_schema, pumping_stations_schema, rank_timing_schema, retry_histogram_schema,
-    row_selection_schema, solver_iterations_schema, thermals_schema,
+    non_controllables_schema, paths_schema, pumping_stations_schema, rank_timing_schema,
+    retry_histogram_schema, row_selection_schema, solver_iterations_schema, thermals_schema,
 };
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
@@ -216,17 +216,10 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
 
 // ─── variables.csv ───────────────────────────────────────────────────────────
 
-/// Write `variables.csv`, one row per column across every output schema, grouped
-/// by file and ordered by column position within each schema.
-fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
-    let file_path = path.join("variables.csv");
-    let mut wtr = csv::Writer::from_path(&file_path)
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
-
-    wtr.write_record(["file", "column", "type", "unit", "description", "nullable"])
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
-
-    let schemas: &[(&str, arrow::datatypes::Schema)] = &[
+/// Every `(file, schema)` pair `variables.csv` documents — the single owner of
+/// the list, shared with the no-empty-description test that guards it.
+fn variables_csv_schemas() -> Vec<(&'static str, arrow::datatypes::Schema)> {
+    vec![
         ("costs", costs_schema()),
         ("hydros", hydros_schema()),
         ("hydro_bus_generation", hydro_bus_generation_schema()),
@@ -239,6 +232,7 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
         ("inflow_lags", inflow_lags_schema()),
         ("in_transit", in_transit_schema()),
         ("generic_violations", generic_violations_schema()),
+        ("paths", paths_schema()),
         ("convergence", convergence_schema()),
         ("iteration_timing", iteration_timing_schema()),
         ("rank_timing", rank_timing_schema()),
@@ -249,9 +243,20 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
             "hydro_energy_productivity",
             hydro_energy_productivity_schema(),
         ),
-    ];
+    ]
+}
 
-    for (schema_name, schema) in schemas {
+/// Write `variables.csv`, one row per column across every output schema, grouped
+/// by file and ordered by column position within each schema.
+fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
+    let file_path = path.join("variables.csv");
+    let mut wtr = csv::Writer::from_path(&file_path)
+        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+
+    wtr.write_record(["file", "column", "type", "unit", "description", "nullable"])
+        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+
+    for (schema_name, schema) in &variables_csv_schemas() {
         for field in schema.fields() {
             let type_str = arrow_type_str(field.data_type());
             let unit = unit_for(schema_name, field.name());
@@ -299,7 +304,9 @@ fn arrow_type_str(dt: &DataType) -> &'static str {
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn unit_for(file: &str, column: &str) -> &'static str {
     match column {
-        "stage_id"
+        "scenario_id"
+        | "stage_id"
+        | "node_id"
         | "block_id"
         | "lag"
         | "iteration"
@@ -435,7 +442,15 @@ fn unit_for(file: &str, column: &str) -> &'static str {
 // per-schema divergence.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn description_for(file: &str, column: &str) -> &'static str {
+    // The simulation-row axis prefix carries one description each, uniform across
+    // every entity file and paths.parquet.
+    match column {
+        "scenario_id" => return "0-based scenario identifier",
+        "node_id" => return "Declared node id visited at this stage",
+        _ => {}
+    }
     match (file, column) {
+        ("paths", "stage_id") => "Stage index",
         ("costs", "stage_id") => "Stage index",
         ("costs", "block_id") => "Block index within stage (nullable)",
         ("costs", "total_cost") => "Total stage cost",
@@ -591,8 +606,16 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("generic_violations", "slack_cost") => "Constraint slack penalty cost",
         ("convergence", "iteration") => "Iteration number (1-based)",
         ("convergence", "lower_bound") => "Lower bound on the optimal value",
-        ("convergence", "upper_bound_mean") => "Mean upper bound estimate (nullable)",
-        ("convergence", "upper_bound_std") => "Std deviation of upper bound (nullable)",
+        ("convergence", "upper_bound") => {
+            "Upper bound estimate (sample mean under a sampled forward, exact \
+             probability-weighted bound under an enumerated forward)"
+        }
+        ("convergence", "upper_bound_std") => {
+            "Std deviation of upper bound (NULL under an exact bound)"
+        }
+        ("convergence", "upper_bound_kind") => {
+            "Upper bound regime: statistical (sampled forward) or exact (enumerated forward)"
+        }
         ("convergence", "gap_percent") => "Relative optimality gap in percent (nullable)",
         ("convergence", "cuts_added") => "Cuts added in this iteration",
         ("convergence", "cuts_removed") => "Cuts removed in this iteration",
@@ -658,7 +681,7 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("rank_timing", "lp_solves") => "LP solves on this rank",
         ("rank_timing", "scenarios_processed") => "Scenarios processed by this rank",
         ("cut_selection", "iteration") => "Iteration number (1-based)",
-        ("cut_selection", "stage") => "Stage index (0-based)",
+        ("cut_selection", "stage_id") => "Declared study stage id",
         ("cut_selection", "cuts_populated") => "Total cuts ever generated at this stage",
         ("cut_selection", "cuts_active_before") => "Active cuts before selection ran",
         ("cut_selection", "cuts_deactivated") => "Cuts deactivated by selection",
@@ -673,11 +696,18 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("cut_selection", "active_after_budget") => {
             "Active cuts after budget enforcement (null when budget disabled)"
         }
-        ("solver_iterations", "iteration") => "Iteration number (1-based) or scenario ID (0-based)",
+        ("solver_iterations", "iteration") => {
+            "Training iteration number (1-based); NULL on a simulation row"
+        }
+        ("solver_iterations", "scenario_id") => {
+            "Simulation trajectory id (0-based); NULL on a training row"
+        }
         ("solver_iterations", "phase") => {
             "Solver phase (forward, backward, lower_bound, simulation)"
         }
-        ("solver_iterations", "stage") => "Stage index (-1 for non-per-stage phases)",
+        ("solver_iterations", "stage_id") => {
+            "Declared study stage id (NULL for the lower_bound and simulation phases)"
+        }
         ("solver_iterations", "lp_solves") => "Number of LP solves",
         ("solver_iterations", "lp_successes") => "Solves that returned optimal",
         ("solver_iterations", "lp_retries") => "Solves requiring retry escalation",
@@ -694,7 +724,7 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("solver_iterations", "load_model_time_ms") => "Cumulative load_model call time",
         ("solver_iterations", "set_bounds_time_ms") => "Cumulative set_bounds call time",
         ("solver_iterations", "basis_set_time_ms") => "Cumulative set_basis call time",
-        ("solver_iterations", "opening") => {
+        ("solver_iterations", "opening_index") => {
             "Opening (noise realization) index within the stage, for backward-pass \
              rows. NULL for forward, lower_bound, and simulation rows — these phases \
              do not have an opening dimension. Backward rows range 0..n_openings."
@@ -708,12 +738,30 @@ fn description_for(file: &str, column: &str) -> &'static str {
         }
         ("retry_histogram", "iteration") => "Iteration number (1-based) or scenario ID (0-based)",
         ("retry_histogram", "phase") => "Solver phase (forward, backward, lower_bound, simulation)",
-        ("retry_histogram", "stage") => "Stage index (-1 for non-per-stage phases)",
+        ("retry_histogram", "stage_id") => {
+            "Declared study stage id (NULL for the forward, lower_bound, and simulation phases)"
+        }
         ("retry_histogram", "retry_level") => "Retry escalation level (0-based)",
         ("retry_histogram", "count") => "Number of solves recovered at this level",
         ("bounds", "hydro_id") => {
             "Owning plant id for a hydro-unit-group row (entity_type_code 8). \
              NULL for the five plant-level entity families."
+        }
+        ("hydro_energy_productivity", "hydro_id") => "Hydro plant identifier",
+        ("hydro_energy_productivity", "stage_id") => {
+            "Stage index; null for a per-hydro default across all stages"
+        }
+        ("hydro_energy_productivity", "equivalent_productivity_mw_per_m3s") => {
+            "Equivalent productivity override"
+        }
+        ("hydro_energy_productivity", "reference_volume_hm3") => {
+            "Reference storage volume for the productivity override"
+        }
+        ("hydro_energy_productivity", "reference_outflow_m3s") => {
+            "Reference outflow for the productivity override"
+        }
+        ("hydro_energy_productivity", "specific_productivity_mw_per_m3s_per_m") => {
+            "Specific productivity (per metre of head) override"
         }
         _ => "",
     }
@@ -1308,6 +1356,20 @@ mod tests {
             ThermalBlockBounds, ThermalStageBounds,
         },
     };
+
+    #[test]
+    fn every_listed_schema_column_has_a_nonempty_description() {
+        for (file, schema) in &variables_csv_schemas() {
+            for field in schema.fields() {
+                let description = description_for(file, field.name());
+                assert!(
+                    !description.is_empty(),
+                    "variables.csv column '{file}.{}' has an empty description",
+                    field.name()
+                );
+            }
+        }
+    }
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -2232,8 +2294,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 221,
-            "variables.csv must have exactly 221 data rows (one per column across all schemas)"
+            row_count, 250,
+            "variables.csv must have exactly 250 data rows (one per column across all schemas)"
         );
     }
 

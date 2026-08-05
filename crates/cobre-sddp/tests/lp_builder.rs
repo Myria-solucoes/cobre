@@ -543,7 +543,7 @@ mod fixture_operational_start_date_order {
 
 mod policy_entity_manifest {
     //! Integration coverage for the embedded per-slot entity manifest written into
-    //! `policy/cuts/stage_NNN.bin` by the shared `write_checkpoint`.
+    //! `policy/cuts/<pool>.bin` by the shared `write_checkpoint`.
     //!
     //! Trains a deterministic case to a policy checkpoint through the same
     //! `write_checkpoint` both front ends call, then reads the cut files back and

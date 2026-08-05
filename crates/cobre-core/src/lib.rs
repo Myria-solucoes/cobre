@@ -71,6 +71,7 @@ pub use entities::{
 };
 pub use entity_id::EntityId;
 pub use error::ValidationError;
+pub use model::horizon::HorizonGraph;
 pub use model::parameters::{CoefficientRef, ComputedParameter, ParameterKind, ScalarParameter};
 pub use model::penalty::{
     GlobalPenaltyDefaults, HydroPenaltyOverrides, resolve_bus_deficit_segments,
@@ -94,9 +95,9 @@ pub use model::scenario::{
     ScenarioSource,
 };
 pub use model::temporal::{
-    Block, BlockMode, CalendarMonth, Node, NoiseMethod, PolicyGraph, PolicyGraphType,
-    ScenarioSourceConfig, SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageId,
-    StageRiskConfig, StageStateConfig, StudyPos, Transition, month_of, window_period_overlaps,
+    Block, BlockMode, CalendarMonth, Node, NoiseMethod, PolicyGraphType, ScenarioSourceConfig,
+    SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageId, StageRiskConfig,
+    StageStateConfig, StudyPos, Transition, month_of, window_period_overlaps,
 };
 pub use stats::welford::WelfordAccumulator;
 pub use system::{System, SystemBuilder};

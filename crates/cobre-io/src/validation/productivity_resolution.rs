@@ -166,13 +166,13 @@ fn find_productivity_for_stage(config: &ProductionModelConfig, stage: &Stage) ->
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        DeficitSegment, EntityId, Hydro,
+        DeficitSegment, EntityId, HorizonGraph, Hydro,
         entities::{Bus, HydroGenerationModel, HydroPenalties},
         initial_conditions::InitialConditions,
         penalty::GlobalPenaltyDefaults,
         temporal::{
-            Block, BlockMode, NoiseMethod, PolicyGraph, ScenarioSourceConfig, Stage,
-            StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+            StageStateConfig,
         },
     };
 
@@ -341,7 +341,7 @@ mod tests {
             stages: StagesData {
                 openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage(0)],
-                policy_graph: PolicyGraph::default(),
+                policy_graph: HorizonGraph::default(),
             },
             initial_conditions: InitialConditions {
                 storage: vec![],

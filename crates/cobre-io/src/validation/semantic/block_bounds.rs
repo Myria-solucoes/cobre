@@ -723,8 +723,10 @@ fn emit_group_raises_declared_capacity_error(
 mod tests {
     use std::collections::HashSet;
 
-    use cobre_core::temporal::{PolicyGraph, PolicyGraphType};
-    use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, Hydro, Thermal};
+    use cobre_core::temporal::PolicyGraphType;
+    use cobre_core::{
+        AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, HorizonGraph, Hydro, Thermal,
+    };
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
@@ -751,7 +753,7 @@ mod tests {
         StagesData {
             openings_declared: std::collections::HashSet::new(),
             stages: vec![make_stage_with_blocks(0, 3), make_stage_with_blocks(1, 2)],
-            policy_graph: PolicyGraph {
+            policy_graph: HorizonGraph {
                 stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
@@ -986,7 +988,7 @@ mod tests {
             StagesData {
                 openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage_with_blocks(0, 1), make_stage_with_blocks(1, 3)],
-                policy_graph: PolicyGraph {
+                policy_graph: HorizonGraph {
                     stage_discount_rate_overrides: std::collections::HashMap::new(),
                     graph_type: PolicyGraphType::FiniteHorizon,
                     annual_discount_rate: 0.06,
@@ -1226,7 +1228,7 @@ mod tests {
             StagesData {
                 openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage_with_blocks(0, 2)],
-                policy_graph: PolicyGraph {
+                policy_graph: HorizonGraph {
                     stage_discount_rate_overrides: std::collections::HashMap::new(),
                     graph_type: PolicyGraphType::FiniteHorizon,
                     annual_discount_rate: 0.06,

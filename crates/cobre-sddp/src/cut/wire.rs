@@ -5,34 +5,41 @@
 //! (`n_state`) is a runtime value, `allgatherv` is called with `T = u8` and
 //! records are packed into a contiguous byte buffer.
 //!
-//! ## Wire format version 1 — cut records only
+//! ## Wire format — cut records only
 //!
 //! Every record is a single cut record. Byte 0 is the version byte (must
-//! equal `CUT_WIRE_VERSION = 1`). Byte 13 is `RECORD_TAG_CUT = 0` (zeroed
-//! padding in v1; reserved for future tag dispatch).
+//! equal `CUT_WIRE_VERSION`). Byte 13 is `RECORD_TAG_CUT = 0` (zeroed
+//! padding; reserved for future tag dispatch).
 //!
-//! ### `CutRecord` byte layout
+//! ### Cut record byte layout
 //!
-//! Total size: `25 + n_state * 8` bytes.
+//! Total size: `29 + n_state * 8` bytes.
 //!
 //! ```text
 //! Offset  Size  Field
 //! ------  ----  -----
-//!  0       1   version             (u8 = 1)
+//!  0       1   version             (u8)
 //!  1- 4    4   slot_index          (u32, native-endian)
 //!  5- 8    4   iteration           (u32, native-endian)
 //!  9-12    4   forward_pass_index  (u32, native-endian)
 //! 13       1   record_tag          (u8 = RECORD_TAG_CUT = 0; padding)
 //! 14-16    3   padding             (zeroed; reserved)
-//! 17-24    8   intercept           (f64, native-endian)
-//! 25 ...   8*n coefficients[0..n]  (f64 each, native-endian)
+//! 17-20    4   node_id             (i32, native-endian; generating node)
+//! 21-28    8   intercept           (f64, native-endian)
+//! 29 ...   8*n coefficients[0..n]  (f64 each, native-endian)
 //! ```
+//!
+//! `node_id` is the declared id (`NodeGraph::node_ids`) of the node that
+//! GENERATED the cut, making each record self-describing rather than
+//! positionally interpreted; on a shared-leaf pool, records from different
+//! generating nodes carry their distinct `node_id`s (pool = container, node =
+//! generator).
 //!
 //! ## Version compatibility
 //!
 //! Receivers reject any record whose version byte does not equal
-//! `CUT_WIRE_VERSION`. No compatibility shim is provided; redeploy all
-//! nodes when upgrading.
+//! `CUT_WIRE_VERSION`. No compatibility shim is provided (no v1 decode path);
+//! redeploy all nodes when upgrading.
 
 use crate::SddpError;
 
@@ -42,9 +49,9 @@ use crate::SddpError;
 
 /// Wire format version byte. Bump when the payload layout changes
 /// in a backward-incompatible way.
-pub const CUT_WIRE_VERSION: u8 = 1;
+pub const CUT_WIRE_VERSION: u8 = 2;
 
-/// Record-tag value at offset 13 of every cut record. Zero in v1 (padding).
+/// Record-tag value at offset 13 of every cut record. Zero (padding).
 pub const RECORD_TAG_CUT: u8 = 0;
 
 // ---------------------------------------------------------------------------
@@ -62,6 +69,10 @@ pub struct CutWireHeader {
     /// [`CutPool`]: crate::cut::CutPool
     pub slot_index: u32,
 
+    /// Declared id (`NodeGraph::node_ids`) of the node that generated this cut.
+    /// Distinct per generating node even when several nodes share one pool.
+    pub node_id: i32,
+
     /// Training iteration counter when this cut was generated.
     pub iteration: u32,
 
@@ -72,6 +83,11 @@ pub struct CutWireHeader {
     pub intercept: f64,
 }
 
+/// One cut's fields for the batch (de)serialization helpers, in wire order:
+/// `(slot_index, node_id, iteration, forward_pass_index, intercept,
+/// coefficients)`.
+pub type CutWireTuple<'a> = (u32, i32, u32, u32, f64, &'a [f64]);
+
 // ---------------------------------------------------------------------------
 // cut_wire_size
 // ---------------------------------------------------------------------------
@@ -81,18 +97,20 @@ pub struct CutWireHeader {
 /// ```
 /// use cobre_sddp::cut::wire::cut_wire_size;
 ///
-/// assert_eq!(cut_wire_size(0), 25);
-/// assert_eq!(cut_wire_size(1), 33);
-/// assert_eq!(cut_wire_size(9), 97);
-/// assert_eq!(cut_wire_size(2080), 16665);
+/// assert_eq!(cut_wire_size(0), 29);
+/// assert_eq!(cut_wire_size(1), 37);
+/// assert_eq!(cut_wire_size(9), 101);
+/// assert_eq!(cut_wire_size(2080), 16669);
 /// ```
 #[inline]
 #[must_use]
 pub fn cut_wire_size(n_state: usize) -> usize {
-    25 + n_state * 8
+    29 + n_state * 8
 }
 
 /// Serialize one cut record into `buf` starting at offset 0 (module-doc layout).
+///
+/// `node_id` is the generating node's declared id (`NodeGraph::node_ids`).
 ///
 /// # Panics (debug builds only)
 ///
@@ -100,6 +118,7 @@ pub fn cut_wire_size(n_state: usize) -> usize {
 pub fn serialize_cut(
     buf: &mut [u8],
     slot_index: u32,
+    node_id: i32,
     iteration: u32,
     forward_pass_index: u32,
     intercept: f64,
@@ -120,10 +139,11 @@ pub fn serialize_cut(
     buf[14] = 0;
     buf[15] = 0;
     buf[16] = 0;
-    buf[17..25].copy_from_slice(&intercept.to_ne_bytes());
+    buf[17..21].copy_from_slice(&node_id.to_ne_bytes());
+    buf[21..29].copy_from_slice(&intercept.to_ne_bytes());
 
     for (i, &coeff) in coefficients.iter().enumerate() {
-        let start = 25 + i * 8;
+        let start = 29 + i * 8;
         buf[start..start + 8].copy_from_slice(&coeff.to_ne_bytes());
     }
 }
@@ -166,12 +186,14 @@ pub fn deserialize_cut(buf: &[u8], n_state: usize) -> Result<(CutWireHeader, Vec
     let slot_index = u32::from_ne_bytes([buf[1], buf[2], buf[3], buf[4]]);
     let iteration = u32::from_ne_bytes([buf[5], buf[6], buf[7], buf[8]]);
     let forward_pass_index = u32::from_ne_bytes([buf[9], buf[10], buf[11], buf[12]]);
+    let node_id = i32::from_ne_bytes([buf[17], buf[18], buf[19], buf[20]]);
     let intercept = f64::from_ne_bytes([
-        buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23], buf[24],
+        buf[21], buf[22], buf[23], buf[24], buf[25], buf[26], buf[27], buf[28],
     ]);
 
     let header = CutWireHeader {
         slot_index,
+        node_id,
         iteration,
         forward_pass_index,
         intercept,
@@ -179,7 +201,7 @@ pub fn deserialize_cut(buf: &[u8], n_state: usize) -> Result<(CutWireHeader, Vec
 
     let coefficients: Vec<f64> = (0..n_state)
         .map(|i| {
-            let s = 25 + i * 8;
+            let s = 29 + i * 8;
             f64::from_ne_bytes([
                 buf[s],
                 buf[s + 1],
@@ -198,7 +220,7 @@ pub fn deserialize_cut(buf: &[u8], n_state: usize) -> Result<(CutWireHeader, Vec
 
 /// Serialize multiple cuts into a freshly allocated contiguous byte buffer.
 ///
-/// Each element of `cuts` is a tuple `(slot_index, iteration,
+/// Each element of `cuts` is a tuple `(slot_index, node_id, iteration,
 /// forward_pass_index, intercept, coefficients)`; all must have the same
 /// `n_state` coefficient count.
 ///
@@ -212,11 +234,11 @@ pub fn deserialize_cut(buf: &[u8], n_state: usize) -> Result<(CutWireHeader, Vec
 /// [`CutSyncBuffers`]: crate::cut::CutSyncBuffers
 #[cold]
 #[must_use]
-pub fn serialize_cuts_to_buffer(cuts: &[(u32, u32, u32, f64, &[f64])], n_state: usize) -> Vec<u8> {
+pub fn serialize_cuts_to_buffer(cuts: &[CutWireTuple<'_>], n_state: usize) -> Vec<u8> {
     let record_size = cut_wire_size(n_state);
     let mut buf = vec![0u8; cuts.len() * record_size];
 
-    for (i, &(slot_index, iteration, forward_pass_index, intercept, coefficients)) in
+    for (i, &(slot_index, node_id, iteration, forward_pass_index, intercept, coefficients)) in
         cuts.iter().enumerate()
     {
         debug_assert!(
@@ -228,6 +250,7 @@ pub fn serialize_cuts_to_buffer(cuts: &[(u32, u32, u32, f64, &[f64])], n_state: 
         serialize_cut(
             &mut buf[start..start + record_size],
             slot_index,
+            node_id,
             iteration,
             forward_pass_index,
             intercept,
@@ -336,32 +359,32 @@ mod tests {
     )]
 
     use super::{
-        CUT_WIRE_VERSION, CutWireHeader, RECORD_TAG_CUT, cut_wire_size, deserialize_cut,
-        deserialize_cuts_from_buffer, deserialize_cuts_from_buffer_into, serialize_cut,
-        serialize_cuts_to_buffer,
+        CUT_WIRE_VERSION, CutWireHeader, CutWireTuple, RECORD_TAG_CUT, cut_wire_size,
+        deserialize_cut, deserialize_cuts_from_buffer, deserialize_cuts_from_buffer_into,
+        serialize_cut, serialize_cuts_to_buffer,
     };
     use crate::SddpError;
 
     #[test]
-    fn cut_wire_size_zero_state_returns_25() {
-        assert_eq!(cut_wire_size(0), 25);
+    fn cut_wire_size_zero_state_returns_29() {
+        assert_eq!(cut_wire_size(0), 29);
     }
 
     #[test]
-    fn cut_wire_size_one_state_returns_33() {
-        assert_eq!(cut_wire_size(1), 33);
+    fn cut_wire_size_one_state_returns_37() {
+        assert_eq!(cut_wire_size(1), 37);
     }
 
     #[test]
-    fn cut_wire_size_three_hydro_ar2_returns_97() {
-        // 3-hydro AR(2) system: n_state = 9 → 25 + 9 * 8 = 97
-        assert_eq!(cut_wire_size(9), 97);
+    fn cut_wire_size_three_hydro_ar2_returns_101() {
+        // 3-hydro AR(2) system: n_state = 9 → 29 + 9 * 8 = 101
+        assert_eq!(cut_wire_size(9), 101);
     }
 
     #[test]
-    fn cut_wire_size_production_scale_returns_16665() {
-        // Production-scale: n_state = 2080 → 25 + 2080 * 8 = 16665
-        assert_eq!(cut_wire_size(2080), 16665);
+    fn cut_wire_size_production_scale_returns_16669() {
+        // Production-scale: n_state = 2080 → 29 + 2080 * 8 = 16669
+        assert_eq!(cut_wire_size(2080), 16669);
     }
 
     #[test]
@@ -370,10 +393,11 @@ mod tests {
         let coefficients = [1.0_f64, 2.0, 3.0];
         let mut buf = vec![0u8; cut_wire_size(n_state)];
 
-        serialize_cut(&mut buf, 5, 3, 7, 42.0, &coefficients);
+        serialize_cut(&mut buf, 5, -9, 3, 7, 42.0, &coefficients);
         let (header, recovered) = deserialize_cut(&buf, n_state).unwrap();
 
         assert_eq!(header.slot_index, 5);
+        assert_eq!(header.node_id, -9);
         assert_eq!(header.iteration, 3);
         assert_eq!(header.forward_pass_index, 7);
         assert_eq!(header.intercept, 42.0);
@@ -389,9 +413,10 @@ mod tests {
         let coefficients = [val, -val, val * 2.0, f64::MIN_POSITIVE];
         let mut buf = vec![0u8; cut_wire_size(n_state)];
 
-        serialize_cut(&mut buf, 1, 10, 2, f64::MAX, &coefficients);
+        serialize_cut(&mut buf, 1, 7, 10, 2, f64::MAX, &coefficients);
         let (header, recovered) = deserialize_cut(&buf, n_state).unwrap();
 
+        assert_eq!(header.node_id, 7);
         assert_eq!(header.intercept.to_bits(), f64::MAX.to_bits());
         for (orig, got) in coefficients.iter().zip(&recovered) {
             assert_eq!(orig.to_bits(), got.to_bits(), "coefficient mismatch");
@@ -403,7 +428,7 @@ mod tests {
         let coefficients = [1.0_f64, 2.0, 3.0];
         let mut buf = vec![0u8; cut_wire_size(3)];
 
-        serialize_cut(&mut buf, 5, 3, 7, 42.0, &coefficients);
+        serialize_cut(&mut buf, 5, -13, 3, 7, 42.0, &coefficients);
 
         assert_eq!(buf[0], CUT_WIRE_VERSION, "version at offset 0");
         assert_eq!(
@@ -428,14 +453,19 @@ mod tests {
             "padding at offsets 14-16 must be zero"
         );
         assert_eq!(
-            f64::from_ne_bytes(buf[17..25].try_into().unwrap()),
-            42.0_f64,
-            "intercept at offset 17"
+            i32::from_ne_bytes(buf[17..21].try_into().unwrap()),
+            -13i32,
+            "node_id at offset 17"
         );
         assert_eq!(
-            f64::from_ne_bytes(buf[25..33].try_into().unwrap()),
+            f64::from_ne_bytes(buf[21..29].try_into().unwrap()),
+            42.0_f64,
+            "intercept at offset 21"
+        );
+        assert_eq!(
+            f64::from_ne_bytes(buf[29..37].try_into().unwrap()),
             1.0_f64,
-            "coefficient[0] at offset 25"
+            "coefficient[0] at offset 29"
         );
     }
 
@@ -445,10 +475,11 @@ mod tests {
         let coefficients: Vec<f64> = (0..n_state).map(|i| i as f64 * 0.001).collect();
         let mut buf = vec![0u8; cut_wire_size(n_state)];
 
-        serialize_cut(&mut buf, 100, 50, 3, 999.0, &coefficients);
+        serialize_cut(&mut buf, 100, 42, 50, 3, 999.0, &coefficients);
         let (header, recovered) = deserialize_cut(&buf, n_state).unwrap();
 
         assert_eq!(header.slot_index, 100);
+        assert_eq!(header.node_id, 42);
         assert_eq!(header.iteration, 50);
         assert_eq!(header.forward_pass_index, 3);
         assert_eq!(header.intercept, 999.0);
@@ -459,14 +490,15 @@ mod tests {
     }
 
     #[test]
-    fn edge_case_n_state_zero_header_only_25_bytes() {
+    fn edge_case_n_state_zero_header_only_29_bytes() {
         let mut buf = vec![0u8; cut_wire_size(0)];
-        assert_eq!(buf.len(), 25);
+        assert_eq!(buf.len(), 29);
 
-        serialize_cut(&mut buf, 1, 2, 3, -1.0, &[]);
+        serialize_cut(&mut buf, 1, 4, 2, 3, -1.0, &[]);
         let (header, coefficients) = deserialize_cut(&buf, 0).unwrap();
 
         assert_eq!(header.slot_index, 1);
+        assert_eq!(header.node_id, 4);
         assert_eq!(header.iteration, 2);
         assert_eq!(header.forward_pass_index, 3);
         assert_eq!(header.intercept, -1.0);
@@ -474,13 +506,13 @@ mod tests {
     }
 
     #[test]
-    fn edge_case_n_state_one_produces_33_byte_record() {
+    fn edge_case_n_state_one_produces_37_byte_record() {
         let mut buf = vec![0u8; cut_wire_size(1)];
-        assert_eq!(buf.len(), 33);
+        assert_eq!(buf.len(), 37);
 
         // Use 2.5 (exactly representable in f64) as a non-PI coefficient.
         let coeff = 2.5_f64;
-        serialize_cut(&mut buf, 0, 0, 0, 7.0, &[coeff]);
+        serialize_cut(&mut buf, 0, 0, 0, 0, 7.0, &[coeff]);
         let (header, coefficients) = deserialize_cut(&buf, 1).unwrap();
 
         assert_eq!(header.intercept, 7.0);
@@ -491,7 +523,7 @@ mod tests {
     #[test]
     fn padding_bytes_at_offset_13_to_16_are_zero() {
         let mut buf = vec![0xFFu8; cut_wire_size(2)]; // Pre-fill with 0xFF
-        serialize_cut(&mut buf, 1, 1, 1, 1.0, &[1.0, 2.0]);
+        serialize_cut(&mut buf, 1, 1, 1, 1, 1.0, &[1.0, 2.0]);
         assert_eq!(&buf[13..17], &[0u8; 4], "padding bytes must be zero");
     }
 
@@ -499,12 +531,19 @@ mod tests {
     fn multi_cut_five_cuts_round_trip_all_match() {
         let n_state = 3;
         let coefficients: Vec<[f64; 3]> = (0..5u32).map(|i| [f64::from(i); 3]).collect();
-        let cuts: Vec<(u32, u32, u32, f64, &[f64])> = coefficients
+        let cuts: Vec<CutWireTuple<'_>> = coefficients
             .iter()
             .enumerate()
             .map(|(i, c)| {
                 let idx = i as u32;
-                (idx, idx * 2, idx, f64::from(idx) * 10.0, c.as_slice())
+                (
+                    idx,
+                    idx as i32,
+                    idx * 2,
+                    idx,
+                    f64::from(idx) * 10.0,
+                    c.as_slice(),
+                )
             })
             .collect();
 
@@ -517,6 +556,7 @@ mod tests {
         for (i, (header, coeffs)) in recovered.iter().enumerate() {
             let idx = i as u32;
             assert_eq!(header.slot_index, idx, "slot_index mismatch at cut {i}");
+            assert_eq!(header.node_id, idx as i32, "node_id mismatch at cut {i}");
             assert_eq!(header.iteration, idx * 2, "iteration mismatch at cut {i}");
             assert_eq!(
                 header.forward_pass_index, idx,
@@ -539,12 +579,12 @@ mod tests {
         let all_coefficients: Vec<Vec<f64>> = (0..10u32)
             .map(|i| vec![f64::from(i), -f64::from(i)])
             .collect();
-        let cuts: Vec<(u32, u32, u32, f64, &[f64])> = all_coefficients
+        let cuts: Vec<CutWireTuple<'_>> = all_coefficients
             .iter()
             .enumerate()
             .map(|(i, c)| {
                 let idx = i as u32;
-                (idx, 0u32, idx, f64::from(idx), c.as_slice())
+                (idx, -(idx as i32), 0u32, idx, f64::from(idx), c.as_slice())
             })
             .collect();
 
@@ -555,6 +595,7 @@ mod tests {
         for (i, (header, coeffs)) in recovered.iter().enumerate() {
             let idx = i as u32;
             assert_eq!(header.slot_index, idx);
+            assert_eq!(header.node_id, -(idx as i32));
             assert_eq!(coeffs[0].to_bits(), f64::from(idx).to_bits());
             assert_eq!(coeffs[1].to_bits(), (-f64::from(idx)).to_bits());
         }
@@ -570,6 +611,7 @@ mod tests {
     fn cut_wire_header_derives_debug_clone_copy_partialeq() {
         let h = CutWireHeader {
             slot_index: 1,
+            node_id: -2,
             iteration: 2,
             forward_pass_index: 3,
             intercept: 4.0,
@@ -586,10 +628,10 @@ mod tests {
         // deserialize_cuts_from_buffer_into produces values bit-for-bit
         // identical to those from deserialize_cuts_from_buffer.
         let n_state = 2usize;
-        let cuts_data: &[(u32, u32, u32, f64, &[f64])] = &[
-            (0, 1, 0, 10.0, &[1.0, 2.0]),
-            (1, 2, 1, 20.0, &[3.0, 4.0]),
-            (2, 3, 2, 30.0, &[5.0, 6.0]),
+        let cuts_data: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (1, 1, 2, 1, 20.0, &[3.0, 4.0]),
+            (2, 2, 3, 2, 30.0, &[5.0, 6.0]),
         ];
         let buf = serialize_cuts_to_buffer(cuts_data, n_state);
 
@@ -635,10 +677,10 @@ mod tests {
         // call the capacity is at least as large as after the first (proving
         // the Vec allocation is retained between calls).
         let n_state = 3usize;
-        let cuts_data: &[(u32, u32, u32, f64, &[f64])] = &[
-            (0, 1, 0, 1.0, &[1.0, 2.0, 3.0]),
-            (1, 1, 1, 2.0, &[4.0, 5.0, 6.0]),
-            (2, 1, 2, 3.0, &[7.0, 8.0, 9.0]),
+        let cuts_data: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 1.0, &[1.0, 2.0, 3.0]),
+            (1, 0, 1, 1, 2.0, &[4.0, 5.0, 6.0]),
+            (2, 0, 1, 2, 3.0, &[7.0, 8.0, 9.0]),
         ];
         let buf = serialize_cuts_to_buffer(cuts_data, n_state);
 
@@ -692,7 +734,7 @@ mod tests {
     fn serialize_cut_writes_version_at_offset_zero() {
         let n_state = 3;
         let mut buf = vec![0u8; cut_wire_size(n_state)];
-        serialize_cut(&mut buf, 5, 3, 7, 42.0, &[1.0, 2.0, 3.0]);
+        serialize_cut(&mut buf, 5, 0, 3, 7, 42.0, &[1.0, 2.0, 3.0]);
         assert_eq!(
             buf[0], CUT_WIRE_VERSION,
             "version byte at offset 0 must equal CUT_WIRE_VERSION"
@@ -708,10 +750,10 @@ mod tests {
     fn deserialize_cut_rejects_wrong_version_byte() {
         let n_state = 3;
         let mut buf = vec![0u8; cut_wire_size(n_state)];
-        serialize_cut(&mut buf, 5, 3, 7, 42.0, &[1.0, 2.0, 3.0]);
+        serialize_cut(&mut buf, 5, 0, 3, 7, 42.0, &[1.0, 2.0, 3.0]);
 
-        // Overwrite the version byte with wire version 2 (the removed format).
-        buf[0] = 2_u8;
+        // Overwrite the version byte with wire version 1 (the removed format).
+        buf[0] = 1_u8;
 
         let result = deserialize_cut(&buf, n_state);
         match result {
@@ -726,25 +768,25 @@ mod tests {
     }
 
     #[test]
-    fn cut_wire_size_matches_25_plus_n_state_times_8_spec() {
-        assert_eq!(cut_wire_size(0), 25);
-        assert_eq!(cut_wire_size(1), 33);
-        assert_eq!(cut_wire_size(9), 97);
-        assert_eq!(cut_wire_size(2080), 16665);
+    fn cut_wire_size_matches_29_plus_n_state_times_8_spec() {
+        assert_eq!(cut_wire_size(0), 29);
+        assert_eq!(cut_wire_size(1), 37);
+        assert_eq!(cut_wire_size(9), 101);
+        assert_eq!(cut_wire_size(2080), 16669);
     }
 
-    // ── Version-1 wire format tests ──────────────────────────────────────────
+    // ── Wire-format constant + version-reject tests ──────────────────────────
 
     #[test]
-    fn wire_version_1_constant_value() {
-        assert_eq!(CUT_WIRE_VERSION, 1);
+    fn wire_version_2_constant_value() {
+        assert_eq!(CUT_WIRE_VERSION, 2);
     }
 
     #[test]
     fn serialize_cut_writes_record_tag_zero_at_offset_13() {
         let n_state = 2;
         let mut buf = vec![0xFFu8; cut_wire_size(n_state)];
-        serialize_cut(&mut buf, 7, 1, 3, 5.0, &[1.0, 2.0]);
+        serialize_cut(&mut buf, 7, 0, 1, 3, 5.0, &[1.0, 2.0]);
         assert_eq!(
             buf[13], RECORD_TAG_CUT,
             "byte 13 must equal RECORD_TAG_CUT after serialize_cut"
@@ -755,13 +797,13 @@ mod tests {
     fn deserialize_cut_rejects_wrong_version() {
         let n_state = 2;
         let mut buf = vec![0u8; cut_wire_size(n_state)];
-        // Write a structurally valid cut record but stamp it as wire version 2 (old format).
-        buf[0] = 2; // wrong wire version
+        // Write a structurally valid cut record but stamp it as wire version 1 (old format).
+        buf[0] = 1; // wrong wire version
         buf[1..5].copy_from_slice(&10u32.to_ne_bytes());
         buf[5..9].copy_from_slice(&1u32.to_ne_bytes());
         buf[9..13].copy_from_slice(&0u32.to_ne_bytes());
         buf[13] = RECORD_TAG_CUT;
-        buf[17..25].copy_from_slice(&1.0f64.to_ne_bytes());
+        buf[21..29].copy_from_slice(&1.0f64.to_ne_bytes());
 
         let result = deserialize_cut(&buf, n_state);
         match result {

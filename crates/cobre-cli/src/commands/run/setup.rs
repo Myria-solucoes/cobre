@@ -767,7 +767,7 @@ mod tests {
 
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InitialConditions,
+        HorizonGraph, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, ScenarioSource,
         System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -777,8 +777,8 @@ mod tests {
         },
         scenario::{InflowHistoryRow, InflowModel, LoadModel, SamplingScheme},
         temporal::{
-            Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
-            SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, SeasonCycleType,
+            SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
         },
     };
 
@@ -1108,7 +1108,7 @@ mod tests {
             },
         );
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,

@@ -16,7 +16,7 @@ use cobre_core::{
     ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_core::{
-    ContractType, EnergyContract, EntityId, InitialConditions, SystemBuilder,
+    ContractType, EnergyContract, EntityId, HorizonGraph, InitialConditions, SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
         hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -24,8 +24,8 @@ use cobre_core::{
     },
     scenario::{InflowHistoryRow, InflowModel, LoadModel, SamplingScheme},
     temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
-        SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, SeasonMap, Stage,
+        StageRiskConfig, StageStateConfig,
     },
 };
 use cobre_io::config::{
@@ -39,7 +39,7 @@ use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context
 
 /// Bounds and penalties are non-zero defaults so `build_stage_templates` succeeds.
 fn minimal_system(n_stages: usize) -> cobre_core::System {
-    minimal_system_with_policy_graph(n_stages, PolicyGraph::default())
+    minimal_system_with_policy_graph(n_stages, HorizonGraph::default())
 }
 
 /// [`minimal_system`]'s body, generalized to accept a caller-supplied
@@ -53,7 +53,7 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
 )]
 fn minimal_system_with_policy_graph(
     n_stages: usize,
-    policy_graph: PolicyGraph,
+    policy_graph: HorizonGraph,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -709,7 +709,7 @@ fn fcf_mut_allows_cut_insertion() {
 
     let n_state = setup.stage_data.state.n_state;
     let coefficients = vec![1.0_f64; n_state];
-    setup.fcf.add_cut(0, 0, 0, 42.0, &coefficients);
+    setup.fcf.add_cut(0, 0, 0, 0, 42.0, &coefficients);
     assert_eq!(setup.fcf.total_active_cuts(), 1);
 }
 
@@ -1055,7 +1055,7 @@ fn node_native_binary_tree_loads_and_constructs_node_graph() {
     use cobre_core::temporal::{Node, Transition};
     use std::collections::HashMap;
 
-    let policy_graph = PolicyGraph {
+    let policy_graph = HorizonGraph {
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.0,
         nodes: vec![
@@ -2426,7 +2426,7 @@ fn minimal_system_2_hydros_with_history(
         .inflow_history(inflow_history)
         .bounds(bounds)
         .penalties(penalties)
-        .policy_graph(PolicyGraph {
+        .policy_graph(HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
@@ -7082,7 +7082,7 @@ fn cut_row_from_state_matches_reference_loop() {
     let coefficients: Vec<f64> = (0..n_state)
         .map(|j| 1.0 + f64::from(u32::try_from(j).expect("state index fits u32")))
         .collect();
-    fcf.add_cut(0, 0, 0, 7.5, &coefficients);
+    fcf.add_cut(0, 0, 0, 0, 7.5, &coefficients);
 
     let from_production = build_cut_row_batch(
         &fcf,

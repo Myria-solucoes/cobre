@@ -11,8 +11,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, PolicyBasisRecord, PolicyCheckpointMetadata,
-    PolicyCutRecord, StageCutsPayload, StageStatesPayload,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
+    ManifestNode, PolicyBasisRecord, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
+    StageCutsPayload, StageStatesPayload,
 };
 
 use crate::errors::{ErrorSource, convert_error};
@@ -24,8 +25,8 @@ pub(crate) struct PyEntitySlot {
     entity_id: i32,
     subindex: u32,
     was_active: bool,
-    #[pyo3(default = ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL)]
-    delivery_anchor: i32,
+    #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
+    delivery_date: i32,
 }
 
 impl From<&PyEntitySlot> for EntitySlot {
@@ -35,7 +36,7 @@ impl From<&PyEntitySlot> for EntitySlot {
             entity_id: slot.entity_id,
             subindex: slot.subindex,
             was_active: slot.was_active,
-            delivery_anchor: slot.delivery_anchor,
+            delivery_date: slot.delivery_date,
         }
     }
 }
@@ -92,15 +93,63 @@ pub(crate) struct PyStageStatesPayload {
 
 #[derive(Debug, FromPyObject)]
 #[pyo3(from_item_all)]
-pub(crate) struct PyPolicyCheckpointMetadata {
-    cobre_version: String,
-    created_at: String,
+pub(crate) struct PyManifestNode {
+    id: i32,
+    stage_id: i32,
+    pool_id: u32,
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyManifestEdge {
+    source_id: i32,
+    target_id: i32,
+    probability: f64,
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyGraphManifest {
+    n_pools: u32,
+    nodes: Vec<PyManifestNode>,
+    edges: Vec<PyManifestEdge>,
+}
+
+impl From<PyGraphManifest> for GraphManifest {
+    fn from(g: PyGraphManifest) -> Self {
+        Self {
+            n_pools: g.n_pools,
+            nodes: g
+                .nodes
+                .into_iter()
+                .map(|n| ManifestNode {
+                    id: n.id,
+                    stage_id: n.stage_id,
+                    pool_id: n.pool_id,
+                })
+                .collect(),
+            edges: g
+                .edges
+                .into_iter()
+                .map(|e| ManifestEdge {
+                    source_id: e.source_id,
+                    target_id: e.target_id,
+                    probability: e.probability,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The producer-namespaced metadata block, mirroring what
+/// [`crate::results::load_policy`] emits under `metadata["producer"]`.
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyProducerBlock {
     completed_iterations: u32,
     final_lower_bound: f64,
     #[pyo3(default)]
     best_upper_bound: Option<f64>,
-    state_dimension: u32,
-    num_stages: u32,
     max_iterations: u32,
     forward_passes: u32,
     warm_start_cuts: u32,
@@ -117,25 +166,52 @@ pub(crate) struct PyPolicyCheckpointMetadata {
     cost_scale_factor: Option<f64>,
 }
 
+impl From<PyProducerBlock> for ProducerBlock {
+    fn from(p: PyProducerBlock) -> Self {
+        Self {
+            completed_iterations: p.completed_iterations,
+            final_lower_bound: p.final_lower_bound,
+            best_upper_bound: p.best_upper_bound,
+            max_iterations: p.max_iterations,
+            forward_passes: p.forward_passes,
+            warm_start_cuts: p.warm_start_cuts,
+            warm_start_counts: p.warm_start_counts,
+            rng_seed: p.rng_seed,
+            total_visited_states: p.total_visited_states,
+            training_block_mode: p.training_block_mode,
+            training_block_mode_per_stage: p.training_block_mode_per_stage,
+            cost_scale_factor: p.cost_scale_factor,
+        }
+    }
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyPolicyCheckpointMetadata {
+    /// Stamped to [`FORMAT_VERSION`] when omitted, so a checkpoint authored from
+    /// raw records is always readable; a round-tripped one carries it back.
+    #[pyo3(default = FORMAT_VERSION)]
+    format_version: u32,
+    cobre_version: String,
+    created_at: String,
+    num_stages: u32,
+    #[pyo3(default)]
+    graph_manifest: Option<PyGraphManifest>,
+    producer: PyProducerBlock,
+}
+
 impl From<PyPolicyCheckpointMetadata> for PolicyCheckpointMetadata {
     fn from(m: PyPolicyCheckpointMetadata) -> Self {
         Self {
+            format_version: m.format_version,
             cobre_version: m.cobre_version,
             created_at: m.created_at,
-            completed_iterations: m.completed_iterations,
-            final_lower_bound: m.final_lower_bound,
-            best_upper_bound: m.best_upper_bound,
-            state_dimension: m.state_dimension,
             num_stages: m.num_stages,
-            max_iterations: m.max_iterations,
-            forward_passes: m.forward_passes,
-            warm_start_cuts: m.warm_start_cuts,
-            warm_start_counts: m.warm_start_counts,
-            rng_seed: m.rng_seed,
-            total_visited_states: m.total_visited_states,
-            training_block_mode: m.training_block_mode,
-            training_block_mode_per_stage: m.training_block_mode_per_stage,
-            cost_scale_factor: m.cost_scale_factor,
+            graph_manifest: m
+                .graph_manifest
+                .map(GraphManifest::from)
+                .unwrap_or_default(),
+            producer: m.producer.into(),
         }
     }
 }

@@ -205,7 +205,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#
@@ -225,7 +225,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#
@@ -275,7 +275,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#
@@ -302,7 +302,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#

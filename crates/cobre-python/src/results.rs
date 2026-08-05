@@ -23,7 +23,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use arrow::array::{
-    Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, UInt32Array,
+    Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, StringArray, UInt32Array,
 };
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -211,8 +211,9 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 /// |--------------------|-----------------|-----------------------------------------------------|
 /// | `iteration`        | `int`           | Iteration number (1-based).                         |
 /// | `lower_bound`      | `float`         | Lower bound on the optimal value.                   |
-/// | `upper_bound_mean` | `float`         | Mean upper bound across forward-pass scenarios.     |
-/// | `upper_bound_std`  | `float`         | Std-dev of the upper bound.                         |
+/// | `upper_bound`      | `float`         | Upper bound estimate (mean if sampled, exact if enumerated). |
+/// | `upper_bound_std`  | `float \| None` | Std-dev of the upper bound (None under an exact bound). |
+/// | `upper_bound_kind` | `str`           | Bound regime: `"statistical"` or `"exact"`.         |
 /// | `gap_percent`      | `float \| None` | Relative gap as a percentage (None if ill-defined). |
 /// | `cuts_added`       | `int`           | Cuts added to the pool this iteration.              |
 /// | `cuts_removed`     | `int`           | Cuts removed from the pool this iteration.          |
@@ -238,7 +239,7 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 ///
 /// rows = cobre.results.load_convergence("output/")
 /// for row in rows:
-///     print(row["iteration"], row["lower_bound"], row["upper_bound_mean"])
+///     print(row["iteration"], row["lower_bound"], row["upper_bound"])
 /// ```
 // too_many_lines: a flat one-pass per-column projection into a Python dict;
 // splitting it would only thread the batch/index/dict through extra call frames.
@@ -277,8 +278,9 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 
         let col_iteration = get_column_by_name::<Int32Array>(&batch, "iteration")?;
         let col_lower_bound = get_column_by_name::<Float64Array>(&batch, "lower_bound")?;
-        let col_upper_bound_mean = get_column_by_name::<Float64Array>(&batch, "upper_bound_mean")?;
+        let col_upper_bound = get_column_by_name::<Float64Array>(&batch, "upper_bound")?;
         let col_upper_bound_std = get_column_by_name::<Float64Array>(&batch, "upper_bound_std")?;
+        let col_upper_bound_kind = get_column_by_name::<StringArray>(&batch, "upper_bound_kind")?;
         let col_gap_percent = get_column_by_name::<Float64Array>(&batch, "gap_percent")?;
         let col_cuts_added = get_column_by_name::<Int32Array>(&batch, "cuts_added")?;
         let col_cuts_removed = get_column_by_name::<Int32Array>(&batch, "cuts_removed")?;
@@ -294,8 +296,13 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 
             row.set_item("iteration", col_iteration.value(i))?;
             row.set_item("lower_bound", col_lower_bound.value(i))?;
-            row.set_item("upper_bound_mean", col_upper_bound_mean.value(i))?;
-            row.set_item("upper_bound_std", col_upper_bound_std.value(i))?;
+            row.set_item("upper_bound", col_upper_bound.value(i))?;
+            if col_upper_bound_std.is_null(i) {
+                row.set_item("upper_bound_std", py.None())?;
+            } else {
+                row.set_item("upper_bound_std", col_upper_bound_std.value(i))?;
+            }
+            row.set_item("upper_bound_kind", col_upper_bound_kind.value(i))?;
 
             if col_gap_percent.is_null(i) {
                 row.set_item("gap_percent", py.None())?;
@@ -345,8 +352,9 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 /// |---------------------|-------------|----------|
 /// | `iteration`         | Int32        | No       |
 /// | `lower_bound`       | Float64      | No       |
-/// | `upper_bound_mean`  | Float64      | No       |
-/// | `upper_bound_std`   | Float64      | No       |
+/// | `upper_bound`       | Float64      | No       |
+/// | `upper_bound_std`   | Float64      | Yes      |
+/// | `upper_bound_kind`  | Utf8         | No       |
 /// | `gap_percent`       | Float64      | Yes      |
 /// | `cuts_added`        | Int32        | No       |
 /// | `cuts_removed`      | Int32        | No       |
@@ -1249,6 +1257,22 @@ fn read_parquet_partition_as_batches(
             ))
         })?;
 
+        // The file may already carry a `scenario_id` column (written as a real
+        // column alongside the Hive partition). When it does, it is authoritative
+        // — surface it as-is rather than prepending a second, duplicate column.
+        if batch
+            .schema()
+            .fields()
+            .iter()
+            .any(|f| f.name() == "scenario_id")
+        {
+            if out_schema.is_none() {
+                *out_schema = Some(batch.schema());
+            }
+            out_batches.push(batch);
+            continue;
+        }
+
         let n_rows = batch.num_rows();
         let scenario_id_array = std::sync::Arc::new(Int64Array::from(vec![scenario_id_val; n_rows]))
             as std::sync::Arc<dyn arrow::array::Array>;
@@ -1513,10 +1537,14 @@ pub fn load_simulation_arrow(
 /// ```python
 /// {
 ///     "metadata": {
-///         "version": "1.0.0",
-///         "completed_iterations": 128,
-///         "state_dimension": 4,
-///         ...
+///         "format_version": 1,
+///         "cobre_version": "1.0.0",
+///         "num_stages": 60,
+///         "graph_manifest": { "n_pools": 60, "nodes": [ ... ], "edges": [ ... ] },
+///         "producer": {
+///             "completed_iterations": 128,
+///             ...
+///         },
 ///     },
 ///     "stage_cuts": [
 ///         {
@@ -1531,7 +1559,7 @@ pub fn load_simulation_arrow(
 ///                     "entity_id": 0,
 ///                     "subindex": 0,
 ///                     "was_active": True,
-///                     "delivery_anchor": -1,
+///                     "delivery_date": -1,
 ///                 },
 ///                 ...
 ///             ],
@@ -1575,7 +1603,7 @@ pub fn load_simulation_arrow(
 /// import cobre.results
 ///
 /// policy = cobre.results.load_policy("output/")
-/// print(policy["metadata"]["completed_iterations"])
+/// print(policy["metadata"]["producer"]["completed_iterations"])
 /// first_stage_cuts = policy["stage_cuts"][0]["cuts"]
 ///
 /// # Non-default policy_path: pass the sub-directory explicitly.
@@ -1627,7 +1655,7 @@ pub fn load_policy(
             slot_dict.set_item("entity_id", into_py(py, slot.entity_id)?)?;
             slot_dict.set_item("subindex", into_py(py, slot.subindex)?)?;
             slot_dict.set_item("was_active", PyBool::new(py, slot.was_active).to_owned())?;
-            slot_dict.set_item("delivery_anchor", into_py(py, slot.delivery_anchor)?)?;
+            slot_dict.set_item("delivery_date", into_py(py, slot.delivery_date)?)?;
             manifest_list.append(slot_dict)?;
         }
         sc_dict.set_item("entity_manifest", manifest_list)?;
@@ -1744,7 +1772,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#
@@ -1771,7 +1799,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#

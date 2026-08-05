@@ -567,12 +567,7 @@ where
             },
         );
 
-        let basis_cache = broadcast_basis_cache(
-            &self.basis_store,
-            self.ranks.num_stages,
-            &self.training_ctx.node_graph.node_ids,
-            self.comm,
-        )?;
+        let basis_cache = broadcast_basis_cache(&self.basis_store, self.comm)?;
 
         Ok(TrainingOutcome {
             result: TrainingResult::new(
@@ -753,7 +748,7 @@ where
                 .push(SolverStatsLogEntry::from_raw(
                     iteration,
                     "forward",
-                    i32::try_from(stage_idx).unwrap_or(i32::MAX),
+                    self.stage_ctx.study_stage_ids.get(stage_idx).copied(),
                     -1,
                     self.ranks.fwd_rank,
                     -1,
@@ -862,7 +857,7 @@ where
                         .push(SolverStatsLogEntry::from_raw(
                             iteration,
                             "backward",
-                            *stage_idx as i32,
+                            self.stage_ctx.study_stage_ids.get(*stage_idx).copied(),
                             i32::try_from(*omega)
                                 .expect("opening index is bounded well below i32::MAX"),
                             *rank,
@@ -938,12 +933,13 @@ where
             // terminal leaves receive no cuts. The root (the sole stage-0 alive
             // node) is recorded here; the loop below scores each interior
             // cut-generating node against ITS OWN visited region.
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             {
                 let root_cut_pool = &self.fcf.pools[root_pool];
                 let root_active = root_cut_pool.active_count() as u32;
                 per_stage.push(StageRowSelectionRecord {
-                    stage: 0,
+                    // Domain stage_id of the root (study-stage position 0).
+                    stage: self.stage_ctx.study_stage_ids.first().copied().unwrap_or(0) as u32,
                     rows_populated: root_cut_pool.populated() as u32,
                     rows_active_before: root_active,
                     rows_deactivated: 0,
@@ -986,7 +982,7 @@ where
                 })
                 .collect();
 
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             for (stage, pool_id, deact, stage_sel_time_ms) in deactivations {
                 let pool = &self.fcf.pools[pool_id];
                 let populated = pool.populated() as u32;
@@ -1000,7 +996,15 @@ where
                 let active_after = self.fcf.pools[pool_id].active_count() as u32;
                 let rows_in_lp = self.fcf.pools[pool_id].cuts_in_lp() as u32;
                 per_stage.push(StageRowSelectionRecord {
-                    stage: stage as u32,
+                    // Domain stage_id by position from the ordered study ids;
+                    // falls back to the positional index for a short stub context.
+                    stage: self
+                        .stage_ctx
+                        .study_stage_ids
+                        .get(stage)
+                        .copied()
+                        .unwrap_or_else(|| i32::try_from(stage).unwrap_or(i32::MAX))
+                        as u32,
                     rows_populated: populated,
                     rows_active_before: active_before,
                     rows_deactivated: n_deact,
@@ -1179,18 +1183,19 @@ where
     /// before the first training iteration runs.
     ///
     /// `cache` carries one [`CapturedBasis`](crate::workspace::CapturedBasis)
-    /// per stage (built by
+    /// per canonical node (built by
     /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)).
-    /// The checkpoint holds a single basis per stage; the forward pass keeps one
-    /// per `(worker, stage)`, so each stage's basis is replicated across every
+    /// The checkpoint holds a single basis per node; the forward pass keeps one
+    /// per `(worker, node)`, so each node's basis is replicated across every
     /// worker for iteration 1's warm-start. `reconstruct_basis` reconciles the
     /// stored cut rows against the current active set by slot identity, so a
-    /// seeded basis stays correct even if cut selection diverges. No-op for a
-    /// fresh start (no cache).
+    /// seeded basis stays correct even if cut selection diverges. Seeds every
+    /// node (`num_nodes`), never truncated at `num_stages`, so a branching
+    /// graph's leaves warm-start too. No-op for a fresh start (no cache).
     pub(crate) fn seed_basis_store(&mut self, cache: &[Option<CapturedBasis>]) {
         let max_local_fwd = self.ranks.max_local_fwd;
-        let num_stages = self.ranks.num_stages;
-        for (t, slot) in cache.iter().enumerate().take(num_stages) {
+        let num_nodes = self.basis_store.num_nodes();
+        for (t, slot) in cache.iter().enumerate().take(num_nodes) {
             let Some(captured) = slot else { continue };
             for scenario in 0..max_local_fwd {
                 *self.basis_store.get_mut(scenario, t) = Some(captured.clone());
@@ -1242,7 +1247,7 @@ where
             .push(SolverStatsLogEntry::from_raw(
                 iteration,
                 "lower_bound",
-                -1,
+                None,
                 -1,
                 self.ranks.fwd_rank,
                 -1,
@@ -2284,7 +2289,7 @@ mod tests {
         // populated slot, one remaining slot.
         let mut fcf = FutureCostFunction::new_per_pool(&[1], 1, 1, 2, &[0], &[1]);
         assert_eq!(fcf.pools[0].capacity, 2);
-        fcf.pools[0].add_cut(0, 0, 7.0, &[3.0]);
+        fcf.pools[0].add_cut(0, 0, 0, 7.0, &[3.0]);
         let prior_capacity = fcf.pools[0].capacity;
 
         grow_pools_for_next_iteration(&mut fcf, 3);
@@ -2304,7 +2309,7 @@ mod tests {
     #[test]
     fn grow_pools_for_next_iteration_is_noop_when_floor_suffices() {
         let mut fcf = FutureCostFunction::new_per_pool(&[1], 1, 1, 10, &[0], &[1]);
-        fcf.pools[0].add_cut(0, 0, 1.0, &[1.0]);
+        fcf.pools[0].add_cut(0, 0, 0, 1.0, &[1.0]);
         let prior_capacity = fcf.pools[0].capacity;
 
         grow_pools_for_next_iteration(&mut fcf, 1);
@@ -2326,7 +2331,7 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 1, forward_passes, max_iterations, &[0, 0]);
         for pool in &mut fcf.pools {
             for fp in 0..forward_passes {
-                pool.add_cut(0, fp, 1.0, &[1.0]);
+                pool.add_cut(0, 0, fp, 1.0, &[1.0]);
             }
         }
         let capacities_before: Vec<usize> = fcf.pools.iter().map(|p| p.capacity).collect();

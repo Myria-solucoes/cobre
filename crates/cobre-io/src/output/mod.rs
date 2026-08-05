@@ -68,10 +68,12 @@ pub struct IterationRecord {
     /// Lower bound on the optimal value at the end of this iteration.
     pub lower_bound: f64,
 
-    /// Mean upper bound estimate across all forward-pass scenarios.
-    pub upper_bound_mean: f64,
+    /// Upper bound estimate for this iteration: the sample mean under a sampled
+    /// forward, the exact probability-weighted bound under an enumerated forward.
+    pub upper_bound: f64,
 
-    /// Standard deviation of the upper bound estimate across scenarios.
+    /// Standard deviation of the upper bound estimate across scenarios. Written
+    /// as NULL to `training/convergence.parquet` under an exact bound.
     pub upper_bound_std: f64,
 
     /// Relative gap between upper and lower bounds as a percentage, if defined.
@@ -277,9 +279,15 @@ pub struct TrainingOutput {
 
     /// Standard deviation of the final upper-bound estimate, if available.
     ///
-    /// `None` when no upper-bound evaluation was performed. The mean is carried
-    /// separately in [`final_upper_bound`](Self::final_upper_bound).
+    /// `None` when no upper-bound evaluation was performed or the bound is exact.
+    /// The value is carried separately in
+    /// [`final_upper_bound`](Self::final_upper_bound).
     pub final_upper_bound_std: Option<f64>,
+
+    /// Upper-bound regime for the whole run: `"statistical"` (sampled forward) or
+    /// `"exact"` (enumerated forward). Mirrored into `training/convergence.parquet`
+    /// and `training/metadata.json`.
+    pub final_upper_bound_kind: String,
 
     /// Number of iterations completed before the stopping condition was triggered.
     pub iterations_completed: u32,
@@ -492,7 +500,7 @@ mod tests {
             .map(|i| IterationRecord {
                 iteration: i,
                 lower_bound: 1.0,
-                upper_bound_mean: 2.0,
+                upper_bound: 2.0,
                 upper_bound_std: 0.1,
                 gap_percent: Some(50.0),
                 cuts_added: 10,
@@ -528,6 +536,7 @@ mod tests {
             final_upper_bound: Some(52.0),
             final_gap_percent: Some(3.85),
             final_upper_bound_std: Some(0.5),
+            final_upper_bound_kind: "statistical".to_string(),
             iterations_completed: 5,
             converged: true,
             termination_reason: "relative gap < 1%".to_string(),
@@ -565,7 +574,7 @@ mod tests {
         let record = IterationRecord {
             iteration: 7,
             lower_bound: 10.5,
-            upper_bound_mean: 11.0,
+            upper_bound: 11.0,
             upper_bound_std: 0.25,
             gap_percent: Some(4.55),
             cuts_added: 15,
@@ -597,7 +606,7 @@ mod tests {
 
         assert_eq!(record.iteration, 7);
         assert_eq!(record.lower_bound, 10.5);
-        assert_eq!(record.upper_bound_mean, 11.0);
+        assert_eq!(record.upper_bound, 11.0);
         assert_eq!(record.upper_bound_std, 0.25);
         assert_eq!(record.gap_percent, Some(4.55));
         assert_eq!(record.cuts_added, 15);

@@ -45,7 +45,7 @@ use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
     buses_schema, contracts_schema, costs_schema, exchanges_schema, generic_violations_schema,
     hydro_bus_generation_schema, hydros_schema, in_transit_schema, inflow_lags_schema,
-    non_controllables_schema, pumping_stations_schema, thermals_schema,
+    non_controllables_schema, paths_schema, pumping_stations_schema, thermals_schema,
 };
 
 // Payload types (mirrors solver simulation result types)
@@ -58,6 +58,9 @@ use crate::output::schemas::{
 pub struct CostWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level aggregates.
     pub block_id: Option<u32>,
     /// Total discounted stage cost.
@@ -118,6 +121,9 @@ pub struct CostWriteRecord {
 pub struct HydroWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
     /// Hydro plant entity ID.
@@ -189,6 +195,9 @@ pub struct HydroWriteRecord {
 pub struct ThermalWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
     /// Thermal unit entity ID.
@@ -212,6 +221,9 @@ pub struct ThermalWriteRecord {
 pub struct ExchangeWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
     /// Transmission line entity ID.
@@ -231,6 +243,9 @@ pub struct ExchangeWriteRecord {
 pub struct BusWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
     /// Bus entity ID.
@@ -250,6 +265,9 @@ pub struct BusWriteRecord {
 pub struct PumpingWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
     /// Pumping station entity ID.
@@ -269,6 +287,9 @@ pub struct PumpingWriteRecord {
 pub struct ContractWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
     /// Contract entity ID.
@@ -288,6 +309,9 @@ pub struct ContractWriteRecord {
 pub struct NonControllableWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
     /// Non-controllable source entity ID.
@@ -309,6 +333,9 @@ pub struct NonControllableWriteRecord {
 pub struct InflowLagWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Hydro plant entity ID.
     pub hydro_id: i32,
     /// Lag index within the AR model (0 = most recent past period).
@@ -323,6 +350,9 @@ pub struct InflowLagWriteRecord {
 pub struct TransitBucketWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Downstream hydro plant entity ID the arc feeds.
     pub hydro_id: i32,
     /// Maturity bucket index (1-based).
@@ -340,6 +370,9 @@ pub struct TransitBucketWriteRecord {
 pub struct HydroBusWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
     /// Hydro plant entity ID.
@@ -357,6 +390,9 @@ pub struct HydroBusWriteRecord {
 pub struct GenericViolationWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
     /// Generic constraint entity ID.
@@ -372,6 +408,9 @@ pub struct GenericViolationWriteRecord {
 pub struct StageWritePayload {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
     /// Cost breakdown records for this stage.
     pub costs: Vec<CostWriteRecord>,
     /// Hydro plant records for this stage.
@@ -404,12 +443,29 @@ pub struct StageWritePayload {
 /// Conversion to this payload is handled by the solver's output integration layer.
 #[derive(Debug)]
 pub struct ScenarioWritePayload {
-    /// 0-based scenario identifier. Determines the Hive partition:
-    /// `{entity}/scenario_id={scenario_id:04d}/data.parquet`.
+    /// 0-based scenario identifier. Determines the Hive partition
+    /// (`{entity}/scenario_id={scenario_id:04d}/data.parquet`) and is also written
+    /// as a real `scenario_id` column on every entity row.
     pub scenario_id: u32,
 
     /// Per-stage detailed results.
     pub stages: Vec<StageWritePayload>,
+}
+
+/// One row of `simulation/paths.parquet`: the node visited at one
+/// `(scenario, stage)` of the sampled walk.
+///
+/// Accumulated by [`SimulationParquetWriter::write_scenario`] and serialized by
+/// the single-owner [`write_paths`]; the wire form the CLI gathers across MPI
+/// ranks is three `i32`s in this field order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimulationPathRecord {
+    /// 0-based scenario identifier.
+    pub scenario_id: i32,
+    /// Stage index (0-based).
+    pub stage_id: i32,
+    /// Declared node id visited at this stage.
+    pub node_id: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +503,10 @@ pub struct SimulationParquetWriter {
     loss_factors: HashMap<i32, f64>,
     scenarios_written: u32,
     partitions_written: Vec<String>,
+    /// One row per `(scenario, stage)` visited, accumulated across every
+    /// `write_scenario` call; drained by [`Self::path_rows`] into the run-level
+    /// `paths.parquet` after the scenario stream closes.
+    path_rows: Vec<SimulationPathRecord>,
 }
 
 // Must stay Send: moved to a background I/O thread.
@@ -546,6 +606,7 @@ impl SimulationParquetWriter {
             loss_factors,
             scenarios_written: 0,
             partitions_written: Vec::new(),
+            path_rows: Vec::new(),
         })
     }
 
@@ -561,16 +622,30 @@ impl SimulationParquetWriter {
     /// - [`OutputError::IoError`] if any filesystem operation fails.
     #[allow(clippy::too_many_lines)] // 10 entity types × ~10 lines each is inherently long
     #[allow(clippy::needless_pass_by_value)] // consuming by value is intentional: payload drives output
+    #[allow(clippy::cast_possible_wrap)] // scenario/stage ids are small non-negative indices
     pub fn write_scenario(&mut self, result: ScenarioWritePayload) -> Result<(), OutputError> {
         let id = result.scenario_id;
+        let scenario_id = id as i32;
         let sim_dir = self.output_dir.join("simulation");
         let partition_suffix = format!("scenario_id={id:04}");
+
+        // One path row per visited (scenario, stage); node_id is stage-uniform.
+        self.path_rows
+            .extend(result.stages.iter().map(|s| SimulationPathRecord {
+                scenario_id,
+                stage_id: s.stage_id as i32,
+                node_id: s.node_id,
+            }));
 
         if result.stages.iter().any(|s| !s.costs.is_empty()) {
             let part_dir = sim_dir.join("costs").join(&partition_suffix);
             std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.costs.len()).sum();
-            let batch = build_costs_batch(result.stages.iter().flat_map(|s| s.costs.iter()), n)?;
+            let batch = build_costs_batch(
+                result.stages.iter().flat_map(|s| s.costs.iter()),
+                scenario_id,
+                n,
+            )?;
             let file_path = part_dir.join("data.parquet");
             write_parquet_atomic(&file_path, &batch, &self.config)?;
             self.partitions_written
@@ -583,6 +658,7 @@ impl SimulationParquetWriter {
             let n: usize = result.stages.iter().map(|s| s.hydros.len()).sum();
             let batch = build_hydros_batch(
                 result.stages.iter().flat_map(|s| s.hydros.iter()),
+                scenario_id,
                 &self.block_durations,
                 n,
             )?;
@@ -609,6 +685,7 @@ impl SimulationParquetWriter {
                     .stages
                     .iter()
                     .flat_map(|s| s.hydro_bus_generation.iter()),
+                scenario_id,
                 &self.block_durations,
                 n,
             )?;
@@ -625,6 +702,7 @@ impl SimulationParquetWriter {
             let n: usize = result.stages.iter().map(|s| s.thermals.len()).sum();
             let batch = build_thermals_batch(
                 result.stages.iter().flat_map(|s| s.thermals.iter()),
+                scenario_id,
                 &self.block_durations,
                 n,
             )?;
@@ -641,6 +719,7 @@ impl SimulationParquetWriter {
             let n: usize = result.stages.iter().map(|s| s.exchanges.len()).sum();
             let batch = build_exchanges_batch(
                 result.stages.iter().flat_map(|s| s.exchanges.iter()),
+                scenario_id,
                 &self.block_durations,
                 &self.loss_factors,
                 n,
@@ -658,6 +737,7 @@ impl SimulationParquetWriter {
             let n: usize = result.stages.iter().map(|s| s.buses.len()).sum();
             let batch = build_buses_batch(
                 result.stages.iter().flat_map(|s| s.buses.iter()),
+                scenario_id,
                 &self.block_durations,
                 n,
             )?;
@@ -673,6 +753,7 @@ impl SimulationParquetWriter {
             let n: usize = result.stages.iter().map(|s| s.pumping_stations.len()).sum();
             let batch = build_pumping_batch(
                 result.stages.iter().flat_map(|s| s.pumping_stations.iter()),
+                scenario_id,
                 &self.block_durations,
                 n,
             )?;
@@ -689,6 +770,7 @@ impl SimulationParquetWriter {
             let n: usize = result.stages.iter().map(|s| s.contracts.len()).sum();
             let batch = build_contracts_batch(
                 result.stages.iter().flat_map(|s| s.contracts.iter()),
+                scenario_id,
                 &self.block_durations,
                 n,
             )?;
@@ -716,6 +798,7 @@ impl SimulationParquetWriter {
                     .stages
                     .iter()
                     .flat_map(|s| s.non_controllables.iter()),
+                scenario_id,
                 &self.block_durations,
                 n,
             )?;
@@ -732,6 +815,7 @@ impl SimulationParquetWriter {
             let n: usize = result.stages.iter().map(|s| s.inflow_lags.len()).sum();
             let batch = build_inflow_lags_batch(
                 result.stages.iter().flat_map(|s| s.inflow_lags.iter()),
+                scenario_id,
                 n,
             )?;
             let file_path = part_dir.join("data.parquet");
@@ -747,6 +831,7 @@ impl SimulationParquetWriter {
             let n: usize = result.stages.iter().map(|s| s.transit_buckets.len()).sum();
             let batch = build_in_transit_batch(
                 result.stages.iter().flat_map(|s| s.transit_buckets.iter()),
+                scenario_id,
                 n,
             )?;
             let file_path = part_dir.join("data.parquet");
@@ -773,6 +858,7 @@ impl SimulationParquetWriter {
                     .stages
                     .iter()
                     .flat_map(|s| s.generic_violations.iter()),
+                scenario_id,
                 n,
             )?;
             let file_path = part_dir.join("data.parquet");
@@ -784,6 +870,19 @@ impl SimulationParquetWriter {
 
         self.scenarios_written += 1;
         Ok(())
+    }
+
+    /// The `(scenario_id, stage_id, node_id)` rows accumulated across every
+    /// [`Self::write_scenario`] call, in arrival order.
+    ///
+    /// The caller is the run-level owner of `paths.parquet`: it feeds these rows
+    /// (gathered across MPI ranks in the distributed CLI, taken directly in the
+    /// single-process bindings) to [`write_paths`], which fixes the canonical
+    /// order. Kept separate from [`Self::finalize`] so the rows survive the move
+    /// that consumes the writer.
+    #[must_use]
+    pub fn path_rows(&self) -> &[SimulationPathRecord] {
+        &self.path_rows
     }
 
     /// Finalize writing and return the [`SimulationOutput`] summary.
@@ -802,6 +901,55 @@ impl SimulationParquetWriter {
             solve_stats: MetadataSimulationSolveStats::default(),
         }
     }
+}
+
+/// Write the run-level, unpartitioned `simulation/paths.parquet` from the
+/// per-`(scenario, stage)` node-path rows.
+///
+/// Single owner of the file: it fixes the canonical `(scenario_id, stage_id)`
+/// order so the output is identical regardless of the order scenarios drained or
+/// which MPI rank contributed which scenario (declaration-order-invariant and
+/// rank-invariant). Uses the crate-default Parquet codec, matching the other
+/// run-level simulation files.
+///
+/// # Errors
+///
+/// - [`OutputError::IoError`] if the `simulation/` directory or file cannot be
+///   written.
+/// - [`OutputError::SerializationError`] if the `RecordBatch` cannot be built.
+pub fn write_paths(
+    output_dir: &Path,
+    mut rows: Vec<SimulationPathRecord>,
+) -> Result<(), OutputError> {
+    rows.sort_by_key(|r| (r.scenario_id, r.stage_id));
+
+    let n = rows.len();
+    let mut scenario_id = Int32Builder::with_capacity(n);
+    let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
+    for r in &rows {
+        scenario_id.append_value(r.scenario_id);
+        stage_id.append_value(r.stage_id);
+        node_id.append_value(r.node_id);
+    }
+
+    let batch = RecordBatch::try_new(
+        Arc::new(paths_schema()),
+        vec![
+            Arc::new(scenario_id.finish()),
+            Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
+        ],
+    )
+    .map_err(|e| OutputError::serialization("paths", e.to_string()))?;
+
+    let sim_dir = output_dir.join("simulation");
+    std::fs::create_dir_all(&sim_dir).map_err(|e| OutputError::io(&sim_dir, e))?;
+    write_parquet_atomic(
+        &sim_dir.join("paths.parquet"),
+        &batch,
+        &ParquetWriterConfig::default(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -831,11 +979,14 @@ fn block_duration(block_durations: &[Vec<f64>], stage_id: u32, block_id: Option<
 #[allow(clippy::cast_possible_wrap)]
 fn build_costs_batch<'a>(
     records: impl IntoIterator<Item = &'a CostWriteRecord>,
+    scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(costs_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut block_id = Int32Builder::with_capacity(n);
     let mut total_cost = Float64Builder::with_capacity(n);
     let mut immediate_cost = Float64Builder::with_capacity(n);
@@ -864,7 +1015,9 @@ fn build_costs_batch<'a>(
     let mut pumping_cost = Float64Builder::with_capacity(n);
 
     for r in records {
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         block_id.append_option(r.block_id.map(|b| b as i32));
         total_cost.append_value(r.total_cost);
         immediate_cost.append_value(r.immediate_cost);
@@ -896,7 +1049,9 @@ fn build_costs_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(block_id.finish()),
             Arc::new(total_cost.finish()),
             Arc::new(immediate_cost.finish()),
@@ -931,7 +1086,9 @@ fn build_costs_batch<'a>(
 /// Arrow column builders for the hydros `RecordBatch`, grouped into one struct
 /// so [`fill_hydro_builders`] takes a single argument rather than one per column.
 struct HydroBuilders {
+    scenario_id: Int32Builder,
     stage_id: Int32Builder,
+    node_id: Int32Builder,
     block_id: Int32Builder,
     hydro_id: Int32Builder,
     turbined_m3s: Float64Builder,
@@ -971,7 +1128,9 @@ struct HydroBuilders {
 impl HydroBuilders {
     fn with_capacity(n: usize) -> Self {
         Self {
+            scenario_id: Int32Builder::with_capacity(n),
             stage_id: Int32Builder::with_capacity(n),
+            node_id: Int32Builder::with_capacity(n),
             block_id: Int32Builder::with_capacity(n),
             hydro_id: Int32Builder::with_capacity(n),
             turbined_m3s: Float64Builder::with_capacity(n),
@@ -1016,12 +1175,15 @@ impl HydroBuilders {
 #[allow(clippy::cast_possible_wrap)]
 fn fill_hydro_builders<'a>(
     records: impl IntoIterator<Item = &'a HydroWriteRecord>,
+    scenario_id: i32,
     block_durations: &[Vec<f64>],
     b: &mut HydroBuilders,
 ) {
     for r in records {
         let dur = block_duration(block_durations, r.stage_id, r.block_id);
+        b.scenario_id.append_value(scenario_id);
         b.stage_id.append_value(r.stage_id as i32);
+        b.node_id.append_value(r.node_id);
         b.block_id.append_option(r.block_id.map(|v| v as i32));
         b.hydro_id.append_value(r.hydro_id);
         b.turbined_m3s.append_value(r.turbined_m3s);
@@ -1078,16 +1240,19 @@ fn fill_hydro_builders<'a>(
 /// [`fill_hydro_builders`].
 fn build_hydros_batch<'a>(
     records: impl IntoIterator<Item = &'a HydroWriteRecord>,
+    scenario_id: i32,
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(hydros_schema());
     let mut b = HydroBuilders::with_capacity(n);
-    fill_hydro_builders(records, block_durations, &mut b);
+    fill_hydro_builders(records, scenario_id, block_durations, &mut b);
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(b.scenario_id.finish()),
             Arc::new(b.stage_id.finish()),
+            Arc::new(b.node_id.finish()),
             Arc::new(b.block_id.finish()),
             Arc::new(b.hydro_id.finish()),
             Arc::new(b.turbined_m3s.finish()),
@@ -1132,12 +1297,15 @@ fn build_hydros_batch<'a>(
 #[allow(clippy::cast_possible_wrap)]
 fn build_hydro_bus_generation_batch<'a>(
     records: impl IntoIterator<Item = &'a HydroBusWriteRecord>,
+    scenario_id: i32,
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(hydro_bus_generation_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut block_id = Int32Builder::with_capacity(n);
     let mut hydro_id = Int32Builder::with_capacity(n);
     let mut bus_id = Int32Builder::with_capacity(n);
@@ -1147,7 +1315,9 @@ fn build_hydro_bus_generation_batch<'a>(
 
     for r in records {
         let dur = block_duration(block_durations, r.stage_id, r.block_id);
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         block_id.append_option(r.block_id.map(|b| b as i32));
         hydro_id.append_value(r.hydro_id);
         bus_id.append_value(r.bus_id);
@@ -1159,7 +1329,9 @@ fn build_hydro_bus_generation_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(block_id.finish()),
             Arc::new(hydro_id.finish()),
             Arc::new(bus_id.finish()),
@@ -1176,12 +1348,15 @@ fn build_hydro_bus_generation_batch<'a>(
 #[allow(clippy::cast_possible_wrap)]
 fn build_thermals_batch<'a>(
     records: impl IntoIterator<Item = &'a ThermalWriteRecord>,
+    scenario_id: i32,
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(thermals_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut block_id = Int32Builder::with_capacity(n);
     let mut thermal_id = Int32Builder::with_capacity(n);
     let mut generation_mw = Float64Builder::with_capacity(n);
@@ -1194,7 +1369,9 @@ fn build_thermals_batch<'a>(
 
     for r in records {
         let dur = block_duration(block_durations, r.stage_id, r.block_id);
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         block_id.append_option(r.block_id.map(|b| b as i32));
         thermal_id.append_value(r.thermal_id);
         generation_mw.append_value(r.generation_mw);
@@ -1209,7 +1386,9 @@ fn build_thermals_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(block_id.finish()),
             Arc::new(thermal_id.finish()),
             Arc::new(generation_mw.finish()),
@@ -1240,13 +1419,16 @@ fn build_thermals_batch<'a>(
 )]
 fn build_exchanges_batch<'a>(
     records: impl IntoIterator<Item = &'a ExchangeWriteRecord>,
+    scenario_id: i32,
     block_durations: &[Vec<f64>],
     loss_factors: &HashMap<i32, f64>,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(exchanges_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut block_id = Int32Builder::with_capacity(n);
     let mut line_id = Int32Builder::with_capacity(n);
     let mut direct_flow_mw = Float64Builder::with_capacity(n);
@@ -1267,7 +1449,9 @@ fn build_exchanges_batch<'a>(
         let total_flow = r.direct_flow_mw + r.reverse_flow_mw;
         let losses = (1.0 - lf) * total_flow;
 
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         block_id.append_option(r.block_id.map(|b| b as i32));
         line_id.append_value(r.line_id);
         direct_flow_mw.append_value(r.direct_flow_mw);
@@ -1283,7 +1467,9 @@ fn build_exchanges_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(block_id.finish()),
             Arc::new(line_id.finish()),
             Arc::new(direct_flow_mw.finish()),
@@ -1306,12 +1492,15 @@ fn build_exchanges_batch<'a>(
 #[allow(clippy::cast_possible_wrap)]
 fn build_buses_batch<'a>(
     records: impl IntoIterator<Item = &'a BusWriteRecord>,
+    scenario_id: i32,
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(buses_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut block_id = Int32Builder::with_capacity(n);
     let mut bus_id = Int32Builder::with_capacity(n);
     let mut load_mw = Float64Builder::with_capacity(n);
@@ -1324,7 +1513,9 @@ fn build_buses_batch<'a>(
 
     for r in records {
         let dur = block_duration(block_durations, r.stage_id, r.block_id);
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         block_id.append_option(r.block_id.map(|b| b as i32));
         bus_id.append_value(r.bus_id);
         load_mw.append_value(r.load_mw);
@@ -1339,7 +1530,9 @@ fn build_buses_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(block_id.finish()),
             Arc::new(bus_id.finish()),
             Arc::new(load_mw.finish()),
@@ -1369,12 +1562,15 @@ fn build_buses_batch<'a>(
 #[allow(clippy::cast_possible_wrap)]
 fn build_pumping_batch<'a>(
     records: impl IntoIterator<Item = &'a PumpingWriteRecord>,
+    scenario_id: i32,
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(pumping_stations_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut block_id = Int32Builder::with_capacity(n);
     let mut pumping_station_id = Int32Builder::with_capacity(n);
     let mut pumped_flow_m3s = Float64Builder::with_capacity(n);
@@ -1386,7 +1582,9 @@ fn build_pumping_batch<'a>(
 
     for r in records {
         let dur = block_duration(block_durations, r.stage_id, r.block_id);
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         block_id.append_option(r.block_id.map(|b| b as i32));
         pumping_station_id.append_value(r.pumping_station_id);
         pumped_flow_m3s.append_value(r.pumped_flow_m3s);
@@ -1400,7 +1598,9 @@ fn build_pumping_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(block_id.finish()),
             Arc::new(pumping_station_id.finish()),
             Arc::new(pumped_flow_m3s.finish()),
@@ -1419,12 +1619,15 @@ fn build_pumping_batch<'a>(
 #[allow(clippy::cast_possible_wrap)]
 fn build_contracts_batch<'a>(
     records: impl IntoIterator<Item = &'a ContractWriteRecord>,
+    scenario_id: i32,
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(contracts_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut block_id = Int32Builder::with_capacity(n);
     let mut contract_id = Int32Builder::with_capacity(n);
     let mut power_mw = Float64Builder::with_capacity(n);
@@ -1435,7 +1638,9 @@ fn build_contracts_batch<'a>(
 
     for r in records {
         let dur = block_duration(block_durations, r.stage_id, r.block_id);
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         block_id.append_option(r.block_id.map(|b| b as i32));
         contract_id.append_value(r.contract_id);
         power_mw.append_value(r.power_mw);
@@ -1448,7 +1653,9 @@ fn build_contracts_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(block_id.finish()),
             Arc::new(contract_id.finish()),
             Arc::new(power_mw.finish()),
@@ -1467,12 +1674,15 @@ fn build_contracts_batch<'a>(
 #[allow(clippy::cast_possible_wrap)]
 fn build_non_controllables_batch<'a>(
     records: impl IntoIterator<Item = &'a NonControllableWriteRecord>,
+    scenario_id: i32,
     block_durations: &[Vec<f64>],
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(non_controllables_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut block_id = Int32Builder::with_capacity(n);
     let mut non_controllable_id = Int32Builder::with_capacity(n);
     let mut generation_mw = Float64Builder::with_capacity(n);
@@ -1485,7 +1695,9 @@ fn build_non_controllables_batch<'a>(
 
     for r in records {
         let dur = block_duration(block_durations, r.stage_id, r.block_id);
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         block_id.append_option(r.block_id.map(|b| b as i32));
         non_controllable_id.append_value(r.non_controllable_id);
         generation_mw.append_value(r.generation_mw);
@@ -1500,7 +1712,9 @@ fn build_non_controllables_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(block_id.finish()),
             Arc::new(non_controllable_id.finish()),
             Arc::new(generation_mw.finish()),
@@ -1518,17 +1732,22 @@ fn build_non_controllables_batch<'a>(
 #[allow(clippy::cast_possible_wrap)]
 fn build_inflow_lags_batch<'a>(
     records: impl IntoIterator<Item = &'a InflowLagWriteRecord>,
+    scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(inflow_lags_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut hydro_id = Int32Builder::with_capacity(n);
     let mut lag_index = Int32Builder::with_capacity(n);
     let mut inflow_m3s = Float64Builder::with_capacity(n);
 
     for r in records {
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         hydro_id.append_value(r.hydro_id);
         lag_index.append_value(r.lag_index as i32);
         inflow_m3s.append_value(r.inflow_m3s);
@@ -1537,7 +1756,9 @@ fn build_inflow_lags_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(hydro_id.finish()),
             Arc::new(lag_index.finish()),
             Arc::new(inflow_m3s.finish()),
@@ -1549,18 +1770,23 @@ fn build_inflow_lags_batch<'a>(
 #[allow(clippy::cast_possible_wrap)]
 fn build_in_transit_batch<'a>(
     records: impl IntoIterator<Item = &'a TransitBucketWriteRecord>,
+    scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(in_transit_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut hydro_id = Int32Builder::with_capacity(n);
     let mut lag = Int32Builder::with_capacity(n);
     let mut in_transit_volume_hm3 = Float64Builder::with_capacity(n);
     let mut delayed_arrival_hm3 = Float64Builder::with_capacity(n);
 
     for r in records {
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         hydro_id.append_value(r.hydro_id);
         lag.append_value(r.lag as i32);
         in_transit_volume_hm3.append_value(r.in_transit_volume_hm3);
@@ -1570,7 +1796,9 @@ fn build_in_transit_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(hydro_id.finish()),
             Arc::new(lag.finish()),
             Arc::new(in_transit_volume_hm3.finish()),
@@ -1583,18 +1811,23 @@ fn build_in_transit_batch<'a>(
 #[allow(clippy::cast_possible_wrap)]
 fn build_generic_violations_batch<'a>(
     records: impl IntoIterator<Item = &'a GenericViolationWriteRecord>,
+    scenario_id: i32,
     n: usize,
 ) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(generic_violations_schema());
 
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
     let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
     let mut block_id = Int32Builder::with_capacity(n);
     let mut constraint_id = Int32Builder::with_capacity(n);
     let mut slack_value = Float64Builder::with_capacity(n);
     let mut slack_cost = Float64Builder::with_capacity(n);
 
     for r in records {
+        scenario_id_col.append_value(scenario_id);
         stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
         block_id.append_option(r.block_id.map(|b| b as i32));
         constraint_id.append_value(r.constraint_id);
         slack_value.append_value(r.slack_value);
@@ -1604,7 +1837,9 @@ fn build_generic_violations_batch<'a>(
     RecordBatch::try_new(
         schema,
         vec![
+            Arc::new(scenario_id_col.finish()),
             Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
             Arc::new(block_id.finish()),
             Arc::new(constraint_id.finish()),
             Arc::new(slack_value.finish()),
@@ -1623,6 +1858,7 @@ fn build_generic_violations_batch<'a>(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
     clippy::float_cmp,
     clippy::panic
 )]
@@ -1838,6 +2074,7 @@ mod tests {
     ) -> PumpingWriteRecord {
         PumpingWriteRecord {
             stage_id,
+            node_id: stage_id as i32,
             block_id,
             pumping_station_id,
             pumped_flow_m3s,
@@ -1850,6 +2087,7 @@ mod tests {
     fn make_cost_record(stage_id: u32, block_id: Option<u32>) -> CostWriteRecord {
         CostWriteRecord {
             stage_id,
+            node_id: stage_id as i32,
             block_id,
             total_cost: 1000.0,
             immediate_cost: 800.0,
@@ -1882,6 +2120,7 @@ mod tests {
     fn make_hydro_record(stage_id: u32, block_id: Option<u32>, hydro_id: i32) -> HydroWriteRecord {
         HydroWriteRecord {
             stage_id,
+            node_id: stage_id as i32,
             block_id,
             hydro_id,
             turbined_m3s: 80.0,
@@ -1921,6 +2160,7 @@ mod tests {
         let stages = (0..n_stages as u32)
             .map(|s| StageWritePayload {
                 stage_id: s,
+                node_id: s as i32,
                 costs: vec![make_cost_record(s, Some(0))],
                 hydros: vec![
                     make_hydro_record(s, Some(0), 1),
@@ -1953,11 +2193,11 @@ mod tests {
         let r0 = make_cost_record(0, Some(0));
         let r1 = make_cost_record(1, Some(0));
         let records = [&r0, &r1];
-        let batch = build_costs_batch(records.iter().copied(), records.len())
+        let batch = build_costs_batch(records.iter().copied(), 0, records.len())
             .expect("costs batch must build");
 
         assert_eq!(batch.num_rows(), 2, "must have 2 rows");
-        assert_eq!(batch.num_columns(), 27, "costs schema has 27 columns");
+        assert_eq!(batch.num_columns(), 29, "costs schema has 29 columns");
 
         let expected = costs_schema();
         assert_eq!(
@@ -1977,10 +2217,10 @@ mod tests {
         let r1 = make_hydro_record(1, Some(0), 2); // generation_mw = 50.0
         let records = [&r0, &r1];
 
-        let batch = build_hydros_batch(records.iter().copied(), &block_durations, records.len())
+        let batch = build_hydros_batch(records.iter().copied(), 0, &block_durations, records.len())
             .expect("hydros batch must build");
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 35, "hydros schema has 35 columns");
+        assert_eq!(batch.num_columns(), 37, "hydros schema has 37 columns");
 
         let gen_mwh_col = batch
             .column_by_name("generation_mwh")
@@ -2044,6 +2284,7 @@ mod tests {
 
         let r = PumpingWriteRecord {
             stage_id: 0,
+            node_id: 0,
             block_id: Some(0),
             pumping_station_id: 1,
             pumped_flow_m3s: 10.0,
@@ -2053,18 +2294,19 @@ mod tests {
         };
         let records = [&r];
 
-        let batch = build_pumping_batch(records.iter().copied(), &block_durations, records.len())
-            .expect("pumping batch must build");
+        let batch =
+            build_pumping_batch(records.iter().copied(), 0, &block_durations, records.len())
+                .expect("pumping batch must build");
         assert_eq!(batch.num_rows(), 1);
 
-        // Schema is field-for-field equal to pumping_stations_schema() (9 fields).
+        // Schema is field-for-field equal to pumping_stations_schema() (11 fields).
         let expected = pumping_stations_schema();
         assert_eq!(
             batch.schema().fields(),
             expected.fields(),
             "schema must match pumping_stations_schema()"
         );
-        assert_eq!(batch.num_columns(), 9, "pumping schema has 9 columns");
+        assert_eq!(batch.num_columns(), 11, "pumping schema has 11 columns");
 
         let f64_col = |name: &str| {
             batch
@@ -2111,6 +2353,7 @@ mod tests {
 
         let r = ExchangeWriteRecord {
             stage_id: 0,
+            node_id: 0,
             block_id: Some(0),
             line_id: 1,
             direct_flow_mw: 100.0,
@@ -2122,13 +2365,14 @@ mod tests {
 
         let batch = build_exchanges_batch(
             records.iter().copied(),
+            0,
             &block_durations,
             &loss_factors,
             records.len(),
         )
         .expect("exchanges batch must build");
         assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 11, "exchanges schema has 11 columns");
+        assert_eq!(batch.num_columns(), 13, "exchanges schema has 13 columns");
 
         let net_flow_col = batch
             .column_by_name("net_flow_mw")
@@ -2162,7 +2406,7 @@ mod tests {
         let r_without = make_cost_record(1, None);
         let records = [&r_with, &r_without];
 
-        let batch = build_costs_batch(records.iter().copied(), records.len())
+        let batch = build_costs_batch(records.iter().copied(), 0, records.len())
             .expect("costs batch must build");
         let block_col = batch
             .column_by_name("block_id")
@@ -2212,6 +2456,160 @@ mod tests {
                 .join("simulation/hydros/scenario_id=0000/data.parquet")
                 .exists(),
             "simulation/hydros/scenario_id=0000/data.parquet must exist"
+        );
+    }
+
+    #[test]
+    fn entity_rows_carry_node_id_and_scenario_id_columns() {
+        use arrow::array::Array;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+
+        // make_test_system() declares no nodes[]; make_scenario_payload stamps the
+        // degenerate per-stage node id (node_id == stage_id). scenario_id = 3.
+        let system = make_test_system();
+        let config = ParquetWriterConfig::default();
+        let mut writer =
+            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+        writer
+            .write_scenario(make_scenario_payload(3, 2))
+            .expect("write_scenario must succeed");
+
+        let path = tmp
+            .path()
+            .join("simulation/hydros/scenario_id=0003/data.parquet");
+        let file = std::fs::File::open(&path).expect("hydros parquet must open");
+        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
+            .expect("reader builder must succeed")
+            .build()
+            .expect("reader must build")
+            .next()
+            .expect("must have rows")
+            .expect("batch must be Ok");
+
+        for col in &["scenario_id", "stage_id", "node_id"] {
+            let field = batch
+                .schema()
+                .field_with_name(col)
+                .unwrap_or_else(|_| panic!("{col} must be a real column"))
+                .clone();
+            assert_eq!(field.data_type(), &arrow::datatypes::DataType::Int32);
+            assert!(!field.is_nullable(), "{col} must be non-null");
+        }
+
+        let i32_col = |name: &str| {
+            batch
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("{name} column must exist"))
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap_or_else(|| panic!("{name} must be Int32Array"))
+                .clone()
+        };
+        let scenario = i32_col("scenario_id");
+        let stage = i32_col("stage_id");
+        let node = i32_col("node_id");
+        assert_eq!(scenario.null_count(), 0, "scenario_id must be non-null");
+        assert_eq!(node.null_count(), 0, "node_id must be non-null");
+        for row in 0..batch.num_rows() {
+            assert_eq!(
+                scenario.value(row),
+                3,
+                "scenario_id column equals the partition"
+            );
+            // Degenerate chain node id equals the stage id on every row.
+            assert_eq!(node.value(row), stage.value(row));
+        }
+    }
+
+    #[test]
+    fn row_schema_is_invariant_to_graph_shape() {
+        // The schema depends only on the entity type, never on the visited node's
+        // id — a chain (node_id == stage_id) and a branching walk (a distinct
+        // node id) emit byte-identical columns.
+        let chain = make_hydro_record(0, Some(0), 1); // node_id 0 (degenerate)
+        let mut branching = make_hydro_record(0, Some(0), 1);
+        branching.node_id = 42; // a branching node id unrelated to the stage
+        let chain_batch = build_hydros_batch([&chain], 0, &[vec![720.0]], 1).unwrap();
+        let branching_batch = build_hydros_batch([&branching], 0, &[vec![720.0]], 1).unwrap();
+        assert_eq!(
+            chain_batch.schema().fields(),
+            branching_batch.schema().fields(),
+            "row schema must not branch on graph shape"
+        );
+    }
+
+    #[test]
+    fn write_paths_is_three_int32_columns_sorted_canonically() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+
+        // Deliberately out of (scenario_id, stage_id) order to pin the canonical sort.
+        let rows = vec![
+            SimulationPathRecord {
+                scenario_id: 1,
+                stage_id: 1,
+                node_id: 5,
+            },
+            SimulationPathRecord {
+                scenario_id: 0,
+                stage_id: 1,
+                node_id: 3,
+            },
+            SimulationPathRecord {
+                scenario_id: 0,
+                stage_id: 0,
+                node_id: 2,
+            },
+        ];
+        write_paths(tmp.path(), rows).expect("write_paths must succeed");
+
+        let path = tmp.path().join("simulation/paths.parquet");
+        assert!(
+            path.exists(),
+            "simulation/paths.parquet must exist (unpartitioned)"
+        );
+        let file = std::fs::File::open(&path).expect("paths parquet must open");
+        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
+            .expect("reader builder must succeed")
+            .build()
+            .expect("reader must build")
+            .next()
+            .expect("must have rows")
+            .expect("batch must be Ok");
+
+        let schema = batch.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["scenario_id", "stage_id", "node_id"]);
+        assert_eq!(batch.num_columns(), 3);
+
+        let col = |name: &str| {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap()
+                .clone()
+        };
+        let scenario = col("scenario_id");
+        let stage = col("stage_id");
+        let node = col("node_id");
+        // Canonical (scenario_id, stage_id) order regardless of insertion order.
+        assert_eq!(
+            (0..3).map(|i| scenario.value(i)).collect::<Vec<_>>(),
+            vec![0, 0, 1]
+        );
+        assert_eq!(
+            (0..3).map(|i| stage.value(i)).collect::<Vec<_>>(),
+            vec![0, 1, 1]
+        );
+        assert_eq!(
+            (0..3).map(|i| node.value(i)).collect::<Vec<_>>(),
+            vec![2, 3, 5]
         );
     }
 
@@ -2275,6 +2673,7 @@ mod tests {
         // this non-empty pumping_stations vector is what triggers the write.
         let stage0 = StageWritePayload {
             stage_id: 0,
+            node_id: 0,
             costs: vec![],
             hydros: vec![],
             hydro_bus_generation: vec![],
@@ -2325,7 +2724,7 @@ mod tests {
             expected.fields(),
             "written schema must match pumping_stations_schema()"
         );
-        assert_eq!(batch.num_columns(), 9, "pumping schema has 9 columns");
+        assert_eq!(batch.num_columns(), 11, "pumping schema has 11 columns");
 
         // Row count == number of (stage, block, station) tuples (2).
         assert_eq!(
@@ -2475,7 +2874,7 @@ mod tests {
             .expect("must have rows")
             .expect("batch must be Ok");
         assert_eq!(batch.num_rows(), 2, "costs parquet must have 2 rows");
-        assert_eq!(batch.num_columns(), 27, "costs schema has 27 columns");
+        assert_eq!(batch.num_columns(), 29, "costs schema has 29 columns");
     }
 
     #[test]
@@ -2636,12 +3035,12 @@ mod tests {
     }
 
     #[test]
-    fn hydros_schema_has_thirty_five_fields() {
+    fn hydros_schema_has_thirty_seven_fields() {
         let schema = hydros_schema();
         assert_eq!(
             schema.fields().len(),
-            35,
-            "hydros_schema must have 35 fields after energy column expansion"
+            37,
+            "hydros_schema must have 37 fields (35 + scenario_id + node_id)"
         );
     }
 
@@ -2791,6 +3190,7 @@ mod tests {
 
         let stage0 = StageWritePayload {
             stage_id: 0,
+            node_id: 0,
             costs: vec![],
             hydros: vec![],
             hydro_bus_generation: vec![],
@@ -2838,6 +3238,7 @@ mod tests {
         // on lag 1.
         let stage0 = StageWritePayload {
             stage_id: 0,
+            node_id: 0,
             costs: vec![],
             hydros: vec![],
             hydro_bus_generation: vec![],
@@ -2851,6 +3252,7 @@ mod tests {
             transit_buckets: vec![
                 TransitBucketWriteRecord {
                     stage_id: 0,
+                    node_id: 0,
                     hydro_id: 1,
                     lag: 1,
                     in_transit_volume_hm3: 11.0,
@@ -2858,6 +3260,7 @@ mod tests {
                 },
                 TransitBucketWriteRecord {
                     stage_id: 0,
+                    node_id: 0,
                     hydro_id: 1,
                     lag: 2,
                     in_transit_volume_hm3: 22.0,
@@ -2979,6 +3382,7 @@ mod tests {
         // partition), so hydro_bus_generation's row count matches hydros'.
         let stage0 = StageWritePayload {
             stage_id: 0,
+            node_id: 0,
             costs: vec![],
             hydros: vec![
                 make_hydro_record(0, Some(0), 1),
@@ -2987,6 +3391,7 @@ mod tests {
             hydro_bus_generation: vec![
                 HydroBusWriteRecord {
                     stage_id: 0,
+                    node_id: 0,
                     block_id: Some(0),
                     hydro_id: 1,
                     bus_id: 1,
@@ -2995,6 +3400,7 @@ mod tests {
                 },
                 HydroBusWriteRecord {
                     stage_id: 0,
+                    node_id: 0,
                     block_id: Some(0),
                     hydro_id: 2,
                     bus_id: 1,
@@ -3075,11 +3481,13 @@ mod tests {
 
         let stage0 = StageWritePayload {
             stage_id: 0,
+            node_id: 0,
             costs: vec![],
             hydros: vec![],
             hydro_bus_generation: vec![
                 HydroBusWriteRecord {
                     stage_id: 0,
+                    node_id: 0,
                     block_id: Some(0),
                     hydro_id: 7,
                     bus_id: 11,
@@ -3088,6 +3496,7 @@ mod tests {
                 },
                 HydroBusWriteRecord {
                     stage_id: 0,
+                    node_id: 0,
                     block_id: Some(0),
                     hydro_id: 7,
                     bus_id: 22,
@@ -3107,10 +3516,12 @@ mod tests {
         };
         let stage1 = StageWritePayload {
             stage_id: 1,
+            node_id: 1,
             costs: vec![],
             hydros: vec![],
             hydro_bus_generation: vec![HydroBusWriteRecord {
                 stage_id: 1,
+                node_id: 1,
                 block_id: Some(0),
                 hydro_id: 5,
                 bus_id: 9,

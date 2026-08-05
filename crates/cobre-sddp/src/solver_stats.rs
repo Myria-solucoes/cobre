@@ -240,18 +240,19 @@ pub fn aggregate_solver_statistics(
 ///
 /// The `opening`/`worker_id` `-1 → None` sentinel decode is owned by
 /// [`SolverStatsLogEntry::from_raw`] — the sole construction path on the hot
-/// push sites — so no consumer re-decodes a sentinel.
+/// push sites — so no consumer re-decodes a sentinel. `stage_id` carries no
+/// sentinel: it is a nullable domain id (a domain stage id may be negative), so
+/// the "no stage" case is `None`, never `-1`.
 #[derive(Debug, Clone)]
 pub struct SolverStatsLogEntry {
-    /// 1-based iteration number (training) or scenario id (simulation).
+    /// 1-based training iteration number.
     pub iteration: u64,
     /// `"forward"`, `"backward"`, or `"lower_bound"`. `&'static str` to avoid
     /// per-entry heap allocation on the hot push path.
     pub phase: &'static str,
-    /// Stage index `>= 0` for forward/backward; `-1` for the lower-bound phase.
-    /// Kept as `i32`, NOT `Option`: the `-1 → NULL Int32` mapping lives in the
-    /// downstream writer; converting here would change the column encoding.
-    pub stage: i32,
+    /// Declared study `stage_id` (domain id) for forward/backward rows; `None`
+    /// for the lower-bound phase (no per-stage attribution).
+    pub stage_id: Option<i32>,
     /// Opening index `Some(ω)` for backward rows; `None` otherwise (writer → NULL).
     pub opening: Option<i32>,
     /// MPI rank that produced this row; never a sentinel (writer wraps in `Some`).
@@ -265,13 +266,13 @@ pub struct SolverStatsLogEntry {
 
 impl SolverStatsLogEntry {
     /// Build an entry from raw producer values, decoding the `-1` sentinel on
-    /// `opening`/`worker_id` into `None` exactly once here. `stage` and `rank`
-    /// are stored verbatim.
+    /// `opening`/`worker_id` into `None` exactly once here. `stage_id` is a
+    /// nullable domain id passed directly (no sentinel); `rank` is stored verbatim.
     #[must_use]
     pub fn from_raw(
         iteration: u64,
         phase: &'static str,
-        stage: i32,
+        stage_id: Option<i32>,
         opening: i32,
         rank: i32,
         worker_id: i32,
@@ -280,7 +281,7 @@ impl SolverStatsLogEntry {
         Self {
             iteration,
             phase,
-            stage,
+            stage_id,
             opening: (opening != -1).then_some(opening),
             rank,
             worker_id: (worker_id != -1).then_some(worker_id),
@@ -291,24 +292,27 @@ impl SolverStatsLogEntry {
 
 /// Convert a [`SolverStatsDelta`] into a [`SolverStatsRow`] for Parquet output.
 ///
-/// `id` is the row identifier: iteration number for training phases, scenario ID
-/// for simulation.
+/// A training row fills `iteration` (leaving `scenario_id = None`); a simulation
+/// row fills `scenario_id` (leaving `iteration = None`). `stage_id` is `None` for
+/// the lower-bound and simulation phases that carry no per-stage attribution.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn delta_to_stats_row(
-    id: u32,
+    iteration: Option<i32>,
+    scenario_id: Option<i32>,
     phase: &str,
-    stage: i32,
-    opening: Option<i32>,
+    stage_id: Option<i32>,
+    opening_index: Option<i32>,
     rank: Option<i32>,
     worker_id: Option<i32>,
     delta: &SolverStatsDelta,
 ) -> SolverStatsRow {
     SolverStatsRow {
-        iteration: id,
+        iteration,
+        scenario_id,
         phase: phase.to_string(),
-        stage,
-        opening,
+        stage_id,
+        opening_index,
         rank,
         worker_id,
         lp_solves: delta.lp_solves as u32,
@@ -332,12 +336,13 @@ pub fn delta_to_stats_row(
 pub fn solver_stats_log_to_rows(log: &[SolverStatsLogEntry]) -> Vec<SolverStatsRow> {
     log.iter()
         .map(|entry| {
-            #[allow(clippy::cast_possible_truncation)] // iteration count fits in u32
-            let id = entry.iteration as u32;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let iteration = entry.iteration as i32;
             delta_to_stats_row(
-                id,
+                Some(iteration),
+                None,
                 entry.phase,
-                entry.stage,
+                entry.stage_id,
                 entry.opening,
                 Some(entry.rank),
                 entry.worker_id,
@@ -976,24 +981,27 @@ mod tests {
 
     #[test]
     fn test_solver_stats_log_per_opening_shape() {
-        // Forward entries use a real stage index (>= 0), opening == None,
+        // Forward entries carry a real (domain) stage_id, opening == None,
         // worker_id == None (no per-worker dimension yet). LB entries use
-        // stage == -1, opening == None, worker_id == None. Backward entries
+        // stage_id == None, opening == None, worker_id == None. Backward entries
         // carry real (rank, worker_id) from allgatherv unpack.
-        let fwd_entry = SolverStatsLogEntry::from_raw(1, "forward", 0, -1, 0, -1, make_delta(4));
-        let bwd_entry_0 = SolverStatsLogEntry::from_raw(1, "backward", 2, 0, 0, 0, make_delta(2));
-        let bwd_entry_1 = SolverStatsLogEntry::from_raw(1, "backward", 2, 1, 0, 1, make_delta(3));
+        let fwd_entry =
+            SolverStatsLogEntry::from_raw(1, "forward", Some(0), -1, 0, -1, make_delta(4));
+        let bwd_entry_0 =
+            SolverStatsLogEntry::from_raw(1, "backward", Some(2), 0, 0, 0, make_delta(2));
+        let bwd_entry_1 =
+            SolverStatsLogEntry::from_raw(1, "backward", Some(2), 1, 0, 1, make_delta(3));
         let lb_entry =
-            SolverStatsLogEntry::from_raw(1, "lower_bound", -1, -1, 0, -1, make_delta(1));
+            SolverStatsLogEntry::from_raw(1, "lower_bound", None, -1, 0, -1, make_delta(1));
 
         let log: Vec<SolverStatsLogEntry> = vec![fwd_entry, bwd_entry_0, bwd_entry_1, lb_entry];
 
-        // Verify the forward entry has a real stage index, opening None, worker_id None.
+        // Verify the forward entry has a real stage_id, opening None, worker_id None.
         assert_eq!(log[0].phase, "forward");
-        assert!(
-            log[0].stage >= 0,
-            "forward stage must be a real stage index, got {}",
-            log[0].stage
+        assert_eq!(
+            log[0].stage_id,
+            Some(0),
+            "forward stage_id must be a real (domain) stage id"
         );
         assert_eq!(log[0].opening, None);
         assert_eq!(
@@ -1002,13 +1010,13 @@ mod tests {
         );
 
         // Verify backward entries carry correct opening indices and worker ids.
-        assert_eq!(log[1].stage, 2);
+        assert_eq!(log[1].stage_id, Some(2));
         assert_eq!(log[1].opening, Some(0));
         assert_eq!(log[1].rank, 0);
         assert_eq!(log[1].worker_id, Some(0));
         assert_eq!(log[1].delta.lp_solves, 2);
 
-        assert_eq!(log[2].stage, 2);
+        assert_eq!(log[2].stage_id, Some(2));
         assert_eq!(log[2].opening, Some(1));
         assert_eq!(log[2].rank, 0);
         assert_eq!(log[2].worker_id, Some(1));
@@ -1023,7 +1031,8 @@ mod tests {
         let collapsed = SolverStatsDelta::aggregate(backward_entries.into_iter());
         assert_eq!(collapsed.lp_solves, 5); // 2 + 3
 
-        // Verify that LB entry has opening None, worker_id None.
+        // Verify that LB entry has stage_id None, opening None, worker_id None.
+        assert_eq!(log[3].stage_id, None);
         assert_eq!(log[3].opening, None);
         assert_eq!(log[3].worker_id, None);
     }
@@ -1031,40 +1040,47 @@ mod tests {
     #[test]
     fn solver_stats_log_entry_from_raw_decodes_minus_one_to_none() {
         // The -1 sentinel on opening/worker_id decodes to None on the struct;
-        // a non-negative index decodes to Some. stage and rank are verbatim.
-        let forward = SolverStatsLogEntry::from_raw(3, "forward", 1, -1, 0, -1, make_delta(5));
+        // a non-negative index decodes to Some. stage_id is passed through and rank
+        // is verbatim.
+        let forward =
+            SolverStatsLogEntry::from_raw(3, "forward", Some(1), -1, 0, -1, make_delta(5));
         assert_eq!(forward.opening, None);
         assert_eq!(forward.worker_id, None);
 
-        let backward = SolverStatsLogEntry::from_raw(3, "backward", 2, 0, 1, 4, make_delta(2));
+        let backward =
+            SolverStatsLogEntry::from_raw(3, "backward", Some(2), 0, 1, 4, make_delta(2));
         assert_eq!(backward.opening, Some(0));
         assert_eq!(backward.worker_id, Some(4));
         assert_eq!(backward.rank, 1);
-        assert_eq!(backward.stage, 2);
+        assert_eq!(backward.stage_id, Some(2));
     }
 
     #[test]
     fn test_solver_stats_log_to_rows_decodes_minus_one_to_none() {
         // The -1 sentinel on opening/worker_id maps to None in the Parquet row;
         // a non-negative index maps to Some. rank is always wrapped in Some.
-        let backward = SolverStatsLogEntry::from_raw(3, "backward", 2, 0, 1, 4, make_delta(2));
-        let forward = SolverStatsLogEntry::from_raw(3, "forward", 1, -1, 1, -1, make_delta(5));
+        let backward =
+            SolverStatsLogEntry::from_raw(3, "backward", Some(2), 0, 1, 4, make_delta(2));
+        let forward =
+            SolverStatsLogEntry::from_raw(3, "forward", Some(1), -1, 1, -1, make_delta(5));
         let log: Vec<SolverStatsLogEntry> = vec![backward, forward];
 
         let rows = solver_stats_log_to_rows(&log);
         assert_eq!(rows.len(), 2);
 
-        // Backward: non-negative opening/worker_id → Some; rank → Some.
-        assert_eq!(rows[0].opening, Some(0));
+        // Backward: non-negative opening/worker_id → Some; rank → Some. A training
+        // row fills iteration and leaves scenario_id None.
+        assert_eq!(rows[0].opening_index, Some(0));
         assert_eq!(rows[0].worker_id, Some(4));
         assert_eq!(rows[0].rank, Some(1));
-        assert_eq!(rows[0].iteration, 3);
-        assert_eq!(rows[0].stage, 2);
+        assert_eq!(rows[0].iteration, Some(3));
+        assert_eq!(rows[0].scenario_id, None);
+        assert_eq!(rows[0].stage_id, Some(2));
         assert_eq!(rows[0].phase, "backward");
         assert_eq!(rows[0].lp_solves, 2);
 
         // Forward: opening == -1 → None; worker_id == -1 → None; rank → Some.
-        assert_eq!(rows[1].opening, None);
+        assert_eq!(rows[1].opening_index, None);
         assert_eq!(rows[1].worker_id, None);
         assert_eq!(rows[1].rank, Some(1));
         assert_eq!(rows[1].phase, "forward");
@@ -1131,7 +1147,7 @@ mod tests {
                 SolverStatsLogEntry::from_raw(
                     1,
                     "forward",
-                    i32::try_from(t).expect("stage fits i32"),
+                    Some(i32::try_from(t).expect("stage fits i32")),
                     -1,
                     0,  // rank
                     -1, // worker_id sentinel → None
@@ -1144,9 +1160,9 @@ mod tests {
         for (t, entry) in log.iter().enumerate() {
             assert_eq!(entry.phase, "forward");
             assert_eq!(
-                entry.stage,
-                i32::try_from(t).expect("stage fits i32"),
-                "stage index must match loop variable"
+                entry.stage_id,
+                Some(i32::try_from(t).expect("stage fits i32")),
+                "stage_id must match loop variable"
             );
             assert_eq!(
                 entry.opening, None,

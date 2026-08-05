@@ -434,11 +434,11 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, HydroBlockBounds,
-        HydroStageBounds, HydroStagePenalties, InitialConditions, LineBlockBounds,
-        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
-        ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, HorizonGraph,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
         entities::{
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -447,9 +447,9 @@ mod tests {
             ExternalLoadRow, ExternalScenarioRow, InflowHistoryRow, InflowModel, LoadModel,
         },
         temporal::{
-            Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
-            SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageLagTransition,
-            StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, SeasonCycleType,
+            SeasonDefinition, SeasonMap, Stage, StageLagTransition, StageRiskConfig,
+            StageStateConfig,
         },
     };
     use cobre_stochastic::par::lag_transition::{
@@ -782,7 +782,7 @@ mod tests {
             },
         );
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
@@ -1201,7 +1201,7 @@ mod tests {
             },
         );
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
@@ -1605,7 +1605,7 @@ mod tests {
             },
         );
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,

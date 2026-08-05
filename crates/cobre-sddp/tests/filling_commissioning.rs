@@ -268,7 +268,7 @@ mod d38_dead_volume_filling_simulation {
                 .iter()
                 .filter(|entry| {
                     matches!(entry.phase, "forward" | "backward")
-                        && boundary_stages.contains(&entry.stage)
+                        && entry.stage_id.is_some_and(|s| boundary_stages.contains(&s))
                 })
                 .map(|entry| &entry.delta),
         )
@@ -1783,7 +1783,7 @@ mod filling_cut_validity {
                 .iter()
                 .filter(|entry| {
                     matches!(entry.phase, "forward" | "backward")
-                        && boundary_stages.contains(&entry.stage)
+                        && entry.stage_id.is_some_and(|s| boundary_stages.contains(&s))
                 })
                 .map(|entry| &entry.delta),
         )

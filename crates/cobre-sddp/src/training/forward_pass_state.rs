@@ -2246,7 +2246,8 @@ mod tests {
     /// incoming state must resolve to the root's own outgoing state.
     #[test]
     fn declared_k_fan_frontier_resolves_each_leaf_own_pool_and_node_id_with_root_incoming_state() {
-        use cobre_core::temporal::{Node, PolicyGraph, PolicyGraphType, Transition};
+        use cobre_core::HorizonGraph;
+        use cobre_core::temporal::{Node, PolicyGraphType, Transition};
         use cobre_io::StageIdResolver;
 
         use crate::setup::node_graph::build_node_graph;
@@ -2271,7 +2272,7 @@ mod tests {
         let stochastic = make_stochastic_context_2_stages();
         let study_stage_ids = [0_i32, 1_i32];
         let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             nodes: vec![node(0, 0), node(1, 1), node(2, 1), node(3, 1), node(4, 1)],
@@ -2351,7 +2352,8 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     #[test]
     fn run_forward_worker_k_fan_pinned_trajectories_match_selected_transitions() {
-        use cobre_core::temporal::{Node, PolicyGraph, PolicyGraphType, Transition};
+        use cobre_core::HorizonGraph;
+        use cobre_core::temporal::{Node, PolicyGraphType, Transition};
         use cobre_io::StageIdResolver;
 
         use crate::setup::node_graph::build_node_graph;
@@ -2376,7 +2378,7 @@ mod tests {
         let stochastic = make_stochastic_context_2_stages();
         let study_stage_ids = [0_i32, 1_i32];
         let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
-        let graph = PolicyGraph {
+        let graph = HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             nodes: vec![node(0, 0), node(1, 1), node(2, 1), node(3, 1), node(4, 1)],

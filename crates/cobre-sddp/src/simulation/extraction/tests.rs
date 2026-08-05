@@ -2604,7 +2604,7 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
     let hydro_lookup =
         HydroReverseLookup::build(spec.geometry, spec.hydro_cell_index, counts.hydro_ids.len());
     let result_prebuilt =
-        extract_stage_result_with_lookups(&view, &spec, 2, &hydro_lookup, &thermal_lookup);
+        extract_stage_result_with_lookups(&view, &spec, 2, 2, &hydro_lookup, &thermal_lookup);
 
     assert_eq!(
         result_standard.thermals.len(),

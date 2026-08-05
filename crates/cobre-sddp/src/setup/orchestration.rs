@@ -289,7 +289,12 @@ impl StudySetup {
         result: &TrainingResult,
         events: &[TrainingEvent],
     ) -> TrainingOutput {
-        build_training_output(result, events, &self.fcf)
+        build_training_output(
+            result,
+            events,
+            &self.fcf,
+            self.loop_params.training_enumerated,
+        )
     }
 
     /// Create a [`WorkspacePool`] of `n_threads` workspaces sized for this study.

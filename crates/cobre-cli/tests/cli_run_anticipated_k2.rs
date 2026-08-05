@@ -442,10 +442,10 @@ fn cli_run_k2_populates_anticipated_columns_and_manifest() {
     // The per-slot state identity now lives in the embedded entity manifest of
     // each policy cut file, not a separate dictionary sidecar. Read stage 0's
     // manifest and assert it carries the two anticipated ring slots for plant 2.
-    let cuts_path = output.join("policy/cuts/stage_000.bin");
+    let cuts_path = output.join("policy/cuts/000.bin");
     assert!(
         cuts_path.exists(),
-        "policy/cuts/stage_000.bin must exist at {}",
+        "policy/cuts/000.bin must exist at {}",
         cuts_path.display()
     );
 

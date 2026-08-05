@@ -11,9 +11,9 @@ use super::validate::{
 };
 use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
-    ExternalNcsRow, ExternalScenarioRow, GenericConstraint, Hydro, InflowHistoryRow, InflowModel,
-    InitialConditions, Line, LoadModel, NcsModel, NetworkTopology, NonControllableSource,
-    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
+    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
+    NonControllableSource, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
     ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
     ValidationError,
 };
@@ -54,7 +54,7 @@ pub struct SystemBuilder {
     contracts: Vec<EnergyContract>,
     non_controllable_sources: Vec<NonControllableSource>,
     stages: Vec<Stage>,
-    policy_graph: PolicyGraph,
+    policy_graph: HorizonGraph,
     penalties: ResolvedPenalties,
     bounds: ResolvedBounds,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
@@ -92,7 +92,7 @@ impl SystemBuilder {
             contracts: Vec::new(),
             non_controllable_sources: Vec::new(),
             stages: Vec::new(),
-            policy_graph: PolicyGraph::default(),
+            policy_graph: HorizonGraph::default(),
             penalties: ResolvedPenalties::empty(),
             bounds: ResolvedBounds::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
@@ -172,7 +172,7 @@ impl SystemBuilder {
 
     /// Set the policy graph.
     #[must_use]
-    pub fn policy_graph(mut self, policy_graph: PolicyGraph) -> Self {
+    pub fn policy_graph(mut self, policy_graph: HorizonGraph) -> Self {
         self.policy_graph = policy_graph;
         self
     }

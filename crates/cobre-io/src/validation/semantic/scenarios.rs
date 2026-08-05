@@ -1089,12 +1089,11 @@ mod tests {
         validation::{ErrorKind, ValidationContext, schema::ParsedData},
     };
     use cobre_core::{
-        EntityId, Hydro,
+        EntityId, HorizonGraph, Hydro,
         entities::HydroGenerationModel,
         scenario::{ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow},
         temporal::{
-            Block, Node, PolicyGraph, PolicyGraphType, SeasonCycleType, SeasonDefinition,
-            SeasonMap, Transition,
+            Block, Node, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap, Transition,
         },
     };
 
@@ -1111,7 +1110,7 @@ mod tests {
         StagesData {
             openings_declared: std::collections::HashSet::new(),
             stages: vec![stage],
-            policy_graph: PolicyGraph {
+            policy_graph: HorizonGraph {
                 stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
@@ -1452,7 +1451,7 @@ mod tests {
         StagesData {
             openings_declared: std::collections::HashSet::new(),
             stages,
-            policy_graph: PolicyGraph {
+            policy_graph: HorizonGraph {
                 stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
@@ -2171,7 +2170,7 @@ mod tests {
         StagesData {
             openings_declared: std::collections::HashSet::new(),
             stages,
-            policy_graph: PolicyGraph {
+            policy_graph: HorizonGraph {
                 stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
