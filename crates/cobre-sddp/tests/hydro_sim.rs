@@ -211,7 +211,7 @@ mod d17_signed_evaporation {
 
     use cobre_core::scenario::ScenarioSource;
     use cobre_sddp::{
-        StudySetup, aggregate_simulation,
+        SimulationWeighting, StudySetup, aggregate_simulation,
         hydro_models::prepare_hydro_models,
         setup::{StudyParams, prepare_stochastic},
     };
@@ -299,8 +299,13 @@ mod d17_signed_evaporation {
         let mut scenario_results = drain_handle.join().expect("drain thread must not panic");
 
         let sim_config = setup.simulation_config();
-        let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
-            .expect("aggregate_simulation must succeed");
+        let (_summary, _gathered) = aggregate_simulation(
+            &local_costs.costs,
+            sim_config,
+            &comm,
+            SimulationWeighting::Uniform,
+        )
+        .expect("aggregate_simulation must succeed");
 
         assert_eq!(
             scenario_results.len(),
@@ -648,8 +653,6 @@ mod multi_resolution_integration {
         let config_path = case_dir.join("config.json");
         let config = cobre_io::parse_config(&config_path).expect("config");
 
-        // ── 1. Structural properties after load ──────────────────────────────────
-
         let system = cobre_io::load_case(&case_dir).expect("load_case D30");
 
         // Pre-study stages carry negative IDs; the study count is the non-negative set.
@@ -707,8 +710,6 @@ mod multi_resolution_integration {
             );
         }
 
-        // ── 2. Build setup and verify noise group IDs ─────────────────────────────
-
         let mut setup = build_setup(&case_dir, &config);
 
         let groups = &setup.stage_data.noise_group_ids;
@@ -730,8 +731,6 @@ mod multi_resolution_integration {
             6,
             "D30: monthly stages 0-5 must have 6 distinct noise group IDs; got {monthly_groups:?}"
         );
-
-        // ── 3. Downstream lag transition fields ───────────────────────────────────
 
         let stage_ctx = setup.stage_ctx();
         let lag_transitions = stage_ctx.stage_lag_transitions;
@@ -773,8 +772,6 @@ mod multi_resolution_integration {
             );
         }
 
-        // ── 4. Train ──────────────────────────────────────────────────────────────
-
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("solver");
 
@@ -802,8 +799,6 @@ mod multi_resolution_integration {
             "D30: lower bound must be finite; got {}",
             outcome.result.final_lb
         );
-
-        // ── 5. Simulate ───────────────────────────────────────────────────────────
 
         let mut pool = setup
             .create_workspace_pool(&comm, 1, ActiveSolver::new)

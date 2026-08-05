@@ -7,7 +7,7 @@
 
 #![allow(clippy::expect_used, clippy::panic, clippy::manual_assert)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
@@ -57,4 +57,44 @@ fn python_parity_script_passes() {
             String::from_utf8_lossy(&output.stderr),
         );
     }
+}
+
+fn read_rs_recursive(dir: &Path) -> String {
+    let mut buf = String::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).expect("read_dir must succeed") {
+            let path = entry.expect("dir entry must be readable").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                buf.push_str(&std::fs::read_to_string(&path).expect("rs file must read"));
+            }
+        }
+    }
+    buf
+}
+
+/// The single-owner `write_scenario_summary` serializer must be called from BOTH
+/// simulation write paths, so `simulation/scenario_summary.parquet` is produced
+/// identically by the CLI and the Python bindings. The generic parity script does
+/// not track bare-imported `cobre_io` run-level writers (this one and
+/// `write_paths`), so this asserts the call sites directly. A `use` import carries
+/// no trailing `(`, so matching `write_scenario_summary(` catches only the call.
+#[test]
+fn both_simulation_write_sites_call_write_scenario_summary() {
+    let root = repo_root();
+    let cli = read_rs_recursive(&root.join("crates/cobre-cli/src/commands/run"));
+    let python =
+        std::fs::read_to_string(root.join("crates/cobre-python/src/run.rs")).expect("run.rs reads");
+
+    let needle = "write_scenario_summary(";
+    assert!(
+        cli.contains(needle),
+        "CLI simulation write path must call write_scenario_summary"
+    );
+    assert!(
+        python.contains(needle),
+        "Python simulation write path must call write_scenario_summary"
+    );
 }

@@ -25,7 +25,7 @@ use cobre_io::{
     PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, write_policy_checkpoint,
 };
 use cobre_sddp::{
-    StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
+    SimulationWeighting, StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
     lead_time::resolve_spread, setup::prepare_stochastic,
 };
 use cobre_solver::{ActiveSolver, SolverInterface};
@@ -158,8 +158,13 @@ fn run_with_simulation(
     let scenario_results = drain_handle.join().expect("drain thread must not panic");
 
     let sim_config = setup.simulation_config();
-    let summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
-        .expect("aggregate_simulation must succeed");
+    let (summary, _gathered) = aggregate_simulation(
+        &local_costs.costs,
+        sim_config,
+        &comm,
+        SimulationWeighting::Uniform,
+    )
+    .expect("aggregate_simulation must succeed");
 
     (result, scenario_results, summary)
 }
@@ -1524,8 +1529,13 @@ fn d12_checkpoint_round_trip() {
     let _scenario_results = drain_handle.join().expect("drain thread must not panic");
 
     let sim_config = setup.simulation_config();
-    let summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
-        .expect("aggregate_simulation must succeed");
+    let (summary, _gathered) = aggregate_simulation(
+        &local_costs.costs,
+        sim_config,
+        &comm,
+        SimulationWeighting::Uniform,
+    )
+    .expect("aggregate_simulation must succeed");
 
     assert_eq!(
         summary.n_scenarios, 1,
@@ -7328,6 +7338,7 @@ mod k_fan_branching_sampled_coverage {
     use std::collections::HashSet;
     use std::sync::mpsc;
 
+    use cobre_sddp::SimulationWeighting;
     use cobre_sddp::TrainingOutcome;
     use cobre_sddp::aggregate_simulation;
     use cobre_sddp::test_support::k_fan_setup;
@@ -7661,9 +7672,13 @@ mod k_fan_branching_sampled_coverage {
             n_scenarios as usize,
             "compact cost buffer must carry one entry per scenario"
         );
-        let summary =
-            aggregate_simulation(&local_costs.costs, fixture.setup.simulation_config(), &comm)
-                .expect("aggregate_simulation must succeed");
+        let (summary, _gathered) = aggregate_simulation(
+            &local_costs.costs,
+            fixture.setup.simulation_config(),
+            &comm,
+            SimulationWeighting::Uniform,
+        )
+        .expect("aggregate_simulation must succeed");
         assert!(
             summary.mean_cost.is_finite(),
             "aggregate mean simulation cost must be finite"

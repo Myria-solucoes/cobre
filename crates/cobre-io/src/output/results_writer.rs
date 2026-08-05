@@ -967,8 +967,6 @@ mod tests {
         sim.cost = Some(crate::MetadataCost {
             mean_cost: 12_345.6,
             std_cost: 678.9,
-            cvar: 15_000.0,
-            cvar_alpha: 0.95,
         });
         sim.solve_stats = MetadataSimulationSolveStats {
             total_lp_solves: Some(200),

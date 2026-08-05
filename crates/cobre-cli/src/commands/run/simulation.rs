@@ -16,6 +16,7 @@ use cobre_io::output::simulation_writer::ScenarioWritePayload;
 use cobre_io::output::simulation_writer::SimulationParquetWriter;
 use cobre_io::output::simulation_writer::SimulationPathRecord;
 use cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS;
+use cobre_sddp::SimulationWeighting;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
@@ -23,6 +24,7 @@ use cobre_sddp::aggregate_simulation;
 use cobre_sddp::pack_delta_scalars;
 use cobre_sddp::pack_scenario_stats;
 use cobre_sddp::reconcile_global_ok;
+use cobre_sddp::setup::SimulationEnumeratedRequest;
 use cobre_sddp::unpack_delta_scalars;
 use cobre_sddp::unpack_scenario_stats;
 use cobre_solver::ActiveSolver;
@@ -158,13 +160,23 @@ pub(super) fn run_simulation_phase(
     let global_path_rows = aggregate_simulation_paths(&ctx.comm, &local_path_rows)?;
 
     // Aggregate across all ranks so the printed mean/std/CI95 reflect every
-    // scenario, not just rank 0's.
-    let cost_summary =
-        aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm).map_err(|e| {
-            CliError::Internal {
+    // scenario, not just rank 0's. The weighting arm mirrors the resolved
+    // simulation source: a declared census (admitted only at derived == 1,
+    // `setup/mod.rs::resolve_enumerated_count`) reports the exact leaf-path
+    // expectation; sampled selection reports the Monte-Carlo sample mean.
+    let census_weights = [1.0];
+    let weighting = match setup.simulation_enumerated {
+        SimulationEnumeratedRequest::Enumerated => SimulationWeighting::Census {
+            weights: &census_weights,
+        },
+        SimulationEnumeratedRequest::Sampled => SimulationWeighting::Uniform,
+    };
+    let (cost_summary, gathered_scenario_costs) =
+        aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm, weighting).map_err(
+            |e| CliError::Internal {
                 message: format!("simulation cost aggregation error: {e}"),
-            }
-        })?;
+            },
+        )?;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
@@ -172,8 +184,6 @@ pub(super) fn run_simulation_phase(
     merged_sim_output.cost = Some(MetadataCost {
         mean_cost: cost_summary.mean_cost,
         std_cost: cost_summary.std_cost,
-        cvar: cost_summary.cvar,
-        cvar_alpha: cost_summary.cvar_alpha,
     });
     merged_sim_output.solve_stats = MetadataSimulationSolveStats {
         total_lp_solves: Some(global_agg.lp_solves),
@@ -207,6 +217,7 @@ pub(super) fn run_simulation_phase(
             &merged_sim_output,
             &global_scenario_stats,
             &global_path_rows,
+            &gathered_scenario_costs,
         )?;
     }
 
@@ -221,6 +232,7 @@ fn write_sim_outputs_on_root(
     merged_sim_output: &SimulationOutput,
     global_scenario_stats: &[(u32, SolverStatsDelta)],
     global_path_rows: &[SimulationPathRecord],
+    gathered_scenario_costs: &[(u32, f64, Option<f64>)],
 ) -> Result<(), CliError> {
     let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
     let sim_ctx = OutputContext {
@@ -238,6 +250,7 @@ fn write_sim_outputs_on_root(
         sim_output: merged_sim_output,
         sim_solver_stats: global_scenario_stats,
         sim_path_rows: global_path_rows,
+        sim_scenario_costs: gathered_scenario_costs,
         output_ctx: &sim_ctx,
         quiet: ctx.quiet,
         stderr: &ctx.stderr,

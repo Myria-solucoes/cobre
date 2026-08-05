@@ -2224,3 +2224,91 @@ mod k_fan_enumerated_determinism {
         assert_eq!(ub_1, ub_2, "exact final_ub must be rank-count invariant");
     }
 }
+
+mod simulation_aggregation_determinism {
+    //! `aggregate_simulation`'s weighted reduction owns exactly one externally
+    //! observable degree of freedom beyond its inputs: the communicator's
+    //! rank/size shape (the counts/displs `allgatherv` layout). It has no
+    //! thread parameter and no internal parallelism, so — unlike the
+    //! train()/simulate()-level gates elsewhere in this file — there is no
+    //! separate "threads=k vs threads=1" axis to exercise here; that axis
+    //! belongs to the scenario-cost values `simulate()` produces upstream
+    //! (already covered by the simulation pipeline's own determinism
+    //! coverage), not to this pure reduction over an already-gathered buffer.
+    //! This gate instead exercises the axis the function actually owns:
+    //! `LocalBackend` (1 rank), `StubComm` (1 rank), a `Rank0Of2` 2-rank stub
+    //! (faithful here because the full 4-scenario buffer is handed to "rank
+    //! 0" directly, mirroring `enumerated_single_path_2rank_stub_matches_single_rank`
+    //! above), and a same-shape repeat.
+
+    use cobre_comm::{Communicator, LocalBackend};
+    use cobre_sddp::simulation::{ScenarioCategoryCosts, SimulationConfig, SimulationWeighting};
+    use cobre_sddp::{Phase, aggregate_simulation};
+
+    use crate::common::{Rank0Of2, StubComm};
+
+    fn zero_cats() -> ScenarioCategoryCosts {
+        ScenarioCategoryCosts {
+            resource_cost: 0.0,
+            recourse_cost: 0.0,
+            violation_cost: 0.0,
+            regularization_cost: 0.0,
+            imputed_cost: 0.0,
+        }
+    }
+
+    fn four_scenario_costs() -> Vec<(u32, f64, ScenarioCategoryCosts)> {
+        vec![
+            (0u32, 1_234.5, zero_cats()),
+            (1u32, 987.25, zero_cats()),
+            (2u32, 5_432.125, zero_cats()),
+            (3u32, 42.0, zero_cats()),
+        ]
+    }
+
+    fn run(comm: &impl Communicator) -> (u64, u64) {
+        let local_costs = four_scenario_costs();
+        let config = SimulationConfig {
+            n_scenarios: 4,
+            io_channel_capacity: 1,
+            profile: Phase::Simulation.profile(),
+        };
+        let (summary, _gathered) =
+            aggregate_simulation(&local_costs, &config, comm, SimulationWeighting::Uniform)
+                .expect("aggregate_simulation must succeed");
+        (summary.mean_cost.to_bits(), summary.std_cost.to_bits())
+    }
+
+    #[test]
+    fn mean_std_bit_identical_across_rank_shapes() {
+        let (mean_local, std_local) = run(&LocalBackend);
+        let (mean_stub, std_stub) = run(&StubComm);
+        let (mean_repeat, std_repeat) = run(&LocalBackend);
+        let (mean_2rank, std_2rank) = run(&Rank0Of2);
+
+        assert_eq!(
+            mean_local, mean_stub,
+            "LocalBackend vs StubComm mean_cost must be bitwise identical"
+        );
+        assert_eq!(
+            std_local, std_stub,
+            "LocalBackend vs StubComm std_cost must be bitwise identical"
+        );
+        assert_eq!(
+            mean_local, mean_repeat,
+            "same-shape repeat mean_cost must be bitwise identical"
+        );
+        assert_eq!(
+            std_local, std_repeat,
+            "same-shape repeat std_cost must be bitwise identical"
+        );
+        assert_eq!(
+            mean_local, mean_2rank,
+            "2-rank stub mean_cost must be bitwise identical"
+        );
+        assert_eq!(
+            std_local, std_2rank,
+            "2-rank stub std_cost must be bitwise identical"
+        );
+    }
+}

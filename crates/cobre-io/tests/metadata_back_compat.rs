@@ -339,8 +339,6 @@ fn fully_populated_simulation_metadata() -> SimulationMetadata {
         cost: Some(MetadataCost {
             mean_cost: 12_345.6,
             std_cost: 200.0,
-            cvar: 13_000.0,
-            cvar_alpha: 0.95,
         }),
         solve_stats: MetadataSimulationSolveStats {
             total_lp_solves: Some(50_000),
@@ -430,8 +428,6 @@ fn simulation_metadata_new_fields_survive_write_read_roundtrip() {
     let decoded_cost = decoded.cost.expect("cost must survive roundtrip");
     assert_eq!(decoded_cost.mean_cost, original_cost.mean_cost);
     assert_eq!(decoded_cost.std_cost, original_cost.std_cost);
-    assert_eq!(decoded_cost.cvar, original_cost.cvar);
-    assert_eq!(decoded_cost.cvar_alpha, original_cost.cvar_alpha);
 
     assert_eq!(
         decoded.solve_stats.total_lp_solves,

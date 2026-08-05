@@ -18,7 +18,7 @@ fn simulation_row_prefix() -> Vec<Field> {
 
 /// Schema for `simulation/costs/` — stage and block-level cost breakdown.
 ///
-/// `block_id` is nullable. See output-schemas.md SS5.1.
+/// See output-schemas.md SS5.1.
 pub(crate) fn costs_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([
@@ -289,6 +289,22 @@ pub(crate) fn generic_violations_schema() -> Schema {
 /// any entity file on `(scenario_id, stage_id)`.
 pub(crate) fn paths_schema() -> Schema {
     Schema::new(simulation_row_prefix())
+}
+
+/// Schema for `simulation/scenario_summary.parquet` — the run-level,
+/// unpartitioned per-scenario summary.
+///
+/// `scenario_id` is the non-null `Int32` join key shared with every entity file
+/// and `paths.parquet` (the `simulation_row_prefix` convention); a wider type
+/// here would break the join on the primary key. `probability` is populated only
+/// under a declared census (the per-scenario leaf-path weight) and is NULL on
+/// every row under sampled selection.
+pub(crate) fn scenario_summary_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("scenario_id", DataType::Int32, false),
+        Field::new("probability", DataType::Float64, true),
+        Field::new("discounted_immediate_cost", DataType::Float64, false),
+    ])
 }
 
 /// Schema for `training/convergence.parquet` — iteration-level convergence log.
@@ -869,6 +885,34 @@ mod tests {
             assert_eq!(field_type(&schema, col), DataType::Int32);
             assert!(!is_nullable(&schema, col), "{col} must be non-null");
         }
+    }
+
+    #[test]
+    fn scenario_summary_schema_field_count_names_and_nullability() {
+        let schema = scenario_summary_schema();
+        assert_eq!(
+            schema.fields().len(),
+            3,
+            "scenario_summary schema must have 3 fields"
+        );
+        let names = field_names(&schema);
+        assert_eq!(
+            names,
+            vec!["scenario_id", "probability", "discounted_immediate_cost"]
+        );
+        assert!(
+            schema.field_with_name("total_cost").is_err(),
+            "no column may be named total_cost"
+        );
+        assert_eq!(field_type(&schema, "scenario_id"), DataType::Int32);
+        assert!(!is_nullable(&schema, "scenario_id"));
+        assert_eq!(field_type(&schema, "probability"), DataType::Float64);
+        assert!(is_nullable(&schema, "probability"));
+        assert_eq!(
+            field_type(&schema, "discounted_immediate_cost"),
+            DataType::Float64
+        );
+        assert!(!is_nullable(&schema, "discounted_immediate_cost"));
     }
 
     #[test]

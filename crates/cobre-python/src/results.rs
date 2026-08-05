@@ -429,10 +429,7 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
         Ok(buf)
     })?;
 
-    let pa_ipc = py.import("pyarrow.ipc")?;
-    let py_bytes = pyo3::types::PyBytes::new(py, &ipc_bytes);
-    let reader = pa_ipc.call_method1("open_stream", (py_bytes,))?;
-    let table = reader.call_method0("read_all")?;
+    let table = ipc_bytes_to_py_table(py, &ipc_bytes)?;
 
     Ok(table.unbind())
 }
@@ -1065,14 +1062,12 @@ fn read_parquet_partition_into(
     Ok(())
 }
 
-/// Load simulation output rows for one entity type directory into a `PyList` of
-/// dicts (with the `scenario_id` field injected), ordered by `scenario_id`.
-///
-/// Returns an empty list if the directory exists but contains no scenario
-/// subdirectories.
-fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py<PyList>> {
-    let result_list = PyList::empty(py);
-
+/// Collect the `scenario_id=NNNN` subdirectories of `entity_dir`, pairing each
+/// parsed id with its `data.parquet` path, sorted ascending by id for
+/// deterministic output order.
+fn collect_sorted_scenario_entries(
+    entity_dir: &std::path::Path,
+) -> PyResult<Vec<(i64, std::path::PathBuf)>> {
     let read_dir = fs::read_dir(entity_dir).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PyFileNotFoundError::new_err(format!(
@@ -1087,7 +1082,6 @@ fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py
         }
     })?;
 
-    // Sorted below by scenario_id for deterministic output order.
     let mut entries: Vec<(i64, std::path::PathBuf)> = Vec::new();
 
     for dir_entry in read_dir {
@@ -1114,6 +1108,18 @@ fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py
     }
 
     entries.sort_by_key(|(id, _)| *id);
+    Ok(entries)
+}
+
+/// Load simulation output rows for one entity type directory into a `PyList` of
+/// dicts (with the `scenario_id` field injected), ordered by `scenario_id`.
+///
+/// Returns an empty list if the directory exists but contains no scenario
+/// subdirectories.
+fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py<PyList>> {
+    let result_list = PyList::empty(py);
+
+    let entries = collect_sorted_scenario_entries(entity_dir)?;
 
     for (scenario_id, parquet_path) in &entries {
         read_parquet_partition_into(py, parquet_path, *scenario_id, &result_list)?;
@@ -1310,50 +1316,11 @@ fn read_parquet_partition_as_batches(
 fn load_entity_type_as_batch(
     entity_dir: &std::path::Path,
 ) -> PyResult<Option<(RecordBatch, std::sync::Arc<Schema>)>> {
-    let read_dir = fs::read_dir(entity_dir).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "simulation entity directory not found: {}",
-                entity_dir.display()
-            ))
-        } else {
-            PyOSError::new_err(format!(
-                "failed to read directory {}: {e}",
-                entity_dir.display()
-            ))
-        }
-    })?;
-
-    let mut entries: Vec<(i64, std::path::PathBuf)> = Vec::new();
-
-    for dir_entry in read_dir {
-        let dir_entry = dir_entry.map_err(|e| {
-            PyOSError::new_err(format!("failed to enumerate {}: {e}", entity_dir.display()))
-        })?;
-
-        let file_name = dir_entry.file_name();
-        let name = file_name.to_string_lossy();
-
-        if !name.starts_with("scenario_id=") {
-            continue;
-        }
-
-        let scenario_str = &name["scenario_id=".len()..];
-        let scenario_id: i64 = scenario_str.parse().map_err(|_| {
-            PyOSError::new_err(format!(
-                "malformed scenario directory name '{name}': expected scenario_id=<integer>"
-            ))
-        })?;
-
-        let parquet_path = dir_entry.path().join("data.parquet");
-        entries.push((scenario_id, parquet_path));
-    }
+    let entries = collect_sorted_scenario_entries(entity_dir)?;
 
     if entries.is_empty() {
         return Ok(None);
     }
-
-    entries.sort_by_key(|(id, _)| *id);
 
     let mut all_batches: Vec<RecordBatch> = Vec::new();
     let mut schema: Option<std::sync::Arc<Schema>> = None;
@@ -1389,6 +1356,19 @@ fn batch_to_ipc_bytes(batch: &RecordBatch, schema: &Schema) -> PyResult<Vec<u8>>
         .finish()
         .map_err(|e| PyOSError::new_err(format!("failed to finish IPC stream: {e}")))?;
     Ok(buf)
+}
+
+/// Serialize one entity type's concatenated batch to Arrow IPC bytes, falling
+/// back to a `scenario_id`-only empty schema when the directory has no scenarios
+/// (no Parquet file exists to discover the entity schema from).
+fn entity_type_ipc_bytes(entity_dir: &Path) -> PyResult<Vec<u8>> {
+    if let Some((batch, schema)) = load_entity_type_as_batch(entity_dir)? {
+        batch_to_ipc_bytes(&batch, &schema)
+    } else {
+        let empty_schema = Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
+        let empty_batch = RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
+        batch_to_ipc_bytes(&empty_batch, &empty_schema)
+    }
 }
 
 /// Reconstruct a `pyarrow.Table` from a raw Arrow IPC stream buffer.
@@ -1477,18 +1457,7 @@ pub fn load_simulation_arrow(
     if let Some(ref et) = entity_type {
         let entity_dir = simulation_dir.join(et);
 
-        let ipc_bytes = py.detach(|| -> PyResult<Vec<u8>> {
-            if let Some((batch, schema)) = load_entity_type_as_batch(&entity_dir)? {
-                batch_to_ipc_bytes(&batch, &schema)
-            } else {
-                // Empty directory: scenario_id-only schema, since no Parquet file
-                // exists to discover the entity schema from.
-                let empty_schema =
-                    Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
-                let empty_batch = RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
-                batch_to_ipc_bytes(&empty_batch, &empty_schema)
-            }
-        })?;
+        let ipc_bytes = py.detach(|| entity_type_ipc_bytes(&entity_dir))?;
 
         let table = ipc_bytes_to_py_table(py, &ipc_bytes)?;
         Ok(table.unbind())
@@ -1501,17 +1470,7 @@ pub fn load_simulation_arrow(
                 continue;
             }
 
-            let ipc_bytes = py.detach(|| -> PyResult<Vec<u8>> {
-                if let Some((batch, schema)) = load_entity_type_as_batch(&entity_dir)? {
-                    batch_to_ipc_bytes(&batch, &schema)
-                } else {
-                    let empty_schema =
-                        Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
-                    let empty_batch =
-                        RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
-                    batch_to_ipc_bytes(&empty_batch, &empty_schema)
-                }
-            })?;
+            let ipc_bytes = py.detach(|| entity_type_ipc_bytes(&entity_dir))?;
 
             let table = ipc_bytes_to_py_table(py, &ipc_bytes)?;
             result.set_item(et, table)?;
@@ -1791,9 +1750,7 @@ mod tests {
             "scenarios": { "total": 100, "completed": 100, "failed": 0 },
             "cost": {
                 "mean_cost": 789012.0,
-                "std_cost": 4321.0,
-                "cvar": 800000.0,
-                "cvar_alpha": 0.95
+                "std_cost": 4321.0
             },
             "distribution": {
                 "backend": "local",

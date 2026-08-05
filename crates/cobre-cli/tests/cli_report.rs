@@ -145,9 +145,7 @@ const SIMULATION_METADATA_WITH_COST_JSON: &str = r#"{
     "scenarios": { "total": 100, "completed": 100, "failed": 0 },
     "cost": {
         "mean_cost": 789012.0,
-        "std_cost": 4321.0,
-        "cvar": 800000.0,
-        "cvar_alpha": 0.95
+        "std_cost": 4321.0
     },
     "distribution": {
         "backend": "local",

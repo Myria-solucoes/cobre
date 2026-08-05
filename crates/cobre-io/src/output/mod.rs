@@ -802,8 +802,6 @@ mod tests {
             cost: Some(MetadataCost {
                 mean_cost: 100.0,
                 std_cost: 10.0,
-                cvar: 120.0,
-                cvar_alpha: 0.95,
             }),
             solve_stats: MetadataSimulationSolveStats {
                 total_lp_solves: Some(40),
@@ -823,8 +821,6 @@ mod tests {
             cost: Some(MetadataCost {
                 mean_cost: 200.0,
                 std_cost: 20.0,
-                cvar: 240.0,
-                cvar_alpha: 0.95,
             }),
             solve_stats: MetadataSimulationSolveStats {
                 total_lp_solves: Some(60),

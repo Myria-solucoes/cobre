@@ -340,17 +340,13 @@ pub struct MetadataScenarios {
 /// Aggregate cost statistics embedded in [`SimulationMetadata`].
 ///
 /// Captures the expected total cost across the simulated scenarios together
-/// with its dispersion and a tail-risk summary.
+/// with its dispersion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataCost {
     /// Mean total cost across simulated scenarios.
     pub mean_cost: f64,
     /// Standard deviation of the total cost across simulated scenarios.
     pub std_cost: f64,
-    /// Conditional Value-at-Risk at `cvar_alpha`.
-    pub cvar: f64,
-    /// Confidence level used for the `CVaR` computation, in `(0, 1)`.
-    pub cvar_alpha: f64,
 }
 
 /// Simulation solve statistics embedded in [`SimulationMetadata`].
@@ -649,8 +645,6 @@ mod tests {
             cost: Some(MetadataCost {
                 mean_cost: 12_345.6,
                 std_cost: 200.0,
-                cvar: 13_000.0,
-                cvar_alpha: 0.95,
             }),
             solve_stats: MetadataSimulationSolveStats {
                 total_lp_solves: Some(50_000),
@@ -727,8 +721,6 @@ mod tests {
             cost: Some(MetadataCost {
                 mean_cost: 12_345.6,
                 std_cost: 200.0,
-                cvar: 13_000.0,
-                cvar_alpha: 0.95,
             }),
             ..make_simulation_metadata()
         };
@@ -739,16 +731,14 @@ mod tests {
             "serialized JSON must contain the mean cost, got: {json}"
         );
         assert!(
-            json.contains(r#""cvar_alpha":0.95"#),
-            "serialized JSON must contain the CVaR alpha, got: {json}"
+            json.contains(r#""std_cost":200.0"#),
+            "serialized JSON must contain the std cost, got: {json}"
         );
 
         let decoded: SimulationMetadata = serde_json::from_str(&json).unwrap();
         let cost = decoded.cost.expect("cost must be present after round-trip");
         assert_eq!(cost.mean_cost, 12_345.6);
         assert_eq!(cost.std_cost, 200.0);
-        assert_eq!(cost.cvar, 13_000.0);
-        assert_eq!(cost.cvar_alpha, 0.95);
     }
 
     #[test]

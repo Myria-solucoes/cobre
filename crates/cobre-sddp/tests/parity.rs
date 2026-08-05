@@ -377,7 +377,7 @@ mod self_reproducibility_regression {
 
     use cobre_core::{TrainingEvent, scenario::ScenarioSource};
     use cobre_sddp::{
-        StudySetup, aggregate_simulation,
+        SimulationWeighting, StudySetup, aggregate_simulation,
         hydro_models::prepare_hydro_models,
         setup::{StudyParams, prepare_stochastic},
     };
@@ -480,8 +480,13 @@ mod self_reproducibility_regression {
         let scenario_results = drain_handle.join().expect("drain thread must not panic");
 
         let sim_config = setup.simulation_config();
-        let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
-            .expect("aggregate_simulation must succeed");
+        let (_summary, _gathered) = aggregate_simulation(
+            &local_costs.costs,
+            sim_config,
+            &comm,
+            SimulationWeighting::Uniform,
+        )
+        .expect("aggregate_simulation must succeed");
 
         compute_parity_hash(&setup, scenario_results)
     }
@@ -554,7 +559,8 @@ mod b6a_hydro_inflow_parity {
     use cobre_core::scenario::ScenarioSource;
     use cobre_core::{CoefficientRef, ConstraintSense, EntityId, VariableRef};
     use cobre_sddp::{
-        aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+        SimulationWeighting, aggregate_simulation, hydro_models::prepare_hydro_models,
+        setup::prepare_stochastic,
     };
 
     use super::common::{StubComm, build_setup_for_case};
@@ -694,8 +700,13 @@ mod b6a_hydro_inflow_parity {
         );
 
         let sim_config = setup.simulation_config();
-        aggregate_simulation(&local_costs.costs, sim_config, &comm)
-            .expect("aggregate_simulation must succeed");
+        aggregate_simulation(
+            &local_costs.costs,
+            sim_config,
+            &comm,
+            SimulationWeighting::Uniform,
+        )
+        .expect("aggregate_simulation must succeed");
     }
 
     /// The cascade `hydro_inflow(1) >= 12.0` constraint solves end-to-end on the

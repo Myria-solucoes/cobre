@@ -22,7 +22,8 @@ use crate::output::schemas::{
     generic_violations_schema, hydro_bus_generation_schema, hydro_energy_productivity_schema,
     hydros_schema, in_transit_schema, inflow_lags_schema, iteration_timing_schema,
     non_controllables_schema, paths_schema, pumping_stations_schema, rank_timing_schema,
-    retry_histogram_schema, row_selection_schema, solver_iterations_schema, thermals_schema,
+    retry_histogram_schema, row_selection_schema, scenario_summary_schema,
+    solver_iterations_schema, thermals_schema,
 };
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
@@ -233,6 +234,7 @@ fn variables_csv_schemas() -> Vec<(&'static str, arrow::datatypes::Schema)> {
         ("in_transit", in_transit_schema()),
         ("generic_violations", generic_violations_schema()),
         ("paths", paths_schema()),
+        ("scenario_summary", scenario_summary_schema()),
         ("convergence", convergence_schema()),
         ("iteration_timing", iteration_timing_schema()),
         ("rank_timing", rank_timing_schema()),
@@ -363,6 +365,7 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         | "delayed_arrival_hm3" => return "hm3",
         "total_cost"
         | "immediate_cost"
+        | "discounted_immediate_cost"
         | "future_cost"
         | "thermal_cost"
         | "anticipated_thermal_cost"
@@ -604,6 +607,13 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("generic_violations", "constraint_id") => "Generic constraint identifier",
         ("generic_violations", "slack_value") => "Constraint slack value",
         ("generic_violations", "slack_cost") => "Constraint slack penalty cost",
+        ("scenario_summary", "probability") => {
+            "Per-scenario leaf-path probability under a declared census; NULL under sampled selection"
+        }
+        ("scenario_summary", "discounted_immediate_cost") => {
+            "Per-scenario discounted immediate cost; excludes the future-cost term that \
+             costs.parquet total_cost includes"
+        }
         ("convergence", "iteration") => "Iteration number (1-based)",
         ("convergence", "lower_bound") => "Lower bound on the optimal value",
         ("convergence", "upper_bound") => {
@@ -2294,8 +2304,22 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 250,
-            "variables.csv must have exactly 250 data rows (one per column across all schemas)"
+            row_count, 253,
+            "variables.csv must have exactly 253 data rows (one per column across all schemas)"
+        );
+    }
+
+    #[test]
+    fn scenario_summary_cost_description_states_future_cost_exclusion() {
+        let cost = description_for("scenario_summary", "discounted_immediate_cost");
+        assert!(
+            cost.contains("exclude") && cost.contains("total_cost"),
+            "the discounted_immediate_cost description must state it excludes the future-cost \
+             term that costs.parquet total_cost includes, got: {cost:?}"
+        );
+        assert!(
+            !description_for("scenario_summary", "probability").is_empty(),
+            "scenario_summary.probability must carry a description"
         );
     }
 

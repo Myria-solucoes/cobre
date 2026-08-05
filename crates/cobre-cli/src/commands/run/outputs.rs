@@ -14,7 +14,9 @@ use cobre_io::ParquetWriterConfig;
 use cobre_io::SimulationOutput;
 use cobre_io::SolverStatsRow;
 use cobre_io::TrainingOutput;
-use cobre_io::output::simulation_writer::{SimulationPathRecord, write_paths};
+use cobre_io::output::simulation_writer::{
+    SimulationPathRecord, write_paths, write_scenario_summary,
+};
 use cobre_io::write_evaporation_models;
 use cobre_io::write_fpha_deviation_points;
 use cobre_io::write_fpha_hyperplanes;
@@ -147,6 +149,9 @@ pub(super) struct WriteSimulationArgs<'a> {
     pub(super) sim_output: &'a SimulationOutput,
     pub(super) sim_solver_stats: &'a [(u32, SolverStatsDelta)],
     pub(super) sim_path_rows: &'a [SimulationPathRecord],
+    /// Gathered per-scenario `(scenario_id, discounted_immediate_cost, probability)`
+    /// in canonical scenario-id order; `probability` is `Some` only under a census.
+    pub(super) sim_scenario_costs: &'a [(u32, f64, Option<f64>)],
     pub(super) output_ctx: &'a OutputContext,
     pub(super) quiet: bool,
     pub(super) stderr: &'a Term,
@@ -188,6 +193,15 @@ pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result
     }
 
     write_paths(args.output_dir, args.sim_path_rows.to_vec()).map_err(CliError::from)?;
+
+    let scenario_summary_rows: Vec<(u32, Option<f64>, f64)> = args
+        .sim_scenario_costs
+        .iter()
+        .map(|&(scenario_id, discounted_immediate_cost, probability)| {
+            (scenario_id, probability, discounted_immediate_cost)
+        })
+        .collect();
+    write_scenario_summary(args.output_dir, &scenario_summary_rows).map_err(CliError::from)?;
 
     if !args.quiet {
         let write_secs = write_start.elapsed().as_secs_f64();

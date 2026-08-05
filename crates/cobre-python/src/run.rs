@@ -54,7 +54,7 @@ use cobre_io::get_hostname;
 use cobre_io::now_iso8601;
 use cobre_io::output::policy::read_policy_checkpoint;
 use cobre_io::output::simulation_writer::{
-    ScenarioWritePayload, SimulationParquetWriter, write_paths,
+    ScenarioWritePayload, SimulationParquetWriter, write_paths, write_scenario_summary,
 };
 use cobre_io::output::write_evaporation_models;
 use cobre_io::output::write_fpha_deviation_points;
@@ -89,12 +89,14 @@ use cobre_sddp::orchestration::CheckpointParams;
 use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
+use cobre_sddp::setup::SimulationEnumeratedRequest;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
-    ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
-    StochasticSource, StochasticSummary, StudyParams, StudySetup, build_hydro_model_summary,
-    build_provenance_report, build_stochastic_summary, prepare_stochastic,
+    ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SimulationWeighting,
+    SolverStatsDelta, StochasticSource, StochasticSummary, StudyParams, StudySetup,
+    build_hydro_model_summary, build_provenance_report, build_stochastic_summary,
+    prepare_stochastic,
 };
 use cobre_solver::ActiveSolver;
 use cobre_solver::active_solver_metadata_id;
@@ -693,19 +695,39 @@ pub(crate) fn run_simulation_phase_py(
         SolverStatsDelta::accumulate_into(&mut agg, delta);
     }
 
-    let cost_summary = aggregate_simulation(
+    // The weighting arm mirrors the resolved simulation source, matching the
+    // CLI path (`cobre-cli`'s `run/simulation.rs`): a declared census
+    // (admitted only at derived == 1, `setup/mod.rs::resolve_enumerated_count`)
+    // reports the exact leaf-path expectation; sampled selection reports the
+    // Monte-Carlo sample mean.
+    let census_weights = [1.0];
+    let weighting = match setup.simulation_enumerated {
+        SimulationEnumeratedRequest::Enumerated => SimulationWeighting::Census {
+            weights: &census_weights,
+        },
+        SimulationEnumeratedRequest::Sampled => SimulationWeighting::Uniform,
+    };
+    let (cost_summary, gathered_scenario_costs) = aggregate_simulation(
         &sim_run_result.costs,
         setup.simulation_config(),
         &LocalBackend,
+        weighting,
     )
     .map_err(|e| format!("simulation error: cost aggregation: {e}"))?;
+
+    let scenario_summary_rows: Vec<(u32, Option<f64>, f64)> = gathered_scenario_costs
+        .iter()
+        .map(|&(scenario_id, discounted_immediate_cost, probability)| {
+            (scenario_id, probability, discounted_immediate_cost)
+        })
+        .collect();
+    write_scenario_summary(output_dir, &scenario_summary_rows)
+        .map_err(|e| format!("output write error: simulation scenario summary output: {e}"))?;
 
     let parallelism = u32::try_from(n_threads).unwrap_or(u32::MAX);
     sim_out.cost = Some(MetadataCost {
         mean_cost: cost_summary.mean_cost,
         std_cost: cost_summary.std_cost,
-        cvar: cost_summary.cvar,
-        cvar_alpha: cost_summary.cvar_alpha,
     });
     sim_out.solve_stats = MetadataSimulationSolveStats {
         total_lp_solves: Some(agg.lp_solves),
@@ -1260,9 +1282,7 @@ pub(crate) fn run_via_study(
         !skip_simulation && config.simulation.enabled && setup.simulation_config.n_scenarios > 0;
     let hydro_models_summary = Some(hydro_models_summary);
 
-    let training_enabled = config.training.enabled;
-
-    if training_enabled {
+    if config.training.enabled {
         apply_training_policy_mode(&mut setup, &system, &config, &output_dir)?;
 
         // Streaming drain thread only when a callback is provided; otherwise the

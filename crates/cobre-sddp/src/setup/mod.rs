@@ -194,6 +194,15 @@ pub struct StudySetup {
     /// Simulation pipeline parameters, stored directly as [`crate::simulation::SimulationConfig`].
     pub simulation_config: SimulationConfig,
 
+    /// Whether simulation's scenario source is a declared census
+    /// (`simulation.selection = enumerated`) or Monte Carlo sampling —
+    /// resolved once the node graph exists, mirroring
+    /// [`Self::simulation_config`]'s `n_scenarios`. The caller reads this to
+    /// select [`crate::simulation::SimulationWeighting::Census`] vs
+    /// [`crate::simulation::SimulationWeighting::Uniform`] for
+    /// `aggregate_simulation`.
+    pub simulation_enumerated: SimulationEnumeratedRequest,
+
     /// Relative path to the policy output directory (e.g. `"training/policy"`).
     pub policy_path: String,
 
@@ -645,6 +654,7 @@ impl StudySetup {
                 io_channel_capacity,
                 profile: simulation_profile,
             },
+            simulation_enumerated,
             policy_path,
             cut_management: CutManagementConfig {
                 cut_selection,

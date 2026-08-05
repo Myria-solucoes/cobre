@@ -164,7 +164,7 @@ pub use setup::{
 // ── simulation ────────────────────────────────────────────────────────────────
 pub use simulation::{
     ScenarioCategoryCosts, SimulationError, SimulationHydroResult, SimulationScenarioResult,
-    SimulationStageResult, SimulationSummary, aggregate_simulation, simulate,
+    SimulationStageResult, SimulationSummary, SimulationWeighting, aggregate_simulation, simulate,
 };
 // ── solver_phase ─────────────────────────────────────────────────────────────
 #[cfg(feature = "highs")]

@@ -45,7 +45,8 @@ use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
     buses_schema, contracts_schema, costs_schema, exchanges_schema, generic_violations_schema,
     hydro_bus_generation_schema, hydros_schema, in_transit_schema, inflow_lags_schema,
-    non_controllables_schema, paths_schema, pumping_stations_schema, thermals_schema,
+    non_controllables_schema, paths_schema, pumping_stations_schema, scenario_summary_schema,
+    thermals_schema,
 };
 
 // Payload types (mirrors solver simulation result types)
@@ -947,6 +948,55 @@ pub fn write_paths(
     std::fs::create_dir_all(&sim_dir).map_err(|e| OutputError::io(&sim_dir, e))?;
     write_parquet_atomic(
         &sim_dir.join("paths.parquet"),
+        &batch,
+        &ParquetWriterConfig::default(),
+    )
+}
+
+/// Write the run-level, unpartitioned `simulation/scenario_summary.parquet` from
+/// the gathered per-scenario `(scenario_id, probability, discounted_immediate_cost)`
+/// rows.
+///
+/// Single owner of the file. `rows` arrive in ascending `scenario_id` (the
+/// canonical order the caller's cross-rank gather already fixed) and are written
+/// verbatim — never re-sorted or re-reduced here — so the output is identical
+/// across rank and thread shapes. `probability` is `Some` per row only under a
+/// declared census and `None` under sampled selection.
+///
+/// # Errors
+///
+/// - [`OutputError::IoError`] if the `simulation/` directory or file cannot be
+///   written.
+/// - [`OutputError::SerializationError`] if the `RecordBatch` cannot be built.
+#[allow(clippy::cast_possible_wrap)] // scenario ids are small non-negative indices
+pub fn write_scenario_summary(
+    output_dir: &Path,
+    rows: &[(u32, Option<f64>, f64)],
+) -> Result<(), OutputError> {
+    let n = rows.len();
+    let mut scenario_id = Int32Builder::with_capacity(n);
+    let mut probability = Float64Builder::with_capacity(n);
+    let mut discounted_immediate_cost = Float64Builder::with_capacity(n);
+    for &(id, prob, cost) in rows {
+        scenario_id.append_value(id as i32);
+        probability.append_option(prob);
+        discounted_immediate_cost.append_value(cost);
+    }
+
+    let batch = RecordBatch::try_new(
+        Arc::new(scenario_summary_schema()),
+        vec![
+            Arc::new(scenario_id.finish()),
+            Arc::new(probability.finish()),
+            Arc::new(discounted_immediate_cost.finish()),
+        ],
+    )
+    .map_err(|e| OutputError::serialization("scenario_summary", e.to_string()))?;
+
+    let sim_dir = output_dir.join("simulation");
+    std::fs::create_dir_all(&sim_dir).map_err(|e| OutputError::io(&sim_dir, e))?;
+    write_parquet_atomic(
+        &sim_dir.join("scenario_summary.parquet"),
         &batch,
         &ParquetWriterConfig::default(),
     )
@@ -2610,6 +2660,140 @@ mod tests {
         assert_eq!(
             (0..3).map(|i| node.value(i)).collect::<Vec<_>>(),
             vec![2, 3, 5]
+        );
+    }
+
+    fn read_scenario_summary(
+        dir: &Path,
+    ) -> (
+        arrow::array::Int32Array,
+        arrow::array::Float64Array,
+        arrow::array::Float64Array,
+    ) {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let path = dir.join("simulation/scenario_summary.parquet");
+        assert!(
+            path.exists(),
+            "simulation/scenario_summary.parquet must exist (unpartitioned)"
+        );
+        let file = std::fs::File::open(&path).expect("scenario_summary parquet must open");
+        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
+            .expect("reader builder must succeed")
+            .build()
+            .expect("reader must build")
+            .next()
+            .expect("must have rows")
+            .expect("batch must be Ok");
+
+        let schema = batch.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["scenario_id", "probability", "discounted_immediate_cost"]
+        );
+
+        let scenario_id = batch
+            .column_by_name("scenario_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .clone();
+        let probability = batch
+            .column_by_name("probability")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap()
+            .clone();
+        let cost = batch
+            .column_by_name("discounted_immediate_cost")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap()
+            .clone();
+        (scenario_id, probability, cost)
+    }
+
+    #[test]
+    fn write_scenario_summary_sampled_has_all_null_probability() {
+        use arrow::array::Array;
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let rows: Vec<(u32, Option<f64>, f64)> =
+            vec![(0, None, 100.0), (1, None, 250.0), (2, None, 175.0)];
+        write_scenario_summary(tmp.path(), &rows).expect("write_scenario_summary must succeed");
+
+        let (scenario_id, probability, cost) = read_scenario_summary(tmp.path());
+        assert_eq!(scenario_id.null_count(), 0, "scenario_id must be non-null");
+        assert_eq!(
+            probability.null_count(),
+            3,
+            "sampled runs leave every probability NULL"
+        );
+        assert_eq!(
+            (0..3).map(|i| scenario_id.value(i)).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            (0..3).map(|i| cost.value(i)).collect::<Vec<_>>(),
+            vec![100.0, 250.0, 175.0]
+        );
+    }
+
+    #[test]
+    fn write_scenario_summary_census_populates_probability() {
+        use arrow::array::Array;
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let rows: Vec<(u32, Option<f64>, f64)> = vec![(0, Some(0.25), 10.0), (1, Some(0.75), 30.0)];
+        write_scenario_summary(tmp.path(), &rows).expect("write_scenario_summary must succeed");
+
+        let (scenario_id, probability, cost) = read_scenario_summary(tmp.path());
+        assert_eq!(
+            probability.null_count(),
+            0,
+            "a declared census populates every probability"
+        );
+        assert_eq!(
+            (0..2).map(|i| scenario_id.value(i)).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            (0..2).map(|i| probability.value(i)).collect::<Vec<_>>(),
+            vec![0.25, 0.75]
+        );
+        assert_eq!(
+            (0..2).map(|i| cost.value(i)).collect::<Vec<_>>(),
+            vec![10.0, 30.0]
+        );
+    }
+
+    #[test]
+    fn write_scenario_summary_writes_rows_verbatim_and_is_byte_deterministic() {
+        // The gather (owned upstream) fixes canonical ascending scenario_id order;
+        // the writer must preserve it verbatim and be a pure function of its rows,
+        // so identical gathered rows produce byte-identical files across rank and
+        // thread shapes.
+        let rows: Vec<(u32, Option<f64>, f64)> = vec![(0, Some(0.5), 12.0), (1, Some(0.5), 8.0)];
+
+        let a = tempfile::tempdir().expect("tempdir must succeed");
+        let b = tempfile::tempdir().expect("tempdir must succeed");
+        write_scenario_summary(a.path(), &rows).expect("write must succeed");
+        write_scenario_summary(b.path(), &rows).expect("write must succeed");
+
+        let (scenario_id, _prob, _cost) = read_scenario_summary(a.path());
+        assert_eq!(
+            (0..2).map(|i| scenario_id.value(i)).collect::<Vec<_>>(),
+            vec![0, 1],
+            "rows are written in the ascending order supplied, never re-sorted"
+        );
+
+        let bytes_a = std::fs::read(a.path().join("simulation/scenario_summary.parquet")).unwrap();
+        let bytes_b = std::fs::read(b.path().join("simulation/scenario_summary.parquet")).unwrap();
+        assert_eq!(
+            bytes_a, bytes_b,
+            "identical rows must serialize to byte-identical files"
         );
     }
 

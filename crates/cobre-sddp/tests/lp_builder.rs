@@ -54,7 +54,7 @@ mod extraction_nonuniform_block_bases {
 
     use cobre_core::{TrainingEvent, scenario::ScenarioSource};
     use cobre_sddp::{
-        SimulationScenarioResult, StudySetup, aggregate_simulation,
+        SimulationScenarioResult, SimulationWeighting, StudySetup, aggregate_simulation,
         hydro_models::prepare_hydro_models,
         setup::{StudyParams, prepare_stochastic},
     };
@@ -150,8 +150,13 @@ mod extraction_nonuniform_block_bases {
         let scenario_results = drain_handle.join().expect("drain thread must not panic");
 
         let sim_config = setup.simulation_config();
-        let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
-            .expect("aggregate_simulation must succeed");
+        let (_summary, _gathered) = aggregate_simulation(
+            &local_costs.costs,
+            sim_config,
+            &comm,
+            SimulationWeighting::Uniform,
+        )
+        .expect("aggregate_simulation must succeed");
 
         scenario_results
     }

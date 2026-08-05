@@ -509,62 +509,19 @@ pub struct SimulationScenarioResult {
 
 /// Aggregate simulation statistics computed after all scenarios complete.
 ///
-/// Produced by MPI aggregation on rank 0 (simulation-architecture.md SS4.4)
-/// and returned as the `Ok` value of `fn simulate()`.
-///
-/// On non-rank-0 processes, `mean_cost`, `std_cost`, `cvar`, and
-/// `category_stats` reflect only locally computed partial data; the
-/// authoritative values are on rank 0 (SS4.4).
+/// Produced by weighted MPI aggregation
+/// ([`crate::simulation::aggregation::aggregate_simulation`]), identical on
+/// every rank, and returned as the `Ok` value of `fn simulate()`.
 #[derive(Debug)]
 pub struct SimulationSummary {
-    /// Mean total cost across all scenarios: `mean_cost = (1/S) * sum(C_s for s in 1..=S)`.
+    /// Weighted mean total cost across all scenarios:
+    /// `mean_cost = Σ wᵢ·Cᵢ` under the caller-selected
+    /// [`SimulationWeighting`](crate::simulation::aggregation::SimulationWeighting).
     pub mean_cost: f64,
     /// Sample standard deviation of total cost: `std_cost = sqrt((1/(S-1)) * sum((C_s - mean_cost)^2 for s in 1..=S))`.
     pub std_cost: f64,
-    /// Minimum total cost across all scenarios.
-    pub min_cost: f64,
-    /// Maximum total cost across all scenarios.
-    pub max_cost: f64,
-    /// `CVaR` (Conditional Value-at-Risk) at the configured confidence level `cvar_alpha`.
-    /// Mean of the worst `(1 - cvar_alpha)` fraction of scenario costs. See simulation-architecture.md SS4.1.
-    pub cvar: f64,
-    /// Confidence level used for `CVaR` computation. Must be in `(0, 1)`.
-    pub cvar_alpha: f64,
-    /// Per-category cost statistics (mean, max, frequency) for each of the five cost categories.
-    pub category_stats: Vec<CategoryCostStats>,
-    /// Fraction of scenarios with at least one stage having deficit > 0.
-    pub deficit_frequency: f64,
-    /// Total deficit energy (`MWh`) summed across all scenarios and stages.
-    pub total_deficit_mwh: f64,
-    /// Total spillage energy (`MWh`) summed across all scenarios and stages.
-    pub total_spillage_mwh: f64,
     /// Number of scenarios simulated (across all ranks).
     pub n_scenarios: u32,
-}
-
-/// Per-category cost statistics for one cost category (SS4.2).
-///
-/// Each of the five cost categories (resource, recourse, violation,
-/// regularization, imputed) produces one `CategoryCostStats` entry in
-/// [`SimulationSummary::category_stats`].
-#[derive(Debug)]
-pub struct CategoryCostStats {
-    /// Category name. Matches the SS4.2 table:
-    /// `"resource"`, `"recourse"`, `"violation"`, `"regularization"`,
-    /// `"imputed"`.
-    pub category: String,
-
-    /// Mean cost for this category across all scenarios.
-    pub mean: f64,
-
-    /// Maximum cost for this category across all scenarios.
-    pub max: f64,
-
-    /// Fraction of scenarios where the category cost is non-zero.
-    ///
-    /// Particularly relevant for deficit (recourse) and constraint
-    /// violations.
-    pub frequency: f64,
 }
 
 const _: fn() = || {
@@ -575,12 +532,11 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::{
-        CategoryCostStats, ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult,
-        SimulationCostResult, SimulationExchangeResult, SimulationGenericViolationResult,
-        SimulationHydroBusResult, SimulationHydroResult, SimulationInflowLagResult,
-        SimulationNonControllableResult, SimulationPumpingResult, SimulationScenarioResult,
-        SimulationStageResult, SimulationSummary, SimulationThermalResult,
-        SimulationTransitBucketResult,
+        ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
+        SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroBusResult,
+        SimulationHydroResult, SimulationInflowLagResult, SimulationNonControllableResult,
+        SimulationPumpingResult, SimulationScenarioResult, SimulationStageResult,
+        SimulationSummary, SimulationThermalResult, SimulationTransitBucketResult,
     };
 
     #[test]
@@ -1071,55 +1027,15 @@ mod tests {
     }
 
     #[test]
-    fn category_cost_stats_construction() {
-        let stats = CategoryCostStats {
-            category: "recourse".to_string(),
-            mean: 500.0,
-            max: 2000.0,
-            frequency: 0.15,
-        };
-
-        assert_eq!(stats.category, "recourse");
-        assert_eq!(stats.mean, 500.0);
-        assert_eq!(stats.max, 2000.0);
-        assert_eq!(stats.frequency, 0.15);
-    }
-
-    #[test]
     fn simulation_summary_construction() {
-        let category_stats: Vec<CategoryCostStats> = (0_i32..5)
-            .map(|i| CategoryCostStats {
-                category: format!("cat_{i}"),
-                mean: f64::from(i) * 100.0,
-                max: f64::from(i) * 500.0,
-                frequency: 0.1 * f64::from(i),
-            })
-            .collect();
-
         let summary = SimulationSummary {
             mean_cost: 1_500_000.0,
             std_cost: 200_000.0,
-            min_cost: 900_000.0,
-            max_cost: 2_100_000.0,
-            cvar: 1_900_000.0,
-            cvar_alpha: 0.95,
-            category_stats,
-            deficit_frequency: 0.08,
-            total_deficit_mwh: 12_500.0,
-            total_spillage_mwh: 3_200.0,
             n_scenarios: 2000,
         };
 
         assert_eq!(summary.mean_cost, 1_500_000.0);
         assert_eq!(summary.std_cost, 200_000.0);
-        assert_eq!(summary.min_cost, 900_000.0);
-        assert_eq!(summary.max_cost, 2_100_000.0);
-        assert_eq!(summary.cvar, 1_900_000.0);
-        assert_eq!(summary.cvar_alpha, 0.95);
-        assert_eq!(summary.category_stats.len(), 5);
-        assert_eq!(summary.deficit_frequency, 0.08);
-        assert_eq!(summary.total_deficit_mwh, 12_500.0);
-        assert_eq!(summary.total_spillage_mwh, 3_200.0);
         assert_eq!(summary.n_scenarios, 2000);
     }
 }
