@@ -170,13 +170,12 @@ pub(crate) fn build_external_inflow_library(
 
 /// Build and validate an [`ExternalScenarioLibrary`] for load.
 ///
-/// Canonical bus ID list from `load_models`: a bus qualifies when
-/// `std_mw > 0.0`, or unconditionally when `load_scheme` is
-/// [`SamplingScheme::External`] — mirrors `noise_entity_order`'s membership
-/// rule so a σ=0 bus keeps its noise-vector slot under the external scheme.
-/// `load_scheme` is the CALLING phase's own resolved scheme; a phase whose
-/// scheme diverges from the training-derived noise-vector width is caught by
-/// `assert_external_library_widths`, not here.
+/// Canonical bus ID list from `load_models`, filtered by
+/// [`LoadModel::is_noise_member`] — the same authority `noise_entity_order`
+/// consumes, so a σ=0 bus keeps its noise-vector slot under the external
+/// scheme. `load_scheme` is the CALLING phase's own resolved scheme; a phase
+/// whose scheme diverges from the training-derived noise-vector width is
+/// caught by `assert_external_library_widths`, not here.
 ///
 /// # Errors
 ///
@@ -191,7 +190,7 @@ pub(crate) fn build_external_load_library(
     let n_stages = stages.len();
     let mut bus_ids: Vec<EntityId> = load_models
         .iter()
-        .filter(|m| m.std_mw > 0.0 || load_scheme == SamplingScheme::External)
+        .filter(|m| m.is_noise_member(load_scheme))
         .map(|m| m.bus_id)
         .collect();
     bus_ids.sort_unstable_by_key(|id| id.0);

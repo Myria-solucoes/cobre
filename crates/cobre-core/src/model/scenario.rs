@@ -379,6 +379,17 @@ pub struct LoadModel {
     pub std_mw: f64,
 }
 
+impl LoadModel {
+    /// The single authority for load-bus noise-vector membership: a bus
+    /// occupies a slot iff it carries load noise or its class is sampled
+    /// externally (a deterministic external value still needs a slot to
+    /// standardize into).
+    #[must_use]
+    pub fn is_noise_member(&self, load_scheme: SamplingScheme) -> bool {
+        self.std_mw > 0.0 || load_scheme == SamplingScheme::External
+    }
+}
+
 /// Per-stage normal noise model parameters for a non-controllable source.
 ///
 /// Loaded from `scenarios/non_controllable_stats.parquet`. Each row provides
@@ -765,7 +776,7 @@ mod tests {
 
     use super::{
         AnnualComponent, CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
-        CorrelationScheduleEntry, InflowModel, NcsModel, SamplingScheme, ScenarioSource,
+        CorrelationScheduleEntry, InflowModel, LoadModel, NcsModel, SamplingScheme, ScenarioSource,
     };
     use crate::EntityId;
 
@@ -814,6 +825,21 @@ mod tests {
             annual: None,
         };
         assert_eq!(par2.ar_order(), 2);
+    }
+
+    #[test]
+    fn load_model_is_noise_member_truth_table() {
+        let make = |std_mw: f64| LoadModel {
+            bus_id: EntityId(1),
+            stage_id: 0,
+            mean_mw: 100.0,
+            std_mw,
+        };
+
+        assert!(make(45.0).is_noise_member(SamplingScheme::InSample));
+        assert!(!make(0.0).is_noise_member(SamplingScheme::InSample));
+        assert!(make(0.0).is_noise_member(SamplingScheme::External));
+        assert!(make(45.0).is_noise_member(SamplingScheme::External));
     }
 
     #[test]

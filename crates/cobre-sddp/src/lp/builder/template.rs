@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
+use cobre_core::scenario::SamplingScheme;
 use cobre_core::{BlockMode, ContractType, EntityId, Hydro, ResolvedBounds, Stage, System};
 use cobre_io::StageIdResolver;
 use cobre_solver::StageTemplate;
@@ -481,14 +482,19 @@ pub(super) fn build_single_stage_template(
     }
 }
 
-/// Bus-slice positions of every bus with `std_mw > 0` in any load model, sorted by
-/// `EntityId` for declaration-order invariance; IDs repeated across stages are
+/// Bus-slice positions of every noise-member load bus (per
+/// `LoadModel::is_noise_member` under `load_scheme`), sorted by `EntityId`
+/// for declaration-order invariance; IDs repeated across stages are
 /// deduplicated.
-fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>) -> Vec<usize> {
+fn collect_load_bus_indices(
+    system: &System,
+    bus_pos: &BTreeMap<EntityId, usize>,
+    load_scheme: SamplingScheme,
+) -> Vec<usize> {
     let mut ids: Vec<EntityId> = system
         .load_models()
         .iter()
-        .filter(|m| m.std_mw > 0.0)
+        .filter(|m| m.is_noise_member(load_scheme))
         .map(|m| m.bus_id)
         .collect();
     ids.sort_unstable_by_key(|id| id.0);
@@ -589,6 +595,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 ///
 /// ```
 /// use chrono::NaiveDate;
+/// use cobre_core::scenario::SamplingScheme;
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
@@ -619,7 +626,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 ///                                    &std::collections::HashMap::new(),
 ///                                    &std::collections::HashMap::new(),
 ///                                    &std::collections::HashMap::new(),
-///                                    &hydro_cell_index)
+///                                    &hydro_cell_index, SamplingScheme::InSample)
 ///     .expect("empty system ok");
 /// assert!(result.templates.is_empty());
 /// ```
@@ -644,6 +651,7 @@ pub fn build_stage_templates(
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
     arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
     hydro_cell_index: &HydroCellIndex,
+    load_scheme: SamplingScheme,
 ) -> Result<StageTemplates, SddpError> {
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_hydros = system.hydros().len();
@@ -670,6 +678,7 @@ pub fn build_stage_templates(
         arc_arrival_density.clone(),
         state_layout.max_par_order,
         hydro_cell_index,
+        load_scheme,
     );
     let n_load_buses = load_bus_indices.len();
     debug_assert!(
@@ -756,6 +765,7 @@ pub fn build_stage_templates_resolving_layout(
         &topology.arc_spread_chrono,
         &topology.arc_arrival_density,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     )
 }
 
@@ -860,6 +870,7 @@ fn build_template_build_ctx<'a>(
     arc_arrival_density: HashMap<usize, Vec<Option<Vec<f64>>>>,
     max_par_order: usize,
     hydro_cell_index: &'a HydroCellIndex,
+    load_scheme: SamplingScheme,
 ) -> (
     TemplateBuildCtx<'a>,
     Vec<usize>,
@@ -933,7 +944,7 @@ fn build_template_build_ctx<'a>(
         system.bounds().n_contracts()
     );
 
-    let load_bus_indices = collect_load_bus_indices(system, &bus_pos);
+    let load_bus_indices = collect_load_bus_indices(system, &bus_pos, load_scheme);
 
     // Per anticipated thermal: global index and commissioning window. The window
     // keys the decision gate's operation-window clause on the delivery stage;

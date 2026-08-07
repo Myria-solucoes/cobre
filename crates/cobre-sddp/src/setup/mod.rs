@@ -903,6 +903,10 @@ fn build_energy_and_templates(
         arc_spread_chrono,
         arc_arrival_density,
         hydro_cell_index,
+        stochastic
+            .provenance()
+            .load_scheme
+            .unwrap_or(SamplingScheme::InSample),
     )?;
 
     let scaling_report = template_postprocess::postprocess_templates(

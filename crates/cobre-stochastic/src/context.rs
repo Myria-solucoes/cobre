@@ -95,14 +95,13 @@ impl NoiseEntityOrder {
 /// An NCS with `std = 0` is included unconditionally: it contributes zero noise
 /// after the transform, and dropping it would shift the canonical entity order.
 ///
-/// A load bus is included when it carries noise (`std_mw > 0`) OR its class is
-/// sourced externally (`schemes.load == Some(SamplingScheme::External)`) — an
-/// external column occupies a slot regardless of its σ, since a deterministic
-/// (σ = 0) external value still needs somewhere to standardize to. Inflow stays
-/// all-hydros and NCS stays unfiltered; only load's membership reads `schemes`.
-/// Every caller must pass the SAME resolved `schemes` (the training scenario
-/// source) so the external-library width check, the opening-tree layout, and
-/// the backward assembly all agree on which entities occupy the vector.
+/// Load-bus membership defers to [`LoadModel::is_noise_member`], the single
+/// membership authority — this fn does not re-derive the predicate. Inflow
+/// stays all-hydros and NCS stays unfiltered; only load's membership reads
+/// `schemes`. Every caller must pass the SAME resolved `schemes` (the training
+/// scenario source) so the external-library width check, the opening-tree
+/// layout, and the backward assembly all agree on which entities occupy the
+/// vector.
 #[must_use]
 pub fn noise_entity_order(system: &System, schemes: &ClassSchemes) -> NoiseEntityOrder {
     let sorted_dedup = |mut ids: Vec<EntityId>| {
@@ -117,7 +116,7 @@ pub fn noise_entity_order(system: &System, schemes: &ClassSchemes) -> NoiseEntit
             system
                 .load_models()
                 .iter()
-                .filter(|m| m.std_mw > 0.0 || schemes.load == Some(SamplingScheme::External))
+                .filter(|m| m.is_noise_member(schemes.load.unwrap_or(SamplingScheme::InSample)))
                 .map(|m| m.bus_id)
                 .collect(),
         ),

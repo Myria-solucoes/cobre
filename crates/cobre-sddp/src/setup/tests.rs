@@ -5414,10 +5414,6 @@ fn external_load_library_built_when_scheme_is_external() {
 /// with `std_mw > 0.0` and one with `std_mw == 0.0`, both present in the
 /// external load rows; setup must succeed and the library must carry both.
 #[test]
-#[ignore = "blocked: collect_load_bus_indices (lp/builder/template.rs) has its own \
-            std_mw > 0.0-only load-bus filter, unsynced with noise_entity_order's \
-            External-scheme relaxation; build_stage_templates's PrecomputedNormal-vs- \
-            n_load_buses debug_assert panics until the two are reconciled"]
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -5427,8 +5423,10 @@ fn external_load_library_built_when_scheme_is_external() {
 )]
 fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
     use chrono::NaiveDate;
+    use cobre_comm::LocalBackend;
     use cobre_core::scenario::ExternalLoadRow;
     use cobre_core::scenario::InflowModel as CoreInflowModel;
+    use cobre_solver::ActiveSolver;
 
     let bus = Bus {
         id: EntityId(1),
@@ -5690,7 +5688,7 @@ fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
     )
     .expect("stochastic context");
 
-    let setup = StudySetup::new(
+    let mut setup = StudySetup::new(
         &system,
         &config,
         stochastic,
@@ -5712,6 +5710,15 @@ fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
     assert_eq!(lib.n_stages(), 2);
     assert_eq!(lib.n_scenarios(), 3);
     assert_eq!(lib.entity_class(), "load");
+
+    // Train-through smoke: the same setup, bounded by minimal_config_with_schemes's
+    // 5-iteration limit. The thermal (100 MW @ 50/MWh) and deficit segment
+    // (500/MWh) keep every stage trivially feasible.
+    let comm = LocalBackend;
+    let mut solver = ActiveSolver::new().expect("solver");
+    setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("train: a sigma=0 External-scheme load bus must not block training");
 }
 
 #[test]
