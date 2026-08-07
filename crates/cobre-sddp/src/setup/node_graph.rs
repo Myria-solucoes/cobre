@@ -887,6 +887,30 @@ pub(crate) fn pool_cut_stride(graph: &NodeGraph, forward_passes: u32) -> Vec<u64
     pool_sum.into_iter().map(|s| s.min(cap)).collect()
 }
 
+/// Per-pool cut-receipt stride under exhaustive (`enumerated`) node-native
+/// traversal: the distinct-incoming-state count per pool = **1** for every
+/// non-leaf pool and **0** for the shared leaf pool. A non-leaf pool's owner
+/// node is in-degree 1 (a recombination join is rejected upstream), so every
+/// trajectory reaching it saw the one persisted incoming state and the backward
+/// appends exactly one cut per node per iteration; a leaf generates no cut, so
+/// its pool receives none.
+///
+/// The enumerated counterpart of [`pool_cut_stride`]'s sampled statistical
+/// margin (mean + σ, capped at `forward_passes`): under node-native enumeration
+/// the true stride is known exactly, so sizing at the sampled bound would keep
+/// the per-pool capacity/basis/broadcast/checkpoint reservation the enumerated
+/// engine never fills. The [`Traversal::Enumerated`] arm routes here; the
+/// [`Traversal::Sampled`] arm keeps [`pool_cut_stride`] unchanged.
+pub(crate) fn enumerated_pool_cut_stride(graph: &NodeGraph) -> Vec<u64> {
+    let mut stride = vec![0u64; graph.n_pools];
+    for (pos, node) in graph.nodes.iter_indexed() {
+        if !graph.successors[pos].is_empty() {
+            stride[node.pool_id] = 1;
+        }
+    }
+    stride
+}
+
 /// Per-node exact prefix count under exhaustive (`enumerated`) forward-pass
 /// selection: `π(n)`, the number of distinct root→node prefixes,
 /// `π(n) = Σ_{(parent, n) edges} π(parent)·|Ω_parent|`, `π(root) = 1`, in
@@ -2065,6 +2089,60 @@ mod tests {
             pool_cut_stride(&ng_declared, forward_passes),
             "a declared chain and the synthesized one must derive identical visit bounds"
         );
+    }
+
+    // ── enumerated_pool_cut_stride: unit stride per non-leaf pool ─────────
+
+    #[test]
+    fn enumerated_pool_cut_stride_is_one_per_nonleaf_pool_zero_for_leaf() {
+        // Root (stage 0, own pool) fans into K=4 leaves (stage 1) sharing ONE
+        // leaf pool: the non-leaf root pool sizes at stride 1, the shared leaf
+        // pool at 0 (leaves generate no cut).
+        let stochastic = stochastic_context(2, 1, 1);
+        let graph = HorizonGraph {
+            nodes: vec![
+                node(0, 0, None),
+                node(1, 1, None),
+                node(2, 1, None),
+                node(3, 1, None),
+                node(4, 1, None),
+            ],
+            transitions: vec![
+                transition(0, 1, 0.25),
+                transition(0, 2, 0.25),
+                transition(0, 3, 0.25),
+                transition(0, 4, 0.25),
+            ],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
+        assert_eq!(ng.n_pools, 2, "one root pool, one shared leaf pool");
+
+        let stride = enumerated_pool_cut_stride(&ng);
+        assert_eq!(stride.len(), ng.n_pools);
+        let root_pool = ng.nodes[NodePos(0)].pool_id;
+        let leaf_pool = ng.nodes[NodePos(1)].pool_id;
+        assert_eq!(stride[root_pool], 1, "the non-leaf root pool sizes at 1");
+        assert_eq!(
+            stride[leaf_pool], 0,
+            "the shared leaf pool sizes at 0 — leaves generate no cut"
+        );
+    }
+
+    #[test]
+    fn enumerated_pool_cut_stride_chain_is_one_per_nonleaf_zero_terminal() {
+        // A 4-stage chain: stages 0..2 are non-leaf (stride 1); the terminal
+        // stage-3 node is a leaf (stride 0).
+        let n_stages = 4;
+        let stochastic = stochastic_context(n_stages, 1, 3);
+        let study_stage_ids: Vec<i32> = (0..n_stages as i32).collect();
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&empty_graph(), n_stages, &resolver, &stochastic).unwrap();
+
+        let stride = enumerated_pool_cut_stride(&ng);
+        assert_eq!(stride, vec![1, 1, 1, 0]);
     }
 
     // ── forward_solve_counts: exact prefix counts ─────────────────────────

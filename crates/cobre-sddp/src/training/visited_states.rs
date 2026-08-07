@@ -158,6 +158,15 @@ impl VisitedStatesArchive {
         self.nodes[node.0].append(gathered, total_fwd);
     }
 
+    /// Archive the single incoming `state` a node saw on the enumerated
+    /// (node-native) path, appending exactly ONE vector — the distinct-
+    /// incoming-state count per node under enumeration is 1, so this never
+    /// replicates the state `total_forward_passes` times the way
+    /// [`Self::archive_gathered_states`] does for the sampled path.
+    pub fn archive_one_state(&mut self, node: NodePos, state: &[f64]) {
+        self.nodes[node.0].append(state, 1);
+    }
+
     /// Return the flat state slice for `node`.
     #[must_use]
     pub fn states_for_node(&self, node: NodePos) -> &[f64] {
@@ -267,6 +276,45 @@ mod tests {
         assert_eq!(a.count(NodePos(0)), 0);
         assert_eq!(a.count(NodePos(1)), 0);
         assert_eq!(a.count(NodePos(3)), 0);
+    }
+
+    // -- One-state-per-node archive (enumerated path) --------------------
+
+    /// On a trunk+fan shape, the enumerated path archives exactly ONE state per
+    /// cut-generating node per iteration — `count` reflects the node's distinct
+    /// incoming states (1 per iteration), never `total_forward_passes`.
+    #[test]
+    fn archive_one_state_appends_a_single_vector_per_node() {
+        // total_forward_passes = 5, but each enumerated archive call adds one.
+        let mut a = VisitedStatesArchive::new(3, 2, 10, 5);
+        a.archive_one_state(NodePos(0), &[10.0, 11.0]);
+        a.archive_one_state(NodePos(1), &[20.0, 21.0]);
+
+        assert_eq!(
+            a.count(NodePos(0)),
+            1,
+            "one distinct incoming state, not total_fwd"
+        );
+        assert_eq!(a.count(NodePos(1)), 1);
+        assert_eq!(a.count(NodePos(2)), 0, "an unvisited node stays empty");
+        assert_eq!(a.states_for_node(NodePos(0)), &[10.0, 11.0]);
+    }
+
+    /// Across iterations the enumerated node accumulates one state each — after
+    /// three iterations its count is 3 (the iteration count), never a
+    /// `total_forward_passes` multiple.
+    #[test]
+    fn archive_one_state_accumulates_one_per_iteration() {
+        let mut a = VisitedStatesArchive::new(2, 2, 10, 8);
+        for it in 0..3_i32 {
+            let base = f64::from(it) * 100.0;
+            a.archive_one_state(NodePos(1), &[base, base + 1.0]);
+        }
+        assert_eq!(a.count(NodePos(1)), 3);
+        assert_eq!(
+            a.states_for_node(NodePos(1)),
+            &[0.0, 1.0, 100.0, 101.0, 200.0, 201.0]
+        );
     }
 
     #[test]

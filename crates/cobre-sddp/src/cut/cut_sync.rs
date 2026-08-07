@@ -586,6 +586,19 @@ impl CutSyncBuffers {
     /// path (identical send bytes, counts, displacements, and remote inserts) —
     /// the generalization is reached by the counts, never by a shape branch.
     ///
+    /// `replicated_pools` names the pools whose backward cut was aggregated by
+    /// the replicated per-node solve (`training::backward::replicated`): every
+    /// rank already appended the bit-identical cut locally, so re-distributing it
+    /// here would insert it once per rank — the cut multiplied by rank count, a
+    /// silent wrong bound. Such a pool is EXCLUDED structurally, by aggregation
+    /// kind and never by a cut count (a count heuristic would drop a legitimately
+    /// exchanged cut on a non-replicated pool): it is not packed, not counted in
+    /// the per-`(rank, pool)` exchange, and not deserialized from any peer —
+    /// generalizing the local-rank-segment skip (a replicated pool's segment is
+    /// skipped for EVERY rank, not only the local one). The sampled level driver
+    /// passes `&[]` (its pools are all trial-point-distributed), so the exchange
+    /// is byte-for-byte unchanged there.
+    ///
     /// # Errors
     ///
     /// Returns `Err(SddpError::Validation(_))` only for a MALFORMED count
@@ -598,13 +611,17 @@ impl CutSyncBuffers {
     pub fn sync_level_records<C: Communicator>(
         &mut self,
         pools: &[usize],
+        replicated_pools: &[usize],
         fcf: &mut FutureCostFunction,
         iteration: u64,
         comm: &C,
     ) -> Result<(usize, usize), SddpError> {
         let my_rank = comm.rank();
-        let n_pools = pools.len();
         let expected_for_me = self.per_rank_cuts[my_rank];
+        // Structural skip by aggregation kind: a replicated-aggregation pool's
+        // cut is already held by every rank, so it is excluded from the exchange
+        // entirely — never packed, counted, or inserted (see the method doc).
+        let is_replicated = |pool: usize| replicated_pools.contains(&pool);
 
         // Grow the send/recv buffers to the level's total across its pools when a
         // multi-pool level exceeds the per-pool capacity the constructor sized —
@@ -617,6 +634,9 @@ impl CutSyncBuffers {
         let mut needed_send = 0usize;
         let mut needed_recv = 0usize;
         for &pool in pools {
+            if is_replicated(pool) {
+                continue;
+            }
             let record_size = cut_wire_size(fcf.pools[pool].state_dimension);
             needed_send += expected_for_me * record_size;
             needed_recv += total_cuts_all_ranks * record_size;
@@ -628,16 +648,20 @@ impl CutSyncBuffers {
             self.recv_buf.resize(needed_recv, 0);
         }
 
-        // Pack every pool's local records contiguously (pool-major), recording
-        // each pool's (record_size, n_local) for the count/deserialize passes.
-        // Taken out of `level_plan_scratch` (never a fresh `Vec::new`) so
-        // `pack_pool_into` can borrow `self` mutably below; restored just
-        // before returning `Ok`.
+        // Pack every non-replicated pool's local records contiguously
+        // (pool-major), recording each pool's (record_size, n_local) for the
+        // count/deserialize passes. Taken out of `level_plan_scratch` (never a
+        // fresh `Vec::new`) so `pack_pool_into` can borrow `self` mutably below;
+        // restored just before returning `Ok`. `n_pools` is the packed
+        // (non-replicated) count — the width every downstream pass indexes by.
         let mut plan = std::mem::take(&mut self.level_plan_scratch);
         plan.clear();
         let mut send_len = 0usize;
         let mut local_total = 0usize;
         for &pool in pools {
+            if is_replicated(pool) {
+                continue;
+            }
             let pool_n_state = fcf.pools[pool].state_dimension;
             debug_assert!(
                 pool_n_state <= self.max_n_state,
@@ -650,6 +674,7 @@ impl CutSyncBuffers {
             local_total += n_local;
             plan.push((pool, record_size, n_local));
         }
+        let n_pools = plan.len();
 
         // Exchange every rank's per-pool local count (a small uniform integer
         // `allgatherv`, `n_pools` per rank) so each peer's per-pool byte segment
@@ -1997,7 +2022,7 @@ mod tests {
         let mut fcf = FutureCostFunction::new(1, n_state, 1, 10, &[0; 1]);
         let mut bufs = CutSyncBuffers::new(n_state, 1, 1);
         let (local, remote) = bufs
-            .sync_level_records(&[], &mut fcf, 1, &LocalBackend)
+            .sync_level_records(&[], &[], &mut fcf, 1, &LocalBackend)
             .unwrap();
         assert_eq!((local, remote), (0, 0));
         assert_eq!(fcf.total_active_cuts(), 0);
@@ -2016,7 +2041,7 @@ mod tests {
         fcf.add_cut(NodeId(0), 1, 1, 0, 20.0, &[3.0, 4.0, 5.0]);
 
         let (local, remote) = bufs
-            .sync_level_records(&[0, 1], &mut fcf, 1, &LocalBackend)
+            .sync_level_records(&[0, 1], &[], &mut fcf, 1, &LocalBackend)
             .unwrap();
         assert_eq!(
             local, 2,
@@ -2125,7 +2150,7 @@ mod tests {
         );
 
         let (local, remote) = bufs
-            .sync_level_records(&[0, 1], &mut fcf, 1, &Rank0Of2Preserve)
+            .sync_level_records(&[0, 1], &[], &mut fcf, 1, &Rank0Of2Preserve)
             .unwrap();
 
         assert_eq!(local, 2, "rank 0 packs its two pool-0 cuts");
@@ -2160,7 +2185,7 @@ mod tests {
         // count whose byte total overruns the grown receive buffer.
         bufs.per_pool_rank_counts = vec![0, u64::from(u32::MAX)];
 
-        let result = bufs.sync_level_records(&[0], &mut fcf, 1, &Rank0Of2Preserve);
+        let result = bufs.sync_level_records(&[0], &[], &mut fcf, 1, &Rank0Of2Preserve);
         match result {
             Err(SddpError::Validation(ref msg)) => {
                 assert!(
@@ -2170,5 +2195,88 @@ mod tests {
             }
             other => panic!("expected SddpError::Validation for the overrun, got: {other:?}"),
         }
+    }
+
+    /// A replicated-aggregation pool is EXCLUDED from the batched exchange: it is
+    /// not packed, so `local_total` counts only the non-replicated pool. The
+    /// `replicated_pools = &[]` contrast packs both pools, so the skip is
+    /// selective (by aggregation kind), never a blanket effect.
+    #[test]
+    fn sync_level_records_excludes_replicated_pool_from_packing() {
+        let n_state = 2usize;
+        let dims = [n_state, n_state];
+        let mut fcf = FutureCostFunction::new_per_pool(&dims, n_state, 1, 10, &[0; 2], &[1; 2]);
+        let mut bufs = CutSyncBuffers::with_distribution(n_state, 2, 1, 1);
+        let it = 1u64;
+
+        // The backward compute inserted each pool's own local cut before the sync.
+        fcf.add_cut(NodeId(0), 0, it, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(1), 1, it, 0, 20.0, &[3.0, 4.0]);
+
+        // Pool 1 replicated -> excluded: only the non-replicated pool 0 is packed.
+        let (local, remote) = bufs
+            .sync_level_records(&[0, 1], &[1], &mut fcf, it, &LocalBackend)
+            .unwrap();
+        assert_eq!(local, 1, "only the non-replicated pool 0 is packed");
+        assert_eq!(remote, 0, "single rank inserts no remote cuts");
+
+        // No replicated pools -> both packed.
+        let (local_all, _) = bufs
+            .sync_level_records(&[0, 1], &[], &mut fcf, it, &LocalBackend)
+            .unwrap();
+        assert_eq!(local_all, 2, "both pools packed when none is replicated");
+    }
+
+    /// World >= 2: a replicated-aggregation pool is skipped even while a
+    /// non-replicated sibling pool IS exchanged. Rank 1's pool-0 cut inserts
+    /// remotely (the legitimate exchange), while the replicated pool 1 — already
+    /// held identically on every rank — is never re-inserted, so it keeps its one
+    /// local cut: `cuts_added` stays the world=1 count, no rank-multiplication.
+    #[test]
+    fn sync_level_records_skips_replicated_pool_under_two_ranks() {
+        let n_state = 2usize;
+        let record_size = cut_wire_size(n_state); // 45
+        let dims = [n_state, n_state];
+        let mut fcf = FutureCostFunction::new_per_pool(&dims, n_state, 2, 10, &[0; 2], &[4; 2]);
+        let mut bufs = CutSyncBuffers::with_distribution(n_state, 2, 2, 4);
+
+        // Rank 0's own local cuts (inserted by the backward compute before sync):
+        // one trial-point-distributed cut in pool 0, one replicated cut in pool 1.
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(1), 1, 1, 0, 20.0, &[3.0, 4.0]);
+
+        // Pool 1 is skipped, so the filtered plan holds only pool 0; the gathered
+        // per-(rank, pool) counts are num_ranks * 1 = 2: rank 0 = [<echoed 1>],
+        // rank 1 = [1] (preserved by the rank-0-only stub).
+        bufs.per_pool_rank_counts = vec![0, 1];
+
+        // Rank 1's distinct pool-0 cut at its byte segment (displs[1] = counts[0] =
+        // 45, pool 0 the only packed pool). fp=1 gives it a distinct slot.
+        serialize_cut(
+            &mut bufs.recv_buf[record_size..2 * record_size],
+            50,
+            0,
+            1,
+            1,
+            100.0,
+            &[5.0, 6.0],
+        );
+
+        let (local, remote) = bufs
+            .sync_level_records(&[0, 1], &[1], &mut fcf, 1, &Rank0Of2Preserve)
+            .unwrap();
+
+        assert_eq!(local, 1, "only the non-replicated pool 0 is packed");
+        assert_eq!(remote, 1, "rank 1's pool-0 cut inserts remotely");
+        assert_eq!(
+            fcf.pools[0].active_count(),
+            2,
+            "pool 0: rank 0's own cut plus rank 1's remote cut"
+        );
+        assert_eq!(
+            fcf.pools[1].active_count(),
+            1,
+            "pool 1 (replicated) keeps its single local cut — no rank-multiplication"
+        );
     }
 }

@@ -738,7 +738,7 @@ impl BackwardPassState {
         let my_rank = inputs.comm.rank();
 
         #[cfg(debug_assertions)]
-        let mut seen_predecessor_states: Vec<(NodePos, Option<NodePos>, Vec<f64>)> = Vec::new();
+        debug_assert_node_predecessor_states_distinct(node_graph, inputs.enumerated_state);
 
         let levels = backward_cut_levels(node_graph);
         let mut cuts_generated: usize = 0;
@@ -750,13 +750,13 @@ impl BackwardPassState {
                 let successor_stage = node_stage.next();
 
                 let x_hat = inputs.enumerated_state.out_state(node_pos);
-                #[cfg(debug_assertions)]
-                debug_assert_predecessor_states_distinct(
-                    &mut seen_predecessor_states,
-                    node_pos,
-                    plan.parent[node_pos],
-                    x_hat,
-                );
+
+                // A node on the enumerated path has ONE distinct incoming state,
+                // so archive that single vector (never `total_fwd` copies as the
+                // sampled level driver does).
+                if let Some(archive) = inputs.visited_archive.as_mut() {
+                    archive.archive_one_state(node_pos, x_hat);
+                }
 
                 assemble_successor_outcome_weights(
                     node_graph,
@@ -1300,47 +1300,64 @@ fn assemble_successor_outcome_weights(
     );
 }
 
-/// Future-DAG insurance (debug-only): the enumerated backward keys a
-/// node's own persisted state purely structurally (its `NodePos` into the
-/// forward's arena), never by comparing state values. This asserts that
-/// assumption stays safe by checking that two cut-generating nodes on
-/// DIFFERENT branches (not sharing the same immediate `plan.parent`) never
-/// carry `to_bits`-identical persisted state — if two did, a future
-/// recombination/DAG extension's structural keying could silently misattribute
-/// one node's cut to another's state. Sibling nodes (the same immediate
-/// parent) are excluded: they legitimately land on the same numeric point —
-/// e.g. a shared binding storage bound reached regardless of which branch's
-/// noise realization — which is ordinary LP degeneracy, not a structural-keying
-/// hazard, since siblings never share a `NodePos` to begin with. `seen`
-/// accumulates every distinct node visited so far in the current
-/// [`BackwardPassState::run_enumerated_backward`] call; a repeat visit to the
-/// SAME node (impossible today — `backward_cut_levels` lists each node once —
-/// reserved for a future multi-level revisit) is not a collision and is
-/// skipped.
+/// Future recombination/DAG insurance (debug-only): the enumerated backward
+/// keys each node's own incoming state purely structurally — a node reads the
+/// persisted `out_state` of its single predecessor by `NodePos`. This asserts the
+/// only way that keying could become ambiguous never arises: for every node,
+/// the `out_states` of its predecessors (the nodes with an edge into it) are
+/// pairwise `to_bits`-distinct. A recombination node (in-degree >= 2) whose two
+/// predecessors carry identical states could not tell which predecessor's state
+/// it inherited. The check is PER-NODE-PREDECESSORS, never pairwise across
+/// distinct cut-generating nodes: two distinct nodes legitimately share a state
+/// (a deterministic trunk's parent and child, two fan branches settling on the
+/// same binding bound) — ordinary LP degeneracy, not a keying hazard, and a
+/// backend-dependent one at that. The current graph is in-degree 1
+/// (`build_parent_map` rejects a second predecessor), so every node has at most
+/// one predecessor and this is vacuous; it only bites a future >= 2-predecessor
+/// recombination.
 #[cfg(debug_assertions)]
-fn debug_assert_predecessor_states_distinct(
-    seen: &mut Vec<(NodePos, Option<NodePos>, Vec<f64>)>,
-    node: NodePos,
-    parent: Option<NodePos>,
-    state: &[f64],
+fn debug_assert_node_predecessor_states_distinct(
+    node_graph: &NodeGraph,
+    enumerated_state: &EnumeratedForwardScratch,
 ) {
-    for (other, other_parent, other_state) in seen.iter() {
-        if *other == node || *other_parent == parent {
-            continue;
+    let mut predecessors: Vec<Vec<NodePos>> = vec![Vec::new(); node_graph.nodes.len()];
+    for (pos, succs) in node_graph.successors.iter_indexed() {
+        for succ in succs {
+            predecessors[succ.child.0].push(pos);
         }
-        let identical = state.len() == other_state.len()
-            && state
-                .iter()
-                .zip(other_state)
-                .all(|(a, b)| a.to_bits() == b.to_bits());
-        debug_assert!(
-            !identical,
-            "enumerated backward: distinct, non-sibling cut-generating nodes {node} and \
-             {other} carry bit-identical persisted states; structural parent-keying assumes \
-             nodes on different branches never collapse to the same state"
-        );
     }
-    seen.push((node, parent, state.to_vec()));
+    assert_predecessor_states_distinct(&predecessors, enumerated_state);
+}
+
+/// The per-node-predecessors core of
+/// [`debug_assert_node_predecessor_states_distinct`], split out so a unit test
+/// can drive it with a hand-built predecessor adjacency and `out_state` arena
+/// (`StudySetup::new` hard-rejects recombination under enumerated, so no
+/// >= 2-predecessor node is constructible through a real study).
+#[cfg(debug_assertions)]
+fn assert_predecessor_states_distinct(
+    predecessors: &[Vec<NodePos>],
+    enumerated_state: &EnumeratedForwardScratch,
+) {
+    for preds in predecessors {
+        for (i, &p) in preds.iter().enumerate() {
+            let p_state = enumerated_state.out_state(p);
+            for &q in &preds[i + 1..] {
+                let q_state = enumerated_state.out_state(q);
+                let identical = p_state.len() == q_state.len()
+                    && p_state
+                        .iter()
+                        .zip(q_state)
+                        .all(|(a, b)| a.to_bits() == b.to_bits());
+                debug_assert!(
+                    !identical,
+                    "enumerated backward: predecessors {p} and {q} of one node carry \
+                     bit-identical persisted states; a recombination node's incoming state \
+                     is ambiguous under structural (NodePos) keying"
+                );
+            }
+        }
+    }
 }
 
 /// Group this rank's own local trial points (`0..local_work`) by the
@@ -1575,8 +1592,11 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
     let mut level_pools = std::mem::take(&mut state.level_pools_scratch);
     level_pools.clear();
     level_pools.extend(nodes_out.iter().map(|nc| nc.pool_id));
+    // The sampled path aggregates every pool by trial-point distribution, so no
+    // pool is replicated: the batched exchange runs over all of the level's pools.
     let (n_local_total, remote_total) = inputs.cut_sync_bufs.sync_level_records(
         &level_pools,
+        &[],
         inputs.fcf,
         inputs.iteration,
         inputs.comm,
@@ -2177,6 +2197,49 @@ mod tests {
         }
         fn size(&self) -> usize {
             1
+        }
+        fn abort(&self, code: i32) -> ! {
+            std::process::exit(code)
+        }
+    }
+
+    /// `size() == 2` sibling of [`StubComm`]: `allgatherv` writes only this
+    /// rank's own slot (`recv[displs[0]..displs[0] + send.len()]`), the faithful
+    /// single-process view of rank 0's contribution to a 2-rank collective.
+    struct Rank0Of2;
+
+    impl Communicator for Rank0Of2 {
+        fn allgatherv<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            _counts: &[usize],
+            displs: &[usize],
+        ) -> Result<(), CommError> {
+            let start = displs[0];
+            recv[start..start + send.len()].copy_from_slice(send);
+            Ok(())
+        }
+        fn allreduce<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            _op: ReduceOp,
+        ) -> Result<(), CommError> {
+            recv[..send.len()].copy_from_slice(send);
+            Ok(())
+        }
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            Ok(())
+        }
+        fn barrier(&self) -> Result<(), CommError> {
+            Ok(())
+        }
+        fn rank(&self) -> usize {
+            0
+        }
+        fn size(&self) -> usize {
+            2
         }
         fn abort(&self, code: i32) -> ! {
             std::process::exit(code)
@@ -3338,11 +3401,12 @@ mod tests {
     /// happy-path and the validation-error tests can share this setup) and
     /// the per-pool active-cut counts (computed regardless of `Ok`/`Err`,
     /// since `fcf` retains whatever cuts were appended before any error).
-    fn run_enumerated_backward_over_graph(
+    fn run_enumerated_backward_over_graph<C: Communicator>(
         node_graph: &NodeGraph,
         stochastic: &cobre_stochastic::StochasticContext,
         traversal: &Traversal,
         enumerated_state: &EnumeratedForwardScratch,
+        comm: &C,
     ) -> (Result<BackwardResult, SddpError>, Vec<usize>) {
         let n_stages = 3_usize;
         let state = state_layout(1, 0);
@@ -3366,11 +3430,10 @@ mod tests {
         };
         let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
-        let comm = StubComm;
         let solution = solution_1_0(100.0, -5.0);
         let mut workspaces = single_workspace(MockSolver::always_ok(solution), n_state);
         let mut basis_store = empty_basis_store(1, node_graph.nodes.len());
-        let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, 1);
+        let mut csb = CutSyncBuffers::with_distribution(n_state, 64, comm.size(), comm.size());
         let mut cut_batches = empty_cut_batches(node_graph.n_pools);
         let ctx = StageContext {
             geometry_per_stage: &[],
@@ -3443,7 +3506,7 @@ mod tests {
             fcf: &mut fcf,
             cut_batches: &mut cut_batches,
             training_ctx: &training_ctx,
-            comm: &comm,
+            comm,
             exchange: &mut exchange,
             records: &[],
             cut_sync_bufs: &mut csb,
@@ -3487,6 +3550,7 @@ mod tests {
             &stochastic,
             &traversal,
             &enumerated_state,
+            &StubComm,
         );
         let result = result.expect("enumerated backward over a trunk+fan graph must not error");
 
@@ -3502,6 +3566,56 @@ mod tests {
             per_pool[trunk_pool], 1,
             "trunk's pool receives exactly one cut"
         );
+    }
+
+    /// World >= 2 cut-exchange hygiene: the enumerated backward appends the
+    /// replicated cut on every rank via `run_backward_node_replicated`, so a
+    /// 2-rank run appends exactly the world=1 count — one cut per non-leaf pool,
+    /// never multiplied by rank count. Guards against a naive future cut exchange
+    /// that would re-insert the replicated cut.
+    #[test]
+    fn enumerated_backward_two_ranks_matches_world_one_cut_count() {
+        let (node_graph, stochastic) = trunk_fan_graph();
+        let root = NodePos(0);
+        let trunk = NodePos(1);
+        let root_pool = node_graph.nodes[root].pool_id;
+        let trunk_pool = node_graph.nodes[trunk].pool_id;
+
+        let traversal = Traversal::resolve(&node_graph, true, 1);
+        let mut enumerated_state = EnumeratedForwardScratch::default();
+        enumerated_state.set_out_state_for_test(root, node_graph.nodes.len(), &[10.0]);
+        enumerated_state.set_out_state_for_test(trunk, node_graph.nodes.len(), &[20.0]);
+
+        let (world1, per_pool_1) = run_enumerated_backward_over_graph(
+            &node_graph,
+            &stochastic,
+            &traversal,
+            &enumerated_state,
+            &StubComm,
+        );
+        let (world2, per_pool_2) = run_enumerated_backward_over_graph(
+            &node_graph,
+            &stochastic,
+            &traversal,
+            &enumerated_state,
+            &Rank0Of2,
+        );
+        let world1 = world1.expect("world=1 enumerated backward must not error");
+        let world2 = world2.expect("world=2 enumerated backward must not error");
+
+        assert_eq!(
+            world2.cuts_generated, world1.cuts_generated,
+            "2-rank cuts_generated equals the world=1 count — no rank-multiplication"
+        );
+        assert_eq!(
+            per_pool_2[root_pool], per_pool_1[root_pool],
+            "root pool: one cut on 2 ranks, exactly as on 1"
+        );
+        assert_eq!(
+            per_pool_2[trunk_pool], per_pool_1[trunk_pool],
+            "trunk pool: one cut on 2 ranks, exactly as on 1"
+        );
+        assert_eq!(per_pool_2[trunk_pool], 1, "and that count is exactly one");
     }
 
     /// A successor whose `EnumeratedPlan::parent` does not record the
@@ -3536,6 +3650,7 @@ mod tests {
             &stochastic,
             &traversal,
             &enumerated_state,
+            &StubComm,
         );
         match result {
             Err(SddpError::Validation(msg)) => {
@@ -3548,34 +3663,49 @@ mod tests {
         }
     }
 
-    /// The future-DAG insurance `debug_assert` fires when two DISTINCT,
-    /// non-sibling cut-generating nodes' persisted states are made
-    /// `to_bits`-identical — a regression a `release` build would never see
-    /// (the assertion is compiled out).
+    /// OQ-3 future-recombination insurance, driven on the assert HELPER directly
+    /// (a real enumerated study cannot construct a >= 2-predecessor node —
+    /// `StudySetup::new` rejects recombination). A node with TWO predecessors
+    /// whose persisted `out_states` are `to_bits`-identical makes its incoming
+    /// state ambiguous under structural keying: the helper fires.
+    #[cfg(debug_assertions)]
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "future-DAG insurance debug_assert compiles out of release"
-    )]
     #[should_panic(expected = "bit-identical persisted states")]
-    fn enumerated_backward_debug_assert_fires_on_identical_nonsibling_predecessor_states() {
-        let (node_graph, stochastic) = trunk_fan_graph();
-        let root = NodePos(0);
-        let trunk = NodePos(1);
+    fn predecessor_states_distinct_fires_on_two_same_state_predecessors() {
+        // Node 2's predecessors are nodes 0 and 1, both carrying [7.0].
+        let predecessors = vec![Vec::new(), Vec::new(), vec![NodePos(0), NodePos(1)]];
+        let mut arena = EnumeratedForwardScratch::default();
+        arena.set_out_state_for_test(NodePos(0), 3, &[7.0]);
+        arena.set_out_state_for_test(NodePos(1), 3, &[7.0]);
+        assert_predecessor_states_distinct(&predecessors, &arena);
+    }
 
-        let traversal = Traversal::resolve(&node_graph, true, 1);
-        let mut enumerated_state = EnumeratedForwardScratch::default();
-        // Root and trunk are DISTINCT, non-sibling cut-generating nodes made
-        // to carry the SAME persisted state — the regression this must catch.
-        enumerated_state.set_out_state_for_test(root, node_graph.nodes.len(), &[10.0]);
-        enumerated_state.set_out_state_for_test(trunk, node_graph.nodes.len(), &[10.0]);
+    /// The false positive the old wrong-axis assert produced under CLP: two
+    /// DISTINCT nodes (a deterministic trunk's parent and child) settle on the
+    /// SAME persisted state. Each is a single predecessor of a different node,
+    /// so no node has >= 2 predecessors — the helper is vacuous and does NOT fire.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn predecessor_states_distinct_ignores_parent_child_same_state() {
+        // Node 1's only predecessor is node 0; both carry the same state.
+        let predecessors = vec![Vec::new(), vec![NodePos(0)]];
+        let mut arena = EnumeratedForwardScratch::default();
+        arena.set_out_state_for_test(NodePos(0), 2, &[10.0]);
+        arena.set_out_state_for_test(NodePos(1), 2, &[10.0]);
+        assert_predecessor_states_distinct(&predecessors, &arena);
+    }
 
-        let _ = run_enumerated_backward_over_graph(
-            &node_graph,
-            &stochastic,
-            &traversal,
-            &enumerated_state,
-        );
+    /// A legitimate recombination node whose two predecessors carry DISTINCT
+    /// states does NOT fire — the helper flags ambiguous (identical) predecessor
+    /// states, never recombination itself.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn predecessor_states_distinct_allows_distinct_predecessor_states() {
+        let predecessors = vec![Vec::new(), Vec::new(), vec![NodePos(0), NodePos(1)]];
+        let mut arena = EnumeratedForwardScratch::default();
+        arena.set_out_state_for_test(NodePos(0), 3, &[7.0]);
+        arena.set_out_state_for_test(NodePos(1), 3, &[8.0]);
+        assert_predecessor_states_distinct(&predecessors, &arena);
     }
 
     /// Cut-generation routing at a two-INTERIOR-node level: each cut-generating

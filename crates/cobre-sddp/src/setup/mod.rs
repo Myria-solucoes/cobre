@@ -583,27 +583,25 @@ impl StudySetup {
             .iter()
             .map(CutStateProjection::n_slots)
             .collect();
-        // Cut-RECEIPT stride selected through the resolved traversal: BOTH arms
-        // call `pool_cut_stride` — NEVER `forward_solve_counts`, the enumerated
-        // engine's node-deduplicated per-pool FORWARD-SOLVE count, a strictly
-        // smaller and different-purpose quantity once a pool sits below a
-        // branch point (it feeds only the engine's own dedup-scale invariant,
-        // `expected_single_rank_solves`). Sizing the POOL from it under-reserves
-        // every branched pool's cut slots: the backward pass still produces one
-        // candidate cut per TRIAL POINT (== `forward_passes`, not per
-        // deduplicated forward solve), so the next trial point collides with a
-        // still-active slot (`CutPool::add_cut`'s double-insert panic) —
-        // reproduced by swapping this call for `forward_solve_counts` on a
-        // K-fan enumerated case. `forward_passes` is already the trial-point
-        // count for whichever axis `traversal` resolved to, so both arms derive
-        // an identical stride; the match exists to keep the derivation visibly
-        // routed through `Traversal` rather than a bare bool.
+        // Cut-RECEIPT stride selected through the resolved traversal. The
+        // `Sampled` arm keeps `pool_cut_stride` — the mean+σ statistical margin
+        // capped at `forward_passes`, one candidate cut per TRIAL POINT — and
+        // NEVER `forward_solve_counts`, the enumerated engine's node-deduplicated
+        // per-pool FORWARD-SOLVE count, which under-reserves a branched pool's
+        // slots (the backward still produces one cut per trial point, so the next
+        // trial collides with a still-active slot — `CutPool::add_cut`'s
+        // double-insert panic). The `Enumerated` arm sizes at the node-native cut
+        // count, `enumerated_pool_cut_stride`: exactly 1 per non-leaf node
+        // (in-degree 1, one distinct incoming state, one cut per iteration) and 0
+        // for the shared leaf pool — NOT the sampled bound, which would keep the
+        // per-pool capacity/basis/broadcast/checkpoint reservation the node-native
+        // backward never fills.
         let visit_bounds = match &traversal {
             node_graph::Traversal::Sampled { forward_passes } => {
                 node_graph::pool_cut_stride(&node_graph, *forward_passes)
             }
             node_graph::Traversal::Enumerated(_) => {
-                node_graph::pool_cut_stride(&node_graph, forward_passes)
+                node_graph::enumerated_pool_cut_stride(&node_graph)
             }
         };
         let fcf = FutureCostFunction::new_per_pool(

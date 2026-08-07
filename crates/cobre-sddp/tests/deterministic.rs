@@ -9028,3 +9028,224 @@ mod f36_gap_attainability {
         );
     }
 }
+
+/// Enumerated-study checkpoint export→re-load round-trip under the stride-1
+/// `cut_id` numbering. The sampled half is `d12_checkpoint_round_trip`; this pins
+/// the enumerated half — an enumerated policy's dense stride-1 `cut_id`
+/// (`iteration_generated * visit_stride + forward_pass_index` with `visit_stride
+/// == 1` and `forward_pass_index == 0`, so `cut_id == iteration` for a non-leaf
+/// pool, never `iteration ×` a larger stride) survives write→read intact. The
+/// trunk+fan enumerated graph carries several non-leaf pools (root plus each
+/// fan node) and one shared leaf pool, so the round-trip is pinned across both
+/// stride-1 and stride-0 pools on both backends.
+#[cfg(feature = "test-support")]
+mod enumerated_checkpoint {
+    use std::collections::HashSet;
+
+    use cobre_io::{
+        FORMAT_VERSION, GraphManifest, PolicyCheckpointMetadata, ProducerBlock, StageCutsPayload,
+        read_policy_checkpoint, write_policy_checkpoint,
+    };
+    use cobre_sddp::policy_export::build_stage_cut_records;
+    use cobre_sddp::setup::NodePos;
+    use cobre_sddp::test_support::k_fan_setup_enumerated;
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::StubComm;
+
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    #[test]
+    fn enumerated_checkpoint_round_trips_under_stride_one_cut_ids() {
+        const K: usize = 3;
+        const MAX_ITERATIONS: u32 = 4;
+
+        let mut fixture = k_fan_setup_enumerated(K, MAX_ITERATIONS);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "enumerated training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+        // Required side effect before the cut extraction below (mirrors d12).
+        let _training_output = fixture.setup.build_training_output(&result, &[]);
+
+        // Partition pools into leaf (stride 0) and non-leaf (stride 1).
+        let node_graph = &fixture.setup.node_graph;
+        let mut leaf_pools: HashSet<usize> = HashSet::new();
+        let mut nonleaf_pools: HashSet<usize> = HashSet::new();
+        for i in 0..node_graph.nodes.len() {
+            let pos = NodePos(i);
+            let pool = node_graph.nodes[pos].pool_id;
+            if node_graph.successors[pos].is_empty() {
+                leaf_pools.insert(pool);
+            } else {
+                nonleaf_pools.insert(pool);
+            }
+        }
+        assert!(
+            !nonleaf_pools.is_empty() && !leaf_pools.is_empty(),
+            "the trunk+fan fixture must exercise both non-leaf and leaf pools"
+        );
+
+        let fcf = &fixture.setup.fcf;
+        // R1: the stride that drives the enumerated cut_id numbering.
+        for &p in &nonleaf_pools {
+            assert_eq!(
+                fcf.pools[p].visit_stride, 1,
+                "non-leaf pool {p} sizes at stride 1"
+            );
+        }
+        for &p in &leaf_pools {
+            assert_eq!(
+                fcf.pools[p].visit_stride, 0,
+                "shared leaf pool {p} sizes at stride 0"
+            );
+        }
+
+        // The real export path: cut_id = iteration_generated * visit_stride + fp.
+        let cut_records_per_stage = build_stage_cut_records(fcf);
+
+        // Write-side stride-1 pin: a non-leaf pool's cut_id is dense (== its
+        // iteration), never iteration × a larger stride; the leaf pool emits none.
+        let mut nonleaf_cut_count = 0usize;
+        for (pool_idx, records) in cut_records_per_stage.iter().enumerate() {
+            if nonleaf_pools.contains(&pool_idx) {
+                for rec in records {
+                    assert_eq!(
+                        rec.cut_id,
+                        u64::from(rec.iteration),
+                        "non-leaf pool {pool_idx}: stride-1 cut_id must equal its iteration"
+                    );
+                    nonleaf_cut_count += 1;
+                }
+            } else {
+                assert!(
+                    records.is_empty(),
+                    "leaf pool {pool_idx} generates no cut (stride 0)"
+                );
+            }
+        }
+        assert!(
+            nonleaf_cut_count > 0,
+            "training must produce non-leaf cuts for the round-trip to pin"
+        );
+
+        let active_indices_per_stage: Vec<Vec<u32>> = fcf
+            .pools
+            .iter()
+            .map(|pool| {
+                (0..pool.populated())
+                    .filter(|&slot| pool.is_active(slot))
+                    .map(|slot| slot as u32)
+                    .collect()
+            })
+            .collect();
+
+        let stage_cuts_payloads: Vec<StageCutsPayload<'_>> = fcf
+            .pools
+            .iter()
+            .enumerate()
+            .map(|(pool_idx, pool)| StageCutsPayload {
+                stage_id: pool_idx as u32,
+                state_dimension: pool.state_dimension as u32,
+                capacity: pool.capacity as u32,
+                warm_start_count: pool.warm_start_count,
+                cuts: &cut_records_per_stage[pool_idx],
+                active_cut_indices: &active_indices_per_stage[pool_idx],
+                populated_count: pool.populated() as u32,
+                entity_manifest: &[],
+            })
+            .collect();
+
+        let n_pools = fcf.pools.len();
+        let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
+        let policy_metadata = PolicyCheckpointMetadata {
+            format_version: FORMAT_VERSION,
+            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: "2026-03-16T00:00:00Z".to_string(),
+            num_stages: n_pools as u32,
+            graph_manifest: GraphManifest::default(),
+            producer: ProducerBlock {
+                completed_iterations: result.iterations as u32,
+                final_lower_bound: result.final_lb,
+                best_upper_bound: Some(result.final_ub),
+                max_iterations: MAX_ITERATIONS,
+                forward_passes: fixture.forward_passes,
+                warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
+                warm_start_counts,
+                rng_seed: 42,
+                total_visited_states: 0,
+                training_block_mode: "parallel".to_string(),
+                training_block_mode_per_stage: vec![],
+                cost_scale_factor: None,
+            },
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let policy_dir = tmp.path().join("policy");
+        write_policy_checkpoint(
+            &policy_dir,
+            &stage_cuts_payloads,
+            &[],
+            &policy_metadata,
+            &[],
+        )
+        .expect("write_policy_checkpoint must succeed");
+        let checkpoint =
+            read_policy_checkpoint(&policy_dir).expect("read_policy_checkpoint must succeed");
+
+        assert_eq!(
+            checkpoint.metadata.num_stages as usize, n_pools,
+            "num_stages round-trips"
+        );
+        assert_eq!(checkpoint.stage_cuts.len(), n_pools, "one payload per pool");
+
+        // Every pool's cuts round-trip byte-for-byte, and every reloaded non-leaf
+        // cut still carries the dense stride-1 cut_id (== its iteration).
+        for (pool_idx, stage) in checkpoint.stage_cuts.iter().enumerate() {
+            let written = &cut_records_per_stage[pool_idx];
+            assert_eq!(
+                stage.cuts.len(),
+                written.len(),
+                "pool {pool_idx} cut count round-trips"
+            );
+            assert_eq!(
+                stage.state_dimension as usize, fcf.pools[pool_idx].state_dimension,
+                "pool {pool_idx} state_dimension round-trips"
+            );
+            for (loaded, w) in stage.cuts.iter().zip(written) {
+                assert_eq!(loaded.cut_id, w.cut_id, "cut_id round-trips");
+                assert_eq!(loaded.slot_index, w.slot_index, "slot_index round-trips");
+                assert_eq!(loaded.iteration, w.iteration, "iteration round-trips");
+                assert_eq!(
+                    loaded.intercept.to_bits(),
+                    w.intercept.to_bits(),
+                    "intercept round-trips bit-for-bit"
+                );
+                assert_eq!(
+                    loaded.coefficients.as_slice(),
+                    w.coefficients,
+                    "coefficients round-trip bit-for-bit"
+                );
+            }
+            if nonleaf_pools.contains(&pool_idx) {
+                for loaded in &stage.cuts {
+                    assert_eq!(
+                        loaded.cut_id,
+                        u64::from(loaded.iteration),
+                        "reloaded non-leaf pool {pool_idx}: stride-1 cut_id survives the round-trip"
+                    );
+                }
+            }
+        }
+    }
+}
