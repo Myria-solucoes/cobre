@@ -3002,3 +3002,332 @@ pub fn dual_folding_setup(fold: LagFold, forward_passes: u32, max_iterations: u3
     StudySetup::new(&system, &config, stochastic, hydro_models)
         .expect("dual_folding_setup: StudySetup::new must succeed")
 }
+
+// ── Deterministic-trunk + terminal-fan fixture (node-native enumerated backward) ──
+
+/// Injected constant productivity (MW per m³/s) for the trunk+fan hydro —
+/// nonzero so turbined inflow generates real MW against the load, giving the
+/// trunk's carried storage genuine marginal value (`default_from_system`'s
+/// `0.0` placeholder would zero every cut coefficient and make the bound
+/// trivially deficit-cost-constant, as on [`k_fan_setup_enumerated`]/
+/// [`branching_tree_setup_enumerated`]).
+const TRUNK_FAN_PRODUCTIVITY: f64 = 0.5;
+
+/// Scarce reservoir (hm³) for the trunk+fan hydro: a small cap and a matching
+/// initial volume make stored water bind across the trunk, so the backward
+/// cut coefficients are genuinely nonzero (mirrors [`DUAL_FOLDING_STORAGE`]).
+const TRUNK_FAN_STORAGE: StorageSpec = StorageSpec {
+    max_storage_hm3: 30.0,
+    initial_storage_hm3: 30.0,
+};
+
+/// Deterministic-trunk + terminal-fan declared graph: `t_trunk` single-successor
+/// trunk nodes (ids `0..t_trunk`, stage ids `0..t_trunk`, each deterministically
+/// reaching the next), followed by a terminal fan of `k` distinct leaves (ids
+/// `t_trunk..t_trunk+k`, stage `t_trunk`) off the LAST trunk node, under
+/// strictly non-uniform weights `i / Σj` (mirrors
+/// [`k_fan_policy_graph`]/[`dual_folding_policy_graph`]: a uniform split would
+/// make every canonical-order reduction sum identical terms, defeating the
+/// canonical-order gate's power).
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation
+)]
+fn trunk_fan_policy_graph(t_trunk: usize, k: usize) -> HorizonGraph {
+    debug_assert!(
+        t_trunk >= 2,
+        "trunk_fan_policy_graph: t_trunk must be >= 2 (a genuine chain-then-fan)"
+    );
+    debug_assert!(
+        k >= 2,
+        "trunk_fan_policy_graph: k must be >= 2 (DECOMP shape)"
+    );
+    let mut nodes = Vec::with_capacity(t_trunk + k);
+    let mut transitions = Vec::with_capacity(t_trunk - 1 + k);
+    for i in 0..t_trunk {
+        nodes.push(PolicyNode {
+            id: i as i32,
+            stage_id: i as i32,
+            scenario_id: None,
+            label: None,
+        });
+        if i > 0 {
+            transitions.push(Transition {
+                source_id: (i - 1) as i32,
+                target_id: i as i32,
+                probability: 1.0,
+                annual_discount_rate_override: None,
+            });
+        }
+    }
+    let last_trunk_id = (t_trunk - 1) as i32;
+    let total_weight: f64 = (1..=k).map(|i| i as f64).sum();
+    for i in 1..=k {
+        let leaf_id = last_trunk_id + i as i32;
+        nodes.push(PolicyNode {
+            id: leaf_id,
+            stage_id: t_trunk as i32,
+            scenario_id: None,
+            label: None,
+        });
+        transitions.push(Transition {
+            source_id: last_trunk_id,
+            target_id: leaf_id,
+            probability: (i as f64) / total_weight,
+            annual_discount_rate_override: None,
+        });
+    }
+    HorizonGraph {
+        graph_type: PolicyGraphType::FiniteHorizon,
+        annual_discount_rate: 0.0,
+        transitions,
+        nodes,
+        stage_discount_rate_overrides: HashMap::new(),
+        season_map: None,
+    }
+}
+
+/// The trunk+fan [`System`]: [`trunk_fan_policy_graph`] over the shared
+/// single-hydro/single-bus [`fan_or_chain_system_ext`] boilerplate, with
+/// [`TRUNK_FAN_STORAGE`] and a deterministic (zero-std) inflow/load — every
+/// scale signal comes from the declared trunk depth and fan width, never from
+/// within-node opening variance.
+fn trunk_fan_system(t_trunk: usize, k: usize) -> System {
+    fan_or_chain_system_ext(
+        t_trunk + 1,
+        trunk_fan_policy_graph(t_trunk, k),
+        0.0,
+        0.0,
+        TRUNK_FAN_STORAGE,
+        Vec::new(),
+        Vec::new(),
+        None,
+        &[],
+    )
+}
+
+/// Fixture bundle for the deterministic-trunk + terminal-fan [`StudySetup`],
+/// carrying the parameters callers need to derive their own expected
+/// solves/cut counts — never a magic literal, always re-derived from these
+/// fields or from `setup.node_graph` directly.
+#[derive(Debug)]
+pub struct TrunkFanFixture {
+    /// The built study: a single-hydro, single-bus system over the declared
+    /// trunk+fan graph.
+    pub setup: StudySetup,
+    /// Trunk depth: `t_trunk` deterministic, single-successor trunk nodes
+    /// (stages `0..t_trunk`), the last of which owns the terminal fan.
+    pub t_trunk: usize,
+    /// Terminal fan width: `k` distinct leaves at stage `t_trunk`, reached
+    /// from the last trunk node under non-uniform weights.
+    pub k: usize,
+    /// Total non-leaf (cut-generating) node count in `setup.node_graph` —
+    /// every trunk node, derived from the graph's own successor lists, never
+    /// assumed equal to `t_trunk` by construction alone.
+    pub n_nonleaf_nodes: usize,
+}
+
+/// Shared build for [`trunk_fan_setup_enumerated`]/[`trunk_fan_setup`]: builds
+/// the stochastic context and study for `config`, injects
+/// [`TRUNK_FAN_PRODUCTIVITY`] over `default_from_system`'s `0.0` placeholder,
+/// and derives `n_nonleaf_nodes` from the resolved graph.
+// `config` is taken by value so callers pass an owned builder result inline;
+// the body only borrows it for `StudySetup::new`.
+#[allow(clippy::expect_used, clippy::needless_pass_by_value)]
+#[must_use]
+fn trunk_fan_fixture(t_trunk: usize, k: usize, config: Config) -> TrunkFanFixture {
+    let system = trunk_fan_system(t_trunk, k);
+    let n_stages = t_trunk + 1;
+    let stochastic = build_stochastic_context(
+        &system,
+        K_FAN_SEED,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("trunk_fan_fixture: build_stochastic_context must succeed");
+    let mut hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+    hydro_models.production = ProductionModelSet::new(
+        vec![vec![
+            ResolvedProductionModel::ConstantProductivity {
+                productivity: TRUNK_FAN_PRODUCTIVITY,
+            };
+            n_stages
+        ]],
+        1,
+        n_stages,
+    );
+    let setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+        .expect("trunk_fan_fixture: StudySetup::new must succeed");
+
+    let n_nonleaf_nodes = (0..setup.node_graph.nodes.len())
+        .map(NodePos)
+        .filter(|&pos| !setup.node_graph.successors[pos].is_empty())
+        .count();
+
+    TrunkFanFixture {
+        setup,
+        t_trunk,
+        k,
+        n_nonleaf_nodes,
+    }
+}
+
+/// The deterministic-trunk + terminal-fan [`StudySetup`] configured
+/// `enumerated`: the node-native enumerated backward's headline linear-work
+/// regression fixture (`backward_solves/iter == k + (t_trunk - 1)`, never
+/// `k²`). Fixed seed, iteration-limit stopping rule, mirroring
+/// [`k_fan_setup_enumerated`]/[`branching_tree_setup_enumerated`].
+///
+/// # Panics
+///
+/// Never in practice — every literal is a hand-checked, internally-consistent
+/// fixture (as [`k_fan_setup`]); `StudySetup::new` only errors on a malformed
+/// system or config, neither of which this builder can produce.
+#[must_use]
+pub fn trunk_fan_setup_enumerated(
+    t_trunk: usize,
+    k: usize,
+    max_iterations: u32,
+) -> TrunkFanFixture {
+    trunk_fan_fixture(t_trunk, k, k_fan_config_enumerated(max_iterations))
+}
+
+/// [`trunk_fan_setup_enumerated`]'s `sampled` sibling: the SAME graph trained
+/// with `forward_passes` trajectories per iteration, never `enumerated`.
+/// `Traversal::Enumerated` always dispatches to the node-native backward
+/// regardless of `backward_scheduler` (`by_scenario`/`by_node` is a
+/// `Traversal::Sampled`-only axis), so the by-scenario/by-node backward-
+/// scheduler comparison needs a fixture that genuinely exercises it — this is
+/// that fixture.
+///
+/// # Panics
+///
+/// Never in practice — as [`trunk_fan_setup_enumerated`].
+#[must_use]
+pub fn trunk_fan_setup(
+    t_trunk: usize,
+    k: usize,
+    forward_passes: u32,
+    max_iterations: u32,
+) -> TrunkFanFixture {
+    trunk_fan_fixture(t_trunk, k, k_fan_config(forward_passes, max_iterations))
+}
+
+#[cfg(test)]
+mod trunk_fan_tests {
+    use super::{
+        ActiveSolver, NodePos, ResolvedProductionModel, TRUNK_FAN_PRODUCTIVITY, TrunkFanFixture,
+        trunk_fan_setup_enumerated,
+    };
+    use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
+
+    /// Single-rank `Communicator` stub, mirroring `tests/common/mod.rs`'s
+    /// `StubComm` (unreachable here — this module lives in `src/`, not
+    /// `tests/`): broadcasts/reductions copy data locally; other collectives
+    /// are no-ops.
+    struct StubComm;
+
+    impl Communicator for StubComm {
+        fn allgatherv<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            _counts: &[usize],
+            _displs: &[usize],
+        ) -> Result<(), CommError> {
+            recv[..send.len()].clone_from_slice(send);
+            Ok(())
+        }
+
+        fn allreduce<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            _op: ReduceOp,
+        ) -> Result<(), CommError> {
+            recv.clone_from_slice(send);
+            Ok(())
+        }
+
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            Ok(())
+        }
+
+        fn barrier(&self) -> Result<(), CommError> {
+            Ok(())
+        }
+
+        fn rank(&self) -> usize {
+            0
+        }
+
+        fn size(&self) -> usize {
+            1
+        }
+
+        fn abort(&self, error_code: i32) -> ! {
+            std::process::exit(error_code)
+        }
+    }
+
+    /// Power self-check (R1): `n_nonleaf_nodes` equals `t_trunk` (every trunk
+    /// node is non-leaf; the last one owns the terminal fan) and the terminal
+    /// fan has exactly `k` leaves — asserted against the fixture's own
+    /// resolved graph, never a hard-coded literal — plus a training smoke
+    /// check: the fixture trains without error. The exhaustive solves/cuts/
+    /// bound/reproducibility gates live in `tests/node_native_backward_gate.rs`
+    /// (slow-tests gated); this stays small and unconditional.
+    #[test]
+    fn trunk_fan_fixture_has_declared_shape_and_trains() {
+        let TrunkFanFixture {
+            mut setup,
+            t_trunk,
+            k,
+            n_nonleaf_nodes,
+        } = trunk_fan_setup_enumerated(3, 3, 3);
+
+        assert_eq!(
+            n_nonleaf_nodes, t_trunk,
+            "every trunk node must be non-leaf, got {n_nonleaf_nodes} for t_trunk={t_trunk}"
+        );
+        let leaf_count = (0..setup.node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| setup.node_graph.successors[pos].is_empty())
+            .count();
+        assert_eq!(
+            leaf_count, k,
+            "the terminal fan must have exactly k leaves, got {leaf_count} for k={k}"
+        );
+        for stage in 0..=t_trunk {
+            match setup.hydro_models.production.model(0, stage) {
+                ResolvedProductionModel::ConstantProductivity { productivity } => {
+                    assert!(
+                        (productivity - TRUNK_FAN_PRODUCTIVITY).abs() < 1e-12,
+                        "stage {stage} productivity must be {TRUNK_FAN_PRODUCTIVITY}, got {productivity}"
+                    );
+                }
+                fpha @ ResolvedProductionModel::Fpha { .. } => {
+                    panic!("stage {stage} must be ConstantProductivity, got {fpha:?}")
+                }
+            }
+        }
+
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &StubComm, 1, ActiveSolver::new, None, None)
+            .expect("training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "trunk+fan fixture must train without error: {:?}",
+            outcome.error
+        );
+    }
+}
