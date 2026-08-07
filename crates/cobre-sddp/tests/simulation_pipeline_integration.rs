@@ -29,7 +29,7 @@ use cobre_solver::{
     Basis, BasisStatus, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics,
     StageTemplate,
 };
-use cobre_stochastic::StochasticContext;
+use cobre_stochastic::{StochasticContext, select_transition_child};
 
 use cobre_sddp::{
     CapturedBasis, EnergyConversionSet, Phase, SimulationError,
@@ -39,6 +39,10 @@ use cobre_sddp::{
     indexer::{StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
+    setup::node_graph::{
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        StageIdx,
+    },
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
     test_support::all_enabled_cut_state_layouts,
     workspace::{SolverWorkspace, WorkspaceSizing},
@@ -2825,9 +2829,9 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     //   add_cut(iter=1, fwd=0) → slot 11
     //   add_cut(iter=2, fwd=0) → slot 12
     let mut fcf = FutureCostFunction::new(n_stages, 1, 1, 5, &[10]);
-    fcf.pools[0].add_cut(0, 0, 0, 50.0, &[1.0]);
-    fcf.pools[0].add_cut(0, 1, 0, 60.0, &[1.0]);
-    fcf.pools[0].add_cut(0, 2, 0, 70.0, &[1.0]);
+    fcf.pools[0].add_cut(NodeId(0), 0, 0, 50.0, &[1.0]);
+    fcf.pools[0].add_cut(NodeId(0), 1, 0, 60.0, &[1.0]);
+    fcf.pools[0].add_cut(NodeId(0), 2, 0, 70.0, &[1.0]);
     assert_eq!(
         fcf.pools[0].active_count(),
         3,
@@ -2842,7 +2846,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     // node_id must match the chain's node_ids[0] == 0 (n_stages = 1 below) or the
     // new node-tag check drops this basis to cold, breaking the warm-start
     // assertions this test exists to pin.
-    let mut cb = CapturedBasis::new(4, 5, 2, 3, 1, 0);
+    let mut cb = CapturedBasis::new(4, 5, 2, 3, 1, NodeId(0));
     cb.basis.row_status = vec![
         BASE_STATUS,
         BASE_STATUS,
@@ -3136,6 +3140,235 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         solver.solve_count, expected_solves,
         "cold-start solve must be called exactly n_scenarios({n_scenarios}) × \
          n_stages({n_stages}) = {expected_solves} times; got {}",
+        solver.solve_count
+    );
+}
+
+// ── R7: node-keyed simulation warm-basis cache (branching K-fan) ───────────
+
+/// A 2-stage K-fan: a stage-0 root (node 0) branching 50/50 into two stage-1
+/// leaves (node 1, node 2) — the minimal shape where node position and stage
+/// diverge (node 2 sits at position 2 while its stage is 1), the exact
+/// condition a stage-keyed warm-basis lookup gets wrong. Leaves share pool 1
+/// (this module's leaf-sharing rule); the warm-basis cache is keyed by node
+/// position regardless.
+fn two_leaf_fan_node_graph() -> NodeGraph {
+    let root_openings = NodeOpenings {
+        source: OpeningSource::Generated,
+        offset: 0,
+        len: 1,
+        q: 1.0,
+    };
+    NodeGraph {
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2)].into(),
+        nodes: vec![
+            NodeRuntime {
+                stage: StageIdx(0),
+                pool_id: 0,
+                openings: root_openings,
+            },
+            NodeRuntime {
+                stage: StageIdx(1),
+                pool_id: 1,
+                openings: root_openings,
+            },
+            NodeRuntime {
+                stage: StageIdx(1),
+                pool_id: 1,
+                openings: root_openings,
+            },
+        ]
+        .into(),
+        successors: vec![
+            vec![
+                NodeSuccessor {
+                    child: NodePos(1),
+                    probability: 0.5,
+                },
+                NodeSuccessor {
+                    child: NodePos(2),
+                    probability: 0.5,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+        ]
+        .into(),
+        n_pools: 2,
+        pool_stage: vec![StageIdx(0), StageIdx(1)],
+    }
+}
+
+/// A `CapturedBasis` warm-startable against `minimal_template_1_0`
+/// (`num_cols=4`, `num_rows=2`, 0 cut rows): 2 BASIC columns + 0 BASIC rows
+/// satisfies `enforce_basic_count_invariant`'s `total_basic == num_row`
+/// requirement, mirroring `run_stage_solve_warm_start_frozen_path_succeeds`'s
+/// fixture.
+fn warm_basis_for_node(node_id: NodeId) -> CapturedBasis {
+    let mut cb = CapturedBasis::new(4, 2, 2, 0, 1, node_id);
+    cb.basis.col_status[0] = BasisStatus::Basic;
+    cb.basis.col_status[1] = BasisStatus::Basic;
+    cb.state_at_capture.push(0.0);
+    cb
+}
+
+/// R7 acceptance: a branching simulation warm-starts from the VISITED node's
+/// own basis, not whichever node's basis happens to land at that stage index.
+/// The pre-fix, stage-keyed lookup (`stage_bases.get(t)`) would resolve node
+/// 2's stage-1 solve to `node_bases[1]` — leaf A's basis, whose `node_id`
+/// mismatches — and `run_stage_solve`'s node-tag guard would silently reject
+/// it as cold. A node-keyed lookup warm-starts every stage-1 solve regardless
+/// of which leaf it visits.
+#[test]
+fn simulate_branching_k_fan_warm_starts_from_visited_node_basis() {
+    let node_graph = two_leaf_fan_node_graph();
+    let n_stages = 2;
+    let n_scenarios = 8u32;
+
+    // Self-checked precondition (testing.md): the pinned scenario range must
+    // resolve visits to BOTH leaves, or this test cannot distinguish a
+    // per-node lookup from the stage-keyed bug it exists to catch.
+    let weights = [0.5_f64, 0.5];
+    let leaf_for_scenario: Vec<usize> = (0..n_scenarios)
+        .map(|s| select_transition_child(0, s, 0, weights.iter().copied()))
+        .collect();
+    assert!(
+        leaf_for_scenario.contains(&0),
+        "pinned scenario range must resolve at least one visit to leaf A (node 1)"
+    );
+    assert!(
+        leaf_for_scenario.contains(&1),
+        "pinned scenario range must resolve at least one visit to leaf B (node 2) — \
+         otherwise this test cannot exercise the node-vs-stage divergence"
+    );
+
+    let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
+    let base_rows: Vec<usize> = vec![0; n_stages];
+    let state = state_layout_for(1, 0);
+    let fcf = FutureCostFunction::new(node_graph.n_pools, 1, 1, 10, &vec![0; node_graph.n_pools]);
+    let stochastic = make_stochastic_context(n_stages);
+    let config = SimulationConfig {
+        n_scenarios,
+        io_channel_capacity: 32,
+        profile: Phase::Simulation.profile(),
+    };
+    let horizon = HorizonMode::Finite {
+        num_stages: n_stages,
+    };
+    let initial_state = vec![50.0_f64];
+
+    let solution = fixed_solution(100.0, 30.0);
+    let solver = MockSolver::always_ok(solution);
+    let comm = StubComm { rank: 0, size: 1 };
+    let entity_counts = entity_counts_1_hydro();
+    let (tx, _rx) = mpsc::sync_channel(32);
+    let hprod = hydro_productivities_1hydro(n_stages);
+    let ec = zero_energy_conversion(1, n_stages);
+
+    // node_bases[0] (root) carries no basis; nodes 1 and 2 each carry their
+    // OWN basis, tagged with their OWN declared node_id.
+    let node_bases: Vec<Option<CapturedBasis>> = vec![
+        None,
+        Some(warm_basis_for_node(NodeId(1))),
+        Some(warm_basis_for_node(NodeId(2))),
+    ];
+
+    let mut workspaces = single_workspace(solver);
+    let result = cobre_sddp::simulate(
+        &mut workspaces,
+        &StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        },
+        &fcf,
+        &TrainingContext {
+            node_graph: &node_graph,
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, node_graph.n_pools),
+            study_dims: &study_dims(),
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        },
+        &config,
+        SimulationOutputSpec {
+            result_tx: &tx,
+            zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
+            block_hours_per_stage: &[],
+            entity_counts: &entity_counts,
+            generic_constraint_row_entries: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            pumping_col_starts: &[],
+            n_pumping: 0,
+            geometry_per_stage: &[],
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices_per_stage: &[],
+            contract_is_import: &[],
+            ncs_entity_ids_per_stage: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities_per_stage: &hprod,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0],
+            event_sender: None,
+        },
+        None,
+        &node_bases,
+        &comm,
+    );
+
+    assert!(
+        result.is_ok(),
+        "branching K-fan simulate must succeed: {result:?}"
+    );
+
+    let solver = workspaces[0].solver.inner();
+    let n_scenarios = n_scenarios as usize;
+    assert_eq!(
+        solver.solve_with_basis_count, n_scenarios,
+        "every stage-1 solve must warm-start from its OWN visited node's basis, \
+         regardless of which leaf it visits; got solve_with_basis_count={} \
+         (expected {n_scenarios} — one per scenario)",
+        solver.solve_with_basis_count
+    );
+    assert_eq!(
+        solver.solve_count, n_scenarios,
+        "every stage-0 (root) solve must be cold (no basis provided); got \
+         solve_count={}",
         solver.solve_count
     );
 }

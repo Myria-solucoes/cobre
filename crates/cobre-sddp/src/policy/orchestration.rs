@@ -27,7 +27,7 @@ use crate::policy_export::{
     build_stage_cuts_payloads, build_stage_entity_manifest, build_stage_states_payloads,
     convert_basis_cache, scale_cut_records_for_export,
 };
-use crate::setup::StudySetup;
+use crate::setup::{NodePos, StudySetup};
 use crate::stochastic_summary::{
     estimation_report_to_fitting_report, inflow_models_to_annual_component_rows,
     inflow_models_to_ar_rows, inflow_models_to_stats_rows,
@@ -114,7 +114,7 @@ pub fn write_checkpoint(
             // `p` is a pool ordinal; its owning stage resolves through
             // `pool_stage` — indexing `study_stage_ids` by `p` is OOB once
             // `n_pools > n_stages` on a branching graph (see `NodeGraph::pool_stage`).
-            let stage_id = setup.study_stage_ids[setup.node_graph.pool_stage[p]];
+            let stage_id = setup.study_stage_ids[setup.node_graph.pool_stage[p].0];
             build_stage_entity_manifest(
                 system,
                 global_layout,
@@ -168,10 +168,9 @@ pub fn write_checkpoint(
             warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
             warm_start_counts,
             rng_seed: params.seed,
-            total_visited_states: training_result
-                .visited_archive
-                .as_ref()
-                .map_or(0, |a| (0..a.num_nodes()).map(|t| a.count(t) as u64).sum()),
+            total_visited_states: training_result.visited_archive.as_ref().map_or(0, |a| {
+                (0..a.num_nodes()).map(|t| a.count(NodePos(t)) as u64).sum()
+            }),
             training_block_mode,
             training_block_mode_per_stage,
             cost_scale_factor: Some(setup.stage_data.stage_templates.cost_scale_factor),

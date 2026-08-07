@@ -12,13 +12,13 @@ use crate::{
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
 };
 
-use super::SuccessorSpec;
+use super::SuccessorChild;
 
 /// Accumulate one opening's solve result (stats delta, outcome, and binding-cut
 /// slot increments) into the workspace accumulators. Call after `view` is dropped.
 pub(crate) fn accumulate_opening_outcome<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
-    succ: &SuccessorSpec<'_>,
+    succ: &SuccessorChild<'_>,
     omega: usize,
     objective: f64,
     x_hat: &[f64],
@@ -27,6 +27,8 @@ pub(crate) fn accumulate_opening_outcome<S: SolverInterface + Send>(
 ) {
     write_opening_outcome(ws, omega, objective, x_hat, stats_before, stats_after);
 
+    // Bump the child's OWN pool region (`metadata_offset + slot`), so a fan's
+    // sibling pools never collide on a shared slot index.
     for (cut_idx, &slot) in succ.successor_active_slots.iter().enumerate() {
         if ws
             .backward_accum
@@ -34,7 +36,7 @@ pub(crate) fn accumulate_opening_outcome<S: SolverInterface + Send>(
             .get(cut_idx)
             .is_some_and(|&d| d > succ.cut_activity_tolerance)
         {
-            ws.backward_accum.slot_increments[slot] += 1;
+            ws.backward_accum.slot_increments[succ.metadata_offset + slot] += 1;
         }
     }
 }
@@ -124,7 +126,7 @@ pub(crate) fn write_opening_outcome<S: SolverInterface + Send>(
 /// stale and potentially infeasible when reloaded.
 pub(crate) fn save_basis_at_omega_zero<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
-    succ: &SuccessorSpec<'_>,
+    succ: &SuccessorChild<'_>,
     basis_slice: &mut BasisStoreSliceMut<'_>,
     m: usize,
     x_hat: &[f64],

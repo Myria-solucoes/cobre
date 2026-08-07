@@ -4,6 +4,8 @@
 //! [`WorkspacePool`] allocates one workspace per worker thread.
 //! [`BasisStore`] provides per-scenario, per-stage basis storage for warm-starting LP solves.
 
+use std::ops::Range;
+
 use cobre_core::WorkerPhaseTimings;
 use cobre_solver::SolverStatistics;
 use cobre_solver::{Basis, BasisStatus, ProfiledSolver, SolverInterface};
@@ -14,6 +16,7 @@ use crate::backward::{OpeningOutcome, StagedCut};
 use crate::dcs::DcsSolveScratch;
 use crate::lp_builder::PatchBuffer;
 use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
+use crate::setup::{NodeId, NodePos};
 use crate::solve::partition;
 use crate::solver_stats::SolverStatsDelta;
 
@@ -51,7 +54,7 @@ pub struct CapturedBasis {
     /// added cuts on the backward warm-start.
     pub state_at_capture: Vec<f64>,
     /// Declared node id (`NodeGraph::node_ids[node]`) this basis was captured at.
-    pub node_id: i32,
+    pub node_id: NodeId,
 }
 
 /// Wire-format version for `CapturedBasis` broadcast payloads.
@@ -101,7 +104,7 @@ impl CapturedBasis {
         base_row_count: usize,
         cut_slot_capacity: usize,
         n_state: usize,
-        node_id: i32,
+        node_id: NodeId,
     ) -> Self {
         Self {
             basis: Basis::new(num_cols, num_rows),
@@ -151,7 +154,7 @@ impl CapturedBasis {
     pub fn to_broadcast_payload(&self, i32_buf: &mut Vec<i32>, f64_buf: &mut Vec<f64>) {
         i32_buf.push(1_i32);
         i32_buf.push(BASIS_BROADCAST_WIRE_VERSION);
-        i32_buf.push(self.node_id);
+        i32_buf.push(self.node_id.0);
         i32_buf.push(self.basis.col_status.len() as i32);
         i32_buf.push(self.basis.row_status.len() as i32);
         i32_buf.push(self.base_row_count as i32);
@@ -253,7 +256,7 @@ impl CapturedBasis {
                  {stage}"
             )));
         }
-        let node_id = i32_buf[*i32_cursor];
+        let node_id = NodeId(i32_buf[*i32_cursor]);
         *i32_cursor += 1;
         let col_len = i32_buf[*i32_cursor] as usize;
         *i32_cursor += 1;
@@ -396,7 +399,9 @@ pub struct WorkspaceSizing {
 pub(crate) struct BackwardAccumulators {
     /// Per-opening backward outcomes, grown to the maximum `n_openings` seen.
     pub(crate) outcomes: Vec<BackwardOutcome>,
-    /// Per-slot binding count, indexed by cut pool slot; zeroed per trial point.
+    /// Per-slot binding count over the node's successor pool regions, concatenated
+    /// per child (`SuccessorChild::metadata_offset + slot`), so a fan's distinct
+    /// sibling pools never collide on a shared slot index; zeroed per trial point.
     pub(crate) slot_increments: Vec<u64>,
     /// Aggregated cut coefficients (`n_state` entries), written by
     /// `aggregate_weighted_into` then copied into [`agg_arena`](Self::agg_arena)
@@ -412,8 +417,10 @@ pub(crate) struct BackwardAccumulators {
     /// merge reads the slice after the parallel region returns. Overwritten per
     /// trial point before any read, so no zero-fill is required.
     pub(crate) agg_arena: Vec<f64>,
-    /// Per-worker metadata sync contribution, indexed by cut pool slot. Zeroed
-    /// once per stage (not per trial point); merged into `metadata_sync_buf`.
+    /// Per-worker metadata sync contribution over the node's successor pool
+    /// regions, concatenated per child (same layout as `slot_increments`). Zeroed
+    /// once per stage (not per trial point); each pool's own region slice is merged
+    /// into `metadata_sync_buf` and synced separately.
     pub(crate) metadata_sync_contribution: Vec<u64>,
     /// Per-worker per-opening solver-statistics accumulator (length
     /// `n_openings`). Re-initialised once per stage; merged into the per-stage
@@ -510,9 +517,13 @@ impl BackwardAccumulators {
 /// (`training.parallelism.backward_scheduler`), held on `BackwardPassState`
 /// and reused across every backward stage for the lifetime of a training run.
 ///
-/// Empty (`arena` capacity `0`) under `BackwardScheduler::ByScenario` (the
-/// default) — sized once by `BackwardPassState::set_scheduler` when the resolved
-/// scheduler is `ByNode`, never on the hot path (sddp.md "By-node
+/// Empty (`arena` capacity `0`) unless `ByNode` could be the scheduler a run
+/// actually dispatches to: sized by `BackwardPassState::resize_by_node_scratch`
+/// (called from both `set_scheduler` and `set_enumerated`, order-independent)
+/// whenever the configured scheduler is literally `ByNode`, OR the run is
+/// enumerated — an enumerated traversal can auto-select `ByNode` at `run()`
+/// time regardless of the configured scheduler (`resolve_backward_scheduler`'s
+/// singleton auto-select). Never resized on the hot path (sddp.md "By-node
 /// scheduler is warm-start-only").
 #[derive(Default)]
 pub(crate) struct ByNodeScratch {
@@ -535,10 +546,13 @@ pub(crate) struct ByNodeScratch {
     /// aggregation loop; starts at `n_state` length, resized (within reserved
     /// capacity) to each stage's `cut_n_state` — see [`Self::arena`].
     pub(crate) coeffs_buf: Vec<f64>,
-    /// Per-`(stage, block-index)` `(simplex_iterations sum, solved-opening
-    /// count)` pivot accumulator, addressed `block_pivots[stage *
-    /// n_blocks_max + block_index]`. `stage` is the backward pass's successor
-    /// index (`t + 1`); aggregated over every trial point `m` claimed for that
+    /// Per-`(generating node, block-index)` `(simplex_iterations sum,
+    /// solved-opening count)` pivot accumulator, addressed via
+    /// [`Self::block_pivot_row`] — never re-derived at a call site. Keyed by
+    /// the GENERATING node's canonical position, never the successor stage
+    /// (`merge_block_pivots`'s own contract): sibling fan nodes at one level
+    /// own distinct rows, so each computes its hardest-first order from its
+    /// own history. Aggregated over every trial point `m` claimed for that
     /// block, never keyed per-`m` (the wrong-but-plausible variant, since
     /// resampled trial points make per-`m` hardness noise where the
     /// opening-block component is iteration-stable). Reset to `(0, 0)` at the
@@ -553,9 +567,10 @@ pub(crate) struct ByNodeScratch {
     /// reset-then-partially-filled mid-run, yielding zeros or a half-filled
     /// row. Same shape as `block_pivots`.
     pub(crate) block_pivots_prev: Vec<(u64, u64)>,
-    /// Row width of `block_pivots` (block slots per stage) — the run's max
-    /// opening count, an upper bound on any stage's actual block count (block
-    /// size >= 1 implies `n_blocks <= n_openings <= n_blocks_max`).
+    /// Row width of `block_pivots`/`block_pivots_prev` (block slots per
+    /// generating node) — the run's max opening count, an upper bound on any
+    /// node's actual block count (block size >= 1 implies
+    /// `n_blocks <= n_openings <= n_blocks_max`).
     pub(crate) n_blocks_max: usize,
     /// Hardest-first claim-order scratch: the successor stage's sorted (or identity)
     /// `0..n_blocks` block-index permutation, recomputed into this buffer
@@ -569,15 +584,17 @@ impl ByNodeScratch {
     /// Allocate the arena and aggregation scratch for `ByNode`: `arena`
     /// holds `max_local_fwd * bwd_max_openings` outcomes, each with an
     /// `n_state`-length coefficient vector; `block_pivots` and
-    /// `block_pivots_prev` each hold `num_stages * bwd_max_openings`
-    /// accumulator cells (see [`Self::block_pivots`]); `block_order` holds
+    /// `block_pivots_prev` each hold `row_axis_len * bwd_max_openings`
+    /// accumulator cells, `row_axis_len` an upper bound on the GENERATING
+    /// node count (see [`Self::block_pivots`] — never a stage count, though
+    /// it coincides with one on a chain); `block_order` holds
     /// `bwd_max_openings` claim-order scratch slots.
     #[must_use]
     pub(crate) fn sized(
         max_local_fwd: usize,
         bwd_max_openings: usize,
         n_state: usize,
-        num_stages: usize,
+        row_axis_len: usize,
     ) -> Self {
         let arena = (0..max_local_fwd * bwd_max_openings)
             .map(|_| BackwardOutcome {
@@ -590,11 +607,21 @@ impl ByNodeScratch {
             arena,
             risk_scratch: RiskMeasureScratch::new(),
             coeffs_buf: vec![0.0_f64; n_state],
-            block_pivots: vec![(0u64, 0u64); num_stages * bwd_max_openings],
-            block_pivots_prev: vec![(0u64, 0u64); num_stages * bwd_max_openings],
+            block_pivots: vec![(0u64, 0u64); row_axis_len * bwd_max_openings],
+            block_pivots_prev: vec![(0u64, 0u64); row_axis_len * bwd_max_openings],
             n_blocks_max: bwd_max_openings,
             block_order: vec![0u32; bwd_max_openings],
         }
+    }
+
+    /// `block_pivots`/`block_pivots_prev`'s row range for the GENERATING
+    /// node `node_pos` — single owner of the `node_pos * n_blocks_max`
+    /// row-start arithmetic (`NodePos` carries no arithmetic of its own), so
+    /// a caller never recomputes it independently of this method.
+    #[must_use]
+    pub(crate) fn block_pivot_row(&self, node_pos: NodePos, n_blocks: usize) -> Range<usize> {
+        let start = node_pos.0 * self.n_blocks_max;
+        start..start + n_blocks
     }
 }
 
@@ -678,7 +705,7 @@ pub struct ScratchBuffers {
     /// the stage the forward loop is about to visit, root-initialized then
     /// advanced by the transition draw. Resized (never reallocated once at
     /// capacity) at each `run_forward_worker` call.
-    pub(crate) current_node_buf: Vec<usize>,
+    pub(crate) current_node_buf: Vec<NodePos>,
 }
 
 /// All per-thread mutable resources required for one LP solve sequence.
@@ -1002,12 +1029,13 @@ impl BasisStore {
     /// # Examples
     ///
     /// ```rust
+    /// use cobre_sddp::setup::NodePos;
     /// use cobre_sddp::workspace::BasisStore;
     ///
     /// let store = BasisStore::new(4, 10);
     /// assert_eq!(store.num_scenarios(), 4);
     /// assert_eq!(store.num_nodes(), 10);
-    /// assert!(store.get(0, 0).is_none());
+    /// assert!(store.get(0, NodePos(0)).is_none());
     /// ```
     #[must_use]
     pub fn new(num_scenarios: usize, num_nodes: usize) -> Self {
@@ -1034,13 +1062,13 @@ impl BasisStore {
     ///
     /// Returns `None` if the slot has not yet been populated.
     #[must_use]
-    pub fn get(&self, scenario: usize, node: usize) -> Option<&CapturedBasis> {
-        self.bases[scenario * self.num_nodes + node].as_ref()
+    pub fn get(&self, scenario: usize, node: NodePos) -> Option<&CapturedBasis> {
+        self.bases[scenario * self.num_nodes + node.0].as_ref()
     }
 
     /// Get a mutable reference to the basis slot at `[scenario][node]`.
-    pub fn get_mut(&mut self, scenario: usize, node: usize) -> &mut Option<CapturedBasis> {
-        &mut self.bases[scenario * self.num_nodes + node]
+    pub fn get_mut(&mut self, scenario: usize, node: NodePos) -> &mut Option<CapturedBasis> {
+        &mut self.bases[scenario * self.num_nodes + node.0]
     }
 
     /// Split the store into `n_workers` disjoint mutable sub-views by scenario
@@ -1108,9 +1136,9 @@ impl BasisStoreSliceMut<'_> {
     ///
     /// Panics if `scenario < self.scenario_offset` (scenario not in this slice).
     #[must_use]
-    pub fn get(&self, scenario: usize, node: usize) -> Option<&CapturedBasis> {
+    pub fn get(&self, scenario: usize, node: NodePos) -> Option<&CapturedBasis> {
         let local = scenario - self.scenario_offset;
-        self.bases[local * self.num_nodes + node].as_ref()
+        self.bases[local * self.num_nodes + node.0].as_ref()
     }
 
     /// This slice's global scenario window `[start, end)` — the scenarios
@@ -1129,9 +1157,9 @@ impl BasisStoreSliceMut<'_> {
     /// # Panics
     ///
     /// Panics if `scenario < self.scenario_offset` (scenario not in this slice).
-    pub fn get_mut(&mut self, scenario: usize, node: usize) -> &mut Option<CapturedBasis> {
+    pub fn get_mut(&mut self, scenario: usize, node: NodePos) -> &mut Option<CapturedBasis> {
         let local = scenario - self.scenario_offset;
-        &mut self.bases[local * self.num_nodes + node]
+        &mut self.bases[local * self.num_nodes + node.0]
     }
 }
 
@@ -1140,8 +1168,8 @@ mod tests {
     #[cfg(feature = "highs")]
     use super::PatchBuffer;
     use super::{
-        BasisStore, ByNodeScratch, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool,
-        WorkspaceSizing,
+        BasisStore, ByNodeScratch, CapturedBasis, NodeId, NodePos, ScratchBuffers, SolverWorkspace,
+        WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
         Basis, BasisStatus, SolutionView, SolverError, SolverInterface, SolverStatistics,
@@ -1455,7 +1483,7 @@ mod tests {
         for s in 0..3 {
             for t in 0..5 {
                 assert!(
-                    store.get(s, t).is_none(),
+                    store.get(s, NodePos(t)).is_none(),
                     "slot [{s}][{t}] must start as None"
                 );
             }
@@ -1465,10 +1493,10 @@ mod tests {
     #[test]
     fn basis_store_get_mut_set_and_retrieve() {
         let mut store = BasisStore::new(2, 3);
-        *store.get_mut(1, 2) = Some(CapturedBasis::new(4, 2, 0, 0, 0, 0));
-        assert!(store.get(1, 2).is_some());
-        assert!(store.get(0, 0).is_none());
-        assert!(store.get(1, 0).is_none());
+        *store.get_mut(1, NodePos(2)) = Some(CapturedBasis::new(4, 2, 0, 0, 0, NodeId(0)));
+        assert!(store.get(1, NodePos(2)).is_some());
+        assert!(store.get(0, NodePos(0)).is_none());
+        assert!(store.get(1, NodePos(0)).is_none());
     }
 
     #[test]
@@ -1493,32 +1521,32 @@ mod tests {
         let mut slices = store.split_workers_mut(2);
 
         // Worker 0 writes to scenario 0 stage 1.
-        *slices[0].get_mut(0, 1) = Some(CapturedBasis::new(2, 1, 0, 0, 0, 0));
+        *slices[0].get_mut(0, NodePos(1)) = Some(CapturedBasis::new(2, 1, 0, 0, 0, NodeId(0)));
         // Worker 1 writes to scenario 3 stage 2.
-        *slices[1].get_mut(3, 2) = Some(CapturedBasis::new(2, 1, 0, 0, 0, 0));
+        *slices[1].get_mut(3, NodePos(2)) = Some(CapturedBasis::new(2, 1, 0, 0, 0, NodeId(0)));
 
         // Drop slices to release the borrow on store.
         drop(slices);
 
         assert!(
-            store.get(0, 1).is_some(),
+            store.get(0, NodePos(1)).is_some(),
             "scenario 0 stage 1 must be populated"
         );
         assert!(
-            store.get(3, 2).is_some(),
+            store.get(3, NodePos(2)).is_some(),
             "scenario 3 stage 2 must be populated"
         );
-        assert!(store.get(0, 0).is_none());
-        assert!(store.get(3, 0).is_none());
+        assert!(store.get(0, NodePos(0)).is_none());
+        assert!(store.get(3, NodePos(0)).is_none());
     }
 
     #[test]
     fn basis_store_split_single_worker() {
         let mut store = BasisStore::new(3, 2);
         let mut slices = store.split_workers_mut(1);
-        *slices[0].get_mut(2, 1) = Some(CapturedBasis::new(1, 0, 0, 0, 0, 0));
+        *slices[0].get_mut(2, NodePos(1)) = Some(CapturedBasis::new(1, 0, 0, 0, 0, NodeId(0)));
         drop(slices);
-        assert!(store.get(2, 1).is_some());
+        assert!(store.get(2, NodePos(1)).is_some());
     }
 
     #[test]
@@ -1541,22 +1569,22 @@ mod tests {
         let mut slices = store.split_workers_mut(3);
 
         // Worker 1 covers absolute scenarios 2..4.
-        *slices[1].get_mut(2, 0) = Some(CapturedBasis::new(1, 0, 0, 0, 0, 0));
-        *slices[1].get_mut(3, 1) = Some(CapturedBasis::new(1, 0, 0, 0, 0, 0));
+        *slices[1].get_mut(2, NodePos(0)) = Some(CapturedBasis::new(1, 0, 0, 0, 0, NodeId(0)));
+        *slices[1].get_mut(3, NodePos(1)) = Some(CapturedBasis::new(1, 0, 0, 0, 0, NodeId(0)));
         drop(slices);
 
-        assert!(store.get(2, 0).is_some());
-        assert!(store.get(3, 1).is_some());
-        assert!(store.get(0, 0).is_none());
-        assert!(store.get(4, 0).is_none());
+        assert!(store.get(2, NodePos(0)).is_some());
+        assert!(store.get(3, NodePos(1)).is_some());
+        assert!(store.get(0, NodePos(0)).is_none());
+        assert!(store.get(4, NodePos(0)).is_none());
     }
 
     #[test]
     fn test_captured_basis_new_capacities() {
-        let cb = CapturedBasis::new(4, 6, 3, 10, 2, 9);
+        let cb = CapturedBasis::new(4, 6, 3, 10, 2, NodeId(9));
         assert_eq!(cb.basis.row_status.len(), 6, "row_status length");
         assert_eq!(cb.base_row_count, 3, "base_row_count");
-        assert_eq!(cb.node_id, 9, "node_id");
+        assert_eq!(cb.node_id, NodeId(9), "node_id");
         assert!(
             cb.cut_row_slots.capacity() >= 10,
             "cut_row_slots capacity must be >= 10 (got {})",
@@ -1584,14 +1612,14 @@ mod tests {
         for s in 0..3 {
             for t in 0..5 {
                 assert!(
-                    store.get(s, t).is_none(),
+                    store.get(s, NodePos(t)).is_none(),
                     "slot [{s}][{t}] must be None before any write"
                 );
             }
         }
         // Write a CapturedBasis at [1][3]; read it back.
-        *store.get_mut(1, 3) = Some(CapturedBasis::new(4, 6, 3, 10, 2, 0));
-        let retrieved = store.get(1, 3);
+        *store.get_mut(1, NodePos(3)) = Some(CapturedBasis::new(4, 6, 3, 10, 2, NodeId(0)));
+        let retrieved = store.get(1, NodePos(3));
         assert!(retrieved.is_some(), "slot [1][3] must be Some after write");
         let cb = retrieved.expect("just checked is_some");
         assert_eq!(cb.base_row_count, 3);
@@ -1602,7 +1630,7 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    store.get(s, t).is_none(),
+                    store.get(s, NodePos(t)).is_none(),
                     "slot [{s}][{t}] must remain None"
                 );
             }
@@ -1679,7 +1707,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: vec![1.5_f64, 2.5, 3.5],
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1735,7 +1763,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![],
             state_at_capture: vec![],
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1788,7 +1816,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![100_u32, 200, 300],
             state_at_capture: vec![0.1_f64, 0.2],
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1857,7 +1885,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![5_u32],
             state_at_capture: vec![9.9_f64],
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1908,7 +1936,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![],
             state_at_capture: vec![1.0_f64, 2.0, 3.0],
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1976,7 +2004,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: vec![0.5_f64, 1.5],
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2041,7 +2069,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: vec![0.5_f64, 1.5],
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2091,7 +2119,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![],
             state_at_capture: vec![],
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2150,7 +2178,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![],
             state_at_capture: vec![],
-            node_id: 77,
+            node_id: NodeId(77),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2159,7 +2187,7 @@ mod tests {
         let bytes_with_node_id = i32_buf.len();
 
         let mut other = original.clone();
-        other.node_id = -1;
+        other.node_id = NodeId(-1);
         let mut i32_buf2: Vec<i32> = Vec::new();
         let mut f64_buf2: Vec<f64> = Vec::new();
         other.to_broadcast_payload(&mut i32_buf2, &mut f64_buf2);
@@ -2230,7 +2258,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: state_at_capture.clone(),
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2291,7 +2319,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![],
             state_at_capture: vec![0.0_f64; 6],
-            node_id: 0,
+            node_id: NodeId(0),
         };
         let mut i32_buf: Vec<i32> = Vec::new();
         let mut f64_buf: Vec<f64> = Vec::new();
@@ -2319,7 +2347,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![],
             state_at_capture: vec![],
-            node_id: 0,
+            node_id: NodeId(0),
         };
         let mut i32_buf2: Vec<i32> = Vec::new();
         let mut f64_buf2: Vec<f64> = Vec::new();
@@ -2340,7 +2368,7 @@ mod tests {
             base_row_count: 3,
             cut_row_slots: vec![1_u32, 2],
             state_at_capture: large_state.clone(),
-            node_id: 0,
+            node_id: NodeId(0),
         };
         let mut i32_buf3: Vec<i32> = Vec::new();
         let mut f64_buf3: Vec<f64> = Vec::new();
@@ -2390,7 +2418,7 @@ mod tests {
             base_row_count: 3,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: state_at_capture.clone(),
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf = Vec::new();
@@ -2442,7 +2470,7 @@ mod tests {
             base_row_count: 6,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: state_at_capture.clone(),
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2497,7 +2525,7 @@ mod tests {
             base_row_count: 8,
             cut_row_slots: vec![],
             state_at_capture: vec![0.0_f64; 6],
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2596,7 +2624,7 @@ mod tests {
             base_row_count: 6,
             cut_row_slots: vec![7_u32, 42],
             state_at_capture: state_at_capture.clone(),
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();

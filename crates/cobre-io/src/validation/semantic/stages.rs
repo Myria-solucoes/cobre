@@ -693,7 +693,10 @@ pub(super) fn check_num_openings_declaration(data: &ParsedData, ctx: &mut Valida
 /// Rule 42 (B2): a per-edge `annual_discount_rate_override` is rejected under
 /// `nodes[]` — the override is a per-stage quantity declared on
 /// `stages[].annual_discount_rate_override`. The edge spelling stays legal in the
-/// chain dialect.
+/// chain dialect. It is rejected rather than folded into the stage because the
+/// cumulative discount factor is baked into each stage's template objective
+/// coefficients, so a per-edge — hence potentially per-node — rate would force
+/// per-node templates.
 pub(super) fn check_edge_discount_override_under_nodes(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -1700,6 +1703,36 @@ mod tests {
                 && errs_contain(&ctx, "annual_discount_rate_override")
                 && errs_contain(&ctx, "stages[].annual_discount_rate_override"),
             "per-edge discount override under nodes[] must be rejected naming the edge: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 42 on a fan: a source node with two out-edges, one carrying
+    /// `annual_discount_rate_override`, is rejected naming that edge — the branching
+    /// shape that motivated the rule.
+    #[test]
+    fn test_fan_edge_discount_override_rejected_under_nodes() {
+        let mut data = node_graph_data(
+            2,
+            vec![node(0, 0, None), node(1, 1, None), node(2, 1, None)],
+            vec![
+                Transition {
+                    source_id: 0,
+                    target_id: 1,
+                    probability: 0.5,
+                    annual_discount_rate_override: Some(0.08),
+                },
+                edge(0, 2, 0.5),
+            ],
+        );
+        data.stages.openings_declared = [0, 1].into_iter().collect();
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "transition 0 -> 1")
+                && errs_contain(&ctx, "annual_discount_rate_override")
+                && errs_contain(&ctx, "stages[].annual_discount_rate_override"),
+            "per-edge discount override on a fan out-edge under nodes[] must be rejected \
+             naming the edge: {:?}",
             ctx.errors()
         );
     }

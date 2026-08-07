@@ -24,22 +24,24 @@ use cobre_solver::{Basis, BasisStatus};
 use crate::SddpError;
 use crate::cut::pool::CutPool;
 use crate::policy::policy_export::ENTITY_TYPE_HYDRO_INFLOW_LAG;
-use crate::setup::StudySetup;
+use crate::setup::{NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
 
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::Path;
 
-/// Resolve the per-stage warm-start cut counts from a loaded policy checkpoint.
+/// Resolve the per-POOL warm-start cut counts from a loaded policy checkpoint.
 ///
-/// Returns a `Vec<u32>` of length `num_stages` for [`FutureCostFunction::new`].
+/// Returns a `Vec<u32>` of length `n_pools` for [`FutureCostFunction::new`].
 /// An empty `metadata.warm_start_counts` (old checkpoint format) broadcasts the
-/// scalar `warm_start_cuts` to all stages.
+/// scalar `warm_start_cuts` to every pool.
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] if `warm_start_counts.len() != num_stages`.
+/// Returns [`SddpError::Validation`] if `warm_start_counts.len() != n_pools`.
+/// `warm_start_counts` is per-pool, not per-stage — validate against the
+/// pool count, which differs from the stage count on a branching graph.
 ///
 /// [`FutureCostFunction::new`]: crate::FutureCostFunction::new
 // Rationale: kept as the validated entry point for the planned checkpoint-migration
@@ -48,15 +50,15 @@ use std::path::Path;
 #[allow(dead_code)]
 pub(crate) fn resolve_warm_start_counts(
     metadata: &PolicyCheckpointMetadata,
-    num_stages: usize,
+    n_pools: usize,
 ) -> Result<Vec<u32>, SddpError> {
     if metadata.producer.warm_start_counts.is_empty() {
-        Ok(vec![metadata.producer.warm_start_cuts; num_stages])
-    } else if metadata.producer.warm_start_counts.len() != num_stages {
+        Ok(vec![metadata.producer.warm_start_cuts; n_pools])
+    } else if metadata.producer.warm_start_counts.len() != n_pools {
         Err(SddpError::Validation(format!(
-            "warm_start_counts length mismatch: checkpoint has {}, current system has {} stages",
+            "warm_start_counts length mismatch: checkpoint has {}, current system has {} pools",
             metadata.producer.warm_start_counts.len(),
-            num_stages,
+            n_pools,
         )))
     } else {
         Ok(metadata.producer.warm_start_counts.clone())
@@ -368,14 +370,17 @@ pub fn compare_graph_manifest_identity(
 pub fn build_basis_cache_from_checkpoint(
     stage_bases: &[OwnedPolicyBasisRecord],
     stage_cuts: &[StageCutsReadResult],
-    node_ids: &[i32],
-    node_pools: &[usize],
+    node_ids: &TypedVec<NodePos, NodeId>,
+    node_pools: &TypedVec<NodePos, usize>,
 ) -> Vec<Option<CapturedBasis>> {
     let n_nodes = node_ids.len();
     let mut cache: Vec<Option<CapturedBasis>> = vec![None; n_nodes];
     for record in stage_bases {
-        let node = record.stage_id as usize;
-        if node >= n_nodes {
+        // Wire boundary: the checkpoint's `stage_id` field is a legacy name for
+        // what the node-native engine writes/reads as a node position — convert
+        // to `NodePos` immediately, never carry the raw wire int past this line.
+        let node = NodePos(record.stage_id as usize);
+        if node.0 >= n_nodes {
             continue;
         }
         let col_status: Vec<BasisStatus> = record
@@ -415,7 +420,7 @@ pub fn build_basis_cache_from_checkpoint(
              cut-row count for the CapturedBasis invariant",
         );
 
-        cache[node] = Some(CapturedBasis {
+        cache[node.0] = Some(CapturedBasis {
             basis: Basis {
                 col_status,
                 row_status,
@@ -718,8 +723,9 @@ mod tests {
     };
 
     use super::{
-        BoundaryInjection, FullFcf, PolicyStageManifest, compare_manifest_slot_identity,
-        load_boundary_cuts, resolve_warm_start_counts, validate_policy_load,
+        BoundaryInjection, FullFcf, NodeId, NodePos, PolicyStageManifest, TypedVec,
+        compare_manifest_slot_identity, load_boundary_cuts, resolve_warm_start_counts,
+        validate_policy_load,
     };
     use crate::SddpError;
 
@@ -2083,7 +2089,41 @@ mod tests {
             "error message should mention length mismatch: {msg}"
         );
         assert!(msg.contains('2'), "should include vector length: {msg}");
-        assert!(msg.contains('3'), "should include num_stages: {msg}");
+        assert!(msg.contains('3'), "should include the pool count: {msg}");
+    }
+
+    /// `warm_start_counts` is a per-POOL field: on a branching graph the pool
+    /// count differs from the stage count, so a checkpoint whose array length
+    /// matches `n_pools` (not `num_stages`) must be accepted, and a checkpoint
+    /// whose array length matches `num_stages` (not `n_pools`) must be
+    /// rejected — asserting the check reads the caller's `n_pools` argument,
+    /// never `metadata.num_stages`.
+    #[test]
+    fn resolve_warm_start_counts_validates_against_n_pools_not_num_stages() {
+        // A 2-stage, 3-pool graph (e.g. one root pool + two branch pools
+        // sharing a stage) — `meta_with_counts` derives `num_stages` from the
+        // counts vector's own length, so override it after construction to
+        // decouple the two counts.
+        let mut meta = meta_with_counts(5, vec![10, 8, 6]);
+        meta.num_stages = 2;
+
+        let n_pools = 3;
+        let counts = resolve_warm_start_counts(&meta, n_pools)
+            .expect("length matches n_pools (3), not num_stages (2): must accept");
+        assert_eq!(counts, vec![10u32, 8, 6]);
+
+        // A caller that mistakenly passes the STAGE count (2) instead of the
+        // pool count (3) must be rejected, not silently accepted against the
+        // wrong axis.
+        let mistaken_num_stages = 2;
+        let result = resolve_warm_start_counts(&meta, mistaken_num_stages);
+        let msg = result
+            .expect_err("array length (3) disagrees with the passed count (2): must reject")
+            .to_string();
+        assert!(
+            msg.contains("pools"),
+            "the rejection must name pools, not stages: {msg}"
+        );
     }
 
     #[test]
@@ -2138,7 +2178,7 @@ mod tests {
             base_row_count: row_status.len(),
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
-            node_id: 0,
+            node_id: NodeId(0),
         };
         let training_result = TrainingResult::new(
             0.0,
@@ -2166,8 +2206,12 @@ mod tests {
         let buf = serialize_stage_basis(&record);
         let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
 
-        let cache =
-            build_basis_cache_from_checkpoint(std::slice::from_ref(&owned), &[], &[0], &[0]);
+        let cache = build_basis_cache_from_checkpoint(
+            std::slice::from_ref(&owned),
+            &[],
+            &vec![NodeId(0)].into(),
+            &vec![0].into(),
+        );
         let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
 
         assert_eq!(
@@ -2206,8 +2250,12 @@ mod tests {
         let buf = serialize_stage_basis(&record);
         let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
 
-        let cache =
-            build_basis_cache_from_checkpoint(std::slice::from_ref(&owned), &[], &[0], &[0]);
+        let cache = build_basis_cache_from_checkpoint(
+            std::slice::from_ref(&owned),
+            &[],
+            &vec![NodeId(0)].into(),
+            &vec![0].into(),
+        );
         let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
 
         let expected_col: Vec<BasisStatus> = col_bytes
@@ -2282,8 +2330,11 @@ mod tests {
     fn build_basis_cache_from_checkpoint_keys_branching_graph_by_node() {
         use super::build_basis_cache_from_checkpoint;
 
-        let node_ids: Vec<i32> = vec![10, 11, 12, 13, 14, 15, 16];
-        let node_pools: Vec<usize> = vec![0, 1, 2, 3, 3, 3, 3];
+        let node_ids: TypedVec<NodePos, NodeId> = vec![10, 11, 12, 13, 14, 15, 16]
+            .into_iter()
+            .map(NodeId)
+            .collect();
+        let node_pools: TypedVec<NodePos, usize> = vec![0, 1, 2, 3, 3, 3, 3].into();
         let stage_cuts = vec![
             pool_cuts(0, &[0]),
             pool_cuts(1, &[1]),
@@ -2309,7 +2360,8 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("node {node} must not be dropped"));
             assert_eq!(
-                cb.node_id, node_ids[node],
+                cb.node_id,
+                node_ids[NodePos(node)],
                 "node {node} must carry its own node_id (no cross-node collision)"
             );
         }
@@ -2334,8 +2386,8 @@ mod tests {
     fn build_basis_cache_from_checkpoint_chain_is_identity_keyed() {
         use super::build_basis_cache_from_checkpoint;
 
-        let node_ids: Vec<i32> = vec![0, 1, 2];
-        let node_pools: Vec<usize> = vec![0, 1, 2];
+        let node_ids: TypedVec<NodePos, NodeId> = vec![0, 1, 2].into_iter().map(NodeId).collect();
+        let node_pools: TypedVec<NodePos, usize> = vec![0, 1, 2].into();
         let stage_cuts = vec![pool_cuts(0, &[0]), pool_cuts(1, &[3]), pool_cuts(2, &[9])];
         let stage_bases = vec![node_basis(0, 1), node_basis(1, 1), node_basis(2, 1)];
 

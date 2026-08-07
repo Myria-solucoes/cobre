@@ -151,8 +151,14 @@ mod simulation_only {
             checkpoint.stage_cuts[0].state_dimension,
             checkpoint.metadata.num_stages,
         );
-        let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
-            .expect("from_deserialized");
+        let pool_state_dimensions: Vec<usize> =
+            setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+        let loaded_fcf = FutureCostFunction::from_deserialized(
+            &proof,
+            &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+        )
+        .expect("from_deserialized");
 
         assert_eq!(
             loaded_fcf.total_active_cuts(),
@@ -841,6 +847,7 @@ mod sparse_dense {
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::build_cut_row_batch_into;
     use cobre_sddp::indexer::StateSpace;
+    use cobre_sddp::setup::NodeId;
     use cobre_sddp::test_support::cut_state_projection;
     use cobre_solver::RowBatch;
 
@@ -872,7 +879,7 @@ mod sparse_dense {
 
         let mut fcf = FutureCostFunction::new(2, n_state, 1, 1, &[0; 2]);
         let coeffs = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
-        fcf.add_cut(0, 0, 0, 0, 50.0, &coeffs);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 50.0, &coeffs);
 
         let col_scale: Vec<f64> = Vec::new();
 

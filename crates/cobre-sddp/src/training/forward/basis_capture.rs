@@ -3,6 +3,7 @@
 use cobre_solver::BasisStatus;
 
 use crate::cut::pool::CutPool;
+use crate::setup::NodeId;
 use crate::workspace::CapturedBasis;
 
 /// Populate `CapturedBasis` metadata after a stage solve.
@@ -26,7 +27,7 @@ pub(crate) fn write_capture_metadata(
     base_row_count: usize,
     cut_row_count: usize,
     current_state: &[f64],
-    node_id: i32,
+    node_id: NodeId,
 ) {
     captured.cut_row_slots.clear();
     for (slot, _intercept, _coeffs) in pool.active_cuts().take(cut_row_count) {

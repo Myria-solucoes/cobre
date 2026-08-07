@@ -22,8 +22,9 @@ pub use codec::{serialize_stage_basis, serialize_stage_cuts, serialize_stage_sta
 pub use records::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
     ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
-    PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload,
-    StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
+    PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
+    STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
+    StageStatesReadResult,
 };
 
 #[cfg(test)]
@@ -894,6 +895,7 @@ mod tests {
         let manifest = sample_manifest();
         let payload = StageStatesPayload {
             stage_id: 2,
+            node_id: 9,
             state_dimension: 3,
             count: 2,
             data: &data,
@@ -904,6 +906,7 @@ mod tests {
         let result = deserialize_stage_states(&buf).expect("manifest round-trip must succeed");
 
         assert_eq!(result.data, data.to_vec(), "data must still round-trip");
+        assert_eq!(result.node_id, 9, "node_id must round-trip");
         assert_manifest_eq(&result.entity_manifest, &manifest);
     }
 

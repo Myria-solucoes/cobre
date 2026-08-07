@@ -6310,9 +6310,19 @@ mod chronological_telescoping {
             checkpoint.stage_cuts[0].state_dimension,
             checkpoint.metadata.num_stages,
         );
+        let pool_state_dimensions: Vec<usize> =
+            setup2.fcf.pools.iter().map(|p| p.state_dimension).collect();
+        let visit_bounds: Vec<u64> = setup2
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
             setup2.loop_params.forward_passes,
             setup2.loop_params.max_iterations.saturating_add(1),
         )
@@ -7341,6 +7351,7 @@ mod k_fan_branching_sampled_coverage {
     use cobre_sddp::SimulationWeighting;
     use cobre_sddp::TrainingOutcome;
     use cobre_sddp::aggregate_simulation;
+    use cobre_sddp::setup::{NodePos, StageIdx};
     use cobre_sddp::test_support::k_fan_setup;
     use cobre_solver::ActiveSolver;
 
@@ -7405,7 +7416,8 @@ mod k_fan_branching_sampled_coverage {
         let (fixture, _outcome) = train_k_fan();
         let node_graph = &fixture.setup.node_graph;
 
-        let cut_generating: Vec<usize> = (0..node_graph.nodes.len())
+        let cut_generating: Vec<NodePos> = (0..node_graph.nodes.len())
+            .map(NodePos)
             .filter(|&pos| !node_graph.successors[pos].is_empty())
             .collect();
         assert_eq!(
@@ -7415,9 +7427,9 @@ mod k_fan_branching_sampled_coverage {
         );
         let root_pos = *cut_generating
             .iter()
-            .find(|&&pos| node_graph.nodes[pos].stage == 0)
+            .find(|&&pos| node_graph.nodes[pos].stage == StageIdx(0))
             .expect("the root is cut-generating and is the fixture's sole stage-0 node");
-        let fan_positions: Vec<usize> = cut_generating
+        let fan_positions: Vec<NodePos> = cut_generating
             .iter()
             .copied()
             .filter(|&pos| pos != root_pos)
@@ -7428,7 +7440,8 @@ mod k_fan_branching_sampled_coverage {
             "K distinct fan nodes must be cut-generating"
         );
 
-        let leaf_positions: Vec<usize> = (0..node_graph.nodes.len())
+        let leaf_positions: Vec<NodePos> = (0..node_graph.nodes.len())
+            .map(NodePos)
             .filter(|&pos| node_graph.successors[pos].is_empty())
             .collect();
         assert_eq!(leaf_positions.len(), K, "K leaves, one per fan branch");
@@ -7505,7 +7518,7 @@ mod k_fan_branching_sampled_coverage {
             .node_graph
             .nodes
             .iter()
-            .map(|n| n.stage)
+            .map(|n| n.stage.0)
             .max()
             .expect("the K-fan graph has at least one node") as u64;
         assert_eq!(
@@ -7754,19 +7767,19 @@ mod k_fan_enumerated_exact_bound {
 
     /// Dedup scale gate: the enumerated forward solves each distinct node
     /// exactly once, so the per-iteration forward LP-solve total equals
-    /// `Σ enumerated_visit_bound` (the node count on a `|Ω|=1` tree), strictly
+    /// `Σ forward_solve_counts` (the node count on a `|Ω|=1` tree), strictly
     /// below the naive per-path total `enumerated_scenario_count * path_length`.
     #[test]
     fn enumerated_k_fan_forward_solves_equal_dedup_total_below_naive() {
         let (fixture, outcome) = train();
         let node_graph = &fixture.setup.node_graph;
 
-        // Σ enumerated_visit_bound on a |Ω|=1 tree == the node count (π(n) = 1).
+        // Σ forward_solve_counts on a |Ω|=1 tree == the node count (π(n) = 1).
         let dedup_total = node_graph.nodes.len() as u64;
         let path_length = 1 + node_graph
             .nodes
             .iter()
-            .map(|n| n.stage)
+            .map(|n| n.stage.0)
             .max()
             .expect("the K-fan has nodes") as u64;
         assert_eq!(path_length, 3, "root -> fan -> leaf");
@@ -7808,6 +7821,260 @@ mod k_fan_enumerated_exact_bound {
                 );
             }
             other => panic!("expected SddpError::Validation, got {other:?}"),
+        }
+    }
+}
+
+mod visit_bound_overflow_guard {
+    //! The release-active visit-bound overflow guard
+    //! (`check_visit_bound` in `training/backward_pass_state.rs`): a named
+    //! rejection when a realized routed count exceeds a pool's statistical
+    //! `pool_cut_stride` floor, and structural non-firing on chain and
+    //! enumerated graphs.
+
+    use std::path::Path;
+
+    use cobre_sddp::SddpError;
+    use cobre_sddp::setup::NodePos;
+    use cobre_sddp::test_support::{k_fan_setup, k_fan_setup_enumerated};
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+    use super::run_deterministic_with_setup;
+
+    /// K=2, F=8: the smallest combination found by a documented sweep over
+    /// `(k_fan branch count, forward_passes, max_iterations)` whose
+    /// SAMPLED routing — under `k_fan_setup`'s fixed training seed — realizes
+    /// a routed count above a fan pool's capped stride within the iteration
+    /// budget (the sweep tried k in 2..=30, forward_passes in 3..=20, and
+    /// max_iterations up to 50; every other combination trained clean the
+    /// whole way). Overflow first occurs at iteration <= 27; 30 sits
+    /// comfortably past that.
+    const K: usize = 2;
+    const FORWARD_PASSES: u32 = 8;
+    const MAX_ITERATIONS: u32 = 30;
+
+    /// R2: constructs a fixture whose capped stride sits strictly below a
+    /// realizable routed count, drives training past it, and asserts the
+    /// named rejection.
+    #[test]
+    fn overflow_guard_rejects_realized_visit_count_above_stride() {
+        let mut fixture = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+
+        // Precondition (asserted, not assumed): some fan pool's capped
+        // stride sits STRICTLY below forward_passes, the realizable routed
+        // ceiling — otherwise an overflow cannot occur on this fixture at
+        // all and the test below would pass vacuously.
+        let node_graph = &fixture.setup.node_graph;
+        let capped_pool = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| !node_graph.successors[pos].is_empty())
+            .map(|pos| node_graph.nodes[pos].pool_id)
+            .find(|&pool_id| fixture.setup.fcf.pools[pool_id].visit_stride < FORWARD_PASSES)
+            .expect(
+                "power precondition: some fan pool's capped stride must sit strictly below \
+                 forward_passes on this K/forward_passes combination, or an overflow cannot be \
+                 realized on this fixture at all",
+            );
+        assert!(
+            fixture.setup.fcf.pools[capped_pool].visit_stride < FORWARD_PASSES,
+            "power precondition restated: pool {capped_pool}'s stride ({}) must be strictly \
+             below forward_passes ({FORWARD_PASSES})",
+            fixture.setup.fcf.pools[capped_pool].visit_stride
+        );
+
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect(
+                "train() itself must return Ok; a mid-training error surfaces as outcome.error",
+            );
+
+        match outcome.error {
+            Some(SddpError::Validation(msg)) => {
+                assert!(
+                    msg.contains("visit-bound overflow"),
+                    "names the failure: {msg}"
+                );
+                assert!(
+                    msg.contains(&format!("pool {capped_pool}")),
+                    "names the overflowing pool: {msg}"
+                );
+                assert!(msg.contains("stride"), "names the stride: {msg}");
+                assert!(msg.contains("routed"), "names the routed count: {msg}");
+            }
+            other => panic!(
+                "expected a named SddpError::Validation visit-bound rejection on this \
+                 (K={K}, forward_passes={FORWARD_PASSES}, max_iterations={MAX_ITERATIONS}) \
+                 fixture, got {other:?}"
+            ),
+        }
+    }
+
+    /// R3 (chain half): every shipped chain deterministic case already routes
+    /// through the guard on every level; `run_deterministic_with_setup`
+    /// asserts `outcome.error.is_none()` internally, so a misfiring guard
+    /// would already fail this call. Additionally asserts the arithmetic
+    /// identity the non-firing falls out of: a chain pool's reach
+    /// probability is exactly `1`, so its `pool_cut_stride` margin equals
+    /// `forward_passes` bit-for-bit (never merely `>=`).
+    #[test]
+    fn overflow_guard_never_fires_on_chain() {
+        let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
+        let (setup, _system, result) = run_deterministic_with_setup(case_dir);
+        assert!(
+            result.iterations > 0,
+            "must train at least one iteration for the guard to have run at all"
+        );
+        for (pool_id, pool) in setup.fcf.pools.iter().enumerate() {
+            assert_eq!(
+                pool.visit_stride, setup.loop_params.forward_passes,
+                "pool {pool_id}: a chain pool's stride must equal forward_passes exactly \
+                 (reach probability 1, pool_cut_stride's variance-0 identity)"
+            );
+        }
+    }
+
+    /// R3 (enumerated half): the K-fan trained fully enumerated
+    /// (`forward_passes` resolved to the graph's exact path count) must
+    /// never trip the guard — every reachable pool's `pool_cut_stride`
+    /// margin structurally upper-bounds its exact, deterministic enumerated
+    /// visit count (no shape predicate: the margin's `+3σ` term is always
+    /// `>= 0` and its cap never falls below the mean).
+    #[test]
+    fn overflow_guard_never_fires_on_enumerated_k_fan() {
+        const K: usize = 4;
+        const MAX_ITERATIONS: u32 = 8;
+
+        let mut fixture = k_fan_setup_enumerated(K, MAX_ITERATIONS);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated K-fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "the overflow guard must never fire on an enumerated graph: {:?}",
+            outcome.error
+        );
+    }
+}
+
+mod heterogeneous_visit_bound_resume {
+    //! R4/R5: `FutureCostFunction::new_with_warm_start` threads the study's
+    //! per-pool state-dimension and visit-bound arrays — the same per-pool
+    //! contract `new_per_pool` takes — so a resumed run's pool geometry
+    //! matches the cold-start run's. Exercised on the K-fan's HETEROGENEOUS
+    //! per-pool strides (declared non-uniform branch weights): the shape the
+    //! pre-fix scalar substitution (every resumed pool given `forward_passes`
+    //! uniformly as its stride) silently broke.
+
+    use cobre_io::StageCutsReadResult;
+    use cobre_sddp::FutureCostFunction;
+    use cobre_sddp::setup::NodeId;
+    use cobre_sddp::test_support::{k_fan_setup, trivial_full_fcf_proof};
+
+    const K: usize = 4;
+    const FORWARD_PASSES: u32 = 3;
+    const MAX_ITERATIONS: u32 = 5;
+
+    #[test]
+    fn resume_matches_cold_start_stride_and_slots_on_heterogeneous_bounds() {
+        let cold = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        let cold_strides: Vec<u32> = cold
+            .setup
+            .fcf
+            .pools
+            .iter()
+            .map(|p| p.visit_stride)
+            .collect();
+        let cold_dims: Vec<usize> = cold
+            .setup
+            .fcf
+            .pools
+            .iter()
+            .map(|p| p.state_dimension)
+            .collect();
+
+        // Power precondition: the K-fan's declared non-uniform branch weights
+        // give distinct pools distinct strides — the shape a scalar
+        // substitution (every pool given forward_passes uniformly) cannot be
+        // distinguished from the fix on.
+        assert!(
+            cold_strides.iter().any(|&s| s != cold_strides[0]),
+            "power precondition: the K-fan fixture must carry heterogeneous per-pool visit \
+             strides (got {cold_strides:?}), or this test cannot distinguish the fix from the \
+             pre-fix scalar substitution"
+        );
+
+        let proof = trivial_full_fcf_proof(
+            u32::try_from(cold_dims[0]).expect("state dimension fits u32"),
+            u32::try_from(cold.setup.num_stages()).expect("stage count fits u32"),
+        );
+
+        // A checkpoint with no warm-start cuts: this test's concern is the
+        // constructor's per-pool dimension/stride threading, not cut-byte
+        // fidelity (already covered by
+        // `assert_cross_mode_load_preserves_cut_bytes` in
+        // `chronological_telescoping`).
+        let stage_results: Vec<StageCutsReadResult> = cold_dims
+            .iter()
+            .enumerate()
+            .map(|(p, &dim)| StageCutsReadResult {
+                stage_id: u32::try_from(p).expect("pool index fits u32"),
+                state_dimension: u32::try_from(dim).expect("state dimension fits u32"),
+                capacity: 0,
+                warm_start_count: 0,
+                populated_count: 0,
+                cuts: Vec::new(),
+                entity_manifest: Vec::new(),
+            })
+            .collect();
+        let visit_bounds: Vec<u64> = cold_strides.iter().map(|&s| u64::from(s)).collect();
+
+        let mut resumed = FutureCostFunction::new_with_warm_start(
+            &proof,
+            &stage_results,
+            &cold_dims,
+            &visit_bounds,
+            FORWARD_PASSES,
+            u64::from(MAX_ITERATIONS),
+        )
+        .expect("new_with_warm_start must build from the injected per-pool arrays");
+
+        let resumed_strides: Vec<u32> = resumed.pools.iter().map(|p| p.visit_stride).collect();
+        assert_eq!(
+            resumed_strides, cold_strides,
+            "resumed per-pool strides must equal the cold-start run's on a heterogeneous-bound \
+             graph — the deleted scalar substitution replaced every pool's stride with \
+             forward_passes ({FORWARD_PASSES}) uniformly"
+        );
+
+        // Slot-index equivalence: the resumed pool's warm_start_count is 0
+        // (no warm-start cuts here) and its iteration_base defaults to 0,
+        // exactly like a fresh cold pool — so a cut at (iteration=1,
+        // forward_pass_index=0) must land at the documented formula's slot,
+        // `warm_start_count + iteration * stride + forward_pass_index`,
+        // using the COLD-START run's own per-pool stride.
+        for (pool_id, &stride) in cold_strides.iter().enumerate() {
+            resumed.add_cut(
+                NodeId(0),
+                pool_id,
+                1,
+                0,
+                1.0,
+                &vec![0.0; cold_dims[pool_id]],
+            );
+            let expected_slot = stride as usize;
+            assert!(
+                resumed.pools[pool_id].is_active(expected_slot),
+                "pool {pool_id}: a cut at iteration 1, forward_pass_index 0 must land at slot \
+                 {expected_slot} (warm_start_count 0 + iteration 1 * stride {stride} + \
+                 forward_pass_index 0) — the cold-start run's own stride"
+            );
         }
     }
 }
@@ -8327,4 +8594,96 @@ mod enumerated_external {
             );
         }
     }
+}
+
+/// A reduced-projection pool (storage-only cut state, `n_slots < n_state`) must
+/// score cuts against trial states read in its OWN projected space. The
+/// visited-states archive is packed at the global StateDim stride; striding it
+/// by the pool's projected dimension — the pre-fix behavior — reads misaligned
+/// memory and deactivates the wrong cuts. This pins the projected read against
+/// that misaligned read on the storage-only cut-state axis, where they differ.
+#[test]
+fn cut_selection_scores_reduced_projection_in_projected_space() {
+    use cobre_core::temporal::StageStateConfig;
+    use cobre_sddp::cut::CutPool;
+    use cobre_sddp::cut_selection::CutSelectionStrategy;
+    use cobre_sddp::indexer::{CutSlot, CutStateProjection, StateSpace};
+    use cobre_sddp::setup::NodeId;
+
+    // 1 hydro, PAR(1): global state = [storage, lag] → n_state = 2.
+    let global = StateSpace::new(1, 1, 0, Vec::new(), 0, 0, Vec::new(), &[1]);
+    assert_eq!(global.n_state, 2);
+
+    let proj = CutStateProjection::new(
+        &global,
+        StageStateConfig {
+            storage: true,
+            inflow_lags: false,
+        },
+    );
+    let n_slots = proj.n_slots();
+    assert!(
+        n_slots < global.n_state,
+        "precondition: strictly reduced projection (n_slots {n_slots} < n_state {})",
+        global.n_state
+    );
+
+    // 1-D cuts: cut0 = x, cut1 = 3, cut2 = 0.5. Over the storage values only,
+    // cut1 is always at-max, so cut0 and cut2 are dominated.
+    let mut pool = CutPool::new(3, n_slots, 1, 0);
+    pool.add_cut(NodeId(0), 0, 0, 0.0, &[1.0]);
+    pool.add_cut(NodeId(0), 1, 0, 3.0, &[0.0]);
+    pool.add_cut(NodeId(0), 2, 0, 0.5, &[0.0]);
+
+    let strategy = CutSelectionStrategy::Level1 {
+        check_frequency: 1,
+        tie_tolerance: 0.0,
+    };
+
+    // Two trial points, packed at the global StateDim stride [storage, lag]:
+    // small storage, large lag so the misalignment is observable.
+    let n_trials = 2;
+    let global_states = [1.0, 10.0, 2.0, 20.0];
+
+    let mut projected = Vec::new();
+    for m in 0..n_trials {
+        for s in 0..n_slots {
+            let g = proj.global_state_index(CutSlot::new(s)).get();
+            projected.push(global_states[m * global.n_state + g]);
+        }
+    }
+    assert_eq!(
+        projected,
+        vec![1.0, 2.0],
+        "storage-only projection selects the storage StateDim, not a prefix stride"
+    );
+
+    let mut projected_deact = strategy
+        .select_for_stage(&pool, &projected, n_trials, 10, 0)
+        .deactivation_indices();
+    projected_deact.sort_unstable();
+
+    // Pre-fix misaligned read: stride the global buffer by the pool dim,
+    // treating the 4 packed values as 4 one-dim states {1, 10, 2, 20}. cut0 is
+    // at-max at the large lag values, so it survives — the wrong deactivation set.
+    let derived_trials = global_states.len() / n_slots;
+    let mut misaligned_deact = strategy
+        .select_for_stage(&pool, &global_states, derived_trials, 10, 0)
+        .deactivation_indices();
+    misaligned_deact.sort_unstable();
+
+    assert_eq!(
+        projected_deact,
+        vec![0, 2],
+        "projected read deactivates cut0 (never at-max among the storage states) and cut2"
+    );
+    assert_eq!(
+        misaligned_deact,
+        vec![2],
+        "misaligned read wrongly keeps cut0 (at-max at lag values read as storage)"
+    );
+    assert_ne!(
+        projected_deact, misaligned_deact,
+        "the projection must change the deactivation set on a reduced pool"
+    );
 }

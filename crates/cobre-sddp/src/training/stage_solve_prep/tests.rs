@@ -20,9 +20,7 @@ use cobre_solver::{
 use cobre_stochastic::StochasticContext;
 use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-use super::{
-    InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
-};
+use super::{InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource};
 use crate::{
     context::{StageContext, TrainingContext},
     horizon_mode::HorizonMode,
@@ -33,6 +31,7 @@ use crate::{
         NcsNoiseOffsets, build_dense_ncs_col_indices, gather_dense_ncs_bounds,
         transform_inflow_noise, transform_ncs_noise,
     },
+    setup::node_graph::StageIdx,
     test_support::{all_enabled_cut_state_layouts, state_layout, study_dims},
     workspace::{ScratchBuffers, WorkspaceSizing},
 };
@@ -340,7 +339,7 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
 
     transform_inflow_noise(
         &raw_noise,
-        0,
+        StageIdx(0),
         &current_state,
         &ctx,
         &training_ctx,
@@ -378,7 +377,6 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     let mut owner_patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
     let params = StageSolvePrepParams {
         state_source: StateSource(&current_state),
-        opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Present,
         inflow_noise: InflowNoise::Transform,
         raw_noise: &raw_noise,
@@ -389,7 +387,7 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         &mut owner_scratch,
         &ctx,
         &training_ctx,
-        0,
+        StageIdx(0),
         &params,
     )
     .expect("fixture commitments are in bounds; reconciliation must not reject");
@@ -412,7 +410,6 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         1,
         "the minimal fixture patches exactly one noise row"
     );
-    assert_eq!(params.opening_mode, OpeningMode::SingleRealized);
 }
 
 /// One bus, one NCS entity, availability factor `mean=0.5, std=0.1` — the D15
@@ -624,7 +621,6 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     };
     let params = StageSolvePrepParams {
         state_source: StateSource(&[]),
-        opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Absent,
         inflow_noise: InflowNoise::PreBuilt,
         raw_noise: &raw_noise,
@@ -642,7 +638,7 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
             n_load_buses: 0,
         },
         &stoch,
-        0,
+        StageIdx(0),
         1,
         &ncs_max_gen,
         &ncs_allow_curtailment,
@@ -680,7 +676,7 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
         &mut owner_scratch,
         &ctx,
         &training_ctx,
-        0,
+        StageIdx(0),
         &params,
     )
     .expect("fixture commitments are in bounds; reconciliation must not reject");
@@ -776,7 +772,6 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
     let mut patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
     let params = StageSolvePrepParams {
         state_source: StateSource(&current_state),
-        opening_mode: OpeningMode::PerOpening,
         load_noise: LoadNoise::Absent,
         inflow_noise: InflowNoise::PreBuilt,
         raw_noise: &raw_noise,
@@ -787,7 +782,7 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
         &mut scratch,
         &ctx,
         &training_ctx,
-        0,
+        StageIdx(0),
         &params,
     )
     .expect("fixture commitments are in bounds; reconciliation must not reject");

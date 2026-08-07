@@ -15,6 +15,7 @@ use cobre_stochastic::{evaluate_par_batch, solve_par_noise_batch};
 use crate::cut::CutRowMap;
 use crate::cut::row::append_new_cuts_to_lp;
 use crate::{
+    backward::fill_external_opening_noise,
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     cut::row::build_cut_row_batch_into,
@@ -24,9 +25,12 @@ use crate::{
     noise::compute_effective_eta,
     rank_reconcile::reconcile_error_flag,
     risk_measure::RiskMeasure,
-    setup::{NodeGraph, NodeSuccessor, node_graph::frontier_node},
+    setup::{
+        NodeGraph, NodeSuccessor, OpeningSource,
+        node_graph::{NodePos, StageIdx, frontier_node},
+    },
     training::stage_solve_prep::{
-        InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
+        InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
     workspace::ScratchBuffers,
 };
@@ -98,6 +102,10 @@ impl<'a> LbEvalScratchBundle<'a> {
 }
 
 /// Rank-0 setup: run the append-only LP load. Only called on rank 0.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if stage 0 carries no alive node.
 fn lb_init_rank0<S: SolverInterface>(
     solver: &mut S,
     fcf: &FutureCostFunction,
@@ -105,16 +113,19 @@ fn lb_init_rank0<S: SolverInterface>(
     training_ctx: &TrainingContext<'_>,
     lb_cut_batch: &mut RowBatch,
     lb_cut_row_map: Option<&mut CutRowMap>,
-) {
+) -> Result<(), SddpError> {
     let state_layout = training_ctx.state;
     // Root pool resolved by STAGE (the sole stage-0 node), never by array
     // position: build_declared_node_graph sorts nodes by ascending id, so
     // nodes[0] is the smallest-id node, not necessarily the root — reading
     // nodes[0].pool_id would inject a sibling's cuts onto the root's stage-0 LP.
     // On a chain the root IS nodes[0] (pool 0).
-    let pool_id = training_ctx.node_graph.nodes[frontier_node(training_ctx.node_graph, 0)].pool_id;
+    let root = frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
+        SddpError::Validation("lower bound: stage 0 carries no alive node".to_string())
+    })?;
+    let pool_id = training_ctx.node_graph.nodes[root].pool_id;
     let cut_state = &training_ctx.cut_state_layouts[pool_id];
-    let template = &ctx.templates[0];
+    let template = ctx.template(StageIdx(0));
 
     // Append-only: cuts are never removed, keeping the lower bound monotone across
     // iterations. The CutRowMap-less branch (tests) rebuilds the model each call.
@@ -146,6 +157,7 @@ fn lb_init_rank0<S: SolverInterface>(
             solver.add_rows(lb_cut_batch);
         }
     }
+    Ok(())
 }
 
 /// Truncation precompute (PAR lag matrix + eta floor, constant across openings),
@@ -167,11 +179,18 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     objectives_buf: &mut Vec<f64>,
 ) -> Result<(), SddpError> {
     let n_hydros = ctx.n_hydros;
-    let base_row = ctx.base_rows[0];
-    let template0 = &ctx.templates[0];
+    let base_row = ctx.base_row(StageIdx(0));
+    let template0 = ctx.template(StageIdx(0));
     let initial_state = training_ctx.initial_state;
     let opening_tree = training_ctx.stochastic.opening_tree();
-    let n_openings = opening_tree.n_openings(0);
+    // Enumerate the ROOT NODE's own Ω, not the stage-0 generated tree: an External
+    // root pins a single scenario column its external library carries, which the
+    // generated tree does not know. Reading the generated tree there evaluates the
+    // wrong stage-0 realization and mis-prices the bound.
+    let root_pos = find_root_position(training_ctx.node_graph)?;
+    let root_openings = training_ctx.node_graph.nodes[root_pos].openings;
+    let root_node_id = training_ctx.node_graph.node_ids[root_pos];
+    let n_openings = root_openings.len;
 
     let needs_truncation = matches!(
         training_ctx.inflow_method,
@@ -209,10 +228,29 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         );
     }
 
+    // An External root reads its pinned column (assembled once, `len == 1`); a
+    // Generated root reads the generated tree opening-by-opening. `raw_noise_buf`
+    // holds the External column across the loop without a per-iteration allocation.
+    let mut ext_buf = std::mem::take(&mut scratch.raw_noise_buf);
+    if root_openings.source == OpeningSource::External {
+        fill_external_opening_noise(
+            training_ctx,
+            ctx,
+            StageIdx(0),
+            root_openings.offset,
+            root_node_id,
+            &mut ext_buf,
+        )?;
+    }
+
     objectives_buf.clear();
 
     for opening_idx in 0..n_openings {
-        let raw_noise = opening_tree.opening(0, opening_idx);
+        let raw_noise: &[f64] = if root_openings.source == OpeningSource::External {
+            &ext_buf
+        } else {
+            opening_tree.opening(0, root_openings.offset + opening_idx)
+        };
 
         if let Some(par_lp) = truncation_par {
             evaluate_par_batch(
@@ -250,7 +288,6 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 
         let prep_params = StageSolvePrepParams {
             state_source: StateSource(initial_state),
-            opening_mode: OpeningMode::PerOpening,
             load_noise: LoadNoise::Absent,
             inflow_noise: InflowNoise::PreBuilt,
             raw_noise,
@@ -261,7 +298,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             scratch,
             ctx,
             training_ctx,
-            0,
+            StageIdx(0),
             &prep_params,
         )?;
 
@@ -276,6 +313,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         objectives_buf.push(view.objective);
     }
 
+    scratch.raw_noise_buf = ext_buf;
     Ok(())
 }
 
@@ -288,12 +326,11 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 ///
 /// Returns [`SddpError::Validation`] naming stage 0 when it holds zero or more
 /// than one node.
-fn find_root_position(node_graph: &NodeGraph) -> Result<usize, SddpError> {
+fn find_root_position(node_graph: &NodeGraph) -> Result<NodePos, SddpError> {
     let mut stage_0 = node_graph
         .nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| n.stage == 0)
+        .iter_indexed()
+        .filter(|(_, n)| n.stage == StageIdx(0))
         .map(|(pos, _)| pos);
     let root_pos = stage_0.next().ok_or_else(|| {
         SddpError::Validation("lower bound: stage 0 has no node in the node graph".to_string())
@@ -359,11 +396,19 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
     cost_scale_factor: f64,
     comm: &C,
 ) -> Result<f64, SddpError> {
-    debug_assert_eq!(
-        objectives.len(),
-        weights.len(),
-        "lb_aggregate_and_broadcast: weight-vector length must equal objective count"
-    );
+    // Hard length check, not a debug assert: the objectives (root Ω evaluations)
+    // and the weights (root outcome set) must be the same set in the same canonical
+    // order. A mismatch is a real configuration error (e.g. an External root paired
+    // against the generated stage-0 tree), not a programmer slip — reject it rather
+    // than silently pairing a truncated vector.
+    if objectives.len() != weights.len() {
+        return Err(SddpError::Validation(format!(
+            "lower bound: root evaluated {} openings but the root outcome set has {} weights; \
+             the root's Ω and its weights must be the same set in canonical order",
+            objectives.len(),
+            weights.len()
+        )));
+    }
     let mut lb = risk_measure.evaluate_risk(objectives, weights) * cost_scale_factor;
     comm.broadcast(std::slice::from_mut(&mut lb), 0)
         .map_err(SddpError::from)?;
@@ -405,19 +450,20 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             "evaluate_lower_bound: stage 0 must have at least one opening"
         );
 
-        lb_init_rank0(
+        let rank0_result = lb_init_rank0(
             solver,
             fcf,
             ctx,
             training_ctx,
             scratch.lb_cut_batch,
             scratch.lb_cut_row_map.as_deref_mut(),
-        );
-
-        let rank0_result = assemble_root_outcome_weights(
-            training_ctx.node_graph,
-            &mut scratch.lb_scratch.weights_buf,
         )
+        .and_then(|()| {
+            assemble_root_outcome_weights(
+                training_ctx.node_graph,
+                &mut scratch.lb_scratch.weights_buf,
+            )
+        })
         .and_then(|()| {
             lb_evaluate_stage_0(
                 solver,
@@ -462,7 +508,7 @@ mod tests {
     use super::{
         LbEvalScratch, LbEvalScratchBundle, assemble_outcome_weights,
         assemble_root_outcome_weights, evaluate_lower_bound, find_root_position,
-        lb_evaluate_stage_0, lb_init_rank0,
+        lb_aggregate_and_broadcast, lb_evaluate_stage_0, lb_init_rank0,
     };
     use crate::{
         PrepareHydroModelsResult, ResolvedParameters, StageTemplates,
@@ -475,7 +521,10 @@ mod tests {
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         risk_measure::RiskMeasure,
-        setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
+        setup::node_graph::StageIdx,
+        setup::{
+            NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        },
         test_support,
         workspace::{ScratchBuffers, WorkspaceSizing},
     };
@@ -1226,6 +1275,25 @@ mod tests {
         assert!(
             (lb - 100_000_000.0).abs() < 1e-7,
             "CVaR(alpha=1, lambda=1) must equal expectation 100_000_000.0, got {lb}"
+        );
+    }
+
+    /// The lower-bound aggregation rejects a root-Ω/weights length mismatch with a
+    /// hard `SddpError::Validation` — never a panic, never a silent truncation. The
+    /// aligned `lb_evaluate_stage_0` + `assemble_root_outcome_weights` path never
+    /// produces one (both size to the root node's own Ω), so this defensive check —
+    /// the guard against an External root evaluated against a differently-sized
+    /// weight vector — is verified here directly.
+    #[test]
+    fn lb_aggregate_rejects_root_omega_weight_length_mismatch() {
+        let comm = LocalComm;
+        let rm = RiskMeasure::Expectation;
+        let objectives = vec![10.0, 20.0, 30.0];
+        let weights = vec![1.0];
+        let result = lb_aggregate_and_broadcast(&objectives, &weights, &rm, 1.0, &comm);
+        assert!(
+            matches!(result, Err(SddpError::Validation(_))),
+            "a root-Ω/weights length mismatch must be a Validation error, got {result:?}"
         );
     }
 
@@ -2936,7 +3004,7 @@ mod tests {
     /// fraction, so every product weight below is exactly representable.
     fn k_fan_root_node_graph() -> NodeGraph {
         let child_a = NodeRuntime {
-            stage: 1,
+            stage: StageIdx(1),
             pool_id: 0,
             openings: NodeOpenings {
                 source: OpeningSource::Generated,
@@ -2946,7 +3014,7 @@ mod tests {
             },
         };
         let child_b = NodeRuntime {
-            stage: 1,
+            stage: StageIdx(1),
             pool_id: 1,
             openings: NodeOpenings {
                 source: OpeningSource::Generated,
@@ -2956,7 +3024,7 @@ mod tests {
             },
         };
         let root = NodeRuntime {
-            stage: 0,
+            stage: StageIdx(0),
             pool_id: 2,
             openings: NodeOpenings {
                 source: OpeningSource::Generated,
@@ -2966,24 +3034,25 @@ mod tests {
             },
         };
         NodeGraph {
-            node_ids: vec![0, 1, 2],
-            nodes: vec![root, child_a, child_b],
+            node_ids: vec![NodeId(0), NodeId(1), NodeId(2)].into(),
+            nodes: vec![root, child_a, child_b].into(),
             successors: vec![
                 vec![
                     NodeSuccessor {
-                        child: 1,
+                        child: NodePos(1),
                         probability: 0.25,
                     },
                     NodeSuccessor {
-                        child: 2,
+                        child: NodePos(2),
                         probability: 0.75,
                     },
                 ],
                 Vec::new(),
                 Vec::new(),
-            ],
+            ]
+            .into(),
             n_pools: 3,
-            pool_stage: vec![1, 1, 0],
+            pool_stage: vec![StageIdx(1), StageIdx(1), StageIdx(0)],
         }
     }
 
@@ -2995,7 +3064,7 @@ mod tests {
     fn assemble_outcome_weights_k_fan_canonical_order_and_product_weights() {
         let ng = k_fan_root_node_graph();
         let mut out = Vec::new();
-        assemble_outcome_weights(&ng, &ng.successors[0], &mut out);
+        assemble_outcome_weights(&ng, &ng.successors[NodePos(0)], &mut out);
 
         assert_eq!(
             out,
@@ -3013,7 +3082,7 @@ mod tests {
     fn root_outcome_weights_expectation_matches_analytical_sum() {
         let ng = k_fan_root_node_graph();
         let mut weights = Vec::new();
-        assemble_outcome_weights(&ng, &ng.successors[0], &mut weights);
+        assemble_outcome_weights(&ng, &ng.successors[NodePos(0)], &mut weights);
 
         let objectives = [8.0, 16.0, 40.0, 80.0, 160.0, 320.0];
         let cost_scale_factor = 1_000_000.0;
@@ -3036,7 +3105,7 @@ mod tests {
     fn root_outcome_weights_cvar_matches_evaluate_risk() {
         let ng = k_fan_root_node_graph();
         let mut weights = Vec::new();
-        assemble_outcome_weights(&ng, &ng.successors[0], &mut weights);
+        assemble_outcome_weights(&ng, &ng.successors[NodePos(0)], &mut weights);
 
         let objectives = [8.0, 16.0, 40.0, 80.0, 160.0, 320.0];
         let cost_scale_factor = 1_000_000.0;
@@ -3091,7 +3160,7 @@ mod tests {
     #[test]
     fn assemble_root_outcome_weights_multi_node_stage_0_is_validation_error() {
         let node_a = NodeRuntime {
-            stage: 0,
+            stage: StageIdx(0),
             pool_id: 0,
             openings: NodeOpenings {
                 source: OpeningSource::Generated,
@@ -3101,7 +3170,7 @@ mod tests {
             },
         };
         let node_b = NodeRuntime {
-            stage: 0,
+            stage: StageIdx(0),
             pool_id: 1,
             openings: NodeOpenings {
                 source: OpeningSource::Generated,
@@ -3111,11 +3180,11 @@ mod tests {
             },
         };
         let ng = NodeGraph {
-            node_ids: vec![0, 1],
-            nodes: vec![node_a, node_b],
-            successors: vec![Vec::new(), Vec::new()],
+            node_ids: vec![NodeId(0), NodeId(1)].into(),
+            nodes: vec![node_a, node_b].into(),
+            successors: vec![Vec::new(), Vec::new()].into(),
             n_pools: 2,
-            pool_stage: vec![0, 0],
+            pool_stage: vec![StageIdx(0), StageIdx(0)],
         };
 
         let mut weights = Vec::new();
@@ -3158,7 +3227,7 @@ mod tests {
         let n_state = fixture.state.n_state;
 
         let leaf = |pool_id| NodeRuntime {
-            stage: 1,
+            stage: StageIdx(1),
             pool_id,
             openings: NodeOpenings {
                 source: OpeningSource::Generated,
@@ -3168,7 +3237,7 @@ mod tests {
             },
         };
         let root = NodeRuntime {
-            stage: 0,
+            stage: StageIdx(0),
             pool_id: 0,
             openings: NodeOpenings {
                 source: OpeningSource::Generated,
@@ -3178,32 +3247,37 @@ mod tests {
             },
         };
         fixture.node_graph = NodeGraph {
-            node_ids: vec![1, 2, 3],
-            nodes: vec![leaf(1), leaf(1), root],
+            node_ids: vec![NodeId(1), NodeId(2), NodeId(3)].into(),
+            nodes: vec![leaf(1), leaf(1), root].into(),
             successors: vec![
                 Vec::new(),
                 Vec::new(),
                 vec![
                     NodeSuccessor {
-                        child: 0,
+                        child: NodePos(0),
                         probability: 0.5,
                     },
                     NodeSuccessor {
-                        child: 1,
+                        child: NodePos(1),
                         probability: 0.5,
                     },
                 ],
-            ],
+            ]
+            .into(),
             n_pools: 2,
-            pool_stage: vec![0, 1],
+            pool_stage: vec![StageIdx(0), StageIdx(1)],
         };
 
         // Power precondition: the buggy nodes[0] read and the stage-resolved root
         // genuinely disagree on which pool is the root's.
         let root_pos = find_root_position(&fixture.node_graph).unwrap();
         let root_pool = fixture.node_graph.nodes[root_pos].pool_id;
-        let leaf_pool = fixture.node_graph.nodes[0].pool_id;
-        assert_eq!(root_pos, 2, "root is at canonical position 2 (id 3), not 0");
+        let leaf_pool = fixture.node_graph.nodes[NodePos(0)].pool_id;
+        assert_eq!(
+            root_pos,
+            NodePos(2),
+            "root is at canonical position 2 (id 3), not 0"
+        );
         assert_ne!(
             root_pool, leaf_pool,
             "the fixture must distinguish the root pool from nodes[0].pool_id"
@@ -3213,10 +3287,10 @@ mod tests {
         // the resolved pool is observable through the built batch's row count.
         let mut fcf = make_fcf(2, n_state);
         let coeff = vec![0.0_f64; n_state];
-        fcf.add_cut(0, root_pool, 1, 0, 0.0, &coeff);
-        fcf.add_cut(0, root_pool, 1, 1, 0.0, &coeff);
-        fcf.add_cut(0, root_pool, 2, 0, 0.0, &coeff);
-        fcf.add_cut(0, leaf_pool, 1, 0, 0.0, &coeff);
+        fcf.add_cut(NodeId(0), root_pool, 1, 0, 0.0, &coeff);
+        fcf.add_cut(NodeId(0), root_pool, 1, 1, 0.0, &coeff);
+        fcf.add_cut(NodeId(0), root_pool, 2, 0, 0.0, &coeff);
+        fcf.add_cut(NodeId(0), leaf_pool, 1, 0, 0.0, &coeff);
         assert_eq!(fcf.pools[root_pool].active_count(), 3);
         assert_eq!(fcf.pools[leaf_pool].active_count(), 1);
 
@@ -3231,7 +3305,8 @@ mod tests {
             &training_ctx,
             &mut lb_cut_batch,
             None,
-        );
+        )
+        .expect("fixture's stage 0 carries a single alive node");
 
         assert_eq!(
             lb_cut_batch.num_rows,

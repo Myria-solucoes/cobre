@@ -18,7 +18,7 @@ use cobre_io::output::policy::{
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
-use crate::setup::NodeGraph;
+use crate::setup::{NodeGraph, NodePos};
 use crate::training::TrainingResult;
 
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
@@ -220,7 +220,7 @@ pub fn build_stage_cut_records(fcf: &FutureCostFunction) -> Vec<Vec<PolicyCutRec
                 .map(|i| {
                     let meta = pool.metadata(i);
                     PolicyCutRecord {
-                        cut_id: meta.iteration_generated * u64::from(pool.forward_passes)
+                        cut_id: meta.iteration_generated * u64::from(pool.visit_stride)
                             + u64::from(meta.forward_pass_index),
                         slot_index: i as u32,
                         iteration: meta.iteration_generated as u32,
@@ -408,7 +408,7 @@ pub fn build_stage_basis_records<'a>(
         .enumerate()
         .filter_map(|(node, opt)| {
             opt.as_ref().map(|_| {
-                let pool = node_graph.nodes[node].pool_id;
+                let pool = node_graph.nodes[NodePos(node)].pool_id;
                 let num_cut_rows = fcf
                     .pools
                     .get(pool)
@@ -438,23 +438,21 @@ pub fn build_stage_basis_records<'a>(
 pub fn build_graph_manifest(node_graph: &NodeGraph, study_stage_ids: &[i32]) -> GraphManifest {
     let nodes = node_graph
         .nodes
-        .iter()
-        .enumerate()
+        .iter_indexed()
         .map(|(pos, node)| ManifestNode {
-            id: node_graph.node_ids[pos],
-            stage_id: study_stage_ids.get(node.stage).copied().unwrap_or(-1),
+            id: node_graph.node_ids[pos].0,
+            stage_id: study_stage_ids.get(node.stage.0).copied().unwrap_or(-1),
             pool_id: node.pool_id as u32,
         })
         .collect();
     let edges = node_graph
         .successors
-        .iter()
-        .enumerate()
+        .iter_indexed()
         .flat_map(|(pos, succs)| {
-            let source_id = node_graph.node_ids[pos];
+            let source_id = node_graph.node_ids[pos].0;
             succs.iter().map(move |succ| ManifestEdge {
                 source_id,
-                target_id: node_graph.node_ids[succ.child],
+                target_id: node_graph.node_ids[succ.child].0,
                 probability: succ.probability,
             })
         })
@@ -473,9 +471,15 @@ pub fn build_graph_manifest(node_graph: &NodeGraph, study_stage_ids: &[i32]) -> 
 /// `stage_manifests` is indexed per POOL, one entry per `fcf.pools` slot —
 /// the same array [`build_stage_cuts_payloads`] indexes. A branching graph has
 /// strictly more nodes than pools (sibling leaves share one pool), so node
-/// `t`'s manifest is `stage_manifests[node_graph.nodes[t].pool_id]` — never
-/// `stage_manifests[t]`, which is only safe on the chain degeneracy where
-/// `pool_id == t`.
+/// position `pos`'s manifest is `stage_manifests[node_graph.nodes[pos].pool_id]`
+/// — never `stage_manifests[pos.0]`, which is only safe when `pool_id == pos.0`
+/// (pool id is not itself a `NodePos`, so this substitution still type-checks).
+///
+/// `stage_id` carries the node's STUDY STAGE (`node_graph.nodes[pos].stage`);
+/// `node_id` carries the node's own declared id (`node_graph.node_ids[pos]`) —
+/// both distinct from the node's position `pos`, so a branching artifact's
+/// per-node states are attributable to their stage, their declared id, and
+/// their position independently.
 #[must_use]
 pub fn build_stage_states_payloads<'a>(
     archive: Option<&'a VisitedStatesArchive>,
@@ -487,10 +491,12 @@ pub fn build_stage_states_payloads<'a>(
     };
     (0..archive.num_nodes())
         .map(|t| {
-            let node = archive.node(t);
-            let pool_id = node_graph.nodes[t].pool_id;
+            let pos = NodePos(t);
+            let node = archive.node(pos);
+            let pool_id = node_graph.nodes[pos].pool_id;
             StageStatesPayload {
-                stage_id: t as u32,
+                stage_id: node_graph.nodes[pos].stage.0 as u32,
+                node_id: node_graph.node_ids[pos].0,
                 state_dimension: node.state_dimension() as u32,
                 count: node.count() as u32,
                 data: node.states(),
@@ -517,7 +523,10 @@ mod tests {
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
-    use crate::setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource};
+    use crate::setup::{
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        StageIdx,
+    };
     use crate::test_support;
     use crate::visited_states::VisitedStatesArchive;
     use cobre_core::commissioning::hydro_operating_active;
@@ -1161,16 +1170,25 @@ mod tests {
             q: 1.0,
         };
         let node = |stage: usize, pool_id: usize| NodeRuntime {
-            stage,
+            stage: StageIdx(stage),
             pool_id,
             openings: opening,
         };
         let edge = |child: usize| NodeSuccessor {
-            child,
+            child: NodePos(child),
             probability: 0.5,
         };
         NodeGraph {
-            node_ids: vec![0, 1, 2, 3, 4, 5, 6],
+            node_ids: vec![
+                NodeId(0),
+                NodeId(1),
+                NodeId(2),
+                NodeId(3),
+                NodeId(4),
+                NodeId(5),
+                NodeId(6),
+            ]
+            .into(),
             nodes: vec![
                 node(0, 0),
                 node(1, 1),
@@ -1179,7 +1197,8 @@ mod tests {
                 node(2, 3),
                 node(2, 3),
                 node(2, 3),
-            ],
+            ]
+            .into(),
             successors: vec![
                 vec![edge(1), edge(2)],
                 vec![edge(3), edge(4)],
@@ -1188,9 +1207,10 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-            ],
+            ]
+            .into(),
             n_pools: 4,
-            pool_stage: vec![0, 1, 1, 2],
+            pool_stage: vec![StageIdx(0), StageIdx(1), StageIdx(1), StageIdx(2)],
         }
     }
 
@@ -1211,6 +1231,10 @@ mod tests {
     /// panics out of bounds the moment `t >= 4`. Indexing through
     /// `node_graph.nodes[t].pool_id` stays in range and resolves every one of
     /// the 4 leaves (t = 3..=6) to the SAME shared pool-3 manifest.
+    ///
+    /// Also pins U13: `stage_id` carries `node_graph.nodes[t].stage` (the
+    /// binary tree's stage 2 for every leaf, not the leaves' distinct node
+    /// positions 3..=6) and `node_id` carries `node_graph.node_ids[t]`.
     #[test]
     fn tree_states_payload_resolves_manifest_through_node_pool_id() {
         let node_graph = binary_tree_node_graph();
@@ -1219,14 +1243,15 @@ mod tests {
 
         let mut archive = VisitedStatesArchive::new(node_graph.nodes.len(), 1, 1, 1);
         for t in 0..node_graph.nodes.len() {
-            archive.archive_gathered_states(t, &[0.0], 1);
+            archive.archive_gathered_states(NodePos(t), &[0.0], 1);
         }
 
         let payloads = build_stage_states_payloads(Some(&archive), &stage_manifests, &node_graph);
 
         assert_eq!(payloads.len(), 7, "one payload per node, not per pool");
         for (t, payload) in payloads.iter().enumerate() {
-            let expected_pool = node_graph.nodes[t].pool_id;
+            let pos = NodePos(t);
+            let expected_pool = node_graph.nodes[pos].pool_id;
             assert_eq!(
                 payload.entity_manifest.len(),
                 1,
@@ -1237,11 +1262,26 @@ mod tests {
                 100 + i32::try_from(expected_pool).unwrap(),
                 "node {t} must carry pool {expected_pool}'s manifest, not stage_manifests[{t}]"
             );
+            assert_eq!(
+                payload.stage_id, node_graph.nodes[pos].stage.0 as u32,
+                "node {t}'s stage_id must be its STUDY STAGE, not its node position"
+            );
+            assert_eq!(
+                payload.node_id, node_graph.node_ids[pos].0,
+                "node {t}'s node_id must be its declared node id"
+            );
         }
 
-        // The 4 leaves all resolve to the one shared pool-3 manifest.
-        for payload in &payloads[3..=6] {
+        // The 4 leaves all resolve to the one shared pool-3 manifest and the
+        // one shared terminal stage, despite carrying 4 distinct node ids.
+        for (t, payload) in payloads[3..=6].iter().enumerate() {
             assert_eq!(payload.entity_manifest[0].entity_id, 103);
+            assert_eq!(payload.stage_id, 2, "every leaf sits at stage 2");
+            assert_eq!(
+                payload.node_id,
+                i32::try_from(3 + t).unwrap(),
+                "leaves keep their own distinct node ids"
+            );
         }
     }
 
@@ -1263,11 +1303,11 @@ mod tests {
 
         // 4 pools; pool 3 (shared leaf pool) gets 2 cuts, pools 0/1/2 get 1 each.
         let mut fcf = FutureCostFunction::new(4, 1, 1, 10, &[0; 4]);
-        fcf.add_cut(0, 0, 0, 0, 0.0, &[0.0]);
-        fcf.add_cut(0, 1, 0, 0, 0.0, &[0.0]);
-        fcf.add_cut(0, 2, 0, 0, 0.0, &[0.0]);
-        fcf.add_cut(0, 3, 0, 0, 0.0, &[0.0]);
-        fcf.add_cut(0, 3, 1, 0, 0.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 0.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 1, 0, 0, 0.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 2, 0, 0, 0.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 3, 0, 0, 0.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 3, 1, 0, 0.0, &[0.0]);
 
         let empty_basis = || CapturedBasis {
             basis: Basis {
@@ -1277,7 +1317,7 @@ mod tests {
             base_row_count: 0,
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
-            node_id: 0,
+            node_id: NodeId(0),
         };
         let basis_cache: Vec<Option<CapturedBasis>> = (0..7).map(|_| Some(empty_basis())).collect();
         let training_result = TrainingResult::new(
@@ -1303,7 +1343,7 @@ mod tests {
                 rec.stage_id as usize, node,
                 "stage_id must carry the node ordinal"
             );
-            let pool = node_graph.nodes[node].pool_id;
+            let pool = node_graph.nodes[NodePos(node)].pool_id;
             let expected = if pool == 3 { 2 } else { 1 };
             assert_eq!(
                 rec.num_cut_rows, expected,

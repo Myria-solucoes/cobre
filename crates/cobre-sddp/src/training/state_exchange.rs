@@ -31,7 +31,7 @@
 
 use cobre_comm::Communicator;
 
-use crate::{error::SddpError, trajectory::TrajectoryRecord};
+use crate::{error::SddpError, setup::node_graph::StageIdx, trajectory::TrajectoryRecord};
 
 /// Pre-allocated buffers for gathering state vectors across all MPI ranks.
 ///
@@ -69,18 +69,20 @@ use crate::{error::SddpError, trajectory::TrajectoryRecord};
 /// use cobre_comm::LocalBackend;
 /// use cobre_sddp::ExchangeBuffers;
 /// use cobre_sddp::TrajectoryRecord;
+/// use cobre_sddp::setup::NodeId;
+/// use cobre_sddp::setup::StageIdx;
 ///
 /// // Three scenarios, two-element state vectors, single rank.
 /// let mut bufs = ExchangeBuffers::new(2, 3, 1);
 ///
 /// let records: Vec<TrajectoryRecord> = vec![
-///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, node_id: 0, state: vec![1.0, 2.0] },
-///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, node_id: 0, state: vec![3.0, 4.0] },
-///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, node_id: 0, state: vec![5.0, 6.0] },
+///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, node_id: NodeId(0), state: vec![1.0, 2.0] },
+///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, node_id: NodeId(0), state: vec![3.0, 4.0] },
+///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, node_id: NodeId(0), state: vec![5.0, 6.0] },
 /// ];
 ///
 /// let comm = LocalBackend;
-/// bufs.exchange(&records, 0, 1, &comm).unwrap();
+/// bufs.exchange(&records, StageIdx(0), 1, &comm).unwrap();
 ///
 /// assert_eq!(bufs.gathered_states(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 /// assert_eq!(bufs.total_scenarios(), 3);
@@ -247,7 +249,7 @@ impl ExchangeBuffers {
     pub fn exchange<C: Communicator>(
         &mut self,
         records: &[TrajectoryRecord],
-        stage: usize,
+        stage: StageIdx,
         num_stages: usize,
         comm: &C,
     ) -> Result<(), SddpError> {
@@ -260,7 +262,7 @@ impl ExchangeBuffers {
         );
 
         for m in 0..self.local_count {
-            let record_idx = m * num_stages + stage;
+            let record_idx = m * num_stages + stage.0;
             debug_assert_eq!(
                 records[record_idx].state.len(),
                 self.n_state,
@@ -382,6 +384,8 @@ mod tests {
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 
     use super::ExchangeBuffers;
+    use crate::setup::NodeId;
+    use crate::setup::node_graph::StageIdx;
     use crate::trajectory::TrajectoryRecord;
 
     // ── Helper ────────────────────────────────────────────────────────────────
@@ -391,7 +395,7 @@ mod tests {
             primal: vec![],
             dual: vec![],
             stage_cost: 0.0,
-            node_id: 0,
+            node_id: NodeId(0),
             state,
         }
     }
@@ -501,7 +505,7 @@ mod tests {
         ];
 
         let comm = LocalBackend;
-        bufs.exchange(&records, 0, 1, &comm).unwrap();
+        bufs.exchange(&records, StageIdx(0), 1, &comm).unwrap();
 
         assert_eq!(bufs.gathered_states(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(bufs.total_scenarios(), 3);
@@ -529,7 +533,7 @@ mod tests {
 
         let mut bufs = ExchangeBuffers::new(2, 2, 1);
         let comm = LocalBackend;
-        bufs.exchange(&records, 1, 3, &comm).unwrap();
+        bufs.exchange(&records, StageIdx(1), 3, &comm).unwrap();
 
         // Stage 1 data: scenario 0 → [30, 31], scenario 1 → [40, 41]
         assert_eq!(bufs.gathered_states(), &[30.0, 31.0, 40.0, 41.0]);
@@ -552,7 +556,7 @@ mod tests {
 
         let mut bufs = ExchangeBuffers::new(3, 2, 1);
         let comm = LocalBackend;
-        bufs.exchange(&records, 0, 1, &comm).unwrap();
+        bufs.exchange(&records, StageIdx(0), 1, &comm).unwrap();
 
         // state_at(rank=0, scenario=1) must match records[1 * 1 + 0].state = [4, 5, 6]
         let state = bufs.state_at(0, 1);
@@ -619,7 +623,7 @@ mod tests {
         let mut bufs = ExchangeBuffers::new(2, 1, 1);
         let records = vec![make_record(vec![1.0, 2.0])];
 
-        let result = bufs.exchange(&records, 0, 1, &FailingComm);
+        let result = bufs.exchange(&records, StageIdx(0), 1, &FailingComm);
         assert!(
             matches!(result, Err(SddpError::Communication(_))),
             "expected SddpError::Communication, got: {result:?}",
@@ -704,7 +708,7 @@ mod tests {
             make_record(vec![5.0, 6.0]),
         ];
         let comm = LocalBackend;
-        bufs.exchange(&records, 0, 1, &comm).unwrap();
+        bufs.exchange(&records, StageIdx(0), 1, &comm).unwrap();
 
         let mut packed = Vec::new();
         bufs.pack_real_states_into(&mut packed);
@@ -788,7 +792,7 @@ mod tests {
         // slot is padding the forward pass never wrote.
         let records = vec![make_record(vec![10.0]), make_record(vec![20.0])];
 
-        bufs.exchange(&records, 0, 2, &Rank1Of2).unwrap();
+        bufs.exchange(&records, StageIdx(0), 2, &Rank1Of2).unwrap();
 
         assert_eq!(
             bufs.gathered_states()[max_local_fwd * n_state],
@@ -806,7 +810,7 @@ mod tests {
         let n_state = 1;
         let mut bufs = ExchangeBuffers::with_actual_counts(n_state, 1, 2, &[1, 0]);
         let records = vec![make_record(vec![10.0]), make_record(vec![20.0])];
-        bufs.exchange(&records, 0, 2, &Rank1Of2).unwrap();
+        bufs.exchange(&records, StageIdx(0), 2, &Rank1Of2).unwrap();
 
         assert_eq!(
             bufs.real_total_scenarios(),

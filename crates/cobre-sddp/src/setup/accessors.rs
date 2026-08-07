@@ -121,7 +121,7 @@ impl StudySetup {
         // `terminal_idx` is a pool ordinal (`== n_pools - 1`); its owning stage
         // resolves through `pool_stage`, never `study_stage_ids[terminal_idx]`,
         // which is OOB once `n_pools > n_stages` on a branching graph.
-        let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx]];
+        let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx].0];
         build_stage_entity_manifest(
             system,
             &self.stage_data.state,

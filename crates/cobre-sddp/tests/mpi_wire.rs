@@ -143,6 +143,7 @@ mod test_mpi_wire_format_version {
     use cobre_sddp::{
         SddpError,
         cut::wire::{CUT_WIRE_VERSION, cut_wire_size, deserialize_cut, serialize_cut},
+        setup::NodeId,
         workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis},
     };
     use cobre_solver::BasisStatus;
@@ -165,7 +166,7 @@ mod test_mpi_wire_format_version {
             base_row_count,
             cut_slot_capacity,
             n_state,
-            0,
+            NodeId(0),
         );
         // Minimal valid data so the Some-path sentinel (i32_buf[0] == 1) is written.
         original
@@ -267,6 +268,7 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
     //! `to_broadcast_payload` / `try_from_broadcast_payload` produce bit-identical
     //! `CapturedBasis` values across four ranks reading from the same shared buffers.
 
+    use cobre_sddp::setup::NodeId;
     use cobre_sddp::workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
     use cobre_solver::BasisStatus;
 
@@ -297,7 +299,7 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
             n_state,
             // Distinct per basis so the wire-carried node_id is exercised
             // (negative to also pin signedness).
-            -(seed as i32),
+            NodeId(-(seed as i32)),
         );
 
         for i in 0..num_cols {
@@ -1942,6 +1944,7 @@ mod k_fan_graph_invariance {
     //! reduce in canonical order — invariant across several distinct
     //! worker-partition boundaries, not merely a single threads=1-vs-k pair.
 
+    use cobre_sddp::setup::NodePos;
     use cobre_sddp::test_support::k_fan_setup;
     use cobre_solver::ActiveSolver;
 
@@ -1984,6 +1987,7 @@ mod k_fan_graph_invariance {
         let probe = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
         let node_graph = &probe.setup.node_graph;
         let cut_generating = (0..node_graph.nodes.len())
+            .map(NodePos)
             .filter(|&pos| !node_graph.successors[pos].is_empty())
             .count();
         let fan_nodes = cut_generating - 1;
@@ -2081,6 +2085,221 @@ mod k_fan_graph_invariance {
     }
 }
 
+mod by_node_k_fan_branching {
+    //! The opening-block (by-node) backward scheduler on the DECOMP K-fan graph:
+    //! it now claims over the reified successor outcome set, so the root's backward
+    //! genuinely fans over its `K` children (each priced against its own LP) instead
+    //! of the child-0 collapse / out-of-bounds the pre-fix loop hit on a fan.
+    //!
+    //! Three gates:
+    //! - `by_node_k_fan_thread_shape_invariance`: `final_lb`/`final_ub`/`final_ub_std`
+    //!   bit-identical across `--threads 1/2/4` under the by-node scheduler.
+    //! - `by_node_k_fan_final_lb_bitwise_invariant_across_world_size`: the same three
+    //!   converged results are bit-identical between the single-rank reference and the
+    //!   real MPI world (`create_communicator(Auto)` resolves to `LocalBackend` under
+    //!   plain `cargo test` and to the `mpiexec` world otherwise). Once a multi-rank
+    //!   fan makes the by-node cut slots multi-branching, the node-visit-offset slot
+    //!   base keeps them collision-free — this is the gate that exercises it.
+    //! - `by_node_falls_back_to_by_scenario_under_active_dcs_on_fan`: an active DCS
+    //!   iteration on a fan takes the by-scenario path exactly as the by-node path
+    //!   does, bit-for-bit.
+
+    use cobre_comm::{BackendKind, Communicator, LocalBackend, create_communicator};
+    use cobre_io::config::BackwardScheduler;
+    use cobre_sddp::setup::NodePos;
+    use cobre_sddp::test_support::{dcs_k_fan_setup, k_fan_setup};
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::StubComm;
+
+    const K: usize = 8;
+    const FORWARD_PASSES: u32 = 6;
+    const MAX_ITERATIONS: u32 = 3;
+    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode { block_size: None };
+
+    /// Train a fresh by-node-forced K-fan at world size `comm.size()` and
+    /// `n_threads`, returning the converged `(final_lb, final_ub, final_ub_std)`.
+    fn train_result<C: Communicator>(comm: &C, n_threads: usize) -> (f64, f64, f64) {
+        let mut fixture = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        fixture.setup.set_scheduler(BY_NODE);
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, comm, n_threads, ActiveSolver::new, None, None)
+            .expect("by-node k_fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "by-node k_fan training must not error: {:?}",
+            outcome.error
+        );
+        (
+            outcome.result.final_lb,
+            outcome.result.final_ub,
+            outcome.result.final_ub_std,
+        )
+    }
+
+    /// Power precondition: the fan carries `>= 2` cut-generating fan nodes beyond
+    /// the root, and `forward_passes` exceeds the largest thread/rank count crossed,
+    /// so a multi-worker shape genuinely splits trial points across partition
+    /// boundaries and the root backward genuinely fans over more than one child.
+    fn assert_genuine_multi_node_level(max_crossed: usize) {
+        let probe = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        let node_graph = &probe.setup.node_graph;
+        let cut_generating = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| !node_graph.successors[pos].is_empty())
+            .count();
+        let fan_nodes = cut_generating - 1;
+        assert!(
+            fan_nodes >= 2,
+            "power precondition: the K-fan must carry >= 2 cut-generating fan nodes (got \
+             {fan_nodes})"
+        );
+        assert!(
+            usize::try_from(FORWARD_PASSES).expect("FORWARD_PASSES fits usize") > max_crossed,
+            "power precondition: forward_passes ({FORWARD_PASSES}) must exceed the largest count \
+             crossed ({max_crossed})"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn by_node_k_fan_thread_shape_invariance() {
+        assert_genuine_multi_node_level(4);
+        let stub = StubComm;
+        let (lb1, ub1, s1) = train_result(&stub, 1);
+        let (lb2, ub2, s2) = train_result(&stub, 2);
+        let (lb4, ub4, s4) = train_result(&stub, 4);
+
+        for (label, lb, ub, s) in [("threads=2", lb2, ub2, s2), ("threads=4", lb4, ub4, s4)] {
+            assert_eq!(
+                lb1.to_bits(),
+                lb.to_bits(),
+                "by-node fan final_lb must be bit-identical between threads=1 and {label}"
+            );
+            assert_eq!(
+                ub1.to_bits(),
+                ub.to_bits(),
+                "by-node fan final_ub must be bit-identical between threads=1 and {label}"
+            );
+            assert_eq!(
+                s1.to_bits(),
+                s.to_bits(),
+                "by-node fan final_ub_std must be bit-identical between threads=1 and {label}"
+            );
+        }
+    }
+
+    /// Real-MPI world-size invariance under the by-node scheduler. Launched under
+    /// `mpiexec -n 2` the world drives the genuine per-`(rank, pool)` cut-count
+    /// exchange over the fan's multi-node backward level; the by-node cut slot uses
+    /// the node-visit-offset base, so multi-rank fan branching stays collision-free.
+    /// Under plain `cargo test` the world is size 1 and the comparison is the
+    /// single-rank identity.
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn by_node_k_fan_final_lb_bitwise_invariant_across_world_size() {
+        let world =
+            create_communicator(BackendKind::Auto).expect("communicator construction must succeed");
+        let world_size = world.size();
+
+        // Power self-check: the fan carries >= 2 cut-generating fan pools, and at
+        // world size >= 2 a single rank's forward passes are fewer than those pools,
+        // so at least one pool draws cuts from a strict subset of ranks — the genuine
+        // multi-rank fan-branching the node-visit-offset slot base addresses.
+        let probe = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        let node_graph = &probe.setup.node_graph;
+        let cut_generating = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| !node_graph.successors[pos].is_empty())
+            .count();
+        let fan_nodes = cut_generating - 1;
+        assert!(
+            fan_nodes >= 2,
+            "power: the K-fan must carry >= 2 cut-generating fan pools (got {fan_nodes})"
+        );
+        const { assert!(FORWARD_PASSES >= 2, "power: forward_passes must be >= 2") };
+        if world_size >= 2 {
+            let per_rank_max =
+                FORWARD_PASSES.div_ceil(u32::try_from(world_size).expect("world size fits u32"));
+            assert!(
+                usize::try_from(per_rank_max).expect("per_rank_max fits usize") < fan_nodes,
+                "power: a single rank's forward passes ({per_rank_max}) must be fewer than the \
+                 fan pools ({fan_nodes}) so some pool draws cuts from a strict subset of ranks"
+            );
+        }
+
+        let (lb_n, ub_n, s_n) = train_result(&world, 1);
+        let (lb_1, ub_1, s_1) = train_result(&LocalBackend, 1);
+        assert_eq!(
+            lb_n.to_bits(),
+            lb_1.to_bits(),
+            "by-node fan final_lb at world size {world_size} (real MPI) must be bit-identical to \
+             the single-rank reference"
+        );
+        assert_eq!(
+            ub_n.to_bits(),
+            ub_1.to_bits(),
+            "by-node fan final_ub at world size {world_size} (real MPI) must be bit-identical to \
+             the single-rank reference"
+        );
+        assert_eq!(
+            s_n.to_bits(),
+            s_1.to_bits(),
+            "by-node fan final_ub_std at world size {world_size} (real MPI) must be bit-identical \
+             to the single-rank reference"
+        );
+    }
+
+    /// An active DCS iteration on a fan forces the by-scenario path (the by-node
+    /// frozen-LP load is incompatible with DCS's cut-free lazy core), so a
+    /// by-node-configured and a by-scenario-configured DCS run agree bit-for-bit.
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn by_node_falls_back_to_by_scenario_under_active_dcs_on_fan() {
+        let stub = StubComm;
+
+        let mut by_node = dcs_k_fan_setup(3, 6, 25);
+        by_node.setup.set_scheduler(BY_NODE);
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let lb_by_node = by_node
+            .setup
+            .train(&mut solver, &stub, 1, ActiveSolver::new, None, None)
+            .expect("training must return Ok")
+            .result
+            .final_lb;
+
+        let mut by_scenario = dcs_k_fan_setup(3, 6, 25);
+        by_scenario
+            .setup
+            .set_scheduler(BackwardScheduler::ByScenario {});
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let lb_by_scenario = by_scenario
+            .setup
+            .train(&mut solver, &stub, 1, ActiveSolver::new, None, None)
+            .expect("training must return Ok")
+            .result
+            .final_lb;
+
+        assert_eq!(
+            lb_by_node.to_bits(),
+            lb_by_scenario.to_bits(),
+            "on a fan under active DCS, by_node must take the by-scenario path bit-for-bit \
+             ({lb_by_node} vs {lb_by_scenario})"
+        );
+    }
+}
+
 mod k_fan_enumerated_determinism {
     //! The enumerated all-paths forward's by-node reproducibility obligation on
     //! the DECOMP K-fan: `final_lb`, the exact `final_ub`, and the generated cut
@@ -2093,6 +2312,7 @@ mod k_fan_enumerated_determinism {
 
     use cobre_comm::Communicator;
     use cobre_sddp::StudySetup;
+    use cobre_sddp::setup::NodePos;
     use cobre_sddp::test_support::{
         KFanFixture, k_fan_setup_enumerated, k_fan_setup_enumerated_reversed,
         single_path_enumerated_setup,
@@ -2147,6 +2367,7 @@ mod k_fan_enumerated_determinism {
     fn assert_genuine_multi_node(max_threads: usize) {
         let probe = k_fan_setup_enumerated(K, MAX_ITERATIONS);
         let fan_nodes = (0..probe.setup.node_graph.nodes.len())
+            .map(NodePos)
             .filter(|&pos| !probe.setup.node_graph.successors[pos].is_empty())
             .count()
             - 1;
@@ -2311,4 +2532,390 @@ mod simulation_aggregation_determinism {
             "2-rank stub std_cost must be bitwise identical"
         );
     }
+}
+
+mod k_fan_sampled_declaration_order_invariance {
+    //! The DECOMP K-fan had a declaration-order-invariance gate under
+    //! `enumerated` (`k_fan_enumerated_determinism`'s
+    //! `enumerated_k_fan_thread_and_declaration_shapes_agree`, driven by
+    //! `k_fan_setup_enumerated_reversed`) but never under `sampled`, even though
+    //! [`cobre_sddp::test_support::k_fan_fixture`] always supported a reversed
+    //! declaration generically. `k_fan_setup_reversed` exposes it: a canonical
+    //! vs. reversed node/transition declaration must train to a bit-identical
+    //! `final_lb`/`final_ub`/`final_ub_std` under `sampled` mode too.
+
+    use cobre_sddp::StudySetup;
+    use cobre_sddp::setup::NodePos;
+    use cobre_sddp::test_support::{KFanFixture, k_fan_setup, k_fan_setup_reversed};
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::StubComm;
+
+    const K: usize = 8;
+    const FORWARD_PASSES: u32 = 6;
+    const MAX_ITERATIONS: u32 = 3;
+
+    /// Power precondition: the fan carries `>= 2` cut-generating fan nodes beyond
+    /// the root, mirroring `k_fan_graph_invariance::assert_genuine_multi_node_level`.
+    fn assert_genuine_k_fan(setup: &StudySetup) {
+        let node_graph = &setup.node_graph;
+        let cut_generating = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| !node_graph.successors[pos].is_empty())
+            .count();
+        let fan_nodes = cut_generating - 1;
+        assert!(
+            fan_nodes >= 2,
+            "power precondition: the K-fan must carry >= 2 cut-generating fan nodes \
+             (got {fan_nodes})"
+        );
+    }
+
+    fn train(mut fixture: KFanFixture) -> (f64, f64, f64) {
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("sampled k_fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "sampled k_fan training must not error: {:?}",
+            outcome.error
+        );
+        (
+            outcome.result.final_lb,
+            outcome.result.final_ub,
+            outcome.result.final_ub_std,
+        )
+    }
+
+    #[test]
+    fn k_fan_sampled_declaration_order_invariance() {
+        let canonical_fixture = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        assert_genuine_k_fan(&canonical_fixture.setup);
+
+        let (lb_canonical, ub_canonical, std_canonical) = train(canonical_fixture);
+        let (lb_reversed, ub_reversed, std_reversed) =
+            train(k_fan_setup_reversed(K, FORWARD_PASSES, MAX_ITERATIONS));
+
+        assert_eq!(
+            lb_canonical.to_bits(),
+            lb_reversed.to_bits(),
+            "sampled K-fan final_lb must be bit-identical between canonical and \
+             reversed declaration order"
+        );
+        assert_eq!(
+            ub_canonical.to_bits(),
+            ub_reversed.to_bits(),
+            "sampled K-fan final_ub must be bit-identical between canonical and \
+             reversed declaration order"
+        );
+        assert_eq!(
+            std_canonical.to_bits(),
+            std_reversed.to_bits(),
+            "sampled K-fan final_ub_std must be bit-identical between canonical and \
+             reversed declaration order"
+        );
+    }
+}
+
+mod non_uniform_branching_projection {
+    //! The non-uniform-cut-state-projection branching fixture (a 3-stage binary
+    //! tree branching at TWO node-graph levels) —
+    //! the branching analogue of the chain's
+    //! `by_node_scheduler_determinism::by_node_handles_non_uniform_cut_projection`.
+    //! No branching fixture exercised this axis before: every existing branching
+    //! fixture (the DECOMP K-fan, the External fans) projects the SAME cut-state
+    //! dimension on every cut-generating pool.
+    //!
+    //! Four gates:
+    //! - `non_uniform_branching_thread_shape_invariance_by_scenario` /
+    //!   `_by_node`: `final_lb`/`final_ub`/`final_ub_std` bit-identical across
+    //!   `--threads 1/2/4`, under each scheduler in turn (R2).
+    //! - `non_uniform_branching_declaration_order_invariance`: canonical vs.
+    //!   reversed node/transition declaration, bit-identical (R4).
+    //! - `non_uniform_branching_value_matches_extensive_form_by_scenario` /
+    //!   `_by_node_matches_extensive_form`: `final_lb` closes to
+    //!   [`extensive_form_optimum`] within LP tolerance under each scheduler, and
+    //!   (the `by_node` case) is additionally bit-identical to `by_scenario` on
+    //!   this `|Ω| = 1`-per-node fixture — the value obligation every branching
+    //!   fixture must carry, since an invariance gate alone cannot catch a
+    //!   deterministic wrong value (the child-0 collapse passed every one).
+
+    use std::collections::BTreeSet;
+
+    use cobre_io::config::BackwardScheduler;
+    use cobre_sddp::StudySetup;
+    use cobre_sddp::setup::{NodePos, StageIdx};
+    use cobre_sddp::test_support::{
+        extensive_form_optimum, non_uniform_branching_setup, non_uniform_branching_setup_reversed,
+        pool_cut_state_dimensions,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::StubComm;
+
+    const FORWARD_PASSES: u32 = 6;
+    /// Iteration budget for the invariance gates (R2/R4): enough for the
+    /// backward pass to genuinely exercise every pool at every thread shape, not
+    /// enough to matter for convergence (no value assertion here).
+    const MAX_ITERATIONS_INVARIANCE: u32 = 4;
+    /// Iteration budget for the oracle gates (R3): enough for `final_lb` to
+    /// actually converge to the extensive-form optimum, mirroring
+    /// `interior_sibling_generated_fan_value_matches_oracle`'s `k_fan_setup(k, 6,
+    /// 25)`.
+    const MAX_ITERATIONS_ORACLE: u32 = 25;
+    const BY_NODE: BackwardScheduler = BackwardScheduler::ByNode { block_size: None };
+
+    /// Relative + absolute LP tolerance for the oracle-vs-engine value
+    /// comparison, identical to `branching_value_oracle.rs`'s `close` (a value
+    /// oracle across two different LP encodings is never bit-exact).
+    const REL_TOL: f64 = 1e-6;
+    const ABS_TOL: f64 = 1e-4;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= ABS_TOL + REL_TOL * a.abs().max(b.abs())
+    }
+
+    /// Power self-check: (a) the tree carries `>= 2` cut-generating fan
+    /// nodes beyond the root (the two stage-1 nodes the tree
+    /// branches into), and (b) at least two pools project DIFFERENT cut-state
+    /// dimensions (`non_uniform_branching_stage_configs`'
+    /// shrink-at-the-fan-level-then-regrow-at-the-leaf shape) — the fixture
+    /// genuinely varies its projection, not merely declares the axis.
+    fn assert_non_uniform_branching_power(setup: &StudySetup) {
+        let node_graph = &setup.node_graph;
+        let fan_nodes = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| {
+                node_graph.nodes[pos].stage != StageIdx(0) && !node_graph.successors[pos].is_empty()
+            })
+            .count();
+        assert!(
+            fan_nodes >= 2,
+            "power precondition: the branching tree must carry >= 2 cut-generating \
+             fan nodes beyond the root (got {fan_nodes})"
+        );
+
+        let dims = pool_cut_state_dimensions(setup);
+        let distinct: BTreeSet<usize> = dims.iter().copied().collect();
+        assert!(
+            distinct.len() >= 2,
+            "power precondition: at least two pools must project DIFFERENT \
+             cut-state dimensions, got a single dimension across all {} pools: {dims:?}",
+            dims.len()
+        );
+    }
+
+    /// Train `setup` single-rank at `n_threads`, returning `(final_lb, final_ub,
+    /// final_ub_std)`.
+    fn train_bounds(mut setup: StudySetup, n_threads: usize) -> (f64, f64, f64) {
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, n_threads, ActiveSolver::new, None, None)
+            .expect("non-uniform branching training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "non-uniform branching training must not error: {:?}",
+            outcome.error
+        );
+        (
+            outcome.result.final_lb,
+            outcome.result.final_ub,
+            outcome.result.final_ub_std,
+        )
+    }
+
+    /// Build a fresh R1 fixture forced onto `scheduler`, then train it at
+    /// `n_threads`.
+    fn run_shape(
+        scheduler: BackwardScheduler,
+        max_iterations: u32,
+        n_threads: usize,
+    ) -> (f64, f64, f64) {
+        let mut setup = non_uniform_branching_setup(FORWARD_PASSES, max_iterations);
+        setup.set_scheduler(scheduler);
+        train_bounds(setup, n_threads)
+    }
+
+    fn assert_thread_shapes_agree(scheduler: BackwardScheduler, scheduler_label: &str) {
+        let probe = non_uniform_branching_setup(FORWARD_PASSES, MAX_ITERATIONS_INVARIANCE);
+        assert_non_uniform_branching_power(&probe);
+
+        let shapes = [1usize, 2, 4];
+        let results: Vec<(f64, f64, f64)> = shapes
+            .iter()
+            .map(|&n_threads| run_shape(scheduler, MAX_ITERATIONS_INVARIANCE, n_threads))
+            .collect();
+
+        let (lb0, ub0, std0) = results[0];
+        for (&n_threads, &(lb, ub, std)) in shapes.iter().zip(&results).skip(1) {
+            assert_eq!(
+                lb.to_bits(),
+                lb0.to_bits(),
+                "{scheduler_label}: final_lb must be bit-identical between threads=1 \
+                 and threads={n_threads}"
+            );
+            assert_eq!(
+                ub.to_bits(),
+                ub0.to_bits(),
+                "{scheduler_label}: final_ub must be bit-identical between threads=1 \
+                 and threads={n_threads}"
+            );
+            assert_eq!(
+                std.to_bits(),
+                std0.to_bits(),
+                "{scheduler_label}: final_ub_std must be bit-identical between \
+                 threads=1 and threads={n_threads}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_uniform_branching_thread_shape_invariance_by_scenario() {
+        assert_thread_shapes_agree(BackwardScheduler::ByScenario {}, "by_scenario");
+    }
+
+    #[test]
+    fn non_uniform_branching_thread_shape_invariance_by_node() {
+        assert_thread_shapes_agree(BY_NODE, "by_node");
+    }
+
+    #[test]
+    fn non_uniform_branching_declaration_order_invariance() {
+        let canonical_probe =
+            non_uniform_branching_setup(FORWARD_PASSES, MAX_ITERATIONS_INVARIANCE);
+        assert_non_uniform_branching_power(&canonical_probe);
+
+        let (lb_canonical, ub_canonical, std_canonical) = train_bounds(canonical_probe, 1);
+        let reversed_setup =
+            non_uniform_branching_setup_reversed(FORWARD_PASSES, MAX_ITERATIONS_INVARIANCE);
+        let (lb_reversed, ub_reversed, std_reversed) = train_bounds(reversed_setup, 1);
+
+        assert_eq!(
+            lb_canonical.to_bits(),
+            lb_reversed.to_bits(),
+            "non-uniform branching final_lb must be bit-identical between canonical \
+             and reversed declaration order"
+        );
+        assert_eq!(
+            ub_canonical.to_bits(),
+            ub_reversed.to_bits(),
+            "non-uniform branching final_ub must be bit-identical between canonical \
+             and reversed declaration order"
+        );
+        assert_eq!(
+            std_canonical.to_bits(),
+            std_reversed.to_bits(),
+            "non-uniform branching final_ub_std must be bit-identical between \
+             canonical and reversed declaration order"
+        );
+    }
+
+    #[test]
+    fn non_uniform_branching_value_matches_extensive_form_by_scenario() {
+        let oracle_probe = non_uniform_branching_setup(FORWARD_PASSES, MAX_ITERATIONS_ORACLE);
+        assert_non_uniform_branching_power(&oracle_probe);
+        let optimum = extensive_form_optimum(&oracle_probe);
+
+        let (lb, ub, _) = run_shape(BackwardScheduler::ByScenario {}, MAX_ITERATIONS_ORACLE, 1);
+        assert!(
+            close(lb, optimum),
+            "by_scenario non-uniform branching final_lb {lb} must equal the \
+             extensive-form optimum {optimum} (gap {})",
+            lb - optimum
+        );
+        assert!(
+            close(lb, ub),
+            "by_scenario non-uniform branching final_lb {lb} must equal final_ub \
+             {ub} (gap {})",
+            lb - ub
+        );
+    }
+
+    #[test]
+    fn non_uniform_branching_by_node_matches_extensive_form() {
+        let oracle_probe = non_uniform_branching_setup(FORWARD_PASSES, MAX_ITERATIONS_ORACLE);
+        assert_non_uniform_branching_power(&oracle_probe);
+        let optimum = extensive_form_optimum(&oracle_probe);
+
+        let (lb_by_scenario, _, _) =
+            run_shape(BackwardScheduler::ByScenario {}, MAX_ITERATIONS_ORACLE, 1);
+        let (lb_by_node, ub_by_node, _) = run_shape(BY_NODE, MAX_ITERATIONS_ORACLE, 1);
+
+        assert!(
+            close(lb_by_node, optimum),
+            "by_node non-uniform branching final_lb {lb_by_node} must equal the \
+             extensive-form optimum {optimum} (gap {})",
+            lb_by_node - optimum
+        );
+        assert!(
+            close(lb_by_node, ub_by_node),
+            "by_node non-uniform branching final_lb {lb_by_node} must equal \
+             final_ub {ub_by_node} (gap {})",
+            lb_by_node - ub_by_node
+        );
+        assert_eq!(
+            lb_by_node.to_bits(),
+            lb_by_scenario.to_bits(),
+            "by_node and by_scenario must produce a bit-identical final_lb on the \
+             |Ω|=1-per-node non-uniform branching fixture ({lb_by_node} vs \
+             {lb_by_scenario})"
+        );
+    }
+}
+
+mod branching_gate_roster {
+    //! The consolidated branching gate roster (R5) and the break-one-obligation
+    //! verification table (R6). No executable code — a module doc only, the
+    //! auditable index every branching-graph correctness claim resolves to.
+    //!
+    //! # The roster — obligation → named gate → file
+    //!
+    //! | Obligation | Named gate(s) | File |
+    //! |---|---|---|
+    //! | Value: fan-out integrates every successor (the child-0 collapse, closed) | `water_binding_external_fan_final_lb_matches_extensive_form`, `water_binding_external_fan_by_node_matches_extensive_form` | `branching_value_oracle.rs` |
+    //! | Value: Generated-fan permanent regression guards (interior-sibling, DCS-arm) | `interior_sibling_generated_fan_value_matches_oracle`, `interior_sibling_generated_fan_by_node_matches_oracle`, `dcs_arm_generated_fan_value_matches_oracle` | `branching_value_oracle.rs` |
+    //! | Value: harness-validation controls (chain, terminal fan) | `chain_control_matches_extensive_form_and_ub`, `terminal_generated_fan_control_matches_extensive_form_and_ub` | `branching_value_oracle.rs` |
+    //! | Value: All-External fan train-smoke (shape only; value deferred — see the module's own header) | `external_distinct_fan_trains_with_distinct_leaf_columns`, `external_root_fan_trains_with_nonzero_root_column`, `external_distinct_fan_by_node_matches_by_scenario` | `branching_value_oracle.rs` |
+    //! | Value: non-uniform-cut-state-projection branching fixture | `non_uniform_branching_value_matches_extensive_form_by_scenario`, `non_uniform_branching_by_node_matches_extensive_form` | `mpi_wire.rs` |
+    //! | Thread-shape: DECOMP K-fan, sampled, `by_scenario` | `k_fan_thread_shape_invariance` | `mpi_wire.rs` |
+    //! | Thread-shape: DECOMP K-fan, sampled, `by_node` | `by_node_k_fan_thread_shape_invariance` | `mpi_wire.rs` |
+    //! | Thread/declaration-shape: DECOMP K-fan, enumerated | `enumerated_k_fan_thread_and_declaration_shapes_agree` | `mpi_wire.rs` |
+    //! | Thread-shape: non-uniform branching, `by_scenario` / `by_node` | `non_uniform_branching_thread_shape_invariance_by_scenario`, `non_uniform_branching_thread_shape_invariance_by_node` | `mpi_wire.rs` |
+    //! | Weighted-aggregation canonical order (4 thread-partition boundaries) | `k_fan_weighted_aggregation_canonical_order_invariance` | `mpi_wire.rs` |
+    //! | Declaration-order: DECOMP K-fan, enumerated | `enumerated_k_fan_thread_and_declaration_shapes_agree`'s reversed-declaration leg | `mpi_wire.rs` |
+    //! | Declaration-order: DECOMP K-fan, sampled | `k_fan_sampled_declaration_order_invariance` | `mpi_wire.rs` |
+    //! | Declaration-order: genuine non-interchangeable fan (water-binding) | `water_binding_external_fan_final_lb_is_declaration_order_invariant` | `branching_value_oracle.rs` |
+    //! | Declaration-order: non-uniform branching | `non_uniform_branching_declaration_order_invariance` | `mpi_wire.rs` |
+    //! | Non-uniform cut-state projection: chain | `by_node_handles_non_uniform_cut_projection` | `mpi_wire.rs` |
+    //! | Non-uniform cut-state projection: branching (the axis no branching fixture covered before) | `non_uniform_branching_thread_shape_invariance_by_scenario`, `non_uniform_branching_thread_shape_invariance_by_node` | `mpi_wire.rs` |
+    //! | By-node-on-branching equivalence | `by_node_k_fan_thread_shape_invariance`, `interior_sibling_generated_fan_by_node_matches_oracle`, `water_binding_external_fan_by_node_matches_extensive_form`, `external_distinct_fan_by_node_matches_by_scenario` | `mpi_wire.rs`, `branching_value_oracle.rs` |
+    //! | Rank-shape: genuine 2-rank real MPI | `k_fan_branching_rank_invariance::k_fan_final_lb_bitwise_invariant_across_world_size` | `test_mpi_sync_cuts_invariant.rs` |
+    //! | Rank-shape: by-node world-size (real MPI when launched under `mpiexec`, single-rank identity under plain `cargo test`) | `by_node_k_fan_final_lb_bitwise_invariant_across_world_size` | `mpi_wire.rs` |
+    //! | DCS fallback under branching | `by_node_falls_back_to_by_scenario_under_active_dcs_on_fan` | `mpi_wire.rs` |
+    //!
+    //! # R6 — break-one-obligation verification (real, observed results)
+    //!
+    //! Each row's obligation was broken with a single scratch edit to production
+    //! code, the full `mpi_wire.rs` + `branching_value_oracle.rs` suites (plus, for
+    //! (b), a real `mpiexec -n 2` run of `k_fan_branching_rank_invariance`) were
+    //! run against the mutated binary, the observed pass/fail outcome was
+    //! recorded below, and the edit was reverted before the next row. No row is
+    //! recorded without having been run.
+    //!
+    //! | # | Obligation | Scratch mutation | Observed result |
+    //! |---|---|---|---|
+    //! | (a) | child-node-id→ω aggregation order | `training/backward_pass_state.rs`: the `SuccessorEntry`-building loop iterated `node_graph.successors[node_pos].iter().rev()` instead of forward order, while the earlier `assemble_successor_outcome_weights` call (which fills the canonical, non-reversed `probabilities_buf`) was left untouched — misaligning which child's outcome lands at which canonical `outcome_range` slot | **FAILS** `water_binding_external_fan_final_lb_matches_extensive_form` and `water_binding_external_fan_by_node_matches_extensive_form` (both `branching_value_oracle.rs`, value gates). The DECOMP K-fan / R1 gates stay green: their children are Generated and numerically interchangeable, so a weight↔outcome swap is invisible in VALUE on those fixtures (documented limitation, same as the Generated-fan cases in `branching_value_oracle.rs`'s own header) — only the genuinely non-interchangeable water-binding fixture has the power to catch this obligation. |
+    //! | (b) | ascending-node-id level exchange order | `training/backward_pass_state.rs`: `run_one_backward_level`'s per-node consumption loop (`nodes_out`/`level_pools` population) iterated `level.iter().enumerate().rev()` instead of forward order | **COVERAGE HOLE.** All 39 `mpi_wire.rs` tests and all 15 `branching_value_oracle.rs` tests stayed green, including under a real `mpiexec -n 2` run of `k_fan_branching_rank_invariance::k_fan_final_lb_bitwise_invariant_across_world_size`. Code inspection explains why: `BackwardPassState::compute_node_visit_offsets` (the cross-rank slot-collision-avoidance collective) and `build_trial_routing` both run BEFORE this loop, using the level's un-reversed order, and each node's own cut computation is self-contained (writes to its own pool/slot regardless of processing order) — so this specific loop's iteration order carries no observable effect at 1 or 2 ranks. Reordering `nodes_out` population is not, by itself, a live bug at the scale this suite tests; a genuine "ascending-node-id exchange order" violation would need to live further upstream (in whatever builds the `level` slice itself) or surface only at more than 2 ranks with asymmetric per-rank routing — neither reproducible in this environment. Reported, not papered over. |
+    //! | (c) | canonical path-cost order | `training/forward/stats_aggregation.rs`: `weighted_cost_reduction`'s compensated-sum loop iterated `costs.iter().zip(weights.iter()).rev()` instead of forward order | **COVERAGE HOLE.** `enumerated_k_fan_thread_and_declaration_shapes_agree`, the three `weighted_cost_reduction_*` unit tests (`training/forward/tests.rs`), all 5 `parity_hash_d*` cases, and all of `branching_value_oracle.rs` stayed green. At the term counts and magnitudes these fixtures exercise (K-fan `K=6`, similar-magnitude Generated stage costs), Neumaier-compensated summation reorders to the same bit pattern — the suite's chosen literals are not rough enough to expose reduction-order sensitivity. A fixture with widely-disparate-magnitude path costs under `enumerated` mode would be needed to give this obligation power; none exists in the branching suite today. Reported, not papered over. |
+    //! | (d) | the `1.0/(n as f64)` uniform-weight left-to-right reduction | `simulation/aggregation.rs`: `aggregate_simulation`'s `mean_cost` replaced from `RiskMeasure::Expectation.evaluate_risk(&cost_recv, &weights)` (per-term `cᵢ·(1/n)`, left-to-right `.sum()`) with `cost_recv.iter().sum::<f64>() / n as f64` (sum-then-divide) | **COVERAGE HOLE.** `simulation_aggregation_determinism::mean_std_bit_identical_across_rank_shapes` stayed green (it compares rank shapes against EACH OTHER under the SAME mutated formula, not against a reference — invariance alone cannot catch a wrong-but-consistent formula). The one unit test built to catch exactly this, `aggregate_uniform_mean_matches_risk_measure_expectation` (`simulation/aggregation.rs`), also stayed green: for its literal costs `[100.0, 200.0, 150.0]` and `n = 3`, sum-then-divide and per-term-weighted-sum round to the identical `f64` bit pattern by coincidence. `branching_value_oracle.rs` never calls `aggregate_simulation` (training-only oracle, no simulation phase), so it cannot pin this obligation either. None of the R1 fixture's own openings are stochastic at the root (`branching_factor: 1` throughout every branching fixture in this suite), so the LB-root reading of this same `1.0/(n as f64)` contract (`training/lower_bound.rs`) is likewise structurally unreachable by the current suite. Reported, not papered over. |
+    //! | (e) | the fan-out itself (re-introducing the child-0 collapse) | `training/backward/by_scenario.rs`: `process_by_scenario_backward`'s child loop narrowed from `for ci in 0..outcomes.n_children()` to `for ci in 0..1` | **FAILS value gates**, confirming the suite catches what it previously missed: `non_uniform_branching_value_matches_extensive_form_by_scenario` and `non_uniform_branching_by_node_matches_extensive_form` (`mpi_wire.rs`, the non-uniform branching value gates), plus `interior_sibling_generated_fan_value_matches_oracle`, `interior_sibling_generated_fan_by_node_matches_oracle`, and `dcs_arm_generated_fan_value_matches_oracle` (`branching_value_oracle.rs`) — the un-written outcome slots for children `1..n` read stale scratch-buffer data, corrupting the aggregate cut on every currently-value-gated branching fixture with `>= 2` cut-generating levels. `water_binding_external_fan_final_lb_matches_extensive_form` (2-stage, one branching level only) stayed green under this specific mutation. |
+    //!
+    //! Every mutation above was reverted immediately after being run; `git diff`
+    //! on the touched production files (`training/backward/by_scenario.rs`,
+    //! `training/backward_pass_state.rs`, `training/forward/stats_aggregation.rs`,
+    //! `simulation/aggregation.rs`) is empty — no scratch mutation survives.
 }

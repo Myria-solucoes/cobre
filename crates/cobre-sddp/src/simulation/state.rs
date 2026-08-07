@@ -35,7 +35,7 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     cut::row::build_cut_row_batch_into,
-    setup::node_graph::frontier_node,
+    setup::node_graph::{NodePos, StageIdx, frontier_node},
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -69,8 +69,11 @@ pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
     pub output: SimulationOutputSpec<'a>,
     /// Pre-frozen LP templates from training. `None` triggers local re-freeze.
     pub frozen_templates: Option<&'a [StageTemplate]>,
-    /// Per-stage warm-start basis captured from the training checkpoint.
-    pub stage_bases: &'a [Option<CapturedBasis>],
+    /// Warm-start basis captured from the training checkpoint, one entry per
+    /// canonical `NodeGraph` position — never per stage, so a branching
+    /// simulation warm-starts from the visited node's own basis instead of
+    /// whichever node's basis happens to land at that stage index.
+    pub node_bases: &'a [Option<CapturedBasis>],
     /// MPI communicator.
     pub comm: &'a C,
 }
@@ -85,7 +88,7 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
         config: &'a SimulationConfig,
         output: SimulationOutputSpec<'a>,
         frozen_templates: Option<&'a [StageTemplate]>,
-        stage_bases: &'a [Option<CapturedBasis>],
+        node_bases: &'a [Option<CapturedBasis>],
         comm: &'a C,
     ) -> Self {
         Self {
@@ -96,7 +99,7 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
             config,
             output,
             frozen_templates,
-            stage_bases,
+            node_bases,
             comm,
         }
     }
@@ -119,8 +122,9 @@ pub(crate) struct SimWorkerParams<'w> {
     output: &'w SimulationOutputSpec<'w>,
     /// Simulation configuration (scenario count, I/O channel capacity).
     config: &'w SimulationConfig,
-    /// Per-stage warm-start basis captured from the training checkpoint.
-    stage_bases: &'w [Option<CapturedBasis>],
+    /// Warm-start basis cache, one entry per canonical `NodeGraph` position
+    /// (see [`SimulationInputs::node_bases`]).
+    node_bases: &'w [Option<CapturedBasis>],
     /// Resolved frozen LP templates (caller-supplied or locally re-frozen).
     frozen_templates: &'w [StageTemplate],
     /// Shared completion counter scaled to a global progress estimate.
@@ -141,7 +145,7 @@ pub(crate) struct SimWorkerParams<'w> {
     world_size: u32,
     /// The stage-0 root's canonical `NodeGraph` position — every scenario's
     /// sampled walk starts here.
-    root_node: usize,
+    root_node: NodePos,
 }
 
 /// Owned scratch state for one simulation run.
@@ -289,7 +293,11 @@ impl SimulationState {
 
         // Every scenario's sampled walk starts at the same stage-0 root —
         // resolved once, mirroring the training forward pass's own root_node.
-        let root_node = frontier_node(training_ctx.node_graph, 0);
+        let root_node = frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
+            SimulationError::InvalidConfiguration(
+                "node graph: stage 0 carries no alive node".to_string(),
+            )
+        })?;
 
         let params = SimWorkerParams {
             ctx: inputs.ctx,
@@ -297,7 +305,7 @@ impl SimulationState {
             training_ctx,
             output: &inputs.output,
             config: inputs.config,
-            stage_bases: inputs.stage_bases,
+            node_bases: inputs.node_bases,
             frozen_templates,
             scenarios_complete: &scenarios_complete,
             sim_start,
@@ -416,7 +424,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         let stats_before = ws.solver.statistics();
         let load_spec = SimScenarioLoadSpec {
             frozen_templates: params.frozen_templates,
-            stage_bases: params.stage_bases,
+            node_bases: params.node_bases,
         };
         // mem::take (capacity retained) so the immutable ScenarioIds borrows of
         // these slices do not conflict with the `&mut ws` passed below.
@@ -541,10 +549,10 @@ fn refreeze_templates_if_needed(
             p,
             state,
             &cut_state_layouts[p],
-            &ctx.templates[t].col_scale,
+            &ctx.template(t).col_scale,
         );
         let mut frozen = StageTemplate::empty();
-        freeze_rows_into_template(&ctx.templates[t], freeze_batch, &mut frozen, freeze_scratch);
+        freeze_rows_into_template(ctx.template(t), freeze_batch, &mut frozen, freeze_scratch);
         owned.push(frozen);
     }
     *owned_frozen = Some(owned);

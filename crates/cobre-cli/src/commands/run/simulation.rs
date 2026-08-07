@@ -16,7 +16,6 @@ use cobre_io::output::simulation_writer::ScenarioWritePayload;
 use cobre_io::output::simulation_writer::SimulationParquetWriter;
 use cobre_io::output::simulation_writer::SimulationPathRecord;
 use cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS;
-use cobre_sddp::SimulationWeighting;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
@@ -25,6 +24,7 @@ use cobre_sddp::pack_delta_scalars;
 use cobre_sddp::pack_scenario_stats;
 use cobre_sddp::reconcile_global_ok;
 use cobre_sddp::setup::SimulationEnumeratedRequest;
+use cobre_sddp::setup::Traversal;
 use cobre_sddp::unpack_delta_scalars;
 use cobre_sddp::unpack_scenario_stats;
 use cobre_solver::ActiveSolver;
@@ -160,17 +160,21 @@ pub(super) fn run_simulation_phase(
     let global_path_rows = aggregate_simulation_paths(&ctx.comm, &local_path_rows)?;
 
     // Aggregate across all ranks so the printed mean/std/CI95 reflect every
-    // scenario, not just rank 0's. The weighting arm mirrors the resolved
-    // simulation source: a declared census (admitted only at derived == 1,
-    // `setup/mod.rs::resolve_enumerated_count`) reports the exact leaf-path
-    // expectation; sampled selection reports the Monte-Carlo sample mean.
-    let census_weights = [1.0];
-    let weighting = match setup.simulation_enumerated {
-        SimulationEnumeratedRequest::Enumerated => SimulationWeighting::Census {
-            weights: &census_weights,
-        },
-        SimulationEnumeratedRequest::Sampled => SimulationWeighting::Uniform,
-    };
+    // scenario, not just rank 0's. The weighting is derived from the resolved
+    // simulation Traversal, never chosen beside it: `Census` is reachable only
+    // through `Traversal::Enumerated` (admitted only at derived == 1,
+    // `setup/mod.rs::resolve_enumerated_count`), which reports the exact
+    // leaf-path expectation; `Traversal::Sampled` reports the Monte-Carlo
+    // sample mean.
+    let simulation_traversal = Traversal::resolve(
+        &setup.node_graph,
+        matches!(
+            setup.simulation_enumerated,
+            SimulationEnumeratedRequest::Enumerated
+        ),
+        n_scenarios,
+    );
+    let weighting = simulation_traversal.simulation_weighting();
     let (cost_summary, gathered_scenario_costs) =
         aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm, weighting).map_err(
             |e| CliError::Internal {
@@ -478,4 +482,55 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
     global_scenario_stats.sort_by_key(|(id, _)| *id);
 
     Ok((global_agg, global_scenario_stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use cobre_sddp::SimulationWeighting;
+    use cobre_sddp::setup::{
+        NodeGraph, NodeId, NodeOpenings, NodeRuntime, OpeningSource, StageIdx, Traversal,
+    };
+
+    /// A single-node, single-leaf graph — enough to resolve a `Traversal` in
+    /// either axis without a full `StudySetup`.
+    fn one_node_graph() -> NodeGraph {
+        NodeGraph {
+            node_ids: vec![NodeId(0)].into(),
+            nodes: vec![NodeRuntime {
+                stage: StageIdx(0),
+                pool_id: 0,
+                openings: NodeOpenings {
+                    source: OpeningSource::Generated,
+                    offset: 0,
+                    len: 1,
+                    q: 1.0,
+                },
+            }]
+            .into(),
+            successors: vec![Vec::new()].into(),
+            n_pools: 1,
+            pool_stage: vec![StageIdx(0)],
+        }
+    }
+
+    /// The CLI derives its simulation weighting from the resolved `Traversal`,
+    /// exactly as `run_simulation_phase` does — under a sampled selection this
+    /// can only ever resolve to `Uniform`, never `Census`, regardless of what a
+    /// caller might otherwise assemble beside it.
+    #[test]
+    fn simulation_weighting_census_underivable_from_sampled_traversal() {
+        let ng = one_node_graph();
+
+        let sampled = Traversal::resolve(&ng, false, 10);
+        assert!(matches!(
+            sampled.simulation_weighting(),
+            SimulationWeighting::Uniform
+        ));
+
+        let enumerated = Traversal::resolve(&ng, true, 1);
+        assert!(matches!(
+            enumerated.simulation_weighting(),
+            SimulationWeighting::Census { .. }
+        ));
+    }
 }

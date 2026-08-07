@@ -22,7 +22,8 @@ use crate::{
 };
 
 use super::{
-    SuccessorSpec, duals_extraction::extract_state_duals_only, lp_setup::patch_opening_bounds,
+    SuccessorChild, SuccessorSpec, duals_extraction::extract_state_duals_only,
+    lp_setup::patch_opening_bounds,
 };
 
 /// Per-outcome payload width in [`solve_replicated_outcome_slice`]'s output:
@@ -59,6 +60,7 @@ pub(crate) fn solve_replicated_outcome_slice<S: SolverInterface + Send>(
     training_ctx: &TrainingContext<'_>,
     exchange: &ExchangeBuffers,
     succ: &SuccessorSpec<'_>,
+    child: &SuccessorChild<'_>,
     m: usize,
     o_start: usize,
     o_end: usize,
@@ -72,26 +74,26 @@ pub(crate) fn solve_replicated_outcome_slice<S: SolverInterface + Send>(
     let tree_view = training_ctx.stochastic.tree_view();
 
     ws.solver.reset_solver_state();
-    super::lp_setup::load_backward_lp(ws, succ);
+    super::lp_setup::load_backward_lp(ws, child);
 
     let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
     for omega in o_start..o_end {
-        let raw_noise = tree_view.opening(s, omega);
+        let raw_noise = tree_view.opening(s.0, omega);
         patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
         let inputs = StageInputs {
             stage_context: ctx,
-            pool: succ.successor_pool,
+            pool: child.successor_pool,
             stored_basis: None,
             stage_index: s,
             scenario_index: scenario_base + m,
             iteration: Some(iteration),
-            node_id: succ.successor_node_id,
+            node_id: child.successor_node_id,
         };
         let view = run_stage_solve(ws, &inputs)?;
         let objective = extract_state_duals_only(
             &view,
             succ.cut_state,
-            &ctx.templates[s].col_scale,
+            &ctx.template(s).col_scale,
             &mut state_duals,
         );
         out.push(objective);

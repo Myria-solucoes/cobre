@@ -13,6 +13,7 @@ use crate::{
     cut::CutRowMap,
     lower_bound::LbEvalScratch,
     lp_builder::PatchBuffer,
+    setup::{NodeId, node_graph::StageIdx},
     trajectory::TrajectoryRecord,
     workspace::{ScratchBuffers, WorkspaceSizing},
 };
@@ -66,7 +67,7 @@ impl IterationScratch {
     pub(crate) fn new(
         max_local_fwd: usize,
         num_stages: usize,
-        pool_stage: &[usize],
+        pool_stage: &[StageIdx],
         n_state: usize,
         lb_root_pool_capacity: usize,
         template_0_num_rows: usize,
@@ -85,7 +86,7 @@ impl IterationScratch {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
-                node_id: 0,
+                node_id: NodeId(0),
                 state: vec![0.0; n_state],
             })
             .collect();
@@ -125,7 +126,7 @@ impl IterationScratch {
         for p in 0..n_pools {
             let t = pool_stage[p];
             freeze_rows_into_template(
-                &stage_ctx.templates[t],
+                stage_ctx.template(t),
                 &freeze_row_batches[p],
                 &mut frozen_templates[p],
                 &mut freeze_scratch,
@@ -184,6 +185,7 @@ mod tests {
 
     use super::IterationScratch;
     use crate::context::StageContext;
+    use crate::setup::node_graph::StageIdx;
 
     fn minimal_template() -> StageTemplate {
         StageTemplate {
@@ -252,7 +254,7 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
-            &(0..num_stages).collect::<Vec<usize>>(),
+            &(0..num_stages).map(StageIdx).collect::<Vec<StageIdx>>(),
             n_state,
             lb_root_pool_capacity,
             template_0_num_rows,
@@ -307,7 +309,7 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
-            &(0..num_stages).collect::<Vec<usize>>(),
+            &(0..num_stages).map(StageIdx).collect::<Vec<StageIdx>>(),
             n_state,
             lb_root_pool_capacity,
             template_0_num_rows,
@@ -362,7 +364,7 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
-            &(0..num_stages).collect::<Vec<usize>>(),
+            &(0..num_stages).map(StageIdx).collect::<Vec<StageIdx>>(),
             n_state,
             lb_root_pool_capacity,
             template_0_num_rows,
@@ -425,7 +427,7 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
-            &(0..num_stages).collect::<Vec<usize>>(),
+            &(0..num_stages).map(StageIdx).collect::<Vec<StageIdx>>(),
             n_state,
             lb_root_pool_capacity,
             template_0_num_rows,
@@ -468,7 +470,7 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
-            &(0..num_stages).collect::<Vec<usize>>(),
+            &(0..num_stages).map(StageIdx).collect::<Vec<StageIdx>>(),
             n_state,
             lb_root_pool_capacity,
             template_0_num_rows,

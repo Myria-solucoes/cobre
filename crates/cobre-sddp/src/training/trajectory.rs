@@ -17,6 +17,8 @@
 //!
 //! [`FutureCostFunction`]: crate::cut::fcf::FutureCostFunction
 
+use crate::setup::NodeId;
+
 /// LP solution for one scenario at one stage, produced by the forward pass.
 ///
 /// The backward pass reads `state` and `dual` to compute cut coefficients; the
@@ -33,7 +35,7 @@ pub struct TrajectoryRecord {
     pub stage_cost: f64,
 
     /// Declared JSON node id this visit resolved against (`NodeGraph::node_ids`).
-    pub node_id: i32,
+    pub node_id: NodeId,
 
     /// End-of-stage state vector (length `n_state`), extracted from `primal` by the stage indexer.
     pub state: Vec<f64>,
@@ -41,7 +43,7 @@ pub struct TrajectoryRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::TrajectoryRecord;
+    use super::{NodeId, TrajectoryRecord};
 
     #[test]
     fn construct_and_access_all_fields() {
@@ -49,14 +51,14 @@ mod tests {
             primal: vec![1.0, 2.0, 3.0],
             dual: vec![0.5, 0.6],
             stage_cost: 42.0,
-            node_id: 3,
+            node_id: NodeId(3),
             state: vec![9.0, 8.0],
         };
 
         assert_eq!(record.primal, vec![1.0, 2.0, 3.0]);
         assert_eq!(record.dual, vec![0.5, 0.6]);
         assert_eq!(record.stage_cost, 42.0);
-        assert_eq!(record.node_id, 3);
+        assert_eq!(record.node_id, NodeId(3));
         assert_eq!(record.state, vec![9.0, 8.0]);
     }
 
@@ -66,7 +68,7 @@ mod tests {
             primal: vec![],
             dual: vec![],
             stage_cost: 42.0,
-            node_id: 0,
+            node_id: NodeId(0), // unread here — this test exercises stage_cost only
             state: vec![],
         };
         assert_eq!(record.stage_cost, 42.0);
@@ -78,7 +80,7 @@ mod tests {
             primal: vec![1.0, 2.0],
             dual: vec![3.0],
             stage_cost: 7.5,
-            node_id: 5,
+            node_id: NodeId(5),
             state: vec![4.0, 5.0],
         };
 
@@ -102,7 +104,7 @@ mod tests {
             primal: vec![1.0],
             dual: vec![2.0],
             stage_cost: 3.0,
-            node_id: 0,
+            node_id: NodeId(0), // unread here — this test only checks the Debug output is non-empty
             state: vec![4.0],
         };
         let s = format!("{record:?}");
@@ -119,7 +121,7 @@ mod tests {
                 primal: vec![],
                 dual: vec![],
                 stage_cost: f64::from(i),
-                node_id: 0,
+                node_id: NodeId(0), // unread here — this test only exercises flat-index addressing
                 state: vec![],
             })
             .collect();

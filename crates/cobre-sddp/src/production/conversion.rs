@@ -7,6 +7,8 @@ use cobre_io::output::simulation_writer::{
     ThermalWriteRecord, TransitBucketWriteRecord,
 };
 
+#[cfg(test)]
+use crate::setup::NodeId;
 use crate::simulation::types::{
     SimulationBusResult, SimulationContractResult, SimulationCostResult, SimulationExchangeResult,
     SimulationGenericViolationResult, SimulationHydroBusResult, SimulationHydroResult,
@@ -281,7 +283,7 @@ fn with_node<S: IntoWriteRecord>(records: Vec<S>, node_id: i32) -> Vec<S::Record
 
 impl From<SimulationStageResult> for StageWritePayload {
     fn from(src: SimulationStageResult) -> Self {
-        let node_id = src.node_id;
+        let node_id = src.node_id.0;
         Self {
             stage_id: src.stage_id,
             node_id,
@@ -504,7 +506,7 @@ mod tests {
     fn make_stage(stage_id: u32) -> SimulationStageResult {
         SimulationStageResult {
             stage_id,
-            node_id: stage_id as i32,
+            node_id: NodeId(stage_id as i32),
             costs: vec![make_cost(stage_id, 0)],
             hydros: vec![make_hydro(stage_id, 0)],
             hydro_bus_generation: vec![make_hydro_bus(stage_id, 0)],

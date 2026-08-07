@@ -12,10 +12,7 @@ use cobre_core::commissioning::commissioning_active;
 use cobre_core::{EntityId, TrainingEvent};
 use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, StageTemplate};
-use cobre_stochastic::par::resolve_stage_lag_transition;
-use cobre_stochastic::{
-    ClassSampleRequest, ForwardSampler, SampleRequest, select_transition_child,
-};
+use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::error::SddpError::Infeasible;
@@ -36,7 +33,9 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     indexer::{HydroCellIndex, StateSpace},
-    setup::node_graph::{node_opening_range, node_pinned_scenario},
+    setup::node_graph::{
+        NodeId, NodePos, StageIdx, advance_sampled_node, node_opening_range, node_pinned_scenario,
+    },
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -49,7 +48,7 @@ use crate::{
     },
     solver_stats::SolverStatsDelta,
     training::stage_solve_prep::{
-        InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
+        InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
     workspace::{CapturedBasis, SolverWorkspace},
 };
@@ -186,7 +185,7 @@ pub(crate) struct ScenarioIds<'a> {
     pub(crate) sampler: &'a ForwardSampler<'a>,
     /// The stage-0 root's canonical `NodeGraph` position — this scenario's
     /// sampled walk starts here, mirroring the training forward pass.
-    pub(crate) root_node: usize,
+    pub(crate) root_node: NodePos,
 }
 
 /// Rebuild the stage `row_lower` slice into `scratch_buf` in original (unscaled)
@@ -236,7 +235,7 @@ fn build_row_lower_unscaled<'a>(
 /// Stage identifiers bundled for `solve_simulation_stage`.
 struct SimStageIds {
     /// Stage index (0-based) — seeds and array indexing key off this.
-    t: usize,
+    t: StageIdx,
     /// Declared study `stage_id` (domain id) stamped into result records and
     /// error messages; resolved by position from the ordered study stage ids,
     /// never the positional index `t`.
@@ -246,10 +245,10 @@ struct SimStageIds {
     /// Canonical `NodeGraph` position this scenario's sampled walk visits at
     /// stage `t` — the pool/node-id resolution site, never `t` itself once a
     /// stage carries more than one alive node.
-    node: usize,
+    node: NodePos,
     /// Declared id of `node` (`node_graph.node_ids[node]`), resolved once at
     /// construction and reused by the solve context and result extraction.
-    node_id: i32,
+    node_id: NodeId,
 }
 
 /// Load-path inputs bundled for `solve_simulation_stage`.
@@ -260,25 +259,32 @@ struct SimStageIds {
 struct SimStageLoadSpec<'a> {
     /// Frozen template for this stage; always populated after the startup re-freeze.
     frozen_template: &'a StageTemplate,
-    /// Warm-start basis captured during training at this stage, if any.
+    /// Warm-start basis captured during training at the visited node, if any.
     warm_basis: Option<&'a CapturedBasis>,
 }
 
 /// Per-stage batched form of [`SimStageLoadSpec`] consumed by
-/// `process_scenario_stages`; indexed by stage via [`Self::stage`].
+/// `process_scenario_stages`; indexed by node via [`Self::stage`].
 pub(crate) struct SimScenarioLoadSpec<'a> {
     pub(crate) frozen_templates: &'a [StageTemplate],
-    pub(crate) stage_bases: &'a [Option<CapturedBasis>],
+    /// Warm-start basis cache, one entry per canonical `NodeGraph` position
+    /// (`build_basis_cache_from_checkpoint`'s and the training session's own
+    /// `BasisStore`'s shape) — never per stage: on a branching graph several
+    /// nodes share a stage, and a stage-keyed lookup would silently warm-start
+    /// from whichever node's basis happened to land at that stage index,
+    /// going cold for every other node sharing it. On a chain, node position
+    /// and stage coincide, so this is byte-identical to the pre-rekey lookup.
+    pub(crate) node_bases: &'a [Option<CapturedBasis>],
 }
 
 impl<'a> SimScenarioLoadSpec<'a> {
-    /// `pool_id` indexes the per-pool frozen overlay (the visited node's own
-    /// pool cuts); `t` still indexes the per-stage warm-start basis cache.
+    /// `pool_id` indexes the per-pool frozen overlay; `node` indexes the
+    /// node-keyed warm-start basis cache — both the visited node's own.
     #[inline]
-    fn stage(&self, t: usize, pool_id: usize) -> SimStageLoadSpec<'a> {
+    fn stage(&self, node: NodePos, pool_id: usize) -> SimStageLoadSpec<'a> {
         SimStageLoadSpec {
             frozen_template: &self.frozen_templates[pool_id],
-            warm_basis: self.stage_bases.get(t).and_then(Option::as_ref),
+            warm_basis: self.node_bases.get(node.0).and_then(Option::as_ref),
         }
     }
 }
@@ -385,13 +391,12 @@ fn solve_simulation_stage<S: SolverInterface>(
     // DCS loads the cut-free base so its fresh CutRowMap owns the resident cut
     // subset; loading the frozen template would double-append the embedded cut rows.
     if dcs.is_some() {
-        ws.solver.load_model(&ctx.templates[t]);
+        ws.solver.load_model(ctx.template(t));
     } else {
         ws.solver.load_model(load_spec.frozen_template);
     }
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(&ws.current_state),
-        opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Present,
         inflow_noise: InflowNoise::Transform,
         raw_noise,
@@ -412,8 +417,8 @@ fn solve_simulation_stage<S: SolverInterface>(
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let stage_id = training_ctx
         .stages
-        .get(t)
-        .map_or(t as i32, |stage| stage.id);
+        .get(t.0)
+        .map_or(t.0 as i32, |stage| stage.id);
     let n_stochastic_ncs = stochastic.n_stochastic_ncs();
 
     // mem::take (capacity retained) so these can be filled from `view` slices tied
@@ -421,8 +426,8 @@ fn solve_simulation_stage<S: SolverInterface>(
     let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
     let mut unscaled_dual: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_dual);
 
-    let col_scale = &ctx.templates[t].col_scale;
-    let row_scale = &ctx.templates[t].row_scale;
+    let col_scale = &ctx.template(t).col_scale;
+    let row_scale = &ctx.template(t).row_scale;
 
     let node = ids.node;
     let pool_id = training_ctx.node_graph.nodes[node].pool_id;
@@ -447,7 +452,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         // `dcs_solve` (mut) are distinct fields.
         lazy_solve_preloaded(
             &mut ws.solver,
-            &ctx.templates[t],
+            ctx.template(t),
             &fcf.pools[pool_id],
             state,
             &training_ctx.cut_state_layouts[pool_id],
@@ -522,7 +527,7 @@ fn solve_simulation_stage<S: SolverInterface>(
     ws.current_state
         .extend_from_slice(&ws.scratch.unscaled_primal[..state.n_state]);
 
-    let stage_lag = resolve_stage_lag_transition(ctx.stage_lag_transitions, t);
+    let stage_lag = ctx.stage_lag(t);
     let downstream_par_order = ws
         .scratch
         .downstream_completed_lags
@@ -586,7 +591,7 @@ fn extract_sim_stage_result(
     let t = ids.t;
     let theta_obj_coeff = ctx
         .templates
-        .get(t)
+        .get(t.0)
         .and_then(|tmpl| tmpl.objective.get(state.theta).copied())
         .unwrap_or(1.0);
     let theta_contribution = unscaled_primal[state.theta] * theta_obj_coeff;
@@ -599,19 +604,16 @@ fn extract_sim_stage_result(
     }
     let blk_hrs = output
         .block_hours_per_stage
-        .get(t)
+        .get(t.0)
         .map_or(&[][..], |v| v.as_slice());
     let (load_row_start, load_n_blks) = if ctx.n_load_buses > 0 {
-        (
-            ctx.load_balance_row_starts[t],
-            ctx.block_counts_per_stage[t],
-        )
+        (ctx.load_balance_row_start(t), ctx.block_count(t))
     } else {
         (0, 0)
     };
     let row_lower_ref = build_row_lower_unscaled(
-        &ctx.templates[t].row_lower,
-        &ctx.templates[t].row_scale,
+        &ctx.template(t).row_lower,
+        &ctx.template(t).row_scale,
         load_rhs_buf,
         row_lower_buf,
         ctx.n_load_buses,
@@ -622,10 +624,10 @@ fn extract_sim_stage_result(
     // NCS upper bounds for extraction, in dense system-column order
     // (`ncs_sys * stage_n_blks + blk`).
     let ncs_n = output.n_ncs;
-    let ncs_col_start = output.ncs_col_starts.get(t).copied().unwrap_or(0);
-    let stage_n_blks = ctx.block_counts_per_stage.get(t).copied().unwrap_or(0);
+    let ncs_col_start = output.ncs_col_starts.get(t.0).copied().unwrap_or(0);
+    let stage_n_blks = ctx.block_count(t);
     // Pumping-flow column base for this stage; `StageLayout` is its sole owner.
-    let pumping_col_start = output.pumping_col_starts.get(t).copied().unwrap_or(0);
+    let pumping_col_start = output.pumping_col_starts.get(t.0).copied().unwrap_or(0);
     let n_pumping = output.n_pumping;
     // Per-stage geometry: a single global stage-0 geometry would mis-stride any
     // stage with a differing block count.
@@ -637,7 +639,7 @@ fn extract_sim_stage_result(
     let geometry_default = StageGeometry::default();
     let geometry = output
         .geometry_per_stage
-        .get(t)
+        .get(t.0)
         .unwrap_or(&geometry_default);
     // Start from the template `col_upper`, then overwrite each non-dormant
     // stochastic column with the per-scenario realized availability. A dormant slot
@@ -647,8 +649,8 @@ fn extract_sim_stage_result(
         let start = ncs_col_start;
         let end = start + ncs_n * stage_n_blks;
         ncs_col_upper_extract_buf.clear();
-        if end <= ctx.templates[t].col_upper.len() {
-            ncs_col_upper_extract_buf.extend_from_slice(&ctx.templates[t].col_upper[start..end]);
+        if end <= ctx.template(t).col_upper.len() {
+            ncs_col_upper_extract_buf.extend_from_slice(&ctx.template(t).col_upper[start..end]);
         } else {
             ncs_col_upper_extract_buf.resize(ncs_n * stage_n_blks, 0.0);
         }
@@ -682,7 +684,7 @@ fn extract_sim_stage_result(
     // empty-table fallback is sized to `hydro_ids.len()` so `lookup.fpha[h]` stays
     // in bounds; built only on that path, never on the production hot path.
     let hydro_lookup_default;
-    let hydro_lookup = if let Some(l) = lookups.hydro_per_stage.get(t) {
+    let hydro_lookup = if let Some(l) = lookups.hydro_per_stage.get(t.0) {
         l
     } else {
         hydro_lookup_default = HydroReverseLookup::build(
@@ -697,7 +699,7 @@ fn extract_sim_stage_result(
             primal: unscaled_primal,
             dual: unscaled_dual,
             objective: view_objective,
-            objective_coeffs: &ctx.templates[t].objective,
+            objective_coeffs: &ctx.template(t).objective,
             row_lower: row_lower_ref,
         },
         &StageExtractionSpec {
@@ -711,13 +713,13 @@ fn extract_sim_stage_result(
             block_hours: blk_hrs,
             generic_constraint_entries: output
                 .generic_constraint_row_entries
-                .get(t)
+                .get(t.0)
                 .map_or(&[], Vec::as_slice),
             ncs_col_start,
             n_ncs: ncs_n,
             ncs_entity_ids: output
                 .ncs_entity_ids_per_stage
-                .get(t)
+                .get(t.0)
                 .map_or(&[], Vec::as_slice),
             ncs_col_upper,
             pumping_col_start,
@@ -725,25 +727,21 @@ fn extract_sim_stage_result(
             pumping_consumption_mw_per_m3s: output.pumping_consumption_mw_per_m3s,
             contract_prices: output
                 .contract_prices_per_stage
-                .get(t)
+                .get(t.0)
                 .map_or(&[], Vec::as_slice),
             contract_is_import: output.contract_is_import,
             diversion_upstream: output.diversion_upstream,
             hydro_productivities: output
                 .hydro_productivities_per_stage
-                .get(t)
+                .get(t.0)
                 .map_or(&[], Vec::as_slice),
-            col_scale: &ctx.templates[t].col_scale,
-            row_scale: &ctx.templates[t].row_scale,
-            cumulative_discount_factor: ctx
-                .cumulative_discount_factors
-                .get(t)
-                .copied()
-                .unwrap_or(1.0),
+            col_scale: &ctx.template(t).col_scale,
+            row_scale: &ctx.template(t).row_scale,
+            cumulative_discount_factor: ctx.cumulative_discount_factor(t),
             cost_scale_factor: ctx.cost_scale_factor,
             energy_conversion: output.energy_conversion,
             hydro_min_storage_hm3: output.hydro_min_storage_hm3,
-            stage_index: t,
+            stage_index: t.0,
             n_stages: ctx.templates.len(),
             anticipated_windows: ctx.anticipated_windows,
             study_stage_ids: ctx.study_stage_ids,
@@ -764,7 +762,7 @@ fn reset_scenario_state<S: SolverInterface>(
     total_scenarios: u32,
     inflow_lags_start: usize,
     training_ctx: &TrainingContext<'_>,
-    root_node: usize,
+    root_node: NodePos,
 ) {
     // Reset solver simplex state at the scenario boundary so a scenario's result
     // cannot depend on which scenarios ran before it (determinism across thread/
@@ -812,38 +810,22 @@ fn reset_scenario_state<S: SolverInterface>(
     ws.scratch.downstream_n_completed = 0;
 }
 
-/// Advance `node` to the one this scenario visits at `t + 1`, mirroring the
-/// training forward pass's sampled walk: a single out-edge is taken with
-/// probability 1 WITHOUT deriving a seed, so a chain never perturbs the
-/// within-node noise stream above (C1 chain-parity).
-///
-/// # Panics (debug builds only)
-///
-/// Panics if `node` has no out-edge before the terminal stage (a
-/// graph-construction invariant).
+/// Advance `node` to the one this scenario visits at `t + 1` (chain-parity
+/// contract stated once at
+/// [`advance_sampled_node`](crate::setup::node_graph::advance_sampled_node)).
 fn advance_simulation_node(
     training_ctx: &TrainingContext<'_>,
-    node: usize,
+    node: NodePos,
     stage_id_u32: u32,
     global_scenario: u32,
-) -> usize {
-    let successors = &training_ctx.node_graph.successors[node];
-    debug_assert!(
-        !successors.is_empty(),
-        "advance_simulation_node: node {node} at stage {stage_id_u32} has no out-edge before \
-         the terminal stage (a graph-construction invariant)"
-    );
-    if successors.len() == 1 {
-        successors[0].child
-    } else {
-        let idx = select_transition_child(
-            SIMULATION_ITERATION,
-            global_scenario,
-            stage_id_u32,
-            successors.iter().map(|s| s.probability),
-        );
-        successors[idx].child
-    }
+) -> NodePos {
+    advance_sampled_node(
+        training_ctx.node_graph,
+        node,
+        SIMULATION_ITERATION,
+        global_scenario,
+        stage_id_u32,
+    )
 }
 
 pub(crate) fn process_scenario_stages<S: SolverInterface>(
@@ -873,26 +855,24 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
     let mut node = ids.root_node;
 
     #[allow(clippy::needless_range_loop)] // t indexes load_spec, ctx arrays, and SimStageIds
-    for t in 0..ids.num_stages {
+    for t in (0..ids.num_stages).map(StageIdx) {
         // Seeds key off the positional stage index `t` (unchanged — a re-key here
         // would perturb the noise/transition draws); the output stage_id is the
         // declared domain id, resolved by position from the ordered study ids.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let stage_seed = t as u32;
+        let stage_seed = t.0 as u32;
         // Domain id by position; falls back to the positional index only if a
         // caller supplies a short study_stage_ids (never in production, where it
         // has one entry per study stage).
         let output_stage_id = ctx
-            .study_stage_ids
-            .get(t)
-            .copied()
-            .unwrap_or_else(|| i32::try_from(t).unwrap_or(i32::MAX));
+            .study_stage_id(t)
+            .unwrap_or_else(|| i32::try_from(t.0).unwrap_or(i32::MAX));
         let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
         let noise = ids.sampler.sample(SampleRequest {
             iteration: SIMULATION_ITERATION,
             scenario: ids.global_scenario,
             stage: stage_seed,
-            stage_idx: t,
+            stage_idx: t.0,
             noise_buf: ids.raw_noise_buf,
             perm_scratch: ids.perm_scratch,
             total_scenarios: ids.total_scenarios,
@@ -908,7 +888,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             ctx,
             fcf,
             training_ctx,
-            &load_spec.stage(t, node_graph.nodes[node].pool_id),
+            &load_spec.stage(node, node_graph.nodes[node].pool_id),
             output,
             &SimStageIds {
                 t,
@@ -921,15 +901,11 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             lookups,
             raw_noise,
         )?;
-        let cum_d = ctx
-            .cumulative_discount_factors
-            .get(t)
-            .copied()
-            .unwrap_or(1.0);
+        let cum_d = ctx.cumulative_discount_factor(t);
         total_cost += cum_d * cost;
         stage_results.push(result);
 
-        if t + 1 < ids.num_stages {
+        if t.next().0 < ids.num_stages {
             node = advance_simulation_node(training_ctx, node, stage_seed, ids.global_scenario);
         }
     }
@@ -1012,7 +988,7 @@ pub fn simulate<S, C: Communicator>(
     config: &SimulationConfig,
     output: SimulationOutputSpec<'_>,
     frozen_templates: Option<&[StageTemplate]>,
-    stage_bases: &[Option<CapturedBasis>],
+    node_bases: &[Option<CapturedBasis>],
     comm: &C,
 ) -> Result<SimulationRunResult, SimulationError>
 where
@@ -1029,7 +1005,7 @@ where
         config,
         output,
         frozen_templates,
-        stage_bases,
+        node_bases,
         comm,
     ))
 }

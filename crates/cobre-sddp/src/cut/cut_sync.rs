@@ -27,6 +27,7 @@ use crate::{
         CutWireHeader, CutWireTuple, cut_wire_size, deserialize_cuts_from_buffer_into,
         serialize_cut,
     },
+    setup::NodeId,
 };
 
 /// Pre-allocated byte buffers for gathering cut wire records across all MPI
@@ -116,6 +117,19 @@ pub struct CutSyncBuffers {
     /// [`std::mem::take`] (never a fresh `Vec::new` per call) so the
     /// level-batched cut exchange stays allocation-free.
     level_plan_scratch: Vec<(usize, usize, usize)>,
+
+    /// Gathered per-`(rank, pool)` local cut counts for the current level,
+    /// `num_ranks * pools.len()` entries in rank-major/pool-minor order. Sizing
+    /// each peer's per-pool segment by ITS OWN count is what lets a multi-node
+    /// level spread across >1 rank; a single pool collapses it to the uniform
+    /// per-rank plan, keeping the chain path byte-identical. Counts ride the wire
+    /// as `u64` (`usize` is not an `MpiDatatype`). Grown lazily inside
+    /// [`Self::sync_level_records`], reused across calls (never a hot-path alloc).
+    per_pool_rank_counts: Vec<u64>,
+
+    /// This rank's own per-pool counts, the send buffer for the per-`(rank, pool)`
+    /// count `allgatherv` (length `pools.len()`); reused across calls.
+    pool_count_send_scratch: Vec<u64>,
 }
 
 impl CutSyncBuffers {
@@ -190,6 +204,8 @@ impl CutSyncBuffers {
             deserialize_headers_buf: Vec::new(),
             deserialize_coefficients_buf: Vec::new(),
             level_plan_scratch: Vec::new(),
+            per_pool_rank_counts: Vec::new(),
+            pool_count_send_scratch: Vec::new(),
         }
     }
 
@@ -333,7 +349,7 @@ impl CutSyncBuffers {
             for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
                 let coeff_start = i * pool_n_state;
                 fcf.add_cut(
-                    header.node_id,
+                    NodeId(header.node_id),
                     pool,
                     u64::from(header.iteration),
                     header.forward_pass_index,
@@ -418,7 +434,7 @@ impl CutSyncBuffers {
             serialize_cut(
                 &mut self.send_buf[start..start + record_size],
                 slot as u32,
-                meta.node,
+                meta.node.0,
                 iteration as u32,
                 meta.forward_pass_index,
                 cut_pool.intercept(slot),
@@ -540,7 +556,7 @@ impl CutSyncBuffers {
             for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
                 let coeff_start = i * pool_n_state;
                 fcf.add_cut(
-                    header.node_id,
+                    NodeId(header.node_id),
                     pool,
                     u64::from(header.iteration),
                     header.forward_pass_index,
@@ -561,17 +577,24 @@ impl CutSyncBuffers {
     /// level count, not node count. Returns `(local_total, remote_total)` cut
     /// counts summed over the level's pools.
     ///
-    /// With a single pool this is byte-for-byte the `pack_local_records` +
-    /// `sync_packed_records` path (identical send bytes, counts, displacements,
-    /// and remote inserts).
+    /// A small integer `allgatherv` first exchanges every rank's per-pool local
+    /// count, so each rank sizes each peer's per-pool segment by ITS OWN count —
+    /// per-pool routing lets a pool's local count differ from the uniform
+    /// per-rank plan (a sibling pool at a multi-node level takes only its own
+    /// visitors). With a single pool the gathered counts collapse to that plan
+    /// and this is byte-for-byte the `pack_local_records` + `sync_packed_records`
+    /// path (identical send bytes, counts, displacements, and remote inserts) —
+    /// the generalization is reached by the counts, never by a shape branch.
     ///
     /// # Errors
     ///
-    /// Returns `Err(SddpError::Validation(_))` when, across >1 rank, a pool's
-    /// local cut count differs from `per_rank_cuts[my_rank]` — per-pool routing
-    /// at a multi-node level needs per-`(rank, pool)` counts exchanged before the
-    /// allgatherv, which is not yet wired (single-rank is unaffected). Returns
-    /// `Err(SddpError::Communication(_))` if the underlying `allgatherv` fails.
+    /// Returns `Err(SddpError::Validation(_))` only for a MALFORMED count
+    /// exchange — a gathered per-`(rank, pool)` count that overruns the grown
+    /// receive buffer, or a local total disagreeing with the packed total — so a
+    /// corrupt exchange fails loudly rather than deserializing at the wrong
+    /// stride. A well-formed multi-node level whose pools carry differing
+    /// per-`(rank, pool)` counts is exchanged correctly. Returns
+    /// `Err(SddpError::Communication(_))` if either underlying `allgatherv` fails.
     pub fn sync_level_records<C: Communicator>(
         &mut self,
         pools: &[usize],
@@ -580,12 +603,16 @@ impl CutSyncBuffers {
         comm: &C,
     ) -> Result<(usize, usize), SddpError> {
         let my_rank = comm.rank();
+        let n_pools = pools.len();
         let expected_for_me = self.per_rank_cuts[my_rank];
 
         // Grow the send/recv buffers to the level's total across its pools when a
         // multi-pool level exceeds the per-pool capacity the constructor sized —
         // a no-op on the single-pool levels the shipped shape produces, so the
-        // chain path never resizes and stays byte-identical.
+        // chain path never resizes and stays byte-identical. `expected_for_me`
+        // and `total_cuts_all_ranks` are safe UPPER bounds: a rank's per-pool
+        // counts sum to at most its own total, so the actual send/recv lengths
+        // never exceed these.
         let total_cuts_all_ranks: usize = self.per_rank_cuts.iter().sum();
         let mut needed_send = 0usize;
         let mut needed_recv = 0usize;
@@ -619,37 +646,66 @@ impl CutSyncBuffers {
             );
             let record_size = cut_wire_size(pool_n_state);
             let n_local = self.pack_pool_into(fcf, pool, iteration, record_size, send_len);
-            // Per-pool routing lets a pool's local cut count differ from the
-            // uniform per-rank plan (a sibling pool at a multi-node level takes
-            // only its own visitors). The remote-rank layout below still assumes
-            // `per_rank_cuts[r]` cuts per pool, so a divergence is safe ONLY at a
-            // single rank (no remote segment is read). Across >1 rank a
-            // multi-node level needs per-`(rank, pool)` counts exchanged first —
-            // not yet wired; reject loudly rather than corrupt remote buffers.
-            if self.num_ranks > 1 && n_local != expected_for_me {
-                return Err(SddpError::Validation(format!(
-                    "sync_cuts invariant violated at pool {pool}: rank \
-                     {my_rank} produced {n_local} cuts, expected \
-                     {expected_for_me} per the cut-distribution plan. \
-                     Per-pool routing across >1 rank needs per-(rank, pool) cut \
-                     counts exchanged before the allgatherv (run a branching \
-                     graph on a single rank until that lands)."
-                )));
-            }
             send_len += n_local * record_size;
             local_total += n_local;
             plan.push((pool, record_size, n_local));
         }
 
+        // Exchange every rank's per-pool local count (a small uniform integer
+        // `allgatherv`, `n_pools` per rank) so each peer's per-pool byte segment
+        // below is sized by ITS OWN count. Counts ride the wire as `u64`; the
+        // per-rank byte `counts`/`displs` are reused as the uniform integer
+        // layout here, then recomputed for the byte `allgatherv`.
+        self.pool_count_send_scratch.clear();
+        self.pool_count_send_scratch
+            .extend(plan.iter().map(|&(_, _, n_local)| n_local as u64));
+        let gathered = self.num_ranks * n_pools;
+        if self.per_pool_rank_counts.len() < gathered {
+            self.per_pool_rank_counts.resize(gathered, 0);
+        }
+        for r in 0..self.num_ranks {
+            self.counts[r] = n_pools;
+            self.displs[r] = r * n_pools;
+        }
+        comm.allgatherv(
+            &self.pool_count_send_scratch,
+            &mut self.per_pool_rank_counts[..gathered],
+            &self.counts,
+            &self.displs,
+        )?;
+
+        // A corrupt exchange must fail loudly, never deserialize at the wrong
+        // stride: this rank's own gathered segment must echo what it packed.
+        let mut my_gathered_total = 0usize;
+        for pool_idx in 0..n_pools {
+            my_gathered_total +=
+                usize::try_from(self.per_pool_rank_counts[my_rank * n_pools + pool_idx]).map_err(
+                    |_| malformed_count_exchange(&format!("rank {my_rank} count exceeds usize")),
+                )?;
+        }
+        if my_gathered_total != local_total {
+            return Err(malformed_count_exchange(&format!(
+                "rank {my_rank} gathered total {my_gathered_total} disagrees with packed local total {local_total}"
+            )));
+        }
+
+        // Size the byte `allgatherv` per `(rank, pool)` from the gathered counts,
+        // rejecting a malformed count (overflow, or a total that overruns the
+        // grown receive buffer). A single pool collapses this to
+        // `per_rank_cuts[r] * record_size` — byte-identical to the chain path.
         for r in 0..self.num_ranks {
             let mut bytes = 0usize;
-            for &(_, record_size, n_local) in &plan {
-                let cuts_for_r = if r == my_rank {
-                    n_local
-                } else {
-                    self.per_rank_cuts[r]
-                };
-                bytes += cuts_for_r * record_size;
+            for (pool_idx, &(_, record_size, _)) in plan.iter().enumerate() {
+                let cuts_for_r = usize::try_from(self.per_pool_rank_counts[r * n_pools + pool_idx])
+                    .map_err(|_| {
+                        malformed_count_exchange(&format!("rank {r} count exceeds usize"))
+                    })?;
+                let seg = cuts_for_r.checked_mul(record_size).ok_or_else(|| {
+                    malformed_count_exchange(&format!("rank {r} per-pool byte count overflows"))
+                })?;
+                bytes = bytes.checked_add(seg).ok_or_else(|| {
+                    malformed_count_exchange(&format!("rank {r} byte total overflows"))
+                })?;
             }
             self.counts[r] = bytes;
         }
@@ -658,16 +714,22 @@ impl CutSyncBuffers {
             self.displs[r] = self.displs[r - 1] + self.counts[r - 1];
         }
 
-        let recv_len: usize = self.counts.iter().sum();
+        let mut recv_len = 0usize;
+        for r in 0..self.num_ranks {
+            recv_len = recv_len.checked_add(self.counts[r]).ok_or_else(|| {
+                malformed_count_exchange(&format!("receive total overflows at rank {r}"))
+            })?;
+        }
+        if recv_len > self.recv_buf.len() {
+            return Err(malformed_count_exchange(&format!(
+                "gathered counts need {recv_len} bytes, exceeding receive buffer capacity {}",
+                self.recv_buf.len()
+            )));
+        }
         debug_assert!(
             send_len <= self.send_buf.len(),
             "send_len {send_len} exceeds send_buf capacity {}",
             self.send_buf.len()
-        );
-        debug_assert!(
-            recv_len <= self.recv_buf.len(),
-            "recv_len {recv_len} exceeds recv_buf capacity {}",
-            self.recv_buf.len()
         );
 
         comm.allgatherv(
@@ -677,15 +739,24 @@ impl CutSyncBuffers {
             &self.displs,
         )?;
 
+        // Remote inserts are rank-major over ascending peer rank, pool-major
+        // within each peer, wire order within a segment. Each pool is a distinct
+        // append target, so for a given pool the inserts arrive in ascending peer
+        // rank regardless of this loop nesting — the rank-count-invariant order
+        // the append-only slot identity needs.
         let mut remote_total = 0usize;
         for r in 0..self.num_ranks {
             if r == my_rank {
                 continue;
             }
             let mut cursor = self.displs[r];
-            for &(pool, record_size, _) in &plan {
+            for (pool_idx, &(pool, record_size, _)) in plan.iter().enumerate() {
                 let pool_n_state = fcf.pools[pool].state_dimension;
-                let seg_len = self.per_rank_cuts[r] * record_size;
+                let seg_cuts = usize::try_from(self.per_pool_rank_counts[r * n_pools + pool_idx])
+                    .map_err(|_| {
+                    malformed_count_exchange(&format!("rank {r} count exceeds usize"))
+                })?;
+                let seg_len = seg_cuts * record_size;
                 let slice = &self.recv_buf[cursor..cursor + seg_len];
                 deserialize_cuts_from_buffer_into(
                     slice,
@@ -696,7 +767,7 @@ impl CutSyncBuffers {
                 for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
                     let coeff_start = i * pool_n_state;
                     fcf.add_cut(
-                        header.node_id,
+                        NodeId(header.node_id),
                         pool,
                         u64::from(header.iteration),
                         header.forward_pass_index,
@@ -724,6 +795,15 @@ impl CutSyncBuffers {
     pub fn recv_capacity(&self) -> usize {
         self.recv_buf.len()
     }
+}
+
+/// Build the `SddpError::Validation` for a malformed per-`(rank, pool)` count
+/// exchange in [`CutSyncBuffers::sync_level_records`]. Only reached on the error
+/// return, so its `format!` never allocates on the hot path.
+fn malformed_count_exchange(detail: &str) -> SddpError {
+    SddpError::Validation(format!(
+        "sync_level_records: malformed per-(rank, pool) count exchange: {detail}"
+    ))
 }
 
 /// Reusable buffers for the replicated-aggregation outcome `allgatherv` at a
@@ -821,6 +901,7 @@ mod tests {
             fcf::FutureCostFunction,
             wire::{CutWireTuple, cut_wire_size, deserialize_cuts_from_buffer, serialize_cut},
         },
+        setup::NodeId,
     };
 
     // ── Unit tests ────────────────────────────────────────────────────────────
@@ -1005,7 +1086,7 @@ mod tests {
         let comm = LocalBackend;
 
         // The backward pass inserts this rank's own cut before sync_cuts runs.
-        fcf.add_cut(0, 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
 
         let local_cuts: &[CutWireTuple<'_>] = &[(0, 0, 1, 0, 10.0, &[1.0, 2.0])];
 
@@ -1295,8 +1376,8 @@ mod tests {
 
         // Pool 0 (dimension 2).
         let s0_record_size = cut_wire_size(dims[0]); // 45
-        fcf.add_cut(0, 0, remote_iteration, 0, 50.0, &[0.1, 0.2]);
-        fcf.add_cut(0, 0, remote_iteration, 1, 60.0, &[0.3, 0.4]);
+        fcf.add_cut(NodeId(0), 0, remote_iteration, 0, 50.0, &[0.1, 0.2]);
+        fcf.add_cut(NodeId(0), 0, remote_iteration, 1, 60.0, &[0.3, 0.4]);
         let s0_packed = bufs.pack_local_records(&fcf, 0, remote_iteration);
         assert_eq!(s0_packed, 2, "pool 0 should pack both local cuts");
 
@@ -1363,8 +1444,22 @@ mod tests {
 
         // Pool 1 (dimension 5).
         let s1_record_size = cut_wire_size(dims[1]); // 69
-        fcf.add_cut(0, 1, remote_iteration, 0, 70.0, &[1.1, 1.2, 1.3, 1.4, 1.5]);
-        fcf.add_cut(0, 1, remote_iteration, 1, 80.0, &[2.1, 2.2, 2.3, 2.4, 2.5]);
+        fcf.add_cut(
+            NodeId(0),
+            1,
+            remote_iteration,
+            0,
+            70.0,
+            &[1.1, 1.2, 1.3, 1.4, 1.5],
+        );
+        fcf.add_cut(
+            NodeId(0),
+            1,
+            remote_iteration,
+            1,
+            80.0,
+            &[2.1, 2.2, 2.3, 2.4, 2.5],
+        );
         let s1_packed = bufs.pack_local_records(&fcf, 1, remote_iteration);
         assert_eq!(s1_packed, 2, "pool 1 should pack both local cuts");
 
@@ -1462,8 +1557,8 @@ mod tests {
 
         let c0 = [1.0, 2.0, 3.0, 4.0];
         let c1 = [5.0, 6.0, 7.0, 8.0];
-        fcf.add_cut(0, 0, 1, 0, 10.0, &c0);
-        fcf.add_cut(0, 0, 1, 1, 20.0, &c1);
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &c0);
+        fcf.add_cut(NodeId(0), 0, 1, 1, 20.0, &c1);
 
         let packed = bufs.pack_local_records(&fcf, 0, 1);
         assert_eq!(packed, 2);
@@ -1533,8 +1628,8 @@ mod tests {
         // One pool (the shared leaf), forward_passes = 2.
         let mut fcf = FutureCostFunction::new(1, n_state, 2, 10, &[0; 1]);
         // Both cuts land in pool 0 but are generated at distinct nodes.
-        fcf.add_cut(7, 0, 1, 0, 10.0, &[1.0, 2.0]);
-        fcf.add_cut(9, 0, 1, 1, 20.0, &[3.0, 4.0]);
+        fcf.add_cut(NodeId(7), 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(9), 0, 1, 1, 20.0, &[3.0, 4.0]);
         // Append-only: two distinct slots, both active.
         assert_eq!(fcf.pools[0].populated(), 4);
         assert_eq!(fcf.pools[0].active_count(), 2);
@@ -1917,8 +2012,8 @@ mod tests {
         let dims = [2usize, 3usize];
         let mut fcf = FutureCostFunction::new_per_pool(&dims, 3, 1, 10, &[0; 2], &[6; 2]);
         let mut bufs = CutSyncBuffers::new(3, 1, 1);
-        fcf.add_cut(0, 0, 1, 0, 10.0, &[1.0, 2.0]);
-        fcf.add_cut(0, 1, 1, 0, 20.0, &[3.0, 4.0, 5.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(0), 1, 1, 0, 20.0, &[3.0, 4.0, 5.0]);
 
         let (local, remote) = bufs
             .sync_level_records(&[0, 1], &mut fcf, 1, &LocalBackend)
@@ -1933,5 +2028,147 @@ mod tests {
             2,
             "local cuts must not be re-inserted"
         );
+    }
+
+    /// Rank 0 of 2; `allgatherv` writes only rank 0's own segment
+    /// (`recv[displs[0]..displs[0] + counts[0]]`), leaving each peer's
+    /// pre-populated segment intact — the faithful single-invocation view of the
+    /// per-`(rank, pool)` count exchange and the byte exchange from rank 0.
+    struct Rank0Of2Preserve;
+
+    impl Communicator for Rank0Of2Preserve {
+        fn allgatherv<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            counts: &[usize],
+            displs: &[usize],
+        ) -> Result<(), CommError> {
+            let start = displs[0];
+            recv[start..start + counts[0]].clone_from_slice(&send[..counts[0]]);
+            Ok(())
+        }
+
+        fn allreduce<T: CommData>(
+            &self,
+            _send: &[T],
+            _recv: &mut [T],
+            _op: ReduceOp,
+        ) -> Result<(), CommError> {
+            unreachable!()
+        }
+
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            unreachable!()
+        }
+
+        fn barrier(&self) -> Result<(), CommError> {
+            unreachable!()
+        }
+
+        fn rank(&self) -> usize {
+            0
+        }
+
+        fn size(&self) -> usize {
+            2
+        }
+
+        fn abort(&self, error_code: i32) -> ! {
+            std::process::exit(error_code)
+        }
+    }
+
+    /// A genuinely multi-node level whose two pools carry differing
+    /// per-`(rank, pool)` counts (pool 0 visited only by rank 0, pool 1 only by
+    /// rank 1) is exchanged at each peer's OWN per-pool stride: rank 1's pool-1
+    /// cuts land in pool 1, and rank 0's pool-0 local cuts are never re-inserted.
+    /// This is the divergence the removed uniform-count rejection used to refuse.
+    #[test]
+    fn sync_level_records_per_rank_pool_divergence_inserts_remote() {
+        let n_state = 2usize;
+        let record_size = cut_wire_size(n_state); // 45
+        let dims = [n_state, n_state];
+        let mut fcf = FutureCostFunction::new_per_pool(&dims, n_state, 2, 10, &[0; 2], &[4; 2]);
+        let mut bufs = CutSyncBuffers::with_distribution(n_state, 2, 2, 4);
+
+        // Rank 0's own pool-0 cuts (the backward pass inserted these before sync);
+        // pool 1 has no local cut on rank 0.
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 1, 20.0, &[3.0, 4.0]);
+
+        // Pre-seed the gathered counts rank-major/pool-minor: rank 0 = [2, 0]
+        // (overwritten by the stub's echo), rank 1 = [0, 2] (preserved). The lazy
+        // resize to num_ranks * n_pools = 4 is a no-op at this length.
+        bufs.per_pool_rank_counts = vec![0, 0, 0, 2];
+
+        // Rank 1's pool-1 cuts at its byte segment (displs[1] = counts[0] = 90;
+        // pool 0 contributes 0 bytes, so pool 1's two records fill [90, 180)).
+        let r1 = 2 * record_size; // 90
+        serialize_cut(
+            &mut bufs.recv_buf[r1..r1 + record_size],
+            50,
+            0,
+            1,
+            0,
+            100.0,
+            &[5.0, 6.0],
+        );
+        serialize_cut(
+            &mut bufs.recv_buf[r1 + record_size..r1 + 2 * record_size],
+            51,
+            0,
+            1,
+            1,
+            200.0,
+            &[7.0, 8.0],
+        );
+
+        let (local, remote) = bufs
+            .sync_level_records(&[0, 1], &mut fcf, 1, &Rank0Of2Preserve)
+            .unwrap();
+
+        assert_eq!(local, 2, "rank 0 packs its two pool-0 cuts");
+        assert_eq!(remote, 2, "rank 1's two pool-1 cuts insert remotely");
+        assert_eq!(
+            fcf.pools[0].active_count(),
+            2,
+            "pool 0: rank 0's own cuts, not re-inserted"
+        );
+        assert_eq!(
+            fcf.pools[1].active_count(),
+            2,
+            "pool 1: rank 1's remote cuts inserted at pool 1's own stride"
+        );
+        // The larger pool-1 cut evaluates to 200 + 7 + 8 at the unit state.
+        assert_eq!(fcf.evaluate_at_state(1, &[1.0, 1.0]), 215.0);
+    }
+
+    /// A fault-injected per-`(rank, pool)` count that overruns the grown receive
+    /// buffer fails loudly (`SddpError::Validation`) rather than deserializing at
+    /// the wrong stride. Rank 0 of 2; rank 1's count segment is pre-seeded with an
+    /// oversized value the stub's rank-0-only echo preserves.
+    #[test]
+    fn sync_level_records_rejects_malformed_count_exchange_overrun() {
+        let n_state = 2usize;
+        let mut fcf = FutureCostFunction::new(1, n_state, 2, 10, &[0; 1]);
+        let mut bufs = CutSyncBuffers::with_distribution(n_state, 1, 2, 2);
+        // Rank 0's own single pool-0 cut.
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
+
+        // num_ranks * n_pools = 2: rank 0 = [<echoed>], rank 1 = [u32::MAX] — a
+        // count whose byte total overruns the grown receive buffer.
+        bufs.per_pool_rank_counts = vec![0, u64::from(u32::MAX)];
+
+        let result = bufs.sync_level_records(&[0], &mut fcf, 1, &Rank0Of2Preserve);
+        match result {
+            Err(SddpError::Validation(ref msg)) => {
+                assert!(
+                    msg.contains("malformed per-(rank, pool) count exchange"),
+                    "message missing the malformed-exchange marker: {msg}"
+                );
+            }
+            other => panic!("expected SddpError::Validation for the overrun, got: {other:?}"),
+        }
     }
 }

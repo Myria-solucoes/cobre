@@ -115,10 +115,23 @@ fn load_checkpoint_into_setup(
     proof: &PolicyLoadProof<FullFcf>,
     setup: &mut StudySetup,
 ) -> Result<(), CliError> {
+    // The pre-replacement (cold-path) FCF already carries the per-pool arrays
+    // `new_per_pool` derived for this study; the resume path reuses them
+    // verbatim rather than substituting a scalar.
+    let pool_state_dimensions: Vec<usize> =
+        setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+    let visit_bounds: Vec<u64> = setup
+        .fcf
+        .pools
+        .iter()
+        .map(|p| u64::from(p.visit_stride))
+        .collect();
     // Reserve one extra slot for cuts added in the final iteration.
     let warm_fcf = FutureCostFunction::new_with_warm_start(
         proof,
         &checkpoint.stage_cuts,
+        &pool_state_dimensions,
+        &visit_bounds,
         setup.loop_params.forward_passes,
         setup.loop_params.max_iterations.saturating_add(1),
     )
@@ -283,8 +296,14 @@ pub(super) fn load_policy_for_simulation(
 
     let (checkpoint, proof) = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
 
-    let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
-        .map_err(CliError::from)?;
+    let pool_state_dimensions: Vec<usize> =
+        setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+    let loaded_fcf = FutureCostFunction::from_deserialized(
+        &proof,
+        &checkpoint.stage_cuts,
+        &pool_state_dimensions,
+    )
+    .map_err(CliError::from)?;
     setup.replace_fcf(loaded_fcf);
 
     let basis_cache = build_basis_cache_from_checkpoint(

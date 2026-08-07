@@ -11,8 +11,8 @@ use cobre_sddp::{
     CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
     StoppingRule, StoppingRuleSet, StudyParams,
     setup::{
-        NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource,
-        SimulationEnumeratedRequest,
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        SimulationEnumeratedRequest, StageIdx, TypedVec,
     },
 };
 
@@ -276,7 +276,7 @@ impl From<&NodeGraph> for BroadcastNodeGraph {
         let mut len = Vec::with_capacity(n);
         let mut q = Vec::with_capacity(n);
         for node in &ng.nodes {
-            stage.push(node.stage);
+            stage.push(node.stage.0);
             pool_id.push(node.pool_id);
             is_external.push(node.openings.source == OpeningSource::External);
             offset.push(node.openings.offset);
@@ -290,14 +290,14 @@ impl From<&NodeGraph> for BroadcastNodeGraph {
         successor_offsets.push(0);
         for succs in &ng.successors {
             for s in succs {
-                successor_child.push(s.child);
+                successor_child.push(s.child.0);
                 successor_probability.push(s.probability);
             }
             successor_offsets.push(successor_child.len());
         }
 
         Self {
-            node_ids: ng.node_ids.clone(),
+            node_ids: ng.node_ids.iter().map(|id| id.0).collect(),
             stage,
             pool_id,
             is_external,
@@ -315,9 +315,9 @@ impl From<&NodeGraph> for BroadcastNodeGraph {
 impl From<BroadcastNodeGraph> for NodeGraph {
     fn from(b: BroadcastNodeGraph) -> Self {
         let n = b.node_ids.len();
-        let nodes: Vec<NodeRuntime> = (0..n)
+        let nodes: TypedVec<NodePos, NodeRuntime> = (0..n)
             .map(|i| NodeRuntime {
-                stage: b.stage[i],
+                stage: StageIdx(b.stage[i]),
                 pool_id: b.pool_id[i],
                 openings: NodeOpenings {
                     source: if b.is_external[i] {
@@ -333,7 +333,7 @@ impl From<BroadcastNodeGraph> for NodeGraph {
             .collect();
         // Derived, not transported: pool -> stage is a pure function of the
         // nodes, so re-deriving here keeps the wire format minimal and drift-free.
-        let mut pool_stage = vec![0usize; b.n_pools];
+        let mut pool_stage = vec![StageIdx(0); b.n_pools];
         for node in &nodes {
             pool_stage[node.pool_id] = node.stage;
         }
@@ -343,14 +343,14 @@ impl From<BroadcastNodeGraph> for NodeGraph {
                 let end = b.successor_offsets[i + 1];
                 (start..end)
                     .map(|j| NodeSuccessor {
-                        child: b.successor_child[j],
+                        child: NodePos(b.successor_child[j]),
                         probability: b.successor_probability[j],
                     })
                     .collect()
             })
             .collect();
         NodeGraph {
-            node_ids: b.node_ids,
+            node_ids: b.node_ids.into_iter().map(NodeId).collect(),
             nodes,
             successors,
             n_pools: b.n_pools,
@@ -460,7 +460,10 @@ where
 mod tests {
     use super::{BroadcastNodeGraph, BroadcastOpeningTree, BroadcastStoppingRule, broadcast_value};
     use crate::error::CliError;
-    use cobre_sddp::setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource};
+    use cobre_sddp::setup::{
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        StageIdx,
+    };
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct Simple {
@@ -556,10 +559,10 @@ mod tests {
     /// non-trivial successor CSR.
     fn sample_node_graph() -> NodeGraph {
         NodeGraph {
-            node_ids: vec![0, 1, 2],
+            node_ids: vec![NodeId(0), NodeId(1), NodeId(2)].into(),
             nodes: vec![
                 NodeRuntime {
-                    stage: 0,
+                    stage: StageIdx(0),
                     pool_id: 0,
                     openings: NodeOpenings {
                         source: OpeningSource::Generated,
@@ -569,7 +572,7 @@ mod tests {
                     },
                 },
                 NodeRuntime {
-                    stage: 1,
+                    stage: StageIdx(1),
                     pool_id: 1,
                     openings: NodeOpenings {
                         source: OpeningSource::Generated,
@@ -579,7 +582,7 @@ mod tests {
                     },
                 },
                 NodeRuntime {
-                    stage: 1,
+                    stage: StageIdx(1),
                     pool_id: 2,
                     openings: NodeOpenings {
                         source: OpeningSource::External,
@@ -588,23 +591,25 @@ mod tests {
                         q: 1.0,
                     },
                 },
-            ],
+            ]
+            .into(),
             successors: vec![
                 vec![
                     NodeSuccessor {
-                        child: 1,
+                        child: NodePos(1),
                         probability: 0.5,
                     },
                     NodeSuccessor {
-                        child: 2,
+                        child: NodePos(2),
                         probability: 0.5,
                     },
                 ],
                 Vec::new(),
                 Vec::new(),
-            ],
+            ]
+            .into(),
             n_pools: 3,
-            pool_stage: vec![0, 1, 1],
+            pool_stage: vec![StageIdx(0), StageIdx(1), StageIdx(1)],
         }
     }
 

@@ -392,6 +392,62 @@ computation, the `run` swap). Pinned by
 `hardest_first_claim_order_is_result_neutral` in `tests/mpi_wire.rs`
 (hardest-first on vs off, bitwise `final_lb`).
 
+## Joint risk is applied once over the flattened successor×opening vector
+
+A branching node's backward cut applies the stage `RiskMeasure` **once** over the
+single flattened joint outcome vector spanning every successor and every one of
+their openings, weighted by the product `P(n→child)·q_{child,ω}` and ordered
+canonically — ascending child node id, then within-child opening.
+`RiskMeasure::aggregate_cut_into` runs exactly once per trial point over that joint
+arena; `assemble_outcome_weights` fills the product weights in the canonical order
+the aggregation depends on (`CVaR`'s tail weighting is index-order-sensitive).
+
+Applying the measure per child and then probability-averaging the children — a
+NESTED measure — is the wrong-but-compiling alternative. It is indistinguishable
+from the joint form in both degenerate regimes (a single successor, or a single
+opening per successor), and with one opening per node — the pure-branching case the
+measure exists for — the within-node measure is vacuous, so the nested form
+collapses to plain expectation with NO tail weighting at all. On a genuine fan the
+two differ: joint `CVaR₀.₅` over outcomes `[10, 20, 30, 40]` at weight `0.25`
+concentrates on the worst two → `35`, while `max`-per-child-then-average gives
+`(20 + 40)/2 = 30`.
+
+Read: `convergence/risk_measure.rs` (`RiskMeasure::aggregate_cut_into`),
+`setup/node_graph.rs` (`assemble_outcome_weights` — the canonical product-weight
+fill), `training/backward/by_scenario.rs` (`process_by_scenario_backward`),
+`training/backward/by_node.rs` (`by_node_finish`), `training/backward/replicated.rs`
+(the replicated path applies the same single aggregation over the same flattened
+arena). Pinned by `joint_cvar_differs_from_nested_per_child_then_average` in
+`convergence/risk_measure.rs` (the analytical `35`-vs-`30` mutation control).
+
+## The branching backward integrates every successor exhaustively
+
+The backward at a node solves **every** successor and **every** one of their
+openings, regardless of which successor the forward pass drew. Sampling selects
+WHICH TRIAL STATES receive a cut; it never truncates a cut's INTEGRATION AXIS.
+`assemble_outcome_weights` iterates the node's whole successor list independent of
+the forward draw, and each child loads its OWN LP — frozen template, delta cut
+batch, pool, basis key, External column — and solves its own openings. A chain is
+the one-element case: one successor, one LP load per trial point, exactly as the
+chain backward solves all of a trial point's openings rather than only the sampled
+one.
+
+"Solve only the sampled child" (the child-0 collapse) is the forbidden
+optimization: pricing every leaf against a single child's LP overstates future
+cost, so `final_lb` overshoots the true first-stage value — `final_lb > final_ub`,
+an invalid lower bound that still compiles and still converges.
+
+Read: `setup/node_graph.rs` (`assemble_outcome_weights`, `successor_outcome_count`
+— the full-successor flatten), `training/backward/by_scenario.rs`
+(`process_by_scenario_backward` — each child loads its own LP),
+`training/backward/by_node.rs` (`by_node_finish` — the opening-block scheduler over
+the same reified outcome set). Pinned by
+`water_binding_external_fan_final_lb_matches_extensive_form` (a distinct-column
+external fan whose reservoir binds, where the child-0 collapse would overshoot the
+extensive-form optimum) and its by-node companion
+`water_binding_external_fan_by_node_matches_extensive_form`, both in
+`tests/branching_value_oracle.rs`.
+
 ## No EWMA upper bound
 
 `ConvergenceMonitor::upper_bound()` returns the raw per-iteration upper bound —

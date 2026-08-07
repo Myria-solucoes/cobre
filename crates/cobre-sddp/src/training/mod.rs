@@ -12,6 +12,9 @@
 //! - `forward` / `backward` — the forward and backward pass kernels.
 //! - `forward_pass_state` / `backward_pass_state` — pre-allocated per-pass
 //!   scratch state and the borrowed-inputs bundles their `run` boundaries take.
+//! - `claim_scatter` — `ClaimCursor` / `canonical_scatter`: the atomic-claim
+//!   and ordered-scatter primitives shared by the by-node backward scheduler
+//!   and the enumerated forward engine.
 //! - `lower_bound` — `evaluate_lower_bound`.
 //! - `state_exchange` — `ExchangeBuffers`: `allgatherv` of trial points between
 //!   the forward and backward passes.
@@ -31,6 +34,7 @@ pub mod lower_bound;
 
 pub(crate) mod backward;
 pub(crate) mod backward_pass_state;
+pub(crate) mod claim_scatter;
 pub(crate) mod forward_pass_state;
 pub(crate) mod rank_reconcile;
 pub(crate) mod session;

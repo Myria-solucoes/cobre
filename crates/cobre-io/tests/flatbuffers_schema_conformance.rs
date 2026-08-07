@@ -28,8 +28,8 @@ use std::process::Command;
 
 use cobre_io::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCutRecord, StageCutsReadResult, StageStatesPayload,
-    StageStatesReadResult, deserialize_stage_basis, deserialize_stage_cuts,
+    PolicyBasisRecord, PolicyCutRecord, STAGE_STATES_NODE_ID_SENTINEL, StageCutsReadResult,
+    StageStatesPayload, StageStatesReadResult, deserialize_stage_basis, deserialize_stage_cuts,
     deserialize_stage_states, serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
 };
 use serde_json::{Value, json};
@@ -523,6 +523,7 @@ fn stage_states_writer_matches_schema() {
     let manifest = conformance_manifest();
     let payload = StageStatesPayload {
         stage_id: 2,
+        node_id: 5,
         state_dimension: 3,
         count: 2,
         data: &data,
@@ -537,12 +538,14 @@ fn stage_states_writer_matches_schema() {
     assert_eq!(as_u64(&json, "count"), 2);
     assert_eq!(get(&json, "data"), &json!([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
     assert_manifest_json_matches(get(&json, "entity_manifest"), &manifest);
+    assert_eq!(i64_or(&json, "node_id", -1), 5);
 }
 
 #[test]
 fn stage_states_reader_consumes_flatc_buffer() {
     let document = json!({
         "stage_id": 9,
+        "node_id": 12,
         "state_dimension": 2,
         "count": 3,
         "data": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
@@ -556,6 +559,7 @@ fn stage_states_reader_consumes_flatc_buffer() {
         deserialize_stage_states(&buf).expect("hand-rolled reader must consume flatc-built buffer");
 
     assert_eq!(result.stage_id, 9);
+    assert_eq!(result.node_id, 12);
     assert_eq!(result.state_dimension, 2);
     assert_eq!(result.count, 3);
     assert_eq!(result.data, vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
@@ -565,6 +569,79 @@ fn stage_states_reader_consumes_flatc_buffer() {
     assert_eq!(result.entity_manifest[0].entity_id, 4);
     assert!(result.entity_manifest[0].was_active);
     assert_eq!(result.entity_manifest[1].entity_id, 5);
+}
+
+/// Forward-compat: a buffer written against a pre-`id:5` `StageStates` schema
+/// (no `node_id` field) must deserialize with `node_id` at
+/// [`STAGE_STATES_NODE_ID_SENTINEL`], never a bare `0` (a valid node id).
+/// Mirrors `pre_delivery_date_entity_slot_reads_as_sentinel`'s rewritten-schema
+/// approach: flatc cannot emit a field the schema lacks, so the buffer is built
+/// from a schema that stops at `entity_manifest (id: 4)`.
+#[test]
+fn pre_node_id_stage_states_reads_as_sentinel() {
+    let schema_pre_node_id = "
+namespace Cobre.IO.Policy;
+
+file_identifier \"CBVF\";
+
+enum EntityType : byte {
+  HydroStorage = 0,
+  HydroInflowLag = 1,
+  AnticipatedThermalState = 2,
+  HydroTransitBucket = 3,
+}
+
+table EntitySlot {
+  entity_type:EntityType (id: 0);
+  entity_id:int32 (id: 1);
+  subindex:uint32 (id: 2);
+  was_active:bool (id: 3);
+}
+
+table StageStates {
+  stage_id:uint32 (id: 0);
+  state_dimension:uint32 (id: 1);
+  count:uint32 (id: 2);
+  data:[float64] (id: 3);
+  entity_manifest:[EntitySlot] (id: 4);
+}
+";
+    let dir = TempDir::new().unwrap();
+    let pre_node_id_schema = dir.path().join("pre_node_id.fbs");
+    std::fs::write(&pre_node_id_schema, schema_pre_node_id).unwrap();
+
+    let document = json!({
+        "stage_id": 3,
+        "state_dimension": 1,
+        "count": 1,
+        "data": [1.0],
+        "entity_manifest": [
+            {"entity_type": "HydroStorage", "entity_id": 1, "subindex": 0, "was_active": true}
+        ]
+    });
+    let json_path = dir.path().join("doc.json");
+    std::fs::write(&json_path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+    let status = flatc_command()
+        .arg("-b")
+        .arg("--root-type")
+        .arg(qualified("StageStates"))
+        .arg("-o")
+        .arg(dir.path())
+        .arg(&pre_node_id_schema)
+        .arg(&json_path)
+        .status()
+        .expect("run flatc -b on pre-node_id schema");
+    assert!(status.success(), "flatc -b on pre-node_id schema failed");
+    let buf = std::fs::read(dir.path().join("doc.bin")).unwrap();
+
+    let result =
+        deserialize_stage_states(&buf).expect("hand-rolled reader must accept pre-node_id buffer");
+    assert_eq!(result.stage_id, 3);
+    assert_eq!(
+        result.node_id, STAGE_STATES_NODE_ID_SENTINEL,
+        "a pre-node_id buffer must read back node_id as the sentinel, not 0"
+    );
 }
 
 // ─── Schema neutrality (0.14 value-function artifact) ────────────────────────

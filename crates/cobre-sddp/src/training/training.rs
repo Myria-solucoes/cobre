@@ -20,6 +20,7 @@ use crate::{
     SddpError, SolverProfiles, TrainingConfig,
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
+    setup::NodePos,
     solver_stats::SolverStatsLogEntry,
     training_session::{IterationOutcome, TrainingSession},
     workspace::CapturedBasis,
@@ -190,7 +191,7 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
     // identity on single-rank runs.
     if comm.size() == 1 {
         let cache = (0..num_nodes)
-            .map(|t| basis_store.get(0, t).cloned())
+            .map(|t| basis_store.get(0, NodePos(t)).cloned())
             .collect();
         return Ok(cache);
     }
@@ -206,7 +207,7 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
     let mut f64_buf: Vec<f64> = Vec::new();
     if comm.rank() == 0 {
         for t in 0..num_nodes {
-            match basis_store.get(0, t) {
+            match basis_store.get(0, NodePos(t)) {
                 None => buf.push(0_i32),
                 Some(captured) => captured.to_broadcast_payload(&mut buf, &mut f64_buf),
             }

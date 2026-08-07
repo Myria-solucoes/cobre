@@ -20,6 +20,8 @@
 //! `losses_mw`, `outflow_m3s`. See simulation-architecture.md SS3.4 for the
 //! complete list.
 
+use crate::setup::NodeId;
+
 /// Cost breakdown for one (stage, block) pair.
 ///
 /// Corresponds to one row in the costs output schema
@@ -422,7 +424,7 @@ pub struct SimulationStageResult {
     /// this stage (`node_graph.node_ids[node]`). On a chain this is the
     /// degenerate per-stage node id; it is never gated on whether `nodes[]` was
     /// declared. Broadcast onto every entity row written for the stage.
-    pub node_id: i32,
+    pub node_id: NodeId,
     /// Cost breakdown results for this stage (one entry per block).
     pub costs: Vec<SimulationCostResult>,
     /// Hydro plant results for this stage.
@@ -532,11 +534,12 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::{
-        ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
-        SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroBusResult,
-        SimulationHydroResult, SimulationInflowLagResult, SimulationNonControllableResult,
-        SimulationPumpingResult, SimulationScenarioResult, SimulationStageResult,
-        SimulationSummary, SimulationThermalResult, SimulationTransitBucketResult,
+        NodeId, ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult,
+        SimulationCostResult, SimulationExchangeResult, SimulationGenericViolationResult,
+        SimulationHydroBusResult, SimulationHydroResult, SimulationInflowLagResult,
+        SimulationNonControllableResult, SimulationPumpingResult, SimulationScenarioResult,
+        SimulationStageResult, SimulationSummary, SimulationThermalResult,
+        SimulationTransitBucketResult,
     };
 
     #[test]
@@ -942,7 +945,7 @@ mod tests {
     fn stage_result_empty_optional_vecs() {
         let stage = SimulationStageResult {
             stage_id: 0,
-            node_id: 0,
+            node_id: NodeId(0),
             costs: vec![],
             hydros: vec![],
             hydro_bus_generation: vec![],
@@ -976,7 +979,7 @@ mod tests {
         let stages: Vec<SimulationStageResult> = (0..12)
             .map(|i| SimulationStageResult {
                 stage_id: i,
-                node_id: i as i32,
+                node_id: NodeId(i as i32),
                 costs: vec![],
                 hydros: vec![],
                 hydro_bus_generation: vec![],

@@ -83,14 +83,24 @@ pub struct PolicyBasisRecord<'a> {
     pub num_cut_rows: u32,
 }
 
+/// Sentinel [`StageStatesPayload::node_id`]/[`StageStatesReadResult::node_id`]
+/// value for a policy-graph node identity absent from the write path (a
+/// caller that never resolved one) or from a pre-`id:5` buffer
+/// (forward-compatible default).
+pub const STAGE_STATES_NODE_ID_SENTINEL: i32 = -1;
+
 /// Payload for writing per-stage visited states to a value-function artifact.
 ///
 /// The `data` slice contains the flat state vectors (row-major, each of length
 /// `state_dimension`). The total number of stored states is `count`.
 #[derive(Debug, Clone)]
 pub struct StageStatesPayload<'a> {
-    /// Stage index (0-based).
+    /// Study stage index (0-based).
     pub stage_id: u32,
+    /// Policy-graph node identity (the declared node id on a branching graph;
+    /// [`STAGE_STATES_NODE_ID_SENTINEL`] when absent). Distinct from
+    /// `stage_id` the moment a graph carries more than one node per stage.
+    pub node_id: i32,
     /// Length of each state vector.
     pub state_dimension: u32,
     /// Number of states stored.
@@ -353,8 +363,11 @@ pub struct StageCutsReadResult {
 /// Owned version of [`StageStatesPayload`] returned by [`crate::deserialize_stage_states`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StageStatesReadResult {
-    /// Stage index (0-based).
+    /// Study stage index (0-based).
     pub stage_id: u32,
+    /// Policy-graph node identity; [`STAGE_STATES_NODE_ID_SENTINEL`] when the
+    /// field is absent from the buffer (a pre-`id:5` artifact).
+    pub node_id: i32,
     /// Length of each state vector.
     pub state_dimension: u32,
     /// Number of states stored.

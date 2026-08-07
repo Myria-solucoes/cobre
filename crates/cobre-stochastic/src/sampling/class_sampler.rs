@@ -257,6 +257,12 @@ impl ClassSampler<'_> {
                 offset,
                 len,
             } => {
+                // An empty class copies nothing but must still skip sample_forward,
+                // whose opening-range assert would otherwise trip on an offset it
+                // never reads.
+                if *len == 0 {
+                    return Ok(());
+                }
                 debug_assert_eq!(
                     output.len(),
                     *len,
@@ -500,6 +506,34 @@ mod tests {
             tree.view().n_openings(req.stage_idx),
         );
         assert_eq!(&output, &full_slice[2..5]);
+    }
+
+    #[test]
+    fn in_sample_zero_entity_skips_out_of_range_opening() {
+        // A node whose opening offset exceeds the stage's opening count would trip
+        // sample_forward's range assert; a zero-entity class must return Ok before
+        // reaching it, leaving output untouched.
+        let tree = uniform_tree(1, 1, 5); // stage 0 carries exactly one opening
+        let view = tree.view();
+        let sampler = ClassSampler::InSample {
+            tree: view,
+            base_seed: 42,
+            offset: 0,
+            len: 0,
+        };
+        // offset 2 + len 1 exceeds the single opening: sample_forward would assert.
+        let req = ClassSampleRequest {
+            node_opening_offset: 2,
+            node_opening_len: 1,
+            ..base_req()
+        };
+        let mut output: Vec<f64> = Vec::new();
+        let mut perm = vec![0usize; 10];
+        sampler.fill(&req, &mut output, &mut perm).unwrap();
+        assert!(
+            output.is_empty(),
+            "zero-entity InSample fill must leave output untouched"
+        );
     }
 
     #[test]

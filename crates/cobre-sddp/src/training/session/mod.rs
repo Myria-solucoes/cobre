@@ -7,6 +7,8 @@ use cobre_comm::CommError::CollectiveFailed;
 use cobre_solver::SolverError;
 use cobre_solver::freeze_rows_into_template;
 
+use crate::indexer::CutSlot;
+
 use crate::cut_selection::CutSelectionStrategy::Dominated;
 use crate::cut_selection::CutSelectionStrategy::Dynamic;
 use crate::cut_selection::CutSelectionStrategy::Level1;
@@ -48,7 +50,7 @@ use crate::{
     lower_bound::evaluate_lower_bound,
     rank_reconcile::{reconcile_error_flag, reconcile_result},
     setup::NodeGraph,
-    setup::node_graph::{enumerate_forward_paths, frontier_node, max_successor_outcome_count},
+    setup::node_graph::{NodePos, StageIdx, Traversal, frontier_node, max_successor_outcome_count},
     solver_stats::{
         SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
@@ -119,6 +121,9 @@ pub(crate) struct TrainingSession<'a, S: SolverInterface + Send, C: Communicator
     exchange_bufs: ExchangeBuffers,
     cut_sync_bufs: CutSyncBuffers,
     visited_archive: Option<VisitedStatesArchive>,
+    /// Reusable projected trial-state buffer for cut selection; grown on first
+    /// use, reused across iterations (no per-cut/per-trial-point allocation).
+    cut_selection_state_scratch: Vec<f64>,
     scratch: IterationScratch,
     convergence_monitor: ConvergenceMonitor,
 
@@ -141,6 +146,9 @@ where
     /// # Errors
     ///
     /// Returns `SddpError::Solver(e)` if the workspace pool cannot be constructed.
+    // Rationale: allocates and wires every per-run scratch buffer in one place;
+    // splitting it would thread each field through a helper for no clarity gain.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn new(
         solver: &'a mut S,
         mut config: TrainingConfig,
@@ -293,15 +301,18 @@ where
         // position: nodes[0] is the smallest-id node, not necessarily the root, so
         // fcf.pools[0] could under-size the map for a root pool larger than pool 0.
         // On a chain the root IS nodes[0] (pool 0), so this equals pools[0].
-        let lb_root_pool =
-            training_ctx.node_graph.nodes[frontier_node(training_ctx.node_graph, 0)].pool_id;
+        let lb_root_node =
+            frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
+                SddpError::Validation("training session: stage 0 carries no alive node".to_string())
+            })?;
+        let lb_root_pool = training_ctx.node_graph.nodes[lb_root_node].pool_id;
         let scratch = IterationScratch::new(
             ranks.max_local_fwd,
             ranks.num_stages,
             &training_ctx.node_graph.pool_stage,
             ranks.n_state,
             fcf.pools[lb_root_pool].capacity,
-            stage_ctx.templates[0].num_rows,
+            stage_ctx.template(StageIdx(0)).num_rows,
             state.hydro_count,
             state.max_par_order,
             state.n_buckets,
@@ -314,7 +325,16 @@ where
         let mut fwd_state =
             ForwardPassState::new(n_workers_local, ranks.num_stages, ranks.max_local_fwd);
         fwd_state.set_profile(solver_profiles.forward);
-        fwd_state.set_enumerated(config.loop_config.training_enumerated);
+        // Resolved once here, at training start — the study's node graph has
+        // existed since `StudySetup` construction, and `resolve_enumerated_training_count`
+        // already ran the enumerated admissibility guards there (a `StudySetup`
+        // that failed them never reaches a `TrainingSession::new` call), so this
+        // resolution is representational, not a second admissibility check.
+        fwd_state.set_traversal(Traversal::resolve(
+            training_ctx.node_graph,
+            config.loop_config.training_enumerated,
+            config.loop_config.forward_passes,
+        ));
 
         let real_states_capacity = exchange_bufs.real_total_scenarios() * ranks.n_state;
         let mut bwd_state = BackwardPassState::new(
@@ -329,6 +349,10 @@ where
         bwd_state.set_profile(solver_profiles.backward);
         bwd_state.set_scheduler(solver_profiles.backward_scheduler);
         bwd_state.set_hardest_first_claim_order(solver_profiles.hardest_first_claim_order);
+        // Mirrors `fwd_state.set_traversal` above — the by-node scheduler's
+        // singleton auto-select (`trial_state_axis_is_singleton`) is licensed
+        // only under an enumerated traversal.
+        bwd_state.set_enumerated(config.loop_config.training_enumerated);
 
         Ok(Self {
             solver,
@@ -344,6 +368,7 @@ where
             exchange_bufs,
             cut_sync_bufs,
             visited_archive,
+            cut_selection_state_scratch: Vec::new(),
             scratch,
             convergence_monitor,
             fwd_state,
@@ -429,7 +454,7 @@ where
             )
         };
 
-        self.run_cut_management(iteration);
+        self.run_cut_management(iteration)?;
 
         grow_pools_for_next_iteration(self.fcf, u64::from(self.config.loop_config.forward_passes));
         // Growth-only: a pool `grow_pools_for_next_iteration` just grew may now
@@ -778,19 +803,18 @@ where
         // probabilities `P(ℓ) = ∏ (edge prob · opening q)`, in the canonical DFS
         // order `sync_forward`'s gathered costs are assembled in — identical on
         // every rank (a pure function of the graph). Sampled forwards keep the
-        // statistical Welford path untouched.
+        // statistical Welford path untouched. The weights themselves are read
+        // straight off the `Traversal` resolved once at training start
+        // (`TrainingSession::new`) — no per-iteration path re-derivation.
         let global_n = self.ranks.num_total_forward_passes;
-        let bound = if self.config.loop_config.training_enumerated {
-            let paths = enumerate_forward_paths(self.training_ctx.node_graph);
+        let bound = if let Some(weights) = self.fwd_state.traversal().path_weights() {
             debug_assert_eq!(
-                paths.weight.len(),
+                weights.len(),
                 global_n,
                 "enumerated path count must equal the resolved forward-pass count"
             );
             self.scratch.ub_path_weights.clear();
-            self.scratch
-                .ub_path_weights
-                .extend_from_slice(&paths.weight);
+            self.scratch.ub_path_weights.extend_from_slice(weights);
             ForwardBound::Exact {
                 path_weights: &self.scratch.ub_path_weights,
             }
@@ -904,10 +928,14 @@ where
     ///
     /// All operations are O(active cuts) and perform no heap allocation when the
     /// cut pools have not grown since the previous iteration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SddpError::Validation`] if stage 0 carries no alive node.
     // Rationale: the phases mutate `&mut self` and each reads state the prior
     // phase wrote, so splitting into helpers would pass every field individually.
     #[allow(clippy::too_many_lines)]
-    fn run_cut_management(&mut self, iteration: u64) {
+    fn run_cut_management(&mut self, iteration: u64) -> Result<(), SddpError> {
         // `sel_state` is `Some` only when strategy-based selection ran;
         // `record_by_pool` (built in the same block) maps a pool id to its
         // `per_stage` record index for the budget back-annotation below.
@@ -926,7 +954,10 @@ where
             // Root pool resolved by STAGE (the sole stage-0 node), never by array
             // position: nodes[0] is the smallest-id node, not necessarily the
             // root on a branching graph (the same resolution the LB path uses).
-            let root_pool = node_graph.nodes[frontier_node(node_graph, 0)].pool_id;
+            let root_node = frontier_node(node_graph, StageIdx(0)).ok_or_else(|| {
+                SddpError::Validation("training session: stage 0 carries no alive node".to_string())
+            })?;
+            let root_pool = node_graph.nodes[root_node].pool_id;
 
             // Selection covers interior cut-generating nodes only. The root's
             // cuts are never a backward-pass successor (activity never updated);
@@ -958,29 +989,58 @@ where
             // per-pool; the visited states are read by NODE position (siblings at
             // one stage own distinct visited regions). On a chain node position
             // equals stage, reproducing the former 1..T-2 stage loop.
-            let interior_nodes: Vec<usize> = (0..node_graph.nodes.len())
-                .filter(|&pos| {
-                    node_graph.nodes[pos].stage >= 1 && !node_graph.successors[pos].is_empty()
+            let interior_nodes: Vec<NodePos> = node_graph
+                .nodes
+                .iter_indexed()
+                .filter(|&(pos, n)| {
+                    n.stage >= StageIdx(1) && !node_graph.successors[pos].is_empty()
                 })
+                .map(|(pos, _)| pos)
                 .collect();
+            let pools = &self.fcf.pools;
+            let cut_state_layouts = self.training_ctx.cut_state_layouts;
+            let n_global = archive_ref.map_or(0, VisitedStatesArchive::packing_stride);
             // Sequential (not `into_par_iter`): the m-block kernel already
             // saturates the cores via its inner parallelism.
-            let pools = &self.fcf.pools;
+            let mut scratch = std::mem::take(&mut self.cut_selection_state_scratch);
+            let mut deactivations: Vec<(usize, usize, CutActivityUpdates, f64)> =
+                Vec::with_capacity(interior_nodes.len());
             #[allow(clippy::cast_possible_truncation)]
-            let deactivations: Vec<(usize, usize, CutActivityUpdates, f64)> = interior_nodes
-                .iter()
-                .map(|&node_pos| {
-                    let node = &node_graph.nodes[node_pos];
-                    let pool_id = node.pool_id;
-                    let pool = &pools[pool_id];
-                    let states = archive_ref.map_or(&[] as &[f64], |a| a.states_for_node(node_pos));
-                    let start = Instant::now();
-                    let deact =
-                        strategy.select_for_stage(pool, states, iteration, node.stage as u32);
-                    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                    (node.stage, pool_id, deact, elapsed_ms)
-                })
-                .collect();
+            for &node_pos in &interior_nodes {
+                let node = &node_graph.nodes[node_pos];
+                let pool_id = node.pool_id;
+                let pool = &pools[pool_id];
+                let proj = &cut_state_layouts[pool_id];
+                let n_slots = proj.n_slots();
+                let n_trials = archive_ref.map_or(0, |a| a.count(node_pos));
+                let global_states =
+                    archive_ref.map_or(&[] as &[f64], |a| a.states_for_node(node_pos));
+                // Project the StateDim-packed archive into the pool's projected
+                // slot space through its own CutStateProjection (identity when
+                // n_slots == n_global). A positional prefix is wrong — a reduced
+                // pool's slots are not the first n_slots StateDims.
+                scratch.clear();
+                scratch.reserve(n_trials * n_slots);
+                for m in 0..n_trials {
+                    let base = m * n_global;
+                    for s in 0..n_slots {
+                        scratch.push(
+                            global_states[base + proj.global_state_index(CutSlot::new(s)).get()],
+                        );
+                    }
+                }
+                let start = Instant::now();
+                let deact = strategy.select_for_stage(
+                    pool,
+                    &scratch,
+                    n_trials,
+                    iteration,
+                    node.stage.0 as u32,
+                );
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                deactivations.push((node.stage.0, pool_id, deact, elapsed_ms));
+            }
+            self.cut_selection_state_scratch = scratch;
 
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             for (stage, pool_id, deact, stage_sel_time_ms) in deactivations {
@@ -1133,6 +1193,7 @@ where
                 freeze_time_ms,
             },
         );
+        Ok(())
     }
 
     /// Rebuild every pool's frozen template from the current active cut set,
@@ -1163,14 +1224,14 @@ where
                 p,
                 state,
                 &self.training_ctx.cut_state_layouts[p],
-                &self.stage_ctx.templates[t].col_scale,
+                &self.stage_ctx.template(t).col_scale,
             );
             #[allow(clippy::cast_possible_truncation)]
             {
                 total_rows_frozen += self.scratch.freeze_row_batches[p].num_rows as u64;
             }
             freeze_rows_into_template(
-                &self.stage_ctx.templates[t],
+                self.stage_ctx.template(t),
                 &self.scratch.freeze_row_batches[p],
                 &mut self.scratch.frozen_templates[p],
                 &mut self.scratch.freeze_scratch,
@@ -1198,7 +1259,7 @@ where
         for (t, slot) in cache.iter().enumerate().take(num_nodes) {
             let Some(captured) = slot else { continue };
             for scenario in 0..max_local_fwd {
-                *self.basis_store.get_mut(scenario, t) = Some(captured.clone());
+                *self.basis_store.get_mut(scenario, NodePos(t)) = Some(captured.clone());
             }
         }
     }
@@ -1272,7 +1333,7 @@ where
 fn selection_record_index_by_pool(
     node_graph: &NodeGraph,
     root_pool: usize,
-    interior_nodes: &[usize],
+    interior_nodes: &[NodePos],
 ) -> Vec<Option<usize>> {
     let mut by_pool = vec![None; node_graph.n_pools];
     by_pool[root_pool] = Some(0);
@@ -1289,7 +1350,7 @@ fn selection_record_index_by_pool(
 /// iteration from [`TrainingSession::run_iteration`], never inside the
 /// forward/backward sweep. A chain pool's construction-time floor already
 /// equals exactly `forward_passes` per iteration
-/// ([`crate::setup::node_graph::sampled_visit_bound`]), so feeding it the
+/// ([`crate::setup::node_graph::pool_cut_stride`]), so feeding it the
 /// same value here never triggers growth; a declared graph's realized
 /// per-pool visit source is supplied once a general-graph traversal is
 /// wired.
@@ -1370,8 +1431,10 @@ mod tests {
         indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
-        setup::node_graph::frontier_node,
-        setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
+        setup::node_graph::{StageIdx, frontier_node},
+        setup::{
+            NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        },
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         test_support,
     };
@@ -2289,7 +2352,7 @@ mod tests {
         // populated slot, one remaining slot.
         let mut fcf = FutureCostFunction::new_per_pool(&[1], 1, 1, 2, &[0], &[1]);
         assert_eq!(fcf.pools[0].capacity, 2);
-        fcf.pools[0].add_cut(0, 0, 0, 7.0, &[3.0]);
+        fcf.pools[0].add_cut(NodeId(0), 0, 0, 7.0, &[3.0]);
         let prior_capacity = fcf.pools[0].capacity;
 
         grow_pools_for_next_iteration(&mut fcf, 3);
@@ -2309,7 +2372,7 @@ mod tests {
     #[test]
     fn grow_pools_for_next_iteration_is_noop_when_floor_suffices() {
         let mut fcf = FutureCostFunction::new_per_pool(&[1], 1, 1, 10, &[0], &[1]);
-        fcf.pools[0].add_cut(0, 0, 0, 1.0, &[1.0]);
+        fcf.pools[0].add_cut(NodeId(0), 0, 0, 1.0, &[1.0]);
         let prior_capacity = fcf.pools[0].capacity;
 
         grow_pools_for_next_iteration(&mut fcf, 1);
@@ -2323,7 +2386,7 @@ mod tests {
     #[test]
     fn grow_pools_for_next_iteration_chain_never_triggers() {
         // A chain-shaped FCF (visit_bound == forward_passes for every pool,
-        // sampled_visit_bound): remaining capacity after any
+        // pool_cut_stride): remaining capacity after any
         // iteration is always >= forward_passes, so this reserved seam is
         // inert on the only live path.
         let forward_passes = 4u32;
@@ -2331,7 +2394,7 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 1, forward_passes, max_iterations, &[0, 0]);
         for pool in &mut fcf.pools {
             for fp in 0..forward_passes {
-                pool.add_cut(0, 0, fp, 1.0, &[1.0]);
+                pool.add_cut(NodeId(0), 0, fp, 1.0, &[1.0]);
             }
         }
         let capacities_before: Vec<usize> = fcf.pools.iter().map(|p| p.capacity).collect();
@@ -2364,49 +2427,51 @@ mod tests {
     #[test]
     fn selection_record_index_by_pool_maps_branching_root_not_by_pool_id() {
         let leaf = |pool_id| NodeRuntime {
-            stage: 2,
+            stage: StageIdx(2),
             pool_id,
             openings: gen_openings(),
         };
         let fan = |pool_id| NodeRuntime {
-            stage: 1,
+            stage: StageIdx(1),
             pool_id,
             openings: gen_openings(),
         };
         let root = NodeRuntime {
-            stage: 0,
+            stage: StageIdx(0),
             pool_id: 2,
             openings: gen_openings(),
         };
-        let succ = |child| NodeSuccessor {
+        let succ = |child: NodePos| NodeSuccessor {
             child,
             probability: 1.0,
         };
         let node_graph = NodeGraph {
-            node_ids: vec![1, 2, 3, 7, 10],
-            nodes: vec![leaf(3), leaf(3), fan(0), fan(1), root],
+            node_ids: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(7), NodeId(10)].into(),
+            nodes: vec![leaf(3), leaf(3), fan(0), fan(1), root].into(),
             successors: vec![
                 Vec::new(),
                 Vec::new(),
-                vec![succ(0)],
-                vec![succ(1)],
-                vec![succ(2), succ(3)],
-            ],
+                vec![succ(NodePos(0))],
+                vec![succ(NodePos(1))],
+                vec![succ(NodePos(2)), succ(NodePos(3))],
+            ]
+            .into(),
             n_pools: 4,
-            pool_stage: vec![1, 1, 0, 2],
+            pool_stage: vec![StageIdx(1), StageIdx(1), StageIdx(0), StageIdx(2)],
         };
 
         // root_pool + interior_nodes computed exactly as run_cut_management does.
-        let root_pool = node_graph.nodes[frontier_node(&node_graph, 0)].pool_id;
-        let interior_nodes: Vec<usize> = (0..node_graph.nodes.len())
-            .filter(|&pos| {
-                node_graph.nodes[pos].stage >= 1 && !node_graph.successors[pos].is_empty()
-            })
+        let root_pool = node_graph.nodes[frontier_node(&node_graph, StageIdx(0)).unwrap()].pool_id;
+        let interior_nodes: Vec<NodePos> = node_graph
+            .nodes
+            .iter_indexed()
+            .filter(|&(pos, n)| n.stage >= StageIdx(1) && !node_graph.successors[pos].is_empty())
+            .map(|(pos, _)| pos)
             .collect();
         assert_eq!(root_pool, 2, "the root owns pool 2, not pool 0");
         assert_eq!(
             interior_nodes,
-            vec![2, 3],
+            vec![NodePos(2), NodePos(3)],
             "fan nodes at canonical positions 2, 3"
         );
 

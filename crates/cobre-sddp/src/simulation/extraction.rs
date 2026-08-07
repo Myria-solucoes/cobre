@@ -30,6 +30,7 @@ use crate::indexer::{
     anticipated_resolution_for, is_anticipated_decision_active_for_delivery,
 };
 use crate::lp_builder::{GenericConstraintRowEntry, StageGeometry};
+use crate::setup::NodeId;
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
     SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroBusResult,
@@ -1283,7 +1284,7 @@ pub fn extract_stage_result(
         view,
         spec,
         stage_id,
-        stage_id as i32,
+        NodeId(stage_id as i32),
         &hydro_lookup,
         &thermal_lookup,
     )
@@ -1309,7 +1310,7 @@ pub(crate) fn extract_stage_result_with_lookups(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
     stage_id: u32,
-    node_id: i32,
+    node_id: NodeId,
     hydro_lookup: &HydroReverseLookup,
     thermal_lookup: &ThermalReverseLookup,
 ) -> SimulationStageResult {

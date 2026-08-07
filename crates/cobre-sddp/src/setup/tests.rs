@@ -1,5 +1,5 @@
 use super::{
-    PhaseLibraries, ScenarioLibraries, StudySetup, assert_external_library_widths,
+    NodeId, NodePos, PhaseLibraries, ScenarioLibraries, StudySetup, assert_external_library_widths,
     build_contract_prices_per_stage,
 };
 use crate::SddpError;
@@ -713,7 +713,7 @@ fn fcf_mut_allows_cut_insertion() {
 
     let n_state = setup.stage_data.state.n_state;
     let coefficients = vec![1.0_f64; n_state];
-    setup.fcf.add_cut(0, 0, 0, 0, 42.0, &coefficients);
+    setup.fcf.add_cut(NodeId(0), 0, 0, 0, 42.0, &coefficients);
     assert_eq!(setup.fcf.total_active_cuts(), 1);
 }
 
@@ -1196,17 +1196,17 @@ fn node_native_binary_tree_loads_and_constructs_node_graph() {
 
     // Canonical (ascending child node id) successor structure, matching the
     // declared transitions: 0->{1,2}, 1->{3,4}, 2->{5,6}; leaves have none.
-    let child_ids = |pos: usize| -> Vec<i32> {
-        setup.node_graph.successors[pos]
+    let child_ids = |pos: usize| -> Vec<NodeId> {
+        setup.node_graph.successors[NodePos(pos)]
             .iter()
             .map(|s| setup.node_graph.node_ids[s.child])
             .collect()
     };
-    assert_eq!(child_ids(0), vec![1, 2]);
-    assert_eq!(child_ids(1), vec![3, 4]);
-    assert_eq!(child_ids(2), vec![5, 6]);
+    assert_eq!(child_ids(0), vec![NodeId(1), NodeId(2)]);
+    assert_eq!(child_ids(1), vec![NodeId(3), NodeId(4)]);
+    assert_eq!(child_ids(2), vec![NodeId(5), NodeId(6)]);
     for leaf_pos in 3..7 {
-        assert!(setup.node_graph.successors[leaf_pos].is_empty());
+        assert!(setup.node_graph.successors[NodePos(leaf_pos)].is_empty());
     }
 }
 
@@ -1247,7 +1247,8 @@ fn chain_fcf_pools_len_equals_num_stages_with_pool_id_identity() {
     assert_eq!(setup.stage_data.cut_state_layouts.len(), n_stages);
     for t in 0..n_stages {
         assert_eq!(
-            setup.node_graph.nodes[t].pool_id, t,
+            setup.node_graph.nodes[NodePos(t)].pool_id,
+            t,
             "chain degeneracy: pool_id must equal stage index {t}"
         );
     }
@@ -7216,7 +7217,7 @@ fn cut_row_from_state_matches_reference_loop() {
     let coefficients: Vec<f64> = (0..n_state)
         .map(|j| 1.0 + f64::from(u32::try_from(j).expect("state index fits u32")))
         .collect();
-    fcf.add_cut(0, 0, 0, 0, 7.5, &coefficients);
+    fcf.add_cut(NodeId(0), 0, 0, 0, 7.5, &coefficients);
 
     let from_production = build_cut_row_batch(
         &fcf,
@@ -8452,7 +8453,7 @@ fn g2_accepts_matching_external_library_width() {
 /// only `stage`, `successors`, and `openings.len`.
 fn ng_node(stage: usize, len: usize) -> super::NodeRuntime {
     super::NodeRuntime {
-        stage,
+        stage: super::node_graph::StageIdx(stage),
         pool_id: 0,
         openings: super::NodeOpenings {
             source: super::OpeningSource::Generated,
@@ -8465,7 +8466,7 @@ fn ng_node(stage: usize, len: usize) -> super::NodeRuntime {
 
 fn ng_edge(child: usize) -> super::NodeSuccessor {
     super::NodeSuccessor {
-        child,
+        child: NodePos(child),
         probability: 0.5,
     }
 }
@@ -8476,16 +8477,17 @@ fn ng_edge(child: usize) -> super::NodeSuccessor {
 /// uniform-fan tautology.
 fn asymmetric_fan_node_graph() -> super::NodeGraph {
     super::NodeGraph {
-        node_ids: vec![0, 1, 2, 3],
-        nodes: vec![ng_node(0, 2), ng_node(1, 3), ng_node(2, 5), ng_node(1, 7)],
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)].into(),
+        nodes: vec![ng_node(0, 2), ng_node(1, 3), ng_node(2, 5), ng_node(1, 7)].into(),
         successors: vec![
             vec![ng_edge(1), ng_edge(3)],
             vec![ng_edge(2)],
             vec![],
             vec![],
-        ],
+        ]
+        .into(),
         n_pools: 1,
-        pool_stage: vec![0],
+        pool_stage: vec![super::node_graph::StageIdx(0)],
     }
 }
 
@@ -8493,15 +8495,16 @@ fn asymmetric_fan_node_graph() -> super::NodeGraph {
 /// `u64` (`u64::MAX ≈ 1.8·10¹⁹`, so the first multiply already overflows).
 fn overflowing_chain_node_graph() -> super::NodeGraph {
     super::NodeGraph {
-        node_ids: vec![0, 1, 2],
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2)].into(),
         nodes: vec![
             ng_node(0, 6_000_000_000),
             ng_node(1, 6_000_000_000),
             ng_node(2, 6_000_000_000),
-        ],
-        successors: vec![vec![ng_edge(1)], vec![ng_edge(2)], vec![]],
+        ]
+        .into(),
+        successors: vec![vec![ng_edge(1)], vec![ng_edge(2)], vec![]].into(),
         n_pools: 1,
-        pool_stage: vec![0],
+        pool_stage: vec![super::node_graph::StageIdx(0)],
     }
 }
 
@@ -8725,11 +8728,11 @@ fn enumeration_asymmetry_symmetric_declarations_do_not_warn() {
 /// `resolve_enumerated_count` admits for execution.
 fn deterministic_chain_node_graph() -> super::NodeGraph {
     super::NodeGraph {
-        node_ids: vec![0, 1],
-        nodes: vec![ng_node(0, 1), ng_node(1, 1)],
-        successors: vec![vec![ng_edge(1)], vec![]],
+        node_ids: vec![NodeId(0), NodeId(1)].into(),
+        nodes: vec![ng_node(0, 1), ng_node(1, 1)].into(),
+        successors: vec![vec![ng_edge(1)], vec![]].into(),
         n_pools: 1,
-        pool_stage: vec![0],
+        pool_stage: vec![super::node_graph::StageIdx(0)],
     }
 }
 
@@ -8800,16 +8803,17 @@ fn resolve_enumerated_count_rejects_non_deterministic_simulation_as_not_wired() 
 /// recombination guard is what fires.
 fn recombining_tree_node_graph() -> super::NodeGraph {
     super::NodeGraph {
-        node_ids: vec![0, 1, 2, 3],
-        nodes: vec![ng_node(0, 1), ng_node(1, 1), ng_node(1, 1), ng_node(2, 1)],
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)].into(),
+        nodes: vec![ng_node(0, 1), ng_node(1, 1), ng_node(1, 1), ng_node(2, 1)].into(),
         successors: vec![
             vec![ng_edge(1), ng_edge(2)],
             vec![ng_edge(3)],
             vec![ng_edge(3)],
             vec![],
-        ],
+        ]
+        .into(),
         n_pools: 1,
-        pool_stage: vec![0],
+        pool_stage: vec![super::node_graph::StageIdx(0)],
     }
 }
 
@@ -8828,7 +8832,7 @@ fn resolve_enumerated_training_count_rejects_recombining_node() {
         .successors
         .iter()
         .flatten()
-        .filter(|s| s.child == 3)
+        .filter(|s| s.child == NodePos(3))
         .count();
     assert_eq!(leaf_in_degree, 2, "fixture must recombine at node id 3");
 
@@ -8846,13 +8850,13 @@ fn resolve_enumerated_training_count_rejects_recombining_node() {
 }
 
 /// The SAME recombining graph is admitted by the sampled forward's setup-time
-/// consumer (`sampled_visit_bound`): sampled carries per-trajectory state and
+/// consumer (`pool_cut_stride`): sampled carries per-trajectory state and
 /// needs no single-predecessor assumption, so the recombination guard is
 /// enumerated-only.
 #[test]
 fn sampled_admits_the_recombining_node_graph() {
     let ng = recombining_tree_node_graph();
-    let bound = super::node_graph::sampled_visit_bound(&ng, 8);
+    let bound = super::node_graph::pool_cut_stride(&ng, 8);
     assert_eq!(
         bound.len(),
         ng.n_pools,
@@ -8868,7 +8872,7 @@ fn sampled_admits_the_recombining_node_graph() {
 /// `offset` — the shape a declared node `scenario_id` produces.
 fn ng_external_node(stage: usize, offset: usize) -> super::NodeRuntime {
     super::NodeRuntime {
-        stage,
+        stage: super::node_graph::StageIdx(stage),
         pool_id: 0,
         openings: super::NodeOpenings {
             source: super::OpeningSource::External,
@@ -8884,11 +8888,14 @@ fn ng_external_node(stage: usize, offset: usize) -> super::NodeRuntime {
 /// opening, the shape the sampled-selection guard rejects.
 fn external_pointer_node_graph() -> super::NodeGraph {
     super::NodeGraph {
-        node_ids: vec![7, 9],
-        nodes: vec![ng_node(0, 3), ng_external_node(1, 2)],
-        successors: vec![vec![ng_edge(1)], vec![]],
+        node_ids: vec![NodeId(7), NodeId(9)].into(),
+        nodes: vec![ng_node(0, 3), ng_external_node(1, 2)].into(),
+        successors: vec![vec![ng_edge(1)], vec![]].into(),
         n_pools: 2,
-        pool_stage: vec![0, 1],
+        pool_stage: vec![
+            super::node_graph::StageIdx(0),
+            super::node_graph::StageIdx(1),
+        ],
     }
 }
 
@@ -8928,6 +8935,79 @@ fn scenario_id_under_enumerated_selection_is_admitted() {
     let ng = external_pointer_node_graph();
     super::reject_scenario_id_under_sampled_selection(&ng, true)
         .expect("enumerated selection admits a node scenario_id");
+}
+
+// ---------------------------------------------------------------------------
+// reject_insample_class_under_external_nodes: the unsupported-mixed-config guard
+// ---------------------------------------------------------------------------
+
+/// A non-empty in-sample class alongside an external-column node graph is a named
+/// `Validation` rejection: the in-sample class would sample a wrong opening at the
+/// external column offset, so the mixed config is refused at setup rather than
+/// silently mis-sampled.
+#[test]
+fn insample_class_under_external_nodes_is_rejected_naming_class() {
+    let ng = external_pointer_node_graph();
+
+    // Confirm the fixture genuinely carries an external-column node before asserting.
+    assert!(
+        ng.nodes
+            .iter()
+            .any(|n| n.openings.source == super::OpeningSource::External),
+        "fixture must carry an external-column node"
+    );
+
+    match super::reject_insample_class_under_external_nodes(
+        &ng,
+        (Some(SamplingScheme::External), 1),
+        (Some(SamplingScheme::InSample), 1),
+        (Some(SamplingScheme::InSample), 0),
+    ) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("load"), "names the offending class: {msg}");
+            assert!(
+                msg.contains("external"),
+                "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a mixed-config Validation error, got {other:?}"),
+    }
+}
+
+/// The all-external config whose only in-sample class is zero-entity (the
+/// degenerate NCS an all-external study still carries) is admitted — a class that
+/// draws nothing never trips the guard.
+#[test]
+fn all_external_with_empty_insample_ncs_is_admitted() {
+    let ng = external_pointer_node_graph();
+    super::reject_insample_class_under_external_nodes(
+        &ng,
+        (Some(SamplingScheme::External), 1),
+        (Some(SamplingScheme::External), 1),
+        (Some(SamplingScheme::InSample), 0),
+    )
+    .expect("all-external with an empty in-sample NCS class is admitted");
+}
+
+/// A graph with no external-column node admits non-empty in-sample classes: the
+/// guard is gated on external-node presence, so an ordinary generated graph is
+/// never touched.
+#[test]
+fn insample_classes_without_external_nodes_are_admitted() {
+    let ng = asymmetric_fan_node_graph();
+    assert!(
+        ng.nodes
+            .iter()
+            .all(|n| n.openings.source == super::OpeningSource::Generated),
+        "fixture must be all-generated"
+    );
+    super::reject_insample_class_under_external_nodes(
+        &ng,
+        (Some(SamplingScheme::InSample), 1),
+        (Some(SamplingScheme::InSample), 1),
+        (Some(SamplingScheme::InSample), 0),
+    )
+    .expect("a generated-only graph admits in-sample classes");
 }
 
 /// Documented exhaustive-destructure guard (a compile-fail proxy; trybuild is

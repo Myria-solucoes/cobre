@@ -41,7 +41,7 @@ fn run_simulate<S, C: cobre_comm::Communicator>(
     config: &SimulationConfig,
     output: SimulationOutputSpec<'_>,
     frozen_templates: Option<&[cobre_solver::StageTemplate]>,
-    stage_bases: &[Option<CapturedBasis>],
+    node_bases: &[Option<CapturedBasis>],
     comm: &C,
 ) -> Result<super::SimulationRunResult, SimulationError>
 where
@@ -57,7 +57,7 @@ where
         config,
         output,
         frozen_templates,
-        stage_bases,
+        node_bases,
         comm,
     };
     state.run(&mut inputs)
@@ -75,7 +75,7 @@ fn run_simulate_with_profile<S, C: cobre_comm::Communicator>(
     config: &SimulationConfig,
     output: SimulationOutputSpec<'_>,
     frozen_templates: Option<&[cobre_solver::StageTemplate]>,
-    stage_bases: &[Option<CapturedBasis>],
+    node_bases: &[Option<CapturedBasis>],
     comm: &C,
     profile: cobre_solver::ActiveProfile,
 ) -> Result<super::SimulationRunResult, SimulationError>
@@ -93,7 +93,7 @@ where
         config,
         output,
         frozen_templates,
-        stage_bases,
+        node_bases,
         comm,
     };
     state.run(&mut inputs)
@@ -1897,9 +1897,12 @@ mod dcs_simulation {
     use crate::dcs::DcsParams;
     use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
     use crate::horizon_mode::HorizonMode;
+    use crate::setup::NodePos;
 
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::{PatchBuffer, StageGeometry};
+    use crate::setup::NodeId;
+    use crate::setup::node_graph::StageIdx;
     use crate::simulation::types::{SimulationCostResult, SimulationStageResult};
     use crate::test_support;
     use crate::workspace::{SolverWorkspace, WorkspaceSizing};
@@ -1990,13 +1993,13 @@ mod dcs_simulation {
     /// omits the binding slot 1 (stale `last_active_iter`).
     fn sim_pool() -> FutureCostFunction {
         let mut fcf = FutureCostFunction::new(1, 1, 8, 10, &[0]);
-        fcf.add_cut(0, 0, 0, 0, 1.0, &[0.0]);
-        fcf.add_cut(0, 0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
-        fcf.add_cut(0, 0, 0, 2, 3.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 1.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
+        fcf.add_cut(NodeId(0), 0, 0, 2, 3.0, &[0.0]);
         let meta = |generated: u64, last: u64| CutMetadata {
             iteration_generated: generated,
             forward_pass_index: 0,
-            node: 0,
+            node: NodeId(0),
             active_count: 0,
             last_active_iter: last,
         };
@@ -2164,11 +2167,11 @@ mod dcs_simulation {
             event_sender: None,
         };
         let ids = SimStageIds {
-            t: 0,
+            t: StageIdx(0),
             stage_id_u32: 0,
             scenario_id: 0,
-            node: 0,
-            node_id: 0,
+            node: NodePos(0),
+            node_id: NodeId(0),
         };
         let load_spec = SimStageLoadSpec {
             frozen_template: frozen,
@@ -2326,6 +2329,9 @@ mod anticipated_ring_matches_forward_propagation {
     use crate::indexer::StateSpace;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::PatchBuffer;
+    use crate::setup::NodeId;
+    use crate::setup::NodePos;
+    use crate::setup::node_graph::StageIdx;
     use crate::simulation::extraction::EntityCounts;
     use crate::test_support;
     use crate::training::forward::{StageKey, run_forward_stage};
@@ -2500,7 +2506,7 @@ mod anticipated_ring_matches_forward_propagation {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
-                node_id: 0,
+                node_id: NodeId(0),
                 state: Vec::new(),
             })
             .collect();
@@ -2509,7 +2515,7 @@ mod anticipated_ring_matches_forward_propagation {
         for (t, template) in templates.iter().enumerate() {
             ws.solver.load_model(template);
             let key = StageKey {
-                t,
+                t: StageIdx(t),
                 m: 0,
                 local_m: 0,
                 num_stages: N_STAGES,
@@ -2519,7 +2525,7 @@ mod anticipated_ring_matches_forward_propagation {
                 terminal_has_boundary_cuts: false,
                 pool: &fcf.pools[t],
                 dcs: None,
-                node: t,
+                node: NodePos(t),
             };
             run_forward_stage(
                 &mut ws,
@@ -2609,11 +2615,11 @@ mod anticipated_ring_matches_forward_propagation {
         for (t, template) in templates.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let ids = SimStageIds {
-                t,
+                t: StageIdx(t),
                 stage_id_u32: t as u32,
                 scenario_id: 0,
-                node: t,
-                node_id: t as i32,
+                node: NodePos(t),
+                node_id: NodeId(t as i32),
             };
             let load_spec = SimStageLoadSpec {
                 frozen_template: template,
@@ -2737,11 +2743,12 @@ mod anticipated_ring_matches_forward_propagation {
 #[test]
 fn simulation_node_pin_is_none_for_generated_and_declared_column_for_external() {
     use crate::setup::node_graph::{
-        NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource, node_pinned_scenario,
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        StageIdx, node_pinned_scenario,
     };
 
     let external = NodeRuntime {
-        stage: 0,
+        stage: StageIdx(0),
         pool_id: 0,
         openings: NodeOpenings {
             source: OpeningSource::External,
@@ -2751,7 +2758,7 @@ fn simulation_node_pin_is_none_for_generated_and_declared_column_for_external() 
         },
     };
     let generated = NodeRuntime {
-        stage: 1,
+        stage: StageIdx(1),
         pool_id: 1,
         openings: NodeOpenings {
             source: OpeningSource::Generated,
@@ -2761,19 +2768,20 @@ fn simulation_node_pin_is_none_for_generated_and_declared_column_for_external() 
         },
     };
     let ng = NodeGraph {
-        node_ids: vec![0, 1],
-        nodes: vec![external, generated],
+        node_ids: vec![NodeId(0), NodeId(1)].into(),
+        nodes: vec![external, generated].into(),
         successors: vec![
             vec![NodeSuccessor {
-                child: 1,
+                child: NodePos(1),
                 probability: 1.0,
             }],
             Vec::new(),
-        ],
+        ]
+        .into(),
         n_pools: 2,
-        pool_stage: vec![0, 1],
+        pool_stage: vec![StageIdx(0), StageIdx(1)],
     };
 
-    assert_eq!(node_pinned_scenario(&ng, 0), Some(5));
-    assert_eq!(node_pinned_scenario(&ng, 1), None);
+    assert_eq!(node_pinned_scenario(&ng, NodePos(0)), Some(5));
+    assert_eq!(node_pinned_scenario(&ng, NodePos(1)), None);
 }

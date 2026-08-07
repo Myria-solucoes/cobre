@@ -90,13 +90,13 @@ use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::setup::SimulationEnumeratedRequest;
+use cobre_sddp::setup::Traversal;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
-    ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SimulationWeighting,
-    SolverStatsDelta, StochasticSource, StochasticSummary, StudyParams, StudySetup,
-    build_hydro_model_summary, build_provenance_report, build_stochastic_summary,
-    prepare_stochastic,
+    ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
+    StochasticSource, StochasticSummary, StudyParams, StudySetup, build_hydro_model_summary,
+    build_provenance_report, build_stochastic_summary, prepare_stochastic,
 };
 use cobre_solver::ActiveSolver;
 use cobre_solver::active_solver_metadata_id;
@@ -695,18 +695,22 @@ pub(crate) fn run_simulation_phase_py(
         SolverStatsDelta::accumulate_into(&mut agg, delta);
     }
 
-    // The weighting arm mirrors the resolved simulation source, matching the
-    // CLI path (`cobre-cli`'s `run/simulation.rs`): a declared census
-    // (admitted only at derived == 1, `setup/mod.rs::resolve_enumerated_count`)
-    // reports the exact leaf-path expectation; sampled selection reports the
-    // Monte-Carlo sample mean.
-    let census_weights = [1.0];
-    let weighting = match setup.simulation_enumerated {
-        SimulationEnumeratedRequest::Enumerated => SimulationWeighting::Census {
-            weights: &census_weights,
-        },
-        SimulationEnumeratedRequest::Sampled => SimulationWeighting::Uniform,
-    };
+    // The weighting is derived from the resolved simulation Traversal, never
+    // chosen beside it, matching the CLI path (`cobre-cli`'s
+    // `run/simulation.rs`): `Census` is reachable only through
+    // `Traversal::Enumerated` (admitted only at derived == 1,
+    // `setup/mod.rs::resolve_enumerated_count`), which reports the exact
+    // leaf-path expectation; `Traversal::Sampled` reports the Monte-Carlo
+    // sample mean.
+    let simulation_traversal = Traversal::resolve(
+        &setup.node_graph,
+        matches!(
+            setup.simulation_enumerated,
+            SimulationEnumeratedRequest::Enumerated
+        ),
+        setup.simulation_config.n_scenarios,
+    );
+    let weighting = simulation_traversal.simulation_weighting();
     let (cost_summary, gathered_scenario_costs) = aggregate_simulation(
         &sim_run_result.costs,
         setup.simulation_config(),
@@ -1082,10 +1086,23 @@ pub(crate) fn apply_training_policy_mode(
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
         let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
+        // The pre-replacement (cold-path) FCF already carries the per-pool
+        // arrays `new_per_pool` derived for this study; the resume path
+        // reuses them verbatim rather than substituting a scalar.
+        let pool_state_dimensions: Vec<usize> =
+            setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+        let visit_bounds: Vec<u64> = setup
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
             setup.loop_params.forward_passes,
             setup.loop_params.max_iterations.saturating_add(1),
         )
@@ -1119,10 +1136,23 @@ pub(crate) fn apply_training_policy_mode(
 
         let completed = u64::from(checkpoint.metadata.producer.completed_iterations);
 
+        // The pre-replacement (cold-path) FCF already carries the per-pool
+        // arrays `new_per_pool` derived for this study; the resume path
+        // reuses them verbatim rather than substituting a scalar.
+        let pool_state_dimensions: Vec<usize> =
+            setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+        let visit_bounds: Vec<u64> = setup
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
             setup.loop_params.forward_passes,
             setup.loop_params.max_iterations.saturating_add(1),
         )
@@ -1209,8 +1239,14 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
     let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
-    let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
-        .map_err(|e| format!("FCF reconstruction error: {e}"))?;
+    let pool_state_dimensions: Vec<usize> =
+        setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+    let loaded_fcf = FutureCostFunction::from_deserialized(
+        &proof,
+        &checkpoint.stage_cuts,
+        &pool_state_dimensions,
+    )
+    .map_err(|e| format!("FCF reconstruction error: {e}"))?;
 
     let basis_cache = build_basis_cache_from_checkpoint(
         &checkpoint.stage_bases,
@@ -1908,8 +1944,8 @@ mod tests {
         };
 
         let stats_log = vec![
-            SolverStatsLogEntry::from_raw(0, "forward", 0, -1, 0, -1, forward_delta),
-            SolverStatsLogEntry::from_raw(0, "backward", 0, 0, 0, 0, backward_delta),
+            SolverStatsLogEntry::from_raw(0, "forward", Some(0), -1, 0, -1, forward_delta),
+            SolverStatsLogEntry::from_raw(0, "backward", Some(0), 0, 0, 0, backward_delta),
         ];
 
         // The helper returns the 5 phase-derived counts only. `total_lp_solves`
@@ -2341,5 +2377,48 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    /// The Python bindings derive their simulation weighting from the resolved
+    /// `Traversal`, exactly as the training-and-simulate path does — under a
+    /// sampled selection this can only ever resolve to `Uniform`, never
+    /// `Census`, regardless of what a caller might otherwise assemble beside it.
+    /// Python-free (no GIL token), mirroring the CLI's own test.
+    #[test]
+    fn simulation_weighting_census_underivable_from_sampled_traversal() {
+        use cobre_sddp::SimulationWeighting;
+        use cobre_sddp::setup::{
+            NodeGraph, NodeId, NodeOpenings, NodeRuntime, OpeningSource, StageIdx, Traversal,
+        };
+
+        let ng = NodeGraph {
+            node_ids: vec![NodeId(0)].into(),
+            nodes: vec![NodeRuntime {
+                stage: StageIdx(0),
+                pool_id: 0,
+                openings: NodeOpenings {
+                    source: OpeningSource::Generated,
+                    offset: 0,
+                    len: 1,
+                    q: 1.0,
+                },
+            }]
+            .into(),
+            successors: vec![Vec::new()].into(),
+            n_pools: 1,
+            pool_stage: vec![StageIdx(0)],
+        };
+
+        let sampled = Traversal::resolve(&ng, false, 10);
+        assert!(matches!(
+            sampled.simulation_weighting(),
+            SimulationWeighting::Uniform
+        ));
+
+        let enumerated = Traversal::resolve(&ng, true, 1);
+        assert!(matches!(
+            enumerated.simulation_weighting(),
+            SimulationWeighting::Census { .. }
+        ));
     }
 }

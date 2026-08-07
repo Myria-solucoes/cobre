@@ -11,14 +11,18 @@ use cobre_core::{TrainingEvent, WorkerTimingPhase};
 use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, SolverStatistics, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
+#[cfg(test)]
+use cobre_stochastic::select_transition_child;
 use cobre_stochastic::{
     ClassDimensions, ClassSampleRequest, ForwardSampler, ForwardSamplerConfig, SampleRequest,
-    build_forward_sampler, select_transition_child,
+    build_forward_sampler,
 };
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
+#[cfg(test)]
+use crate::setup::node_graph::NodeId;
 use crate::training_session::iteration_scratch::IterationScratch;
 use crate::training_session::rank_distribution::RankDistribution;
 use crate::training_session::runtime::RuntimeHandles;
@@ -28,11 +32,14 @@ use crate::{
     cut::FutureCostFunction,
     error::SddpError,
     forward::{
-        EnumeratedForwardResult, EnumeratedForwardState, EnumeratedParams, ForwardResult, StageKey,
-        run_enumerated_forward, run_forward_stage,
+        EnumeratedForwardResult, EnumeratedForwardScratch, EnumeratedParams, ForwardResult,
+        StageKey, run_enumerated_forward, run_forward_stage,
     },
     indexer::StateSpace,
-    setup::node_graph::{any_stage_node, frontier_node, node_opening_range},
+    setup::node_graph::{
+        EnumeratedPlan, NodePos, StageIdx, Traversal, advance_sampled_node, any_stage_node,
+        frontier_node, node_opening_range,
+    },
     solve::partition,
     solver_phase::Phase,
     solver_stats::SolverStatsDelta,
@@ -134,7 +141,7 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub terminal_has_boundary_cuts: bool,
     /// The stage-0 root's canonical `NodeGraph` position — every trajectory's
     /// walk starts here. A chain-degenerate graph's root is `nodes[0]`.
-    pub root_node: usize,
+    pub root_node: NodePos,
     /// Noise dimension for worker-local sampling buffers (`OutOfSample` path).
     pub noise_dim: usize,
     /// Initial reservoir state shared across all workers.
@@ -228,14 +235,19 @@ pub(crate) struct ForwardPassState {
     /// [`Self::set_profile`] before the first `run()` call.
     profile: ActiveProfile,
 
-    /// `true` when `selection = enumerated`: [`Self::run`] dispatches to the
-    /// enumerated all-paths engine instead of the sampled by-scenario driver.
-    /// Set once via [`Self::set_enumerated`]; defaults to `false` (sampled).
-    enumerated: bool,
+    /// The resolved forward-traversal axis: [`Self::run`] dispatches on this
+    /// directly (no separate flag), so "selected enumerated but carries no
+    /// plan" is unrepresentable. Set once via [`Self::set_traversal`];
+    /// defaults to `Traversal::Sampled { forward_passes: 0 }` — the
+    /// `run_forward_pass` test shim never calls `set_traversal`, matching its
+    /// existing sampled-only behavior.
+    traversal: Traversal,
 
-    /// Graph-invariant enumerated traversal plan + reused arenas, built lazily
-    /// on the first enumerated run. `None` on the sampled path.
-    enumerated_state: Option<EnumeratedForwardState>,
+    /// Reused per-run mutable scratch for the enumerated engine (arena,
+    /// per-worker capture buffers). Meaningful only while `traversal` is
+    /// `Enumerated`; always present (never `Option`) and grows to size on the
+    /// first enumerated `run()`, so no allocation occurs after warm-up.
+    enumerated_scratch: EnumeratedForwardScratch,
 }
 
 impl ForwardPassState {
@@ -268,8 +280,8 @@ impl ForwardPassState {
             stage_stats,
             reconcile_scratch: [0_i32; 1],
             profile: Phase::Forward.profile(),
-            enumerated: false,
-            enumerated_state: None,
+            traversal: Traversal::default(),
+            enumerated_scratch: EnumeratedForwardScratch::default(),
         }
     }
 
@@ -279,11 +291,19 @@ impl ForwardPassState {
         self.profile = profile;
     }
 
-    /// Routes [`Self::run`] to the enumerated all-paths engine (`true`) or the
-    /// sampled by-scenario driver (`false`, the default). Set once from
-    /// `selection`; there is no separate forward-scheduler knob.
-    pub(crate) fn set_enumerated(&mut self, enumerated: bool) {
-        self.enumerated = enumerated;
+    /// Routes [`Self::run`] to the enumerated all-paths engine
+    /// (`Traversal::Enumerated`) or the sampled by-scenario driver
+    /// (`Traversal::Sampled`, the default). Set once from the resolved
+    /// selection; there is no separate forward-scheduler knob.
+    pub(crate) fn set_traversal(&mut self, traversal: Traversal) {
+        self.traversal = traversal;
+    }
+
+    /// The resolved forward-traversal axis, for a caller (the training
+    /// session) that needs to read it after `run()` returns — e.g.
+    /// `Traversal::path_weights()` for the exact upper-bound reduction.
+    pub(crate) fn traversal(&self) -> &Traversal {
+        &self.traversal
     }
 
     /// Execute the forward pass for one training iteration on this rank.
@@ -356,138 +376,146 @@ impl ForwardPassState {
             external_ncs_library: training_ctx.external_ncs_library,
         })?;
 
-        if self.enumerated {
-            return self.run_enumerated(inputs, &sampler);
-        }
+        // Taken out for the match's duration so `self` stays freely `&mut`-usable
+        // inside both arms (the `Enumerated` arm's `plan` borrows this local, not
+        // `self`); restored before returning. Zero-allocation: `Traversal::default()`
+        // is a stack-only `Sampled` variant.
+        let traversal = std::mem::take(&mut self.traversal);
+        let result = match &traversal {
+            Traversal::Enumerated(plan) => self.run_enumerated(inputs, &sampler, plan),
+            Traversal::Sampled { .. } => 'sampled: {
+                let n_workers = inputs.workspaces.len().max(1);
+                let start = Instant::now();
 
-        let n_workers = inputs.workspaces.len().max(1);
-        let start = Instant::now();
-
-        let mut remaining: &mut [TrajectoryRecord] = inputs.records;
-        let mut record_slices: Vec<&mut [TrajectoryRecord]> = Vec::with_capacity(n_workers);
-        for w in 0..n_workers {
-            let (start_m, end_m) = partition(forward_passes, n_workers, w);
-            let (slice, rest) = remaining.split_at_mut((end_m - start_m) * num_stages);
-            record_slices.push(slice);
-            remaining = rest;
-        }
-        let basis_slices = inputs.basis_store.split_workers_mut(n_workers);
-
-        let noise_dim = stochastic.dim();
-
-        let root_node = frontier_node(training_ctx.node_graph, 0);
-
-        let terminal_has_boundary_cuts = num_stages > 0 && {
-            let terminal_node = any_stage_node(training_ctx.node_graph, num_stages - 1);
-            inputs.fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count
-                > 0
-        };
-
-        // Re-size the per-worker per-stage accumulators: the worker count may
-        // differ from `new()` if the pool shrank. Fast path resets in place when
-        // the shape is unchanged; otherwise rebuild to `(n_workers, num_stages)`.
-        let shape_matches = self.worker_stage_stats.len() == n_workers
-            && self.worker_stage_stats.first().map_or(0, Vec::len) == num_stages;
-        if shape_matches {
-            for inner in &mut self.worker_stage_stats {
-                for d in inner.iter_mut() {
-                    d.reset_in_place();
+                let mut remaining: &mut [TrajectoryRecord] = inputs.records;
+                let mut record_slices: Vec<&mut [TrajectoryRecord]> = Vec::with_capacity(n_workers);
+                for w in 0..n_workers {
+                    let (start_m, end_m) = partition(forward_passes, n_workers, w);
+                    let (slice, rest) = remaining.split_at_mut((end_m - start_m) * num_stages);
+                    record_slices.push(slice);
+                    remaining = rest;
                 }
-            }
-        } else {
-            self.worker_stage_stats.clear();
-            for _ in 0..n_workers {
-                self.worker_stage_stats.push(
-                    (0..num_stages)
-                        .map(|_| SolverStatsDelta::default())
-                        .collect(),
-                );
-            }
-        }
+                let basis_slices = inputs.basis_store.split_workers_mut(n_workers);
 
-        self.worker_stats_before.clear();
-        self.worker_stats_before
-            .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
+                let noise_dim = stochastic.dim();
 
-        // Apply the forward-phase solver profile to every workspace. `set_profile`
-        // is delta-tracked: it issues solver-option FFI calls only for fields that
-        // differ from each solver's current state.
-        let forward_profile = self.profile;
-        for ws in inputs.workspaces.iter_mut() {
-            ws.solver.set_profile(&forward_profile);
-            debug_assert!(
-                ws.solver.current_profile() == &forward_profile,
-                "solver profile must equal the profile passed to set_profile"
-            );
-        }
+                let (root_node, terminal_has_boundary_cuts) =
+                    match Self::resolve_root_and_terminal_cuts(training_ctx, num_stages, inputs.fcf)
+                    {
+                        Ok(pair) => pair,
+                        Err(e) => break 'sampled Err(e),
+                    };
 
-        for ws in inputs.workspaces.iter_mut() {
-            ws.worker_timing_buf = WorkerPhaseTimings::default();
-        }
+                // Re-size the per-worker per-stage accumulators: the worker count may
+                // differ from `new()` if the pool shrank. Fast path resets in place when
+                // the shape is unchanged; otherwise rebuild to `(n_workers, num_stages)`.
+                let shape_matches = self.worker_stage_stats.len() == n_workers
+                    && self.worker_stage_stats.first().map_or(0, Vec::len) == num_stages;
+                if shape_matches {
+                    for inner in &mut self.worker_stage_stats {
+                        for d in inner.iter_mut() {
+                            d.reset_in_place();
+                        }
+                    }
+                } else {
+                    self.worker_stage_stats.clear();
+                    for _ in 0..n_workers {
+                        self.worker_stage_stats.push(
+                            (0..num_stages)
+                                .map(|_| SolverStatsDelta::default())
+                                .collect(),
+                        );
+                    }
+                }
 
-        let parallel_start = Instant::now();
-        // Drain `worker_stage_stats` into the parallel closure; the updated stats
-        // come back via each `ForwardWorkerResult` so the allocation is recycled.
-        let worker_stage_stats_for_par: Vec<Vec<SolverStatsDelta>> =
-            std::mem::take(&mut self.worker_stage_stats);
+                self.worker_stats_before.clear();
+                self.worker_stats_before
+                    .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
 
-        let params = ForwardWorkerParams {
-            forward_passes,
-            total_forward_passes: inputs.total_forward_passes,
-            num_stages,
-            n_workers,
-            iteration: inputs.iteration,
-            fwd_offset: inputs.fwd_offset,
-            terminal_has_boundary_cuts,
-            root_node,
-            noise_dim,
-            initial_state,
-            lag_accum_seed,
-            lag_weight_seed,
-            state,
-            ctx: inputs.ctx,
-            frozen: inputs.frozen,
-            fcf: inputs.fcf,
-            training_ctx,
-            sampler: &sampler,
-        };
-        let worker_results: Vec<Result<ForwardWorkerResult, SddpError>> = inputs
-            .workspaces
-            .par_iter_mut()
-            .zip(record_slices.par_iter_mut())
-            .zip(basis_slices.into_par_iter())
-            .zip(worker_stage_stats_for_par.into_par_iter())
-            .enumerate()
-            .map(
-                |(w, (((ws, worker_records), mut basis_slice), mut per_stage_stats))| {
-                    run_forward_worker(
-                        w,
-                        ws,
-                        worker_records,
-                        &mut basis_slice,
-                        &mut per_stage_stats,
-                        &params,
+                // Apply the forward-phase solver profile to every workspace. `set_profile`
+                // is delta-tracked: it issues solver-option FFI calls only for fields that
+                // differ from each solver's current state.
+                let forward_profile = self.profile;
+                for ws in inputs.workspaces.iter_mut() {
+                    ws.solver.set_profile(&forward_profile);
+                    debug_assert!(
+                        ws.solver.current_profile() == &forward_profile,
+                        "solver profile must equal the profile passed to set_profile"
+                    );
+                }
+
+                for ws in inputs.workspaces.iter_mut() {
+                    ws.worker_timing_buf = WorkerPhaseTimings::default();
+                }
+
+                let parallel_start = Instant::now();
+                // Drain `worker_stage_stats` into the parallel closure; the updated stats
+                // come back via each `ForwardWorkerResult` so the allocation is recycled.
+                let worker_stage_stats_for_par: Vec<Vec<SolverStatsDelta>> =
+                    std::mem::take(&mut self.worker_stage_stats);
+
+                let params = ForwardWorkerParams {
+                    forward_passes,
+                    total_forward_passes: inputs.total_forward_passes,
+                    num_stages,
+                    n_workers,
+                    iteration: inputs.iteration,
+                    fwd_offset: inputs.fwd_offset,
+                    terminal_has_boundary_cuts,
+                    root_node,
+                    noise_dim,
+                    initial_state,
+                    lag_accum_seed,
+                    lag_weight_seed,
+                    state,
+                    ctx: inputs.ctx,
+                    frozen: inputs.frozen,
+                    fcf: inputs.fcf,
+                    training_ctx,
+                    sampler: &sampler,
+                };
+                let worker_results: Vec<Result<ForwardWorkerResult, SddpError>> = inputs
+                    .workspaces
+                    .par_iter_mut()
+                    .zip(record_slices.par_iter_mut())
+                    .zip(basis_slices.into_par_iter())
+                    .zip(worker_stage_stats_for_par.into_par_iter())
+                    .enumerate()
+                    .map(
+                        |(w, (((ws, worker_records), mut basis_slice), mut per_stage_stats))| {
+                            run_forward_worker(
+                                w,
+                                ws,
+                                worker_records,
+                                &mut basis_slice,
+                                &mut per_stage_stats,
+                                &params,
+                            )
+                        },
                     )
-                },
-            )
-            .collect();
+                    .collect();
 
-        #[allow(clippy::cast_possible_truncation)]
-        let parallel_wall_ms = parallel_start.elapsed().as_millis() as u64;
+                #[allow(clippy::cast_possible_truncation)]
+                let parallel_wall_ms = parallel_start.elapsed().as_millis() as u64;
 
-        let ppc = PostProcessContext {
-            n_workers,
-            num_stages,
-            parallel_wall_ms,
-            start,
+                let ppc = PostProcessContext {
+                    n_workers,
+                    num_stages,
+                    parallel_wall_ms,
+                    start,
+                };
+                self.post_process_worker_results(inputs, worker_results, &ppc)
+            }
         };
-        self.post_process_worker_results(inputs, worker_results, &ppc)
+        self.traversal = traversal;
+        result
     }
 
     /// Enumerated all-paths forward for one iteration: dispatched from
-    /// [`Self::run`] when `selection = enumerated`. Applies the forward profile,
-    /// builds (once) the graph-invariant traversal plan, and drives the by-node
-    /// engine, whose per-path costs feed the exact `Σ P(ℓ)·C(ℓ)` bound.
+    /// [`Self::run`] under `Traversal::Enumerated`. Applies the forward
+    /// profile and drives the by-node engine against the already-resolved
+    /// `plan` (built once, at `Traversal` resolution — never re-derived
+    /// here), whose per-path costs feed the exact `Σ P(ℓ)·C(ℓ)` bound.
     ///
     /// # Errors
     ///
@@ -496,6 +524,7 @@ impl ForwardPassState {
         &mut self,
         inputs: &mut ForwardPassInputs<'_, S>,
         sampler: &ForwardSampler<'_>,
+        plan: &EnumeratedPlan,
     ) -> Result<ForwardResult, SddpError>
     where
         S: SolverInterface<Profile = ActiveProfile> + Send,
@@ -503,7 +532,6 @@ impl ForwardPassState {
         let start = Instant::now();
         let training_ctx = inputs.training_ctx;
         let num_stages = training_ctx.horizon.num_stages();
-        let n_state = training_ctx.state.n_state;
 
         let forward_profile = self.profile;
         for ws in inputs.workspaces.iter_mut() {
@@ -513,13 +541,19 @@ impl ForwardPassState {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
-        let terminal_has_boundary_cuts = num_stages > 0 && {
-            let terminal_node = any_stage_node(training_ctx.node_graph, num_stages - 1);
+        let terminal_has_boundary_cuts = if num_stages > 0 {
+            let terminal_node = any_stage_node(training_ctx.node_graph, StageIdx(num_stages - 1))
+                .ok_or_else(|| {
+                SddpError::Validation(
+                    "forward pass: terminal stage carries no alive node".to_string(),
+                )
+            })?;
             inputs.fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count
                 > 0
+        } else {
+            false
         };
 
-        let node_graph = training_ctx.node_graph;
         let dcs_params = training_ctx.dcs.filter(|p| p.is_active(inputs.iteration));
 
         let params = EnumeratedParams {
@@ -541,15 +575,13 @@ impl ForwardPassState {
             dcs: dcs_params,
         };
 
-        let enum_state = self
-            .enumerated_state
-            .get_or_insert_with(|| EnumeratedForwardState::new(node_graph, n_state));
         let EnumeratedForwardResult {
             scenario_costs,
             lp_solves,
             stage_stats,
         } = run_enumerated_forward(
-            enum_state,
+            plan,
+            &mut self.enumerated_scratch,
             inputs.workspaces,
             inputs.basis_store,
             inputs.records,
@@ -567,6 +599,35 @@ impl ForwardPassState {
             scheduling_overhead_ms: 0,
             stage_stats,
         })
+    }
+
+    /// Resolve the sampled traversal's root node and whether its terminal
+    /// pool carries warm-start boundary cuts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SddpError::Validation`] if stage 0 or the terminal stage
+    /// carries no alive node.
+    fn resolve_root_and_terminal_cuts(
+        training_ctx: &TrainingContext<'_>,
+        num_stages: usize,
+        fcf: &FutureCostFunction,
+    ) -> Result<(NodePos, bool), SddpError> {
+        let root_node = frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
+            SddpError::Validation("forward pass: stage 0 carries no alive node".to_string())
+        })?;
+        let terminal_has_boundary_cuts = if num_stages > 0 {
+            let terminal_node = any_stage_node(training_ctx.node_graph, StageIdx(num_stages - 1))
+                .ok_or_else(|| {
+                SddpError::Validation(
+                    "forward pass: terminal stage carries no alive node".to_string(),
+                )
+            })?;
+            fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count > 0
+        } else {
+            false
+        };
+        Ok((root_node, terminal_has_boundary_cuts))
     }
 
     /// Sequential post-processing after the rayon parallel region.
@@ -708,7 +769,7 @@ impl ForwardPassState {
 // RATIONALE: one sequential per-(stage, trajectory) pipeline — node/state
 // resolution, LP solve, and the transition-draw advance are load-bearing
 // ordering, not independent steps a split would clarify; the numerical work
-// itself is already delegated to `run_forward_stage`/`select_transition_child`.
+// itself is already delegated to `run_forward_stage`/`advance_sampled_node`.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     w: usize,
@@ -762,11 +823,11 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     // `per_stage_stats`, so an iterator over `per_stage_stats` alone would not
     // eliminate the range index.
     #[allow(clippy::needless_range_loop)]
-    for t in 0..params.num_stages {
+    for t in (0..params.num_stages).map(StageIdx) {
         let cum_d = params
             .ctx
             .cumulative_discount_factors
-            .get(t)
+            .get(t.0)
             .copied()
             .unwrap_or(1.0);
 
@@ -800,15 +861,15 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             // a per-trajectory walk needs no parent-node lookup: every edge is
             // t -> t+1, so the state that fed this visit is always this same
             // trajectory's own `t - 1` solve, on a chain or a declared graph alike.
-            let src: &[f64] = if t == 0 {
+            let src: &[f64] = if t.0 == 0 {
                 params.initial_state
             } else {
-                &worker_records[local_m * params.num_stages + (t - 1)].state
+                &worker_records[local_m * params.num_stages + (t.0 - 1)].state
             };
             ws.current_state.extend_from_slice(src);
 
             // Seed (or zero) the lag accumulator at trajectory start.
-            if t == 0 {
+            if t.0 == 0 {
                 if params.lag_accum_seed.is_empty() {
                     ws.scratch.lag_accumulator.fill(0.0);
                     ws.scratch.lag_weight_accum.fill(0.0);
@@ -826,11 +887,11 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
 
             let global_scenario = params.fwd_offset + m;
             #[allow(clippy::cast_possible_truncation)]
-            let (i32, s32, t32) = (params.iteration as u32, global_scenario as u32, t as u32);
+            let (i32, s32, t32) = (params.iteration as u32, global_scenario as u32, t.0 as u32);
 
             let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
 
-            if t == 0 {
+            if t.0 == 0 {
                 let class_req = ClassSampleRequest {
                     iteration: i32,
                     scenario: s32,
@@ -852,7 +913,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 iteration: i32,
                 scenario: s32,
                 stage: t32,
-                stage_idx: t,
+                stage_idx: t.0,
                 noise_buf: &mut raw_noise_buf,
                 perm_scratch: &mut perm_scratch,
                 total_scenarios: total_scenarios_u32,
@@ -887,31 +948,13 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             )?;
             let stage_delta =
                 SolverStatsDelta::from_snapshots(&stats_before_stage, &ws.solver.statistics());
-            SolverStatsDelta::accumulate_into(&mut per_stage_stats[t], &stage_delta);
+            SolverStatsDelta::accumulate_into(&mut per_stage_stats[t.0], &stage_delta);
             ws.scratch.trajectory_costs_buf[local_m] += cum_d * stage_cost;
 
-            // Advance this trajectory to the node it will visit at t + 1. A
-            // single out-edge is taken with probability 1 WITHOUT deriving a
-            // seed — no branch means no draw, so the within-node noise stream
-            // above is never perturbed (C1 chain-parity depends on this).
-            if t + 1 < params.num_stages {
-                let successors = &node_graph.successors[node];
-                debug_assert!(
-                    !successors.is_empty(),
-                    "run_forward_worker: node {node} at stage {t} has no out-edge before the \
-                     terminal stage (a graph-construction invariant)"
-                );
-                current_node_buf[local_m] = if successors.len() == 1 {
-                    successors[0].child
-                } else {
-                    let idx = select_transition_child(
-                        i32,
-                        s32,
-                        t32,
-                        successors.iter().map(|s| s.probability),
-                    );
-                    successors[idx].child
-                };
+            // Advance this trajectory to the node it will visit at t + 1
+            // (chain-parity contract stated once at `advance_sampled_node`).
+            if t.next().0 < params.num_stages {
+                current_node_buf[local_m] = advance_sampled_node(node_graph, node, i32, s32, t32);
             }
         }
     }
@@ -1315,7 +1358,7 @@ mod tests {
                     primal: Vec::new(),
                     dual: Vec::new(),
                     stage_cost: 0.0,
-                    node_id: 0,
+                    node_id: NodeId(0),
                     state: Vec::new(),
                 })
                 .collect();
@@ -1609,7 +1652,7 @@ mod tests {
             iteration: 1,
             fwd_offset: 0,
             terminal_has_boundary_cuts: false,
-            root_node: 0,
+            root_node: NodePos(0),
             noise_dim: fx.stochastic.dim(),
             initial_state: &fx.initial_state,
             lag_accum_seed: &[],
@@ -1632,7 +1675,7 @@ mod tests {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
-                node_id: 0,
+                node_id: NodeId(0),
                 state: Vec::new(),
             })
             .collect();
@@ -2180,7 +2223,7 @@ mod tests {
             iteration: 1,
             fwd_offset: 0,
             terminal_has_boundary_cuts: false,
-            root_node: 0,
+            root_node: NodePos(0),
             noise_dim: stochastic.dim(),
             initial_state: &initial_state,
             lag_accum_seed: &lag_accum_seed,
@@ -2209,7 +2252,7 @@ mod tests {
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
-            node_id: 0,
+            node_id: NodeId(0),
             state: Vec::new(),
         }];
         let mut per_stage_stats = vec![SolverStatsDelta::default()];
@@ -2288,8 +2331,8 @@ mod tests {
         let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)
             .expect("declared K-fan graph must build");
 
-        let root = 0_usize;
-        let leaves: Vec<usize> = stage_frontier(&node_graph, 1).collect();
+        let root = NodePos(0);
+        let leaves: Vec<NodePos> = stage_frontier(&node_graph, StageIdx(1)).collect();
         assert_eq!(leaves.len(), 4, "all 4 leaves must be alive at stage 1");
 
         let expected_leaf_pool = node_graph.nodes[leaves[0]].pool_id;
@@ -2297,10 +2340,10 @@ mod tests {
             expected_leaf_pool, node_graph.nodes[root].pool_id,
             "the shared leaf pool must differ from the root's own pool"
         );
-        let leaf_node_ids: Vec<i32> = leaves.iter().map(|&l| node_graph.node_ids[l]).collect();
+        let leaf_node_ids: Vec<NodeId> = leaves.iter().map(|&l| node_graph.node_ids[l]).collect();
         assert_eq!(
             leaf_node_ids,
-            vec![1, 2, 3, 4],
+            vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
             "each leaf must resolve its OWN declared node id"
         );
 
@@ -2311,7 +2354,7 @@ mod tests {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
-                node_id: 0,
+                node_id: NodeId(0),
                 state: Vec::new(),
             })
             .collect();
@@ -2332,7 +2375,7 @@ mod tests {
             );
             let parent_stage = node_graph.nodes[parent.unwrap()].stage;
             assert_eq!(
-                worker_records[parent_stage].state, root_state,
+                worker_records[parent_stage.0].state, root_state,
                 "leaf {leaf}'s incoming state must equal the root's own outgoing state"
             );
         }
@@ -2393,7 +2436,7 @@ mod tests {
         };
         let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)
             .expect("declared K-fan graph must build");
-        let root = 0_usize;
+        let root = NodePos(0);
 
         let state = state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); 2];
@@ -2510,7 +2553,7 @@ mod tests {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
-                node_id: 0,
+                node_id: NodeId(0),
                 state: Vec::new(),
             })
             .collect();
@@ -2528,7 +2571,7 @@ mod tests {
 
         let successors = &node_graph.successors[root];
         let weights: Vec<f64> = successors.iter().map(|s| s.probability).collect();
-        let mut resolved_leaves: std::collections::BTreeSet<i32> =
+        let mut resolved_leaves: std::collections::BTreeSet<NodeId> =
             std::collections::BTreeSet::new();
         #[allow(clippy::cast_possible_truncation)]
         let pinned_iteration_u32 = pinned_iteration as u32;

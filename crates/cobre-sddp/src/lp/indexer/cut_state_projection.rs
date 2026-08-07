@@ -37,6 +37,10 @@ use super::{CutSlot, InCol, OutCol, REGION_ORDER, StateDim, StateSpace};
 /// for a structurally-zero coefficient.
 #[derive(Debug, Clone)]
 pub struct CutStateProjection {
+    /// Global state-vector [`StateDim`] per cut slot — the projection's own
+    /// global→projected gather index (identity for an all-enabled pool).
+    global_state_indices: Vec<StateDim>,
+
     /// LP incoming column per cut slot (extraction hot path).
     incoming_columns: Vec<InCol>,
 
@@ -74,6 +78,7 @@ impl CutStateProjection {
     /// ```
     #[must_use]
     pub fn new(global: &StateSpace, state_config: StageStateConfig) -> Self {
+        let mut global_state_indices = Vec::new();
         let mut incoming_columns = Vec::new();
         let mut outgoing_columns = Vec::new();
         let mut render_coeff_indices = Vec::new();
@@ -82,6 +87,7 @@ impl CutStateProjection {
         let mut push_dim = |g: StateDim| {
             let reduced_j = incoming_columns.len();
             let outgoing = global.lp_column_for_state(g);
+            global_state_indices.push(g);
             incoming_columns.push(global.state_to_lp_incoming_column(g));
             outgoing_columns.push(outgoing);
             // Drop padding slots, never zero-fill: keeps the default render
@@ -110,6 +116,7 @@ impl CutStateProjection {
         );
 
         Self {
+            global_state_indices,
             incoming_columns,
             outgoing_columns,
             render_coeff_indices,
@@ -123,6 +130,32 @@ impl CutStateProjection {
     #[must_use]
     pub fn n_slots(&self) -> usize {
         self.incoming_columns.len()
+    }
+
+    /// Map a cut slot `s ∈ [0, n_slots())` to the global [`StateDim`] it
+    /// projects — the gather index for reading a `StateDim`-packed trial-state
+    /// vector into the pool's projected slot space.
+    ///
+    /// Identity for an all-enabled pool (`s == global_state_index(s).get()`); a
+    /// reduced pool selects the enabled dimensions, which are NOT a prefix (a
+    /// `storage:false` pool begins at the first inflow-lag [`StateDim`]). Index a
+    /// `StateDim`-packed archive through this, never [`Self::outgoing_column`],
+    /// which remaps inflow-lag slots off the [`StateDim`] axis (to `z_inflow`,
+    /// outside `[0, n_state)`).
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `s >= n_slots()`.
+    #[inline]
+    #[must_use]
+    pub fn global_state_index(&self, s: CutSlot) -> StateDim {
+        let j = s.get();
+        debug_assert!(
+            j < self.n_slots(),
+            "cut slot {j} out of bounds (n_slots = {})",
+            self.n_slots()
+        );
+        self.global_state_indices[j]
     }
 
     /// Map a cut slot `s ∈ [0, n_slots())` to its LP incoming-state column,
@@ -308,6 +341,41 @@ mod tests {
                 cut.incoming_column(CutSlot::new(j)),
                 InCol::new(global.storage_in.start + j),
                 "storage-only slot {j} must map to storage_in.start + {j}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_state_index_is_identity_for_all_enabled() {
+        let global = finalized(3, 2, 0, 0, vec![]);
+        let cut = CutStateProjection::new(&global, ALL_ENABLED);
+
+        assert_eq!(cut.n_slots(), global.n_state);
+        for j in 0..global.n_state {
+            assert_eq!(cut.global_state_index(CutSlot::new(j)), StateDim::new(j));
+        }
+    }
+
+    /// `storage:false, inflow_lags:true` selects the lag dimensions, which begin
+    /// at `StateDim` `N` — NOT a prefix, and where `outgoing_column` would remap
+    /// off the `StateDim` axis; `global_state_index` selects the raw lag dims.
+    #[test]
+    fn global_state_index_selects_nonprefix_enabled_dims() {
+        let global = finalized(2, 1, 0, 0, vec![]);
+        let cut = CutStateProjection::new(
+            &global,
+            StageStateConfig {
+                storage: false,
+                inflow_lags: true,
+            },
+        );
+
+        assert_eq!(cut.n_slots(), global.hydro_count * global.max_par_order);
+        for i in 0..cut.n_slots() {
+            assert_eq!(
+                cut.global_state_index(CutSlot::new(i)),
+                StateDim::new(global.hydro_count + i),
+                "lag slot {i} projects global StateDim N + {i}, not a prefix index"
             );
         }
     }

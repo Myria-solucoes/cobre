@@ -93,10 +93,11 @@ pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
     ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
-    PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload,
-    StageCutsReadResult, StageStatesPayload, StageStatesReadResult, deserialize_stage_basis,
-    deserialize_stage_cuts, deserialize_stage_states, read_policy_checkpoint,
-    serialize_stage_basis, serialize_stage_cuts, serialize_stage_states, write_policy_checkpoint,
+    PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
+    STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
+    StageStatesReadResult, deserialize_stage_basis, deserialize_stage_cuts,
+    deserialize_stage_states, read_policy_checkpoint, serialize_stage_basis, serialize_stage_cuts,
+    serialize_stage_states, write_policy_checkpoint,
 };
 pub use output::{
     ConvergenceSummary, DeviationSummary, DeviationWorstEntry, DistributionInfo, HostLayout,

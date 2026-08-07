@@ -7,12 +7,252 @@
 //! pools, and uniform `q`.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::marker::PhantomData;
+use std::ops::{Index, IndexMut};
 
 use cobre_core::HorizonGraph;
 use cobre_io::StageIdResolver;
-use cobre_stochastic::StochasticContext;
+use cobre_stochastic::{StochasticContext, select_transition_child};
 
 use crate::error::SddpError;
+use crate::simulation::SimulationWeighting;
+
+/// A declared JSON node id — the value stored in [`NodeGraph::node_ids`], never
+/// a position into the graph's parallel arrays.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct NodeId(pub i32);
+
+impl fmt::Display for NodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// A 0-based positional stage index — the study-stage array position
+/// (`stage_data.stages[stage]`, `for t in 0..n_stages`), never [`cobre_core`]'s
+/// declared `StageId`. Runtime-only: an infra crate or a wire payload takes
+/// the bare `usize`/`i32`/`u32`, converted at that boundary exactly as
+/// [`NodeId`] converts at the cut/policy codecs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StageIdx(pub usize);
+
+impl fmt::Display for StageIdx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl StageIdx {
+    /// The next stage position, `self + 1` — the newtype carries no
+    /// arithmetic operator, so every `t -> t+1` advance in the crate routes
+    /// through this one method rather than an ad hoc `.0`-rewrap.
+    #[must_use]
+    pub fn next(self) -> StageIdx {
+        StageIdx(self.0 + 1)
+    }
+}
+
+/// A 0-based canonical position into the node graph's own parallel arrays
+/// (`NodeGraph::nodes`, `successors`, `node_ids`) — never a study-stage index
+/// and never a declared JSON node id. On a chain the two coincide
+/// numerically (`NodePos(t)` and `StageIdx(t)` carry the same raw value at
+/// every position); that numeric coincidence is exactly what let a stage
+/// index stand in for a node position at a call site, silently, across this
+/// crate — `NodePos` makes the substitution a compile error. Runtime-only:
+/// converted to a bare `usize`/`i32` at an infra-crate or wire boundary
+/// (`policy/codec.rs`'s `stage_id` field, the `cobre-cli` broadcast payload),
+/// exactly as [`StageIdx`] converts at its own boundaries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodePos(pub usize);
+
+impl fmt::Display for NodePos {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// A [`TypedVec`] index space: converts to and from the raw storage
+/// position. Adding a new index space wires exactly one impl of this trait;
+/// `pub` only so `TypedVec<Idx, T>`'s own `pub` API (`Index`, `get`) stays
+/// callable from outside this crate, never implemented outside it in
+/// practice.
+pub trait TypedIndex: Copy {
+    /// The raw storage position this index resolves to.
+    fn as_usize(self) -> usize;
+
+    /// Wraps a raw storage position as this index — the inverse of
+    /// [`TypedIndex::as_usize`], letting [`TypedVec::iter_indexed`] hand back
+    /// a typed position without a manual `.enumerate().map(Idx)` at every
+    /// call site.
+    fn from_usize(pos: usize) -> Self;
+}
+
+impl TypedIndex for StageIdx {
+    fn as_usize(self) -> usize {
+        self.0
+    }
+
+    fn from_usize(pos: usize) -> Self {
+        StageIdx(pos)
+    }
+}
+
+impl TypedIndex for NodePos {
+    fn as_usize(self) -> usize {
+        self.0
+    }
+
+    fn from_usize(pos: usize) -> Self {
+        NodePos(pos)
+    }
+}
+
+/// A `Vec<T>` indexable ONLY by `Idx` (`StageIdx` or `NodePos`) — never by a
+/// bare `usize`, so a stage position and a node position cannot be
+/// substituted for each other at a read. No `Deref`: a
+/// `Deref<Target = Vec<T>>` would leak `usize` indexing back in via
+/// coercion, defeating the whole point of the wrapper.
+#[derive(Debug, Clone, PartialEq)]
+#[repr(transparent)]
+pub struct TypedVec<Idx, T>(Vec<T>, PhantomData<Idx>);
+
+impl<Idx, T> TypedVec<Idx, T> {
+    /// An empty `TypedVec`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Vec::new(), PhantomData)
+    }
+
+    /// An empty `TypedVec` pre-allocated for `capacity` elements.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity), PhantomData)
+    }
+
+    /// Iterator over `&T`, in storage order.
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+
+    /// Iterator over `&mut T`, in storage order.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.0.iter_mut()
+    }
+
+    /// Number of elements.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the vector holds no elements.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Appends `value` at the end.
+    pub fn push(&mut self, value: T) {
+        self.0.push(value);
+    }
+
+    /// Borrows the backing storage as a plain `usize`-indexable slice.
+    #[must_use]
+    pub fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<Idx: TypedIndex, T> TypedVec<Idx, T> {
+    /// `&T` at `idx`, or `None` if out of bounds.
+    #[must_use]
+    pub fn get(&self, idx: Idx) -> Option<&T> {
+        self.0.get(idx.as_usize())
+    }
+
+    /// Iterator over `(Idx, &T)` pairs, in storage order — the typed
+    /// counterpart of `Vec::iter().enumerate()`; without it, every read site
+    /// that needs both a value and its own position would fall back to
+    /// enumerating as a bare `usize` and re-wrapping by hand.
+    pub fn iter_indexed(&self) -> impl Iterator<Item = (Idx, &T)> + '_ {
+        self.0
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (Idx::from_usize(i), t))
+    }
+}
+
+impl<Idx, T> Default for TypedVec<Idx, T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Idx: TypedIndex, T> Index<Idx> for TypedVec<Idx, T> {
+    type Output = T;
+
+    fn index(&self, idx: Idx) -> &T {
+        &self.0[idx.as_usize()]
+    }
+}
+
+impl<Idx: TypedIndex, T> IndexMut<Idx> for TypedVec<Idx, T> {
+    fn index_mut(&mut self, idx: Idx) -> &mut T {
+        &mut self.0[idx.as_usize()]
+    }
+}
+
+impl<Idx, T> FromIterator<T> for TypedVec<Idx, T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self(Vec::from_iter(iter), PhantomData)
+    }
+}
+
+impl<Idx, T> IntoIterator for TypedVec<Idx, T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a, Idx, T> IntoIterator for &'a TypedVec<Idx, T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a, Idx, T> IntoIterator for &'a mut TypedVec<Idx, T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
+    }
+}
+
+impl<Idx, T> From<Vec<T>> for TypedVec<Idx, T> {
+    fn from(items: Vec<T>) -> Self {
+        Self(items, PhantomData)
+    }
+}
 
 /// Which substrate a node's [`NodeOpenings`] view addresses. Both are
 /// single-storage, read-only realization stores — `Generated` reads
@@ -69,7 +309,7 @@ impl NodeOpenings {
 pub struct NodeSuccessor {
     /// Dense canonical position of the child in [`NodeGraph::nodes`] — not
     /// its declared JSON node id.
-    pub child: usize,
+    pub child: NodePos,
     /// Normalized transition probability `P(n -> m)` — cobre-io's load-time,
     /// once-only Neumaier normalization (`normalize_out_edge_probabilities`);
     /// never re-normalized here.
@@ -84,7 +324,7 @@ pub struct NodeSuccessor {
 pub struct NodeRuntime {
     /// Study-stage array index (`stage_data.stages[stage]`), not the JSON
     /// stage id.
-    pub stage: usize,
+    pub stage: StageIdx,
     /// Pool id into `FutureCostFunction::pools` (pool *contents* — capacity,
     /// archives, basis tagging — are out of scope here). Leaves
     /// share one id; a node with successors always owns its own.
@@ -98,29 +338,31 @@ pub struct NodeRuntime {
 /// successor list.
 ///
 /// Absent `nodes[]`, `build_node_graph` synthesizes the byte-exact chain
-/// degeneracy: one node per stage, `node_ids[t] = t as i32` (a synthetic
-/// id — the source declared no `nodes[]`), pools 1:1.
+/// degeneracy: one node per stage, `node_ids[t] = NodeId(t as i32)` (a
+/// synthetic id — the source declared no `nodes[]`), pools 1:1.
 #[derive(Debug, Clone)]
 pub struct NodeGraph {
     /// Declared JSON node id at each canonical position (`node_ids.len() ==
     /// nodes.len()`).
-    pub node_ids: Vec<i32>,
+    pub node_ids: TypedVec<NodePos, NodeId>,
     /// Runtime nodes, canonical (ascending `node_ids`) order.
-    pub nodes: Vec<NodeRuntime>,
+    pub nodes: TypedVec<NodePos, NodeRuntime>,
     /// `successors[i]` is node `i`'s out-edge list, ascending child node id —
     /// the load-bearing canonical order (`CVaR`'s tie-break is index-order-sensitive).
-    pub successors: Vec<Vec<NodeSuccessor>>,
+    pub successors: TypedVec<NodePos, Vec<NodeSuccessor>>,
     /// `max(pool_id) + 1`.
     pub n_pools: usize,
     /// `pool_stage[p]` is the study-stage index of the node(s) owning pool `p`
-    /// — the base LP structure a per-pool frozen overlay composes onto
-    /// (`freeze(templates[pool_stage[p]], active_cuts(p))`). Well-defined
-    /// because every node sharing a pool shares one stage (a non-leaf pool has
-    /// exactly one owner; the shared leaf pool's leaves are all terminal).
-    /// The frozen overlay MUST index its base by this, never by a pool ordinal
-    /// used as a stage: on a branching graph `pool_id != stage`. On a chain
-    /// `pool_stage[t] == t`.
-    pub pool_stage: Vec<usize>,
+    /// — indexed by POOL id, never by [`NodePos`] (the pool-id space is
+    /// distinct from both node position and stage index, and is not typed by
+    /// this newtype sweep). The base LP structure a per-pool frozen overlay
+    /// composes onto (`freeze(templates[pool_stage[p]], active_cuts(p))`).
+    /// Well-defined because every node sharing a pool shares one stage (a
+    /// non-leaf pool has exactly one owner; the shared leaf pool's leaves are
+    /// all terminal). The frozen overlay MUST index its base by this, never
+    /// by a pool ordinal used as a stage: on a branching graph
+    /// `pool_id != stage`. On a chain `pool_stage[t] == StageIdx(t)`.
+    pub pool_stage: Vec<StageIdx>,
 }
 
 impl NodeGraph {
@@ -129,7 +371,7 @@ impl NodeGraph {
     /// ([`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint))
     /// keys each node's cut records through this.
     #[must_use]
-    pub fn node_pool_ids(&self) -> Vec<usize> {
+    pub fn node_pool_ids(&self) -> TypedVec<NodePos, usize> {
         self.nodes.iter().map(|n| n.pool_id).collect()
     }
 }
@@ -170,32 +412,38 @@ fn build_chain_node_graph(
     stochastic: &StochasticContext,
 ) -> NodeGraph {
     let tree = stochastic.opening_tree();
-    let mut nodes = Vec::with_capacity(n_stages);
-    let mut successors = Vec::with_capacity(n_stages);
+    let mut nodes = TypedVec::with_capacity(n_stages);
+    let mut successors = TypedVec::with_capacity(n_stages);
+    // On a chain, stage position, pool id, and node position all coincide
+    // numerically with the loop counter `t` — but each is constructed into
+    // its own typed space (`StageIdx`, the untyped pool-id space, `NodePos`)
+    // at its own use, rather than one raw value standing in for all three.
     for t in 0..n_stages {
+        let stage = StageIdx(t);
+        let pool_id = t;
         let len = tree.n_openings(t);
         nodes.push(NodeRuntime {
-            stage: t,
-            pool_id: t,
+            stage,
+            pool_id,
             openings: NodeOpenings::new(OpeningSource::Generated, 0, len),
         });
         if t + 1 < n_stages {
             successors.push(vec![NodeSuccessor {
-                child: t + 1,
-                probability: chain_transition_probability(graph, resolver, t),
+                child: NodePos(t + 1),
+                probability: chain_transition_probability(graph, resolver, stage),
             }]);
         } else {
             successors.push(Vec::new());
         }
     }
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-    let node_ids: Vec<i32> = (0..n_stages as i32).collect();
+    let node_ids: TypedVec<NodePos, NodeId> = (0..n_stages as i32).map(NodeId).collect();
     NodeGraph {
         node_ids,
         nodes,
         successors,
         n_pools: n_stages,
-        pool_stage: (0..n_stages).collect(),
+        pool_stage: (0..n_stages).map(StageIdx).collect(),
     }
 }
 
@@ -204,8 +452,12 @@ fn build_chain_node_graph(
 /// `normalize_out_edge_probabilities` at load time, when declared); `1.0`
 /// when no transition departs the stage — the fully-implicit chain, where a
 /// single deterministic out-edge is structurally required.
-fn chain_transition_probability(graph: &HorizonGraph, resolver: &StageIdResolver, t: usize) -> f64 {
-    let Some(stage_id) = resolver.id_at(t) else {
+fn chain_transition_probability(
+    graph: &HorizonGraph,
+    resolver: &StageIdResolver,
+    t: StageIdx,
+) -> f64 {
+    let Some(stage_id) = resolver.id_at(t.0) else {
         return 1.0;
     };
     graph
@@ -233,9 +485,14 @@ fn build_declared_node_graph(
 ) -> Result<NodeGraph, SddpError> {
     let tree = stochastic.opening_tree();
 
+    // `order[k]` is the original `graph.nodes` index (a `cobre_core`-owned
+    // array, never this crate's own node position) of the node that becomes
+    // canonical position `k`; the two loops below over `order` therefore
+    // build `node_ids`/`nodes` in ascending canonical `NodePos` order.
     let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
     order.sort_by_key(|&i| graph.nodes[i].id);
-    let node_ids: Vec<i32> = order.iter().map(|&i| graph.nodes[i].id).collect();
+    let node_ids: TypedVec<NodePos, NodeId> =
+        order.iter().map(|&i| NodeId(graph.nodes[i].id)).collect();
     // Reject duplicate node ids: the forward/backward warm-start apply guard
     // matches a stored basis to the current LP by `CapturedBasis.node_id`, so a
     // duplicate id would false-match one node's basis onto another's LP (the CLP
@@ -250,34 +507,35 @@ fn build_declared_node_graph(
             "node graph: duplicate node id {dup} declared more than once"
         )));
     }
-    let id_to_position: HashMap<i32, usize> = node_ids
-        .iter()
-        .enumerate()
+    let id_to_position: HashMap<NodeId, NodePos> = node_ids
+        .iter_indexed()
         .map(|(pos, &id)| (id, pos))
         .collect();
     let n = order.len();
 
     // Out-edges per source, canonical (ascending child node id) order — the
-    // load-bearing order CVaR's tie-break depends on.
+    // load-bearing order CVaR's tie-break depends on. Indexed by raw node
+    // position (never `NodePos` itself): purely local bookkeeping over
+    // `graph.transitions` indices, an infra array with its own index space.
     let mut out_edge_idx: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, tr) in graph.transitions.iter().enumerate() {
-        let src_pos = *id_to_position.get(&tr.source_id).ok_or_else(|| {
+        let src_pos = *id_to_position.get(&NodeId(tr.source_id)).ok_or_else(|| {
             SddpError::Validation(format!(
                 "node graph: transition source id {} names no declared node",
                 tr.source_id
             ))
         })?;
-        out_edge_idx[src_pos].push(i);
+        out_edge_idx[src_pos.0].push(i);
     }
 
-    let mut successors: Vec<Vec<NodeSuccessor>> = Vec::with_capacity(n);
+    let mut successors: TypedVec<NodePos, Vec<NodeSuccessor>> = TypedVec::with_capacity(n);
     let mut is_leaf = vec![true; n];
     for (pos, edges) in out_edge_idx.iter_mut().enumerate() {
         edges.sort_by_key(|&i| graph.transitions[i].target_id);
         let mut list = Vec::with_capacity(edges.len());
         for &i in edges.iter() {
             let tr = &graph.transitions[i];
-            let child_pos = *id_to_position.get(&tr.target_id).ok_or_else(|| {
+            let child_pos = *id_to_position.get(&NodeId(tr.target_id)).ok_or_else(|| {
                 SddpError::Validation(format!(
                     "node graph: transition target id {} names no declared node",
                     tr.target_id
@@ -294,7 +552,9 @@ fn build_declared_node_graph(
 
     // node -> pool: non-leaves own a pool each, in canonical node order; all
     // leaves then share ONE trailing pool id — leaf-ness is the whole
-    // condition, unconditional, no boundary-source discriminator.
+    // condition, unconditional, no boundary-source discriminator. Pool id is
+    // its own untyped index space (not part of this newtype sweep), so this
+    // stays a raw-usize-indexed array.
     let mut pool_id = vec![0usize; n];
     let mut next_pool = 0usize;
     for pos in 0..n {
@@ -314,16 +574,16 @@ fn build_declared_node_graph(
     }
     let n_pools = if has_leaf { next_pool + 1 } else { next_pool };
 
-    let mut nodes = Vec::with_capacity(n);
+    let mut nodes: TypedVec<NodePos, NodeRuntime> = TypedVec::with_capacity(n);
     for &pos in &order {
         let node = &graph.nodes[pos];
-        let canonical_pos = id_to_position[&node.id];
-        let stage = resolver.resolve(node.stage_id).ok_or_else(|| {
+        let canonical_pos = id_to_position[&NodeId(node.id)];
+        let stage = StageIdx(resolver.resolve(node.stage_id).ok_or_else(|| {
             SddpError::Validation(format!(
                 "node graph: node {} stage id {} names no declared study stage",
                 node.id, node.stage_id
             ))
-        })?;
+        })?);
         let openings = match node.scenario_id {
             Some(k) => {
                 let offset = usize::try_from(k).map_err(|_| {
@@ -334,11 +594,11 @@ fn build_declared_node_graph(
                 })?;
                 NodeOpenings::new(OpeningSource::External, offset, 1)
             }
-            None => NodeOpenings::new(OpeningSource::Generated, 0, tree.n_openings(stage)),
+            None => NodeOpenings::new(OpeningSource::Generated, 0, tree.n_openings(stage.0)),
         };
         nodes.push(NodeRuntime {
             stage,
-            pool_id: pool_id[canonical_pos],
+            pool_id: pool_id[canonical_pos.0],
             openings,
         });
     }
@@ -348,7 +608,7 @@ fn build_declared_node_graph(
     // so the last writer per pool is also the only stage value written. The
     // debug-only conflict check guards a future leaf-terminality relaxation or a
     // programmatic construction path that bypasses cobre-io validation.
-    let mut pool_stage = vec![0usize; n_pools];
+    let mut pool_stage = vec![StageIdx(0); n_pools];
     #[cfg(debug_assertions)]
     let mut pool_stage_seen = vec![false; n_pools];
     for node in &nodes {
@@ -371,11 +631,11 @@ fn build_declared_node_graph(
     // successor of a node therefore sits exactly one stage downstream —
     // asserted, not re-derived, since this is what makes pool dimension
     // well-defined by construction with no heterogeneity rule.
-    for (pos, node) in nodes.iter().enumerate() {
+    for (pos, node) in nodes.iter_indexed() {
         for succ in &successors[pos] {
             debug_assert_eq!(
                 nodes[succ.child].stage,
-                node.stage + 1,
+                node.stage.next(),
                 "node graph: successor stage must be exactly one downstream of its parent \
                  (t -> t+1) — parent stage {}, child stage {}",
                 node.stage,
@@ -462,12 +722,11 @@ pub(crate) fn max_successor_outcome_count(graph: &NodeGraph) -> usize {
 /// risk), so a level is one cut-sharing barrier. Absent `nodes[]` every stage
 /// carries one such node, so each level holds exactly one node (== that stage)
 /// and the sweep reduces to the reversed stage loop.
-pub(crate) fn backward_cut_levels(graph: &NodeGraph) -> Vec<Vec<usize>> {
-    let cut_generating = |pos: usize| !graph.successors[pos].is_empty();
+pub(crate) fn backward_cut_levels(graph: &NodeGraph) -> Vec<Vec<NodePos>> {
+    let cut_generating = |pos: NodePos| !graph.successors[pos].is_empty();
     let Some(max_stage) = graph
         .nodes
-        .iter()
-        .enumerate()
+        .iter_indexed()
         .filter(|&(pos, _)| cut_generating(pos))
         .map(|(_, n)| n.stage)
         .max()
@@ -475,12 +734,11 @@ pub(crate) fn backward_cut_levels(graph: &NodeGraph) -> Vec<Vec<usize>> {
         return Vec::new();
     };
 
-    let mut levels: Vec<Vec<usize>> = Vec::new();
-    for stage in (0..=max_stage).rev() {
-        let level: Vec<usize> = graph
+    let mut levels: Vec<Vec<NodePos>> = Vec::new();
+    for stage in (0..=max_stage.0).rev().map(StageIdx) {
+        let level: Vec<NodePos> = graph
             .nodes
-            .iter()
-            .enumerate()
+            .iter_indexed()
             .filter(|&(pos, n)| n.stage == stage && cut_generating(pos))
             .map(|(pos, _)| pos)
             .collect();
@@ -515,7 +773,7 @@ pub(crate) fn enumerated_scenario_count(graph: &NodeGraph) -> Result<u64, SddpEr
     }
 
     let n = graph.nodes.len();
-    let mut has_predecessor = vec![false; n];
+    let mut has_predecessor: TypedVec<NodePos, bool> = vec![false; n].into();
     for succs in &graph.successors {
         for succ in succs {
             has_predecessor[succ.child] = true;
@@ -525,10 +783,10 @@ pub(crate) fn enumerated_scenario_count(graph: &NodeGraph) -> Result<u64, SddpEr
     // Resolve `f` in descending-stage order: every successor sits exactly one
     // stage downstream (t -> t+1), so a node's children are already resolved
     // when it is visited.
-    let mut order: Vec<usize> = (0..n).collect();
+    let mut order: Vec<NodePos> = (0..n).map(NodePos).collect();
     order.sort_by(|&a, &b| graph.nodes[b].stage.cmp(&graph.nodes[a].stage));
 
-    let mut subtree = vec![0_u64; n];
+    let mut subtree: TypedVec<NodePos, u64> = vec![0_u64; n].into();
     for &pos in &order {
         let len = u64::try_from(graph.nodes[pos].openings.len).map_err(|_| overflow_err())?;
         let children = if graph.successors[pos].is_empty() {
@@ -546,7 +804,7 @@ pub(crate) fn enumerated_scenario_count(graph: &NodeGraph) -> Result<u64, SddpEr
     }
 
     let mut total = 0_u64;
-    for (pos, &has_pred) in has_predecessor.iter().enumerate() {
+    for (pos, &has_pred) in has_predecessor.iter_indexed() {
         if !has_pred {
             total = total.checked_add(subtree[pos]).ok_or_else(overflow_err)?;
         }
@@ -554,7 +812,7 @@ pub(crate) fn enumerated_scenario_count(graph: &NodeGraph) -> Result<u64, SddpEr
     Ok(total)
 }
 
-/// Standard-deviation multiplier for [`sampled_visit_bound`]'s per-node
+/// Standard-deviation multiplier for [`pool_cut_stride`]'s per-node
 /// margin (mean + this many σ under the binomial approximation for a node's
 /// realized visit count). A chain node's probability is exactly `1.0`, so its
 /// variance term is exactly `0.0` regardless of this value — the chain
@@ -570,6 +828,16 @@ const VISIT_BOUND_SIGMA_MULTIPLIER: f64 = 3.0;
 /// top-down dual of [`enumerated_scenario_count`]'s bottom-up opening-count
 /// walk, propagated in the same ascending/descending-stage order.
 ///
+/// A cut-receipt stride — how many times a pool's cuts get a fresh slot per
+/// iteration — distinct from [`forward_solve_counts`]'s per-node LP-solve
+/// count; the two coincide only where the graph makes visits statically known
+/// (a derived-count-one enumerated graph).
+///
+/// This floor is statistical, not a guarantee: a rare iteration's realized
+/// routed count can exceed it whenever `0 < P(n) < 1`. The training backward
+/// pass rejects that excess rather than silently addressing past the pool's
+/// slot block — see `check_visit_bound` in `training/backward_pass_state.rs`.
+///
 /// A chain node's single successor normalizes to exactly `1.0`
 /// (`chain_transition_probability`), so `P(n) = 1.0`, the variance term is
 /// exactly `0.0`, and the floor is `F` bit-for-bit for every pool — the
@@ -580,9 +848,9 @@ const VISIT_BOUND_SIGMA_MULTIPLIER: f64 = 3.0;
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation
 )]
-pub(crate) fn sampled_visit_bound(graph: &NodeGraph, forward_passes: u32) -> Vec<u64> {
+pub(crate) fn pool_cut_stride(graph: &NodeGraph, forward_passes: u32) -> Vec<u64> {
     let n = graph.nodes.len();
-    let mut has_predecessor = vec![false; n];
+    let mut has_predecessor: TypedVec<NodePos, bool> = vec![false; n].into();
     for succs in &graph.successors {
         for succ in succs {
             has_predecessor[succ.child] = true;
@@ -592,10 +860,10 @@ pub(crate) fn sampled_visit_bound(graph: &NodeGraph, forward_passes: u32) -> Vec
     // Ascending-stage order: every successor sits exactly one stage
     // downstream (t -> t+1), so a node's own probability is fully
     // accumulated from its predecessors before it propagates to its children.
-    let mut order: Vec<usize> = (0..n).collect();
+    let mut order: Vec<NodePos> = (0..n).map(NodePos).collect();
     order.sort_by_key(|&i| graph.nodes[i].stage);
 
-    let mut prob = vec![0.0f64; n];
+    let mut prob: TypedVec<NodePos, f64> = vec![0.0f64; n].into();
     for &i in &order {
         if !has_predecessor[i] {
             prob[i] = 1.0;
@@ -607,7 +875,7 @@ pub(crate) fn sampled_visit_bound(graph: &NodeGraph, forward_passes: u32) -> Vec
 
     let f = f64::from(forward_passes);
     let mut pool_sum = vec![0u64; graph.n_pools];
-    for (i, node) in graph.nodes.iter().enumerate() {
+    for (i, node) in graph.nodes.iter_indexed() {
         let p = prob[i];
         let mean = f * p;
         let variance = (f * p * (1.0 - p)).max(0.0);
@@ -624,14 +892,16 @@ pub(crate) fn sampled_visit_bound(graph: &NodeGraph, forward_passes: u32) -> Vec
 /// `π(n) = Σ_{(parent, n) edges} π(parent)·|Ω_parent|`, `π(root) = 1`, in
 /// canonical node-position order. The per-node dual of
 /// [`enumerated_scenario_count`]'s bottom-up opening walk;
-/// [`enumerated_visit_bound`] sums it per pool. The enumerated forward driver
+/// [`forward_solve_counts`] sums it per pool. The enumerated forward driver
 /// solves node `n` exactly `π(n)` times per iteration. Overflow-safe
 /// (`checked_mul`/`checked_add`), mirroring [`enumerated_scenario_count`].
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] when a path-product-sum exceeds `u64`.
-pub(crate) fn enumerated_node_visit_counts(graph: &NodeGraph) -> Result<Vec<u64>, SddpError> {
+pub(crate) fn enumerated_node_visit_counts(
+    graph: &NodeGraph,
+) -> Result<TypedVec<NodePos, u64>, SddpError> {
     fn overflow_err() -> SddpError {
         SddpError::Validation(
             "enumerated visit bound exceeds u64: the policy graph's root→node \
@@ -641,17 +911,17 @@ pub(crate) fn enumerated_node_visit_counts(graph: &NodeGraph) -> Result<Vec<u64>
     }
 
     let n = graph.nodes.len();
-    let mut has_predecessor = vec![false; n];
+    let mut has_predecessor: TypedVec<NodePos, bool> = vec![false; n].into();
     for succs in &graph.successors {
         for succ in succs {
             has_predecessor[succ.child] = true;
         }
     }
 
-    let mut order: Vec<usize> = (0..n).collect();
+    let mut order: Vec<NodePos> = (0..n).map(NodePos).collect();
     order.sort_by_key(|&i| graph.nodes[i].stage);
 
-    let mut prefix_count = vec![0_u64; n];
+    let mut prefix_count: TypedVec<NodePos, u64> = vec![0_u64; n].into();
     for &i in &order {
         if !has_predecessor[i] {
             prefix_count[i] = 1;
@@ -675,13 +945,18 @@ pub(crate) fn enumerated_node_visit_counts(graph: &NodeGraph) -> Result<Vec<u64>
 /// enumerated forward driver's single-rank per-iteration solve total is
 /// `Σ` of this vector. Overflow-safe, mirroring that function's guard.
 ///
+/// A per-node forward-solve count — how many times the enumerated engine
+/// actually solves each pool's LP — distinct from [`pool_cut_stride`]'s
+/// cut-receipt stride; the two coincide only where the graph makes visits
+/// statically known (a derived-count-one enumerated graph).
+///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] when a path-product-sum exceeds `u64`.
-pub(crate) fn enumerated_visit_bound(graph: &NodeGraph) -> Result<Vec<u64>, SddpError> {
+pub(crate) fn forward_solve_counts(graph: &NodeGraph) -> Result<Vec<u64>, SddpError> {
     let prefix_count = enumerated_node_visit_counts(graph)?;
     let mut pool_sum = vec![0_u64; graph.n_pools];
-    for (i, node) in graph.nodes.iter().enumerate() {
+    for (i, node) in graph.nodes.iter_indexed() {
         pool_sum[node.pool_id] = pool_sum[node.pool_id]
             .checked_add(prefix_count[i])
             .ok_or_else(|| {
@@ -709,48 +984,77 @@ pub(crate) fn enumerated_visit_bound(graph: &NodeGraph) -> Result<Vec<u64>, Sddp
 /// graph's frontier carries more than one node.
 pub(crate) fn stage_frontier(
     node_graph: &NodeGraph,
-    stage: usize,
-) -> impl Iterator<Item = usize> + '_ {
+    stage: StageIdx,
+) -> impl Iterator<Item = NodePos> + '_ {
     node_graph
         .nodes
-        .iter()
-        .enumerate()
+        .iter_indexed()
         .filter(move |(_, n)| n.stage == stage)
         .map(|(pos, _)| pos)
 }
 
-/// The study's sole root: stage `stage`'s one alive node. Used only for
-/// stage-0 root resolution — every sampled trajectory starts here (a
-/// multi-root graph is out of scope for the sampled walk) — so a stage
-/// carrying more than one node here is a `debug_assert`-checked construction
-/// invariant, not a silent default.
-pub(crate) fn frontier_node(node_graph: &NodeGraph, stage: usize) -> usize {
+/// The study's sole root: stage `stage`'s one alive node, or `None` if the
+/// stage carries no alive node. Used only for stage-0 root resolution — every
+/// sampled trajectory starts here (a multi-root graph is out of scope for the
+/// sampled walk) — so a stage carrying more than one node here is a
+/// `debug_assert`-checked construction invariant, never silently resolved to
+/// the first candidate.
+pub(crate) fn frontier_node(node_graph: &NodeGraph, stage: StageIdx) -> Option<NodePos> {
     let mut frontier = stage_frontier(node_graph, stage);
     let node = frontier.next();
-    debug_assert!(
-        node.is_some(),
-        "frontier_node: stage {stage} carries no alive node"
-    );
     debug_assert!(
         frontier.next().is_none(),
         "frontier_node: stage {stage} carries more than one alive node"
     );
-    // `stage` itself is a safe fallback consistent with the debug-checked invariants above.
-    node.unwrap_or(stage)
+    node
 }
 
-/// Any one node at `stage` — the first in ascending canonical order. Unlike
-/// [`frontier_node`], this tolerates a stage carrying several nodes: every
-/// node at the terminal stage is a leaf (no edge crosses the horizon), and
-/// leaves sharing a stage share ONE pool (this module's leaf-sharing rule),
-/// so any representative resolves the same pool.
-pub(crate) fn any_stage_node(node_graph: &NodeGraph, stage: usize) -> usize {
-    let node = stage_frontier(node_graph, stage).next();
+/// Any one node at `stage` — the first in ascending canonical order, or
+/// `None` if the stage carries no alive node. Unlike [`frontier_node`], this
+/// tolerates a stage carrying several nodes: every node at the terminal stage
+/// is a leaf (no edge crosses the horizon), and leaves sharing a stage share
+/// ONE pool (this module's leaf-sharing rule), so any representative
+/// resolves the same pool.
+pub(crate) fn any_stage_node(node_graph: &NodeGraph, stage: StageIdx) -> Option<NodePos> {
+    stage_frontier(node_graph, stage).next()
+}
+
+/// Advance a sampled trajectory from `node` to the node it visits at the next
+/// stage: a single out-edge is taken with probability 1 WITHOUT deriving a
+/// seed, so a chain never perturbs the within-node noise stream (C1
+/// chain-parity). Single owner for the training forward pass
+/// (`training::forward_pass_state::run_forward_worker`) and the simulation
+/// pass (`simulation::pipeline::advance_simulation_node`) — both delegate here
+/// so the chain-parity contract is stated once.
+///
+/// # Panics (debug builds only)
+///
+/// Panics if `node` has no out-edge — a graph-construction invariant for any
+/// call site that is not the terminal stage.
+pub(crate) fn advance_sampled_node(
+    node_graph: &NodeGraph,
+    node: NodePos,
+    iteration: u32,
+    scenario: u32,
+    stage: u32,
+) -> NodePos {
+    let successors = &node_graph.successors[node];
     debug_assert!(
-        node.is_some(),
-        "any_stage_node: stage {stage} carries no alive node"
+        !successors.is_empty(),
+        "advance_sampled_node: node {node} at stage {stage} has no out-edge before the \
+         terminal stage (a graph-construction invariant)"
     );
-    node.unwrap_or(stage)
+    if successors.len() == 1 {
+        successors[0].child
+    } else {
+        let idx = select_transition_child(
+            iteration,
+            scenario,
+            stage,
+            successors.iter().map(|s| s.probability),
+        );
+        successors[idx].child
+    }
 }
 
 /// `node`'s single canonical predecessor, or `None` at a root. A node reached
@@ -760,11 +1064,10 @@ pub(crate) fn any_stage_node(node_graph: &NodeGraph, stage: usize) -> usize {
 /// forward walk needs no parent lookup (every trajectory carries its own
 /// previous-stage record directly); its only callers today are tests.
 #[cfg(test)]
-pub(crate) fn node_parent(node_graph: &NodeGraph, node: usize) -> Option<usize> {
+pub(crate) fn node_parent(node_graph: &NodeGraph, node: NodePos) -> Option<NodePos> {
     let mut candidates = node_graph
         .successors
-        .iter()
-        .enumerate()
+        .iter_indexed()
         .filter(|(_, succs)| succs.iter().any(|s| s.child == node))
         .map(|(pos, _)| pos);
     let parent = candidates.next();
@@ -780,7 +1083,7 @@ pub(crate) fn node_parent(node_graph: &NodeGraph, node: usize) -> Option<usize> 
 /// chain-degenerate node's spans the whole stage); an `External` view addresses
 /// its own scenario column `k` as the degenerate `(k, 1)` — within-node
 /// weighted openings are deferred, so an External view's `len` is always `1`.
-pub(crate) fn node_opening_range(node_graph: &NodeGraph, node: usize) -> (usize, usize) {
+pub(crate) fn node_opening_range(node_graph: &NodeGraph, node: NodePos) -> (usize, usize) {
     let openings = node_graph.nodes[node].openings;
     match openings.source {
         OpeningSource::Generated => (openings.offset, openings.len),
@@ -795,7 +1098,7 @@ pub(crate) fn node_opening_range(node_graph: &NodeGraph, node: usize) -> (usize,
 /// (`openings.offset`), so forward, backward, and simulation all read the same
 /// `eta_slice(stage, k)`; a `Generated` node yields `None`, so the sampler
 /// hash-selects exactly as it does today (the sampled/generated byte-parity path).
-pub(crate) fn node_pinned_scenario(node_graph: &NodeGraph, node: usize) -> Option<usize> {
+pub(crate) fn node_pinned_scenario(node_graph: &NodeGraph, node: NodePos) -> Option<usize> {
     let openings = node_graph.nodes[node].openings;
     match openings.source {
         OpeningSource::External => Some(openings.offset),
@@ -810,9 +1113,9 @@ pub(crate) fn node_pinned_scenario(node_graph: &NodeGraph, node: usize) -> Optio
 /// node reached by more than one edge is a recombination join, which the graph
 /// does not yet admit — `debug_assert`-checked, never silently resolved to an
 /// arbitrary predecessor.
-pub(crate) fn build_parent_map(node_graph: &NodeGraph) -> Vec<Option<usize>> {
-    let mut parent = vec![None; node_graph.nodes.len()];
-    for (pos, succs) in node_graph.successors.iter().enumerate() {
+pub(crate) fn build_parent_map(node_graph: &NodeGraph) -> TypedVec<NodePos, Option<NodePos>> {
+    let mut parent: TypedVec<NodePos, Option<NodePos>> = vec![None; node_graph.nodes.len()].into();
+    for (pos, succs) in node_graph.successors.iter_indexed() {
         for succ in succs {
             debug_assert!(
                 parent[succ.child].is_none(),
@@ -835,9 +1138,10 @@ pub(crate) fn build_parent_map(node_graph: &NodeGraph) -> Vec<Option<usize>> {
 /// opening enumeration is deferred and rejected upstream), so a path is a
 /// distinct root→leaf node sequence and the path count is
 /// [`enumerated_scenario_count`].
+#[derive(Debug)]
 pub(crate) struct EnumeratedForwardPaths {
     /// Leaf node position of each path, canonical order. Length = path count.
-    pub leaf: Vec<usize>,
+    pub leaf: Vec<NodePos>,
     /// `P(ℓ)` of each path, canonical order: the fixed-order root→leaf product
     /// of edge transition probabilities and within-node opening weights `q`
     /// (both already load-time-normalized). Length = path count.
@@ -851,9 +1155,9 @@ pub(crate) struct EnumeratedForwardPaths {
 pub(crate) fn enumerate_forward_paths(node_graph: &NodeGraph) -> EnumeratedForwardPaths {
     fn walk(
         node_graph: &NodeGraph,
-        node: usize,
+        node: NodePos,
         weight_before_node: f64,
-        leaf: &mut Vec<usize>,
+        leaf: &mut Vec<NodePos>,
         weight: &mut Vec<f64>,
     ) {
         let w = weight_before_node * node_graph.nodes[node].openings.q;
@@ -869,7 +1173,7 @@ pub(crate) fn enumerate_forward_paths(node_graph: &NodeGraph) -> EnumeratedForwa
     }
 
     let n = node_graph.nodes.len();
-    let mut has_predecessor = vec![false; n];
+    let mut has_predecessor: TypedVec<NodePos, bool> = vec![false; n].into();
     for succs in &node_graph.successors {
         for succ in succs {
             has_predecessor[succ.child] = true;
@@ -879,12 +1183,115 @@ pub(crate) fn enumerate_forward_paths(node_graph: &NodeGraph) -> EnumeratedForwa
         leaf: Vec::new(),
         weight: Vec::new(),
     };
-    for (root, &has_pred) in has_predecessor.iter().enumerate() {
+    for (root, &has_pred) in has_predecessor.iter_indexed() {
         if !has_pred {
             walk(node_graph, root, 1.0, &mut paths.leaf, &mut paths.weight);
         }
     }
     paths
+}
+
+// ── Traversal: the resolved forward-traversal axis ─────────────────────────
+
+/// The resolved forward-traversal axis — sampled or exhaustive — for one
+/// selection declaration (training's `training_enumerated`, or simulation's
+/// `simulation_enumerated`). Resolved once, from the graph and an
+/// already-admissibility-checked selection flag, via [`Traversal::resolve`];
+/// never re-derived per iteration. Enum dispatch (never `Box<dyn Trait>`) so
+/// "selected exhaustive but carries no plan" is unrepresentable — the plan
+/// lives inline in the `Enumerated` variant, not behind a separate flag and
+/// `Option`.
+///
+/// Distinct from the config wire forms (`training_enumerated: bool`,
+/// [`crate::setup::SimulationEnumeratedRequest`]), which stay on the MPI
+/// broadcast unchanged; `Traversal` is the runtime resolution of them and is
+/// never itself broadcast.
+#[derive(Debug)]
+pub enum Traversal {
+    /// Monte-Carlo forward-pass selection; `forward_passes` is the resolved
+    /// (not placeholder) per-iteration trajectory count.
+    Sampled {
+        /// Resolved forward-pass count for this axis (training's
+        /// `forward_passes` or simulation's `n_scenarios`).
+        forward_passes: u32,
+    },
+    /// Exhaustive root→leaf path selection over the resolved node graph.
+    Enumerated(EnumeratedPlan),
+}
+
+impl Default for Traversal {
+    /// `Sampled { forward_passes: 0 }` — the placeholder a `ForwardPassState`
+    /// carries until `set_traversal` installs the resolved axis, and the
+    /// value `run()` swaps back in around the `Enumerated` arm's borrow
+    /// (never observed by a real caller).
+    fn default() -> Self {
+        Traversal::Sampled { forward_passes: 0 }
+    }
+}
+
+impl Traversal {
+    /// Resolve the traversal axis from an already-admissibility-checked
+    /// selection: `is_enumerated` and `forward_passes` must already reflect
+    /// the caller's own guard-checked resolution (training routes through
+    /// `resolve_enumerated_training_count`, simulation through
+    /// `resolve_enumerated_count`) — this constructor re-derives no guard and
+    /// cannot fail.
+    #[must_use]
+    pub fn resolve(node_graph: &NodeGraph, is_enumerated: bool, forward_passes: u32) -> Self {
+        if is_enumerated {
+            Traversal::Enumerated(EnumeratedPlan::new(node_graph))
+        } else {
+            Traversal::Sampled { forward_passes }
+        }
+    }
+
+    /// Per-path probabilities `P(ℓ)` in canonical path order, for the exact
+    /// `Σ P(ℓ)·C(ℓ)` forward bound — `None` under `Sampled`, where the bound
+    /// is the statistical Welford estimate instead.
+    #[must_use]
+    pub fn path_weights(&self) -> Option<&[f64]> {
+        match self {
+            Traversal::Sampled { .. } => None,
+            Traversal::Enumerated(plan) => Some(&plan.paths.weight),
+        }
+    }
+
+    /// The simulation cost-aggregation weighting this axis licenses: an exact
+    /// census under `Enumerated` (weighted by the same per-path probabilities
+    /// [`Self::path_weights`] returns), the uniform Monte-Carlo weighting
+    /// under `Sampled`. The single derivation point for
+    /// [`crate::simulation::SimulationWeighting::Census`] — an estimator
+    /// carrying no evidence of its own that the walk it weights was
+    /// exhaustive, so every caller reaches it through here rather than
+    /// constructing it beside a selection flag.
+    #[must_use]
+    pub fn simulation_weighting(&self) -> SimulationWeighting<'_> {
+        match self.path_weights() {
+            Some(weights) => SimulationWeighting::Census { weights },
+            None => SimulationWeighting::Uniform,
+        }
+    }
+}
+
+/// Graph-invariant exhaustive-traversal plan: the canonical root→leaf path
+/// enumeration and the single-predecessor parent map, both pure functions of
+/// the resolved [`NodeGraph`]. Carries no per-run mutable scratch — the
+/// enumerated forward engine's reused arenas are
+/// `training::forward::enumerated::EnumeratedForwardScratch`, owned
+/// separately by `ForwardPassState` and grown lazily against this plan.
+#[derive(Debug)]
+pub struct EnumeratedPlan {
+    pub(crate) paths: EnumeratedForwardPaths,
+    pub(crate) parent: TypedVec<NodePos, Option<NodePos>>,
+}
+
+impl EnumeratedPlan {
+    fn new(node_graph: &NodeGraph) -> Self {
+        Self {
+            paths: enumerate_forward_paths(node_graph),
+            parent: build_parent_map(node_graph),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1171,7 +1578,7 @@ mod tests {
         assert_eq!(ng.nodes.len(), n_stages, "one node per stage");
         assert_eq!(ng.n_pools, n_stages, "pools 1:1");
         for (t, n) in ng.nodes.iter().enumerate() {
-            assert_eq!(n.stage, t);
+            assert_eq!(n.stage, StageIdx(t));
             assert_eq!(n.pool_id, t, "chain pools are 1:1 (identity)");
             assert_eq!(n.openings.source, OpeningSource::Generated);
             assert_eq!(n.openings.len, branching);
@@ -1183,11 +1590,11 @@ mod tests {
             );
         }
         // Last stage is the terminal leaf: no successors.
-        assert!(ng.successors[n_stages - 1].is_empty());
+        assert!(ng.successors[NodePos(n_stages - 1)].is_empty());
         for t in 0..n_stages - 1 {
-            assert_eq!(ng.successors[t].len(), 1);
-            assert_eq!(ng.successors[t][0].child, t + 1);
-            assert_eq!(ng.successors[t][0].probability, 1.0);
+            assert_eq!(ng.successors[NodePos(t)].len(), 1);
+            assert_eq!(ng.successors[NodePos(t)][0].child, NodePos(t + 1));
+            assert_eq!(ng.successors[NodePos(t)][0].probability, 1.0);
         }
     }
 
@@ -1234,10 +1641,10 @@ mod tests {
         let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
 
         // Root (position 0) owns its own pool.
-        let root_pool = ng.nodes[0].pool_id;
+        let root_pool = ng.nodes[NodePos(0)].pool_id;
         // The four leaves (positions 1..4) share exactly one pool id, distinct
         // from the root's.
-        let leaf_pools: Vec<usize> = ng.nodes[1..=4].iter().map(|n| n.pool_id).collect();
+        let leaf_pools: Vec<usize> = (1..=4).map(|i| ng.nodes[NodePos(i)].pool_id).collect();
         assert!(
             leaf_pools.iter().all(|&p| p == leaf_pools[0]),
             "all leaves must share one pool id: {leaf_pools:?}"
@@ -1314,8 +1721,8 @@ mod tests {
             );
         }
         // The shared leaf pool maps to the terminal stage 2.
-        let leaf_pool = ng.nodes[3].pool_id;
-        assert_eq!(ng.pool_stage[leaf_pool], 2);
+        let leaf_pool = ng.nodes[NodePos(3)].pool_id;
+        assert_eq!(ng.pool_stage[leaf_pool], StageIdx(2));
     }
 
     #[test]
@@ -1325,7 +1732,10 @@ mod tests {
         let study_stage_ids: Vec<i32> = (0..n_stages as i32).collect();
         let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
         let ng = build_node_graph(&empty_graph(), n_stages, &resolver, &stochastic).unwrap();
-        assert_eq!(ng.pool_stage, vec![0, 1, 2, 3]);
+        assert_eq!(
+            ng.pool_stage,
+            vec![StageIdx(0), StageIdx(1), StageIdx(2), StageIdx(3)]
+        );
     }
 
     #[test]
@@ -1384,15 +1794,18 @@ mod tests {
         let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
 
         // Canonical node order is ascending declared id: 0, 1, 3, 5.
-        assert_eq!(ng.node_ids, vec![0, 1, 3, 5]);
-        let root_pos = ng.node_ids.iter().position(|&id| id == 0).unwrap();
-        let child_ids: Vec<i32> = ng.successors[root_pos]
+        assert_eq!(
+            ng.node_ids.as_slice(),
+            [NodeId(0), NodeId(1), NodeId(3), NodeId(5)]
+        );
+        let root_pos = NodePos(ng.node_ids.iter().position(|&id| id == NodeId(0)).unwrap());
+        let child_ids: Vec<NodeId> = ng.successors[root_pos]
             .iter()
             .map(|s| ng.node_ids[s.child])
             .collect();
         assert_eq!(
             child_ids,
-            vec![1, 3, 5],
+            vec![NodeId(1), NodeId(3), NodeId(5)],
             "successors must be ascending child node id regardless of declaration order"
         );
     }
@@ -1414,7 +1827,7 @@ mod tests {
             assert_eq!(n.openings.offset, 0);
             assert_eq!(
                 n.openings.len,
-                stochastic.opening_tree().n_openings(n.stage)
+                stochastic.opening_tree().n_openings(n.stage.0)
             );
         }
         // NodeOpenings carries no realization buffer field — inspection of
@@ -1437,7 +1850,7 @@ mod tests {
         let ng = build_node_graph(&graph, 1, &resolver, &stochastic).unwrap();
 
         assert_eq!(ng.nodes.len(), 1);
-        let openings = ng.nodes[0].openings;
+        let openings = ng.nodes[NodePos(0)].openings;
         assert_eq!(openings.source, OpeningSource::External);
         assert_eq!(openings.offset, 7);
         assert_eq!(openings.len, 1);
@@ -1456,13 +1869,19 @@ mod tests {
         let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
         let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
 
-        assert_eq!(ng.nodes[0].openings.source, OpeningSource::External);
-        assert_eq!(node_opening_range(&ng, 0), (4, 1));
-
-        assert_eq!(ng.nodes[1].openings.source, OpeningSource::Generated);
-        let generated = ng.nodes[1].openings;
         assert_eq!(
-            node_opening_range(&ng, 1),
+            ng.nodes[NodePos(0)].openings.source,
+            OpeningSource::External
+        );
+        assert_eq!(node_opening_range(&ng, NodePos(0)), (4, 1));
+
+        assert_eq!(
+            ng.nodes[NodePos(1)].openings.source,
+            OpeningSource::Generated
+        );
+        let generated = ng.nodes[NodePos(1)].openings;
+        assert_eq!(
+            node_opening_range(&ng, NodePos(1)),
             (generated.offset, generated.len)
         );
     }
@@ -1482,13 +1901,13 @@ mod tests {
         // External node pins its declared column `k`, and it is exactly the
         // `node_opening_range` offset the forward driver reads — the single-owner
         // agreement the training and simulation sites depend on.
-        assert_eq!(node_pinned_scenario(&ng, 0), Some(4));
+        assert_eq!(node_pinned_scenario(&ng, NodePos(0)), Some(4));
         assert_eq!(
-            node_pinned_scenario(&ng, 0),
-            Some(node_opening_range(&ng, 0).0)
+            node_pinned_scenario(&ng, NodePos(0)),
+            Some(node_opening_range(&ng, NodePos(0)).0)
         );
         // Generated node yields `None` → the sampler hash-selects unchanged.
-        assert_eq!(node_pinned_scenario(&ng, 1), None);
+        assert_eq!(node_pinned_scenario(&ng, NodePos(1)), None);
     }
 
     // ── Discount: per-stage, never per-node ─────────────────────────────────
@@ -1510,8 +1929,8 @@ mod tests {
         let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
         let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
 
-        let sibling_stages: Vec<usize> = ng.nodes[1..=2].iter().map(|n| n.stage).collect();
-        assert_eq!(sibling_stages, vec![1, 1]);
+        let sibling_stages: Vec<StageIdx> = (1..=2).map(|i| ng.nodes[NodePos(i)].stage).collect();
+        assert_eq!(sibling_stages, vec![StageIdx(1), StageIdx(1)]);
     }
 
     // ── Rank-invariance (mpiexec -n1 vs -n2 substitute) ─────────────────────
@@ -1572,10 +1991,10 @@ mod tests {
         }
     }
 
-    // ── sampled_visit_bound: chain identity ─────────────────────────────────
+    // ── pool_cut_stride: chain identity ─────────────────────────────────
 
     #[test]
-    fn sampled_visit_bound_chain_matches_forward_passes_over_a_sweep() {
+    fn pool_cut_stride_chain_matches_forward_passes_over_a_sweep() {
         let n_stages = 4;
         let stochastic = stochastic_context(n_stages, 1, 5);
         let graph = empty_graph();
@@ -1591,7 +2010,7 @@ mod tests {
             (7, 37, 13),
             (12, 1, 1),
         ] {
-            let visit_bound = sampled_visit_bound(&ng, forward_passes);
+            let visit_bound = pool_cut_stride(&ng, forward_passes);
             assert_eq!(visit_bound.len(), ng.n_pools);
             for &vb in &visit_bound {
                 assert_eq!(
@@ -1620,7 +2039,7 @@ mod tests {
     }
 
     #[test]
-    fn sampled_visit_bound_declared_chain_matches_synthesized_chain() {
+    fn pool_cut_stride_declared_chain_matches_synthesized_chain() {
         let n_stages = 3;
         let forward_passes = 17u32;
         let stochastic_a = stochastic_context(n_stages, 1, 5);
@@ -1642,16 +2061,16 @@ mod tests {
         let ng_declared = build_node_graph(&declared, n_stages, &resolver, &stochastic_b).unwrap();
 
         assert_eq!(
-            sampled_visit_bound(&ng_synthesized, forward_passes),
-            sampled_visit_bound(&ng_declared, forward_passes),
+            pool_cut_stride(&ng_synthesized, forward_passes),
+            pool_cut_stride(&ng_declared, forward_passes),
             "a declared chain and the synthesized one must derive identical visit bounds"
         );
     }
 
-    // ── enumerated_visit_bound: exact prefix counts ─────────────────────────
+    // ── forward_solve_counts: exact prefix counts ─────────────────────────
 
     #[test]
-    fn enumerated_visit_bound_k_fan_matches_hand_computed_prefix_counts() {
+    fn forward_solve_counts_k_fan_matches_hand_computed_prefix_counts() {
         // Root (stage 0, own pool) fans into K=4 leaves (stage 1, sharing ONE
         // pool per the leaf-sharing rule). branching_factor=1 gives every
         // node's own opening count exactly 1, so each root->leaf path
@@ -1678,9 +2097,9 @@ mod tests {
         let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
         assert_eq!(ng.n_pools, 2, "one pool for the root, one shared leaf pool");
 
-        let visit_bound = enumerated_visit_bound(&ng).unwrap();
-        let root_pool = ng.nodes[0].pool_id;
-        let leaf_pool = ng.nodes[1].pool_id;
+        let visit_bound = forward_solve_counts(&ng).unwrap();
+        let root_pool = ng.nodes[NodePos(0)].pool_id;
+        let leaf_pool = ng.nodes[NodePos(1)].pool_id;
         assert_eq!(
             visit_bound[root_pool], 1,
             "root: a single root prefix, π(root) = 1"
@@ -1711,7 +2130,7 @@ mod tests {
     }
 
     #[test]
-    fn enumerated_visit_bound_duality_with_enumerated_scenario_count() {
+    fn forward_solve_counts_duality_with_enumerated_scenario_count() {
         // K-fan (branching_factor=1): duality holds with every leaf's own
         // contribution at 1.
         let stochastic_kfan = stochastic_context(2, 1, 1);
@@ -1737,9 +2156,10 @@ mod tests {
         };
         let ng_branchy =
             build_node_graph(&graph_branchy, 2, &resolver, &stochastic_branchy).unwrap();
-        let visit_bound = enumerated_visit_bound(&ng_branchy).unwrap();
+        let visit_bound = forward_solve_counts(&ng_branchy).unwrap();
         assert_eq!(
-            visit_bound[ng_branchy.nodes[1].pool_id], 6,
+            visit_bound[ng_branchy.nodes[NodePos(1)].pool_id],
+            6,
             "the shared leaf pool sums both children's π = |Ω_root| each, not divided between them"
         );
         assert_prefix_duality(&ng_branchy);
@@ -1758,7 +2178,10 @@ mod tests {
         let levels = backward_cut_levels(&ng);
         // The terminal leaf (stage 3) generates no cut; stages 2,1,0 each hold
         // exactly one cut-generating node, descending.
-        assert_eq!(levels, vec![vec![2], vec![1], vec![0]]);
+        assert_eq!(
+            levels,
+            vec![vec![NodePos(2)], vec![NodePos(1)], vec![NodePos(0)]]
+        );
     }
 
     #[test]
@@ -1793,13 +2216,13 @@ mod tests {
 
         let levels = backward_cut_levels(&ng);
         // Stage 1 (both interior nodes, ascending position) before stage 0.
-        assert_eq!(levels, vec![vec![1, 2], vec![0]]);
+        assert_eq!(levels, vec![vec![NodePos(1), NodePos(2)], vec![NodePos(0)]]);
         for level in &levels {
             assert!(
                 level.windows(2).all(|w| w[0] < w[1]),
                 "each level's node positions must be strictly ascending"
             );
-            let stages: Vec<usize> = level.iter().map(|&p| ng.nodes[p].stage).collect();
+            let stages: Vec<StageIdx> = level.iter().map(|&p| ng.nodes[p].stage).collect();
             assert!(
                 stages.windows(2).all(|w| w[0] == w[1]),
                 "every node in a level shares one stage"
@@ -1808,15 +2231,15 @@ mod tests {
     }
 
     /// `Σ_leaf π(leaf)·|Ω_leaf| == enumerated_scenario_count(graph)` — the
-    /// prefix-count/scenario-count duality [`enumerated_visit_bound`] cites.
+    /// prefix-count/scenario-count duality [`forward_solve_counts`] cites.
     /// Assumes every leaf sharing a pool carries the same `openings.len`
     /// (true of every fixture this helper is called on).
     fn assert_prefix_duality(graph: &NodeGraph) {
-        let visit_bound = enumerated_visit_bound(graph).unwrap();
+        let visit_bound = forward_solve_counts(graph).unwrap();
         let expected = enumerated_scenario_count(graph).unwrap();
 
         let mut leaf_len_by_pool: HashMap<usize, usize> = HashMap::new();
-        for (i, n) in graph.nodes.iter().enumerate() {
+        for (i, n) in graph.nodes.iter_indexed() {
             if graph.successors[i].is_empty() {
                 leaf_len_by_pool.insert(n.pool_id, n.openings.len);
             }
@@ -1874,11 +2297,11 @@ mod tests {
             "every |Ω|=1 tree node has exactly one root->node prefix: {counts:?}"
         );
 
-        let total: u64 = enumerated_visit_bound(&ng).unwrap().into_iter().sum();
+        let total: u64 = forward_solve_counts(&ng).unwrap().into_iter().sum();
         assert_eq!(
             total,
             ng.nodes.len() as u64,
-            "Σ enumerated_visit_bound sums π(n)=1 over every node = the node count"
+            "Σ forward_solve_counts sums π(n)=1 over every node = the node count"
         );
         // The dedup total beats naive per-path re-solving.
         let paths = enumerated_scenario_count(&ng).unwrap();
@@ -1886,7 +2309,7 @@ mod tests {
         assert_eq!(paths, k as u64, "one path per leaf on a |Ω|=1 K-fan");
         assert!(
             total < paths * path_length,
-            "Σ enumerated_visit_bound ({total}) must be strictly below \
+            "Σ forward_solve_counts ({total}) must be strictly below \
              enumerated_scenario_count * path_length ({})",
             paths * path_length
         );
@@ -1904,7 +2327,8 @@ mod tests {
         // successor's edge probability IS that path's P(ℓ) (q = 1, single leaf
         // edge at prob 1).
         let root = (0..ng.nodes.len())
-            .find(|&p| ng.nodes[p].stage == 0)
+            .map(NodePos)
+            .find(|&p| ng.nodes[p].stage == StageIdx(0))
             .unwrap();
         let expected: Vec<f64> = ng.successors[root].iter().map(|s| s.probability).collect();
         for (got, want) in paths.weight.iter().zip(expected.iter()) {
@@ -1926,19 +2350,66 @@ mod tests {
         let ng = enumerated_k_fan(3);
         let parent = build_parent_map(&ng);
         let root = (0..ng.nodes.len())
-            .find(|&p| ng.nodes[p].stage == 0)
+            .map(NodePos)
+            .find(|&p| ng.nodes[p].stage == StageIdx(0))
             .unwrap();
         assert_eq!(parent[root], None, "the root has no predecessor");
-        for (pos, node) in ng.nodes.iter().enumerate() {
-            if node.stage == 0 {
+        for (pos, node) in ng.nodes.iter_indexed() {
+            if node.stage == StageIdx(0) {
                 continue;
             }
             let p = parent[pos].expect("a non-root node has exactly one parent");
             assert_eq!(
                 ng.nodes[p].stage,
-                node.stage - 1,
+                StageIdx(node.stage.0 - 1),
                 "a node's parent sits exactly one stage upstream"
             );
         }
+    }
+
+    // ── Traversal ────────────────────────────────────────────────────────
+
+    #[test]
+    fn traversal_resolve_sampled_carries_the_resolved_count() {
+        let ng = enumerated_k_fan(3);
+        let traversal = Traversal::resolve(&ng, false, 7);
+        assert!(matches!(
+            traversal,
+            Traversal::Sampled { forward_passes: 7 }
+        ));
+        assert_eq!(traversal.path_weights(), None);
+    }
+
+    #[test]
+    fn traversal_resolve_enumerated_builds_the_plan_once() {
+        let ng = enumerated_k_fan(3);
+        let traversal = Traversal::resolve(&ng, true, 0);
+        let expected = enumerate_forward_paths(&ng);
+        let weights = traversal
+            .path_weights()
+            .expect("enumerated traversal must carry path weights");
+        assert_eq!(weights, expected.weight.as_slice());
+    }
+
+    /// `SimulationWeighting::Census` is derivable ONLY from an enumerated
+    /// traversal — the estimator-integrity fix (U3): a sampled traversal must
+    /// resolve to `Uniform`, never `Census`, regardless of what weights a
+    /// caller might otherwise be tempted to supply beside it.
+    #[test]
+    fn simulation_weighting_census_underivable_from_sampled_traversal() {
+        use crate::simulation::SimulationWeighting;
+
+        let ng = enumerated_k_fan(3);
+        let sampled = Traversal::resolve(&ng, false, 3);
+        assert!(matches!(
+            sampled.simulation_weighting(),
+            SimulationWeighting::Uniform
+        ));
+
+        let enumerated = Traversal::resolve(&ng, true, 0);
+        assert!(matches!(
+            enumerated.simulation_weighting(),
+            SimulationWeighting::Census { .. }
+        ));
     }
 }

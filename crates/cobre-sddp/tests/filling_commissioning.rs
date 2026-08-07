@@ -1308,6 +1308,7 @@ mod filling_cut_validity {
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use cobre_sddp::SolverStatsDelta;
+    use cobre_sddp::setup::NodePos;
     use cobre_solver::ActiveSolver;
 
     use super::common::StubComm;
@@ -1810,11 +1811,11 @@ mod filling_cut_validity {
         let init_storage = 100.0_f64;
         let mut control_moved = false;
         for stage in 0..N_STAGES {
-            let stage_states = archive.states_for_node(stage);
+            let stage_states = archive.states_for_node(NodePos(stage));
             if stage_states.is_empty() {
                 continue;
             }
-            let dim = archive.node(stage).state_dimension();
+            let dim = archive.node(NodePos(stage)).state_dimension();
             assert!(
                 ctl_storage_col < dim,
                 "control storage column {ctl_storage_col} must lie within the state \
@@ -1855,15 +1856,15 @@ mod filling_cut_validity {
         let out_col_last_filling = state.storage.start + hf1_pos;
         let out_col_entry = state.storage.start + hf1_pos;
 
-        let last_filling_states = archive.states_for_node(last_filling);
-        let entry_states = archive.states_for_node(entry);
+        let last_filling_states = archive.states_for_node(NodePos(last_filling));
+        let entry_states = archive.states_for_node(NodePos(entry));
         assert!(
             !last_filling_states.is_empty() && !entry_states.is_empty(),
             "the visited archive must hold outgoing states at the last Filling stage \
          ({last_filling}) and the entry stage ({entry}) for the handoff check"
         );
-        let dim_lf = archive.node(last_filling).state_dimension();
-        let dim_e = archive.node(entry).state_dimension();
+        let dim_lf = archive.node(NodePos(last_filling)).state_dimension();
+        let dim_e = archive.node(NodePos(entry)).state_dimension();
         assert_eq!(
             dim_lf, dim_e,
             "state dimension must be identical across the boundary (the storage \

@@ -16,8 +16,8 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use super::super::error::OutputError;
 use super::records::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCutRecord, StageCutsReadResult, StageStatesPayload,
-    StageStatesReadResult,
+    PolicyBasisRecord, PolicyCutRecord, STAGE_STATES_NODE_ID_SENTINEL, StageCutsReadResult,
+    StageStatesPayload, StageStatesReadResult,
 };
 
 use std::path::Path;
@@ -71,6 +71,7 @@ const STATES_FIELD_STATE_DIMENSION: u16 = 6;
 const STATES_FIELD_COUNT: u16 = 8;
 const STATES_FIELD_DATA: u16 = 10;
 const STATES_FIELD_ENTITY_MANIFEST: u16 = 12;
+const STATES_FIELD_NODE_ID: u16 = 14;
 
 /// The coefficient vector must be created before the `start_table`/`end_table`
 /// pair — `FlatBuffers` requires nested objects to precede the enclosing table
@@ -280,6 +281,7 @@ pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
     builder.push_slot_always::<u32>(STATES_FIELD_COUNT, payload.count);
     builder.push_slot_always(STATES_FIELD_DATA, data_vec);
     builder.push_slot_always(STATES_FIELD_ENTITY_MANIFEST, manifest_vec);
+    builder.push_slot_always::<i32>(STATES_FIELD_NODE_ID, payload.node_id);
 
     let root_offset = builder.end_table(root);
     builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
@@ -824,8 +826,15 @@ pub fn deserialize_stage_states(buf: &[u8]) -> Result<StageStatesReadResult, Out
         ctx,
     )?;
 
+    // Absent in a pre-`id:5` buffer (FlatBuffers graceful absence): default to
+    // the sentinel, never a bare 0 — 0 is a valid node id.
+    let node_id = field_pos(buf, table_pos, vtable_pos, STATES_FIELD_NODE_ID)
+        .and_then(|p| read_i32_le(buf, p))
+        .unwrap_or(STAGE_STATES_NODE_ID_SENTINEL);
+
     Ok(StageStatesReadResult {
         stage_id,
+        node_id,
         state_dimension,
         count,
         data,

@@ -2512,6 +2512,7 @@ fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
 #[test]
 fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
     use super::{HydroReverseLookup, ThermalReverseLookup, extract_stage_result_with_lookups};
+    use crate::setup::NodeId;
 
     let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
@@ -2603,8 +2604,14 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
     let thermal_lookup = ThermalReverseLookup::build(&study_dims, counts.thermal_ids.len());
     let hydro_lookup =
         HydroReverseLookup::build(spec.geometry, spec.hydro_cell_index, counts.hydro_ids.len());
-    let result_prebuilt =
-        extract_stage_result_with_lookups(&view, &spec, 2, 2, &hydro_lookup, &thermal_lookup);
+    let result_prebuilt = extract_stage_result_with_lookups(
+        &view,
+        &spec,
+        2,
+        NodeId(2),
+        &hydro_lookup,
+        &thermal_lookup,
+    );
 
     assert_eq!(
         result_standard.thermals.len(),

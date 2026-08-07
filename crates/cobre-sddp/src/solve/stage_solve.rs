@@ -9,6 +9,7 @@ use crate::{
     cut::pool::CutPool,
     error::SddpError,
     indexer::StateSpace,
+    setup::{NodeId, StageIdx},
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
@@ -25,7 +26,7 @@ pub struct StageInputs<'a> {
     /// Stored basis from the previous iteration, if any.
     pub stored_basis: Option<&'a CapturedBasis>,
     /// Stage index `t`.
-    pub stage_index: usize,
+    pub stage_index: StageIdx,
     /// Scenario index `m`.
     pub scenario_index: usize,
     /// Training iteration (1-based) on the forward pass; `None` on backward and
@@ -34,7 +35,7 @@ pub struct StageInputs<'a> {
     pub iteration: Option<u64>,
     /// Declared id of the node being solved (`NodeGraph::node_ids[node]`); a
     /// `stored_basis` whose `node_id` differs is treated as cold.
-    pub node_id: i32,
+    pub node_id: NodeId,
 }
 
 /// Execute one LP solve at stage `t` for scenario `m`, owning basis
@@ -72,8 +73,8 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
         // `base_row_count` is the non-frozen template row count so cut rows are
         // matched by slot identity, not positional copy from the stored basis.
         let target = ReconstructionTarget {
-            base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
-            num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
+            base_row_count: inputs.stage_context.template(inputs.stage_index).num_rows,
+            num_cols: inputs.stage_context.template(inputs.stage_index).num_cols,
         };
 
         let _ = reconstruct_basis(
@@ -110,7 +111,7 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
     let view = solved.map_err(|e| {
         map_solver_error(
             e,
-            inputs.stage_index,
+            inputs.stage_index.0,
             inputs.scenario_index,
             inputs.iteration,
         )
@@ -228,6 +229,7 @@ mod tests {
         context::StageContext,
         cut::pool::CutPool,
         lp_builder::PatchBuffer,
+        setup::{NodeId, StageIdx},
         test_support::state_layout_with_transit_buckets,
         workspace::{CapturedBasis, SolverWorkspace, WorkspaceSizing},
     };
@@ -353,10 +355,10 @@ mod tests {
             stage_context: &ctx,
             pool: &pool,
             stored_basis: None,
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 0,
             iteration: Some(1),
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let result = run_stage_solve(&mut ws, &inputs);
@@ -397,7 +399,7 @@ mod tests {
             template.num_rows,
             0,
             1,
-            5, // node_id — matches inputs.node_id below (the match/warm case)
+            NodeId(5), // node_id — matches inputs.node_id below (the match/warm case)
         );
         captured.basis.col_status.clear();
         captured.basis.col_status.push(B); // x0 BASIC
@@ -412,10 +414,10 @@ mod tests {
             stage_context: &ctx,
             pool: &pool,
             stored_basis: Some(&captured),
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 0,
             iteration: None,
-            node_id: 5,
+            node_id: NodeId(5),
         };
 
         let result = run_stage_solve(&mut ws, &inputs);
@@ -452,10 +454,10 @@ mod tests {
             stage_context: &ctx,
             pool: &pool,
             stored_basis: None,
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 7,
             iteration: Some(42),
-            node_id: 0,
+            node_id: NodeId(0),
         };
 
         let result = run_stage_solve(&mut ws, &inputs);
@@ -501,17 +503,17 @@ mod tests {
             template.num_rows,
             0,
             1,
-            9, // node_id — matches inputs.node_id below (the match/warm case)
+            NodeId(9), // node_id — matches inputs.node_id below (the match/warm case)
         );
 
         let inputs = StageInputs {
             stage_context: &ctx,
             pool: &pool,
             stored_basis: Some(&all_lower),
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 3,
             iteration: Some(5),
-            node_id: 9,
+            node_id: NodeId(9),
         };
 
         match run_stage_solve(&mut ws, &inputs) {
@@ -556,17 +558,17 @@ mod tests {
             template.num_rows,
             0,
             1,
-            1, // node A
+            NodeId(1), // node A
         );
 
         let inputs = StageInputs {
             stage_context: &ctx,
             pool: &pool,
             stored_basis: Some(&stored_at_node_a),
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 3,
             iteration: Some(5),
-            node_id: 2, // node B — mismatches the stored basis's node A
+            node_id: NodeId(2), // node B — mismatches the stored basis's node A
         };
 
         let result = run_stage_solve(&mut ws, &inputs);

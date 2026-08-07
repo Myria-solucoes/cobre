@@ -14,6 +14,8 @@
 //! per-stage archive. Each `NodeStates` stores its state vectors in a single
 //! flat `Vec<f64>` for cache-friendly iteration during the domination sweep.
 
+use crate::setup::NodePos;
+
 /// Single-node visited-states buffer.
 ///
 /// Stores forward-pass trial points as a flat contiguous `Vec<f64>`:
@@ -138,8 +140,8 @@ impl VisitedStatesArchive {
     ///
     /// Panics if `node >= self.num_nodes()`.
     #[must_use]
-    pub fn node(&self, node: usize) -> &NodeStates {
-        &self.nodes[node]
+    pub fn node(&self, node: NodePos) -> &NodeStates {
+        &self.nodes[node.0]
     }
 
     /// Returns a mutable reference to the [`NodeStates`] for `node`.
@@ -147,25 +149,33 @@ impl VisitedStatesArchive {
     /// # Panics
     ///
     /// Panics if `node >= self.num_nodes()`.
-    pub fn node_mut(&mut self, node: usize) -> &mut NodeStates {
-        &mut self.nodes[node]
+    pub fn node_mut(&mut self, node: NodePos) -> &mut NodeStates {
+        &mut self.nodes[node.0]
     }
 
     /// Archive one iteration's gathered states for `node`.
-    pub fn archive_gathered_states(&mut self, node: usize, gathered: &[f64], total_fwd: usize) {
-        self.nodes[node].append(gathered, total_fwd);
+    pub fn archive_gathered_states(&mut self, node: NodePos, gathered: &[f64], total_fwd: usize) {
+        self.nodes[node.0].append(gathered, total_fwd);
     }
 
     /// Return the flat state slice for `node`.
     #[must_use]
-    pub fn states_for_node(&self, node: usize) -> &[f64] {
-        self.nodes[node].states()
+    pub fn states_for_node(&self, node: NodePos) -> &[f64] {
+        self.nodes[node.0].states()
+    }
+
+    /// The global state dimension every node's buffer is packed at — the stride
+    /// a reader must walk the archive by, so the walk stride equals the write
+    /// stride by construction rather than by re-deriving it from another source.
+    #[must_use]
+    pub fn packing_stride(&self) -> usize {
+        self.nodes.first().map_or(0, NodeStates::state_dimension)
     }
 
     /// Number of states accumulated at a given node.
     #[must_use]
-    pub fn count(&self, node: usize) -> usize {
-        self.nodes[node].count()
+    pub fn count(&self, node: NodePos) -> usize {
+        self.nodes[node.0].count()
     }
 
     /// Trim each node to the most recent `window_iterations` iterations' worth
@@ -189,6 +199,7 @@ impl VisitedStatesArchive {
 #[cfg(test)]
 mod tests {
     use super::{NodeStates, VisitedStatesArchive};
+    use crate::setup::NodePos;
 
     /// Build a synthetic gathered buffer: `base, base+1, ..., base + total_fwd*state_dim - 1`.
     #[allow(clippy::cast_precision_loss)]
@@ -242,8 +253,8 @@ mod tests {
         let a = VisitedStatesArchive::new(5, 4, 10, 20);
         assert_eq!(a.num_nodes(), 5);
         for t in 0..5 {
-            assert_eq!(a.count(t), 0);
-            assert!(a.states_for_node(t).is_empty());
+            assert_eq!(a.count(NodePos(t)), 0);
+            assert!(a.states_for_node(NodePos(t)).is_empty());
         }
     }
 
@@ -251,31 +262,37 @@ mod tests {
     fn archive_gathered_states_delegates() {
         let mut a = VisitedStatesArchive::new(4, 3, 10, 10);
         let gathered = make_gathered(3, 3, 1.0);
-        a.archive_gathered_states(2, &gathered, 3);
-        assert_eq!(a.count(2), 3);
-        assert_eq!(a.count(0), 0);
-        assert_eq!(a.count(1), 0);
-        assert_eq!(a.count(3), 0);
+        a.archive_gathered_states(NodePos(2), &gathered, 3);
+        assert_eq!(a.count(NodePos(2)), 3);
+        assert_eq!(a.count(NodePos(0)), 0);
+        assert_eq!(a.count(NodePos(1)), 0);
+        assert_eq!(a.count(NodePos(3)), 0);
     }
 
     #[test]
     fn archive_accumulates_across_iterations() {
         let mut a = VisitedStatesArchive::new(3, 2, 10, 5);
         let g1 = make_gathered(2, 5, 0.0);
-        a.archive_gathered_states(1, &g1, 5);
+        a.archive_gathered_states(NodePos(1), &g1, 5);
         let g2 = make_gathered(2, 5, 100.0);
-        a.archive_gathered_states(1, &g2, 5);
-        assert_eq!(a.count(1), 10);
+        a.archive_gathered_states(NodePos(1), &g2, 5);
+        assert_eq!(a.count(NodePos(1)), 10);
+    }
+
+    #[test]
+    fn archive_packing_stride_reports_write_dimension() {
+        let a = VisitedStatesArchive::new(3, 7, 10, 5);
+        assert_eq!(a.packing_stride(), 7);
     }
 
     #[test]
     fn archive_states_for_node_returns_flat_slice() {
         let mut a = VisitedStatesArchive::new(3, 2, 10, 10);
         let gathered = vec![10.0, 20.0, 30.0, 40.0];
-        a.archive_gathered_states(1, &gathered, 2);
-        assert_eq!(a.states_for_node(1), &[10.0, 20.0, 30.0, 40.0]);
-        assert!(a.states_for_node(0).is_empty());
-        assert!(a.states_for_node(2).is_empty());
+        a.archive_gathered_states(NodePos(1), &gathered, 2);
+        assert_eq!(a.states_for_node(NodePos(1)), &[10.0, 20.0, 30.0, 40.0]);
+        assert!(a.states_for_node(NodePos(0)).is_empty());
+        assert!(a.states_for_node(NodePos(2)).is_empty());
     }
 
     // -- Sibling-node independence (AC 2) --------------------------------
@@ -291,20 +308,26 @@ mod tests {
         let first_sibling_states = make_gathered(2, 3, 0.0);
         let second_sibling_states = make_gathered(2, 3, 100.0);
 
-        a.archive_gathered_states(1, &first_sibling_states, 3);
-        a.archive_gathered_states(2, &second_sibling_states, 3);
+        a.archive_gathered_states(NodePos(1), &first_sibling_states, 3);
+        a.archive_gathered_states(NodePos(2), &second_sibling_states, 3);
 
-        assert_eq!(a.states_for_node(1), first_sibling_states.as_slice());
-        assert_eq!(a.states_for_node(2), second_sibling_states.as_slice());
-        assert_eq!(a.count(1), 3);
-        assert_eq!(a.count(2), 3);
+        assert_eq!(
+            a.states_for_node(NodePos(1)),
+            first_sibling_states.as_slice()
+        );
+        assert_eq!(
+            a.states_for_node(NodePos(2)),
+            second_sibling_states.as_slice()
+        );
+        assert_eq!(a.count(NodePos(1)), 3);
+        assert_eq!(a.count(NodePos(2)), 3);
         assert!(
-            a.states_for_node(0).is_empty(),
+            a.states_for_node(NodePos(0)).is_empty(),
             "the parent node must not receive either sibling's states"
         );
         assert_ne!(
-            a.states_for_node(1),
-            a.states_for_node(2),
+            a.states_for_node(NodePos(1)),
+            a.states_for_node(NodePos(2)),
             "sibling A's states must not leak into sibling B's archive"
         );
     }
@@ -418,17 +441,21 @@ mod tests {
             for it in 0..10_i32 {
                 let base = f64::from(i32::try_from(t).unwrap()) * 1000.0 + f64::from(it) * 100.0;
                 let gathered = make_gathered(state_dim, total_fwd, base);
-                a.archive_gathered_states(t, &gathered, total_fwd);
+                a.archive_gathered_states(NodePos(t), &gathered, total_fwd);
             }
-            assert_eq!(a.count(t), 100);
+            assert_eq!(a.count(NodePos(t)), 100);
         }
 
         a.trim_to_window(3);
 
         for t in 0..num_nodes {
-            assert!(a.count(t) <= 30, "node {t} has count {}", a.count(t));
-            assert_eq!(a.count(t), 30);
-            assert_eq!(a.states_for_node(t).len(), 30 * state_dim);
+            assert!(
+                a.count(NodePos(t)) <= 30,
+                "node {t} has count {}",
+                a.count(NodePos(t))
+            );
+            assert_eq!(a.count(NodePos(t)), 30);
+            assert_eq!(a.states_for_node(NodePos(t)).len(), 30 * state_dim);
         }
     }
 
@@ -439,19 +466,19 @@ mod tests {
         // 2 iterations * 10 forward passes = 20 states per node.
         for it in 0..2_i32 {
             let gathered = make_gathered(2, total_fwd, f64::from(it) * 100.0);
-            a.archive_gathered_states(0, &gathered, total_fwd);
-            a.archive_gathered_states(1, &gathered, total_fwd);
+            a.archive_gathered_states(NodePos(0), &gathered, total_fwd);
+            a.archive_gathered_states(NodePos(1), &gathered, total_fwd);
         }
-        let before_0: Vec<f64> = a.states_for_node(0).to_vec();
-        let before_1: Vec<f64> = a.states_for_node(1).to_vec();
+        let before_0: Vec<f64> = a.states_for_node(NodePos(0)).to_vec();
+        let before_1: Vec<f64> = a.states_for_node(NodePos(1)).to_vec();
 
         // window=5 -> window_states = 50 > 20.
         a.trim_to_window(5);
 
-        assert_eq!(a.count(0), 20);
-        assert_eq!(a.count(1), 20);
-        assert_eq!(a.states_for_node(0), before_0.as_slice());
-        assert_eq!(a.states_for_node(1), before_1.as_slice());
+        assert_eq!(a.count(NodePos(0)), 20);
+        assert_eq!(a.count(NodePos(1)), 20);
+        assert_eq!(a.states_for_node(NodePos(0)), before_0.as_slice());
+        assert_eq!(a.states_for_node(NodePos(1)), before_1.as_slice());
     }
 
     #[test]
@@ -467,18 +494,22 @@ mod tests {
         // iter 3: base 300.0 -> values 300..310
         for it in 0..4_i32 {
             let base = f64::from(it) * 100.0;
-            a.archive_gathered_states(0, &make_gathered(state_dim, total_fwd, base), total_fwd);
+            a.archive_gathered_states(
+                NodePos(0),
+                &make_gathered(state_dim, total_fwd, base),
+                total_fwd,
+            );
         }
-        assert_eq!(a.count(0), 20);
+        assert_eq!(a.count(NodePos(0)), 20);
 
         // Keep last 2 iterations (10 states).
         a.trim_to_window(2);
-        assert_eq!(a.count(0), 10);
+        assert_eq!(a.count(NodePos(0)), 10);
 
         // Expected: values from iterations 2 and 3.
         let mut expected: Vec<f64> = (200..210).map(f64::from).collect();
         expected.extend((300..310).map(f64::from));
-        assert_eq!(a.states_for_node(0), expected.as_slice());
+        assert_eq!(a.states_for_node(NodePos(0)), expected.as_slice());
     }
 
     #[test]
@@ -486,14 +517,14 @@ mod tests {
         let total_fwd = 4;
         let mut a = VisitedStatesArchive::new(3, 2, 10, total_fwd);
         for t in 0..3 {
-            a.archive_gathered_states(t, &make_gathered(2, total_fwd, 0.0), total_fwd);
+            a.archive_gathered_states(NodePos(t), &make_gathered(2, total_fwd, 0.0), total_fwd);
         }
 
         a.trim_to_window(0);
 
         for t in 0..3 {
-            assert_eq!(a.count(t), 0);
-            assert!(a.states_for_node(t).is_empty());
+            assert_eq!(a.count(NodePos(t)), 0);
+            assert!(a.states_for_node(NodePos(t)).is_empty());
         }
     }
 }

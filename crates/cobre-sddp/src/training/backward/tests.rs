@@ -52,12 +52,168 @@ use crate::{
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::{BackwardOutcome, RiskMeasure},
+    setup::NodeId,
+    setup::node_graph::{NodePos, StageIdx},
     solver_stats::SolverStatsDelta,
     state_exchange::ExchangeBuffers,
     test_support,
     trajectory::TrajectoryRecord,
     workspace::{BackwardAccumulators, BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
+
+/// Owned backing arrays for a single-successor (chain-degenerate) reified
+/// [`super::SuccessorOutcomes`], used by the backward-pass unit tests. The
+/// pool-indexed `frozen`/`cut_batches` are padded up to `pool_id` so `child(0)`
+/// resolves the successor's LP data.
+struct SingleSuccessor {
+    entries: Vec<super::SuccessorEntry>,
+    active_slots: Vec<usize>,
+    frozen: Vec<StageTemplate>,
+    cut_batches: Vec<RowBatch>,
+}
+
+impl SingleSuccessor {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        successor_node: NodePos,
+        successor_node_id: NodeId,
+        pool_id: usize,
+        num_cuts_at_successor: usize,
+        populated_count: usize,
+        active_slots: Vec<usize>,
+        openings: crate::setup::node_graph::NodeOpenings,
+        n_openings: usize,
+        frozen_template: StageTemplate,
+        cut_batch: RowBatch,
+    ) -> Self {
+        let empty = || RowBatch {
+            num_rows: 0,
+            row_starts: Vec::new(),
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
+        let mut frozen = Vec::with_capacity(pool_id + 1);
+        let mut cut_batches = Vec::with_capacity(pool_id + 1);
+        for _ in 0..pool_id {
+            frozen.push(frozen_template.clone());
+            cut_batches.push(empty());
+        }
+        frozen.push(frozen_template);
+        cut_batches.push(cut_batch);
+        let active_len = active_slots.len();
+        Self {
+            entries: vec![super::SuccessorEntry {
+                successor_node,
+                successor_node_id,
+                pool_id,
+                num_cuts_at_successor,
+                populated_count,
+                active_slots: 0..active_len,
+                metadata_offset: 0,
+                openings,
+                outcome_range: 0..n_openings,
+            }],
+            active_slots,
+            frozen,
+            cut_batches,
+        }
+    }
+
+    fn outcomes<'a>(
+        &'a self,
+        pools: &'a [crate::cut::pool::CutPool],
+        template_num_rows: usize,
+        cut_activity_tolerance: f64,
+    ) -> super::SuccessorOutcomes<'a> {
+        super::SuccessorOutcomes::new(
+            &self.entries,
+            &self.active_slots,
+            &self.frozen,
+            &self.cut_batches,
+            pools,
+            template_num_rows,
+            cut_activity_tolerance,
+        )
+    }
+}
+
+/// One successor child for the multi-child reified-fan builder [`MultiSuccessor`].
+struct ChildSpec {
+    successor_node: NodePos,
+    successor_node_id: NodeId,
+    pool_id: usize,
+    openings: crate::setup::node_graph::NodeOpenings,
+    num_cuts_at_successor: usize,
+    populated_count: usize,
+    active_slots: Vec<usize>,
+}
+
+/// Owned backing arrays for a MULTI-child reified [`super::SuccessorOutcomes`] — a
+/// genuine fan the single-child [`SingleSuccessor`] cannot represent. Children carry
+/// their own pool, External column, node id, and per-pool binding-metadata region
+/// (`metadata_offset`), so a test can assert none of child 0's data is reused.
+struct MultiSuccessor {
+    entries: Vec<super::SuccessorEntry>,
+    active_slots: Vec<usize>,
+    frozen: Vec<StageTemplate>,
+    cut_batches: Vec<RowBatch>,
+}
+
+impl MultiSuccessor {
+    fn new(
+        children: Vec<ChildSpec>,
+        frozen: Vec<StageTemplate>,
+        cut_batches: Vec<RowBatch>,
+    ) -> Self {
+        let mut entries = Vec::with_capacity(children.len());
+        let mut active_slots = Vec::new();
+        let mut outcome_offset = 0usize;
+        let mut metadata_offset = 0usize;
+        for c in children {
+            let outcome_len = c.openings.len;
+            let slots_start = active_slots.len();
+            active_slots.extend(c.active_slots.iter().copied());
+            entries.push(super::SuccessorEntry {
+                successor_node: c.successor_node,
+                successor_node_id: c.successor_node_id,
+                pool_id: c.pool_id,
+                num_cuts_at_successor: c.num_cuts_at_successor,
+                populated_count: c.populated_count,
+                active_slots: slots_start..active_slots.len(),
+                metadata_offset,
+                openings: c.openings,
+                outcome_range: outcome_offset..outcome_offset + outcome_len,
+            });
+            outcome_offset += outcome_len;
+            metadata_offset += c.populated_count;
+        }
+        Self {
+            entries,
+            active_slots,
+            frozen,
+            cut_batches,
+        }
+    }
+
+    fn outcomes<'a>(
+        &'a self,
+        pools: &'a [crate::cut::pool::CutPool],
+        template_num_rows: usize,
+        cut_activity_tolerance: f64,
+    ) -> super::SuccessorOutcomes<'a> {
+        super::SuccessorOutcomes::new(
+            &self.entries,
+            &self.active_slots,
+            &self.frozen,
+            &self.cut_batches,
+            pools,
+            template_num_rows,
+            cut_activity_tolerance,
+        )
+    }
+}
 
 fn empty_cut_batches(n_stages: usize) -> Vec<RowBatch> {
     (0..n_stages)
@@ -251,6 +407,89 @@ impl SolverInterface for MockSolver {
     }
 }
 
+/// Records, per solve, the concatenated `set_row_bounds` lower values patched since
+/// the previous solve and whether a warm basis was offered — so a fan test can prove
+/// each child saw its OWN patched noise and its OWN `(m, child node)` basis. Returns
+/// binding cut duals (`cut_dual > tolerance`) so per-child binding metadata fires.
+struct PerChildProbeSolver {
+    current_num_rows: usize,
+    current_num_cols: usize,
+    binding_dual: f64,
+    pending_row_lower: Vec<f64>,
+    per_solve_row_lower: Vec<Vec<f64>>,
+    per_solve_basis_offered: Vec<bool>,
+    buf_dual: Vec<f64>,
+    buf_reduced_costs: Vec<f64>,
+}
+
+impl PerChildProbeSolver {
+    fn new(binding_dual: f64) -> Self {
+        Self {
+            current_num_rows: 0,
+            current_num_cols: 0,
+            binding_dual,
+            pending_row_lower: Vec::new(),
+            per_solve_row_lower: Vec::new(),
+            per_solve_basis_offered: Vec::new(),
+            buf_dual: Vec::new(),
+            buf_reduced_costs: Vec::new(),
+        }
+    }
+}
+
+impl SolverInterface for PerChildProbeSolver {
+    type Profile = cobre_solver::ActiveProfile;
+
+    fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
+    fn solver_name_version(&self) -> String {
+        "PerChildProbe 0.0.0".to_string()
+    }
+    fn load_model(&mut self, template: &StageTemplate) {
+        self.current_num_rows = template.num_rows;
+        self.current_num_cols = template.num_cols;
+    }
+    fn add_rows(&mut self, cuts: &RowBatch) {
+        self.current_num_rows += cuts.num_rows;
+    }
+    fn set_row_bounds(&mut self, _indices: &[usize], lower: &[f64], _upper: &[f64]) {
+        self.pending_row_lower.extend_from_slice(lower);
+    }
+    fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+    fn solve(
+        &mut self,
+        basis: Option<&Basis>,
+    ) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
+        self.per_solve_basis_offered.push(basis.is_some());
+        self.per_solve_row_lower
+            .push(std::mem::take(&mut self.pending_row_lower));
+        self.buf_dual.clear();
+        self.buf_dual
+            .resize(self.current_num_rows, self.binding_dual);
+        self.buf_reduced_costs.clear();
+        self.buf_reduced_costs.resize(self.current_num_cols, 0.0);
+        Ok(cobre_solver::SolutionView {
+            objective: 0.0,
+            primal: &[],
+            dual: &self.buf_dual,
+            reduced_costs: &self.buf_reduced_costs,
+            iterations: 0,
+            solve_time_seconds: 0.0,
+        })
+    }
+    fn get_basis(&mut self, out: &mut Basis) {
+        crate::test_support::fill_consistent_basis(out);
+    }
+    fn statistics(&self) -> SolverStatistics {
+        SolverStatistics::default()
+    }
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        out.copy_from(&SolverStatistics::default());
+    }
+    fn name(&self) -> &'static str {
+        "PerChildProbe"
+    }
+}
+
 fn minimal_template_1_0() -> StageTemplate {
     StageTemplate {
         num_cols: 3,
@@ -304,7 +543,10 @@ fn staged_cut_coefficients<'a>(cut: &super::StagedCut, arena: &'a [f64]) -> &'a 
 ///
 /// The workspace is sized for `n_hydro=1`, `max_par_order=0`, and `n_state`
 /// state dimensions.
-fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<MockSolver>> {
+fn single_workspace<S: SolverInterface + Send>(
+    solver: S,
+    n_state: usize,
+) -> Vec<SolverWorkspace<S>> {
     vec![SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -427,8 +669,8 @@ fn basis_store_with_one(
     // chain (`chain_node_graph`), where `node_ids[t] == t`, so this must equal
     // the successor's `node_id` for the warm-start propagation path this
     // helper exercises to actually reach the warm path.
-    let node_id = i32::try_from(stage).expect("test fixture stage count fits in i32");
-    *store.get_mut(scenario, stage) = Some(CapturedBasis {
+    let node_id = NodeId(i32::try_from(stage).expect("test fixture stage count fits in i32"));
+    *store.get_mut(scenario, NodePos(stage)) = Some(CapturedBasis {
         basis,
         base_row_count,
         cut_row_slots: Vec::new(),
@@ -456,7 +698,8 @@ fn exchange_and_records(
 
     let records = test_support::trial_state_records(states, n_stages);
     let mut bufs = ExchangeBuffers::new(n_state, states.len(), 1);
-    bufs.exchange(&records, 0, n_stages, &LocalBackend).unwrap();
+    bufs.exchange(&records, StageIdx(0), n_stages, &LocalBackend)
+        .unwrap();
     (bufs, records)
 }
 
@@ -471,13 +714,13 @@ fn exchange_with_states(n_state: usize, states: Vec<Vec<f64>>) -> ExchangeBuffer
             primal: vec![],
             dual: vec![],
             stage_cost: 0.0,
-            node_id: 0,
+            node_id: NodeId(0),
             state,
         })
         .collect();
 
     let comm = LocalBackend;
-    bufs.exchange(&records, 0, 1, &comm).unwrap();
+    bufs.exchange(&records, StageIdx(0), 1, &comm).unwrap();
     bufs
 }
 
@@ -927,7 +1170,7 @@ fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
 #[test]
 fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     // Acceptance criterion: iteration=2, forward_passes=3, global
-    // trial point m=1 → fcf.add_cut(0,stage=0, iteration=2, fpi=1, ...).
+    // trial point m=1 → fcf.add_cut(NodeId(0),stage=0, iteration=2, fpi=1, ...).
     // slot = warm_start + 2*3 + 1 = 7.
     let n_stages = 2_usize;
     let n_openings = 2_usize;
@@ -1838,7 +2081,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
 #[allow(clippy::too_many_lines)]
 fn forward_pass_index_matches_global_scenario_index() {
     // Acceptance criterion: when a cut is generated for global trial point
-    // m=5, then `fcf.add_cut(0,stage, iteration, 5, ...)` is called with
+    // m=5, then `fcf.add_cut(NodeId(0),stage, iteration, 5, ...)` is called with
     // forward_pass_index = m = 5.
     //
     // Setup: iteration=2, forward_passes=6 (6 scenarios on 1 rank), 1 opening.
@@ -2064,7 +2307,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
     assert_eq!(
         warm_start_calls, 1,
         "first opening at successor stage must call solve(Some(&basis)) \
-         when basis_store.get(0, 1) is pre-populated (warm_start_calls == 1, got {warm_start_calls})"
+         when basis_store.get(0, NodePos(1)) is pre-populated (warm_start_calls == 1, got {warm_start_calls})"
     );
 }
 
@@ -2279,7 +2522,7 @@ fn backward_solver_error_propagates() {
     // is a local variable dropped on error. The store slot at (0, 1) remains
     // as it was; this just verifies the store is untouched by an error path.
     assert!(
-        basis_store.get(0, 1).is_some(),
+        basis_store.get(0, NodePos(1)).is_some(),
         "BasisStore must not be mutated by the backward pass error path"
     );
 }
@@ -4486,30 +4729,35 @@ fn run_one_trial_state_with_stores(
             inflow_lags: true,
         },
     );
+    let template_num_rows = frozen_template.num_rows;
     let succ_spec = super::SuccessorSpec {
-        t: 0,
-        successor: 1,
-        successor_node: 1,
-        successor_node_id: training_ctx.node_graph.node_ids[1],
+        t: StageIdx(0),
+        successor: StageIdx(1),
         my_rank: 0,
         probabilities: &succ_probabilities,
-        cut_batch: &empty_cut_batch,
-        num_cuts_at_successor: 0,
-        template_num_rows: frozen_template.num_rows,
-        frozen_template: &frozen_template,
-        successor_active_slots: &successor_active_slots,
-        cut_activity_tolerance: 0.0,
-        successor_populated_count: fcf.pools[1].populated(),
-        successor_pool: &fcf.pools[1],
         cut_state: &cut_state_projection,
     };
+    let single = SingleSuccessor::new(
+        NodePos(1),
+        training_ctx.node_graph.node_ids[NodePos(1)],
+        1,
+        0,
+        fcf.pools[1].populated(),
+        successor_active_slots.clone(),
+        training_ctx.node_graph.nodes[NodePos(1)].openings,
+        n_openings,
+        frozen_template,
+        empty_cut_batch,
+    );
+    let outcomes = single.outcomes(&fcf.pools, template_num_rows, 0.0);
+    let child0 = outcomes.child(0);
 
     // Derive a single-worker BasisStoreSliceMut covering all scenarios.
     let mut basis_slices = basis_store.split_workers_mut(1);
     let mut basis_slice = basis_slices.remove(0);
 
     let ws = &mut workspaces[0];
-    super::load_backward_lp(ws, &succ_spec);
+    super::load_backward_lp(ws, &child0);
     ws.backward_accum
         .per_opening_stats
         .resize_with(n_openings, SolverStatsDelta::default);
@@ -4529,9 +4777,11 @@ fn run_one_trial_state_with_stores(
         &training_ctx,
         &exchange,
         fwd_offset,
+        fwd_offset,
         iteration,
         &risk_measures,
         &succ_spec,
+        &outcomes,
         &mut basis_slice,
         &super::StageOpeningSolver::Frozen,
         0,
@@ -4618,8 +4868,15 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
     let raw_noise: Vec<f64> = Vec::new();
     let mut ws = transit_bucket_only_workspace(MockSolver::always_ok(solution_1_0(0.0, 0.0)), 2);
 
-    super::patch_opening_bounds(&mut ws, &ctx, &training_ctx, &raw_noise, &x_hat, 0)
-        .expect("fixture commitments are in bounds; reconciliation must not reject");
+    super::patch_opening_bounds(
+        &mut ws,
+        &ctx,
+        &training_ctx,
+        &raw_noise,
+        &x_hat,
+        StageIdx(0),
+    )
+    .expect("fixture commitments are in bounds; reconciliation must not reject");
 
     let cp = ws.patch_buf.state_col_patch_count();
     assert_eq!(
@@ -4637,6 +4894,247 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
     }
 }
 
+/// Per-child isolation on a genuine fan: root → two children at stage 1 with
+/// DISTINCT External inflow columns AND DISTINCT non-leaf pools. Asserts none of
+/// child 0's data is reused for child 1: (a) each child reads its OWN declared
+/// External column (distinct patched inflow noise), (b) each warm-starts from its
+/// OWN `(m, child node)` basis key (distinct basis-store slots captured), (c) each
+/// child's binding activity lands in ITS OWN pool's metadata region.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn per_child_backward_isolates_column_basis_and_pool_metadata() {
+    use crate::setup::node_graph::{NodeOpenings, OpeningSource};
+
+    let n_stages = 2_usize;
+    let stochastic = make_stochastic_context(n_stages, 1);
+    let state = test_support::state_layout(1, 0);
+    let n_state = state.n_state;
+
+    // Two external inflow columns at stage 1 carrying materially different eta.
+    let mut inflow_lib =
+        cobre_stochastic::ExternalScenarioLibrary::new(n_stages, 2, 1, "inflow", vec![1, 2]);
+    inflow_lib.eta_slice_mut(1, 0).copy_from_slice(&[2.0]);
+    inflow_lib.eta_slice_mut(1, 1).copy_from_slice(&[-2.0]);
+
+    let templates = vec![minimal_template_1_0(); n_stages];
+    let base_rows = vec![0_usize; n_stages];
+    // Per-(stage, hydro) inflow noise scale; the transform indexes `stage * n_hydros + h`.
+    let noise_scale = vec![1.0_f64; n_stages];
+    let ctx = StageContext {
+        geometry_per_stage: &[],
+        templates: &templates,
+        base_rows: &base_rows,
+        noise_scale: &noise_scale,
+        n_hydros: 1,
+        cost_scale_factor: 1_000_000.0,
+        n_load_buses: 0,
+        load_balance_row_starts: &[],
+        load_bus_indices: &[],
+        block_counts_per_stage: &[],
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+        ncs_max_gen: &[],
+        ncs_allow_curtailment: &[],
+        discount_factors: &[],
+        cumulative_discount_factors: &[],
+        stage_lag_transitions: &[],
+        noise_group_ids: &[],
+        downstream_par_order: 0,
+    };
+
+    let horizon = HorizonMode::Finite {
+        num_stages: n_stages,
+    };
+    let study_dims = test_support::study_dims();
+    let node_graph = crate::test_support::chain_node_graph(&stochastic);
+    let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
+    let training_ctx = TrainingContext {
+        node_graph: &node_graph,
+        horizon: &horizon,
+        state: &state,
+        cut_state_layouts: &cut_state_layouts,
+        study_dims: &study_dims,
+        inflow_method: &InflowNonNegativityMethod::None,
+        stochastic: &stochastic,
+        initial_state: &[],
+        inflow_scheme: SamplingScheme::External,
+        load_scheme: SamplingScheme::InSample,
+        ncs_scheme: SamplingScheme::InSample,
+        stages: &[],
+        historical_library: None,
+        external_inflow_library: Some(&inflow_lib),
+        external_load_library: None,
+        external_ncs_library: None,
+        lag_accum_seed: &[],
+        lag_weight_seed: &[],
+        dcs: None,
+    };
+
+    // Two distinct non-leaf pools (1 and 2), each carrying active cuts so binding
+    // metadata is non-trivial; pool 0 is the generating (root) pool. The populated
+    // counts and active slots are read back from the FCF rather than assumed.
+    let n_pools = 3;
+    let mut fcf = FutureCostFunction::new(n_pools, n_state, 1, 10, &vec![0u32; n_pools]);
+    fcf.add_cut(NodeId(1), 1, 1, 0, 0.0, &vec![0.0; n_state]);
+    fcf.add_cut(NodeId(2), 2, 1, 0, 0.0, &vec![0.0; n_state]);
+    let base_num_rows = minimal_template_1_0().num_rows;
+    let pool_child = |pool: usize, node: usize, node_id: NodeId, offset: usize| {
+        let active: Vec<usize> = fcf.active_cuts(pool).map(|(s, _, _)| s).collect();
+        ChildSpec {
+            successor_node: NodePos(node),
+            successor_node_id: node_id,
+            pool_id: pool,
+            openings: NodeOpenings {
+                source: OpeningSource::External,
+                offset,
+                len: 1,
+                q: 1.0,
+            },
+            num_cuts_at_successor: active.len(),
+            populated_count: fcf.pools[pool].populated(),
+            active_slots: active,
+        }
+    };
+    let child_1 = pool_child(1, 1, NodeId(101), 0);
+    let child_2 = pool_child(2, 2, NodeId(102), 1);
+    let (pop1, pop2) = (child_1.populated_count, child_2.populated_count);
+    assert!(
+        pop1 >= 1 && pop2 >= 1,
+        "both fan pools must carry active cuts"
+    );
+    let num_cuts_1 = child_1.num_cuts_at_successor;
+    let num_cuts_2 = child_2.num_cuts_at_successor;
+
+    // Each pool's frozen template = base rows + that pool's own active cut rows.
+    let frozen_for = |n_cuts: usize| {
+        let mut t = minimal_template_1_0();
+        t.num_rows = base_num_rows + n_cuts;
+        t
+    };
+    let frozen = vec![
+        minimal_template_1_0(),
+        frozen_for(num_cuts_1),
+        frozen_for(num_cuts_2),
+    ];
+    let cut_batches = empty_cut_batches(n_pools);
+    let multi = MultiSuccessor::new(vec![child_1, child_2], frozen, cut_batches);
+    let cut_state_projection = CutStateProjection::new(
+        &state,
+        StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    );
+    let succ_spec = super::SuccessorSpec {
+        t: StageIdx(0),
+        successor: StageIdx(1),
+        my_rank: 0,
+        probabilities: &[0.5_f64, 0.5],
+        cut_state: &cut_state_projection,
+    };
+    let outcomes = multi.outcomes(&fcf.pools, base_num_rows, 0.0);
+    let total_metadata = outcomes.total_metadata_len();
+    assert_eq!(
+        total_metadata,
+        pop1 + pop2,
+        "the metadata buffer concatenates each pool's own slot region"
+    );
+
+    let trial_states = vec![vec![10.0_f64]];
+    let records = test_support::trial_state_records(&trial_states, n_stages);
+    let mut exchange = ExchangeBuffers::new(n_state, trial_states.len(), 1);
+    exchange
+        .exchange(&records, StageIdx(1), n_stages, &StubComm)
+        .expect("exchange must succeed");
+
+    // Basis node axis covers the child node positions (1, 2), not just n_stages.
+    let mut basis_store = BasisStore::new(exchange.local_count(), 3);
+    let mut basis_slices = basis_store.split_workers_mut(1);
+
+    let mut workspaces = single_workspace(PerChildProbeSolver::new(1.0), n_state);
+    let ws = &mut workspaces[0];
+    ws.backward_accum.outcomes.clear();
+    for _ in 0..2 {
+        ws.backward_accum.outcomes.push(BackwardOutcome {
+            intercept: 0.0,
+            coefficients: vec![0.0; n_state],
+            objective_value: 0.0,
+        });
+    }
+    ws.backward_accum
+        .per_opening_stats
+        .resize_with(2, SolverStatsDelta::default);
+    ws.backward_accum.slot_increments.clear();
+    ws.backward_accum.slot_increments.resize(total_metadata, 0);
+    ws.backward_accum
+        .metadata_sync_contribution
+        .resize(total_metadata, 0);
+    ws.backward_accum.metadata_sync_contribution[..total_metadata].fill(0);
+    ws.backward_accum.agg_coefficients.resize(n_state, 0.0);
+    ws.backward_accum.agg_arena.resize(n_state, 0.0);
+
+    let risk_measures = vec![RiskMeasure::Expectation; n_stages];
+    super::process_by_scenario_backward(
+        ws,
+        &ctx,
+        &training_ctx,
+        &exchange,
+        0,
+        0,
+        1,
+        &risk_measures,
+        &succ_spec,
+        &outcomes,
+        &mut basis_slices[0],
+        &super::StageOpeningSolver::Frozen,
+        0,
+        0,
+        0,
+    )
+    .expect("per-child backward must succeed");
+
+    // (a) Each child read its OWN External column: the two solves patched DIFFERENT
+    // inflow noise. If child 0's column were reused, both patches would be equal.
+    let probe = ws.solver.inner();
+    assert_eq!(
+        probe.per_solve_row_lower.len(),
+        2,
+        "one solve per child (each External child has one opening)"
+    );
+    assert_ne!(
+        probe.per_solve_row_lower[0], probe.per_solve_row_lower[1],
+        "each child must patch its OWN External column's noise, not a reused child-0 column"
+    );
+
+    // (b) Each child warm-started from and captured its OWN (m, child node) basis.
+    for node in [NodePos(1), NodePos(2)] {
+        assert!(
+            basis_slices[0].get(0, node).is_some(),
+            "child at node {node} must capture its own (m, child node) basis"
+        );
+    }
+
+    // (c) Each child's binding activity landed in ITS OWN pool's metadata region:
+    // child 0 → region `[0, pop1)` (pool 1), child 1 → region `[pop1, pop1+pop2)`
+    // (pool 2). Both regions record bindings, and neither is empty — a child-0
+    // collapse would leave pool 2's region untouched.
+    let contrib = &ws.backward_accum.metadata_sync_contribution;
+    let pool1_region: u64 = contrib[0..pop1].iter().sum();
+    let pool2_region: u64 = contrib[pop1..pop1 + pop2].iter().sum();
+    assert_eq!(
+        pool1_region, num_cuts_1 as u64,
+        "pool 1's region must record child 0's binding cuts"
+    );
+    assert_eq!(
+        pool2_region, num_cuts_2 as u64,
+        "pool 2's region must record child 1's binding cuts, not collide onto pool 1"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // resolve_backward_basis_* unit tests
 // ---------------------------------------------------------------------------
@@ -4645,13 +5143,13 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
 fn resolve_backward_basis_returns_some_when_slot_is_populated() {
     use crate::workspace::{BasisStore, CapturedBasis};
 
-    let b = CapturedBasis::new(2, 2, 0, 0, 0, 0);
+    let b = CapturedBasis::new(2, 2, 0, 0, 0, NodeId(0));
     let mut store = BasisStore::new(1, 2);
-    *store.get_mut(0, 1) = Some(b);
+    *store.get_mut(0, NodePos(1)) = Some(b);
 
     let slices = store.split_workers_mut(1);
     let slice = &slices[0];
-    let basis_ref = super::resolve_backward_basis(slice, 0, 1);
+    let basis_ref = super::resolve_backward_basis(slice, 0, NodePos(1));
 
     assert!(basis_ref.is_some(), "expected Some when slot has a basis");
     drop(slices);
@@ -4662,7 +5160,7 @@ fn resolve_backward_basis_returns_none_when_slot_is_empty() {
     let mut store = BasisStore::new(1, 2);
     let slices = store.split_workers_mut(1);
     let slice = &slices[0];
-    let basis_ref = super::resolve_backward_basis(slice, 0, 1);
+    let basis_ref = super::resolve_backward_basis(slice, 0, NodePos(1));
 
     assert!(basis_ref.is_none(), "expected None for empty slot");
     drop(slices);
@@ -4679,10 +5177,10 @@ fn backward_write_populates_basis_store_at_omega_zero() {
 
     // Verify the BasisStore slot was written.
     assert!(
-        basis_store.get(0, 1).is_some(),
+        basis_store.get(0, NodePos(1)).is_some(),
         "BasisStore[0, 1] must be Some after backward write at omega=0"
     );
-    let captured = basis_store.get(0, 1).unwrap();
+    let captured = basis_store.get(0, NodePos(1)).unwrap();
     assert_eq!(
         captured.state_at_capture,
         vec![5.0_f64],
@@ -4714,14 +5212,14 @@ fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
         // Matches the chain's node_ids[1] == 1 so the pre-existing slot is
         // still eligible as a warm-start input, not silently dropped cold by
         // the node-tag check this fixture is not exercising.
-        node_id: 1,
+        node_id: NodeId(1),
     };
     let mut basis_store = BasisStore::new(1, 2);
-    *basis_store.get_mut(0, 1) = Some(pre_existing);
+    *basis_store.get_mut(0, NodePos(1)) = Some(pre_existing);
 
     // Verify sentinel is in place before the call.
     assert_eq!(
-        basis_store.get(0, 1).unwrap().state_at_capture,
+        basis_store.get(0, NodePos(1)).unwrap().state_at_capture,
         vec![42.0_f64],
         "sentinel must be in place before the infeasible solve"
     );
@@ -4740,12 +5238,12 @@ fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
 
     // The slot must still be Some after the successful reuse-path write.
     assert!(
-        basis_store.get(0, 1).is_some(),
+        basis_store.get(0, NodePos(1)).is_some(),
         "BasisStore[0, 1] must not be None after successful reuse-path write at ω=0"
     );
     // The reuse path updates state_at_capture to the current x_hat=[5.0].
     assert_eq!(
-        basis_store.get(0, 1).unwrap().state_at_capture,
+        basis_store.get(0, NodePos(1)).unwrap().state_at_capture,
         vec![5.0_f64],
         "state_at_capture must be updated to x_hat by the reuse path"
     );
@@ -5095,7 +5593,7 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
     let mut fcf = FutureCostFunction::new(3, state.n_state, 1, 10, &[0; 3]);
     let mut coefficients = vec![0.0_f64; state.n_state];
     coefficients[state.anticipated_slots_out.start] = 7.5;
-    fcf.add_cut(0, 1, 0, 0, 0.0, &coefficients);
+    fcf.add_cut(NodeId(0), 1, 0, 0, 0.0, &coefficients);
 
     let mut batch = RowBatch {
         num_rows: 0,
@@ -5187,9 +5685,9 @@ fn dcs_core_template() -> StageTemplate {
 fn dcs_two_stage_fcf() -> FutureCostFunction {
     let n_stages = 2;
     let mut fcf = FutureCostFunction::new(n_stages, 1, 8, 10, &vec![0; n_stages]);
-    fcf.add_cut(0, 1, 0, 0, 1.0, &[0.0]);
-    fcf.add_cut(0, 1, 0, 1, 0.0, &[2.0]);
-    fcf.add_cut(0, 1, 0, 2, 3.0, &[0.0]);
+    fcf.add_cut(NodeId(0), 1, 0, 0, 1.0, &[0.0]);
+    fcf.add_cut(NodeId(0), 1, 0, 1, 0.0, &[2.0]);
+    fcf.add_cut(NodeId(0), 1, 0, 2, 3.0, &[0.0]);
     // Seed metadata: slots 0 and 2 are "recently active"; the binding slot 1
     // is stale so the k2 window excludes it (forcing the lazy add). All were
     // generated before the current iteration so none is current-iteration
@@ -5197,7 +5695,7 @@ fn dcs_two_stage_fcf() -> FutureCostFunction {
     let meta = |generated: u64, last: u64| CutMetadata {
         iteration_generated: generated,
         forward_pass_index: 0,
-        node: 0,
+        node: NodeId(0),
         active_count: 0,
         last_active_iter: last,
     };
@@ -5253,6 +5751,7 @@ fn run_dcs_backward_trial_state(
 /// Returns the produced [`StagedCut`], its coefficient slice resolved from
 /// the worker arena (the bytes the FCF would receive), and the post-call
 /// `metadata_sync_contribution` snapshot.
+#[allow(clippy::too_many_lines)]
 fn run_dcs_backward_trial_state_at(
     dcs: Option<DcsParams>,
     iteration: u64,
@@ -5340,34 +5839,40 @@ fn run_dcs_backward_trial_state_at(
             inflow_lags: true,
         },
     );
+    let template_num_rows = core.num_rows;
     let succ = super::SuccessorSpec {
-        t: 0,
-        successor: 1,
-        successor_node: 1,
-        successor_node_id: training_ctx.node_graph.node_ids[1],
+        t: StageIdx(0),
+        successor: StageIdx(1),
         my_rank: 0,
         probabilities: &probabilities,
-        cut_batch: &cut_batch,
-        num_cuts_at_successor: num_cuts,
-        template_num_rows: core.num_rows,
-        frozen_template: &core,
-        successor_active_slots: &successor_active_slots,
-        cut_activity_tolerance: 0.0,
-        successor_populated_count: fcf.pools[1].populated(),
-        successor_pool: &fcf.pools[1],
         cut_state: &cut_state_projection,
     };
+    let single = SingleSuccessor::new(
+        NodePos(1),
+        training_ctx.node_graph.node_ids[NodePos(1)],
+        1,
+        num_cuts,
+        fcf.pools[1].populated(),
+        successor_active_slots.clone(),
+        training_ctx.node_graph.nodes[NodePos(1)].openings,
+        probabilities.len(),
+        core.clone(),
+        cut_batch.clone(),
+    );
+    let outcomes = single.outcomes(&fcf.pools, template_num_rows, 0.0);
+    let child0 = outcomes.child(0);
 
     let mut basis_slices = basis_store.split_workers_mut(1);
     let ws = &mut workspaces[0];
     // Choose the opening-solve strategy exactly as the driver does, then issue
-    // the per-trial-point prepare/load (mirrors process_stage_backward's per-`m`
-    // load after the per-opening solver-state reset). The `Frozen` variant loads the frozen all-cuts
-    // LP; the `Lazy` variant loads the cut-free core + builds the metadata seed.
+    // the per-child prepare/load (mirrors process_by_scenario_backward's per-child
+    // load after the per-child solver-state reset). The `Frozen` variant loads the
+    // child's frozen all-cuts LP; the `Lazy` variant loads the cut-free core +
+    // builds the metadata seed.
     let opening_solver = super::StageOpeningSolver::from_dcs_params(
         dcs.filter(|params| params.is_active(iteration)),
     );
-    opening_solver.prepare(ws, &ctx, &succ, iteration);
+    opening_solver.prepare(ws, &ctx, &succ, &child0, iteration);
     // Initialise the per-opening accumulator buffers the trial-point helper
     // expects (mirrors process_stage_backward's per-stage setup).
     let n_openings = succ.probabilities.len();
@@ -5378,7 +5883,7 @@ fn run_dcs_backward_trial_state_at(
             objective_value: 0.0,
         });
     }
-    let pop = succ.successor_populated_count;
+    let pop = child0.populated_count;
     if ws.backward_accum.slot_increments.len() < pop {
         ws.backward_accum.slot_increments.resize(pop, 0);
     }
@@ -5407,9 +5912,11 @@ fn run_dcs_backward_trial_state_at(
         &training_ctx,
         &exchange,
         0,
+        0,
         iteration,
         &risk_measures,
         &succ,
+        &outcomes,
         &mut basis_slices[0],
         &opening_solver,
         0,
@@ -5857,28 +6364,33 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
             inflow_lags: true,
         },
     );
+    let template_num_rows = base.num_rows;
     let succ = super::SuccessorSpec {
-        t: 0,
-        successor: 1,
-        successor_node: 1,
-        successor_node_id: training_ctx.node_graph.node_ids[1],
+        t: StageIdx(0),
+        successor: StageIdx(1),
         my_rank: 0,
         probabilities: &probabilities,
-        cut_batch: &cut_batch,
-        num_cuts_at_successor: num_cuts,
-        template_num_rows: base.num_rows,
-        frozen_template: &frozen,
-        successor_active_slots: &successor_active_slots,
-        cut_activity_tolerance: 0.0,
-        successor_populated_count: fcf.pools[1].populated(),
-        successor_pool: &fcf.pools[1],
         cut_state: &cut_state_projection,
     };
+    let single = SingleSuccessor::new(
+        NodePos(1),
+        training_ctx.node_graph.node_ids[NodePos(1)],
+        1,
+        num_cuts,
+        fcf.pools[1].populated(),
+        successor_active_slots.clone(),
+        training_ctx.node_graph.nodes[NodePos(1)].openings,
+        probabilities.len(),
+        frozen.clone(),
+        cut_batch.clone(),
+    );
+    let outcomes = single.outcomes(&fcf.pools, template_num_rows, 0.0);
+    let child0 = outcomes.child(0);
 
     let mut basis_slices = basis_store.split_workers_mut(1);
     let ws = &mut workspaces[0];
     // Choose the opening-solve strategy as the driver does, then issue the
-    // per-trial-point prepare/load (mirrors process_stage_backward's per-`m`
+    // per-child prepare/load (mirrors process_by_scenario_backward's per-child
     // load). `dcs = Some(dcs_params(2))` with `iteration = 5` selects `Lazy`,
     // whose prepare loads the cut-free core + builds the metadata seed.
     let opening_solver = super::StageOpeningSolver::from_dcs_params(
@@ -5886,7 +6398,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
             .dcs
             .filter(|params| params.is_active(iteration)),
     );
-    opening_solver.prepare(ws, &ctx, &succ, iteration);
+    opening_solver.prepare(ws, &ctx, &succ, &child0, iteration);
     let n_openings = succ.probabilities.len();
     while ws.backward_accum.outcomes.len() < n_openings {
         ws.backward_accum.outcomes.push(BackwardOutcome {
@@ -5895,7 +6407,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
             objective_value: 0.0,
         });
     }
-    let pop = succ.successor_populated_count;
+    let pop = child0.populated_count;
     if ws.backward_accum.slot_increments.len() < pop {
         ws.backward_accum.slot_increments.resize(pop, 0);
     }
@@ -5924,9 +6436,11 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
         &training_ctx,
         &exchange,
         0,
+        0,
         iteration,
         &risk_measures,
         &succ,
+        &outcomes,
         &mut basis_slices[0],
         &opening_solver,
         0,

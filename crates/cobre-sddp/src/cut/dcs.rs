@@ -23,6 +23,7 @@ use crate::cut_selection::CutSelectionStrategy;
 use crate::error::SddpError;
 use crate::gemm::gemm_block;
 use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
+use crate::setup::{NodeId, StageIdx};
 use crate::workspace::CapturedBasis;
 
 /// Dynamic Cut Selection hyperparameters.
@@ -346,7 +347,7 @@ pub fn score_violated_candidates(
 #[derive(Clone, Copy, Debug)]
 pub struct DcsSolveContext {
     /// Stage index `t`.
-    pub stage_index: usize,
+    pub stage_index: StageIdx,
     /// Scenario index `m`.
     pub scenario_index: usize,
     /// Training iteration (1-based) feeding the `k1` recency window, or `None`
@@ -368,7 +369,7 @@ pub struct DcsSolveContext {
 
     /// Declared id of the node being solved (`NodeGraph::node_ids[node]`); a
     /// `stored_basis` whose `node_id` differs is treated as cold.
-    pub node_id: i32,
+    pub node_id: NodeId,
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +536,7 @@ impl DcsSolveScratch {
 fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
     match e {
         SolverError::Infeasible => SddpError::Infeasible {
-            stage: ctx.stage_index,
+            stage: ctx.stage_index.0,
             iteration: ctx.iteration.unwrap_or(0),
             scenario: ctx.scenario_index,
         },
@@ -786,6 +787,7 @@ mod tests {
     use crate::cut::{CutPool, CutRowMap};
     use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
     use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
+    use crate::setup::{NodeId, StageIdx};
     use crate::workspace::CapturedBasis;
 
     /// All-enabled per-pool projection of `idx`: every scoring/append test uses a
@@ -917,7 +919,7 @@ mod tests {
     /// Insert a cut at `slot` with `intercept` and `coeffs`, and set its
     /// `iteration_generated`. Returns nothing; mutates `pool`.
     fn add(pool: &mut CutPool, slot: u32, intercept: f64, coeffs: &[f64], iter_generated: u64) {
-        pool.add_cut(0, 0, slot, intercept, coeffs);
+        pool.add_cut(NodeId(0), 0, slot, intercept, coeffs);
         pool.set_iteration_generated_for_test(slot as usize, iter_generated);
     }
 
@@ -1356,7 +1358,7 @@ mod tests {
         for slot in 0..cap {
             let intercept = draw_f64(&mut state);
             let coeffs = [draw_f64(&mut state), draw_f64(&mut state)];
-            pool.add_cut(0, 0, slot as u32, intercept, &coeffs);
+            pool.add_cut(NodeId(0), 0, slot as u32, intercept, &coeffs);
             // iteration_generated in [1, 12].
             let gen_iter = 1 + (splitmix64(&mut state) % 12);
             pool.set_iteration_generated_for_test(slot, gen_iter);
@@ -1777,9 +1779,9 @@ mod tests {
     /// All-cuts optimum: theta = 5.0, objective = 5.0; binding slot = 2.
     fn make_three_cut_pool() -> CutPool {
         let mut pool = CutPool::new(16, 1, 16, 0);
-        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
-        pool.add_cut(0, 0, 1, 0.0, &[1.0]);
-        pool.add_cut(0, 0, 2, 5.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 0, 1.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 1, 0.0, &[1.0]);
+        pool.add_cut(NodeId(0), 0, 2, 5.0, &[0.0]);
         for slot in 0..3 {
             pool.set_iteration_generated_for_test(slot, 1);
         }
@@ -1795,10 +1797,10 @@ mod tests {
     /// (floor 20). Used to exercise the opening-reuse continue path.
     fn make_four_cut_pool() -> CutPool {
         let mut pool = CutPool::new(16, 1, 16, 0);
-        pool.add_cut(0, 0, 0, 1.0, &[0.0]);
-        pool.add_cut(0, 0, 1, 0.0, &[1.0]);
-        pool.add_cut(0, 0, 2, 5.0, &[0.0]);
-        pool.add_cut(0, 0, 3, 0.0, &[2.0]);
+        pool.add_cut(NodeId(0), 0, 0, 1.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 1, 0.0, &[1.0]);
+        pool.add_cut(NodeId(0), 0, 2, 5.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 3, 0.0, &[2.0]);
         for slot in 0..4 {
             pool.set_iteration_generated_for_test(slot, 1);
         }
@@ -1811,11 +1813,11 @@ mod tests {
 
     fn ctx() -> DcsSolveContext {
         DcsSolveContext {
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 0,
             iteration: Some(10),
             continue_carry: false,
-            node_id: 0,
+            node_id: NodeId(0),
         }
     }
 
@@ -1885,7 +1887,7 @@ mod tests {
     /// against `num_row = 1`), so the uniform-BASIC reconstruction's
     /// `enforce_basic_count_invariant` surfaces `SddpError::BasisShapeMismatch`
     /// if it is ever attempted.
-    fn make_deficit_basis(node_id: i32) -> CapturedBasis {
+    fn make_deficit_basis(node_id: NodeId) -> CapturedBasis {
         CapturedBasis::new(4, 1, 1, 0, 0, node_id)
     }
 
@@ -1903,7 +1905,7 @@ mod tests {
         let params = lazy_params(10, 50);
         solver.load_model(&core);
 
-        let stored = make_deficit_basis(1); // node A
+        let stored = make_deficit_basis(NodeId(1)); // node A
 
         let result = lazy_solve_preloaded(
             &mut solver,
@@ -1917,7 +1919,7 @@ mod tests {
             &params,
             &mut scratch,
             DcsSolveContext {
-                node_id: 2,
+                node_id: NodeId(2),
                 ..ctx()
             }, // node B — mismatches stored's node A
         );
@@ -1946,7 +1948,7 @@ mod tests {
         let params = lazy_params(10, 50);
         solver.load_model(&core);
 
-        let stored = make_deficit_basis(1); // node A
+        let stored = make_deficit_basis(NodeId(1)); // node A
 
         let result = lazy_solve_preloaded(
             &mut solver,
@@ -1960,7 +1962,7 @@ mod tests {
             &params,
             &mut scratch,
             DcsSolveContext {
-                node_id: 1,
+                node_id: NodeId(1),
                 ..ctx()
             }, // node A — matches stored
         );
@@ -2614,7 +2616,7 @@ mod tests {
         let indexer = lazy_indexer();
         // One cut: intercept 5, coeff [0] → floor 5.0 at x0 = 2.
         let mut pool = CutPool::new(16, 1, 16, 0);
-        pool.add_cut(0, 0, 0, 5.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 0, 5.0, &[0.0]);
         pool.set_iteration_generated_for_test(0, 1);
 
         // Primal layout: [x0, c1, c2, theta]. First solve reports theta = 0
@@ -2664,11 +2666,11 @@ mod tests {
         let mut metadata = Vec::with_capacity(n);
         let mut active = Vec::with_capacity(n);
         for (i, &(is_active, iteration_generated, last_active_iter)) in specs.iter().enumerate() {
-            pool.add_cut(0, 0, i as u32, 0.0, &[0.0]);
+            pool.add_cut(NodeId(0), 0, i as u32, 0.0, &[0.0]);
             metadata.push(CutMetadata {
                 iteration_generated,
                 forward_pass_index: i as u32,
-                node: 0,
+                node: NodeId(0),
                 active_count: 0,
                 last_active_iter,
             });

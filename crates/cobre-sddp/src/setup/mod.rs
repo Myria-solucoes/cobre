@@ -62,7 +62,10 @@ pub mod stage_data;
 pub mod stochastic_pipeline;
 pub(crate) mod template_postprocess;
 
-pub use node_graph::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource};
+pub use node_graph::{
+    EnumeratedPlan, NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor,
+    OpeningSource, StageIdx, Traversal, TypedVec,
+};
 pub use params::{
     ConstructionConfig, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS,
     DEFAULT_SEED, SimulationEnumeratedRequest, StudyParams,
@@ -532,6 +535,15 @@ impl StudySetup {
         )?;
 
         reject_scenario_id_under_sampled_selection(&node_graph, training_enumerated)?;
+        {
+            let prov = stochastic.provenance();
+            reject_insample_class_under_external_nodes(
+                &node_graph,
+                (prov.inflow_scheme, stochastic.n_hydros()),
+                (prov.load_scheme, stochastic.n_load_buses()),
+                (prov.ncs_scheme, stochastic.n_stochastic_ncs()),
+            )?;
+        }
 
         // Resolves any `enumerated`-declared phase's actual count now that the
         // graph exists — config load could only signal the request, never the
@@ -558,12 +570,41 @@ impl StudySetup {
             SimulationEnumeratedRequest::Sampled => n_scenarios,
         };
 
+        // Resolved AFTER the guard-checked counts above (`resolve_enumerated_training_count`
+        // has already run the enumerated admissibility guards for a `true`
+        // `training_enumerated`), so this resolution cannot fail — it is the
+        // typed reification of what the two calls above already validated.
+        let traversal =
+            node_graph::Traversal::resolve(&node_graph, training_enumerated, forward_passes);
+
         let cut_state_layouts = build_cut_state_layouts(system, &state_layout, &node_graph);
         let pool_state_dimensions: Vec<usize> = cut_state_layouts
             .iter()
             .map(CutStateProjection::n_slots)
             .collect();
-        let visit_bounds = node_graph::sampled_visit_bound(&node_graph, forward_passes);
+        // Cut-RECEIPT stride selected through the resolved traversal: BOTH arms
+        // call `pool_cut_stride` — NEVER `forward_solve_counts`, the enumerated
+        // engine's node-deduplicated per-pool FORWARD-SOLVE count, a strictly
+        // smaller and different-purpose quantity once a pool sits below a
+        // branch point (it feeds only the engine's own dedup-scale invariant,
+        // `expected_single_rank_solves`). Sizing the POOL from it under-reserves
+        // every branched pool's cut slots: the backward pass still produces one
+        // candidate cut per TRIAL POINT (== `forward_passes`, not per
+        // deduplicated forward solve), so the next trial point collides with a
+        // still-active slot (`CutPool::add_cut`'s double-insert panic) —
+        // reproduced by swapping this call for `forward_solve_counts` on a
+        // K-fan enumerated case. `forward_passes` is already the trial-point
+        // count for whichever axis `traversal` resolved to, so both arms derive
+        // an identical stride; the match exists to keep the derivation visibly
+        // routed through `Traversal` rather than a bare bool.
+        let visit_bounds = match &traversal {
+            node_graph::Traversal::Sampled { forward_passes } => {
+                node_graph::pool_cut_stride(&node_graph, *forward_passes)
+            }
+            node_graph::Traversal::Enumerated(_) => {
+                node_graph::pool_cut_stride(&node_graph, forward_passes)
+            }
+        };
         let fcf = FutureCostFunction::new_per_pool(
             &pool_state_dimensions,
             state_layout.n_state,
@@ -1234,11 +1275,11 @@ fn build_cut_state_layouts(
     // their own (disjoint) pool id with the successor-sized projection below.
     let mut layouts =
         vec![CutStateProjection::new(state_layout, FULL_STATE_CONFIG); node_graph.n_pools];
-    for (pos, node) in node_graph.nodes.iter().enumerate() {
+    for (pos, node) in node_graph.nodes.iter_indexed() {
         let Some(succ) = node_graph.successors[pos].first() else {
             continue;
         };
-        let config = study_stages[node_graph.nodes[succ.child].stage].state_config;
+        let config = study_stages[node_graph.nodes[succ.child].stage.0].state_config;
         layouts[node.pool_id] = CutStateProjection::new(state_layout, config);
     }
     layouts
@@ -1773,8 +1814,7 @@ fn reject_scenario_id_under_sampled_selection(
     }
     if let Some((pos, node)) = node_graph
         .nodes
-        .iter()
-        .enumerate()
+        .iter_indexed()
         .find(|(_, n)| n.openings.source == OpeningSource::External)
     {
         return Err(SddpError::Validation(format!(
@@ -1782,6 +1822,50 @@ fn reject_scenario_id_under_sampled_selection(
              selection; scenario_id requires enumerated selection",
             node_graph.node_ids[pos], node.stage
         )));
+    }
+    Ok(())
+}
+
+/// Reject a non-empty in-sample class alongside an external-column node graph. An
+/// [`OpeningSource::External`] node pins a scenario column that only the external
+/// libraries carry; a class with real entities drawing under
+/// [`SamplingScheme::InSample`] instead reads the generated opening tree at that
+/// column offset, silently sampling a wrong opening (or, where the tree lacks that
+/// column, tripping the sampler's opening-range assert). The mixed config is
+/// unsupported: for an external-column graph every non-empty class must draw
+/// external. A zero-entity class draws nothing and is exempt (the degenerate
+/// no-entity class an all-external study still carries).
+///
+/// Takes each class's `(scheme, entity_count)` directly so it is unit-testable
+/// without a [`StochasticContext`].
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the first offending class and the
+/// admitting condition (all non-empty classes external).
+fn reject_insample_class_under_external_nodes(
+    node_graph: &NodeGraph,
+    inflow: (Option<SamplingScheme>, usize),
+    load: (Option<SamplingScheme>, usize),
+    ncs: (Option<SamplingScheme>, usize),
+) -> Result<(), SddpError> {
+    let Some((pos, node)) = node_graph
+        .nodes
+        .iter_indexed()
+        .find(|(_, n)| n.openings.source == OpeningSource::External)
+    else {
+        return Ok(());
+    };
+    for (class, (scheme, count)) in [("inflow", inflow), ("load", load), ("ncs", ncs)] {
+        if count > 0 && scheme == Some(SamplingScheme::InSample) {
+            return Err(SddpError::Validation(format!(
+                "node {} (stage {}) pins an external scenario column, but the {class} class draws \
+                 {count} entities under in-sample selection; an external-column node graph admits \
+                 only all-external non-empty classes (a zero-entity class is exempt) — set the \
+                 {class} class to external selection",
+                node_graph.node_ids[pos], node.stage
+            )));
+        }
     }
     Ok(())
 }
@@ -1801,8 +1885,7 @@ fn reject_scenario_id_under_sampled_selection(
 fn reject_within_node_opening_enumeration(node_graph: &NodeGraph) -> Result<(), SddpError> {
     if let Some((pos, node)) = node_graph
         .nodes
-        .iter()
-        .enumerate()
+        .iter_indexed()
         .find(|(_, n)| n.openings.len > 1)
     {
         return Err(SddpError::Validation(format!(
@@ -1834,11 +1917,11 @@ fn reject_within_node_opening_enumeration(node_graph: &NodeGraph) -> Result<(), 
 /// Returns [`SddpError::Validation`] naming the first offending node id and its
 /// stage (sibling to the within-node-opening rejection above).
 fn reject_recombining_node_enumeration(node_graph: &NodeGraph) -> Result<(), SddpError> {
-    let mut in_degree = vec![0usize; node_graph.nodes.len()];
+    let mut in_degree: TypedVec<NodePos, usize> = vec![0usize; node_graph.nodes.len()].into();
     for succ in node_graph.successors.iter().flatten() {
         in_degree[succ.child] += 1;
     }
-    if let Some(pos) = in_degree.iter().position(|&d| d >= 2) {
+    if let Some(pos) = in_degree.iter().position(|&d| d >= 2).map(NodePos) {
         return Err(SddpError::Validation(format!(
             "enumerated scenario selection requires a single-predecessor (tree) policy graph, \
              but node id {} (stage {}) is reached from {} predecessor nodes (a recombination \

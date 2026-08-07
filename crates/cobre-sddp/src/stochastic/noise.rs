@@ -13,6 +13,7 @@ use crate::indexer::StateSpace;
 use crate::{
     InflowNonNegativityMethod,
     context::{StageContext, TrainingContext},
+    setup::node_graph::StageIdx,
     workspace::ScratchBuffers,
 };
 
@@ -63,7 +64,7 @@ pub(crate) fn has_par_model(stochastic: &StochasticContext, n_hydros: usize) -> 
 /// applying [`compute_effective_eta`] clamping under truncation.
 pub(crate) fn transform_inflow_noise(
     raw_noise: &[f64],
-    stage: usize,
+    stage: StageIdx,
     current_state: &[f64],
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
@@ -80,16 +81,16 @@ pub(crate) fn transform_inflow_noise(
 #[allow(clippy::similar_names)]
 pub(crate) fn compute_water_balance_rhs(
     raw_noise: &[f64],
-    stage: usize,
+    stage: StageIdx,
     current_state: &[f64],
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
     scratch: &mut ScratchBuffers,
 ) {
     let n_hydros = ctx.n_hydros;
-    let stage_offset = stage * n_hydros;
-    let base_row = ctx.base_rows[stage];
-    let template_row_lower = &ctx.templates[stage].row_lower;
+    let stage_offset = stage.0 * n_hydros;
+    let base_row = ctx.base_row(stage);
+    let template_row_lower = &ctx.template(stage).row_lower;
     let noise_scale = ctx.noise_scale;
     let inflow_method = training_ctx.inflow_method;
     let stochastic = training_ctx.stochastic;
@@ -121,7 +122,7 @@ pub(crate) fn compute_water_balance_rhs(
             // evaluate_par_batch expects the n_hydros PAR series only.
             evaluate_par_batch(
                 par_lp,
-                stage,
+                stage.0,
                 &scratch.lag_matrix_buf,
                 &raw_noise[..n_hydros],
                 &mut scratch.par_inflow_buf,
@@ -134,7 +135,7 @@ pub(crate) fn compute_water_balance_rhs(
                 let zero_targets = &scratch.zero_targets_buf[..n_hydros];
                 solve_par_noise_batch(
                     par_lp,
-                    stage,
+                    stage.0,
                     &scratch.lag_matrix_buf,
                     zero_targets,
                     &mut scratch.eta_floor_buf,
@@ -161,8 +162,8 @@ pub(crate) fn compute_water_balance_rhs(
 
         // Z-inflow RHS in m3/s: no zeta, no withdrawal (unlike the water-balance RHS above).
         if has_par {
-            let base = par_lp.deterministic_base(stage, h);
-            let sigma = par_lp.sigma(stage, h);
+            let base = par_lp.deterministic_base(stage.0, h);
+            let sigma = par_lp.sigma(stage.0, h);
             scratch.z_inflow_rhs_buf.push(base + sigma * eta_eff);
         } else {
             scratch.z_inflow_rhs_buf.push(0.0);
@@ -267,7 +268,7 @@ pub(crate) fn transform_load_noise(
     n_hydros: usize,
     n_load_buses: usize,
     stochastic: &StochasticContext,
-    stage: usize,
+    stage: StageIdx,
     block_count: usize,
     load_rhs_buf: &mut Vec<f64>,
 ) {
@@ -278,11 +279,11 @@ pub(crate) fn transform_load_noise(
     let load_lp = stochastic.normal();
     for lb_idx in 0..n_load_buses {
         let eta = raw_noise[n_hydros + lb_idx];
-        let mean = load_lp.mean(stage, lb_idx);
-        let std = load_lp.std(stage, lb_idx);
+        let mean = load_lp.mean(stage.0, lb_idx);
+        let std = load_lp.std(stage.0, lb_idx);
         let realization = (mean + std * eta).max(0.0);
         for blk in 0..block_count {
-            let factor = load_lp.block_factor(stage, lb_idx, blk);
+            let factor = load_lp.block_factor(stage.0, lb_idx, blk);
             load_rhs_buf.push(realization * factor);
         }
     }
@@ -319,7 +320,7 @@ pub(crate) fn transform_ncs_noise(
     raw_noise: &[f64],
     offsets: &NcsNoiseOffsets,
     stochastic: &StochasticContext,
-    stage: usize,
+    stage: StageIdx,
     block_count: usize,
     ncs_max_gen: &[f64],
     ncs_allow_curtailment: &[bool],
@@ -341,14 +342,14 @@ pub(crate) fn transform_ncs_noise(
     let ncs_noise_start = offsets.n_hydros + offsets.n_load_buses;
     for ncs_idx in 0..n_stochastic_ncs {
         let eta = raw_noise[ncs_noise_start + ncs_idx];
-        let mean = ncs_lp.mean(stage, ncs_idx);
-        let std = ncs_lp.std(stage, ncs_idx);
+        let mean = ncs_lp.mean(stage.0, ncs_idx);
+        let std = ncs_lp.std(stage.0, ncs_idx);
         let max_gen = ncs_max_gen[ncs_idx];
         let availability_ratio = (mean + std * eta).clamp(0.0, 1.0);
         let realization = max_gen * availability_ratio;
         let allow_curtailment = ncs_allow_curtailment[ncs_idx];
         for blk in 0..block_count {
-            let factor = ncs_lp.block_factor(stage, ncs_idx, blk);
+            let factor = ncs_lp.block_factor(stage.0, ncs_idx, blk);
             let upper = realization * factor;
             ncs_col_upper_buf.push(upper);
             ncs_col_lower_buf.push(if allow_curtailment { 0.0 } else { upper });
@@ -521,6 +522,7 @@ mod tests {
             compute_effective_eta, gather_dense_ncs_bounds, shift_lag_state,
             transform_inflow_noise, transform_load_noise, transform_ncs_noise,
         },
+        setup::node_graph::StageIdx,
         test_support,
         workspace::ScratchBuffers,
     };
@@ -1011,7 +1013,7 @@ mod tests {
 
         transform_inflow_noise(
             &raw_noise,
-            0,
+            StageIdx(0),
             &current_state,
             &ctx,
             &training_ctx,
@@ -1096,7 +1098,7 @@ mod tests {
 
         transform_inflow_noise(
             &raw_noise,
-            0,
+            StageIdx(0),
             &current_state,
             &ctx,
             &training_ctx,
@@ -1181,7 +1183,7 @@ mod tests {
 
         transform_inflow_noise(
             &raw_noise,
-            0,
+            StageIdx(0),
             &current_state,
             &ctx,
             &training_ctx,
@@ -1214,7 +1216,15 @@ mod tests {
         let raw_noise = vec![0.0_f64, 0.0_f64]; // [hydro_eta, load_eta]
         let mut load_rhs_buf = Vec::new();
 
-        transform_load_noise(&raw_noise, 1, 1, &stochastic, 0, 1, &mut load_rhs_buf);
+        transform_load_noise(
+            &raw_noise,
+            1,
+            1,
+            &stochastic,
+            StageIdx(0),
+            1,
+            &mut load_rhs_buf,
+        );
 
         assert_eq!(load_rhs_buf.len(), 1);
         // The block_factor for a single Parallel block is the block duration
@@ -1240,7 +1250,15 @@ mod tests {
         let raw_noise = vec![0.0_f64, -10.0_f64];
         let mut load_rhs_buf = Vec::new();
 
-        transform_load_noise(&raw_noise, 1, 1, &stochastic, 0, 1, &mut load_rhs_buf);
+        transform_load_noise(
+            &raw_noise,
+            1,
+            1,
+            &stochastic,
+            StageIdx(0),
+            1,
+            &mut load_rhs_buf,
+        );
 
         assert_eq!(load_rhs_buf.len(), 1);
         assert!(
@@ -2587,7 +2605,7 @@ mod tests {
             &raw_noise,
             &offsets,
             &stoch,
-            0,
+            StageIdx(0),
             n_blks,
             &ncs_max_gen,
             &ncs_allow_curtailment,
@@ -2623,7 +2641,7 @@ mod tests {
             &raw_noise,
             &offsets,
             &stoch,
-            0,
+            StageIdx(0),
             n_blks,
             &ncs_max_gen,
             &ncs_allow_curtailment,

@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use cobre_io::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
     ManifestNode, PolicyBasisRecord, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
-    StageCutsPayload, StageStatesPayload,
+    STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload, StageStatesPayload,
 };
 
 use crate::errors::{ErrorSource, convert_error};
@@ -84,6 +84,8 @@ pub(crate) struct PyBasisRecord {
 #[pyo3(from_item_all)]
 pub(crate) struct PyStageStatesPayload {
     stage_id: u32,
+    #[pyo3(default = STAGE_STATES_NODE_ID_SENTINEL)]
+    node_id: i32,
     state_dimension: u32,
     count: u32,
     data: Vec<f64>,
@@ -354,6 +356,7 @@ pub fn write_policy_checkpoint(
             .enumerate()
             .map(|(i, ss)| StageStatesPayload {
                 stage_id: ss.stage_id,
+                node_id: ss.node_id,
                 state_dimension: ss.state_dimension,
                 count: ss.count,
                 data: &ss.data,

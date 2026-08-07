@@ -541,6 +541,7 @@ mod cut_conformance {
         CutPool,
         wire::{CutWireHeader, cut_wire_size, deserialize_cut, serialize_cut},
     };
+    use cobre_sddp::setup::NodeId;
 
     /// Verify `CutWireHeader` serialize/deserialize round-trip with `n_state=3`.
     #[test]
@@ -600,9 +601,9 @@ mod cut_conformance {
     fn cut_pool_add_then_active_cuts_returns_correct_data() {
         let mut pool = CutPool::new(10, 1, 1, 0);
 
-        pool.add_cut(0, 0, 0, 10.0, &[1.0]);
-        pool.add_cut(0, 1, 0, 20.0, &[2.0]);
-        pool.add_cut(0, 2, 0, 30.0, &[3.0]);
+        pool.add_cut(NodeId(0), 0, 0, 10.0, &[1.0]);
+        pool.add_cut(NodeId(0), 1, 0, 20.0, &[2.0]);
+        pool.add_cut(NodeId(0), 2, 0, 30.0, &[3.0]);
 
         let active: Vec<(usize, f64, &[f64])> = pool.active_cuts().collect();
         assert_eq!(active.len(), 3, "must return all 3 active cuts");

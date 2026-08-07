@@ -554,6 +554,7 @@ mod tests {
     use cobre_io::IterationRecord;
 
     use super::{PhaseTimingTotals, build_training_output, sum_phase_timing_ms};
+    use crate::setup::NodeId;
     use crate::{FutureCostFunction, TrainingResult};
 
     fn make_result(reason: &str, lb: f64, ub: f64, gap: f64, iterations: u64) -> TrainingResult {
@@ -642,11 +643,11 @@ mod tests {
 
         let mut fcf = FutureCostFunction::new(2, 1, 4, 10, &[0; 2]);
 
-        fcf.add_cut(0, 0, 0, 0, 1.0, &[1.0]);
-        fcf.add_cut(0, 0, 0, 1, 2.0, &[0.5]);
-        fcf.add_cut(0, 0, 0, 2, 3.0, &[0.25]);
-        fcf.add_cut(0, 1, 0, 0, 4.0, &[1.0]);
-        fcf.add_cut(0, 1, 0, 1, 5.0, &[0.5]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 1.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 1, 2.0, &[0.5]);
+        fcf.add_cut(NodeId(0), 0, 0, 2, 3.0, &[0.25]);
+        fcf.add_cut(NodeId(0), 1, 0, 0, 4.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 1, 0, 1, 5.0, &[0.5]);
 
         let output = build_training_output(&result, &events, &fcf, false);
 
@@ -671,10 +672,10 @@ mod tests {
 
         let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
         // iteration 1, forward_passes 2 -> slots 2,3 (block [0,2) stays empty).
-        fcf.add_cut(0, 0, 1, 0, 1.0, &[1.0]);
-        fcf.add_cut(0, 0, 1, 1, 2.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 0, 1.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 1, 2.0, &[1.0]);
         // stage 1: one cut at iteration 1 -> slot 2.
-        fcf.add_cut(0, 1, 1, 0, 3.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 1, 1, 0, 3.0, &[1.0]);
 
         let populated: u64 = fcf.pools.iter().map(|p| p.populated() as u64).sum();
         assert_eq!(

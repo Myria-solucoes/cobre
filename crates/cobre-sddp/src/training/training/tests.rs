@@ -43,6 +43,7 @@ use crate::{
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
+    setup::NodeId,
     solver_stats::{SolverStatsDelta, SolverStatsLogEntry},
     test_support,
 };
@@ -2184,6 +2185,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
 #[test]
 fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     const VARIANTS: [BasisStatus; 7] = [
@@ -2202,7 +2204,7 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
 
     // Populate scenario 0 with a per-stage-distinct status sequence.
     for t in 0..num_stages {
-        *store.get_mut(0, t) = Some(CapturedBasis {
+        *store.get_mut(0, NodePos(t)) = Some(CapturedBasis {
             basis: Basis {
                 col_status: vec![VARIANTS[t], VARIANTS[t + 1]],
                 row_status: vec![VARIANTS[t + 2]],
@@ -2210,13 +2212,13 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
             base_row_count: 0,
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
-            node_id: 0,
+            node_id: NodeId(0),
         });
     }
 
     // Populate scenario 3 (last) with completely different values.
     for t in 0..num_stages {
-        *store.get_mut(3, t) = Some(CapturedBasis {
+        *store.get_mut(3, NodePos(t)) = Some(CapturedBasis {
             basis: Basis {
                 col_status: vec![BasisStatus::Superbasic, BasisStatus::Fixed],
                 row_status: vec![BasisStatus::Nonbasic],
@@ -2224,7 +2226,7 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
             base_row_count: 0,
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
-            node_id: 0,
+            node_id: NodeId(0),
         });
     }
 
@@ -2273,13 +2275,14 @@ fn ac_broadcast_basis_cache_none_slots_preserved() {
 #[test]
 fn broadcast_basis_cache_single_rank_preserves_metadata() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let num_stages = 2;
     let mut store = BasisStore::new(1, num_stages);
 
     // Populate stage 0 with non-empty metadata.
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Lower, BasisStatus::Basic],
             row_status: vec![BasisStatus::Upper, BasisStatus::Zero, BasisStatus::Nonbasic],
@@ -2287,7 +2290,7 @@ fn broadcast_basis_cache_single_rank_preserves_metadata() {
         base_row_count: 2,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
         state_at_capture: vec![1.5_f64, 2.5_f64],
-        node_id: 4,
+        node_id: NodeId(4),
     });
     // Stage 1 left None.
 
@@ -2308,7 +2311,8 @@ fn broadcast_basis_cache_single_rank_preserves_metadata() {
         "state_at_capture must be preserved"
     );
     assert_eq!(
-        cb.node_id, 4,
+        cb.node_id,
+        NodeId(4),
         "single-rank path preserves node_id from capture (the multi-rank path \
          now recovers it from the wire, never an out-of-band fill)"
     );
@@ -2502,10 +2506,11 @@ impl MultiRankMockComm {
 #[test]
 fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let mut store = BasisStore::new(1, 2);
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Lower, BasisStatus::Basic, BasisStatus::Upper],
             row_status: vec![BasisStatus::Zero, BasisStatus::Nonbasic],
@@ -2514,7 +2519,7 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
         state_at_capture: vec![1.5_f64, 2.5_f64],
         // node_id rides the wire, so rank 1 must recover THIS captured value.
-        node_id: 3,
+        node_id: NodeId(3),
     });
     // Stage 1 left None.
 
@@ -2555,7 +2560,8 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
         "base_row_count must round-trip on non-root rank"
     );
     assert_eq!(
-        cb0.node_id, 3,
+        cb0.node_id,
+        NodeId(3),
         "node_id now rides the wire; rank 1 must recover rank 0's captured \
          value, no longer an out-of-band fill from a per-stage node array"
     );
@@ -2570,12 +2576,13 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
 #[test]
 fn broadcast_basis_cache_branching_round_trips_every_node() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let num_nodes = 7;
     let mut store = BasisStore::new(1, num_nodes);
     for node in 0..num_nodes {
-        *store.get_mut(0, node) = Some(CapturedBasis {
+        *store.get_mut(0, NodePos(node)) = Some(CapturedBasis {
             basis: Basis {
                 col_status: vec![BasisStatus::Basic],
                 row_status: vec![BasisStatus::Lower],
@@ -2583,7 +2590,7 @@ fn broadcast_basis_cache_branching_round_trips_every_node() {
             base_row_count: 1,
             cut_row_slots: Vec::new(),
             state_at_capture: vec![node as f64],
-            node_id: 100 + node as i32,
+            node_id: NodeId(100 + node as i32),
         });
     }
 
@@ -2605,7 +2612,7 @@ fn broadcast_basis_cache_branching_round_trips_every_node() {
             .unwrap_or_else(|| panic!("node {node} must round-trip (no truncation)"));
         assert_eq!(
             cb.node_id,
-            100 + node as i32,
+            NodeId(100 + node as i32),
             "node {node} must recover its own node_id across the branching broadcast"
         );
         assert_eq!(cb.state_at_capture, vec![node as f64]);
@@ -2615,10 +2622,11 @@ fn broadcast_basis_cache_branching_round_trips_every_node() {
 #[test]
 fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let mut store = BasisStore::new(1, 1);
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Nonbasic, BasisStatus::Superbasic],
             row_status: vec![BasisStatus::Fixed],
@@ -2626,7 +2634,7 @@ fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
         base_row_count: 1,
         cut_row_slots: vec![], // deliberately empty
         state_at_capture: vec![3.75_f64],
-        node_id: 0,
+        node_id: NodeId(0),
     });
 
     let root_comm = MultiRankMockComm::new_root();
@@ -2665,11 +2673,12 @@ fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
 #[test]
 fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     // Build a store with cut_row_slots = [10, 11, 12].
     let mut store = BasisStore::new(1, 1);
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Lower],
             row_status: vec![BasisStatus::Basic],
@@ -2677,7 +2686,7 @@ fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
         base_row_count: 1,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
         state_at_capture: vec![0.0_f64],
-        node_id: 0,
+        node_id: NodeId(0),
     });
 
     // Record rank-0 payloads.
@@ -2729,10 +2738,11 @@ fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
 #[test]
 fn broadcast_basis_cache_truncated_state_returns_validation() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let mut store = BasisStore::new(1, 1);
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Lower],
             row_status: vec![BasisStatus::Basic],
@@ -2740,7 +2750,7 @@ fn broadcast_basis_cache_truncated_state_returns_validation() {
         base_row_count: 1,
         cut_row_slots: vec![],
         state_at_capture: vec![1.0_f64, 2.0_f64, 3.0_f64],
-        node_id: 0,
+        node_id: NodeId(0),
     });
 
     let root_comm = MultiRankMockComm::new_root();
@@ -2985,7 +2995,7 @@ fn ac_training_result_new_assigns_all_fields() {
         base_row_count: 3,
         cut_row_slots: vec![4_u32],
         state_at_capture: vec![5.0_f64],
-        node_id: 6,
+        node_id: NodeId(6),
     })];
     let solver_stats_log = vec![SolverStatsLogEntry::from_raw(
         7,

@@ -8,27 +8,27 @@ use cobre_stochastic::ExternalScenarioLibrary;
 use crate::{
     context::{StageContext, TrainingContext},
     error::SddpError,
+    setup::{NodeId, NodePos, StageIdx},
     training::stage_solve_prep::{
-        InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
+        InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
 };
 
-use super::SuccessorSpec;
+use super::SuccessorChild;
 
-/// Load the stage LP template and append delta cuts.
+/// Load one successor child's frozen LP template and append its delta cuts.
 ///
-/// Resets the solver's retained basis, factorization, and RNG position so results
-/// do not depend on the scenario-to-worker partition. The LP structure is
-/// identical across a trial point's openings, so only bound patching runs per
-/// opening.
+/// The LP structure is identical across a child's openings, so only bound patching
+/// runs per opening. Each child loads ITS OWN pool's template and delta batch, so a
+/// fan's blocks never reuse child 0's LP (the child-0 collapse).
 pub(crate) fn load_backward_lp<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
-    succ: &SuccessorSpec<'_>,
+    child: &SuccessorChild<'_>,
 ) {
-    ws.solver.load_model(succ.frozen_template);
-    if succ.cut_batch.num_rows > 0 {
-        ws.solver.add_rows(succ.cut_batch);
+    ws.solver.load_model(child.frozen_template);
+    if child.cut_batch.num_rows > 0 {
+        ws.solver.add_rows(child.cut_batch);
     }
 }
 
@@ -47,11 +47,10 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     training_ctx: &TrainingContext<'_>,
     raw_noise: &[f64],
     x_hat: &[f64],
-    s: usize,
+    s: StageIdx,
 ) -> Result<(), SddpError> {
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(x_hat),
-        opening_mode: OpeningMode::PerOpening,
         load_noise: LoadNoise::Present,
         inflow_noise: InflowNoise::Transform,
         raw_noise,
@@ -86,9 +85,9 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
 pub(crate) fn fill_external_opening_noise(
     training_ctx: &TrainingContext<'_>,
     ctx: &StageContext<'_>,
-    stage: usize,
+    stage: StageIdx,
     k: usize,
-    node_id: i32,
+    node_id: NodeId,
     buf: &mut Vec<f64>,
 ) -> Result<(), SddpError> {
     assemble_external_opening_noise(
@@ -102,7 +101,7 @@ pub(crate) fn fill_external_opening_noise(
             training_ctx.external_load_library,
             training_ctx.external_ncs_library,
         ],
-        stage,
+        stage.0,
         k,
         node_id,
         buf,
@@ -127,7 +126,7 @@ fn assemble_external_opening_noise(
     libraries: [Option<&ExternalScenarioLibrary>; 3],
     stage: usize,
     k: usize,
-    node_id: i32,
+    node_id: NodeId,
     buf: &mut Vec<f64>,
 ) -> Result<(), SddpError> {
     buf.clear();
@@ -155,7 +154,7 @@ fn fill_external_class(
     stage: usize,
     k: usize,
     class: &str,
-    node_id: i32,
+    node_id: NodeId,
 ) -> Result<(), SddpError> {
     if segment.is_empty() {
         return Ok(());
@@ -178,7 +177,7 @@ fn fill_external_class(
 pub(crate) fn resolve_backward_basis<'a>(
     basis_slice: &'a BasisStoreSliceMut<'_>,
     m: usize,
-    successor_node: usize,
+    successor_node: NodePos,
 ) -> Option<&'a CapturedBasis> {
     basis_slice.get(m, successor_node)
 }
@@ -188,7 +187,7 @@ pub(crate) fn resolve_backward_basis<'a>(
 mod tests {
     use cobre_stochastic::ExternalScenarioLibrary;
 
-    use super::{assemble_external_opening_noise, fill_external_class};
+    use super::{NodeId, assemble_external_opening_noise, fill_external_class};
     use crate::SddpError;
 
     /// A single-`(stage, k)` external library carrying `values` for its class.
@@ -226,7 +225,7 @@ mod tests {
             [Some(&inflow), Some(&load), Some(&ncs)],
             stage,
             k,
-            7,
+            NodeId(7),
             &mut buf,
         )
         .expect("assembly with all libraries present must succeed");
@@ -252,7 +251,7 @@ mod tests {
             [Some(&inflow), None, None],
             stage,
             k,
-            0,
+            NodeId(0),
             &mut buf,
         )
         .expect("zero-dimension load/ncs classes must be skipped");
@@ -264,8 +263,15 @@ mod tests {
         // n_hydros = 2 but no inflow library present ⇒ a named Validation error,
         // never a silent fallback to the generated opening tree.
         let mut buf = Vec::new();
-        let err = assemble_external_opening_noise([2, 0, 0], [None, None, None], 1, 2, 7, &mut buf)
-            .expect_err("a nonempty class with no library must error");
+        let err = assemble_external_opening_noise(
+            [2, 0, 0],
+            [None, None, None],
+            1,
+            2,
+            NodeId(7),
+            &mut buf,
+        )
+        .expect_err("a nonempty class with no library must error");
         match err {
             SddpError::Validation(msg) => {
                 assert!(msg.contains("node 7"), "message names the node: {msg}");
@@ -280,14 +286,14 @@ mod tests {
     #[test]
     fn fill_external_class_empty_segment_no_library_is_ok() {
         // A zero-length segment needs no library — the class carries no noise.
-        fill_external_class(&mut [], None, 0, 0, "load", 3)
+        fill_external_class(&mut [], None, 0, 0, "load", NodeId(3))
             .expect("an empty segment must be a no-op regardless of the library");
     }
 
     #[test]
     fn fill_external_class_nonempty_no_library_names_node_stage_class() {
         let mut segment = [0.0_f64; 2];
-        let err = fill_external_class(&mut segment, None, 4, 5, "ncs", 9)
+        let err = fill_external_class(&mut segment, None, 4, 5, "ncs", NodeId(9))
             .expect_err("a nonempty segment with no library must error");
         match err {
             SddpError::Validation(msg) => {
@@ -305,7 +311,7 @@ mod tests {
         let (stage, k) = (2_usize, 1_usize);
         let lib = stub_library("inflow", 3, stage, k, &[10.0, 11.0, 12.0]);
         let mut segment = [0.0_f64; 3];
-        fill_external_class(&mut segment, Some(&lib), stage, k, "inflow", 0)
+        fill_external_class(&mut segment, Some(&lib), stage, k, "inflow", NodeId(0))
             .expect("copy from a present library must succeed");
         assert_eq!(segment, [10.0, 11.0, 12.0]);
         assert_eq!(&segment, lib.eta_slice(stage, k));

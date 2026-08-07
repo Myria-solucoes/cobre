@@ -647,6 +647,7 @@ mod cut_selection_determinism_realistic {
 
     use cobre_sddp::cut::CutPool;
     use cobre_sddp::cut_selection::{CutActivityUpdates, CutMetadata, CutSelectionStrategy};
+    use cobre_sddp::setup::NodeId;
 
     fn splitmix64(state: &mut u64) -> u64 {
         *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -674,7 +675,7 @@ mod cut_selection_determinism_realistic {
             let intercept = f64::from_bits((1023u64 << 52) | bits) - 1.5;
             let mut coeffs = vec![0.0_f64; d];
             fill_f64(&mut coeffs, state.wrapping_add(slot as u64));
-            pool.add_cut(0, 0, slot as u32, intercept, &coeffs);
+            pool.add_cut(NodeId(0), 0, slot as u32, intercept, &coeffs);
         }
         // Force all cuts eligible: iteration_generated < the current_iteration (5)
         // the tests below pass to select.
@@ -1328,6 +1329,7 @@ mod hybrid_reconstruction {
     use cobre_sddp::basis_reconstruct::{
         ReconstructionStats, ReconstructionTarget, reconstruct_basis,
     };
+    use cobre_sddp::setup::NodeId;
     use cobre_sddp::workspace::CapturedBasis;
     use cobre_solver::Basis;
     use cobre_solver::BasisStatus::{Basic as B, Lower as L};
@@ -1348,7 +1350,7 @@ mod hybrid_reconstruction {
             base_rows,
             slots.len(),
             state_at_capture.len(),
-            0,
+            NodeId(0),
         );
         cb.basis.row_status.clear();
         cb.basis.row_status.resize(base_rows, B);
@@ -1588,9 +1590,23 @@ mod warm_start {
             checkpoint.stage_cuts[0].state_dimension,
             checkpoint.metadata.num_stages,
         );
+        let pool_state_dimensions: Vec<usize> = setup_phase2
+            .fcf
+            .pools
+            .iter()
+            .map(|p| p.state_dimension)
+            .collect();
+        let visit_bounds: Vec<u64> = setup_phase2
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
             setup_phase2.loop_params.forward_passes,
             setup_phase2.loop_params.max_iterations.saturating_add(1),
         )
@@ -1649,9 +1665,23 @@ mod warm_start {
             checkpoint.stage_cuts[0].state_dimension,
             checkpoint.metadata.num_stages,
         );
+        let pool_state_dimensions: Vec<usize> = setup_warm
+            .fcf
+            .pools
+            .iter()
+            .map(|p| p.state_dimension)
+            .collect();
+        let visit_bounds: Vec<u64> = setup_warm
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
             setup_warm.loop_params.forward_passes,
             setup_warm.loop_params.max_iterations.saturating_add(1),
         )
