@@ -772,16 +772,14 @@ impl BackwardPassState {
                 let mut metadata_offset = 0usize;
                 for succ_edge in &node_graph.successors[node_pos] {
                     let child_node = succ_edge.child;
-                    match plan.parent[child_node] {
-                        Some(p) if p == node_pos => {}
-                        other => {
-                            return Err(SddpError::Validation(format!(
-                                "enumerated backward: node {}'s successor {} does not record \
-                                 node {} as its EnumeratedPlan parent (found {other:?}); the \
-                                 node-native cut cannot resolve which persisted state is its own",
-                                node_id, node_graph.node_ids[child_node], node_id,
-                            )));
-                        }
+                    let parent = plan.parent[child_node];
+                    if parent != Some(node_pos) {
+                        return Err(SddpError::Validation(format!(
+                            "enumerated backward: node {}'s successor {} does not record \
+                             node {} as its EnumeratedPlan parent (found {parent:?}); the \
+                             node-native cut cannot resolve which persisted state is its own",
+                            node_id, node_graph.node_ids[child_node], node_id,
+                        )));
                     }
                     let child_pool = node_graph.nodes[child_node].pool_id;
                     let child_openings = node_graph.nodes[child_node].openings;

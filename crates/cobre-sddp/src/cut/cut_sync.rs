@@ -618,9 +618,6 @@ impl CutSyncBuffers {
     ) -> Result<(usize, usize), SddpError> {
         let my_rank = comm.rank();
         let expected_for_me = self.per_rank_cuts[my_rank];
-        // Structural skip by aggregation kind: a replicated-aggregation pool's
-        // cut is already held by every rank, so it is excluded from the exchange
-        // entirely — never packed, counted, or inserted (see the method doc).
         let is_replicated = |pool: usize| replicated_pools.contains(&pool);
 
         // Grow the send/recv buffers to the level's total across its pools when a

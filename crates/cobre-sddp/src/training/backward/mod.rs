@@ -315,7 +315,6 @@ impl<'a> SuccessorOutcomes<'a> {
         }
     }
 
-    /// Number of successor children.
     pub(crate) fn n_children(&self) -> usize {
         self.entries.len()
     }

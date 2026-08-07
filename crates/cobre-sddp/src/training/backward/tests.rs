@@ -5225,7 +5225,6 @@ fn resolve_backward_basis_returns_some_when_slot_is_populated() {
     let basis_ref = super::resolve_backward_basis(slice, 0, NodePos(1));
 
     assert!(basis_ref.is_some(), "expected Some when slot has a basis");
-    drop(slices);
 }
 
 #[test]
@@ -5236,7 +5235,6 @@ fn resolve_backward_basis_returns_none_when_slot_is_empty() {
     let basis_ref = super::resolve_backward_basis(slice, 0, NodePos(1));
 
     assert!(basis_ref.is_none(), "expected None for empty slot");
-    drop(slices);
 }
 
 // ---------------------------------------------------------------------------

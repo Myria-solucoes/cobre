@@ -50,7 +50,10 @@ use crate::{
     lower_bound::evaluate_lower_bound,
     rank_reconcile::{reconcile_error_flag, reconcile_result},
     setup::NodeGraph,
-    setup::node_graph::{NodePos, StageIdx, Traversal, frontier_node, max_successor_outcome_count},
+    setup::node_graph::{
+        NodePos, StageIdx, Traversal, enumerated_requires_state_exchange, frontier_node,
+        max_successor_outcome_count,
+    },
     solver_stats::{
         SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
@@ -335,6 +338,27 @@ where
             config.loop_config.training_enumerated,
             config.loop_config.forward_passes,
         ));
+
+        // Enumerated forward leaves a node's persisted outgoing state
+        // zero-filled on any rank whose assigned paths never visit it
+        // (`EnumeratedForwardScratch::ensure_sized`), while the replicated
+        // backward (`run_backward_node_replicated`) partitions every non-leaf
+        // node's openings across ALL ranks regardless — sound only absent
+        // interior branching. Hard-reject before any solve rather than let a
+        // world >= 2 interior-branching run cut against a zeroed state.
+        if comm.size() > 1
+            && matches!(fwd_state.traversal(), Traversal::Enumerated(_))
+            && let Some(node_id) = enumerated_requires_state_exchange(training_ctx.node_graph)
+        {
+            return Err(SddpError::Validation(format!(
+                "enumerated training at world >= 2 requires a graph with no interior \
+                 branching (a deterministic trunk + terminal fan): node {node_id} is a \
+                 non-leaf node not shared by every root→leaf path — the enumerated \
+                 forward's per-rank state exchange is elided for it, so the replicated \
+                 backward would cut against a zeroed incoming state on any rank that never \
+                 visits it, pending the interior-node state-exchange fix"
+            )));
+        }
 
         let real_states_capacity = exchange_bufs.real_total_scenarios() * ranks.n_state;
         let mut bwd_state = BackwardPassState::new(
@@ -2487,5 +2511,337 @@ mod tests {
             "on a root-not-smallest-id graph the record map must NOT be the identity — \
              using pool id as a per_stage index misattributes eviction stats"
         );
+    }
+
+    // ── TrainingSession::new: enumerated world >= 2 interior-branching guard ─
+
+    /// `size() == 2` sibling of [`StubComm`] — the same faithful rank-0
+    /// partial-write stub `backward_pass_state.rs`'s test module uses for its
+    /// 2-rank enumerated backward regression. `TrainingSession::new` never
+    /// issues a collective itself (only `RankDistribution::new` reads
+    /// `size()`/`rank()`), so the collective bodies below are never exercised
+    /// by the tests that use this stub — only `size()` is load-bearing.
+    struct Rank0Of2;
+
+    impl Communicator for Rank0Of2 {
+        fn allgatherv<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            _counts: &[usize],
+            displs: &[usize],
+        ) -> Result<(), CommError> {
+            let start = displs[0];
+            recv[start..start + send.len()].clone_from_slice(send);
+            Ok(())
+        }
+
+        fn allreduce<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            _op: ReduceOp,
+        ) -> Result<(), CommError> {
+            recv.clone_from_slice(send);
+            Ok(())
+        }
+
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            Ok(())
+        }
+
+        fn barrier(&self) -> Result<(), CommError> {
+            Ok(())
+        }
+
+        fn rank(&self) -> usize {
+            0
+        }
+
+        fn size(&self) -> usize {
+            2
+        }
+
+        fn abort(&self, error_code: i32) -> ! {
+            std::process::exit(error_code)
+        }
+    }
+
+    /// Root branches into two non-leaf nodes at stage 1, each fanning into
+    /// its own leaf at stage 2 — node 1 (and node 2) sit on only one of the
+    /// two root→leaf paths, never on both.
+    fn interior_branching_node_graph() -> NodeGraph {
+        let leaf = |pool_id| NodeRuntime {
+            stage: StageIdx(2),
+            pool_id,
+            openings: gen_openings(),
+        };
+        let branch = |pool_id| NodeRuntime {
+            stage: StageIdx(1),
+            pool_id,
+            openings: gen_openings(),
+        };
+        let root = NodeRuntime {
+            stage: StageIdx(0),
+            pool_id: 0,
+            openings: gen_openings(),
+        };
+        NodeGraph {
+            node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3), NodeId(4)].into(),
+            nodes: vec![root, branch(1), branch(2), leaf(3), leaf(3)].into(),
+            successors: vec![
+                vec![
+                    NodeSuccessor {
+                        child: NodePos(1),
+                        probability: 0.5,
+                    },
+                    NodeSuccessor {
+                        child: NodePos(2),
+                        probability: 0.5,
+                    },
+                ],
+                vec![NodeSuccessor {
+                    child: NodePos(3),
+                    probability: 1.0,
+                }],
+                vec![NodeSuccessor {
+                    child: NodePos(4),
+                    probability: 1.0,
+                }],
+                Vec::new(),
+                Vec::new(),
+            ]
+            .into(),
+            n_pools: 4,
+            pool_stage: vec![StageIdx(0), StageIdx(1), StageIdx(1), StageIdx(2)],
+        }
+    }
+
+    /// Root → trunk → three leaves: every non-leaf node (root, trunk) lies on
+    /// every root→leaf path — the deterministic-trunk + terminal-fan shape.
+    fn trunk_terminal_fan_node_graph() -> NodeGraph {
+        let leaf = || NodeRuntime {
+            stage: StageIdx(2),
+            pool_id: 2,
+            openings: gen_openings(),
+        };
+        let trunk = NodeRuntime {
+            stage: StageIdx(1),
+            pool_id: 1,
+            openings: gen_openings(),
+        };
+        let root = NodeRuntime {
+            stage: StageIdx(0),
+            pool_id: 0,
+            openings: gen_openings(),
+        };
+        let succ = |child: NodePos| NodeSuccessor {
+            child,
+            probability: 1.0 / 3.0,
+        };
+        NodeGraph {
+            node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3), NodeId(4)].into(),
+            nodes: vec![root, trunk, leaf(), leaf(), leaf()].into(),
+            successors: vec![
+                vec![NodeSuccessor {
+                    child: NodePos(1),
+                    probability: 1.0,
+                }],
+                vec![succ(NodePos(2)), succ(NodePos(3)), succ(NodePos(4))],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ]
+            .into(),
+            n_pools: 3,
+            pool_stage: vec![StageIdx(0), StageIdx(1), StageIdx(2)],
+        }
+    }
+
+    /// World >= 2 enumerated training over an interior-branching graph is a
+    /// named `SddpError::Validation`, never a panic and never a silent
+    /// rank-shape-dependent wrong cut.
+    #[test]
+    fn training_session_new_rejects_interior_branching_enumerated_at_world_ge_2() {
+        let n_stages = 3;
+        let node_graph = interior_branching_node_graph();
+        let state = test_support::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
+        let base_rows = vec![2usize; n_stages];
+        let initial_state = vec![0.0_f64; state.n_state];
+        let stochastic = make_stochastic_context(n_stages, 1);
+        let stages = make_stages(n_stages);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let mut fcf = FutureCostFunction::new(
+            node_graph.n_pools,
+            state.n_state,
+            1,
+            10,
+            &vec![0; node_graph.n_pools],
+        );
+        let mut config = make_config(1, 10, 1, n_stages);
+        config.loop_config.training_enumerated = true;
+        let mut solver = MockSolver::with_fixed(100.0);
+        let comm = Rank0Of2;
+        let block_counts = vec![1usize; n_stages];
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts =
+            test_support::all_enabled_cut_state_layouts(&state, node_graph.n_pools);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &study_dims,
+            &state,
+            &cut_state_layouts,
+            &stochastic,
+            &initial_state,
+            &stages,
+            &node_graph,
+        );
+
+        // `TrainingSession` carries no `Debug` impl, so `.err().expect(..)`
+        // (never `.expect_err(..)`, which requires `Debug` on the `Ok` side).
+        let err = TrainingSession::new(
+            &mut solver,
+            config,
+            &mut fcf,
+            &stage_ctx,
+            &training_ctx,
+            &comm,
+            || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
+        )
+        .err()
+        .expect(
+            "interior branching under enumerated at world >= 2 must be rejected, not \
+             silently wrong",
+        );
+
+        match err {
+            SddpError::Validation(msg) => {
+                assert!(
+                    msg.contains("interior branching"),
+                    "message must name the interior-branching condition: {msg}"
+                );
+                assert!(
+                    msg.contains(&format!("node {}", NodeId(1))),
+                    "message must name the offending node: {msg}"
+                );
+            }
+            other => panic!("expected SddpError::Validation, got {other:?}"),
+        }
+    }
+
+    /// The same interior-branching graph at world = 1 is always sound (a
+    /// single rank holds every node's state), so `TrainingSession::new`
+    /// succeeds.
+    #[test]
+    fn training_session_new_accepts_interior_branching_enumerated_at_world_1() {
+        let n_stages = 3;
+        let node_graph = interior_branching_node_graph();
+        let state = test_support::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
+        let base_rows = vec![2usize; n_stages];
+        let initial_state = vec![0.0_f64; state.n_state];
+        let stochastic = make_stochastic_context(n_stages, 1);
+        let stages = make_stages(n_stages);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let mut fcf = FutureCostFunction::new(
+            node_graph.n_pools,
+            state.n_state,
+            1,
+            10,
+            &vec![0; node_graph.n_pools],
+        );
+        let mut config = make_config(1, 10, 1, n_stages);
+        config.loop_config.training_enumerated = true;
+        let mut solver = MockSolver::with_fixed(100.0);
+        let comm = StubComm;
+        let block_counts = vec![1usize; n_stages];
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts =
+            test_support::all_enabled_cut_state_layouts(&state, node_graph.n_pools);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &study_dims,
+            &state,
+            &cut_state_layouts,
+            &stochastic,
+            &initial_state,
+            &stages,
+            &node_graph,
+        );
+
+        let _session = TrainingSession::new(
+            &mut solver,
+            config,
+            &mut fcf,
+            &stage_ctx,
+            &training_ctx,
+            &comm,
+            || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
+        )
+        .expect("world = 1 is always sound, even with interior branching");
+    }
+
+    /// The deterministic-trunk + terminal-fan shape at world >= 2 does NOT
+    /// trip the guard — the DECOMP shape stays live.
+    #[test]
+    fn training_session_new_accepts_trunk_terminal_fan_enumerated_at_world_ge_2() {
+        let n_stages = 3;
+        let node_graph = trunk_terminal_fan_node_graph();
+        let state = test_support::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
+        let base_rows = vec![2usize; n_stages];
+        let initial_state = vec![0.0_f64; state.n_state];
+        let stochastic = make_stochastic_context(n_stages, 1);
+        let stages = make_stages(n_stages);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let mut fcf = FutureCostFunction::new(
+            node_graph.n_pools,
+            state.n_state,
+            1,
+            10,
+            &vec![0; node_graph.n_pools],
+        );
+        let mut config = make_config(1, 10, 1, n_stages);
+        config.loop_config.training_enumerated = true;
+        let mut solver = MockSolver::with_fixed(100.0);
+        let comm = Rank0Of2;
+        let block_counts = vec![1usize; n_stages];
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts =
+            test_support::all_enabled_cut_state_layouts(&state, node_graph.n_pools);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &study_dims,
+            &state,
+            &cut_state_layouts,
+            &stochastic,
+            &initial_state,
+            &stages,
+            &node_graph,
+        );
+
+        let _session = TrainingSession::new(
+            &mut solver,
+            config,
+            &mut fcf,
+            &stage_ctx,
+            &training_ctx,
+            &comm,
+            || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
+        )
+        .expect("a deterministic trunk + terminal fan stays sound at world >= 2");
     }
 }

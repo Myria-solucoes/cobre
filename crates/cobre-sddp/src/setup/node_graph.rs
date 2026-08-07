@@ -994,6 +994,57 @@ pub(crate) fn forward_solve_counts(graph: &NodeGraph) -> Result<Vec<u64>, SddpEr
     Ok(pool_sum)
 }
 
+/// Whether the enumerated forward's cross-rank state elision at world >= 2 is
+/// sound: sound iff every non-leaf (cut-generating) node lies on every
+/// root→leaf path — a deterministic trunk that branches only at its own
+/// terminal fan. Returns the first (ascending canonical position) interior
+/// branch node — one whose own subtree does not span every leaf of the
+/// graph, so some root→leaf path bypasses it entirely — or `None` when the
+/// graph has no interior branching (a chain, or any trunk+terminal-fan
+/// shape).
+///
+/// [`crate::training::forward::enumerated::run_enumerated_forward`] populates
+/// a node's persisted outgoing state only on the ranks whose assigned paths
+/// visit it, leaving every other rank's slot zero-filled
+/// (`EnumeratedForwardScratch::ensure_sized`'s zero-fill); a trunk node sits
+/// on every path and so is replicated on every rank, but an interior branch
+/// node is not.
+/// [`crate::training::backward::replicated::run_backward_node_replicated`]
+/// partitions a cut-generating node's successor openings across ALL ranks
+/// regardless of whether a rank actually holds that node's true state — sound
+/// only when this predicate returns `None`; the caller hard-rejects otherwise.
+pub(crate) fn enumerated_requires_state_exchange(graph: &NodeGraph) -> Option<NodeId> {
+    let n = graph.nodes.len();
+    let mut is_leaf: TypedVec<NodePos, bool> = vec![false; n].into();
+    for (pos, succs) in graph.successors.iter_indexed() {
+        is_leaf[pos] = succs.is_empty();
+    }
+    let total_leaves = is_leaf.iter().filter(|&&leaf| leaf).count();
+
+    // Descending-stage order: every successor sits exactly one stage
+    // downstream (t -> t+1), so a node's children are already resolved when
+    // it is visited — mirrors `enumerated_scenario_count`'s subtree walk.
+    let mut order: Vec<NodePos> = (0..n).map(NodePos).collect();
+    order.sort_by(|&a, &b| graph.nodes[b].stage.cmp(&graph.nodes[a].stage));
+
+    let mut leaf_count: TypedVec<NodePos, usize> = vec![0usize; n].into();
+    for &pos in &order {
+        leaf_count[pos] = if is_leaf[pos] {
+            1
+        } else {
+            graph.successors[pos]
+                .iter()
+                .map(|s| leaf_count[s.child])
+                .sum()
+        };
+    }
+
+    (0..n)
+        .map(NodePos)
+        .find(|&pos| !is_leaf[pos] && leaf_count[pos] != total_leaves)
+        .map(|pos| graph.node_ids[pos])
+}
+
 // ── Driver-shared traversal helpers ─────────────────────────────────────────
 //
 // Structural resolution helpers shared by the forward training driver
@@ -2241,6 +2292,94 @@ mod tests {
             "the shared leaf pool sums both children's π = |Ω_root| each, not divided between them"
         );
         assert_prefix_duality(&ng_branchy);
+    }
+
+    // ── enumerated_requires_state_exchange: world >= 2 soundness predicate ──
+
+    #[test]
+    fn enumerated_requires_state_exchange_flags_interior_branch_node() {
+        // Root fans into two INTERIOR nodes at stage 1 (each with its own two
+        // leaves at stage 2) — mirrors
+        // `backward_cut_levels_multi_node_level_is_ascending_node_id_descending_stage`.
+        // Node 1 (and node 2) sit on only one of the two root→leaf paths.
+        let stochastic = stochastic_context(3, 1, 2);
+        let graph = HorizonGraph {
+            nodes: vec![
+                node(0, 0, None),
+                node(1, 1, None),
+                node(2, 1, None),
+                node(3, 2, None),
+                node(4, 2, None),
+                node(5, 2, None),
+                node(6, 2, None),
+            ],
+            transitions: vec![
+                transition(0, 1, 0.5),
+                transition(0, 2, 0.5),
+                transition(1, 3, 0.5),
+                transition(1, 4, 0.5),
+                transition(2, 5, 0.5),
+                transition(2, 6, 0.5),
+            ],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1, 2];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, 3, &resolver, &stochastic).unwrap();
+
+        assert_eq!(
+            enumerated_requires_state_exchange(&ng),
+            Some(NodeId(1)),
+            "node 1 is a non-leaf node not shared by every root→leaf path — the path \
+             through node 2 bypasses it"
+        );
+    }
+
+    #[test]
+    fn enumerated_requires_state_exchange_is_none_on_a_trunk_terminal_fan() {
+        // Root → trunk → three leaves: every non-leaf node (root, trunk) lies
+        // on every root→leaf path.
+        let stochastic = stochastic_context(3, 1, 3);
+        let graph = HorizonGraph {
+            nodes: vec![
+                node(0, 0, None),
+                node(1, 1, None),
+                node(2, 2, None),
+                node(3, 2, None),
+                node(4, 2, None),
+            ],
+            transitions: vec![
+                transition(0, 1, 1.0),
+                transition(1, 2, 1.0 / 3.0),
+                transition(1, 3, 1.0 / 3.0),
+                transition(1, 4, 1.0 / 3.0),
+            ],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1, 2];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, 3, &resolver, &stochastic).unwrap();
+
+        assert_eq!(
+            enumerated_requires_state_exchange(&ng),
+            None,
+            "a trunk + terminal fan has no interior branching"
+        );
+    }
+
+    #[test]
+    fn enumerated_requires_state_exchange_is_none_on_a_chain() {
+        let n_stages = 4;
+        let stochastic = stochastic_context(n_stages, 1, 2);
+        let study_stage_ids: Vec<i32> = (0..n_stages as i32).collect();
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&empty_graph(), n_stages, &resolver, &stochastic).unwrap();
+
+        assert_eq!(
+            enumerated_requires_state_exchange(&ng),
+            None,
+            "a chain has exactly one leaf; every non-leaf node's subtree spans it"
+        );
     }
 
     // ── backward_cut_levels: reverse-topological level decomposition ────────

@@ -309,9 +309,9 @@ fn sampled_trunk_fan_bound_closes_under_by_scenario_and_by_node() {
 
 /// `final_lb`/`final_ub` must be bitwise identical across `--threads 1`/`2`/`4`
 /// on the enumerated trunk+fan fixture (the satisfiable thread-shape axis;
-/// genuine world>=2 rank-shape bit-invariance rides the real-MPI SLURM job,
-/// per the ticket-074 ruling that in-process 2-rank genuine-fan invariance is
-/// structurally unsatisfiable — no `Rank0Of2` stub here).
+/// genuine world>=2 rank-shape bit-invariance rides the real-MPI SLURM job —
+/// in-process 2-rank genuine-fan invariance is structurally unsatisfiable, so
+/// there is no `Rank0Of2` stub here).
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "trains the trunk+fan fixture three times to convergence; slow-tests only"

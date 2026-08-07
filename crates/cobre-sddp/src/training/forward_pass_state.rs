@@ -550,18 +550,8 @@ impl ForwardPassState {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
-        let terminal_has_boundary_cuts = if num_stages > 0 {
-            let terminal_node = any_stage_node(training_ctx.node_graph, StageIdx(num_stages - 1))
-                .ok_or_else(|| {
-                SddpError::Validation(
-                    "forward pass: terminal stage carries no alive node".to_string(),
-                )
-            })?;
-            inputs.fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count
-                > 0
-        } else {
-            false
-        };
+        let terminal_has_boundary_cuts =
+            Self::resolve_terminal_has_boundary_cuts(training_ctx, num_stages, inputs.fcf)?;
 
         let dcs_params = training_ctx.dcs.filter(|p| p.is_active(inputs.iteration));
 
@@ -610,6 +600,29 @@ impl ForwardPassState {
         })
     }
 
+    /// Whether the terminal stage's pool carries warm-start (boundary) cuts;
+    /// `false` for a zero-stage horizon.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SddpError::Validation`] if the terminal stage carries no alive node.
+    fn resolve_terminal_has_boundary_cuts(
+        training_ctx: &TrainingContext<'_>,
+        num_stages: usize,
+        fcf: &FutureCostFunction,
+    ) -> Result<bool, SddpError> {
+        if num_stages == 0 {
+            return Ok(false);
+        }
+        let terminal_node = any_stage_node(training_ctx.node_graph, StageIdx(num_stages - 1))
+            .ok_or_else(|| {
+                SddpError::Validation(
+                    "forward pass: terminal stage carries no alive node".to_string(),
+                )
+            })?;
+        Ok(fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count > 0)
+    }
+
     /// Resolve the sampled traversal's root node and whether its terminal
     /// pool carries warm-start boundary cuts.
     ///
@@ -625,17 +638,8 @@ impl ForwardPassState {
         let root_node = frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
             SddpError::Validation("forward pass: stage 0 carries no alive node".to_string())
         })?;
-        let terminal_has_boundary_cuts = if num_stages > 0 {
-            let terminal_node = any_stage_node(training_ctx.node_graph, StageIdx(num_stages - 1))
-                .ok_or_else(|| {
-                SddpError::Validation(
-                    "forward pass: terminal stage carries no alive node".to_string(),
-                )
-            })?;
-            fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count > 0
-        } else {
-            false
-        };
+        let terminal_has_boundary_cuts =
+            Self::resolve_terminal_has_boundary_cuts(training_ctx, num_stages, fcf)?;
         Ok((root_node, terminal_has_boundary_cuts))
     }
 
