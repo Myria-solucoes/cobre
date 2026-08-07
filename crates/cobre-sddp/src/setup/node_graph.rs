@@ -1367,6 +1367,25 @@ impl EnumeratedPlan {
             parent: build_parent_map(node_graph),
         }
     }
+
+    /// Walk path `p`'s leaf up to its root via the single-predecessor parent
+    /// map, writing the canonical root→leaf node sequence (ascending stage)
+    /// into `out` — the single owner of this walk for both the training
+    /// enumerated forward and the census simulation driver.
+    pub(crate) fn walk_path(&self, p: usize, num_stages: usize, out: &mut Vec<NodePos>) {
+        out.clear();
+        let mut cur = Some(self.paths.leaf[p]);
+        while let Some(node) = cur {
+            out.push(node);
+            cur = self.parent[node];
+        }
+        out.reverse();
+        debug_assert_eq!(
+            out.len(),
+            num_stages,
+            "root→leaf path must visit exactly one node per stage"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2580,6 +2599,31 @@ mod tests {
                 ng.nodes[p].stage,
                 StageIdx(node.stage.0 - 1),
                 "a node's parent sits exactly one stage upstream"
+            );
+        }
+    }
+
+    #[test]
+    fn walk_path_returns_the_ascending_stage_sequence_spanning_every_stage() {
+        let k = 3usize;
+        let num_stages = 3usize;
+        let ng = enumerated_k_fan(k);
+        let plan = EnumeratedPlan::new(&ng);
+
+        let mut out = Vec::new();
+        for p in 0..plan.paths.leaf.len() {
+            plan.walk_path(p, num_stages, &mut out);
+            assert_eq!(out.len(), num_stages, "path must span every stage");
+            let stages: Vec<StageIdx> = out.iter().map(|&pos| ng.nodes[pos].stage).collect();
+            assert_eq!(
+                stages,
+                vec![StageIdx(0), StageIdx(1), StageIdx(2)],
+                "walk_path must return nodes in ascending stage order"
+            );
+            assert_eq!(
+                out[num_stages - 1],
+                plan.paths.leaf[p],
+                "the last entry must be the path's own leaf"
             );
         }
     }

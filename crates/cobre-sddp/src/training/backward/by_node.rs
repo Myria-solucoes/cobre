@@ -22,6 +22,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelI
 
 use crate::{
     SddpError,
+    claim_scatter::{ClaimCursor, canonical_scatter},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     risk_measure::{BackwardOutcome, RiskMeasure},
@@ -29,7 +30,6 @@ use crate::{
     solver_stats::SolverStatsDelta,
     stage_solve::{StageInputs, run_stage_solve},
     state_exchange::ExchangeBuffers,
-    training::claim_scatter::{ClaimCursor, canonical_scatter},
     workspace::{BasisStore, ByNodeScratch, SolverWorkspace},
 };
 

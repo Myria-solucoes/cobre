@@ -261,6 +261,77 @@ pub(crate) fn accumulate_and_shift_lag_state(
     );
 }
 
+/// Trajectory-carried scratch accumulators captured at a node's outgoing edge
+/// and restored as its children's incoming state — the water-travel/derived-lag
+/// counterpart of the LP-column state that rides the record's `state` field.
+/// Empty/zero on a study with no PAR lags or downstream travel time (the K-fan
+/// path), where every field below is length-0 or `0.0`.
+#[derive(Clone, Default)]
+pub(crate) struct AccumSnapshot {
+    lag_accumulator: Vec<f64>,
+    lag_weight_accum: Vec<f64>,
+    downstream_accumulator: Vec<f64>,
+    downstream_weight_accum: f64,
+    downstream_completed_lags: Vec<f64>,
+    downstream_n_completed: usize,
+}
+
+impl AccumSnapshot {
+    pub(crate) fn capture_from(&mut self, ws_scratch: &ScratchBuffers) {
+        self.lag_accumulator.clear();
+        self.lag_accumulator
+            .extend_from_slice(&ws_scratch.lag_accumulator);
+        self.lag_weight_accum.clear();
+        self.lag_weight_accum
+            .extend_from_slice(&ws_scratch.lag_weight_accum);
+        self.downstream_accumulator.clear();
+        self.downstream_accumulator
+            .extend_from_slice(&ws_scratch.downstream_accumulator);
+        self.downstream_weight_accum = ws_scratch.downstream_weight_accum;
+        self.downstream_completed_lags.clear();
+        self.downstream_completed_lags
+            .extend_from_slice(&ws_scratch.downstream_completed_lags);
+        self.downstream_n_completed = ws_scratch.downstream_n_completed;
+    }
+
+    pub(crate) fn copy_into(&self, dst: &mut AccumSnapshot) {
+        dst.lag_accumulator.clear();
+        dst.lag_accumulator.extend_from_slice(&self.lag_accumulator);
+        dst.lag_weight_accum.clear();
+        dst.lag_weight_accum
+            .extend_from_slice(&self.lag_weight_accum);
+        dst.downstream_accumulator.clear();
+        dst.downstream_accumulator
+            .extend_from_slice(&self.downstream_accumulator);
+        dst.downstream_weight_accum = self.downstream_weight_accum;
+        dst.downstream_completed_lags.clear();
+        dst.downstream_completed_lags
+            .extend_from_slice(&self.downstream_completed_lags);
+        dst.downstream_n_completed = self.downstream_n_completed;
+    }
+
+    pub(crate) fn restore_into(&self, ws_scratch: &mut ScratchBuffers) {
+        ws_scratch.lag_accumulator.clear();
+        ws_scratch
+            .lag_accumulator
+            .extend_from_slice(&self.lag_accumulator);
+        ws_scratch.lag_weight_accum.clear();
+        ws_scratch
+            .lag_weight_accum
+            .extend_from_slice(&self.lag_weight_accum);
+        ws_scratch.downstream_accumulator.clear();
+        ws_scratch
+            .downstream_accumulator
+            .extend_from_slice(&self.downstream_accumulator);
+        ws_scratch.downstream_weight_accum = self.downstream_weight_accum;
+        ws_scratch.downstream_completed_lags.clear();
+        ws_scratch
+            .downstream_completed_lags
+            .extend_from_slice(&self.downstream_completed_lags);
+        ws_scratch.downstream_n_completed = self.downstream_n_completed;
+    }
+}
+
 /// Transform raw load noise `η` into patched load-balance RHS values, one per
 /// load bus and block, clamped at zero so load demand is never negative.
 pub(crate) fn transform_load_noise(

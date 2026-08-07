@@ -20,6 +20,7 @@
 // from integration tests in `tests/` (separate crates needing pub visibility);
 // the `pub mod` namespaces are not a semver-stable API — prefer the curated
 // re-exports below. `pub(crate)` modules are crate internals.
+pub(crate) mod claim_scatter;
 pub mod config;
 pub mod convergence;
 pub mod cut;

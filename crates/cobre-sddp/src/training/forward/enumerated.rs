@@ -20,97 +20,26 @@ use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
 use crate::{
+    claim_scatter::{ClaimCursor, canonical_scatter},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
-    noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
+    noise::{AccumSnapshot, DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
     setup::node_graph::{
         EnumeratedPlan, NodeGraph, NodeId, NodePos, StageIdx, TypedVec, forward_solve_counts,
         node_opening_range, node_pinned_scenario, stage_frontier,
     },
     solver_stats::SolverStatsDelta,
     stage_solve::{StageInputs, fill_unscaled, run_stage_solve},
-    training::claim_scatter::{ClaimCursor, canonical_scatter},
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
     trajectory::TrajectoryRecord,
-    workspace::{BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace},
+    workspace::{BasisStore, CapturedBasis, SolverWorkspace},
 };
 
 use super::write_capture_metadata;
-
-/// Trajectory-carried scratch accumulators captured at a node's outgoing edge
-/// and restored as its children's incoming state — the water-travel/derived-lag
-/// counterpart of the LP-column state that rides the record's `state` field.
-/// Empty/zero on a study with no PAR lags or downstream travel time (the K-fan
-/// path), where every field below is length-0 or `0.0`.
-#[derive(Clone, Default)]
-struct AccumSnapshot {
-    lag_accumulator: Vec<f64>,
-    lag_weight_accum: Vec<f64>,
-    downstream_accumulator: Vec<f64>,
-    downstream_weight_accum: f64,
-    downstream_completed_lags: Vec<f64>,
-    downstream_n_completed: usize,
-}
-
-impl AccumSnapshot {
-    fn capture_from(&mut self, ws_scratch: &ScratchBuffers) {
-        self.lag_accumulator.clear();
-        self.lag_accumulator
-            .extend_from_slice(&ws_scratch.lag_accumulator);
-        self.lag_weight_accum.clear();
-        self.lag_weight_accum
-            .extend_from_slice(&ws_scratch.lag_weight_accum);
-        self.downstream_accumulator.clear();
-        self.downstream_accumulator
-            .extend_from_slice(&ws_scratch.downstream_accumulator);
-        self.downstream_weight_accum = ws_scratch.downstream_weight_accum;
-        self.downstream_completed_lags.clear();
-        self.downstream_completed_lags
-            .extend_from_slice(&ws_scratch.downstream_completed_lags);
-        self.downstream_n_completed = ws_scratch.downstream_n_completed;
-    }
-
-    fn copy_into(&self, dst: &mut AccumSnapshot) {
-        dst.lag_accumulator.clear();
-        dst.lag_accumulator.extend_from_slice(&self.lag_accumulator);
-        dst.lag_weight_accum.clear();
-        dst.lag_weight_accum
-            .extend_from_slice(&self.lag_weight_accum);
-        dst.downstream_accumulator.clear();
-        dst.downstream_accumulator
-            .extend_from_slice(&self.downstream_accumulator);
-        dst.downstream_weight_accum = self.downstream_weight_accum;
-        dst.downstream_completed_lags.clear();
-        dst.downstream_completed_lags
-            .extend_from_slice(&self.downstream_completed_lags);
-        dst.downstream_n_completed = self.downstream_n_completed;
-    }
-
-    fn restore_into(&self, ws_scratch: &mut ScratchBuffers) {
-        ws_scratch.lag_accumulator.clear();
-        ws_scratch
-            .lag_accumulator
-            .extend_from_slice(&self.lag_accumulator);
-        ws_scratch.lag_weight_accum.clear();
-        ws_scratch
-            .lag_weight_accum
-            .extend_from_slice(&self.lag_weight_accum);
-        ws_scratch.downstream_accumulator.clear();
-        ws_scratch
-            .downstream_accumulator
-            .extend_from_slice(&self.downstream_accumulator);
-        ws_scratch.downstream_weight_accum = self.downstream_weight_accum;
-        ws_scratch.downstream_completed_lags.clear();
-        ws_scratch
-            .downstream_completed_lags
-            .extend_from_slice(&self.downstream_completed_lags);
-        ws_scratch.downstream_n_completed = self.downstream_n_completed;
-    }
-}
 
 /// One node's forward visit outcome, keyed by canonical node position in the
 /// per-node arena and produced worker-locally in the claim loop.
@@ -487,7 +416,7 @@ where
     let mut node_seq: Vec<NodePos> = Vec::with_capacity(num_stages);
     for m in path_range.clone() {
         node_seq.clear();
-        walk_root_to_leaf(&plan.parent, plan.paths.leaf[m], num_stages, &mut node_seq);
+        plan.walk_path(m, num_stages, &mut node_seq);
         let local_m = m - params.fwd_offset;
         for &node in &node_seq {
             if !scratch.on_my_paths[node] {
@@ -616,7 +545,7 @@ where
     for m in path_range.clone() {
         let local_m = m - params.fwd_offset;
         seq.clear();
-        walk_root_to_leaf(&plan.parent, plan.paths.leaf[m], num_stages, &mut seq);
+        plan.walk_path(m, num_stages, &mut seq);
         debug_assert_eq!(seq.len(), num_stages, "path must span every stage");
         let mut cost = 0.0_f64;
         for (t, &node) in seq.iter().enumerate() {
@@ -662,28 +591,6 @@ where
         lp_solves,
         stage_stats,
     })
-}
-
-/// Walk a leaf up to its root via the single-predecessor parent map, writing the
-/// root→leaf node sequence (ascending stage) into `out`.
-fn walk_root_to_leaf(
-    parent: &TypedVec<NodePos, Option<NodePos>>,
-    leaf: NodePos,
-    num_stages: usize,
-    out: &mut Vec<NodePos>,
-) {
-    out.clear();
-    let mut cur = Some(leaf);
-    while let Some(node) = cur {
-        out.push(node);
-        cur = parent[node];
-    }
-    out.reverse();
-    debug_assert_eq!(
-        out.len(),
-        num_stages,
-        "root→leaf path must visit exactly one node per stage"
-    );
 }
 
 /// One worker's claim loop over a stage's node units. Claims units from the
