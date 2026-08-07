@@ -85,7 +85,7 @@
 //! | 9  | `min(constraint_violation_costs) > max(resource_costs)`                 | `penalties.json`                               | `ModelQuality` (warning) |
 //! |10  | `min(resource_costs) > 0`                                               | `penalties.json`                               | `ModelQuality` (warning) |
 //! |11  | FPHA hydros: `turbined_cost >= 0`                                  | `penalties.json`                               | `BusinessRuleViolation`  |
-//! |12  | `std_m3s >= 0.0`; warn when `== 0.0` (deterministic inflow)            | `scenarios/inflow_seasonal_stats.parquet`      | `ModelQuality` (warning) |
+//! |12  | `std_m3s >= 0.0`; warn when `== 0.0` (deterministic inflow) — suppressed for a class whose resolved scheme is External | `scenarios/inflow_seasonal_stats.parquet` | `ModelQuality` (warning) |
 //! |13  | *(retired — number never reused)* | — | — |
 //! |14  | Correlation matrix symmetry (`matrix[i][j] == matrix[j][i]` ±1e-9)     | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |15  | Correlation matrix diagonal entries equal 1.0 (±1e-9)                  | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
@@ -122,6 +122,7 @@
 //! |46  | Every (slot-occupying external class, stage) carries the exact `scenario_id` set `{0..raw_c(t)-1}` per entity — a set check (rejects 1-based deck, gap, duplicate, out-of-range), not a bound check (A1) | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
 //! |47  | Every external scenario row's `stage_id` resolves to a declared study stage via the [`StageIdResolver`], never silently dropped (A2) | `scenarios/external_*_scenarios.parquet` | `InvalidValue` |
 //! |48  | Per edge `n → m` and slot-occupying external class, the raw cells of columns `scenario_id(n)`/`scenario_id(m)` agree bitwise over the shared prefix `s <= t(n)` (declared `nodes[]` only) | `scenarios/external_*_scenarios.parquet` | `ModelQuality` (warning) |
+//! |50  | Inflow requires σ > 0 at every `(entity, stage)` an external class covers (its PAR inversion is undefined at σ = 0); load/NCS additionally accept σ = 0 when every external value at that `(entity, stage)` equals μ (a deterministic column, standardizing to η = 0) — σ = 0 with a value that disagrees with μ is rejected, naming the entity, stage, and offending value | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
 //!
 //! Rule 49 (G2 — each standardized external library's `n_entities()` matches its
 //! `noise_entity_order` block width) is enforced downstream at study setup

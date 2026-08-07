@@ -88,7 +88,8 @@ use cobre_io::StageIdResolver;
 use cobre_io::build_hydro_reference_volumes_resolved;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
-    ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext, SweepDirection,
+    ClassSchemes, ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext,
+    SweepDirection,
 };
 
 use crate::{
@@ -1413,6 +1414,7 @@ fn build_scenario_libraries(
             Some(scenario_libraries::build_external_load_library(
                 system.external_load_scenarios(),
                 system.load_models(),
+                load_scheme,
                 stages,
                 forward_passes,
             )?)
@@ -1477,6 +1479,7 @@ fn build_scenario_libraries(
             Some(scenario_libraries::build_external_load_library(
                 system.external_load_scenarios(),
                 system.load_models(),
+                sim_load_scheme,
                 stages,
                 forward_passes,
             )?)
@@ -1517,7 +1520,7 @@ fn build_scenario_libraries(
         },
     };
 
-    assert_external_library_widths(system, &libraries)?;
+    assert_external_library_widths(system, &libraries, training_source)?;
     Ok(libraries)
 }
 
@@ -1526,12 +1529,20 @@ fn build_scenario_libraries(
 /// owner of the three-block entity order — rather than re-deriving a class's
 /// entity count a third time; a mismatch is a hard [`SddpError::Validation`]
 /// naming the class and both widths. Runs at setup because the standardized
-/// libraries exist only after [`build_scenario_libraries`].
+/// libraries exist only after [`build_scenario_libraries`]. `training_source`
+/// resolves the same [`ClassSchemes`] every `noise_entity_order` caller in the
+/// setup path passes, so training and simulation phases agree on membership.
 fn assert_external_library_widths(
     system: &System,
     libraries: &ScenarioLibraries,
+    training_source: &ScenarioSource,
 ) -> Result<(), SddpError> {
-    let order = noise_entity_order(system);
+    let schemes = ClassSchemes {
+        inflow: Some(training_source.inflow_scheme),
+        load: Some(training_source.load_scheme),
+        ncs: Some(training_source.ncs_scheme),
+    };
+    let order = noise_entity_order(system, &schemes);
     let check = |library: Option<&ExternalScenarioLibrary>, block_width: usize| {
         library.map_or(Ok(()), |lib| {
             if lib.n_entities() == block_width {

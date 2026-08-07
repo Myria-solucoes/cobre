@@ -2534,6 +2534,80 @@ mod simulation_aggregation_determinism {
     }
 }
 
+mod uniform_weight_left_to_right_reduction {
+    //! Chain-parity obligation: the uniform simulation weight is the exact
+    //! `1.0 / (n as f64)` bit pattern, combined with each cost via a plain
+    //! left-to-right per-term reduction (`Σ wᵢ·cᵢ`) — never sum-then-divide
+    //! (`(Σ cᵢ) / n`). The two formulas are mathematically equal but diverge
+    //! in the last mantissa bit for generic inputs; `resolve_weights` /
+    //! `RiskMeasure::Expectation::evaluate_risk` (`simulation/aggregation.rs`)
+    //! implement the former. `simulation_aggregation_determinism` above
+    //! compares rank shapes against EACH OTHER under whichever formula runs,
+    //! so it cannot discriminate a wrong-but-internally-consistent formula;
+    //! this gate compares against an independently hand-rolled reference.
+
+    use cobre_comm::LocalBackend;
+    use cobre_sddp::simulation::{ScenarioCategoryCosts, SimulationConfig, SimulationWeighting};
+    use cobre_sddp::{Phase, aggregate_simulation};
+
+    fn zero_cats() -> ScenarioCategoryCosts {
+        ScenarioCategoryCosts {
+            resource_cost: 0.0,
+            recourse_cost: 0.0,
+            violation_cost: 0.0,
+            regularization_cost: 0.0,
+            imputed_cost: 0.0,
+        }
+    }
+
+    /// Chosen so `Σ (cᵢ · 1/n)` (left-to-right) and `(Σ cᵢ) / n`
+    /// (sum-then-divide) round to distinct `f64` bit patterns — verified by
+    /// the self-check in the test body, not assumed.
+    const COSTS: [f64; 6] = [7327.12, 8201.927, 8028.681, 8551.528, 9317.915, 2703.178];
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn aggregate_simulation_uniform_mean_matches_left_to_right_per_term_weighted_sum() {
+        let n = COSTS.len();
+        let local_costs: Vec<(u32, f64, ScenarioCategoryCosts)> = COSTS
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (i as u32, c, zero_cats()))
+            .collect();
+        let config = SimulationConfig {
+            n_scenarios: n as u32,
+            io_channel_capacity: 1,
+            profile: Phase::Simulation.profile(),
+        };
+
+        let (summary, _gathered) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &LocalBackend,
+            SimulationWeighting::Uniform,
+        )
+        .expect("aggregate_simulation must succeed");
+
+        let w = 1.0 / (n as f64);
+        let mut left_to_right = 0.0_f64;
+        for &c in &COSTS {
+            left_to_right += w * c;
+        }
+        let sum_then_divide = COSTS.iter().sum::<f64>() / (n as f64);
+        assert_ne!(
+            left_to_right.to_bits(),
+            sum_then_divide.to_bits(),
+            "fixture literals must discriminate the two formulas or this test has no power"
+        );
+        assert_eq!(
+            summary.mean_cost.to_bits(),
+            left_to_right.to_bits(),
+            "aggregate_simulation's uniform mean must be the exact left-to-right, \
+             per-term 1.0/(n as f64)-weighted sum, not sum-then-divide"
+        );
+    }
+}
+
 mod k_fan_sampled_declaration_order_invariance {
     //! The DECOMP K-fan had a declaration-order-invariance gate under
     //! `enumerated` (`k_fan_enumerated_determinism`'s

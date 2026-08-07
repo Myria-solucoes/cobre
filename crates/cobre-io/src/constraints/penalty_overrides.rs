@@ -50,11 +50,11 @@
 //!
 //! ### `penalty_overrides_ncs`
 //!
-//! | Column              | Type   | Required | Description                            |
-//! | ------------------- | ------ | -------- | -------------------------------------- |
-//! | `source_id`         | INT32  | Yes      | Non-controllable source ID             |
-//! | `stage_id`          | INT32  | Yes      | Stage ID                               |
-//! | `curtailment_cost`  | DOUBLE | No       | Curtailment penalty (USD/`MWh`)        |
+//! | Column              | Type   | Required | Description                                       |
+//! | ------------------- | ------ | -------- | ------------------------------------------------- |
+//! | `ncs_id`            | INT32  | Yes      | Non-controllable source ID (accepts legacy `source_id`) |
+//! | `stage_id`          | INT32  | Yes      | Stage ID                                          |
+//! | `curtailment_cost`  | DOUBLE | No       | Curtailment penalty (USD/`MWh`)                   |
 //!
 //! ## Output ordering
 //!
@@ -81,7 +81,9 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{extract_optional_float64, extract_required_int32};
+use crate::parquet_helpers::{
+    extract_optional_float64, extract_required_int32, extract_required_int32_aliased,
+};
 
 // ── Row types ─────────────────────────────────────────────────────────────────
 
@@ -787,7 +789,7 @@ pub fn parse_penalty_overrides_ncs(path: &Path) -> Result<Vec<NcsPenaltyOverride
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        let source_id_col = extract_required_int32(&batch, "source_id", path)?;
+        let source_id_col = extract_required_int32_aliased(&batch, &["ncs_id", "source_id"], path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
         let curtailment_cost_col = extract_optional_float64(&batch, "curtailment_cost", path)?;
@@ -1592,6 +1594,28 @@ mod tests {
         .expect("valid batch")
     }
 
+    fn make_ncs_batch_id_col(
+        id_col: &str,
+        ids: &[i32],
+        stage_ids: &[i32],
+        curtailment_cost: Vec<Option<f64>>,
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(id_col, DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("curtailment_cost", DataType::Float64, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(ids.to_vec())),
+                Arc::new(Int32Array::from(stage_ids.to_vec())),
+                Arc::new(Float64Array::from(curtailment_cost)),
+            ],
+        )
+        .expect("valid batch")
+    }
+
     /// AC: 3 rows for 2 NCS entities, correctly sorted by (source_id, stage_id).
     #[test]
     fn test_ncs_valid_3_rows_sorted() {
@@ -1612,9 +1636,39 @@ mod tests {
         assert!((rows[2].curtailment_cost.unwrap() - 300.0).abs() < f64::EPSILON);
     }
 
-    /// AC: missing required `source_id` column -> SchemaError with field "source_id".
+    /// Alias: the legacy `source_id` column name still loads.
     #[test]
-    fn test_ncs_missing_source_id() {
+    fn test_ncs_source_id_alias_legacy_loads() {
+        let batch = make_ncs_batch_id_col("source_id", &[1], &[0], vec![Some(250.0)]);
+        let tmp = write_parquet(&batch);
+        let rows = parse_penalty_overrides_ncs(tmp.path()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_id, EntityId::from(1));
+        assert!((rows[0].curtailment_cost.unwrap() - 250.0).abs() < f64::EPSILON);
+    }
+
+    /// Alias: the preferred `ncs_id` column loads identically to `source_id`.
+    #[test]
+    fn test_ncs_ncs_id_alias_loads() {
+        let legacy = make_ncs_batch_id_col(
+            "source_id",
+            &[2, 1],
+            &[0, 1],
+            vec![Some(300.0), Some(250.0)],
+        );
+        let preferred =
+            make_ncs_batch_id_col("ncs_id", &[2, 1], &[0, 1], vec![Some(300.0), Some(250.0)]);
+        let tmp_legacy = write_parquet(&legacy);
+        let tmp_preferred = write_parquet(&preferred);
+        let rows_legacy = parse_penalty_overrides_ncs(tmp_legacy.path()).unwrap();
+        let rows_preferred = parse_penalty_overrides_ncs(tmp_preferred.path()).unwrap();
+        assert_eq!(rows_legacy, rows_preferred);
+    }
+
+    /// Neither the preferred nor the legacy id column present -> error names the
+    /// preferred `ncs_id` spelling.
+    #[test]
+    fn test_ncs_missing_id_column_errors_new_spelling() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("stage_id", DataType::Int32, false),
             Field::new("curtailment_cost", DataType::Float64, true),
@@ -1632,10 +1686,7 @@ mod tests {
 
         match &err {
             LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("source_id"),
-                    "field should contain 'source_id', got: {field}"
-                );
+                assert_eq!(field, "ncs_id", "field should be 'ncs_id', got: {field}");
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }

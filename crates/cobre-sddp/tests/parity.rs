@@ -2438,3 +2438,91 @@ mod water_travel_time_no_arc_byte_identity {
         super::common::parity_hash::run_golden_case("parity_baselines_clp", "D06", ClpSolver::new);
     }
 }
+mod sacred_chain_parity_roster {
+    //! The ten chain-parity obligations and their break-one-obligation
+    //! verification table. No executable code — a module doc only, the
+    //! auditable index every chain-parity correctness claim (absent
+    //! `nodes[]`) resolves to. Mirrors `tests/mpi_wire.rs`'s
+    //! `branching_gate_roster` in shape and intent; the two rosters are
+    //! disjoint (see the closing section below).
+    //!
+    //! # The roster — obligation → named test → introduced alongside
+    //!
+    //! | # | Obligation | Named test | File | Introduced alongside |
+    //! |---|---|---|---|---|
+    //! | 1 | Pool indexing on a chain (`pool_id == stage`) | `pool_stage_chain_is_identity` | `setup/node_graph.rs` | the pool re-key to pool-id addressing |
+    //! | 2 | Draw-sequence tuples pinned at sampler level (no test-only env vars) | `transition_draw_call_does_not_perturb_subsequent_within_node_noise` | `cobre-stochastic` `sampling/class_sampler.rs` | the sampled root-to-leaf graph walk |
+    //! | 3 | Per-pool cut append order (checkpoint bytes) | `read_policy_checkpoint_full_round_trip` | `cobre-io` `output/policy/mod.rs` | the versioned value-function-artifact checkpoint schema |
+    //! | 4 | Basis addressing + constant node tag | `opening_order_determinism` | `mpi_wire.rs` | basis node-tagging (cross-node warm-start rejection) |
+    //! | 5 | Full golden-case output parity, both backends | `parity_hash_d06`/`d15`/`d30`/`d34`/`d41` (`parity_hash_highs` and `parity_hash_clp`) | `parity.rs` | pre-existing; the harness was re-keyed by pool id when pools became node-indexed |
+    //! | 6 | The existing `mpi_wire.rs` gates | `opening_order_determinism`, `by_node_scheduler_determinism_expectation`, `by_node_scheduler_determinism_cvar`, `hardest_first_claim_order_is_result_neutral`, `retry_armed_determinism_expectation`, `retry_armed_determinism_cvar`, `derived_inflow_seeds_rank_invariant`, `four_rank_basis_broadcast_round_trip`, `k_fan_thread_shape_invariance`, `k_fan_weighted_aggregation_canonical_order_invariance`, `enumerated_k_fan_thread_and_declaration_shapes_agree` | `mpi_wire.rs` | various (see each gate's own module doc) |
+    //! | 7 | CVaR `(outcomes, probabilities)` index-order identity | `cvar_aggregation_tie_break_follows_canonical_child_order` | `training/backward_pass_state.rs` | threading successor product weights through backward cut aggregation |
+    //! | 8 | Uniform-weight bit pattern `1.0/(n as f64)`, left-to-right reduction | `aggregate_simulation_uniform_mean_matches_left_to_right_per_term_weighted_sum` | `mpi_wire.rs` | `aggregate_simulation`'s formula predates this pin; the dedicated bit-pattern-plus-reduction gate is added here |
+    //! | 9 | Unchanged pool capacities on chains | `pool_cut_stride_chain_matches_forward_passes_over_a_sweep` | `setup/node_graph.rs` | per-node pool capacity replacing the flat per-stage formula |
+    //! | 10 | Checkpoint round-trip | `d12_checkpoint_round_trip` | `deterministic.rs` | pre-existing (the D-series deterministic suite) |
+    //!
+    //! Item 8 is the one addition this change makes: the pre-existing
+    //! `aggregate_uniform_mean_matches_risk_measure_expectation`
+    //! (`simulation/aggregation.rs`) exercises the same formula but its
+    //! literal costs (`[100.0, 200.0, 150.0]`, `n = 3`) round to the
+    //! identical `f64` bit pattern under sum-then-divide by coincidence —
+    //! documented as a coverage hole in `mpi_wire.rs`'s own
+    //! `branching_gate_roster` (row d) for the branching suite, and
+    //! independently reconfirmed below for the chain suite. The new gate's
+    //! literals are chosen so the two formulas provably diverge (self-checked
+    //! in the test body) — it closes the hole rather than duplicating the
+    //! existing test's blind spot. Every other item resolves to an existing
+    //! named test; none needed a second addition.
+    //!
+    //! # Break-one-obligation verification (real, observed results)
+    //!
+    //! Each row's obligation was broken with a single scratch mutation to
+    //! production code, the mapped test (plus enough of the surrounding
+    //! suite to bound the blast radius) was run against the mutated binary,
+    //! the observed pass/fail outcome was recorded below, and the edit was
+    //! reverted before the next row. No row is recorded without having been
+    //! run.
+    //!
+    //! | # | Scratch mutation | Observed result |
+    //! |---|---|---|
+    //! | 1 | `setup/node_graph.rs`: `build_chain_node_graph`'s `let pool_id = t;` changed to `n_stages - 1 - t` (reversed) | **FAILS** 22 tests across `cobre-sddp --lib`, including the mapped `pool_stage_chain_is_identity` and `chain_degeneracy_one_node_per_stage_1to1_pools_uniform_q_bit_pattern` — pool-id identity is a deeply load-bearing invariant with broad existing coverage (over-determined, not a hole). |
+    //! | 2 | `cobre-stochastic` `sampling/class_sampler.rs`: introduced a shared `static AtomicU64` call counter, XORed into both `select_transition_child`'s seed and `ClassSampler::fill`'s `InSample` seed (simulating a stateful, call-order-dependent draw) | **FAILS** exactly the mapped test within `class_sampler`'s own 29-test module (28 pass, 1 fails), plus 2 more at the crate level (`sampling::tests::test_composite_in_sample_fills_correct_segments`, `sampling::tests::test_in_sample_sample_is_deterministic`) that also exercise `InSample::fill` repeatability — over-determined, not a hole. The current architecture has no shared mutable state between the two draws (each independently re-derives a pure-function seed and a fresh RNG), so this mutation had to introduce the state the obligation forbids rather than merely reorder existing code. |
+    //! | 3 | `cobre-io` `output/policy/codec.rs`: `deserialize_stage_cuts`'s cut-vector read loop changed from `nested_positions.iter().enumerate()` to `.iter().rev().enumerate()` | **FAILS** exactly 2 tests in `cobre-io --lib`: the mapped `read_policy_checkpoint_full_round_trip` and the lower-level `deserialize_stage_cuts_three_cuts_all_match` — over-determined, not a hole. |
+    //! | 4 | `training/forward/basis_capture.rs`: `write_capture_metadata`'s `captured.node_id = node_id;` hardcoded to `NodeId(0)` (every capture mistagged to node 0 regardless of the real node being solved) | **COVERAGE HOLE.** The mapped `opening_order_determinism`, all 39 other `mpi_wire.rs` tests, `parity_hash_d06`, and `d12_checkpoint_round_trip` all stayed green. On a chain the mismatch (`0 != t` for every `t > 0`) forces every non-root basis capture to cold-start — uniformly and deterministically, so it is bit-reproducible across every thread/rank shape these gates compare (a shape-invariance gate cannot see a shape-invariant defect), and the D02/D06 LPs these fixtures use converge to the same unique optimal vertex regardless of warm- or cold-start, so even the final numeric output is unmoved (the parity hash deliberately excludes iteration counts, so a hot-vs-cold difference in convergence speed alone would not move it either). `run_stage_solve_cross_node_stored_basis_is_treated_as_cold` (`solve/stage_solve.rs`) proves the reject mechanism fires correctly given an already-mismatched tag, but nothing in the suite proves `write_capture_metadata` populates the tag correctly from the real node in the first place, on an end-to-end chain run. Reported, not papered over. |
+    //! | 5 | `simulation/extraction.rs`: the per-block `SimulationHydroResult` builder's `storage_final_hm3: storage_final,` changed to `storage_final + 1e-6` | **FAILS** `parity_hash_d06`/`d30`/`d34`/`d41` (D15 unaffected — its fixture has no hydro storage exercising this field) plus `water_travel_time_no_arc_byte_identity::d06_parity_hash_matches_existing_baseline_highs`, a second D06-hash-checking test — over-determined, not a hole. `d12_checkpoint_round_trip` (item 10) stays green under the same mutation (its cost comparison tolerance, 1e-2, absorbs a 1e-6 perturbation) — confirming items 5 and 10 are genuinely independent obligations, not accidental duplicates. |
+    //! | 6 | Three independent mutations tried against the item-6 roster: (a) the same seed perturbation as row 8 below applied to `cobre-stochastic`'s `derive_inflow_seeds`; (b) and (c) `training/forward/stats_aggregation.rs`'s `weighted_cost_reduction` reduction loop reversed (twice, isolating the K-fan aggregation path) | **COVERAGE HOLE for the roster as a whole.** All 40 `mpi_wire.rs` tests stayed green under every one of the three mutations. This is a structural property, not a fluke: every named gate in item 6 tests invariance across thread/rank/claim shape, which is orthogonal to value correctness — a uniformly-wrong-but-deterministic formula or order change produces the identical wrong value under every shape, so shape-comparison gates cannot see it by design (several backward-pass claim orderings are explicitly claim-order-neutral by contract — e.g. hardest-first, pinned by `hardest_first_claim_order_is_result_neutral`). Mutation (a) WAS caught elsewhere in the suite (`d16_par1_lag_shift`, `deterministic.rs`, a value-pinned behavioral-tier test) and mutation (b)/(c) reproduces the exact coverage hole `mpi_wire.rs`'s own `branching_gate_roster` row (c) already documents for the branching suite (Neumaier-compensated summation over these fixtures' literals happens to reorder to the same bit pattern). Reported, not papered over; the system as a whole has power, the item-6 roster alone does not. |
+    //! | 7 | `setup/node_graph.rs`: `assemble_outcome_weights`'s `for succ in successors` changed to `.iter().rev()` | **FAILS** 5 tests in `cobre-sddp --lib`, including the mapped `cvar_aggregation_tie_break_follows_canonical_child_order` and its sibling at the shared owner's other call site (`assemble_successor_outcome_weights_k_fan_canonical_order_and_product_weights`, `assemble_outcome_weights_k_fan_canonical_order_and_product_weights`, `root_outcome_weights_cvar_matches_evaluate_risk`, `root_outcome_weights_expectation_matches_analytical_sum`) — over-determined, not a hole; `assemble_outcome_weights` is deliberately the single owner both call sites delegate to. |
+    //! | 8 | `simulation/aggregation.rs`: `aggregate_simulation`'s `mean_cost` changed from `RiskMeasure::Expectation.evaluate_risk(&cost_recv, &weights)` to `cost_recv.iter().sum::<f64>() / n as f64` (sum-then-divide) | **FAILS** exactly the mapped (new) test, 39/40 other `mpi_wire.rs` tests stay green, and `parity_hash_d06`/`d15`/`d30`/`d34`/`d41` plus `d12_checkpoint_round_trip` are unaffected (the golden hash excludes simulation summary statistics; `d12`'s tolerance absorbs the difference). Confirms the new test closes a real, previously-undetectable gap rather than duplicating existing coverage. |
+    //! | 9 | `cut/fcf.rs`: `pool_capacity`'s `warm_start_count + max_iterations * visit_bound` changed to `warm_start_count + 1 + max_iterations * visit_bound` | **FAILS** 8 tests in `cobre-sddp --lib`, including the mapped `pool_cut_stride_chain_matches_forward_passes_over_a_sweep` (whose own assertion message states the chain-parity contract verbatim: "chain capacity must equal warm_start + max_iterations * forward_passes exactly") and its `cut::fcf` siblings — over-determined, not a hole. |
+    //! | 10 | `cobre-io` `output/policy/checkpoint.rs`: `bin_file_name`'s `format!("{id:03}.bin")` changed to 4-digit padding | **FAILS** exactly the mapped `d12_checkpoint_round_trip` in `deterministic.rs` (99 other tests unaffected) plus 4 sibling file-naming assertions in `cobre-io --lib` — over-determined, not a hole. The reader itself is unaffected (`read_sorted_bin_files` globs `*.bin` and derives identity from inside each buffer, never from the name), confirming the doc comment's own claim. |
+    //!
+    //! Every mutation above was reverted immediately after being run; `git
+    //! diff` on each touched production file was confirmed empty before
+    //! moving to the next row. No scratch mutation survives in the tree.
+    //!
+    //! # The two branching gates (not among the ten)
+    //!
+    //! Two branching-graph gates were deliberately deferred to land alongside
+    //! the branching-engine work rather than here, and are cited by name
+    //! below rather than re-implemented:
+    //!
+    //! - **By-node scheduler equivalence on the branching graph** —
+    //!   consolidated in `mpi_wire.rs`'s `branching_gate_roster` under
+    //!   "By-node-on-branching equivalence"
+    //!   (`by_node_k_fan_thread_shape_invariance`,
+    //!   `interior_sibling_generated_fan_by_node_matches_oracle`,
+    //!   `water_binding_external_fan_by_node_matches_extensive_form`,
+    //!   `external_distinct_fan_by_node_matches_by_scenario`).
+    //! - **Real 2-rank D-2 rank-invariance on a branching graph** — the test
+    //!   is
+    //!   `k_fan_branching_rank_invariance::k_fan_final_lb_bitwise_invariant_across_world_size`
+    //!   in `tests/test_mpi_sync_cuts_invariant.rs`, cited in
+    //!   `branching_gate_roster` under "Rank-shape: genuine 2-rank real MPI".
+    //! - **Both are consolidated** in `mpi_wire.rs`'s `branching_gate_roster`
+    //!   module (value + invariance, both schedulers, uniform and
+    //!   non-uniform cut-state axis, single- and multi-rank), verified to
+    //!   exist by inspecting the live tree rather than re-derived here.
+    //!
+    //! Neither gate is among the ten (all ten are chain obligations, absent
+    //! `nodes[]`); neither is an eleventh or twelfth item.
+}

@@ -1023,6 +1023,7 @@ fn fan_or_chain_system(n_stages: usize, policy_graph: HorizonGraph) -> System {
         Vec::new(),
         Vec::new(),
         None,
+        &[],
     )
 }
 
@@ -1057,6 +1058,10 @@ impl StorageSpec {
 /// `stage_state_configs`, when `Some`, supplies one [`StageStateConfig`] per stage
 /// (length `n_stages`); `None` keeps every stage at [`K_FAN_DEFAULT_STATE_CONFIG`],
 /// byte-identical to every caller predating this parameter.
+/// `inflow_ar_coefficients` populates every stage's `InflowModel::ar_coefficients`
+/// (empty leaves the PAR-free `vec![]`, byte-identical to every caller predating it);
+/// a non-empty slice with a near-zero `inflow_std` builds a deterministic PAR series,
+/// mirroring `d16_par1_lag_shift`.
 // Rationale: one linear entity/bounds/penalties assembly shared by every fan/chain
 // fixture in this file; splitting the newest knob into a struct would cost a
 // one-off type for a single call site, while every existing caller already reads
@@ -1075,6 +1080,7 @@ fn fan_or_chain_system_ext(
     external_rows: Vec<ExternalScenarioRow>,
     external_load_rows: Vec<ExternalLoadRow>,
     stage_state_configs: Option<&[StageStateConfig]>,
+    inflow_ar_coefficients: &[f64],
 ) -> System {
     let bus_id = EntityId(1);
     let hydro_id = EntityId(2);
@@ -1146,7 +1152,15 @@ fn fan_or_chain_system_ext(
     let stages: Vec<_> = (0..n_stages)
         .map(|i| {
             let config = stage_state_configs.map_or(K_FAN_DEFAULT_STATE_CONFIG, |cfgs| cfgs[i]);
-            k_fan_stage(i, i as i32, config)
+            let mut stage = k_fan_stage(i, i as i32, config);
+            // A PAR series (nonempty ar_coefficients) requires a season_id for the
+            // lag-stage statistics lookup (`fill_stage_arrays`); the pre-study lag
+            // stats then resolve through the seasonal fallback. PAR-free callers
+            // leave season_id None, unchanged.
+            if !inflow_ar_coefficients.is_empty() {
+                stage.season_id = Some(0);
+            }
+            stage
         })
         .collect();
 
@@ -1157,7 +1171,7 @@ fn fan_or_chain_system_ext(
             stage_id: i as i32,
             mean_m3s: 60.0,
             std_m3s: inflow_std,
-            ar_coefficients: vec![],
+            ar_coefficients: inflow_ar_coefficients.to_vec(),
             residual_std_ratio: 1.0,
             annual: None,
         })
@@ -1397,6 +1411,31 @@ pub fn k_fan_setup_enumerated_reversed(k: usize, max_iterations: u32) -> KFanFix
     k_fan_fixture(k, true, k_fan_config_enumerated(max_iterations))
 }
 
+/// The DECOMP K-fan [`StudySetup`] configured `enumerated` under the fixture's
+/// expectation measure ([`StageRiskConfig::Expectation`] on every stage) with a
+/// `Gap { tolerance }` stopping rule ahead of the mandatory iteration-limit
+/// fallback — the gap-attainability fixture. The `Gap` carries only the absolute
+/// canonical-R$ `tolerance` arm (no `relative_tolerance`), so
+/// `inject_gap_bound_stalling_companion` injects no `BoundStalling` companion;
+/// an unattainable `tolerance` therefore falls through to the mandatory
+/// `IterationLimit`. `cost_scale_factor == None` keeps the default factor;
+/// `Some(f)` prescales the LP by `f` — `Some(1.0)` runs it unscaled, the two
+/// settings the canonical-units pinning regression compares. Otherwise identical
+/// to [`k_fan_setup_enumerated`] (fixed seed, iteration limit `max_iterations`).
+#[must_use]
+pub fn k_fan_setup_gap(
+    k: usize,
+    tolerance: f64,
+    max_iterations: u32,
+    cost_scale_factor: Option<f64>,
+) -> KFanFixture {
+    k_fan_fixture(
+        k,
+        false,
+        k_fan_config_gap(tolerance, max_iterations, cost_scale_factor),
+    )
+}
+
 /// A single-path (count-1) `enumerated` chain study: a 2-stage,
 /// `branching_factor: 1` chain (empty policy graph) whose enumerated path count
 /// resolves to `1`. The faithful fixture for the enumerated engine's 2-rank
@@ -1475,6 +1514,28 @@ fn k_fan_fixture(k: usize, reversed: bool, config: Config) -> KFanFixture {
 fn k_fan_config_enumerated(max_iterations: u32) -> Config {
     let mut config = k_fan_config(1, max_iterations);
     config.training.selection = Some(TrainingSelection::Enumerated {});
+    config
+}
+
+/// [`k_fan_config_enumerated`] whose stopping-rule set is a `Gap` rule (the
+/// absolute canonical-R$ `tolerance` arm only, no `relative_tolerance`) declared
+/// FIRST, then the mandatory `IterationLimit`. The `Gap` leads so a closed-gap
+/// iteration reports the `gap` reason rather than `iteration_limit` — the
+/// termination reason is the first triggered rule in declaration order. When
+/// `cost_scale_factor` is `Some`, it overrides `modeling.cost_scale_factor`
+/// (left `None`, i.e. the default factor, otherwise).
+fn k_fan_config_gap(tolerance: f64, max_iterations: u32, cost_scale_factor: Option<f64>) -> Config {
+    let mut config = k_fan_config_enumerated(max_iterations);
+    config.training.stopping_rules = Some(vec![
+        StoppingRuleConfig::Gap {
+            tolerance: Some(tolerance),
+            relative_tolerance: None,
+        },
+        StoppingRuleConfig::IterationLimit {
+            limit: max_iterations,
+        },
+    ]);
+    config.modeling.cost_scale_factor = cost_scale_factor;
     config
 }
 
@@ -1973,6 +2034,7 @@ pub fn external_distinct_fan_setup(k: usize, max_iterations: u32) -> StudySetup 
         rows,
         load_rows,
         None,
+        &[],
     );
 
     let config = external_fan_config_enumerated(max_iterations);
@@ -2105,6 +2167,7 @@ pub fn external_root_fan_setup(k: usize, max_iterations: u32) -> StudySetup {
         rows,
         load_rows,
         None,
+        &[],
     );
 
     let config = external_fan_config_enumerated(max_iterations);
@@ -2272,6 +2335,7 @@ fn build_water_binding_external_fan(k: usize, max_iterations: u32, reversed: boo
         rows,
         Vec::new(),
         None,
+        &[],
     );
 
     let config = water_binding_fan_config_enumerated(max_iterations);
@@ -2437,6 +2501,7 @@ fn branching_tree_system(reversed: bool) -> System {
         Vec::new(),
         Vec::new(),
         Some(&non_uniform_branching_stage_configs()),
+        &[],
     )
 }
 
@@ -2501,6 +2566,42 @@ fn build_non_uniform_branching_setup(
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     StudySetup::new(&system, &config, stochastic, hydro_models)
         .expect("non_uniform_branching_setup: StudySetup::new must succeed")
+}
+
+/// The `enumerated`-mode 3-stage binary tree oracle fixture: root branches into 2
+/// nodes at [`K_FAN_BRANCH_STAGE_ID`], each branching into 2 leaves at
+/// [`K_FAN_LEAF_STAGE_ID`], reusing [`branching_tree_policy_graph`]'s non-uniform
+/// `0.35`/`0.65` weights unchanged — the shape a shape-based enumerated-admission
+/// clause would have rejected. Otherwise identical to [`oracle_chain_setup`]/
+/// [`k_fan_setup_enumerated`]: the plain [`K_FAN_DEFAULT_STATE_CONFIG`]
+/// single-hydro system, `enumerated` selection, fixed seed, iteration-limit
+/// stopping rule.
+///
+/// # Panics
+///
+/// Never in practice — as [`k_fan_setup`].
+#[allow(clippy::expect_used)]
+#[must_use]
+pub fn branching_tree_setup_enumerated(max_iterations: u32) -> StudySetup {
+    let system = fan_or_chain_system(3, branching_tree_policy_graph(false));
+    let config = k_fan_config_enumerated(max_iterations);
+    let stochastic = build_stochastic_context(
+        &system,
+        K_FAN_SEED,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("branching_tree_setup_enumerated: build_stochastic_context must succeed");
+    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+    StudySetup::new(&system, &config, stochastic, hydro_models)
+        .expect("branching_tree_setup_enumerated: StudySetup::new must succeed")
 }
 
 /// Per-pool cut-state dimension (`CutStateProjection::n_slots`), pool-id-indexed
@@ -2716,4 +2817,188 @@ pub fn extensive_form_optimum(setup: &StudySetup) -> f64 {
     // The template objective carries the cost-scale divisor; rescale to the physical
     // cost units the engine reports `final_lb` in.
     solution.objective * setup.stage_data.stage_templates.cost_scale_factor
+}
+
+// ── Dual-folding trunk+fan fixture ────────────────────────────────────────────
+
+/// PAR(1) coefficient `ψ` for the dual-folding trunk — nonzero so the incoming
+/// inflow-lag column carries a genuine subgradient (`∂Q/∂lag ≠ 0`); a zero `ψ`
+/// makes the lag inert and the fold vacuous.
+const DUAL_FOLDING_PSI: f64 = 0.5;
+/// Near-zero inflow std for the dual-folding trunk (mirrors
+/// `d16_par1_lag_shift`'s `1e-10`): the series is deterministic yet non-degenerate,
+/// so the PAR-normalization path — which rejects an exactly-zero-variance AR
+/// series — still accepts it.
+const DUAL_FOLDING_INFLOW_STD: f64 = 1e-10;
+/// Terminal-fan width — `≥ 2` non-uniform successors so the fan is genuine (the
+/// R4 power precondition asserts this at run time).
+const DUAL_FOLDING_FAN_K: usize = 3;
+/// Constant hydro productivity (MW per m³/s) for the dual-folding hydro —
+/// nonzero so turbined inflow generates real MW against the load, giving both the
+/// reservoir and the inflow lag a nonzero marginal value (`default_from_system`'s
+/// `0.0` placeholder would zero every cut coefficient and make the fold vacuous).
+const DUAL_FOLDING_PRODUCTIVITY: f64 = 0.5;
+/// Scarce reservoir (hm³) for the dual-folding hydro: a small cap and a matching
+/// initial volume make stored water bind, so the trunk storage cut coefficient is
+/// nonzero — the "trunk cut coefficient" comparison has power.
+const DUAL_FOLDING_STORAGE: StorageSpec = StorageSpec {
+    max_storage_hm3: 30.0,
+    initial_storage_hm3: 30.0,
+};
+
+/// Which inflow-lag representation a dual-folding build carries on its
+/// deterministic trunk. Both variants share one [`System`] and one
+/// `state_space.inflow_lag_depth`; they differ ONLY in the per-stage
+/// `StageStateConfig.inflow_lags` toggle, so the LP columns (and the PAR
+/// dynamics) are identical and only the trunk cut PROJECTION changes.
+#[derive(Debug, Clone, Copy)]
+pub enum LagFold {
+    /// Bound-fixed lag: trunk cuts project storage only. The incoming lag column
+    /// is still pinned, but its reduced cost is not projected into the cut — the
+    /// lag is priced through the (storage-only) boundary future cost.
+    Folded,
+    /// Lag-state-enabled: trunk cuts carry the inflow lag as an explicit cut-state
+    /// dimension alongside storage.
+    Unfolded,
+}
+
+/// Per-stage `state_config` for a dual-folding build: `inflow_lags` follows
+/// `fold` on every stage. A node's cut pool is sized by its SUCCESSOR's stage
+/// config (`build_cut_state_layouts`), so toggling every stage uniformly toggles
+/// both trunk pools (the root's, sized by stage 1; the mid's, sized by stage 2).
+fn dual_folding_stage_configs(fold: LagFold) -> [StageStateConfig; 3] {
+    let inflow_lags = matches!(fold, LagFold::Unfolded);
+    [StageStateConfig {
+        storage: true,
+        inflow_lags,
+    }; 3]
+}
+
+/// The deterministic-trunk-then-terminal-fan policy graph: root (id `0`, stage
+/// [`K_FAN_ROOT_STAGE_ID`]) → mid (id `1`, stage [`K_FAN_BRANCH_STAGE_ID`]) → `k`
+/// terminal leaves (ids `2..=k+1`, stage [`K_FAN_LEAF_STAGE_ID`]) under
+/// non-uniform weights `i / Σj` (never uniform `1/k`). The two trunk nodes (root,
+/// mid) each own their own cut pool; the `k` leaves share one terminal pool.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation
+)]
+fn dual_folding_policy_graph(k: usize) -> HorizonGraph {
+    debug_assert!(k >= 2, "dual_folding_policy_graph: k must be >= 2");
+    let mut nodes = Vec::with_capacity(2 + k);
+    let mut transitions = Vec::with_capacity(1 + k);
+    nodes.push(PolicyNode {
+        id: 0,
+        stage_id: K_FAN_ROOT_STAGE_ID,
+        scenario_id: None,
+        label: None,
+    });
+    nodes.push(PolicyNode {
+        id: 1,
+        stage_id: K_FAN_BRANCH_STAGE_ID,
+        scenario_id: None,
+        label: None,
+    });
+    transitions.push(Transition {
+        source_id: 0,
+        target_id: 1,
+        probability: 1.0,
+        annual_discount_rate_override: None,
+    });
+    let total_weight: f64 = (1..=k).map(|i| i as f64).sum();
+    for i in 1..=k {
+        let leaf_id = 1 + i as i32;
+        nodes.push(PolicyNode {
+            id: leaf_id,
+            stage_id: K_FAN_LEAF_STAGE_ID,
+            scenario_id: None,
+            label: None,
+        });
+        transitions.push(Transition {
+            source_id: 1,
+            target_id: leaf_id,
+            probability: (i as f64) / total_weight,
+            annual_discount_rate_override: None,
+        });
+    }
+    HorizonGraph {
+        graph_type: PolicyGraphType::FiniteHorizon,
+        annual_discount_rate: 0.0,
+        transitions,
+        nodes,
+        stage_discount_rate_overrides: HashMap::new(),
+        season_map: None,
+    }
+}
+
+/// The dual-folding [`System`]: [`dual_folding_policy_graph`] over the shared
+/// single-hydro/single-bus [`fan_or_chain_system_ext`] boilerplate, with a
+/// deterministic PAR(1) trunk ([`DUAL_FOLDING_PSI`], [`DUAL_FOLDING_INFLOW_STD`])
+/// and the `fold`-selected per-stage `state_config`.
+fn dual_folding_system(fold: LagFold) -> System {
+    fan_or_chain_system_ext(
+        3,
+        dual_folding_policy_graph(DUAL_FOLDING_FAN_K),
+        DUAL_FOLDING_INFLOW_STD,
+        0.0,
+        DUAL_FOLDING_STORAGE,
+        Vec::new(),
+        Vec::new(),
+        Some(&dual_folding_stage_configs(fold)),
+        &[DUAL_FOLDING_PSI],
+    )
+}
+
+/// Build the dual-folding [`StudySetup`] for `fold`: a deterministic PAR(1) trunk
+/// (root → mid) followed by a terminal fan of [`DUAL_FOLDING_FAN_K`] leaves,
+/// trained `sampled` with the shared fixed seed. Both `fold` variants set the
+/// same `state_space.inflow_lag_depth = Some(1)`, so they share one lag-state
+/// dimension and one LP column layout; only [`dual_folding_stage_configs`]'s
+/// `inflow_lags` toggle differs (see [`LagFold`]).
+///
+/// # Panics
+///
+/// Never in practice — every literal is a hand-checked, internally-consistent
+/// fixture (as [`k_fan_setup`]); `build_stochastic_context`/`StudySetup::new`
+/// only error on a malformed study.
+#[allow(clippy::expect_used)]
+#[must_use]
+pub fn dual_folding_setup(fold: LagFold, forward_passes: u32, max_iterations: u32) -> StudySetup {
+    let system = dual_folding_system(fold);
+    let mut config = k_fan_config(forward_passes, max_iterations);
+    // One explicit lag slot, independent of the fitted AR order, so both `fold`
+    // variants share one lag-state dimension and differ only in the `inflow_lags`
+    // cut toggle.
+    config.state_space.inflow_lag_depth = Some(1);
+    let stochastic = build_stochastic_context(
+        &system,
+        K_FAN_SEED,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("dual_folding_setup: build_stochastic_context must succeed");
+    let mut hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+    // Override the 0.0 productivity placeholder so turbined inflow generates real
+    // MW; otherwise storage and lag carry no marginal value and every cut
+    // coefficient is zero (the fold would fold nothing).
+    hydro_models.production = ProductionModelSet::new(
+        vec![vec![
+            ResolvedProductionModel::ConstantProductivity {
+                productivity: DUAL_FOLDING_PRODUCTIVITY,
+            };
+            3
+        ]],
+        1,
+        3,
+    );
+    StudySetup::new(&system, &config, stochastic, hydro_models)
+        .expect("dual_folding_setup: StudySetup::new must succeed")
 }

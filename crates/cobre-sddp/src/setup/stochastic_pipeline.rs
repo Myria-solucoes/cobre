@@ -69,6 +69,7 @@ fn load_user_opening_tree_inner(
     case_dir: &Path,
     system: &System,
     config: &Config,
+    training_source: &ScenarioSource,
 ) -> Result<Option<OpeningTree>, SddpError> {
     match config.training_openings() {
         None | Some(Openings::Generated {}) => Ok(None),
@@ -87,7 +88,12 @@ fn load_user_opening_tree_inner(
 
             let rows = load_noise_openings(Some(&path))?;
 
-            let expected_dim = noise_entity_order(system).dim();
+            let schemes = ClassSchemes {
+                inflow: Some(training_source.inflow_scheme),
+                load: Some(training_source.load_scheme),
+                ncs: Some(training_source.ncs_scheme),
+            };
+            let expected_dim = noise_entity_order(system, &schemes).dim();
 
             let (study_stage_ids, expected_openings_per_stage): (Vec<i32>, Vec<usize>) = system
                 .stages()
@@ -324,7 +330,12 @@ fn compute_external_scenario_counts(
         return None;
     }
     let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
-    let noise_order = noise_entity_order(system);
+    let schemes = ClassSchemes {
+        inflow: Some(training_source.inflow_scheme),
+        load: Some(training_source.load_scheme),
+        ncs: Some(training_source.ncs_scheme),
+    };
+    let noise_order = noise_entity_order(system, &schemes);
 
     let inflow_counts = class_scenario_counts(
         training_source.inflow_scheme,
@@ -368,7 +379,8 @@ pub fn prepare_stochastic(
     let (system, estimation_report, estimation_path) =
         estimate_from_history(system, case_dir, config)?;
 
-    let user_opening_tree = load_user_opening_tree_inner(case_dir, &system, config)?;
+    let user_opening_tree =
+        load_user_opening_tree_inner(case_dir, &system, config, training_source)?;
 
     let load_factor_entries = load_load_factors_for_stochastic(case_dir)?;
     let block_pairs: Vec<Vec<BlockFactorPair>> = load_factor_entries
@@ -1709,8 +1721,13 @@ mod tests {
         write_ring_noise_openings(dir.path());
 
         let config = config_from_json(&format!(r#"{{"training": {{{SAMPLED_TRAINING}}}}}"#));
-        let loaded = load_user_opening_tree_inner(dir.path(), &fx.system, &config)
-            .expect("an undeclared file must resolve to Ok(None)");
+        let loaded = load_user_opening_tree_inner(
+            dir.path(),
+            &fx.system,
+            &config,
+            &ScenarioSource::default(),
+        )
+        .expect("an undeclared file must resolve to Ok(None)");
         assert!(
             loaded.is_none(),
             "a present-but-undeclared noise_openings.parquet must be ignored"
@@ -1728,9 +1745,14 @@ mod tests {
         let config = config_from_json(&format!(
             r#"{{"training": {{{SAMPLED_TRAINING}, "scenario_source": {{"openings": {{"source": "file"}}}}}}}}"#
         ));
-        let loaded = load_user_opening_tree_inner(dir.path(), &fx.system, &config)
-            .expect("a declared, present file must load")
-            .expect("a declared file must install a tree");
+        let loaded = load_user_opening_tree_inner(
+            dir.path(),
+            &fx.system,
+            &config,
+            &ScenarioSource::default(),
+        )
+        .expect("a declared, present file must load")
+        .expect("a declared file must install a tree");
         assert_eq!(loaded.n_stages(), 5);
         assert_eq!(loaded.dim(), 1);
         for s in 0..5 {
@@ -1747,8 +1769,13 @@ mod tests {
         let config = config_from_json(&format!(
             r#"{{"training": {{{SAMPLED_TRAINING}, "scenario_source": {{"openings": {{"source": "file"}}}}}}}}"#
         ));
-        let err = load_user_opening_tree_inner(dir.path(), &fx.system, &config)
-            .expect_err("a declared but absent file must error");
+        let err = load_user_opening_tree_inner(
+            dir.path(),
+            &fx.system,
+            &config,
+            &ScenarioSource::default(),
+        )
+        .expect_err("a declared but absent file must error");
         match err {
             SddpError::Io(e) => assert!(
                 e.to_string().contains("noise_openings.parquet"),

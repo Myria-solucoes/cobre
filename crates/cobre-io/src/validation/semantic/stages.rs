@@ -830,7 +830,7 @@ mod tests {
         StageRiskConfig, Transition,
     };
 
-    use crate::scenarios::InflowArCoefficientRow;
+    use crate::scenarios::{InflowArCoefficientRow, InflowSeasonalStatsRow};
     use crate::validation::{ErrorKind, ValidationContext};
 
     /// One AR coefficient row at the given 1-based lag (the PAR order is the max
@@ -1341,6 +1341,12 @@ mod tests {
         kfan.external_scenarios = vec![ext_inflow(1, 0), ext_inflow(1, 1), ext_inflow(1, 2)];
         // Stage 0 is generated (num_openings declared); stage 1 is external (none).
         kfan.stages.openings_declared = [0].into_iter().collect();
+        kfan.inflow_seasonal_stats = vec![InflowSeasonalStatsRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 1,
+            mean_m3s: 100.0,
+            std_m3s: 5.0,
+        }];
         let ctx = run(&kfan);
         assert!(!ctx.has_errors(), "valid K-fan errors: {:?}", ctx.errors());
         assert!(
@@ -1383,6 +1389,20 @@ mod tests {
         ];
         // Stage 0 generated; stages 1 and 2 external.
         tree.stages.openings_declared = [0].into_iter().collect();
+        tree.inflow_seasonal_stats = vec![
+            InflowSeasonalStatsRow {
+                hydro_id: EntityId::from(1),
+                stage_id: 1,
+                mean_m3s: 100.0,
+                std_m3s: 5.0,
+            },
+            InflowSeasonalStatsRow {
+                hydro_id: EntityId::from(1),
+                stage_id: 2,
+                mean_m3s: 100.0,
+                std_m3s: 5.0,
+            },
+        ];
         let ctx = run(&tree);
         assert!(!ctx.has_errors(), "valid tree errors: {:?}", ctx.errors());
         assert!(
@@ -1390,6 +1410,42 @@ mod tests {
                 .iter()
                 .any(|w| w.message.contains("identical")),
             "distinct-realization tree must not warn recombinable"
+        );
+    }
+
+    /// A genuine fan whose two sibling successors carry the same realization
+    /// pointer — the duplicate-pointer / degenerate-branching shape a retired
+    /// admissibility predicate would have rejected — now loads with no error. A
+    /// node's realization is defined by its own `scenario_id` (the per-class
+    /// pointer bound is the only surviving pointer rule), so duplicate sibling
+    /// pointers are admissible; the structurally identical siblings draw only the
+    /// recombinable-signature warning, never a rejection. Asserts an OLD rule does
+    /// NOT fire — the counterpart to the sibling tests that assert a surviving rule
+    /// does.
+    #[test]
+    fn test_node_graph_duplicate_sibling_pointer_branch_admitted() {
+        // Root (stage 0, generated) fans to two stage-1 leaves both pointing at
+        // the single external column 0 (raw_c = 1): a real branch with degenerate
+        // sibling pointers.
+        let mut data = node_graph_data(
+            2,
+            vec![node(0, 0, None), node(1, 1, Some(0)), node(2, 1, Some(0))],
+            vec![edge(0, 1, 0.5), edge(0, 2, 0.5)],
+        );
+        data.config = config_enumerated_external_inflow();
+        data.external_scenarios = vec![ext_inflow(1, 0)];
+        data.stages.openings_declared = [0].into_iter().collect();
+        data.inflow_seasonal_stats = vec![InflowSeasonalStatsRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 1,
+            mean_m3s: 100.0,
+            std_m3s: 5.0,
+        }];
+        let ctx = run(&data);
+        assert!(
+            !ctx.has_errors(),
+            "duplicate-pointer branch must load with no error: {:?}",
+            ctx.errors()
         );
     }
 

@@ -8687,3 +8687,344 @@ fn cut_selection_scores_reduced_projection_in_projected_space() {
         "the projection must change the deactivation set on a reduced pool"
     );
 }
+
+/// Dual-folding verification.
+///
+/// On a deterministic PAR(1) trunk the inflow lag is redundant state, so the two
+/// representations the engine supports — folded (`inflow_lags: false`, storage-only
+/// trunk cuts, the production default; the lag is bound-fixed and priced through the
+/// storage future cost) and unfolded (`inflow_lags: true`, the lag carried as an
+/// explicit cut-state dimension) — must agree on the deterministic trunk.
+///
+/// Empirically the fold-invariant quantities are:
+///   * the trunk **cut coefficients**: the two builds share one stage LP (identical
+///     columns, pins, and successor solves) and one deterministic forward
+///     trajectory, so the incoming-storage reduced cost — the storage subgradient —
+///     is **bit-identical** across every trunk cut; only the cut PROJECTION differs
+///     (the unfolded build additionally carries a nonzero lag coefficient the folded
+///     build absorbs into the intercept);
+///   * the **first-stage policy**: both builds realize the same optimal policy, so
+///     the policy cost (`final_ub`) agrees to a stated tolerance — the folded and
+///     unfolded LPs are different, so the simulation may settle on a
+///     different-but-valid vertex at the degenerate optimum (~1 ULP here), the
+///     hot != cold divergence the determinism contract permits (never asserted equal
+///     bit-for-bit).
+///
+/// `final_lb` is deliberately NOT compared between the builds: a non-vacuous fold
+/// (nonzero lag coefficient) forces the unfolded build to carry a redundant lag
+/// dimension the deterministic forward under-samples, so its lower bound stays loose
+/// while the folded build converges (`lb == ub`). That is the correct finding — it
+/// is why folding is the default — not an agreement quantity.
+mod dual_folding_f34 {
+    use cobre_sddp::StudySetup;
+    use cobre_sddp::test_support::{LagFold, dual_folding_setup, pool_cut_state_dimensions};
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::StubComm;
+
+    const FORWARD_PASSES: u32 = 3;
+    const MAX_ITERATIONS: u32 = 12;
+    /// Relative tolerance for the converged-value / policy-cost comparisons: a
+    /// different-but-valid vertex at the degenerate optimum agrees only to solver
+    /// optimality tolerance, never to the bit (the observed `final_ub` gap is ~1 ULP).
+    const VALUE_REL_TOL: f64 = 1e-6;
+    /// A coefficient magnitude above this counts as genuinely nonzero — the trunk
+    /// storage/lag coefficients are ~0.07/0.14, far above solver noise.
+    const NONZERO_EPS: f64 = 1e-9;
+
+    struct Trained {
+        setup: StudySetup,
+        lb: f64,
+        ub: f64,
+    }
+
+    fn train(fold: LagFold) -> Trained {
+        let mut setup = dual_folding_setup(fold, FORWARD_PASSES, MAX_ITERATIONS);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("dual-folding training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "dual-folding training must not error: {:?}",
+            outcome.error
+        );
+        Trained {
+            lb: outcome.result.final_lb,
+            ub: outcome.result.final_ub,
+            setup,
+        }
+    }
+
+    /// Pool ids of the trunk nodes (nodes with a successor own their own pool).
+    fn trunk_pool_ids(setup: &StudySetup) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for (pos, node) in setup.node_graph.nodes.iter_indexed() {
+            if !setup.node_graph.successors[pos].is_empty() && !ids.contains(&node.pool_id) {
+                ids.push(node.pool_id);
+            }
+        }
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Widest successor count over all nodes — the terminal fan's width.
+    fn fan_width(setup: &StudySetup) -> usize {
+        setup
+            .node_graph
+            .nodes
+            .iter_indexed()
+            .map(|(pos, _)| setup.node_graph.successors[pos].len())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Bit pattern of the storage coefficient (cut-state slot 0) of every active cut
+    /// in `pool`, in the canonical append-only order.
+    fn storage_coeff_bits(setup: &StudySetup, pool: usize) -> Vec<u64> {
+        setup
+            .fcf
+            .active_cuts(pool)
+            .map(|(_slot, _intercept, coeffs)| coeffs[0].to_bits())
+            .collect()
+    }
+
+    /// Largest absolute value of coefficient `slot` over `pool`'s active cuts.
+    fn max_abs_coeff(setup: &StudySetup, pool: usize, slot: usize) -> f64 {
+        setup
+            .fcf
+            .active_cuts(pool)
+            .map(|(_s, _i, coeffs)| coeffs.get(slot).copied().unwrap_or(0.0).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: trains two policies; run with --features slow-tests"
+    )]
+    #[test]
+    fn f34_dual_folding_trunk_agreement() {
+        let folded = train(LagFold::Folded);
+        let unfolded = train(LagFold::Unfolded);
+
+        let trunk_a = trunk_pool_ids(&folded.setup);
+        let trunk_b = trunk_pool_ids(&unfolded.setup);
+        assert_eq!(
+            trunk_a, trunk_b,
+            "folded and unfolded share one graph, so their trunk pools coincide"
+        );
+
+        // ── R4: power preconditions — the agreement must not be vacuous ──
+        assert!(
+            fan_width(&folded.setup) >= 2,
+            "terminal fan must carry >= 2 successors (got {})",
+            fan_width(&folded.setup)
+        );
+        assert!(
+            folded.setup.stage_state().max_par_order > 0,
+            "trunk must carry a genuine inflow lag (max_par_order > 0)"
+        );
+
+        let dims_a = pool_cut_state_dimensions(&folded.setup);
+        let dims_b = pool_cut_state_dimensions(&unfolded.setup);
+        for &p in &trunk_a {
+            assert!(
+                dims_b[p] > dims_a[p],
+                "fold must be structurally non-vacuous: unfolded trunk pool {p} must \
+                 project more cut-state dims ({}) than folded ({})",
+                dims_b[p],
+                dims_a[p]
+            );
+        }
+
+        // Numerical non-vacuity: the unfolded build carries a nonzero lag coefficient
+        // (the fold folds something real), and the shared storage coefficient is
+        // nonzero (so its bit-identity below has power).
+        for &p in &trunk_b {
+            assert!(
+                max_abs_coeff(&unfolded.setup, p, 1) > NONZERO_EPS,
+                "unfolded trunk pool {p} must carry a nonzero lag coefficient"
+            );
+        }
+        for &p in &trunk_a {
+            assert!(
+                max_abs_coeff(&folded.setup, p, 0) > NONZERO_EPS,
+                "folded trunk pool {p} must carry a nonzero storage coefficient"
+            );
+        }
+
+        // ── R3: trunk agreement ──
+        // (1) Trunk cut coefficients: the storage subgradient is bit-identical. The
+        //     two builds solve one identical stage LP over one identical deterministic
+        //     trajectory; only the cut projection differs, so the incoming-storage
+        //     reduced cost is fixed bit-for-bit by the determinism contract.
+        for (&pa, &pb) in trunk_a.iter().zip(trunk_b.iter()) {
+            assert_eq!(
+                storage_coeff_bits(&folded.setup, pa),
+                storage_coeff_bits(&unfolded.setup, pb),
+                "trunk storage cut coefficients must be bit-identical (pool {pa})"
+            );
+        }
+
+        // (2) The folded (default) build converges: its lower bound reaches the
+        //     policy cost, so `final_ub` below is the true optimum.
+        assert!(
+            (folded.lb - folded.ub).abs() <= VALUE_REL_TOL * folded.ub.abs(),
+            "folded build must converge: lb {} vs ub {}",
+            folded.lb,
+            folded.ub
+        );
+
+        // (3) First-stage policy: both builds realize the same optimum, compared to a
+        //     stated tolerance because the different LPs may reach a
+        //     different-but-valid vertex (never bit-for-bit; the determinism contract
+        //     forbids asserting hot == cold across a representation change).
+        assert!(
+            (folded.ub - unfolded.ub).abs() <= VALUE_REL_TOL * folded.ub.abs(),
+            "first-stage policy cost must agree within tolerance: folded {} vs unfolded {}",
+            folded.ub,
+            unfolded.ub
+        );
+
+        // (4) The unfolded lower bound is valid (never exceeds the shared optimum),
+        //     even though it stays loose — the redundant deterministic lag is
+        //     under-sampled, so its gap does not close.
+        assert!(
+            unfolded.lb <= unfolded.ub * (1.0 + VALUE_REL_TOL),
+            "unfolded lower bound {} must not exceed the optimum {}",
+            unfolded.lb,
+            unfolded.ub
+        );
+    }
+}
+
+mod f36_gap_attainability {
+    //! Fixture-based gap-attainability check on the enumerated DECOMP K-fan.
+    //! Under enumerated forwards + an expectation measure, the `Gap { tolerance }`
+    //! stopping rule halts training once the EXACT canonical-R$ gap
+    //! `final_ub − final_lb` closes to `<= tolerance`. `final_ub` is exact under
+    //! enumerated (`final_ub_std == 0`), so the gap is a hard quantity, not a
+    //! statistical estimate. `Gap` is admissible only under enumerated +
+    //! expectation (rejected elsewhere at setup — that admission test is owned
+    //! elsewhere and not re-authored here).
+
+    use cobre_sddp::stopping_rule::RULE_GAP;
+    use cobre_sddp::test_support::k_fan_setup_gap;
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+
+    /// Fan width and iteration budget. The enumerated K-fan learns its exact policy
+    /// in a single backward pass, so the gap closes well within the budget; the
+    /// budget only bounds a hypothetical non-converging run.
+    const K: usize = 4;
+    const MAX_ITERATIONS: u32 = 30;
+
+    /// Absolute gap tolerance, canonical R$. The fixture's optimum is ~8.928e7 R$
+    /// and the converged gap sits at the LP-solver ULP floor (~1e-8 R$), so 10.0 R$
+    /// is comfortably above the feasibility-noise floor (~1e-9 × the objective
+    /// magnitude ≈ 0.09 R$) yet far below the objective — a genuinely attainable
+    /// absolute tolerance. A tolerance below the noise floor would leave the gap
+    /// `> tolerance`, so the run would stop on a NON-`gap` rule instead — for this
+    /// absolute-only `Gap` the mandatory `iteration_limit`, since an absolute R$
+    /// tolerance injects no `bound_stalling` companion (a relative-tolerance `Gap`
+    /// gets one) — and the `reason == gap` assertion below is that unattainability
+    /// failure signal.
+    const GAP_TOLERANCE_R: f64 = 10.0;
+
+    /// Train the gap-configured fixture at `cost_scale_factor`, returning
+    /// `(final_lb, final_ub, final_ub_std, reason)`.
+    fn train_gap(cost_scale_factor: Option<f64>) -> (f64, f64, f64, String) {
+        let mut fixture = k_fan_setup_gap(K, GAP_TOLERANCE_R, MAX_ITERATIONS, cost_scale_factor);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("gap-configured K-fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "gap-configured K-fan training must not error: {:?}",
+            outcome.error
+        );
+        let r = &outcome.result;
+        (r.final_lb, r.final_ub, r.final_ub_std, r.reason.clone())
+    }
+
+    /// Attainability (+ expectation-only): on the enumerated + expectation fixture,
+    /// the achieved canonical-R$ gap closes to `<= GAP_TOLERANCE_R` and the run
+    /// stops on the `gap` rule (not `iteration_limit` / the `bound_stalling`
+    /// companion) — the attainability signal.
+    #[test]
+    fn gap_tolerance_attained_under_enumerated_expectation() {
+        let (lb, ub, ub_std, reason) = train_gap(None);
+
+        assert_eq!(
+            ub_std, 0.0,
+            "enumerated forwards give an exact UB: final_ub_std must be 0"
+        );
+        let gap = ub - lb;
+        assert!(
+            gap <= GAP_TOLERANCE_R,
+            "achieved canonical-R$ gap {gap} must close to <= tolerance {GAP_TOLERANCE_R}"
+        );
+        assert_eq!(
+            reason, RULE_GAP,
+            "must stop on the gap rule (attainable tolerance); a non-gap stop \
+             ({reason}) with gap > tolerance is the unattainability failure signal"
+        );
+    }
+
+    /// Canonical-units pinning: the absolute gap comparison is on the UNSCALED
+    /// (canonical-R$) side. The same fixture at `cost_scale_factor == 1.0`
+    /// (unscaled LP) and at a non-unit factor converges to the same
+    /// gap-in-canonical-R$ and the same lower bound. A comparison performed on the
+    /// SCALED bounds would shift the reported bounds by the factor (the non-unit
+    /// run's `final_lb` would be `× 1/factor`) and fail the lb-match. Mirrors
+    /// `d02_single_hydro_cost_scale_invariant`.
+    #[test]
+    fn gap_comparison_is_canonical_units_invariant_to_cost_scale() {
+        let (lb_unit, ub_unit, _, reason_unit) = train_gap(Some(1.0));
+        let (lb_scaled, ub_scaled, _, reason_scaled) = train_gap(Some(1e6));
+
+        assert_eq!(
+            reason_unit, RULE_GAP,
+            "unit-factor run must stop on the gap rule"
+        );
+        assert_eq!(
+            reason_scaled, RULE_GAP,
+            "non-unit-factor run must stop on the gap rule"
+        );
+
+        let gap_unit = ub_unit - lb_unit;
+        let gap_scaled = ub_scaled - lb_scaled;
+        assert!(
+            gap_unit <= GAP_TOLERANCE_R && gap_scaled <= GAP_TOLERANCE_R,
+            "both runs' canonical-R$ gap must close to <= tolerance \
+             (unit {gap_unit}, scaled {gap_scaled})"
+        );
+
+        // Same gap-in-canonical-R$: both converge to the ~0 gap and must agree far
+        // tighter than the stopping tolerance (a genuine equality, not a restatement
+        // of `both <= tolerance`). A scaled-side comparison would let the non-unit
+        // run stop at a canonical gap up to tolerance × factor, diverging here.
+        let gap_match_tol = 1e-3;
+        assert!(
+            (gap_unit - gap_scaled).abs() <= gap_match_tol,
+            "the two runs must close to the same gap-in-canonical-R$ \
+             (unit {gap_unit}, scaled {gap_scaled}, tol {gap_match_tol})"
+        );
+        // The lower bound is scale-invariant in canonical R$ — this carries the
+        // pin's power: a scaled-bounds comparison/report would shift it by the
+        // factor (the ~8.928e7 R$ optimum vs a ~1/factor-shifted value). The
+        // magnitude-relative tolerance admits scaling roundoff yet rejects the
+        // factor-sized shift.
+        let lb_match_tol = 1e-6 * ub_unit.abs().max(1.0);
+        assert!(
+            (lb_unit - lb_scaled).abs() <= lb_match_tol,
+            "canonical-R$ lower bound must be invariant to cost_scale_factor \
+             (unit {lb_unit}, scaled {lb_scaled}, tol {lb_match_tol})"
+        );
+    }
+}

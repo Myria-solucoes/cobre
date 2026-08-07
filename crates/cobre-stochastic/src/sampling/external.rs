@@ -33,7 +33,10 @@ use super::eta_inversion::run_eta_inversion;
 /// Pre-standardized eta store for external scenario files.
 ///
 /// A pure data container: the external-file parsing pass populates it, the
-/// `ClassSampler::External` variant reads it during the forward pass.
+/// `ClassSampler::External` variant reads it during the forward pass. An eta
+/// of `(μ = 0, σ = 1, ψ = 0)` is not a placeholder or an absence marker — it
+/// IS the natural value, the identity that makes a stored entry interpretable
+/// on its own.
 ///
 /// # Examples
 ///
