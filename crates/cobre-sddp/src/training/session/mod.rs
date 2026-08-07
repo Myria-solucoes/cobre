@@ -349,10 +349,6 @@ where
         bwd_state.set_profile(solver_profiles.backward);
         bwd_state.set_scheduler(solver_profiles.backward_scheduler);
         bwd_state.set_hardest_first_claim_order(solver_profiles.hardest_first_claim_order);
-        // Mirrors `fwd_state.set_traversal` above — the by-node scheduler's
-        // singleton auto-select (`trial_state_axis_is_singleton`) is licensed
-        // only under an enumerated traversal.
-        bwd_state.set_enumerated(config.loop_config.training_enumerated);
 
         Ok(Self {
             solver,
@@ -861,6 +857,8 @@ where
             &self.ranks,
             &self.runtime,
             iteration,
+            self.fwd_state.traversal(),
+            self.fwd_state.enumerated_state(),
         );
         let backward_result = bwd.run(&mut inputs)?;
 

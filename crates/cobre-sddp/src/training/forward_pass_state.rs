@@ -306,6 +306,15 @@ impl ForwardPassState {
         &self.traversal
     }
 
+    /// The persisted per-node outgoing-state arena from the most recent
+    /// enumerated forward pass, handed to `BackwardPassInputs` so the
+    /// enumerated backward fork reads a cut-generating node's own trial state
+    /// directly instead of `records`/`exchange.state_at`. Empty (never
+    /// indexed) under `Traversal::Sampled`.
+    pub(crate) fn enumerated_state(&self) -> &EnumeratedForwardScratch {
+        &self.enumerated_scratch
+    }
+
     /// Execute the forward pass for one training iteration on this rank.
     ///
     /// Simulates `inputs.local_forward_passes` scenario trajectories through

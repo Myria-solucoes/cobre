@@ -17,24 +17,27 @@ use rayon::iter::{
 };
 
 use crate::risk_measure::BackwardOutcome;
-use crate::setup::node_graph::{NodeGraph, NodeId, NodePos, StageIdx, backward_cut_levels};
+#[cfg(test)]
+use crate::setup::node_graph::NodeId;
+use crate::setup::node_graph::{
+    EnumeratedPlan, NodeGraph, NodePos, StageIdx, Traversal, backward_cut_levels,
+};
 use crate::{
     backward::{
-        BackwardResult, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut, SuccessorChild,
+        BackwardResult, ReplicatedScratch, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut,
         SuccessorEntry, SuccessorOutcomes, SuccessorSpec, by_node_block_count, by_node_finish,
-        hardest_first_block_order, identity_block_order, merge_block_pivots, outcome_stride,
+        hardest_first_block_order, identity_block_order, merge_block_pivots,
         process_by_scenario_backward, process_stage_backward_by_node, resolve_block_size,
-        solve_replicated_outcome_slice,
+        run_backward_node_replicated,
     },
     config::CutManagementConfig,
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
-    cut_sync::{CutSyncBuffers, OutcomeExchangeScratch},
+    cut_sync::CutSyncBuffers,
     error::SddpError,
-    forward::build_delta_cut_row_batch_into,
+    forward::{EnumeratedForwardScratch, build_delta_cut_row_batch_into},
     rank_reconcile::reconcile_result,
     risk_measure::RiskMeasure,
-    solve::partition,
     solver_phase::Phase,
     solver_stats::{
         SolverStatsDelta, StageWorkerStatsBuffer, WORKER_STATS_ENTRY_STRIDE,
@@ -106,6 +109,18 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
 
     /// Global offset for this rank's trial points (`rank * fwd_per_rank`).
     pub fwd_offset: usize,
+
+    /// The resolved forward-traversal axis (mirrors
+    /// `ForwardPassState::traversal()`): [`BackwardPassState::run`] dispatches
+    /// on this directly, `Traversal::Enumerated` routing to the node-native
+    /// fork and `Traversal::Sampled` to the by-scenario/by-node level driver.
+    pub traversal: &'a Traversal,
+
+    /// The forward pass's persisted per-node outgoing-state arena
+    /// (`ForwardPassState::enumerated_state`), read by the enumerated
+    /// backward fork via `EnumeratedPlan`'s node-native level sweep. Unused
+    /// under `Traversal::Sampled`.
+    pub enumerated_state: &'a EnumeratedForwardScratch,
 }
 
 impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C> {
@@ -131,6 +146,8 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
         ranks: &RankDistribution,
         runtime: &'a RuntimeHandles,
         iteration: u64,
+        traversal: &'a Traversal,
+        enumerated_state: &'a EnumeratedForwardScratch,
     ) -> Self {
         Self {
             workspaces: &mut fwd_pool.workspaces,
@@ -151,6 +168,8 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
             iteration,
             local_work: ranks.my_actual_fwd,
             fwd_offset: ranks.my_fwd_offset,
+            traversal,
+            enumerated_state,
         }
     }
 }
@@ -255,14 +274,6 @@ pub struct BackwardPassState {
     /// call.
     scheduler: BackwardScheduler,
 
-    /// Whether this training run's resolved forward-traversal axis is
-    /// `Traversal::Enumerated` — the sole licensing fact for
-    /// `trial_state_axis_is_singleton`'s by-node auto-select (a sampled
-    /// traversal's trial points are independently drawn, never provably
-    /// identical). Defaults to `false`; override with
-    /// [`Self::set_enumerated`] before the first `run()` call.
-    is_enumerated: bool,
-
     /// Whether the by-node scheduler claims hardest-`(stage,
     /// block)`-first using [`Self::by_node_scratch`]'s
     /// `block_pivots_prev` row, or the canonical ascending block order.
@@ -337,6 +348,11 @@ pub struct BackwardPassState {
     /// `n_nodes` per rank). Reused.
     bwd_visit_counts: Vec<usize>,
     bwd_visit_displs: Vec<usize>,
+
+    /// Scratch for the enumerated backward's replicated per-node solve
+    /// (`run_backward_node_replicated`). Empty (zero footprint) under
+    /// `Traversal::Sampled`, which never touches it.
+    replicated_scratch: ReplicatedScratch,
 }
 
 /// One successor child's cut-pool binding-metadata region: which pool, the base
@@ -365,8 +381,7 @@ impl BackwardPassState {
     ///
     /// `max_local_fwd`, `n_state`, and `num_stages`, together with
     /// `bwd_max_openings`, size `Self::by_node_scratch` once `set_scheduler`
-    /// or `set_enumerated` calls `Self::resize_by_node_scratch`;
-    /// `by_node_scratch` starts empty.
+    /// calls `Self::resize_by_node_scratch`; `by_node_scratch` starts empty.
     #[must_use]
     pub fn new(
         n_workers_local: usize,
@@ -402,7 +417,6 @@ impl BackwardPassState {
             reconcile_scratch: [0_i32; 1],
             profile: Phase::Backward.profile(),
             scheduler: BackwardScheduler::default(),
-            is_enumerated: false,
             hardest_first_claim_order: true,
             max_local_fwd,
             bwd_max_openings,
@@ -419,6 +433,7 @@ impl BackwardPassState {
             bwd_visit_counts: Vec::new(),
             bwd_visit_displs: Vec::new(),
             level_pool_regions_scratch: Vec::new(),
+            replicated_scratch: ReplicatedScratch::default(),
         }
     }
 
@@ -428,21 +443,6 @@ impl BackwardPassState {
         self.profile = profile;
     }
 
-    /// Records whether this run's resolved forward-traversal axis is
-    /// `Traversal::Enumerated` (default: `false`), mirroring
-    /// `ForwardPassState::set_traversal`. Call before `run()`.
-    ///
-    /// Also re-derives `Self::by_node_scratch`'s sizing: an enumerated
-    /// traversal can make `trial_state_axis_is_singleton` auto-select the
-    /// by-node scheduler at `run()` time regardless of `Self::scheduler`
-    /// (`resolve_backward_scheduler`'s "regardless of config" clause), so the
-    /// scratch must be sized whenever THAT could happen, not only when
-    /// `ByNode` was the literal configured value.
-    pub fn set_enumerated(&mut self, is_enumerated: bool) {
-        self.is_enumerated = is_enumerated;
-        self.resize_by_node_scratch();
-    }
-
     /// Overrides the backward-pass scheduler applied at [`Self::run`] entry
     /// (default: [`BackwardScheduler::ByScenario`]). Call before `run()`.
     pub fn set_scheduler(&mut self, scheduler: BackwardScheduler) {
@@ -450,17 +450,11 @@ impl BackwardPassState {
         self.resize_by_node_scratch();
     }
 
-    /// Single owner of `Self::by_node_scratch`'s size decision, called from
-    /// both [`Self::set_scheduler`] and [`Self::set_enumerated`] so the
-    /// result never depends on which of the two is called last: sized to the
-    /// full `max_local_fwd * bwd_max_openings` shape whenever `ByNode` could
-    /// be the scheduler `run()` actually dispatches to — either because
-    /// `Self::scheduler` is literally `ByNode`, or because
-    /// `Self::is_enumerated` licenses `trial_state_axis_is_singleton`'s
-    /// auto-select — empty otherwise. Never on the hot path.
+    /// Single owner of `Self::by_node_scratch`'s size decision: sized to the
+    /// full `max_local_fwd * bwd_max_openings` shape whenever `Self::scheduler`
+    /// is literally `ByNode`, empty otherwise. Never on the hot path.
     fn resize_by_node_scratch(&mut self) {
-        let may_dispatch_by_node =
-            matches!(self.scheduler, BackwardScheduler::ByNode { .. }) || self.is_enumerated;
+        let may_dispatch_by_node = matches!(self.scheduler, BackwardScheduler::ByNode { .. });
         self.by_node_scratch = if may_dispatch_by_node {
             ByNodeScratch::sized(
                 self.max_local_fwd,
@@ -483,6 +477,35 @@ impl BackwardPassState {
 
     /// Execute the backward pass for one training iteration on this rank.
     ///
+    /// Dispatches on `inputs.traversal`, mirroring the forward fork
+    /// (`ForwardPassState::run`'s `Traversal::Enumerated` match arm):
+    /// `Traversal::Enumerated` routes to the node-native
+    /// [`Self::run_enumerated_backward`], `Traversal::Sampled` to
+    /// [`Self::run_sampled_backward`] (the pre-existing per-level driver,
+    /// byte-frozen).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SddpError::Infeasible { .. })` when a stage LP has no
+    /// feasible solution during the backward sweep. Returns
+    /// `Err(SddpError::Solver(_))` for all other terminal LP solver failures.
+    pub fn run<S, C: Communicator>(
+        &mut self,
+        inputs: &mut BackwardPassInputs<'_, S, C>,
+    ) -> Result<BackwardResult, SddpError>
+    where
+        S: SolverInterface<Profile = ActiveProfile> + Send,
+    {
+        match inputs.traversal {
+            Traversal::Enumerated(plan) => self.run_enumerated_backward(inputs, plan),
+            Traversal::Sampled { .. } => self.run_sampled_backward(inputs),
+        }
+    }
+
+    /// The sampled-traversal backward driver: the per-level reverse-topological
+    /// sweep (`run_one_backward_level`/`compute_one_backward_node`), byte-frozen
+    /// — [`Self::run`]'s `Traversal::Sampled` arm.
+    ///
     /// # Errors
     ///
     /// Returns `Err(SddpError::Infeasible { .. })` when a stage LP has no
@@ -497,7 +520,7 @@ impl BackwardPassState {
     /// - `inputs.ctx.base_rows.len() != num_stages`
     /// - `inputs.risk_measures.len() != num_stages`
     /// - `inputs.frozen.len() != n_pools`
-    pub fn run<S, C: Communicator>(
+    fn run_sampled_backward<S, C: Communicator>(
         &mut self,
         inputs: &mut BackwardPassInputs<'_, S, C>,
     ) -> Result<BackwardResult, SddpError>
@@ -655,6 +678,217 @@ impl BackwardPassState {
             load_imbalance_ms: imbalance_ms,
             scheduling_overhead_ms: scheduling_ms,
             cut_sync_time_ms: cut_sync_ms,
+        })
+    }
+
+    /// The enumerated-traversal backward driver: walks `backward_cut_levels`
+    /// (already node-native, non-leaf reverse-topological) and, for each
+    /// cut-generating node, reads its own persisted outgoing state
+    /// (`inputs.enumerated_state`, populated by the enumerated forward — the
+    /// value every trajectory sharing this node saw, by construction), builds
+    /// its successor outcome set once (`assemble_successor_outcome_weights` +
+    /// `SuccessorOutcomes`, unchanged from the sampled path), and solves it via
+    /// the replicated per-node solve ([`run_backward_node_replicated`]) —
+    /// exactly ONE cut per non-leaf node, never one per trajectory. Neither
+    /// the per-level state exchange nor the batched cut exchange is ever
+    /// invoked: every rank already holds every cut-generating node's state
+    /// locally at world = 1 (the forward replicates trunk nodes on every
+    /// rank), and the replicated solve appends the bit-identical cut on every
+    /// rank directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SddpError::Validation(_))` when a cut-generating node's
+    /// successor does not record that node as its `EnumeratedPlan` parent (a
+    /// malformed plan — the node-native cut cannot resolve which persisted
+    /// state is its own). Returns `Err(SddpError::Infeasible { .. })`/
+    /// `Err(SddpError::Solver(_))` from a successor LP solve.
+    // RATIONALE: the per-node level sweep — the parent-consistency validation,
+    // the successor-outcome-set assembly (mirroring compute_one_backward_node's
+    // sampled-path build, which the sampled path must stay byte-frozen and
+    // therefore cannot share), and the replicated solve dispatch — is one
+    // reproducibility-critical sequence; splitting it would fragment the
+    // node-native level loop for no clarity gain.
+    #[allow(clippy::too_many_lines)]
+    fn run_enumerated_backward<S, C: Communicator>(
+        &mut self,
+        inputs: &mut BackwardPassInputs<'_, S, C>,
+        plan: &EnumeratedPlan,
+    ) -> Result<BackwardResult, SddpError>
+    where
+        S: SolverInterface<Profile = ActiveProfile> + Send,
+    {
+        let start = Instant::now();
+        let solves_before: u64 = inputs
+            .workspaces
+            .iter()
+            .map(|ws| ws.solver.statistics().solve_count)
+            .sum();
+
+        let backward_profile = self.profile;
+        for ws in inputs.workspaces.iter_mut() {
+            ws.solver.set_profile(&backward_profile);
+        }
+        let ws0 = inputs.workspaces.first_mut().ok_or_else(|| {
+            SddpError::Validation("enumerated backward: no solver workspace available".into())
+        })?;
+
+        let training_ctx = inputs.training_ctx;
+        let node_graph = training_ctx.node_graph;
+        let my_rank = inputs.comm.rank();
+
+        #[cfg(debug_assertions)]
+        let mut seen_predecessor_states: Vec<(NodePos, Option<NodePos>, Vec<f64>)> = Vec::new();
+
+        let levels = backward_cut_levels(node_graph);
+        let mut cuts_generated: usize = 0;
+        for level in &levels {
+            for &node_pos in level {
+                let node_id = node_graph.node_ids[node_pos];
+                let pool_id = node_graph.nodes[node_pos].pool_id;
+                let node_stage = node_graph.nodes[node_pos].stage;
+                let successor_stage = node_stage.next();
+
+                let x_hat = inputs.enumerated_state.out_state(node_pos);
+                #[cfg(debug_assertions)]
+                debug_assert_predecessor_states_distinct(
+                    &mut seen_predecessor_states,
+                    node_pos,
+                    plan.parent[node_pos],
+                    x_hat,
+                );
+
+                assemble_successor_outcome_weights(
+                    node_graph,
+                    node_pos,
+                    &mut self.probabilities_buf,
+                );
+                let n_openings = self.probabilities_buf.len();
+
+                let template_num_rows = inputs.ctx.template(successor_stage).num_rows;
+                self.successor_meta_buf.clear();
+                self.successor_active_slots_buf.clear();
+                let mut outcome_offset = 0usize;
+                let mut metadata_offset = 0usize;
+                for succ_edge in &node_graph.successors[node_pos] {
+                    let child_node = succ_edge.child;
+                    match plan.parent[child_node] {
+                        Some(p) if p == node_pos => {}
+                        other => {
+                            return Err(SddpError::Validation(format!(
+                                "enumerated backward: node {}'s successor {} does not record \
+                                 node {} as its EnumeratedPlan parent (found {other:?}); the \
+                                 node-native cut cannot resolve which persisted state is its own",
+                                node_id, node_graph.node_ids[child_node], node_id,
+                            )));
+                        }
+                    }
+                    let child_pool = node_graph.nodes[child_node].pool_id;
+                    let child_openings = node_graph.nodes[child_node].openings;
+                    let child_cut_layout = &training_ctx.cut_state_layouts[child_pool];
+                    build_delta_cut_row_batch_into(
+                        &mut inputs.cut_batches[child_pool],
+                        inputs.fcf,
+                        child_pool,
+                        training_ctx.state,
+                        child_cut_layout,
+                        &inputs.ctx.template(successor_stage).col_scale,
+                        inputs.iteration,
+                    );
+                    let num_cuts_at_successor = (inputs.frozen[child_pool].num_rows
+                        - template_num_rows)
+                        + inputs.cut_batches[child_pool].num_rows;
+                    let slots_start = self.successor_active_slots_buf.len();
+                    self.successor_active_slots_buf
+                        .extend(inputs.fcf.active_cuts(child_pool).map(|(slot, _, _)| slot));
+                    let slots_end = self.successor_active_slots_buf.len();
+                    let populated_count = inputs.fcf.pools[child_pool].populated();
+                    let outcome_len = child_openings.len;
+                    self.successor_meta_buf.push(SuccessorEntry {
+                        successor_node: child_node,
+                        successor_node_id: node_graph.node_ids[child_node],
+                        pool_id: child_pool,
+                        num_cuts_at_successor,
+                        populated_count,
+                        active_slots: slots_start..slots_end,
+                        metadata_offset,
+                        openings: child_openings,
+                        outcome_range: outcome_offset..outcome_offset + outcome_len,
+                    });
+                    outcome_offset += outcome_len;
+                    metadata_offset += populated_count;
+                }
+
+                let outcomes = SuccessorOutcomes::new(
+                    &self.successor_meta_buf,
+                    &self.successor_active_slots_buf,
+                    inputs.frozen,
+                    &*inputs.cut_batches,
+                    &inputs.fcf.pools,
+                    template_num_rows,
+                    inputs.cut_activity_tolerance,
+                );
+                debug_assert_eq!(
+                    outcomes.total_outcomes(),
+                    n_openings,
+                    "the reified successor outcome set must have as many outcomes as \
+                     flattened weights"
+                );
+
+                let succ_spec = SuccessorSpec {
+                    t: node_stage,
+                    successor: successor_stage,
+                    my_rank,
+                    probabilities: &self.probabilities_buf,
+                    cut_state: &training_ctx.cut_state_layouts[pool_id],
+                };
+
+                let n_state = succ_spec.cut_state.n_slots();
+                let intercept = run_backward_node_replicated(
+                    &mut self.replicated_scratch,
+                    ws0,
+                    inputs.ctx,
+                    training_ctx,
+                    inputs.comm,
+                    &inputs.risk_measures[node_stage.0],
+                    &self.probabilities_buf,
+                    &succ_spec,
+                    &outcomes,
+                    x_hat,
+                    pool_id,
+                    inputs.iteration,
+                )?;
+                inputs.fcf.add_cut(
+                    node_id,
+                    pool_id,
+                    inputs.iteration,
+                    0,
+                    intercept,
+                    &ws0.backward_accum.agg_coefficients[..n_state],
+                );
+                cuts_generated += 1;
+            }
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let solves_after: u64 = inputs
+            .workspaces
+            .iter()
+            .map(|ws| ws.solver.statistics().solve_count)
+            .sum();
+
+        Ok(BackwardResult {
+            cuts_generated,
+            elapsed_ms,
+            lp_solves: solves_after - solves_before,
+            stage_stats: Vec::new(),
+            state_exchange_time_ms: 0,
+            cut_batch_build_time_ms: 0,
+            setup_time_ms: 0,
+            load_imbalance_ms: 0,
+            scheduling_overhead_ms: 0,
+            cut_sync_time_ms: 0,
         })
     }
 
@@ -1030,45 +1264,20 @@ struct NodeCompute {
     scheduling_ms: u64,
 }
 
-/// A node's trial-state axis is a [conceptual] singleton when its raw,
-/// undeduped trial points are all known to carry the identical state — always
-/// true under `Traversal::Enumerated` (the engine solves each node's LP
-/// exactly once per iteration and broadcasts the outgoing state to every path
-/// that shares it, so every trial point the backward pass sees for that node
-/// is byte-identical by construction), and worth flagging only when there is
-/// more than one such trial point to potentially consolidate. A sampled
-/// traversal draws independent noise per trajectory, so it never licenses
-/// this signal, even when a node happens to see exactly one trial point this
-/// iteration.
-///
-/// Feeds [`resolve_backward_scheduler`]'s scheduler choice only; the actual
-/// dedup collapse (replacing `n_trial_states` distinct solves with one,
-/// replicated) is not implemented — see [`run_backward_node_replicated`].
-fn trial_state_axis_is_singleton(is_enumerated: bool, n_trial_states: usize) -> bool {
-    is_enumerated && n_trial_states > 1
-}
-
-/// Resolve the effective backward thread scheduler. A singleton-trial-state
-/// group auto-selects the by-node scheduler regardless of config
-/// — the by-scenario scheduler would serialize it to one work unit — but an
-/// active Dynamic Cut Selection iteration always forces the by-scenario path
-/// (its cut-free lazy core is incompatible with the by-node frozen-LP
-/// load). A non-singleton group keeps its configured scheduler unchanged.
+/// Resolve the effective backward thread scheduler for the SAMPLED path
+/// (`compute_one_backward_node`'s only caller): an active Dynamic Cut
+/// Selection iteration always forces the by-scenario path (its cut-free lazy
+/// core is incompatible with the by-node frozen-LP load); otherwise the
+/// configured scheduler is unchanged.
 fn resolve_backward_scheduler(
-    singleton: bool,
     dcs_active: bool,
     configured: BackwardScheduler,
 ) -> BackwardScheduler {
     if dcs_active {
-        return BackwardScheduler::ByScenario {};
+        BackwardScheduler::ByScenario {}
+    } else {
+        configured
     }
-    if singleton {
-        return match configured {
-            BackwardScheduler::ByNode { .. } => configured,
-            BackwardScheduler::ByScenario {} => BackwardScheduler::ByNode { block_size: None },
-        };
-    }
-    configured
 }
 
 /// Flatten node `node_pos`'s successor outcome set
@@ -1089,6 +1298,49 @@ fn assemble_successor_outcome_weights(
         &node_graph.successors[node_pos],
         out,
     );
+}
+
+/// Future-DAG insurance (debug-only): the enumerated backward keys a
+/// node's own persisted state purely structurally (its `NodePos` into the
+/// forward's arena), never by comparing state values. This asserts that
+/// assumption stays safe by checking that two cut-generating nodes on
+/// DIFFERENT branches (not sharing the same immediate `plan.parent`) never
+/// carry `to_bits`-identical persisted state — if two did, a future
+/// recombination/DAG extension's structural keying could silently misattribute
+/// one node's cut to another's state. Sibling nodes (the same immediate
+/// parent) are excluded: they legitimately land on the same numeric point —
+/// e.g. a shared binding storage bound reached regardless of which branch's
+/// noise realization — which is ordinary LP degeneracy, not a structural-keying
+/// hazard, since siblings never share a `NodePos` to begin with. `seen`
+/// accumulates every distinct node visited so far in the current
+/// [`BackwardPassState::run_enumerated_backward`] call; a repeat visit to the
+/// SAME node (impossible today — `backward_cut_levels` lists each node once —
+/// reserved for a future multi-level revisit) is not a collision and is
+/// skipped.
+#[cfg(debug_assertions)]
+fn debug_assert_predecessor_states_distinct(
+    seen: &mut Vec<(NodePos, Option<NodePos>, Vec<f64>)>,
+    node: NodePos,
+    parent: Option<NodePos>,
+    state: &[f64],
+) {
+    for (other, other_parent, other_state) in seen.iter() {
+        if *other == node || *other_parent == parent {
+            continue;
+        }
+        let identical = state.len() == other_state.len()
+            && state
+                .iter()
+                .zip(other_state)
+                .all(|(a, b)| a.to_bits() == b.to_bits());
+        debug_assert!(
+            !identical,
+            "enumerated backward: distinct, non-sibling cut-generating nodes {node} and \
+             {other} carry bit-identical persisted states; structural parent-keying assumes \
+             nodes on different branches never collapse to the same state"
+        );
+    }
+    seen.push((node, parent, state.to_vec()));
 }
 
 /// Group this rank's own local trial points (`0..local_work`) by the
@@ -1392,10 +1644,11 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
 
 /// Compute one node's backward cut over `trial_points` — the trial-point
 /// indices routed to this node's pool — building the successor cut batch,
-/// solving (the replicated aggregation at a singleton-trial-state group, else
-/// the by-node or trial-point path), inserting the local cut(s), reconciling,
-/// and computing this node's timing. The level driver owns the state exchange,
-/// the routing, the batched cut exchange, and the metadata/stats gather.
+/// solving (the by-node or by-scenario path), inserting the local cut(s),
+/// reconciling, and computing this node's timing. The level driver owns the
+/// state exchange, the routing, the batched cut exchange, and the
+/// metadata/stats gather. Sampled-only — the enumerated backward's per-node
+/// solve is `BackwardPassState::run_enumerated_backward`.
 // RATIONALE: sequences the per-node solve phases whose intermediate state each
 // next phase reads; splitting further would thread every disjoint sub-field as
 // &mut without gaining clarity.
@@ -1518,17 +1771,15 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
         cut_state: cut_state_projection,
     };
 
-    // One resolver decides the scheduler: `resolve_backward_scheduler` owns
-    // both the DCS fallback (its cut-free lazy core is incompatible with the
-    // by-node frozen-LP load, sddp.md "By-node scheduler is warm-start-only")
-    // and the singleton-trial-state auto-select.
+    // `resolve_backward_scheduler` owns the DCS fallback: its cut-free lazy
+    // core is incompatible with the by-node frozen-LP load (sddp.md "By-node
+    // scheduler is warm-start-only").
     let dcs_active = training_ctx
         .dcs
         .filter(|p| p.is_active(inputs.iteration))
         .is_some();
-    let singleton = trial_state_axis_is_singleton(state.is_enumerated, trial_points.len());
     let use_by_node = matches!(
-        resolve_backward_scheduler(singleton, dcs_active, state.scheduler),
+        resolve_backward_scheduler(dcs_active, state.scheduler),
         BackwardScheduler::ByNode { .. }
     );
 
@@ -1690,134 +1941,6 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
         imbalance_ms,
         scheduling_ms,
     })
-}
-
-/// Scalars for [`run_backward_node_replicated`].
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-struct ReplicatedAggregate {
-    /// Cut-state dimension (subgradient length per outcome).
-    n_state: usize,
-    /// Total outcomes in the node's successor outcome set.
-    n_openings: usize,
-    /// Total MPI rank count (the opening-split partition denominator).
-    n_ranks: usize,
-    /// This rank's MPI rank index (the singleton trial point's exchange slot).
-    my_rank: usize,
-    /// The node's own cut pool.
-    pool_id: usize,
-    /// Declared id of the generating node (cut provenance).
-    node_id: NodeId,
-    /// Global offset of this rank's trial points.
-    fwd_offset: usize,
-    /// Current training iteration.
-    iteration: u64,
-}
-
-/// Reserved: opening-split replicated aggregation for a singleton-trial-state
-/// node — a declared dedup/recombining node whose scenarios collapse onto one
-/// trial state. Ranks split the successor outcome set, allgather per-outcome
-/// `(objective, subgradient)` in canonical `(m, ψ)` order, and every rank runs
-/// the identical flat `aggregate_cut_into` and appends the identical cut, so the
-/// batched cut exchange is skipped for the pool (a naive exchange would multiply
-/// the cut by the rank count).
-///
-/// Inert until the forward pass actually collapses a singleton-trial-state
-/// node's `n_trial_states` distinct solves into one: [`trial_state_axis_is_singleton`]
-/// now honestly detects the axis (feeding [`resolve_backward_scheduler`]'s
-/// by-node auto-select), but `compute_one_backward_node` still dispatches only
-/// to the by-node/by-scenario schedulers — neither collapses `trial_points`,
-/// so this replicated path has no caller yet. Wiring it in is what would make
-/// the collapse real; until then this function stays dead code. The allgather
-/// + aggregation math is pinned by the backward-pass unit tests.
-///
-/// # Errors
-///
-/// Propagates the slice solve's `SddpError` and the outcome `allgatherv`'s
-/// `SddpError::Validation`/`SddpError::Communication`.
-#[allow(dead_code, clippy::too_many_arguments)]
-fn run_backward_node_replicated<S: SolverInterface + Send, C: Communicator>(
-    ws: &mut SolverWorkspace<S>,
-    ctx: &StageContext<'_>,
-    training_ctx: &TrainingContext<'_>,
-    exchange: &ExchangeBuffers,
-    comm: &C,
-    fcf: &mut FutureCostFunction,
-    risk_measure: &RiskMeasure,
-    probabilities: &[f64],
-    succ: &SuccessorSpec<'_>,
-    child: &SuccessorChild<'_>,
-    agg: ReplicatedAggregate,
-) -> Result<usize, SddpError> {
-    let ReplicatedAggregate {
-        n_state,
-        n_openings,
-        n_ranks,
-        my_rank,
-        pool_id,
-        node_id,
-        fwd_offset,
-        iteration,
-    } = agg;
-
-    let (o_start, o_end) = partition(n_openings, n_ranks, my_rank);
-    let mut outcome_counts = vec![0usize; n_ranks];
-    for (r, c) in outcome_counts.iter_mut().enumerate() {
-        let (s0, e0) = partition(n_openings, n_ranks, r);
-        *c = e0 - s0;
-    }
-
-    let mut slice = Vec::new();
-    solve_replicated_outcome_slice(
-        ws,
-        ctx,
-        training_ctx,
-        exchange,
-        succ,
-        child,
-        0,
-        o_start,
-        o_end,
-        fwd_offset,
-        iteration,
-        &mut slice,
-    )?;
-
-    let mut ex = OutcomeExchangeScratch::default();
-    let full = ex.allgather_outcomes(&slice, n_state, &outcome_counts, comm)?;
-
-    let x_hat = exchange.state_at(my_rank, 0);
-    let stride = outcome_stride(n_state);
-    let mut outcomes: Vec<BackwardOutcome> = Vec::with_capacity(n_openings);
-    for o in 0..n_openings {
-        let base = o * stride;
-        let coefficients = full[base + 1..base + 1 + n_state].to_vec();
-        let objective = full[base];
-        let intercept = objective
-            - coefficients
-                .iter()
-                .zip(x_hat)
-                .map(|(c, x)| c * x)
-                .sum::<f64>();
-        outcomes.push(BackwardOutcome {
-            intercept,
-            coefficients,
-            objective_value: objective,
-        });
-    }
-
-    let mut intercept = 0.0_f64;
-    let mut coeffs = vec![0.0_f64; n_state];
-    let mut risk_scratch = crate::risk_measure::RiskMeasureScratch::default();
-    risk_measure.aggregate_cut_into(
-        &outcomes,
-        probabilities,
-        &mut intercept,
-        &mut coeffs,
-        &mut risk_scratch,
-    );
-    fcf.add_cut(node_id, pool_id, iteration, 0, intercept, &coeffs);
-    Ok(1)
 }
 
 /// Evaluate this node's routed `trial_points` for a single backward stage,
@@ -2553,6 +2676,9 @@ mod tests {
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,
+
+            traversal: &Traversal::default(),
+            enumerated_state: &EnumeratedForwardScratch::default(),
         };
 
         let result = state
@@ -2727,6 +2853,9 @@ mod tests {
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,
+
+            traversal: &Traversal::default(),
+            enumerated_state: &EnumeratedForwardScratch::default(),
         };
 
         let result = state_machine
@@ -3139,6 +3268,9 @@ mod tests {
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,
+
+            traversal: &Traversal::default(),
+            enumerated_state: &EnumeratedForwardScratch::default(),
         };
 
         let result = state_machine
@@ -3149,6 +3281,301 @@ mod tests {
             .map(|p| fcf.active_cuts(p).count())
             .collect();
         (result.cuts_generated, per_pool)
+    }
+
+    // ── enumerated backward: node-native fork ──────────────────────────────
+
+    /// A hand-built small trunk+fan graph: root (stage 0, id 0) → ONE trunk
+    /// node (stage 1, id 1) → THREE leaves (stage 2, ids 2..4, one shared
+    /// pool). Two non-leaf (cut-generating) nodes: root and the trunk node.
+    fn trunk_fan_graph() -> (NodeGraph, cobre_stochastic::StochasticContext) {
+        use crate::setup::node_graph::build_node_graph;
+        use cobre_core::HorizonGraph;
+        use cobre_core::temporal::{Node, PolicyGraphType, Transition};
+        use cobre_io::StageIdResolver;
+
+        fn node(id: i32, stage_id: i32) -> Node {
+            Node {
+                id,
+                stage_id,
+                scenario_id: None,
+                label: None,
+            }
+        }
+        fn transition(source_id: i32, target_id: i32, probability: f64) -> Transition {
+            Transition {
+                source_id,
+                target_id,
+                probability,
+                annual_discount_rate_override: None,
+            }
+        }
+
+        let n_stages = 3_usize;
+        let stochastic = make_stochastic_context(n_stages, 3);
+        let study_stage_ids = [0_i32, 1, 2];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let graph = HorizonGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            nodes: vec![node(0, 0), node(1, 1), node(2, 2), node(3, 2), node(4, 2)],
+            transitions: vec![
+                transition(0, 1, 1.0),
+                transition(1, 2, 1.0 / 3.0),
+                transition(1, 3, 1.0 / 3.0),
+                transition(1, 4, 1.0 / 3.0),
+            ],
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            season_map: None,
+        };
+        let node_graph = build_node_graph(&graph, n_stages, &resolver, &stochastic)
+            .expect("declared trunk+fan graph must build");
+        (node_graph, stochastic)
+    }
+
+    /// Run the enumerated backward over `node_graph` with the given resolved
+    /// `traversal`/`enumerated_state`, returning the raw result (so both the
+    /// happy-path and the validation-error tests can share this setup) and
+    /// the per-pool active-cut counts (computed regardless of `Ok`/`Err`,
+    /// since `fcf` retains whatever cuts were appended before any error).
+    fn run_enumerated_backward_over_graph(
+        node_graph: &NodeGraph,
+        stochastic: &cobre_stochastic::StochasticContext,
+        traversal: &Traversal,
+        enumerated_state: &EnumeratedForwardScratch,
+    ) -> (Result<BackwardResult, SddpError>, Vec<usize>) {
+        let n_stages = 3_usize;
+        let state = state_layout(1, 0);
+        let templates = vec![minimal_template_1_0(); n_stages];
+        let base_rows = vec![1_usize; n_stages];
+        let frozen_templates: Vec<StageTemplate> = (0..node_graph.n_pools)
+            .map(|p| templates[node_graph.pool_stage[p].0].clone())
+            .collect();
+        let n_state = state.n_state;
+
+        let mut fcf = FutureCostFunction::new(
+            node_graph.n_pools,
+            n_state,
+            1,
+            10,
+            &vec![0; node_graph.n_pools],
+        );
+        let mut exchange = ExchangeBuffers::new(n_state, 1, 1);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
+
+        let comm = StubComm;
+        let solution = solution_1_0(100.0, -5.0);
+        let mut workspaces = single_workspace(MockSolver::always_ok(solution), n_state);
+        let mut basis_store = empty_basis_store(1, node_graph.nodes.len());
+        let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, 1);
+        let mut cut_batches = empty_cut_batches(node_graph.n_pools);
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = study_dims();
+        let training_ctx = TrainingContext {
+            node_graph,
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, node_graph.n_pools),
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic,
+            initial_state: &[],
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        };
+
+        let bwd_max_openings = node_graph
+            .successors
+            .iter()
+            .map(|succs| {
+                succs
+                    .iter()
+                    .map(|s| node_graph.nodes[s.child].openings.len)
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let mut state_machine =
+            BackwardPassState::new(1, 1, bwd_max_openings, n_state, 1, n_state, n_stages);
+
+        let mut inputs = BackwardPassInputs {
+            workspaces: &mut workspaces,
+            basis_store: &mut basis_store,
+            ctx: &ctx,
+            frozen: &frozen_templates,
+            fcf: &mut fcf,
+            cut_batches: &mut cut_batches,
+            training_ctx: &training_ctx,
+            comm: &comm,
+            exchange: &mut exchange,
+            records: &[],
+            cut_sync_bufs: &mut csb,
+            visited_archive: None,
+            event_sender: None,
+            risk_measures: &risk_measures,
+            cut_activity_tolerance: 0.0,
+            iteration: 1,
+            local_work: 0,
+            fwd_offset: 0,
+            traversal,
+            enumerated_state,
+        };
+
+        let result = state_machine.run(&mut inputs);
+        let per_pool: Vec<usize> = (0..node_graph.n_pools)
+            .map(|p| fcf.active_cuts(p).count())
+            .collect();
+        (result, per_pool)
+    }
+
+    /// Over a hand-built small trunk+fan graph, `run_enumerated_backward`
+    /// (dispatched via `BackwardPassState::run` under `Traversal::Enumerated`)
+    /// appends exactly ONE cut per non-leaf node — never one per trajectory.
+    #[test]
+    fn enumerated_backward_appends_one_cut_per_nonleaf_node() {
+        let (node_graph, stochastic) = trunk_fan_graph();
+        let root = NodePos(0);
+        let trunk = NodePos(1);
+        let root_pool = node_graph.nodes[root].pool_id;
+        let trunk_pool = node_graph.nodes[trunk].pool_id;
+        assert_ne!(root_pool, trunk_pool, "root and trunk own distinct pools");
+
+        let traversal = Traversal::resolve(&node_graph, true, 1);
+        let mut enumerated_state = EnumeratedForwardScratch::default();
+        enumerated_state.set_out_state_for_test(root, node_graph.nodes.len(), &[10.0]);
+        enumerated_state.set_out_state_for_test(trunk, node_graph.nodes.len(), &[20.0]);
+
+        let (result, per_pool) = run_enumerated_backward_over_graph(
+            &node_graph,
+            &stochastic,
+            &traversal,
+            &enumerated_state,
+        );
+        let result = result.expect("enumerated backward over a trunk+fan graph must not error");
+
+        assert_eq!(
+            result.cuts_generated, 2,
+            "exactly one cut per non-leaf node (root, trunk) — never one per trajectory"
+        );
+        assert_eq!(
+            per_pool[root_pool], 1,
+            "root's pool receives exactly one cut"
+        );
+        assert_eq!(
+            per_pool[trunk_pool], 1,
+            "trunk's pool receives exactly one cut"
+        );
+    }
+
+    /// A successor whose `EnumeratedPlan::parent` does not record the
+    /// cut-generating node as its parent is a named `SddpError::Validation`,
+    /// never a silent default or a panic.
+    #[test]
+    fn enumerated_backward_missing_parent_is_validation_error() {
+        use crate::setup::node_graph::{EnumeratedForwardPaths, EnumeratedPlan};
+
+        let (node_graph, stochastic) = trunk_fan_graph();
+        let root = NodePos(0);
+        let trunk = NodePos(1);
+
+        // Deliberately corrupt: the trunk node's parent should be `Some(root)`;
+        // recording `None` instead makes root's own successor check fail.
+        // `paths` is irrelevant here — `run_enumerated_backward` never reads it.
+        let bad_plan = EnumeratedPlan {
+            paths: EnumeratedForwardPaths {
+                leaf: Vec::new(),
+                weight: Vec::new(),
+            },
+            parent: vec![None, None, Some(trunk), Some(trunk), Some(trunk)].into(),
+        };
+        let traversal = Traversal::Enumerated(bad_plan);
+
+        let mut enumerated_state = EnumeratedForwardScratch::default();
+        enumerated_state.set_out_state_for_test(root, node_graph.nodes.len(), &[10.0]);
+        enumerated_state.set_out_state_for_test(trunk, node_graph.nodes.len(), &[20.0]);
+
+        let (result, _) = run_enumerated_backward_over_graph(
+            &node_graph,
+            &stochastic,
+            &traversal,
+            &enumerated_state,
+        );
+        match result {
+            Err(SddpError::Validation(msg)) => {
+                assert!(
+                    msg.contains("EnumeratedPlan parent"),
+                    "message names the malformed-plan condition: {msg}"
+                );
+            }
+            other => panic!("expected SddpError::Validation, got {other:?}"),
+        }
+    }
+
+    /// The future-DAG insurance `debug_assert` fires when two DISTINCT,
+    /// non-sibling cut-generating nodes' persisted states are made
+    /// `to_bits`-identical — a regression a `release` build would never see
+    /// (the assertion is compiled out).
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "future-DAG insurance debug_assert compiles out of release"
+    )]
+    #[should_panic(expected = "bit-identical persisted states")]
+    fn enumerated_backward_debug_assert_fires_on_identical_nonsibling_predecessor_states() {
+        let (node_graph, stochastic) = trunk_fan_graph();
+        let root = NodePos(0);
+        let trunk = NodePos(1);
+
+        let traversal = Traversal::resolve(&node_graph, true, 1);
+        let mut enumerated_state = EnumeratedForwardScratch::default();
+        // Root and trunk are DISTINCT, non-sibling cut-generating nodes made
+        // to carry the SAME persisted state — the regression this must catch.
+        enumerated_state.set_out_state_for_test(root, node_graph.nodes.len(), &[10.0]);
+        enumerated_state.set_out_state_for_test(trunk, node_graph.nodes.len(), &[10.0]);
+
+        let _ = run_enumerated_backward_over_graph(
+            &node_graph,
+            &stochastic,
+            &traversal,
+            &enumerated_state,
+        );
     }
 
     /// Cut-generation routing at a two-INTERIOR-node level: each cut-generating
@@ -3438,6 +3865,9 @@ mod tests {
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,
+
+            traversal: &Traversal::default(),
+            enumerated_state: &EnumeratedForwardScratch::default(),
         };
 
         let _ = bwd_state
@@ -3569,6 +3999,9 @@ mod tests {
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,
+
+            traversal: &Traversal::default(),
+            enumerated_state: &EnumeratedForwardScratch::default(),
         };
 
         let _ = state
@@ -3941,91 +4374,50 @@ mod tests {
         );
     }
 
-    // ── by-node auto-selection ─────────────────────────────────────────
+    // ── sampled scheduler resolution ────────────────────────────────────
 
     #[test]
-    fn by_node_auto_selection_singleton_picks_by_node_else_keeps_configured() {
+    fn resolve_backward_scheduler_dcs_forces_by_scenario_else_keeps_configured() {
         use cobre_io::config::BackwardScheduler;
 
-        // Enumerated + more than one trial point: every trial point is known
-        // identical, so the axis is a singleton.
-        assert!(trial_state_axis_is_singleton(true, 4));
-        // Sampled traversal never licenses the signal, regardless of count —
-        // its trial points are independently drawn, not provably identical.
-        assert!(!trial_state_axis_is_singleton(false, 4));
-        assert!(!trial_state_axis_is_singleton(false, 1));
-        // Enumerated with only one trial point: nothing to consolidate.
-        assert!(!trial_state_axis_is_singleton(true, 1));
-
-        // Singleton ⇒ by-node regardless of the configured scheduler.
+        // No active DCS: the configured scheduler passes through unchanged.
         assert!(matches!(
-            resolve_backward_scheduler(true, false, BackwardScheduler::ByScenario {}),
-            BackwardScheduler::ByNode { .. }
-        ));
-        assert!(matches!(
-            resolve_backward_scheduler(true, false, BackwardScheduler::ByNode { block_size: None }),
-            BackwardScheduler::ByNode { .. }
-        ));
-        // Non-singleton (chain) ⇒ configured scheduler unchanged.
-        assert!(matches!(
-            resolve_backward_scheduler(false, false, BackwardScheduler::ByScenario {}),
+            resolve_backward_scheduler(false, BackwardScheduler::ByScenario {}),
             BackwardScheduler::ByScenario {}
         ));
         assert!(matches!(
-            resolve_backward_scheduler(
-                false,
-                false,
-                BackwardScheduler::ByNode { block_size: None }
-            ),
+            resolve_backward_scheduler(false, BackwardScheduler::ByNode { block_size: None }),
             BackwardScheduler::ByNode { .. }
         ));
-        // An active DCS iteration forces the by-scenario path even at a singleton.
+        // An active DCS iteration always forces the by-scenario path — its
+        // cut-free lazy core is incompatible with the by-node frozen-LP load.
         assert!(matches!(
-            resolve_backward_scheduler(true, true, BackwardScheduler::ByNode { block_size: None }),
+            resolve_backward_scheduler(true, BackwardScheduler::ByNode { block_size: None }),
+            BackwardScheduler::ByScenario {}
+        ));
+        assert!(matches!(
+            resolve_backward_scheduler(true, BackwardScheduler::ByScenario {}),
             BackwardScheduler::ByScenario {}
         ));
     }
 
     #[test]
-    fn by_node_scratch_sizing_is_order_independent_of_set_enumerated_vs_set_scheduler() {
+    fn by_node_scratch_sizing_follows_configured_scheduler_only() {
         use cobre_io::config::BackwardScheduler;
 
-        // Baseline: neither call made ⇒ empty (the pre-existing ByScenario/
-        // sampled default).
+        // No scheduler set ⇒ empty (the pre-existing ByScenario/sampled default).
         let baseline = BackwardPassState::new(1, 1, 4, 0, 2, 3, 5);
         assert_eq!(baseline.by_node_scratch_arena_capacity(), 0);
 
-        // set_scheduler(ByNode) alone still sizes it (the pre-existing path).
+        // set_scheduler(ByNode) sizes it.
         let mut by_node_only = BackwardPassState::new(1, 1, 4, 0, 2, 3, 5);
         by_node_only.set_scheduler(BackwardScheduler::ByNode { block_size: None });
         assert!(by_node_only.by_node_scratch_arena_capacity() > 0);
 
-        // set_enumerated(true) called AFTER set_scheduler(ByScenario): the
-        // resolve_backward_scheduler singleton auto-select can still dispatch
-        // ByNode at run() time even though ByScenario is configured, so the
-        // scratch must be sized here too (this exact ordering is what
-        // BackwardPassState::new -> TrainingSession's set_scheduler-then-
-        // set_enumerated call sequence produces).
-        let mut enumerated_after = BackwardPassState::new(1, 1, 4, 0, 2, 3, 5);
-        enumerated_after.set_scheduler(BackwardScheduler::ByScenario {});
-        enumerated_after.set_enumerated(true);
-        assert!(enumerated_after.by_node_scratch_arena_capacity() > 0);
-
-        // Same two calls in the opposite order produce the identical result —
-        // the sizing decision does not depend on call order.
-        let mut enumerated_before = BackwardPassState::new(1, 1, 4, 0, 2, 3, 5);
-        enumerated_before.set_enumerated(true);
-        enumerated_before.set_scheduler(BackwardScheduler::ByScenario {});
-        assert_eq!(
-            enumerated_before.by_node_scratch_arena_capacity(),
-            enumerated_after.by_node_scratch_arena_capacity()
-        );
-
-        // A later set_enumerated(false) with ByScenario still configured
-        // returns the scratch to empty — the OR-condition is re-derived fresh
-        // on every call, not latched permanently on.
-        enumerated_before.set_enumerated(false);
-        assert_eq!(enumerated_before.by_node_scratch_arena_capacity(), 0);
+        // set_scheduler(ByScenario) keeps it empty.
+        let mut by_scenario_only = BackwardPassState::new(1, 1, 4, 0, 2, 3, 5);
+        by_scenario_only.set_scheduler(BackwardScheduler::ByScenario {});
+        assert_eq!(by_scenario_only.by_node_scratch_arena_capacity(), 0);
     }
 
     // ── per-node basis isolation + chain byte-address ──────────────────

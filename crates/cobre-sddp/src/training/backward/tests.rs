@@ -47,13 +47,14 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::{FutureCostFunction, row::build_cut_row_batch},
     cut_sync::CutSyncBuffers,
+    forward::EnumeratedForwardScratch,
     horizon_mode::HorizonMode,
     indexer::{CutStateProjection, StateDim},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::{BackwardOutcome, RiskMeasure},
     setup::NodeId,
-    setup::node_graph::{NodePos, StageIdx},
+    setup::node_graph::{NodePos, StageIdx, Traversal},
     solver_stats::SolverStatsDelta,
     state_exchange::ExchangeBuffers,
     test_support,
@@ -1054,6 +1055,9 @@ fn single_stage_system_produces_no_cuts() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -1157,6 +1161,9 @@ fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -1263,6 +1270,9 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -1363,6 +1373,9 @@ fn no_cuts_generated_at_last_stage() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -1464,6 +1477,9 @@ fn elapsed_ms_is_non_negative() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -1560,6 +1576,9 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     });
 
     assert!(
@@ -1704,6 +1723,9 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -1826,6 +1848,9 @@ fn cut_gradient_sign_physically_correct() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -1953,6 +1978,9 @@ fn cut_is_tight_at_trial_state() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -2066,6 +2094,9 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -2190,6 +2221,9 @@ fn forward_pass_index_matches_global_scenario_index() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -2300,6 +2334,9 @@ fn warm_start_uses_prepopulated_forward_basis() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -2403,6 +2440,9 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -2512,6 +2552,9 @@ fn backward_solver_error_propagates() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     });
 
     assert!(
@@ -2675,6 +2718,9 @@ fn test_backward_pass_parallel_cut_determinism() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -2766,6 +2812,9 @@ fn test_backward_pass_parallel_cut_determinism() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -3162,6 +3211,9 @@ fn backward_pass_load_patches_applied() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -3340,6 +3392,9 @@ fn backward_pass_no_load_buses_unchanged() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -3523,6 +3578,9 @@ fn backward_pass_cut_coefficients_unaffected() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -3653,6 +3711,9 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -3792,6 +3853,9 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -3986,6 +4050,9 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .unwrap();
 
@@ -4356,6 +4423,9 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .expect("single-rank 2-worker backward must not error");
 
@@ -4586,6 +4656,9 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     })
     .expect("dual-rank stub backward must not error");
 
@@ -5388,6 +5461,9 @@ fn handshake_passes_with_local_backend() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     });
 
     assert!(
@@ -5553,6 +5629,9 @@ fn handshake_rejects_nonuniform_workers() {
         cut_sync_bufs: &mut csb,
         visited_archive: None,
         event_sender: None,
+
+        traversal: &Traversal::default(),
+        enumerated_state: &EnumeratedForwardScratch::default(),
     });
 
     match result {

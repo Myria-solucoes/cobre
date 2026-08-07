@@ -43,9 +43,8 @@ pub use sampler::build_sampler_from_ctx;
 pub use stats_aggregation::{ForwardBound, sync_forward};
 
 pub(crate) use basis_capture::write_capture_metadata;
-pub(crate) use enumerated::{
-    EnumeratedForwardResult, EnumeratedForwardScratch, EnumeratedParams, run_enumerated_forward,
-};
+pub use enumerated::EnumeratedForwardScratch;
+pub(crate) use enumerated::{EnumeratedForwardResult, EnumeratedParams, run_enumerated_forward};
 pub(crate) use stage_solve::run_forward_stage;
 
 /// Local statistics from one rank's forward pass.

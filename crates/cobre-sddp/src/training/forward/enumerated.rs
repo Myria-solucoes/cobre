@@ -138,8 +138,11 @@ struct NodeVisit {
 /// Always present on `ForwardPassState` (never `Option`): dispatch is driven
 /// solely by the resolved `Traversal`, read fresh each call, so there is no
 /// separate flag this scratch's population could drift out of sync with.
+/// `pub` (not `pub(crate)`) solely so `BackwardPassInputs::enumerated_state`
+/// (a public field) stays nameable from the crate's own integration tests;
+/// every field stays module-private, read only through [`Self::out_state`].
 #[derive(Default)]
-pub(crate) struct EnumeratedForwardScratch {
+pub struct EnumeratedForwardScratch {
     /// Per-node visit arena, indexed by canonical node position.
     arena: TypedVec<NodePos, NodeVisit>,
     /// Per-node `arena` population flag, reset each run.
@@ -187,6 +190,27 @@ impl EnumeratedForwardScratch {
         self.on_my_paths = vec![false; n_nodes].into();
         self.m_rep = vec![0; n_nodes].into();
         self.stage_units = Vec::with_capacity(n_nodes);
+    }
+
+    /// Node `node`'s outgoing state from the most recent [`run_enumerated_forward`]
+    /// call — persisted across the fwd→bwd boundary via
+    /// `ForwardPassState::enumerated_state` so the enumerated backward can read a
+    /// cut-generating node's own trial state directly, never through
+    /// `records`/`exchange.state_at`.
+    pub(crate) fn out_state(&self, node: NodePos) -> &[f64] {
+        &self.arena[node].out_state
+    }
+
+    /// Test-only: directly seed node `node`'s `out_state`, growing the arena to
+    /// `n_nodes` positions first if needed. Lets a `BackwardPassState`-level unit
+    /// test hand-set the persisted arena without running a full forward solve.
+    #[cfg(test)]
+    pub(crate) fn set_out_state_for_test(&mut self, node: NodePos, n_nodes: usize, state: &[f64]) {
+        if self.arena.len() < n_nodes {
+            self.arena = (0..n_nodes).map(|_| NodeVisit::default()).collect();
+        }
+        self.arena[node].out_state.clear();
+        self.arena[node].out_state.extend_from_slice(state);
     }
 }
 

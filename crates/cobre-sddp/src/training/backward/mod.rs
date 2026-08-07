@@ -78,7 +78,7 @@ pub(crate) use by_node::{
 };
 pub(crate) use by_scenario::{StageOpeningSolver, process_by_scenario_backward};
 pub(crate) use lp_setup::fill_external_opening_noise;
-pub(crate) use replicated::{outcome_stride, solve_replicated_outcome_slice};
+pub(crate) use replicated::{ReplicatedScratch, run_backward_node_replicated};
 
 #[cfg(test)]
 pub(crate) use lp_setup::{load_backward_lp, patch_opening_bounds, resolve_backward_basis};

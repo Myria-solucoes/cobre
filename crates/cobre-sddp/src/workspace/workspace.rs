@@ -519,12 +519,11 @@ impl BackwardAccumulators {
 ///
 /// Empty (`arena` capacity `0`) unless `ByNode` could be the scheduler a run
 /// actually dispatches to: sized by `BackwardPassState::resize_by_node_scratch`
-/// (called from both `set_scheduler` and `set_enumerated`, order-independent)
-/// whenever the configured scheduler is literally `ByNode`, OR the run is
-/// enumerated — an enumerated traversal can auto-select `ByNode` at `run()`
-/// time regardless of the configured scheduler (`resolve_backward_scheduler`'s
-/// singleton auto-select). Never resized on the hot path (sddp.md "By-node
-/// scheduler is warm-start-only").
+/// (called from `set_scheduler`) whenever the configured scheduler is
+/// literally `ByNode`. Untouched by the enumerated traversal — its per-node
+/// solve (`BackwardPassState::run_enumerated_backward`) never dispatches
+/// through the by-node scheduler at all. Never resized on the hot path
+/// (sddp.md "By-node scheduler is warm-start-only").
 #[derive(Default)]
 pub(crate) struct ByNodeScratch {
     /// Per-`(m, ω)` outcome arena, addressed `arena[m * n_openings + omega]` for

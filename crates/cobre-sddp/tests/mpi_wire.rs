@@ -1335,9 +1335,11 @@ mod by_node_scratch {
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
         cut_sync::CutSyncBuffers,
+        forward::EnumeratedForwardScratch,
         horizon_mode::HorizonMode,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
+        setup::Traversal,
         test_support::{
             all_enabled_cut_state_layouts, state_layout, study_dims, trial_state_records,
         },
@@ -1760,6 +1762,9 @@ mod by_node_scratch {
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,
+
+            traversal: &Traversal::default(),
+            enumerated_state: &EnumeratedForwardScratch::default(),
         };
 
         for iteration in 1..=3_u64 {
@@ -1893,6 +1898,9 @@ mod by_node_scratch {
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,
+
+            traversal: &Traversal::default(),
+            enumerated_state: &EnumeratedForwardScratch::default(),
         };
 
         let _ = state
