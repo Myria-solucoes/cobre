@@ -25,7 +25,7 @@ use crate::{
     workspace::{CapturedBasis, SolverWorkspace, WorkspacePool, WorkspaceSizing},
 };
 
-use super::StudySetup;
+use super::{SimulationEnumeratedRequest, StudySetup, Traversal};
 use crate::build_training_output;
 use crate::simulate;
 use crate::train;
@@ -239,6 +239,14 @@ impl StudySetup {
     {
         let stage_ctx = self.stage_ctx();
         let training_ctx = self.simulation_ctx();
+        let traversal = Traversal::resolve(
+            &self.node_graph,
+            matches!(
+                self.simulation_enumerated,
+                SimulationEnumeratedRequest::Enumerated
+            ),
+            self.simulation_config().n_scenarios,
+        );
 
         let output = SimulationOutputSpec {
             result_tx,
@@ -279,6 +287,7 @@ impl StudySetup {
             frozen_templates,
             stage_bases,
             comm,
+            &traversal,
         )
     }
 

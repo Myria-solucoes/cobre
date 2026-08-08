@@ -35,9 +35,10 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     cut::row::build_cut_row_batch_into,
-    setup::node_graph::{NodePos, StageIdx, frontier_node},
+    setup::node_graph::{NodePos, StageIdx, Traversal, frontier_node},
     simulation::{
         config::SimulationConfig,
+        enumerated::run_enumerated_simulation,
         error::SimulationError,
         extraction::assign_scenarios,
         pipeline::{
@@ -76,10 +77,15 @@ pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
     pub node_bases: &'a [Option<CapturedBasis>],
     /// MPI communicator.
     pub comm: &'a C,
+    /// The resolved simulation-traversal axis: [`SimulationState::run`] forks
+    /// on this directly — `Sampled` keeps the existing per-scenario loop,
+    /// `Enumerated` dispatches to the node-native census driver.
+    pub traversal: &'a Traversal,
 }
 
 impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
     /// Construct a `SimulationInputs` bundle from positional arguments.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         workspaces: &'a mut [SolverWorkspace<S>],
         ctx: &'a StageContext<'a>,
@@ -90,6 +96,7 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
         frozen_templates: Option<&'a [StageTemplate]>,
         node_bases: &'a [Option<CapturedBasis>],
         comm: &'a C,
+        traversal: &'a Traversal,
     ) -> Self {
         Self {
             workspaces,
@@ -101,6 +108,7 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
             frozen_templates,
             node_bases,
             comm,
+            traversal,
         }
     }
 }
@@ -259,10 +267,6 @@ impl SimulationState {
                 (None, None) => unreachable!("owned_frozen is Some when frozen_templates is None"),
             };
 
-        let scenario_range = assign_scenarios(inputs.config.n_scenarios, rank, inputs.comm.size());
-        #[allow(clippy::cast_possible_truncation)]
-        let local_count = (scenario_range.end - scenario_range.start) as usize;
-        let scenario_start = scenario_range.start as usize;
         let n_workers = inputs.workspaces.len().max(1);
         let world_size = u32::try_from(inputs.comm.size()).unwrap_or(1).max(1);
         let sim_start = Instant::now();
@@ -291,57 +295,82 @@ impl SimulationState {
             ws.solver.set_profile(&self.profile);
         }
 
-        // Every scenario's sampled walk starts at the same stage-0 root —
-        // resolved once, mirroring the training forward pass's own root_node.
-        let root_node = frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
-            SimulationError::InvalidConfiguration(
-                "node graph: stage 0 carries no alive node".to_string(),
-            )
-        })?;
+        let (all_costs, all_stats): (WorkerCosts, WorkerStats) = match inputs.traversal {
+            Traversal::Sampled { .. } => {
+                let scenario_range =
+                    assign_scenarios(inputs.config.n_scenarios, rank, inputs.comm.size());
+                #[allow(clippy::cast_possible_truncation)]
+                let local_count = (scenario_range.end - scenario_range.start) as usize;
+                let scenario_start = scenario_range.start as usize;
 
-        let params = SimWorkerParams {
-            ctx: inputs.ctx,
-            fcf: inputs.fcf,
-            training_ctx,
-            output: &inputs.output,
-            config: inputs.config,
-            node_bases: inputs.node_bases,
-            frozen_templates,
-            scenarios_complete: &scenarios_complete,
-            sim_start,
-            local_count,
-            n_workers,
-            scenario_start,
-            sampler: &sampler,
-            num_stages,
-            world_size,
-            root_node,
+                // Every scenario's sampled walk starts at the same stage-0 root —
+                // resolved once, mirroring the training forward pass's own root_node.
+                let root_node =
+                    frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
+                        SimulationError::InvalidConfiguration(
+                            "node graph: stage 0 carries no alive node".to_string(),
+                        )
+                    })?;
+
+                let params = SimWorkerParams {
+                    ctx: inputs.ctx,
+                    fcf: inputs.fcf,
+                    training_ctx,
+                    output: &inputs.output,
+                    config: inputs.config,
+                    node_bases: inputs.node_bases,
+                    frozen_templates,
+                    scenarios_complete: &scenarios_complete,
+                    sim_start,
+                    local_count,
+                    n_workers,
+                    scenario_start,
+                    sampler: &sampler,
+                    num_stages,
+                    world_size,
+                    root_node,
+                };
+
+                let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> =
+                    inputs
+                        .workspaces
+                        .par_iter_mut()
+                        .enumerate()
+                        .map(|(w, ws)| run_worker_scenarios(w, ws, &params))
+                        .collect();
+
+                let mut all_costs = Vec::with_capacity(local_count);
+                let mut all_stats = Vec::with_capacity(local_count);
+                for result in worker_results {
+                    let (costs, stats) = result?;
+                    all_costs.extend(costs);
+                    all_stats.extend(stats);
+                }
+                // Each worker emits a contiguous ascending scenario_id range, so the
+                // sequential `extend` leaves `all_costs`/`all_stats` sorted — no sort needed.
+                debug_assert!(
+                    all_costs.windows(2).all(|w| w[0].0 <= w[1].0),
+                    "all_costs not pre-sorted: workers must emit ascending scenario_id"
+                );
+                debug_assert!(
+                    all_stats.windows(2).all(|w| w[0].0 <= w[1].0),
+                    "all_stats not pre-sorted: workers must emit ascending scenario_id"
+                );
+                (all_costs, all_stats)
+            }
+            Traversal::Enumerated(plan) => {
+                let k = plan.paths.leaf.len();
+                #[allow(clippy::cast_possible_truncation)]
+                if k != inputs.config.n_scenarios as usize {
+                    return Err(SimulationError::InvalidConfiguration(format!(
+                        "enumerated plan carries {k} leaf paths but the simulation config \
+                         resolved n_scenarios = {}",
+                        inputs.config.n_scenarios
+                    )));
+                }
+                run_enumerated_simulation(plan, inputs, frozen_templates, &sampler)?
+            }
         };
-
-        let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> = inputs
-            .workspaces
-            .par_iter_mut()
-            .enumerate()
-            .map(|(w, ws)| run_worker_scenarios(w, ws, &params))
-            .collect();
-
-        let mut all_costs = Vec::with_capacity(local_count);
-        let mut all_stats = Vec::with_capacity(local_count);
-        for result in worker_results {
-            let (costs, stats) = result?;
-            all_costs.extend(costs);
-            all_stats.extend(stats);
-        }
-        // Each worker emits a contiguous ascending scenario_id range, so the
-        // sequential `extend` leaves `all_costs`/`all_stats` sorted — no sort needed.
-        debug_assert!(
-            all_costs.windows(2).all(|w| w[0].0 <= w[1].0),
-            "all_costs not pre-sorted: workers must emit ascending scenario_id"
-        );
-        debug_assert!(
-            all_stats.windows(2).all(|w| w[0].0 <= w[1].0),
-            "all_stats not pre-sorted: workers must emit ascending scenario_id"
-        );
 
         if let Some(sender) = inputs.output.event_sender.take() {
             #[allow(clippy::cast_possible_truncation)]
@@ -486,7 +515,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
 }
 
 /// Build the [`ForwardSampler`] for a simulation run from the training context.
-fn build_sim_sampler<'a>(
+pub(crate) fn build_sim_sampler<'a>(
     training_ctx: &'a TrainingContext<'a>,
 ) -> Result<ForwardSampler<'a>, SimulationError> {
     Ok(build_forward_sampler(ForwardSamplerConfig {

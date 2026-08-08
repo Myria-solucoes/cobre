@@ -20,6 +20,7 @@ use crate::{
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
+    setup::node_graph::Traversal,
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -43,6 +44,7 @@ fn run_simulate<S, C: cobre_comm::Communicator>(
     frozen_templates: Option<&[cobre_solver::StageTemplate]>,
     node_bases: &[Option<CapturedBasis>],
     comm: &C,
+    traversal: &Traversal,
 ) -> Result<super::SimulationRunResult, SimulationError>
 where
     S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
@@ -59,6 +61,7 @@ where
         frozen_templates,
         node_bases,
         comm,
+        traversal,
     };
     state.run(&mut inputs)
 }
@@ -78,6 +81,7 @@ fn run_simulate_with_profile<S, C: cobre_comm::Communicator>(
     node_bases: &[Option<CapturedBasis>],
     comm: &C,
     profile: cobre_solver::ActiveProfile,
+    traversal: &Traversal,
 ) -> Result<super::SimulationRunResult, SimulationError>
 where
     S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
@@ -95,6 +99,7 @@ where
         frozen_templates,
         node_bases,
         comm,
+        traversal,
     };
     state.run(&mut inputs)
 }
@@ -885,6 +890,7 @@ fn simulation_load_patches_applied() {
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1052,6 +1058,7 @@ fn simulation_no_load_buses_unchanged() {
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1191,6 +1198,7 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
         &[],
         &comm,
         resolved,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1340,6 +1348,7 @@ fn simulation_inflow_extraction_unaffected() {
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1718,6 +1727,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1852,6 +1862,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 

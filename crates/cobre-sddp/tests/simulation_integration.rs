@@ -54,6 +54,7 @@ use cobre_sddp::{
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
+    setup::node_graph::Traversal,
     simulate,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
     train,
@@ -865,6 +866,7 @@ fn train_simulate_write_cycle() {
         None,
         &[],
         &sim_comm,
+        &Traversal::default(),
     )
     .expect("simulate must succeed");
 
@@ -1539,6 +1541,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         None,
         &[],
         &StubComm,
+        &Traversal::default(),
     )
     .expect("simulate must succeed");
 
@@ -1561,6 +1564,217 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         "Expected at least one hydro result with outflow_slack_below_m3s = {expected_slack_m3s:.6} \
          (sentinel_m3s={sentinel_m3s} / zeta={zeta}), but all were zero. \
          This indicates the extraction path does not read from the slack column.",
+    );
+}
+
+/// A `SimulationSelection::Enumerated` study with derived
+/// `K == 1` (the [`Fixture`]'s single-opening chain) dispatches
+/// `SimulationState::run` to `run_enumerated_simulation`, and its single
+/// `SimulationScenarioResult` is bit-for-bit equal to the sampled
+/// simulation's single scenario on the same trained study — both walks visit
+/// the graph's one and only root-to-leaf path, drawing noise from the same
+/// `(scenario = 0, iteration = 0, stage)` seed either way, so the two must
+/// coincide exactly.
+#[test]
+fn enumerated_census_k1_matches_sampled_single_scenario() {
+    use cobre_sddp::setup::node_graph::Traversal;
+
+    let fx = Fixture::new(2);
+    let mut fcf = make_fcf(fx.n_stages);
+    let mut solver = MockSolver::with_fixed(100.0);
+    let comm = StubComm;
+
+    let training_config = TrainingConfig {
+        loop_config: LoopConfig {
+            forward_passes: 1,
+            training_enumerated: false,
+            max_iterations: 3,
+            start_iteration: 0,
+            n_fwd_threads: 1,
+            max_blocks: 1,
+            stopping_rules: iteration_limit(3),
+        },
+        cut_management: CutManagementConfig {
+            cut_selection: None,
+            budget: None,
+            cut_activity_tolerance: 0.0,
+            warm_start_cuts: 0,
+            risk_measures: fx.risk_measures.clone(),
+        },
+        events: EventConfig {
+            event_sender: None,
+            checkpoint_interval: None,
+            shutdown_flag: None,
+            export_states: false,
+        },
+    };
+
+    let block_counts_per_stage = vec![1usize; fx.n_stages];
+    let stage_ctx = StageContext {
+        geometry_per_stage: &[],
+        templates: &fx.templates,
+        base_rows: &fx.base_rows,
+        noise_scale: &[],
+        n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
+        n_load_buses: 0,
+        load_balance_row_starts: &[],
+        load_bus_indices: &[],
+        block_counts_per_stage: &block_counts_per_stage,
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+        ncs_max_gen: &[],
+        ncs_allow_curtailment: &[],
+        discount_factors: &[],
+        cumulative_discount_factors: &[],
+        stage_lag_transitions: &[],
+        noise_group_ids: &[],
+        downstream_par_order: 0,
+    };
+    let cut_state_layouts = all_enabled_cut_state_layouts(&fx.state, fx.n_stages);
+    let study_dims = study_dims_for(0, 0, 0, 0, false);
+    let node_graph = cobre_sddp::test_support::chain_node_graph(&fx.stochastic);
+    let training_context = TrainingContext {
+        node_graph: &node_graph,
+        horizon: &fx.horizon,
+        state: &fx.state,
+        cut_state_layouts: &cut_state_layouts,
+        study_dims: &study_dims,
+        inflow_method: &InflowNonNegativityMethod::None,
+        stochastic: &fx.stochastic,
+        initial_state: &fx.initial_state,
+        inflow_scheme: SamplingScheme::InSample,
+        load_scheme: SamplingScheme::InSample,
+        ncs_scheme: SamplingScheme::InSample,
+        historical_library: None,
+        external_inflow_library: None,
+        external_load_library: None,
+        external_ncs_library: None,
+        lag_accum_seed: &[],
+        lag_weight_seed: &[],
+        dcs: None,
+        stages: &[],
+    };
+    train(
+        &mut solver,
+        training_config,
+        &mut fcf,
+        &stage_ctx,
+        &training_context,
+        &comm,
+        || Ok(MockSolver::with_fixed(100.0)),
+        None,
+        SolverProfiles::default(),
+    )
+    .expect("train must succeed");
+
+    let derived_k = cobre_sddp::test_support::node_scenario_count(&node_graph)
+        .expect("node_scenario_count must not overflow on this trivial fixture");
+    assert_eq!(
+        derived_k, 1,
+        "the fixture's single-opening chain must derive exactly one enumerated path"
+    );
+
+    let entity_counts = EntityCounts {
+        hydro_ids: vec![1],
+        hydro_productivities: vec![1.0],
+        thermal_ids: vec![],
+        line_ids: vec![],
+        bus_ids: vec![0],
+        pumping_station_ids: vec![],
+        contract_ids: vec![],
+        non_controllable_ids: vec![],
+    };
+    let zero_ec = EnergyConversion {
+        equivalent_productivity_mw_per_m3s: 0.0,
+        reference_volume_hm3: 0.0,
+        reference_outflow_m3s: 0.0,
+    };
+    let ec = EnergyConversionSet::new(
+        vec![vec![zero_ec; fx.n_stages]; 1],
+        vec![vec![0.0_f64; fx.n_stages]; 1],
+        1,
+        fx.n_stages,
+    );
+    let sim_config = SimulationConfig {
+        n_scenarios: 1,
+        io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
+    };
+    let hydro_cell_index = cobre_sddp::test_support::identity_hydro_cell_index(256);
+    let hydro_productivities_per_stage = vec![vec![1.0]; fx.n_stages];
+
+    let run_sim =
+        |traversal: &Traversal| -> cobre_sddp::simulation::types::SimulationScenarioResult {
+            let sim_solver = MockSolver::with_fixed(100.0);
+            let mut sim_workspaces = vec![SolverWorkspace::new(
+                0,
+                0,
+                sim_solver,
+                PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
+                fx.state.n_state,
+                WorkspaceSizing {
+                    hydro_count: fx.state.hydro_count,
+                    max_par_order: fx.state.max_par_order,
+                    n_load_buses: 0,
+                    max_blocks: 0,
+                    downstream_par_order: 0,
+                    ..WorkspaceSizing::default()
+                },
+            )];
+            let (result_tx, result_rx) = mpsc::sync_channel(4);
+            simulate(
+                &mut sim_workspaces,
+                &stage_ctx,
+                &fcf,
+                &training_context,
+                &sim_config,
+                SimulationOutputSpec {
+                    result_tx: &result_tx,
+                    zeta_per_stage: &[],
+                    hydro_cell_index: &hydro_cell_index,
+                    block_hours_per_stage: &[],
+                    entity_counts: &entity_counts,
+                    generic_constraint_row_entries: &[],
+                    ncs_col_starts: &[],
+                    n_ncs: 0,
+                    pumping_col_starts: &[],
+                    n_pumping: 0,
+                    geometry_per_stage: &[],
+                    pumping_consumption_mw_per_m3s: &[],
+                    contract_prices_per_stage: &[],
+                    contract_is_import: &[],
+                    ncs_entity_ids_per_stage: &[],
+                    diversion_upstream: &HashMap::new(),
+                    hydro_productivities_per_stage: &hydro_productivities_per_stage,
+                    energy_conversion: &ec,
+                    hydro_min_storage_hm3: &[0.0],
+                    event_sender: None,
+                },
+                None,
+                &[],
+                &comm,
+                traversal,
+            )
+            .expect("simulate must succeed");
+            drop(result_tx);
+            let mut results: Vec<_> = result_rx.into_iter().collect();
+            assert_eq!(results.len(), 1, "K=1 must produce exactly one scenario");
+            results.remove(0)
+        };
+
+    let enumerated_plan = Traversal::resolve(&node_graph, true, 1);
+    let enum_scenario = run_sim(&enumerated_plan);
+    let sampled_scenario = run_sim(&Traversal::default());
+
+    assert_eq!(
+        enum_scenario, sampled_scenario,
+        "the enumerated K=1 census's single scenario must be bit-for-bit equal to the \
+         sampled simulation's single scenario on the same trained study"
     );
 }
 

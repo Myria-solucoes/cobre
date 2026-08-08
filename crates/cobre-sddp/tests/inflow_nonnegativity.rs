@@ -51,6 +51,7 @@ use cobre_sddp::{
     inflow_method::InflowNonNegativityMethod,
     lp_builder::{PatchBuffer, StageGeometry, build_stage_templates_resolving_layout},
     risk_measure::RiskMeasure,
+    setup::node_graph::Traversal,
     simulate,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
     train,
@@ -699,6 +700,7 @@ fn simulate_fixture(
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )?;
 
     drop(result_tx);

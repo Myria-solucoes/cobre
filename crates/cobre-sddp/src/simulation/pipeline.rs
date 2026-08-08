@@ -34,7 +34,8 @@ use crate::{
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     indexer::{HydroCellIndex, StateSpace},
     setup::node_graph::{
-        NodeId, NodePos, StageIdx, advance_sampled_node, node_opening_range, node_pinned_scenario,
+        NodeId, NodePos, StageIdx, Traversal, advance_sampled_node, node_opening_range,
+        node_pinned_scenario,
     },
     simulation::{
         config::SimulationConfig,
@@ -233,22 +234,22 @@ fn build_row_lower_unscaled<'a>(
 }
 
 /// Stage identifiers bundled for `solve_simulation_stage`.
-struct SimStageIds {
+pub(crate) struct SimStageIds {
     /// Stage index (0-based) — seeds and array indexing key off this.
-    t: StageIdx,
+    pub(crate) t: StageIdx,
     /// Declared study `stage_id` (domain id) stamped into result records and
     /// error messages; resolved by position from the ordered study stage ids,
     /// never the positional index `t`.
-    stage_id_u32: u32,
+    pub(crate) stage_id_u32: u32,
     /// Scenario ID for error messages.
-    scenario_id: u32,
+    pub(crate) scenario_id: u32,
     /// Canonical `NodeGraph` position this scenario's sampled walk visits at
     /// stage `t` — the pool/node-id resolution site, never `t` itself once a
     /// stage carries more than one alive node.
-    node: NodePos,
+    pub(crate) node: NodePos,
     /// Declared id of `node` (`node_graph.node_ids[node]`), resolved once at
     /// construction and reused by the solve context and result extraction.
-    node_id: NodeId,
+    pub(crate) node_id: NodeId,
 }
 
 /// Load-path inputs bundled for `solve_simulation_stage`.
@@ -256,11 +257,11 @@ struct SimStageIds {
 /// The LP is loaded via `load_model(frozen_template)` — the frozen template
 /// already embeds all active cut rows as structural rows. No `add_rows` call
 /// is needed.
-struct SimStageLoadSpec<'a> {
+pub(crate) struct SimStageLoadSpec<'a> {
     /// Frozen template for this stage; always populated after the startup re-freeze.
-    frozen_template: &'a StageTemplate,
+    pub(crate) frozen_template: &'a StageTemplate,
     /// Warm-start basis captured during training at the visited node, if any.
-    warm_basis: Option<&'a CapturedBasis>,
+    pub(crate) warm_basis: Option<&'a CapturedBasis>,
 }
 
 /// Per-stage batched form of [`SimStageLoadSpec`] consumed by
@@ -281,7 +282,7 @@ impl<'a> SimScenarioLoadSpec<'a> {
     /// `pool_id` indexes the per-pool frozen overlay; `node` indexes the
     /// node-keyed warm-start basis cache — both the visited node's own.
     #[inline]
-    fn stage(&self, node: NodePos, pool_id: usize) -> SimStageLoadSpec<'a> {
+    pub(crate) fn stage(&self, node: NodePos, pool_id: usize) -> SimStageLoadSpec<'a> {
         SimStageLoadSpec {
             frozen_template: &self.frozen_templates[pool_id],
             warm_basis: self.node_bases.get(node.0).and_then(Option::as_ref),
@@ -368,7 +369,7 @@ fn map_sim_solver_error(e: SddpError, ids: &SimStageIds) -> SimulationError {
 // RATIONALE: the sequential per-stage steps cannot split without fragmenting the
 // per-stage invariant tracking.
 #[allow(clippy::too_many_lines)]
-fn solve_simulation_stage<S: SolverInterface>(
+pub(crate) fn solve_simulation_stage<S: SolverInterface>(
     ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
     fcf: &FutureCostFunction,
@@ -570,7 +571,7 @@ fn solve_simulation_stage<S: SolverInterface>(
 // `StageExtractionSpec` literal; splitting it would only relocate the ~25 borrowed
 // inputs into a parameter list, scattering the assembly the literal reads.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn extract_sim_stage_result(
+pub(crate) fn extract_sim_stage_result(
     inflow_m3s_buf: &mut Vec<f64>,
     row_lower_buf: &mut Vec<f64>,
     load_rhs_buf: &[f64],
@@ -755,7 +756,7 @@ fn extract_sim_stage_result(
 }
 
 /// Reset workspace state to the initial conditions for a new scenario.
-fn reset_scenario_state<S: SolverInterface>(
+pub(crate) fn reset_scenario_state<S: SolverInterface>(
     ws: &mut SolverWorkspace<S>,
     sampler: &ForwardSampler<'_>,
     global_scenario: u32,
@@ -980,6 +981,10 @@ pub(crate) fn dispatch_scenario_result(
 /// feasible solution, `Err(SimulationError::SolverError { .. })` for other
 /// terminal LP solver failures, and `Err(SimulationError::ChannelClosed)` when
 /// the channel receiver has been dropped.
+// RATIONALE: simulate() is a thin argument-forwarding shim to
+// SimulationState::run; splitting would only relocate the parameter list, not
+// reduce it — SimulationInputs already bundles what can be bundled.
+#[allow(clippy::too_many_arguments)]
 pub fn simulate<S, C: Communicator>(
     workspaces: &mut [SolverWorkspace<S>],
     ctx: &StageContext<'_>,
@@ -990,6 +995,7 @@ pub fn simulate<S, C: Communicator>(
     frozen_templates: Option<&[StageTemplate]>,
     node_bases: &[Option<CapturedBasis>],
     comm: &C,
+    traversal: &Traversal,
 ) -> Result<SimulationRunResult, SimulationError>
 where
     S: SolverInterface<Profile = ActiveProfile> + Send,
@@ -1007,6 +1013,7 @@ where
         frozen_templates,
         node_bases,
         comm,
+        traversal,
     ))
 }
 

@@ -6,6 +6,7 @@
 
 pub mod aggregation;
 pub mod config;
+pub(crate) mod enumerated;
 pub mod error;
 pub mod extraction;
 pub mod pipeline;

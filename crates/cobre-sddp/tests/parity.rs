@@ -779,6 +779,7 @@ mod determinism {
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         risk_measure::RiskMeasure,
+        setup::node_graph::Traversal,
         simulate,
         simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
         train,
@@ -1467,6 +1468,7 @@ mod determinism {
                     None,
                     &[],
                     &comm,
+                    &Traversal::default(),
                 )
             })
             .unwrap();
