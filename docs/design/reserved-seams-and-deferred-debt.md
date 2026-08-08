@@ -73,29 +73,6 @@ register whose milestone is a decision, not an implementation trigger, so it
 is a stronger candidate for removal than the others here if that decision goes
 against wiring it.
 
-### Resolved-parameters MPI broadcast pair (`serialize_resolved_parameters` / `deserialize_resolved_parameters`)
-
-**What it is.** `crates/cobre-sddp/src/policy/resolved_parameters.rs` defines a
-versioned postcard envelope (`RESOLVED_PARAMETERS_WIRE_VERSION`,
-`ResolvedParametersWireEnvelope`) and a serialize/deserialize pair for
-broadcasting a built `ResolvedParameters` table over MPI. `ResolvedParameters`
-is built per-rank at setup today (`build_resolved_parameters`, called
-identically on every rank from identically-broadcast config) and never
-broadcast — the pair has had zero production callers since introduction. Both
-functions are `pub(crate)` (downgraded from `pub`, with the crate-root
-re-export in `lib.rs` narrowed to match) and carry `#[allow(dead_code)]`; their
-round-trip and reject-old-version tests stay in place and keep exercising the
-wire format directly.
-
-**Owner.** The setup-layer config-projection redesign — the direction that
-would build `ResolvedParameters` once on rank 0 and broadcast it, rather than
-every rank re-resolving it independently from identically-broadcast config.
-
-**Consuming milestone.** Landing that redesign is the only path that would call
-these functions. If the redesign is ruled out (every rank keeps re-resolving
-independently, which is also correct and simpler), this pair becomes a
-removal, not a permanent seam — it is not reserved unconditionally.
-
 ## Verified NOT reserved
 
 `historical_years` (`cobre_core::scenario::ScenarioSource`,
