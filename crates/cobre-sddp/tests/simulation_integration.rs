@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc;
 
 use chrono::NaiveDate;
+use cobre_comm::Communicator;
 use cobre_core::{
     DeficitSegment, EntityId, SystemBuilder, TrainingEvent,
     scenario::{
@@ -68,14 +69,15 @@ use cobre_sddp::{
     solver_stats::SolverStatsDelta,
     test_support::{
         branching_tree_setup_enumerated, extensive_form_optimum, k_fan_setup_enumerated,
-        node_prefix_counts, node_scenario_count, trunk_fan_setup_enumerated,
-        water_binding_external_fan_setup,
+        node_prefix_counts, node_scenario_count, single_path_enumerated_setup,
+        trunk_fan_setup_enumerated, water_binding_external_fan_setup,
     },
     train,
     workspace::{SolverWorkspace, WorkspaceSizing},
 };
 
 mod common;
+use common::Rank0Of2;
 use common::StubComm;
 use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
@@ -1873,9 +1875,10 @@ struct CensusRun {
 }
 
 /// Run `setup`'s (already-census-converted) simulation under `n_threads`
-/// workers on a single (stub) rank, aggregating with the traversal-derived
-/// [`cobre_sddp::SimulationWeighting`].
-fn run_census(setup: &StudySetup, comm: &StubComm, n_threads: usize) -> CensusRun {
+/// workers on `comm`, aggregating with the traversal-derived
+/// [`cobre_sddp::SimulationWeighting`]. Generic over the communicator so the
+/// same path runs under a single-rank stub and the 2-rank `Rank0Of2` shape.
+fn run_census<C: Communicator>(setup: &StudySetup, comm: &C, n_threads: usize) -> CensusRun {
     let mut pool = setup
         .create_workspace_pool(comm, n_threads, ActiveSolver::new)
         .expect("workspace pool");
@@ -2295,4 +2298,52 @@ fn census_output_is_bit_identical_across_thread_counts() {
              threads={n_threads}"
         );
     }
+}
+
+/// Rank-shape invariance of the census SWEEP. Mirrors the forward engine's
+/// `enumerated_single_path_2rank_stub_matches_single_rank`: a single-path
+/// (`K == 1`) census driven end-to-end through `StudySetup::simulate` must
+/// produce bit-identical `mean_cost`/`std_cost` under a single-rank stub and the
+/// 2-rank `Rank0Of2` shape. Unlike `census_output_is_bit_identical_across_thread_counts`
+/// (threads only, `world_size == 1`) and the `mpi_wire.rs` rank-shape gate
+/// (`aggregate_simulation` on hand-built costs, never the sweep), this exercises
+/// the full `world_size == 2` sweep pipeline — `assign_scenarios` /
+/// `mark_own_paths` / `run_sweep` / `re_expand`, then the gather-then-sum
+/// aggregate. `Rank0Of2` is faithful ONLY at `K == 1`, where rank 1's
+/// `assign_scenarios` share is empty (the zero it leaves unwritten IS what a
+/// genuine rank 1 would send); genuine cross-rank trunk replication is covered
+/// by the real-MPI SLURM job, the same ceiling the forward engine's stub carries.
+#[test]
+fn census_single_path_sweep_bit_identical_across_rank_shapes() {
+    let setup = as_enumerated_census(train_census_fixture_to_convergence(
+        single_path_enumerated_setup(30),
+    ));
+
+    // Power self-checks: `Rank0Of2` is faithful only when rank 1 does zero work,
+    // i.e. the census resolves to a single path, and the stub genuinely presents
+    // a 2-rank world (never a vacuous size-1 comparison).
+    assert_eq!(
+        setup.simulation_config().n_scenarios,
+        1,
+        "single_path fixture must resolve to K == 1 for Rank0Of2 faithfulness"
+    );
+    assert_eq!(Rank0Of2.size(), 2, "Rank0Of2 must present a 2-rank world");
+
+    let single = run_census(&setup, &StubComm, 1);
+    let two_rank = run_census(&setup, &Rank0Of2, 1);
+
+    assert_eq!(
+        single.summary.mean_cost.to_bits(),
+        two_rank.summary.mean_cost.to_bits(),
+        "census mean_cost must be bitwise identical between world_size 1 and 2"
+    );
+    assert_eq!(
+        single.summary.std_cost.to_bits(),
+        two_rank.summary.std_cost.to_bits(),
+        "census std_cost must be bitwise identical between world_size 1 and 2"
+    );
+    assert_eq!(
+        single.summary.std_cost, 0.0,
+        "a single-path census is a degenerate zero-variance distribution"
+    );
 }

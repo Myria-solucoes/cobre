@@ -83,9 +83,14 @@ struct EnumeratedSimScratch {
     /// Reused per-stage claim-unit list (canonical node order).
     stage_units: Vec<NodePos>,
     /// Per-worker capture slots, `None` until the claim loop fills them.
-    /// `Option`-wrapped so the sequential scatter can move a capture out via
-    /// `Option::take` — `SimNodeVisit` has no `Default` (it carries a
-    /// [`SimulationStageResult`], which has none).
+    /// `Option`-wrapped so the sequential scatter *moves* each capture into the
+    /// arena via `Option::take`, rather than copying its buffers and reusing the
+    /// slot the way the training forward engine's arena does: that sweep runs
+    /// across many training iterations and amortizes a per-iteration copy, but
+    /// this one runs once per call, so a move allocates each arena buffer exactly
+    /// once with zero copies — copy-and-reuse would only add work here.
+    /// (`SimNodeVisit` also has no `Default` — it carries a
+    /// [`SimulationStageResult`], which has none.)
     worker_captures: Vec<Vec<Option<SimNodeVisit>>>,
 }
 
@@ -257,16 +262,14 @@ fn enumerated_sim_stage_worker<S: SolverInterface + Send>(
         if captures.len() <= count {
             captures.push(None);
         }
+        let mut accum = AccumSnapshot::default();
+        accum.capture_from(&ws.scratch);
         captures[count] = Some(SimNodeVisit {
             node,
             node_id,
             immediate_cost,
             out_state: ws.current_state[..n_state].to_vec(),
-            accum: {
-                let mut accum = AccumSnapshot::default();
-                accum.capture_from(&ws.scratch);
-                accum
-            },
+            accum,
             stats: visit_stats,
             result,
         });

@@ -79,6 +79,13 @@ pub struct SimulationRunResult {
     pub costs: Vec<(u32, f64, ScenarioCategoryCosts)>,
     /// Per-scenario `(scenario_id, opening, delta)`, sorted by `scenario_id`.
     pub solver_stats: Vec<(u32, i32, SolverStatsDelta)>,
+    /// The run's resolved census leaf-path weights (canonical path order) when
+    /// the traversal was `Enumerated`, else `None` — the exact
+    /// [`crate::simulation::SimulationWeighting::Census`] input the caller feeds
+    /// to [`crate::simulation::aggregate_simulation`], carried out here so the
+    /// aggregation reuses the one `EnumeratedPlan` this run already built rather
+    /// than re-resolving the `Traversal` a second time.
+    pub census_weights: Option<Vec<f64>>,
 }
 
 /// Output-related inputs bundled from the caller for [`simulate`].

@@ -85,6 +85,9 @@ pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
 
 impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
     /// Construct a `SimulationInputs` bundle from positional arguments.
+    // RATIONALE: a field-for-field bundle constructor; splitting would only
+    // relocate the parameter list, not reduce it — the struct already bundles
+    // what can be bundled.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         workspaces: &'a mut [SolverWorkspace<S>],
@@ -383,6 +386,7 @@ impl SimulationState {
         Ok(SimulationRunResult {
             costs: all_costs,
             solver_stats: all_stats,
+            census_weights: inputs.traversal.path_weights().map(<[f64]>::to_vec),
         })
     }
 }

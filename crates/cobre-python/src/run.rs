@@ -75,6 +75,7 @@ use cobre_sddp::FutureCostFunction;
 use cobre_sddp::PolicyLoadProof;
 use cobre_sddp::PolicyStageManifest;
 use cobre_sddp::SddpError;
+use cobre_sddp::SimulationWeighting;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::aggregate_simulation;
 use cobre_sddp::build_basis_cache_from_checkpoint;
@@ -89,8 +90,6 @@ use cobre_sddp::orchestration::CheckpointParams;
 use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
-use cobre_sddp::setup::SimulationEnumeratedRequest;
-use cobre_sddp::setup::Traversal;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
@@ -695,22 +694,15 @@ pub(crate) fn run_simulation_phase_py(
         SolverStatsDelta::accumulate_into(&mut agg, delta);
     }
 
-    // The weighting is derived from the resolved simulation Traversal, never
-    // chosen beside it, matching the CLI path (`cobre-cli`'s
-    // `run/simulation.rs`): `Census` is reachable only through
-    // `Traversal::Enumerated` (admitted for any derived leaf-path count,
-    // `setup/mod.rs::resolve_enumerated_simulation_count`), which reports the
-    // exact leaf-path expectation; `Traversal::Sampled` reports the Monte-Carlo
-    // sample mean.
-    let simulation_traversal = Traversal::resolve(
-        &setup.node_graph,
-        matches!(
-            setup.simulation_enumerated,
-            SimulationEnumeratedRequest::Enumerated
-        ),
-        setup.simulation_config.n_scenarios,
-    );
-    let weighting = simulation_traversal.simulation_weighting();
+    // The weighting rides out on the run result, resolved once from the
+    // simulation Traversal inside `simulate()` (matching the CLI path in
+    // `cobre-cli`'s `run/simulation.rs`): `Census` (exact leaf-path expectation)
+    // when `census_weights` is `Some`, the uniform Monte-Carlo sample mean when
+    // `None`.
+    let weighting = match sim_run_result.census_weights.as_deref() {
+        Some(weights) => SimulationWeighting::Census { weights },
+        None => SimulationWeighting::Uniform,
+    };
     let (cost_summary, gathered_scenario_costs) = aggregate_simulation(
         &sim_run_result.costs,
         setup.simulation_config(),

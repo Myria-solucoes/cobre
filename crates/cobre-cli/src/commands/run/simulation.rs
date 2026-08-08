@@ -16,6 +16,7 @@ use cobre_io::output::simulation_writer::ScenarioWritePayload;
 use cobre_io::output::simulation_writer::SimulationParquetWriter;
 use cobre_io::output::simulation_writer::SimulationPathRecord;
 use cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS;
+use cobre_sddp::SimulationWeighting;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
@@ -23,8 +24,6 @@ use cobre_sddp::aggregate_simulation;
 use cobre_sddp::pack_delta_scalars;
 use cobre_sddp::pack_scenario_stats;
 use cobre_sddp::reconcile_global_ok;
-use cobre_sddp::setup::SimulationEnumeratedRequest;
-use cobre_sddp::setup::Traversal;
 use cobre_sddp::unpack_delta_scalars;
 use cobre_sddp::unpack_scenario_stats;
 use cobre_solver::ActiveSolver;
@@ -160,21 +159,14 @@ pub(super) fn run_simulation_phase(
     let global_path_rows = aggregate_simulation_paths(&ctx.comm, &local_path_rows)?;
 
     // Aggregate across all ranks so the printed mean/std/CI95 reflect every
-    // scenario, not just rank 0's. The weighting is derived from the resolved
-    // simulation Traversal, never chosen beside it: `Census` is reachable only
-    // through `Traversal::Enumerated` (admitted for any derived leaf-path count,
-    // `setup/mod.rs::resolve_enumerated_simulation_count`), which reports the
-    // exact leaf-path expectation; `Traversal::Sampled` reports the Monte-Carlo
-    // sample mean.
-    let simulation_traversal = Traversal::resolve(
-        &setup.node_graph,
-        matches!(
-            setup.simulation_enumerated,
-            SimulationEnumeratedRequest::Enumerated
-        ),
-        n_scenarios,
-    );
-    let weighting = simulation_traversal.simulation_weighting();
+    // scenario, not just rank 0's. The weighting rides out on the run result,
+    // resolved once from the simulation Traversal inside `simulate()` — `Census`
+    // (exact leaf-path expectation) when `census_weights` is `Some`, the uniform
+    // Monte-Carlo sample mean when `None`.
+    let weighting = match sim_run_result.census_weights.as_deref() {
+        Some(weights) => SimulationWeighting::Census { weights },
+        None => SimulationWeighting::Uniform,
+    };
     let (cost_summary, gathered_scenario_costs) =
         aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm, weighting).map_err(
             |e| CliError::Internal {
