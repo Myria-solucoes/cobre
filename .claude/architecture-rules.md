@@ -35,7 +35,7 @@ Available context structs:
 | `OpeningTreeInputs`   | `cobre-stochastic/src/tree/generate.rs`          | Optional inputs to `generate_opening_tree`                                                                                         | Immutable bundle (`&`)  |
 | `LbEvalScratch`       | `cobre-sddp/src/training/lower_bound.rs`         | Rank-0 risk-measure aggregation scratch (`objectives_buf`, `weights_buf`) with no `ScratchBuffers` counterpart                     | Mutable (`&mut`)        |
 | `LbEvalScratchBundle` | `cobre-sddp/src/training/lower_bound.rs`         | Bundles `patch_buf`, `lb_cut_batch`, `lb_cut_row_map`, `noise_scratch` (`ScratchBuffers`), `lb_scratch` for `evaluate_lower_bound` | Mutable bundle (`&mut`) |
-| `RiskMeasureScratch`  | `cobre-sddp/src/risk_measure.rs`                 | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`)                                                                    | Mutable (`&mut`)        |
+| `RiskMeasureScratch`  | `cobre-sddp/src/convergence/risk_measure.rs`     | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`)                                                                    | Mutable (`&mut`)        |
 
 **Decision tree when adding new data to the hot path:**
 
@@ -228,11 +228,14 @@ shape).
 
 ## Python Parity Checklist
 
-When adding a new output file in the CLI (`write_outputs` in `run.rs`):
+Every output file the CLI writes must also be written by the Python bindings —
+the invariant CLAUDE.md's Python-parity hard rule owns (state the rule, not a
+"currently none missing" snapshot). When adding a new output:
 
-1. Does `run_inner()` in `cobre-python/src/run.rs` write the same file?
-2. If not, add it. The Python path should call the same `cobre_io` write function.
-
-Current gaps (to be fixed):
-
-- None — all CLI output writes are mirrored in Python.
+1. The CLI writes it via `write_training_outputs` / `write_simulation_outputs`
+   in `crates/cobre-cli/src/commands/run/outputs.rs`.
+2. Wire the same `cobre_io` write into the Python path — `run_via_study` /
+   `run_training_phase_py` in `crates/cobre-python/src/run.rs` — so both surfaces
+   emit the file. `cobre-python` is excluded from the Cargo workspace, so
+   `cargo test --workspace` does not catch a missing mirror; check both paths by
+   hand.

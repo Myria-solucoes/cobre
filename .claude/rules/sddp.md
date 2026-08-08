@@ -265,14 +265,75 @@ determinism regression.
 
 ## Cut pool is append-only; basis matches by slot identity
 
-Cuts are never removed from the LP. Deactivation toggles a cut row's RHS bounds
-to the `±f64::INFINITY` sentinel (trivially satisfied); every cut keeps a stable
-slot index for the lifetime of the run. The per-iteration template refreeze
-encodes **only active cuts** (one row per `active_cuts()` entry), not inactive
-cuts at sentinel bounds. Warm-start basis reconstruction therefore matches stored
-cut rows to current LP rows by **`CutPool` slot identity**, never by row count.
+**One pool per pool id.** A pool is addressed by its 0-based **pool id**,
+resolved from the node graph's `node → pool` map (`NodeGraph`,
+`NodeRuntime.pool_id`); on the degenerate one-node-per-stage graph (`nodes[]`
+absent) `pool_id == stage`, so every read reduces byte-for-byte to the
+pre-node-native stage read. Sibling fan nodes at one level may share a pool.
+
+**Append-only within a pool.** Cuts are never removed from the LP. Deactivation
+toggles a cut row's RHS bounds to the `±f64::INFINITY` sentinel (trivially
+satisfied); every cut keeps a stable slot index for the lifetime of the run,
+placed by `slot_index`'s deterministic function of `warm_start_count`,
+`iteration`, `iteration_base`, `visit_stride`, and `forward_pass_index`. The
+per-iteration template refreeze encodes **only active cuts** (one row per
+`active_cuts()` entry), not inactive cuts at sentinel bounds.
+
+**Growth is between-iteration and append-only.** A pool's capacity may grow
+between iterations (`CutPool::grow`, when a node's realized visit rate would
+exceed its construction-time `visit_stride` floor) — never mid-iteration. Growth
+is `Vec::resize`, which only appends new slots, so every populated slot keeps its
+index across the realloc. Relocating or re-packing a populated slot on growth is
+the wrong-but-compiling alternative — it silently invalidates every stored
+basis's slot-identity match. Each cut record also carries its generating
+`node_id` (`CutMetadata.node`, set by `add_cut(node_id, …)`); this is
+**provenance only** (carried onto the MPI cut wire) and never affects which slot
+the cut lands in — the append-only, slot-identity contract is independent of
+`node_id`.
+
+**Basis matches by slot, never by count or column.** Warm-start basis
+reconstruction matches stored cut rows to current LP rows by **`CutPool` slot
+identity**, never by row count and never by absolute column index.
 `reconstruct_basis` is the single hot-path entry point — never bypass it.
-Read: `cut/pool.rs`, `cut/basis_reconstruct.rs`.
+Read: `cut/pool.rs` (`CutPool::grow`, `add_cut`, `CutMetadata.node`,
+`slot_index`), `cut/fcf.rs` (the `node → pool` map / pool-id addressing),
+`cut/basis_reconstruct.rs`. Pinned by
+`test_anticipated_5stage_k2_warm_start_zero_basis_rejections`
+(`tests/anticipated_scenarios.rs` — the anticipated ring shifts every downstream
+column, yet the run records zero basis rejections because reconstruction matches
+by slot identity, not column index) and the slot-identity reconstruction
+regressions in `tests/cut_basis.rs`.
+
+## A stored basis warm-starts only at its own node (node-tag)
+
+A `CapturedBasis` carries the declared `node_id` it was captured at
+(`CapturedBasis::new(…, NodeId)`, `NodeGraph::node_ids[node]`). Every apply site
+warm-starts from a stored basis **only when its `node_id` matches the node being
+solved** and treats a mismatch as **cold** (`stored_basis.filter(|c| c.node_id
+== node_id)`). A resampled path may revisit a stage at a different node than the
+one whose basis is cached there, and warm-starting across that boundary reuses a
+basis built against a different LP.
+
+This node-tag check is the **sole** line of defence, not defence in depth:
+**CLP accepts a shape-mismatched (or otherwise wrong) warm basis silently**,
+whereas HiGHS validates and rejects it loudly
+(`reference_solver_basis_validation_asymmetry`). A cross-node warm-start is
+therefore a silent wrong-vertex / wrong-dual on the CLP backend with no solver
+backstop — so the check must live in cobre's own apply path, never be delegated
+to the solver. Dropping the `node_id` filter, or comparing pool id instead of the
+declared node id (sibling fan nodes share a pool — see the append-only section
+above), is the wrong-but-compiling alternative: it compiles, warm-starts from the
+wrong LP, and at a degenerate optimum settles on a different-but-equally-valid
+vertex, silently breaking the run-to-run reproducibility and declaration-order
+invariance the determinism contract requires.
+Read: `workspace/workspace.rs` (`CapturedBasis::node_id`, `CapturedBasis::new`),
+`solve/stage_solve.rs` (`run_stage_solve`'s `node_id` filter, `StageInputs::
+node_id`), `cut/dcs.rs` (the same cross-node-reuse rejection on the DCS path).
+Pinned directly by `run_stage_solve_cross_node_stored_basis_is_treated_as_cold`
+(`solve/stage_solve.rs` — a deficit-shaped basis tagged at a mismatching node
+drops to cold instead of erroring) and its DCS companion in `cut/dcs.rs`; the
+reproducibility the check protects is pinned by the `opening_order_determinism`
+gate in `tests/mpi_wire.rs` (bitwise `final_lb` across thread and rank shapes).
 
 ## NCS stochastic availability is a dimensionless factor
 
@@ -331,6 +392,13 @@ stub, bitwise `final_lb`) and the MPI SLURM Integration job's rank-invariance
 comparison on `examples/4ree`.
 
 ## By-node scheduler is warm-start-only
+
+The live scheduler spellings are `by_scenario` (the default) and `by_node`, both
+under `training.parallelism.backward_scheduler`. The retired `trial_point` /
+`opening_block` spellings are unknown-variant deserialize errors — a clean break
+with no `serde(alias)` fallback — pinned by
+`retired_scheduler_spellings_are_deserialize_error`
+(`crates/cobre-io/src/config/training.rs`).
 
 The opt-in by-node scheduler
 (`training.parallelism.backward_scheduler = { method = by_node }`)

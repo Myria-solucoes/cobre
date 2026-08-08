@@ -188,6 +188,38 @@ and `cobre-python` (`core`, `io`, `solver`, `comm`, `stochastic`, `sddp`).
 `cobre-solver`/`cobre-comm`/`cobre-stochastic` in addition to `cobre-sddp` —
 they do not reach those crates only transitively through `cobre-sddp`.
 
+## Case file formats — JSON for structure, Parquet for bulk
+
+`cobre-io` reads a case directory of JSON and Parquet files, and the split
+between the two is a rule, not a per-file judgement call:
+
+- **JSON** carries **structure and identity**: the entity declarations (buses,
+  lines, hydro/thermal/pumping/contract/non-controllable-source), the network
+  and cascade topology, the temporal (stage/block) model, the study
+  configuration, and the policy graph's `nodes[]` node/transition topology.
+  These are small, hand-authored, and describe the shape of the problem.
+- **Parquet** carries anything whose size **scales with entities × stages ×
+  blocks × scenarios**: inflow scenario series, estimated stochastic-model
+  parameters, and the result tables (primal / dual / equipment / cost). These
+  are machine-written columnar bulk, never hand-edited.
+
+Stated as an invariant so it is not re-argued at each new input surface: a
+quantity that grows with the study's entity/stage/block/scenario dimensions goes
+in Parquet; the structure the solver builds against goes in JSON.
+
+**A graph is structure, so `nodes[]` is JSON — within a bounded ceiling.** The
+node/transition graph declares the study's topology, so it lands on the JSON
+side. That is safe only because the _declared_ graph stays small: with fan width
+`K` and horizon `T`, a fan is `O(K)` nodes and a recombining hybrid (a chain
+carrying a bounded fan) is `O(T + K)` nodes — both JSON-sized. A fully-enumerated
+`K^T` scenario tree is not: its node count is exponential in the horizon, and it
+is never materialized as an explicit `nodes[]` array. When enumeration is
+requested, the enumerated root→leaf path count is computed with checked
+arithmetic and a `u64` overflow is a hard setup error — so an exponential tree is
+**guard-rejected** before the solver runs, and it exists only as the implicit
+product of a small declared graph. "Structure goes in JSON" therefore does not
+read as "any graph goes in JSON".
+
 ## Build & feature notes
 
 - **Solver backend selection is compile-time and mutually exclusive.**
