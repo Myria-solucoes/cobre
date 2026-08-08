@@ -69,6 +69,7 @@ use cobre_sddp::{
     test_support::{
         branching_tree_setup_enumerated, extensive_form_optimum, k_fan_setup_enumerated,
         node_prefix_counts, node_scenario_count, trunk_fan_setup_enumerated,
+        water_binding_external_fan_setup,
     },
     train,
     workspace::{SolverWorkspace, WorkspaceSizing},
@@ -2005,6 +2006,91 @@ fn census_mean_and_variance_match_hand_computed_weighted_formula() {
     assert!(
         (run.summary.std_cost - hand_std).abs() < 1e-9,
         "summary.std_cost {} must equal the hand-computed √Σw(c−μ)² {hand_std} within 1e-9",
+        run.summary.std_cost
+    );
+}
+
+/// Exact mean + variance census oracle on genuinely DISTINCT per-leaf costs.
+/// `census_mean_and_variance_match_hand_computed_weighted_formula` above runs on
+/// `k_fan_setup_enumerated`, whose deficit-dominated leaves are bit-identical
+/// (`ρ = 0` placeholder) — so `Σ w·c = c` for any weight vector and the weighted
+/// variance is `≈ 0`, neither assertion has power to catch a mis-weighted or
+/// uniform-weighted census. `water_binding_external_fan_setup`'s scarce reservoir
+/// and non-zero productivity (`ρ = 0.95`) make each leaf's own inflow bind,
+/// producing distinct costs; its leaf `i` (`1..=k`) carries the same declared edge
+/// probability `i / Σj` as the k-fan above, hand-derived here independent of the
+/// engine's plan weights.
+#[test]
+fn census_distinct_cost_mean_and_variance_match_hand_computed_weighted_formula() {
+    let k = 3usize;
+    let fixture = water_binding_external_fan_setup(k, 30);
+    let setup = as_enumerated_census(train_census_fixture_to_convergence(fixture));
+
+    let comm = StubComm;
+    let run = run_census(&setup, &comm, 1);
+
+    assert_eq!(
+        run.gathered.len(),
+        k,
+        "gathered rows must have exactly k entries"
+    );
+    let total_weight: f64 = (1..=k).map(|i| i as f64).sum();
+    let mut costs = Vec::with_capacity(k);
+    let mut weights = Vec::with_capacity(k);
+    for (idx, &(scenario_id, cost, weight)) in run.gathered.iter().enumerate() {
+        assert_eq!(
+            scenario_id, idx as u32,
+            "gathered rows must be canonical ascending scenario_id"
+        );
+        let w = weight.expect("census weight must be populated (Some) under Census weighting");
+        let expected_w = (idx + 1) as f64 / total_weight;
+        assert!(
+            (w - expected_w).abs() < 1e-9,
+            "leaf {idx}'s weight {w} must equal the fixture's declared edge probability \
+             {expected_w} (= (idx+1)/Σj)"
+        );
+        costs.push(cost);
+        weights.push(w);
+    }
+
+    let weight_sum: f64 = weights.iter().sum();
+    assert!(
+        (weight_sum - 1.0).abs() < 1e-9,
+        "weights must sum to 1.0, got {weight_sum}"
+    );
+
+    // Non-degeneracy self-check: without this, a fixture that silently degenerated
+    // to equal per-leaf costs would leave the mean/variance assertions below vacuous.
+    let max_cost = costs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let min_cost = costs.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        max_cost - min_cost > 1.0,
+        "per-leaf costs must be genuinely distinct (max {max_cost} - min {min_cost} must exceed \
+         1.0); a fixture that degenerated to equal costs would make the mean/variance \
+         assertions below vacuous: {costs:?}"
+    );
+
+    let hand_mean: f64 = costs.iter().zip(&weights).map(|(c, w)| c * w).sum();
+    let hand_var: f64 = costs
+        .iter()
+        .zip(&weights)
+        .map(|(c, w)| w * (c - hand_mean).powi(2))
+        .sum();
+    let hand_std = hand_var.sqrt();
+
+    assert!(
+        (run.summary.mean_cost - hand_mean).abs() < 1e-9,
+        "summary.mean_cost {} must equal the hand-computed Σw·c {hand_mean} within 1e-9",
+        run.summary.mean_cost
+    );
+    assert!(
+        (run.summary.std_cost - hand_std).abs() < 1e-9,
+        "summary.std_cost {} must equal the hand-computed √Σw(c−μ)² {hand_std} within 1e-9",
+        run.summary.std_cost
+    );
+    assert!(
+        run.summary.std_cost > 0.0,
+        "summary.std_cost must be strictly positive on this distinct-cost fixture, got {}",
         run.summary.std_cost
     );
 }
