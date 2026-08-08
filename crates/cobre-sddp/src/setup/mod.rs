@@ -563,11 +563,9 @@ impl StudySetup {
             forward_passes
         };
         let n_scenarios = match simulation_enumerated {
-            SimulationEnumeratedRequest::Enumerated => resolve_enumerated_count(
-                &node_graph,
-                "simulation",
-                "the weighted census simulation",
-            )?,
+            SimulationEnumeratedRequest::Enumerated => {
+                resolve_enumerated_simulation_count(&node_graph)?
+            }
             SimulationEnumeratedRequest::Sampled => n_scenarios,
         };
 
@@ -1734,59 +1732,18 @@ fn warn_on_enumeration_asymmetry(training_enumerated: bool, simulation_enumerate
     }
 }
 
-/// Resolve an `enumerated`-declared phase's actual executed count once the
-/// node graph exists: derives the graph's scenario count via
-/// [`node_graph::enumerated_scenario_count`], propagating its overflow guard
-/// unchanged (the `K^T` rejection, stating the derived count is
-/// unrepresentable). The only derived count this admits for execution is `1`
-/// — a fully deterministic graph with no stochastic branching, where the
-/// existing sampled-with-one-pass walk already IS the enumeration bit-for-bit.
-/// Any larger derived count means `phase`'s enumerated execution (named by
-/// `capability`) is not yet wired, and is rejected rather than silently
-/// running as `sampled` (which draws i.i.d. with replacement and would not
-/// reproduce a true exhaustive traversal).
-///
-/// # Errors
-///
-/// Propagates [`node_graph::enumerated_scenario_count`]'s overflow
-/// [`SddpError::Validation`] unchanged; returns a [`SddpError::Validation`]
-/// naming `phase`, `capability`, and the derived count when the derived count
-/// is not `1`.
-fn resolve_enumerated_count(
-    node_graph: &NodeGraph,
-    phase: &str,
-    capability: &str,
-) -> Result<u32, SddpError> {
-    let derived = node_graph::enumerated_scenario_count(node_graph)?;
-    if derived == 1 {
-        Ok(1)
-    } else {
-        Err(SddpError::Validation(format!(
-            "{phase} enumerated scenario selection derived {derived} scenarios from the \
-             policy graph, but {capability} is not yet wired; only a fully deterministic \
-             graph (derived count 1, no stochastic branching) executes enumerated selection \
-             today"
-        )))
-    }
-}
-
-/// Resolve the `enumerated`-declared TRAINING forward-pass count once the node
-/// graph exists: the fully-enumerated path count
-/// [`node_graph::enumerated_scenario_count`], propagating its `K^T` overflow
-/// guard unchanged. Unlike the simulation resolver above, any derived count
-/// `>= 1` executes — the enumerated all-paths forward engine is the consumer.
-///
-/// Rejects a graph carrying a non-singleton within-node opening set at any
-/// node: the forward engine solves each node once per distinct incoming state,
-/// which enumerates the graph's structural branching but not within-node
-/// weighted openings (deferred). A generated multi-opening node would make the
-/// per-node solve count understate the true path set, silently biasing the
-/// exact bound — so it is rejected here, not run.
-///
-/// Also rejects a recombining node via [`reject_recombining_node_enumeration`]:
-/// the engine reconstructs incoming state through a single predecessor, which a
-/// multi-parent node has no unique choice of. Sampled selection admits both
-/// shapes.
+/// Shared enumerated admissibility guard, called by both
+/// [`resolve_enumerated_training_count`] and
+/// [`resolve_enumerated_simulation_count`] so the two enumerated axes cannot
+/// admit different graph shapes: derives the graph's path count via
+/// [`node_graph::enumerated_scenario_count`] (propagating its `K^T` u64
+/// overflow guard unchanged), rejects a non-singleton within-node opening set
+/// via [`reject_within_node_opening_enumeration`], rejects a recombination
+/// join via [`reject_recombining_node_enumeration`] — the two preconditions
+/// exact node-dedup traversal needs, not merely a fence — then narrows the
+/// result to `u32`. `axis` and `count_noun` phrase only the caller's own
+/// overflow message (e.g. `("training", "forward-pass")`,
+/// `("simulation", "scenario")`).
 ///
 /// # Errors
 ///
@@ -1794,16 +1751,45 @@ fn resolve_enumerated_count(
 /// [`SddpError::Validation`]; returns [`SddpError::Validation`] when a node
 /// carries more than one opening, when a node has two or more predecessors (a
 /// recombination join), or when the derived count exceeds `u32`.
-fn resolve_enumerated_training_count(node_graph: &NodeGraph) -> Result<u32, SddpError> {
+fn enumerated_admissible_count(
+    node_graph: &NodeGraph,
+    axis: &str,
+    count_noun: &str,
+) -> Result<u32, SddpError> {
     let derived = node_graph::enumerated_scenario_count(node_graph)?;
     reject_within_node_opening_enumeration(node_graph)?;
     reject_recombining_node_enumeration(node_graph)?;
     u32::try_from(derived).map_err(|_| {
         SddpError::Validation(format!(
-            "training enumerated scenario selection derived {derived} paths from the policy \
-             graph, exceeding the u32 forward-pass count the engine addresses"
+            "{axis} enumerated scenario selection derived {derived} paths from the policy \
+             graph, exceeding the u32 {count_noun} count the engine addresses"
         ))
     })
+}
+
+/// Resolve the `enumerated`-declared TRAINING forward-pass count once the node
+/// graph exists, via the shared guard [`enumerated_admissible_count`]: any
+/// derived count `>= 1` executes — the enumerated all-paths forward engine is
+/// the consumer.
+///
+/// # Errors
+///
+/// See [`enumerated_admissible_count`].
+fn resolve_enumerated_training_count(node_graph: &NodeGraph) -> Result<u32, SddpError> {
+    enumerated_admissible_count(node_graph, "training", "forward-pass")
+}
+
+/// Resolve the `enumerated`-declared SIMULATION scenario count once the node
+/// graph exists, via the shared guard [`enumerated_admissible_count`]: any
+/// derived count `>= 1` executes — the node-native census simulation engine is
+/// the consumer, weighting each resolved leaf path through
+/// [`node_graph::Traversal::simulation_weighting`].
+///
+/// # Errors
+///
+/// See [`enumerated_admissible_count`].
+fn resolve_enumerated_simulation_count(node_graph: &NodeGraph) -> Result<u32, SddpError> {
+    enumerated_admissible_count(node_graph, "simulation", "scenario")
 }
 
 /// Reject a node carrying a scenario pointer under sampled forward selection: a
@@ -1884,12 +1870,13 @@ fn reject_insample_class_under_external_nodes(
 }
 
 /// Reject an `enumerated` graph whose branching is expressed as within-node
-/// openings rather than structurally as distinct nodes: the enumerated forward
-/// engine solves each node once per distinct incoming state and does not
-/// enumerate a node's own opening set, so a `|Ω_n| > 1` node would be sampled
-/// at a single realization while the exact bound weights it as if fully
-/// enumerated. Declare the branching structurally (one realization per node)
-/// or use sampled selection.
+/// openings rather than structurally as distinct nodes: every enumerated axis
+/// (training's forward engine, the census simulation driver) solves each node
+/// once per distinct incoming state and does not enumerate a node's own
+/// opening set, so a `|Ω_n| > 1` node would be sampled at a single realization
+/// while the exact bound weights it as if fully enumerated. Declare the
+/// branching structurally (one realization per node) or use sampled
+/// selection.
 ///
 /// # Errors
 ///
@@ -1914,13 +1901,13 @@ fn reject_within_node_opening_enumeration(node_graph: &NodeGraph) -> Result<(), 
 
 /// Reject an `enumerated` graph carrying a recombination join — a node reached
 /// from two or more predecessor nodes (in-degree ≥ 2, counting how many
-/// successor edges name it as a child). The enumerated forward engine
-/// reconstructs each visited node's incoming state through the
-/// single-predecessor [`node_graph::build_parent_map`]; a multi-parent node
-/// would, in a release build, be solved once under one arbitrarily chosen
-/// parent's outgoing state while paths arriving through its other parent
-/// silently read that wrong state — an invalid exact bound, not a compile
-/// error. This setup-time guard precedes and makes release-active
+/// successor edges name it as a child). Every enumerated axis reconstructs
+/// each visited node's incoming state through the single-predecessor
+/// [`node_graph::build_parent_map`] (via [`EnumeratedPlan`]); a multi-parent
+/// node would, in a release build, be solved once under one arbitrarily
+/// chosen parent's outgoing state while paths arriving through its other
+/// parent silently read that wrong state — an invalid exact bound, not a
+/// compile error. This setup-time guard precedes and makes release-active
 /// `build_parent_map`'s single-predecessor `debug_assert`. Sampled selection is
 /// unaffected: it carries each trajectory's own incoming state and resolves
 /// recombination natively.

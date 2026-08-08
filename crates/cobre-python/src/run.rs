@@ -698,9 +698,9 @@ pub(crate) fn run_simulation_phase_py(
     // The weighting is derived from the resolved simulation Traversal, never
     // chosen beside it, matching the CLI path (`cobre-cli`'s
     // `run/simulation.rs`): `Census` is reachable only through
-    // `Traversal::Enumerated` (admitted only at derived == 1,
-    // `setup/mod.rs::resolve_enumerated_count`), which reports the exact
-    // leaf-path expectation; `Traversal::Sampled` reports the Monte-Carlo
+    // `Traversal::Enumerated` (admitted for any derived leaf-path count,
+    // `setup/mod.rs::resolve_enumerated_simulation_count`), which reports the
+    // exact leaf-path expectation; `Traversal::Sampled` reports the Monte-Carlo
     // sample mean.
     let simulation_traversal = Traversal::resolve(
         &setup.node_graph,

@@ -9039,60 +9039,55 @@ fn enumeration_asymmetry_symmetric_declarations_do_not_warn() {
 }
 
 // ---------------------------------------------------------------------------
-// resolve_enumerated_count: the `K^T` guard + not-yet-wired gate
+// enumerated_admissible_count: the shared guard both enumerated axes call
 // ---------------------------------------------------------------------------
 
-/// A 2-node chain with `|Ω| = 1` at every node: zero stochastic branching, so
-/// `enumerated_scenario_count` derives exactly `1` — the sole case
-/// `resolve_enumerated_count` admits for execution.
-fn deterministic_chain_node_graph() -> super::NodeGraph {
+/// Root (stage 0, `|Ω| = 1`) branches structurally to three stage-1 leaves
+/// (each `|Ω| = 1`): a single-predecessor tree with no within-node opening and
+/// no recombination, whose derived scenario count is the leaf count,
+/// `K = 3` — the shape both `resolve_enumerated_training_count` and
+/// `resolve_enumerated_simulation_count` must admit now that the derived-≥-1
+/// census gate is open.
+fn terminal_fan_tree_node_graph() -> super::NodeGraph {
     super::NodeGraph {
-        node_ids: vec![NodeId(0), NodeId(1)].into(),
-        nodes: vec![ng_node(0, 1), ng_node(1, 1)].into(),
-        successors: vec![vec![ng_edge(1)], vec![]].into(),
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)].into(),
+        nodes: vec![ng_node(0, 1), ng_node(1, 1), ng_node(1, 1), ng_node(1, 1)].into(),
+        successors: vec![
+            vec![ng_edge(1), ng_edge(2), ng_edge(3)],
+            vec![],
+            vec![],
+            vec![],
+        ]
+        .into(),
         n_pools: 1,
         pool_stage: vec![super::node_graph::StageIdx(0)],
     }
 }
 
-/// A fully deterministic (derived count `1`) graph resolves to `1` — the
-/// chain-degenerate case the existing sampled-with-one-pass walk already
-/// executes correctly.
+/// A `K = 3` branching tree is admitted for TRAINING through the shared
+/// guard — unchanged behavior, pinning the R1/R2 refactor byte-neutral.
 #[test]
-fn resolve_enumerated_count_admits_deterministic_graph() {
-    let ng = deterministic_chain_node_graph();
-    assert_eq!(
-        super::resolve_enumerated_count(&ng, "training", "the exhaustive forward-pass traversal")
-            .unwrap(),
-        1
-    );
+fn resolve_enumerated_training_count_admits_branching_tree() {
+    let ng = terminal_fan_tree_node_graph();
+    assert_eq!(super::resolve_enumerated_training_count(&ng).unwrap(), 3);
 }
 
-/// A derived count greater than `1` names the phase's enumerated execution as
-/// not yet wired, stating the derived count — never a silent fallthrough to
-/// `sampled`.
+/// The SAME `K = 3` branching tree is admitted for SIMULATION — the
+/// derived-≥-1 census gate is open, so a non-degenerate leaf-path count
+/// resolves rather than rejects.
 #[test]
-fn resolve_enumerated_count_rejects_non_deterministic_graph_as_not_wired() {
-    let ng = asymmetric_fan_node_graph();
-    match super::resolve_enumerated_count(&ng, "training", "the exhaustive forward-pass traversal")
-    {
-        Err(SddpError::Validation(msg)) => {
-            assert!(msg.contains("44"), "names the derived count: {msg}");
-            assert!(msg.contains("not yet wired"), "names the guard: {msg}");
-            assert!(msg.contains("training"), "names the phase: {msg}");
-        }
-        other => panic!("expected a not-yet-wired Validation error, got {other:?}"),
-    }
+fn resolve_enumerated_simulation_count_admits_branching_tree() {
+    let ng = terminal_fan_tree_node_graph();
+    assert_eq!(super::resolve_enumerated_simulation_count(&ng).unwrap(), 3);
 }
 
-/// A `K^T` overflow propagates unchanged from `enumerated_scenario_count` (the
-/// `K^T` guard) — the derived count is unrepresentable, never a "not yet
-/// wired" message instead.
+/// A `K^T` overflow propagates unchanged from `enumerated_scenario_count`
+/// through the shared guard — the derived count is unrepresentable, never
+/// silently admitted.
 #[test]
-fn resolve_enumerated_count_propagates_kt_overflow_guard() {
+fn resolve_enumerated_simulation_count_propagates_kt_overflow_guard() {
     let ng = overflowing_chain_node_graph();
-    match super::resolve_enumerated_count(&ng, "training", "the exhaustive forward-pass traversal")
-    {
+    match super::resolve_enumerated_simulation_count(&ng) {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("overflow"), "names the overflow: {msg}");
         }
@@ -9100,18 +9095,34 @@ fn resolve_enumerated_count_propagates_kt_overflow_guard() {
     }
 }
 
-/// The simulation phase's non-deterministic rejection names the simulation
-/// phase and its capability — the count is purely graph-derived, with no
-/// census cross-check.
+/// A 2-node chain whose root carries `|Ω| = 2` (a within-node opening set) and
+/// a singleton-opening leaf: no recombination (the root is the sole
+/// predecessor of its one child), so `reject_within_node_opening_enumeration`
+/// is the guard that fires, not `reject_recombining_node_enumeration`.
+fn within_node_multi_opening_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![NodeId(0), NodeId(1)].into(),
+        nodes: vec![ng_node(0, 2), ng_node(1, 1)].into(),
+        successors: vec![vec![ng_edge(1)], vec![]].into(),
+        n_pools: 1,
+        pool_stage: vec![super::node_graph::StageIdx(0)],
+    }
+}
+
+/// A within-node multi-opening node (`|Ω| > 1`) under enumerated SIMULATION is
+/// a named `Validation` rejection — the sibling requirement to the
+/// recombination guard tested below, both preconditions the exact node-dedup
+/// traversal needs (design §1.4).
 #[test]
-fn resolve_enumerated_count_rejects_non_deterministic_simulation_as_not_wired() {
-    let ng = asymmetric_fan_node_graph();
-    match super::resolve_enumerated_count(&ng, "simulation", "the weighted census simulation") {
+fn resolve_enumerated_simulation_count_rejects_within_node_multi_opening() {
+    let ng = within_node_multi_opening_node_graph();
+    match super::resolve_enumerated_simulation_count(&ng) {
         Err(SddpError::Validation(msg)) => {
-            assert!(msg.contains("not yet wired"), "names the guard: {msg}");
-            assert!(msg.contains("simulation"), "names the phase: {msg}");
+            assert!(msg.contains("node id 0"), "names the offending node: {msg}");
+            assert!(msg.contains("stage 0"), "names its stage: {msg}");
+            assert!(msg.contains("2 openings"), "names the opening count: {msg}");
         }
-        other => panic!("expected a not-yet-wired Validation error, got {other:?}"),
+        other => panic!("expected a within-node-opening Validation error, got {other:?}"),
     }
 }
 
@@ -9156,6 +9167,25 @@ fn resolve_enumerated_training_count_rejects_recombining_node() {
     assert_eq!(leaf_in_degree, 2, "fixture must recombine at node id 3");
 
     match super::resolve_enumerated_training_count(&ng) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("node id 3"), "names the offending node: {msg}");
+            assert!(msg.contains("stage 2"), "names its stage: {msg}");
+            assert!(
+                msg.contains("recombination"),
+                "names the recombination cause: {msg}"
+            );
+        }
+        other => panic!("expected a recombination Validation error, got {other:?}"),
+    }
+}
+
+/// The SAME recombining graph is rejected under enumerated SIMULATION too —
+/// the guard is shared (`enumerated_admissible_count`), so the two axes
+/// cannot admit different graph shapes.
+#[test]
+fn resolve_enumerated_simulation_count_rejects_recombining_node() {
+    let ng = recombining_tree_node_graph();
+    match super::resolve_enumerated_simulation_count(&ng) {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("node id 3"), "names the offending node: {msg}");
             assert!(msg.contains("stage 2"), "names its stage: {msg}");

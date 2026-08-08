@@ -7806,22 +7806,18 @@ mod k_fan_enumerated_exact_bound {
         }
     }
 
-    /// The simulation-enumerated guard stays: weighted/census simulation is not yet
-    /// built, so an enumerated `K >= 2` simulation is rejected with a crisp named
-    /// `SddpError::Validation` (the training-only guard lift does not extend to it).
+    /// The simulation-enumerated admissibility guard admits any derived leaf-path
+    /// count on a single-predecessor tree: an enumerated `K >= 2` simulation setup
+    /// resolves `Ok`, with `n_scenarios` set to the derived count `K`.
     #[test]
-    fn enumerated_k_ge_2_simulation_is_rejected() {
-        let err = try_k_fan_simulation_enumerated(K)
-            .expect_err("enumerated K>=2 simulation must be rejected");
-        match err {
-            cobre_sddp::SddpError::Validation(msg) => {
-                assert!(
-                    msg.contains("simulation") && msg.contains("not yet wired"),
-                    "the rejection must name the simulation capability: {msg}"
-                );
-            }
-            other => panic!("expected SddpError::Validation, got {other:?}"),
-        }
+    fn enumerated_k_ge_2_simulation_is_admitted() {
+        let setup = try_k_fan_simulation_enumerated(K)
+            .expect("enumerated K>=2 simulation must be admitted on a single-predecessor tree");
+        assert_eq!(
+            setup.simulation_config.n_scenarios,
+            u32::try_from(K).expect("K fits u32"),
+            "n_scenarios must resolve to the derived leaf-path count K"
+        );
     }
 }
 

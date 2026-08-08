@@ -32,9 +32,8 @@ pub enum SimulationWeighting<'a> {
     /// weight `1.0 / n`.
     Uniform,
     /// A declared census: per-scenario leaf-path probabilities, aligned to
-    /// the canonical gathered order. `resolve_enumerated_count`
-    /// (`setup/mod.rs`) admits only a single-scenario census today; a wider
-    /// weight vector is the reserved census-execution seam.
+    /// the canonical gathered order — one weight per admitted leaf path, from
+    /// `setup/mod.rs`'s `resolve_enumerated_simulation_count`.
     Census {
         /// Per-scenario probability weights, canonical gathered order.
         /// Must sum to `1.0` within `1e-9`.

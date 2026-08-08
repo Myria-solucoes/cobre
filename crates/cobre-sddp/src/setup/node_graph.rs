@@ -1309,8 +1309,8 @@ impl Traversal {
     /// selection: `is_enumerated` and `forward_passes` must already reflect
     /// the caller's own guard-checked resolution (training routes through
     /// `resolve_enumerated_training_count`, simulation through
-    /// `resolve_enumerated_count`) — this constructor re-derives no guard and
-    /// cannot fail.
+    /// `resolve_enumerated_simulation_count` — both share one admissibility
+    /// guard) — this constructor re-derives no guard and cannot fail.
     #[must_use]
     pub fn resolve(node_graph: &NodeGraph, is_enumerated: bool, forward_passes: u32) -> Self {
         if is_enumerated {

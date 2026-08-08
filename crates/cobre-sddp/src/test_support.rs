@@ -1561,13 +1561,14 @@ fn external_fan_config_enumerated(max_iterations: u32) -> Config {
 }
 
 /// Attempt to build the K-fan study with `simulation.selection = enumerated`,
-/// returning the setup result unpanicked — the enumerated `K >= 2` simulation
-/// rejection is a `Result`, not a fixture, so callers assert on the `Err`.
+/// returning the setup result unpanicked — a `Result`, not a fixture, so
+/// callers assert on it directly: an admitted single-predecessor tree resolves
+/// `Ok`, with `n_scenarios` set to the derived leaf-path count `K`.
 ///
 /// # Errors
 ///
 /// Returns whatever `StudySetup::new` returns for the enumerated-simulation
-/// config (a [`SddpError::Validation`] on the `K >= 2` graph).
+/// config.
 ///
 /// # Panics
 ///
