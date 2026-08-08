@@ -21,9 +21,8 @@ use crate::error::CliError;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Postcard-serializable stopping rule. Mirrors [`StoppingRule`], whose
-/// internally-tagged serde representation postcard (non-self-describing)
-/// refuses to deserialize (`WontImplement`).
+/// Postcard-serializable stopping rule. Mirrors [`StoppingRule`], which
+/// derives neither `Serialize` nor `Deserialize`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BroadcastStoppingRule {
     IterationLimit {

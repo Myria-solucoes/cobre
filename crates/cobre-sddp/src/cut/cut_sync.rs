@@ -303,6 +303,33 @@ impl CutSyncBuffers {
             );
         }
 
+        self.exchange_and_insert_remote_cuts(
+            pool,
+            pool_n_state,
+            record_size,
+            n_local,
+            my_rank,
+            fcf,
+            comm,
+        )
+    }
+
+    /// Exchange one pool's cut records via a single `allgatherv` and insert
+    /// every remote rank's deserialized cuts into `fcf` — the shared tail of
+    /// [`Self::sync_cuts`] and [`Self::sync_packed_records`]: build the
+    /// per-rank counts/displacements, exchange, then deserialize and
+    /// [`FutureCostFunction::add_cut`] every slice but the caller's own rank's.
+    /// Returns the inserted remote-cut count.
+    fn exchange_and_insert_remote_cuts<C: Communicator>(
+        &mut self,
+        pool: usize,
+        pool_n_state: usize,
+        record_size: usize,
+        n_local: usize,
+        my_rank: usize,
+        fcf: &mut FutureCostFunction,
+        comm: &C,
+    ) -> Result<usize, SddpError> {
         for r in 0..self.num_ranks {
             let cuts_for_r = if r == my_rank {
                 n_local
@@ -323,6 +350,7 @@ impl CutSyncBuffers {
             self.recv_buf.len()
         );
 
+        let send_len = n_local * record_size;
         comm.allgatherv(
             &self.send_buf[..send_len],
             &mut self.recv_buf[..recv_len],
@@ -508,66 +536,15 @@ impl CutSyncBuffers {
             self.send_buf.len()
         );
 
-        for r in 0..self.num_ranks {
-            let cuts_for_r = if r == my_rank {
-                n_local
-            } else {
-                self.per_rank_cuts[r]
-            };
-            self.counts[r] = cuts_for_r * record_size;
-        }
-        self.displs[0] = 0;
-        for r in 1..self.num_ranks {
-            self.displs[r] = self.displs[r - 1] + self.counts[r - 1];
-        }
-
-        let recv_len: usize = self.counts.iter().sum();
-        debug_assert!(
-            recv_len <= self.recv_buf.len(),
-            "recv_len {recv_len} exceeds recv_buf capacity {}",
-            self.recv_buf.len()
-        );
-
-        comm.allgatherv(
-            &self.send_buf[..send_len],
-            &mut self.recv_buf[..recv_len],
-            &self.counts,
-            &self.displs,
-        )?;
-
-        let mut remote_cut_count = 0usize;
-
-        for r in 0..self.num_ranks {
-            if r == my_rank {
-                continue;
-            }
-
-            let start = self.displs[r];
-            let end = start + self.counts[r];
-            let slice = &self.recv_buf[start..end];
-
-            deserialize_cuts_from_buffer_into(
-                slice,
-                pool_n_state,
-                &mut self.deserialize_headers_buf,
-                &mut self.deserialize_coefficients_buf,
-            )?;
-
-            for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
-                let coeff_start = i * pool_n_state;
-                fcf.add_cut(
-                    NodeId(header.node_id),
-                    pool,
-                    u64::from(header.iteration),
-                    header.forward_pass_index,
-                    header.intercept,
-                    &self.deserialize_coefficients_buf[coeff_start..coeff_start + pool_n_state],
-                );
-                remote_cut_count += 1;
-            }
-        }
-
-        Ok(remote_cut_count)
+        self.exchange_and_insert_remote_cuts(
+            pool,
+            pool_n_state,
+            record_size,
+            n_local,
+            my_rank,
+            fcf,
+            comm,
+        )
     }
 
     /// Exchange every pool of one reverse-topological cut-sharing level in a

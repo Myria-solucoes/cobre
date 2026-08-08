@@ -787,9 +787,7 @@ impl<S: SolverInterface> SolverWorkspace<S> {
 }
 
 impl ScratchBuffers {
-    /// Allocate scratch buffers sized for the given per-worker parameters;
-    /// shared by all three `SolverWorkspace` construction sites to keep them in
-    /// sync.
+    /// Allocate scratch buffers sized for the given per-worker parameters.
     #[must_use]
     pub fn new(s: WorkspaceSizing) -> Self {
         let WorkspaceSizing {
@@ -884,29 +882,17 @@ impl<S: SolverInterface> WorkspacePool<S> {
             .map(|idx| {
                 let worker_id =
                     i32::try_from(idx).expect("worker_id fits in i32 (rayon pools are small)");
-                SolverWorkspace {
-                    rank,
-                    worker_id,
-                    solver: ProfiledSolver::new(solver_factory()),
-                    patch_buf: PatchBuffer::new(
-                        sizing.hydro_count,
-                        sizing.max_par_order,
-                        sizing.n_load_buses,
-                        sizing.max_blocks,
-                        sizing.n_buckets,
-                        sizing.n_anticipated,
-                        sizing.k_max,
-                    ),
-                    current_state: Vec::with_capacity(n_state),
-                    scratch: ScratchBuffers::new(sizing),
-                    scratch_basis: Basis::new(0, 0),
-                    backward_accum: BackwardAccumulators::new(
-                        sizing.max_openings,
-                        sizing.initial_pool_capacity,
-                        sizing.n_state,
-                    ),
-                    worker_timing_buf: WorkerPhaseTimings::default(),
-                }
+                let solver = solver_factory();
+                let patch_buf = PatchBuffer::new(
+                    sizing.hydro_count,
+                    sizing.max_par_order,
+                    sizing.n_load_buses,
+                    sizing.max_blocks,
+                    sizing.n_buckets,
+                    sizing.n_anticipated,
+                    sizing.k_max,
+                );
+                SolverWorkspace::new(rank, worker_id, solver, patch_buf, n_state, sizing)
             })
             .collect();
         Self { workspaces }
@@ -935,29 +921,19 @@ impl<S: SolverInterface> WorkspacePool<S> {
         for idx in 0..n_threads {
             let worker_id =
                 i32::try_from(idx).expect("worker_id fits in i32 (rayon pools are small)");
-            workspaces.push(SolverWorkspace {
-                rank,
-                worker_id,
-                solver: ProfiledSolver::new(solver_factory()?),
-                patch_buf: PatchBuffer::new(
-                    sizing.hydro_count,
-                    sizing.max_par_order,
-                    sizing.n_load_buses,
-                    sizing.max_blocks,
-                    sizing.n_buckets,
-                    sizing.n_anticipated,
-                    sizing.k_max,
-                ),
-                current_state: Vec::with_capacity(n_state),
-                scratch: ScratchBuffers::new(sizing),
-                scratch_basis: Basis::new(0, 0),
-                backward_accum: BackwardAccumulators::new(
-                    sizing.max_openings,
-                    sizing.initial_pool_capacity,
-                    sizing.n_state,
-                ),
-                worker_timing_buf: WorkerPhaseTimings::default(),
-            });
+            let solver = solver_factory()?;
+            let patch_buf = PatchBuffer::new(
+                sizing.hydro_count,
+                sizing.max_par_order,
+                sizing.n_load_buses,
+                sizing.max_blocks,
+                sizing.n_buckets,
+                sizing.n_anticipated,
+                sizing.k_max,
+            );
+            workspaces.push(SolverWorkspace::new(
+                rank, worker_id, solver, patch_buf, n_state, sizing,
+            ));
         }
         Ok(Self { workspaces })
     }

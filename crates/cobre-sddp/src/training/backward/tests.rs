@@ -5238,7 +5238,7 @@ fn resolve_backward_basis_returns_none_when_slot_is_empty() {
 }
 
 // ---------------------------------------------------------------------------
-// T2 integration tests (backward write populates BasisStore)
+// Integration tests (backward write populates BasisStore)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -5246,7 +5246,6 @@ fn backward_write_populates_basis_store_at_omega_zero() {
     let mut basis_store = BasisStore::new(1, 2);
     let workspaces = run_one_trial_state_with_stores(&mut basis_store).unwrap();
 
-    // Verify the BasisStore slot was written.
     assert!(
         basis_store.get(0, NodePos(1)).is_some(),
         "BasisStore[0, 1] must be Some after backward write at omega=0"
@@ -5257,7 +5256,6 @@ fn backward_write_populates_basis_store_at_omega_zero() {
         vec![5.0_f64],
         "state_at_capture must equal x_hat"
     );
-    // Confirm the solver ran exactly once.
     assert_eq!(
         workspaces[0].solver.inner().call_count,
         1,
@@ -5288,7 +5286,6 @@ fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
     let mut basis_store = BasisStore::new(1, 2);
     *basis_store.get_mut(0, NodePos(1)) = Some(pre_existing);
 
-    // Verify sentinel is in place before the call.
     assert_eq!(
         basis_store.get(0, NodePos(1)).unwrap().state_at_capture,
         vec![42.0_f64],
@@ -5307,12 +5304,10 @@ fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
     let result = run_one_trial_state_with_stores(&mut basis_store);
     assert!(result.is_ok(), "expected Ok for successful solve");
 
-    // The slot must still be Some after the successful reuse-path write.
     assert!(
         basis_store.get(0, NodePos(1)).is_some(),
         "BasisStore[0, 1] must not be None after successful reuse-path write at ω=0"
     );
-    // The reuse path updates state_at_capture to the current x_hat=[5.0].
     assert_eq!(
         basis_store.get(0, NodePos(1)).unwrap().state_at_capture,
         vec![5.0_f64],
@@ -5320,7 +5315,7 @@ fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
     );
 }
 
-/// T-HW01: handshake passes when all ranks agree on `n_workers_local`.
+/// Handshake passes when all ranks agree on `n_workers_local`.
 ///
 /// Uses `StubComm` (echoes send→recv, i.e. min==max==local) with a
 /// 2-worker setup and a 1-stage system so no backward stages are swept.
@@ -5470,7 +5465,7 @@ fn handshake_passes_with_local_backend() {
     );
 }
 
-/// T-HW02: handshake rejects non-uniform `n_workers_local` across ranks.
+/// Handshake rejects non-uniform `n_workers_local` across ranks.
 ///
 /// `NonUniformStubComm` simulates a 2-rank cluster where min and max
 /// worker counts differ. Its `allreduce(Min)` returns all `T::default()`

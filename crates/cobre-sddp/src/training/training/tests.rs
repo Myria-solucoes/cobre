@@ -222,7 +222,6 @@ impl Communicator for StubComm {
 /// [`SystemBuilder`] + `build_stochastic_context` pattern as the forward-pass
 /// integration tests.  The `n_openings` parameter controls the branching
 /// factor of the opening tree.
-#[allow(clippy::cast_possible_wrap)]
 fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticContext {
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
@@ -952,7 +951,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         .iter()
         .filter(|e| matches!(e, TrainingEvent::WorkerTiming { .. }))
         .collect();
-    // C2: exactly 8 WorkerTiming events (4 workers × 2 phases × 1 iteration).
+    // Exactly 8 WorkerTiming events (4 workers × 2 phases × 1 iteration).
     assert_eq!(
         worker_events.len(),
         8,
@@ -1003,7 +1002,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
     assert_eq!(fwd_workers.len(), 4, "expected 4 distinct forward workers");
     assert_eq!(bwd_workers.len(), 4, "expected 4 distinct backward workers");
 
-    // C3: setup-sum invariant — sum of per-worker BWD_SETUP equals
+    // Setup-sum invariant: sum of per-worker BWD_SETUP equals
     // BackwardPassComplete.setup_time_ms within ±1 ms tolerance.
     // (BackwardPassComplete.setup_time_ms is u64; per-worker timings are f64.)
     let bwd_setup_total_ms_u64 = events
@@ -1013,7 +1012,6 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
             _ => None,
         })
         .expect("BackwardPassComplete event must exist");
-    #[allow(clippy::cast_precision_loss)]
     let bwd_setup_total_ms = bwd_setup_total_ms_u64 as f64;
     assert!(
         (bwd_setup_sum_ms - bwd_setup_total_ms).abs() < 1.0,
@@ -1570,7 +1568,6 @@ fn cut_selection_level1_runs_at_frequency() {
         "expected exactly 1 PolicySelectionComplete event for check_frequency=3 over 5 iterations"
     );
 
-    // Verify the event was emitted at iteration 3.
     let TrainingEvent::PolicySelectionComplete { iteration, .. } = sel_events[0] else {
         panic!("wrong variant");
     };
@@ -1714,7 +1711,6 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
         *rows_deactivated, 0,
         "stage 0 is exempt from cut selection, so no cuts should be deactivated"
     );
-    // Verify per-stage records are populated and stage 0 is exempt.
     assert!(
         !per_stage.is_empty(),
         "per_stage must contain at least the stage 0 record"
@@ -1937,7 +1933,6 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
     )
     .unwrap();
 
-    // Verify partial result semantics.
     assert!(outcome.error.is_some(), "expected error in TrainingOutcome");
     assert_eq!(
         outcome.result.iterations, 0,
@@ -1949,7 +1944,6 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
         "total_time_ms must be > 0"
     );
 
-    // Verify TrainingFinished event was emitted with reason "error".
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
     let finished = events
         .iter()

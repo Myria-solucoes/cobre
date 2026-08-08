@@ -442,6 +442,14 @@ pub(super) fn make_correlation(group: CorrelationGroup) -> CorrelationModel {
 
 // ── Config helpers ────────────────────────────────────────────────────────────
 
+/// Parse `json` into a `Config` via a scratch temp file — the shared
+/// write-then-parse path every fixture builder below uses.
+fn config_from_json(json: &str) -> Config {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), json).unwrap();
+    parse_config(tmp.path()).unwrap()
+}
+
 /// Minimal `Config` required to fill `ParsedData`.
 pub(super) fn minimal_config() -> Config {
     let json = r#"{
@@ -452,9 +460,7 @@ pub(super) fn minimal_config() -> Config {
             ]
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
 }
 
 /// Build a `Config` with `training.scenario_source.inflow.scheme = "external"`.
@@ -471,9 +477,7 @@ pub(super) fn config_with_training_external_inflow() -> Config {
             }
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
 }
 
 /// Build a `Config` with `training.selection = enumerated` and
@@ -492,9 +496,7 @@ pub(super) fn config_enumerated_external_inflow() -> Config {
             }
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
 }
 
 /// Build a `Config` with `training.selection = enumerated` and every class at
@@ -509,9 +511,7 @@ pub(super) fn config_enumerated() -> Config {
             "selection": { "method": "enumerated" }
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
 }
 
 /// Build a `Config` whose training scenario source sets the `external` scheme for
@@ -537,9 +537,7 @@ pub(super) fn config_with_training_external(inflow: bool, load: bool, ncs: bool)
         }}"#,
         classes.join(", ")
     );
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(&json)
 }
 
 /// Build a sampled `Config` declaring `training.scenario_source.openings =
@@ -556,9 +554,7 @@ pub(super) fn config_sampled_file_openings() -> Config {
             }
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
 }
 
 /// Build an enumerated `Config` declaring `training.scenario_source.openings =
@@ -575,9 +571,7 @@ pub(super) fn config_enumerated_file_openings() -> Config {
             }
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
 }
 
 /// Build a `Config` with `simulation.scenario_source.load.scheme = "external"`.
@@ -596,9 +590,7 @@ pub(super) fn config_with_simulation_external_load() -> Config {
             }
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
 }
 
 // ── Season / estimation data builders ────────────────────────────────────────

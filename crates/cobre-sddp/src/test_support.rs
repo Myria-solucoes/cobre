@@ -813,7 +813,7 @@ pub fn trial_state_records(states: &[Vec<f64>], n_stages: usize) -> Vec<Trajecto
         .collect()
 }
 
-/// The byte-exact chain [`NodeGraph`] (C1) for `stochastic`: one node per
+/// The byte-exact chain [`NodeGraph`] for `stochastic`: one node per
 /// stage, pools 1:1, each node's `Ω` view spanning exactly that stage's
 /// [`StochasticContext::opening_tree`] openings. Delegates to
 /// [`build_node_graph`]'s own chain path (an empty `nodes[]`) instead of
@@ -992,16 +992,6 @@ fn k_fan_stage(index: usize, id: i32, state_config: StageStateConfig) -> Stage {
 /// A single-hydro, single-bus [`System`] over the 3-stage K-fan calendar: hydro
 /// storage/inflow/turbine dynamics against a bus deficit fallback, so every
 /// visited node solves a genuine (non-degenerate) LP with real dual activity.
-///
-/// # Panics
-///
-/// Never in practice — see the rationale below.
-#[allow(clippy::too_many_lines, clippy::expect_used)]
-// Rationale: one linear entity/bounds/penalties assembly, mirroring
-// `deterministic.rs`'s `build_system` — splitting further would scatter the
-// literal the caller reads as a whole. The calendar dates are valid by
-// construction, and `SystemBuilder::build` only errors on a malformed system,
-// which every literal below avoids.
 fn k_fan_system(k: usize, reversed: bool) -> System {
     fan_or_chain_system(3, k_fan_policy_graph(k, reversed))
 }
@@ -1361,13 +1351,7 @@ pub struct KFanFixture {
 ///
 /// # Panics
 ///
-/// Never in practice — see the rationale below.
-#[allow(clippy::expect_used)]
-// Rationale: every literal in `k_fan_system`/`k_fan_config` is a hand-checked,
-// internally-consistent fixture; `StudySetup::new` only errors on a malformed
-// system or config, neither of which this builder can produce, and
-// `enumerated_scenario_count` only errors on a `u64` path-product overflow,
-// unreachable at this fixture's scale.
+/// Never in practice — see [`k_fan_fixture`].
 #[must_use]
 pub fn k_fan_setup(k: usize, forward_passes: u32, max_iterations: u32) -> KFanFixture {
     k_fan_fixture(k, false, k_fan_config(forward_passes, max_iterations))
@@ -1473,6 +1457,14 @@ pub fn single_path_enumerated_setup(max_iterations: u32) -> StudySetup {
 /// Shared build for [`k_fan_setup`]/[`k_fan_setup_enumerated`]: builds the
 /// stochastic context and study for `config` and derives the fixture's exposed
 /// counts from the resolved study (never a caller literal).
+///
+/// # Panics
+///
+/// Never in practice: every literal in `k_fan_system`/`k_fan_config` is a
+/// hand-checked, internally-consistent fixture; `StudySetup::new` only errors
+/// on a malformed system or config, neither of which any caller here
+/// produces, and `enumerated_scenario_count` only errors on a `u64`
+/// path-product overflow, unreachable at this fixture's scale.
 // `config` is taken by value so callers pass an owned builder result inline; the
 // body only borrows it for `StudySetup::new`.
 #[allow(clippy::expect_used, clippy::needless_pass_by_value)]

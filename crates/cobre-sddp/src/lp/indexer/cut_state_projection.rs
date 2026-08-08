@@ -236,7 +236,10 @@ impl CutStateProjection {
     ///
     /// `cut_slot` indexes a stored cut's `coefficients` slice (length
     /// [`Self::n_slots`]); `outgoing_lp_column` is where the cut-row builder places
-    /// the negated, scaled coefficient. For an all-enabled study this reproduces
+    /// the negated, scaled coefficient — identity for storage; for a lag
+    /// dimension the outgoing state (after `shift_lag_state`) holds `z_inflow`
+    /// at lag 0 and the shifted incoming lags at lag 1+, so the column
+    /// addresses `z_inflow` / incoming lag `l−1`. For an all-enabled study this reproduces
     /// the global `nonzero_state_indices` render — same reduced index, same column.
     #[inline]
     #[must_use]

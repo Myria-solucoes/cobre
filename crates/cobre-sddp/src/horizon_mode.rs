@@ -115,7 +115,6 @@ mod tests {
 
     #[test]
     fn is_terminal_last_stage_is_true() {
-        // Acceptance criterion: is_terminal(5) returns true for num_stages=5
         let h = HorizonMode::Finite { num_stages: 5 };
         assert!(h.is_terminal(5));
     }
@@ -134,7 +133,6 @@ mod tests {
 
     #[test]
     fn is_terminal_single_stage_is_terminal() {
-        // Even for num_stages=1 (invalid config), stage 1 should be terminal.
         let h = HorizonMode::Finite { num_stages: 1 };
         assert!(h.is_terminal(1));
     }
@@ -151,7 +149,6 @@ mod tests {
 
     #[test]
     fn validate_rejects_one_stage() {
-        // Acceptance criterion: num_stages=1 returns Err(SddpError::Validation(_))
         let h = HorizonMode::Finite { num_stages: 1 };
         let result = h.validate();
         assert!(

@@ -279,7 +279,7 @@ pub(super) fn check_node_graph(data: &ParsedData, ctx: &mut ValidationContext) {
     }
 }
 
-/// Rules 36 (B3 conditional requirement) and 37 (R6.2 pointer bound), applied
+/// Rules 36 and 37, applied
 /// only under enumerated forward selection: a node's `scenario_id` is required
 /// exactly when its stage carries a slot-occupying external class and, when
 /// present, must index a valid column of every such class. Inert under any other
@@ -627,7 +627,7 @@ fn check_recombinable_signature(
     }
 }
 
-/// Rule 41 (B1): `num_openings` is required at a stage carrying generated openings
+/// Rule 41: `num_openings` is required at a stage carrying generated openings
 /// (no slot-occupying external class) and rejected as meaningless where a stage
 /// carries only external openings. Declared `nodes[]` only — the chain dialect's
 /// requiredness is a parse-layer check ([`crate::stages::parse_stages`]). Generated
@@ -690,7 +690,7 @@ pub(super) fn check_num_openings_declaration(data: &ParsedData, ctx: &mut Valida
     }
 }
 
-/// Rule 42 (B2): a per-edge `annual_discount_rate_override` is rejected under
+/// Rule 42: a per-edge `annual_discount_rate_override` is rejected under
 /// `nodes[]` — the override is a per-stage quantity declared on
 /// `stages[].annual_discount_rate_override`. The edge spelling stays legal in the
 /// chain dialect. It is rejected rather than folded into the stage because the
@@ -721,7 +721,7 @@ pub(super) fn check_edge_discount_override_under_nodes(
     }
 }
 
-/// Rule 43 (B6): `openings = {source: file}` supplies a user-declared backward
+/// Rule 43: `openings = {source: file}` supplies a user-declared backward
 /// opening tree — a sampled, chain-dialect feature. It is rejected together with
 /// a declared `nodes[]` policy graph (nodes[] declares the opening set) and under
 /// enumerated forward selection (which consumes external columns, not a
@@ -760,7 +760,7 @@ pub(super) fn check_nodes_and_noise_openings(data: &ParsedData, ctx: &mut Valida
     }
 }
 
-/// Rule 44 (B5): `sampling_method` is inert under external openings and ill-defined
+/// Rule 44: `sampling_method` is inert under external openings and ill-defined
 /// at a multi-node stage; a warning names such a stage and the load succeeds.
 /// Declared `nodes[]` only — the chain dialect's `sampling_method` is unchanged.
 pub(super) fn check_sampling_method_meaningfulness(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -1449,7 +1449,7 @@ mod tests {
         );
     }
 
-    /// R6.2: a `scenario_id` equal to (and beyond) `raw_c(t)` is rejected
+    /// Rule 37: a `scenario_id` equal to (and beyond) `raw_c(t)` is rejected
     /// naming the node, value, stage and bound; a value below `raw_c` is accepted.
     #[test]
     fn test_node_graph_realization_bound_at_and_beyond_raw_c() {

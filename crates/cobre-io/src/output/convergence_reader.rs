@@ -71,21 +71,10 @@ struct BatchTotals {
     final_upper_bound: f64,
     final_upper_bound_std: f64,
     final_gap_percent: Option<f64>,
-    has_rows: bool,
 }
 
 impl BatchTotals {
     fn into_summary(self) -> ConvergenceSummary {
-        if !self.has_rows {
-            return ConvergenceSummary {
-                total_lp_solves: 0,
-                total_time_ms: 0,
-                final_lower_bound: 0.0,
-                final_upper_bound: 0.0,
-                final_upper_bound_std: 0.0,
-                final_gap_percent: None,
-            };
-        }
         #[allow(clippy::cast_sign_loss)]
         ConvergenceSummary {
             total_lp_solves: self.total_lp_solves.max(0) as u64,
@@ -198,7 +187,6 @@ fn accumulate_batch(batch: &RecordBatch, totals: &mut BatchTotals) -> Result<(),
         None
     };
 
-    totals.has_rows = true;
     Ok(())
 }
 

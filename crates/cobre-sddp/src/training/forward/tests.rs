@@ -1555,7 +1555,6 @@ fn run_one_iteration(
 #[test]
 fn warm_start_first_iteration_cold_second_iteration_warm() {
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     // Single workspace and a shared basis store (1 scenario × 3 stages).
@@ -1587,7 +1586,6 @@ fn warm_start_first_iteration_cold_second_iteration_warm() {
 #[test]
 fn basis_invalidated_on_solver_error() {
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     // Call 4 = second iteration, stage 1 (calls 0-2 = first iteration
     // stages 0,1,2; calls 3,4,5 = second iteration stages 0,1,2).
@@ -1922,19 +1920,6 @@ fn test_forward_pass_work_distribution() {
 /// `mean_m3s` and `std_m3s`. Used by truncation tests.
 #[allow(clippy::too_many_lines)]
 fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
-    use std::collections::BTreeMap;
-
-    use chrono::NaiveDate;
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
-    use cobre_core::scenario::{
-        CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-    };
-    use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
-    };
-    use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
-
     let bus = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
@@ -3124,7 +3109,6 @@ fn test_build_delta_empty_pool() {
     // Empty pool → num_rows == 0, row_starts == [0], col_indices empty.
     let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3158,7 +3142,6 @@ fn test_build_delta_single_iteration_filter() {
     fcf.add_cut(NodeId(0), 0, 3, 0, 30.0, &[3.0]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3192,7 +3175,6 @@ fn test_build_delta_skips_deactivated_cuts() {
     fcf.pools[0].deactivate(&[2]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3235,7 +3217,6 @@ fn test_build_delta_excludes_warm_start_cuts() {
     fcf.pools[0] = pool;
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3265,7 +3246,6 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
     fcf.add_cut(NodeId(0), 0, 1, 1, 20.0, &[3.0]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
 
     let mut batch_full = empty_delta_batch();
     build_cut_row_batch_into(
@@ -3315,7 +3295,6 @@ fn test_build_delta_sparse_path() {
     // n_hydro=1, n_lag=1: n_state=2 (vol + lag).
     // nonzero_state_indices should be non-empty (check via indexer).
     let state = test_support::state_layout(1, 1);
-    let _indexer = test_support::geom(1, 1);
     // nonzero_state_indices is the mask for non-trivially-zero state dims.
     let mask_len = state.nonzero_state_indices.len();
 
@@ -3353,7 +3332,6 @@ fn test_build_delta_reuses_out_buffer() {
     fcf.add_cut(NodeId(0), 0, 2, 0, 22.0, &[2.0]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     // First call: iteration 1 → should yield the iteration-1 cut.
@@ -3391,7 +3369,6 @@ fn test_build_delta_clears_row_starts() {
     fcf.add_cut(NodeId(0), 0, 1, 0, 5.0, &[1.0]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
 
     // Pre-populate batch with garbage.
     let mut batch = RowBatch {
@@ -3444,15 +3421,7 @@ fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
     fcf.pools[0] = pool;
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
-    let mut batch = RowBatch {
-        num_rows: 0,
-        row_starts: Vec::new(),
-        col_indices: Vec::new(),
-        values: Vec::new(),
-        row_lower: Vec::new(),
-        row_upper: Vec::new(),
-    };
+    let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
         &mut batch,

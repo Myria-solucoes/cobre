@@ -1135,7 +1135,7 @@ mod decomp_integration {
         // Drain the channel in a background thread to avoid blocking simulate().
         let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
 
-        let sim_run = setup
+        setup
             .simulate(
                 &mut pool.workspaces,
                 &comm,
@@ -1149,10 +1149,6 @@ mod decomp_integration {
         drop(result_tx);
         let _scenario_results = drain_handle.join().expect("drain thread must not panic");
 
-        assert!(
-            sim_run.costs.is_empty() || !sim_run.costs.is_empty(),
-            "simulate returned successfully"
-        );
         let sim_config = setup.simulation_config();
         assert_eq!(
             sim_config.n_scenarios, 5,

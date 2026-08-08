@@ -205,9 +205,7 @@ pub fn reconstruct_basis_uniform_basic(
 fn reconstruct_col_statuses(stored: &CapturedBasis, target: ReconstructionTarget, out: &mut Basis) {
     out.col_status.clear();
     out.col_status.extend_from_slice(&stored.basis.col_status);
-    if out.col_status.len() != target.num_cols {
-        out.col_status.resize(target.num_cols, BasisStatus::Basic);
-    }
+    out.col_status.resize(target.num_cols, BasisStatus::Basic);
 }
 
 /// Copy the first `target.base_row_count` template row statuses from the stored

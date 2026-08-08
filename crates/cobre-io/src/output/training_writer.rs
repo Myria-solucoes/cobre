@@ -582,7 +582,7 @@ mod tests {
                 ],
             })
             .collect();
-        let mut training = make_training_output(records.clone());
+        let mut training = make_training_output(records);
         training.worker_timing_records = worker_records;
         let writer = TrainingParquetWriter::new(tmp.path(), &config).expect("new must succeed");
         writer.write(&training).expect("write must succeed");

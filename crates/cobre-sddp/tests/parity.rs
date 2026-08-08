@@ -1538,7 +1538,6 @@ mod determinism {
         const N_ITERATIONS: u64 = 10;
         const BRANCHING: usize = 4;
 
-        // Multi-opening fixture so the per-trial-point solve loop visits >1 opening.
         let mut fx = Fixture3H::with_branching(BRANCHING);
 
         // Keys are arbitrary: the determinism property needs the order to be

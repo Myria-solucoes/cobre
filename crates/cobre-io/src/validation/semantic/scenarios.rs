@@ -537,11 +537,11 @@ struct ClassExternal {
 
 /// Rules 45-48: external-library coherence across the slot-occupying external
 /// classes of the training scenario source — the shared per-stage raw
-/// column-count vector `raw_c(t)` (P-B1, rule 45), the exact `scenario_id` set
-/// per (class, stage) (A1, rule 46), out-of-range `stage_id` rejection (A2, rule
-/// 47), and the prefix-coherence warning (rule 48). P-B1/A1/A2 fire for every
+/// column-count vector `raw_c(t)` (rule 45), the exact `scenario_id` set
+/// per (class, stage) (rule 46), out-of-range `stage_id` rejection (rule
+/// 47), and the prefix-coherence warning (rule 48). Rules 45-47 fire for every
 /// study; the prefix-coherence warning only when `nodes[]` is declared. Reads
-/// raw parsed values only — the standardized-library width assertion (G2) runs
+/// raw parsed values only — the standardized-library width assertion runs
 /// at study setup, where the standardized libraries exist.
 pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut ValidationContext) {
     let Ok(source) = data

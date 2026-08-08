@@ -737,19 +737,13 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
         Vec::with_capacity(raw.stages.len() + raw.pre_study_stages.len());
 
     for (i, raw_stage) in raw.stages.into_iter().enumerate() {
-        let start_date = parse_date(
+        let (start_date, end_date) = parse_stage_date_range(
+            "stages",
+            i,
             &raw_stage.start_date,
-            &format!("stages[{i}].start_date"),
+            &raw_stage.end_date,
             path,
         )?;
-        let end_date = parse_date(&raw_stage.end_date, &format!("stages[{i}].end_date"), path)?;
-        if start_date >= end_date {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("stages[{i}].end_date"),
-                message: format!("end_date ({end_date}) must be after start_date ({start_date})"),
-            });
-        }
 
         let blocks = convert_blocks(&raw_stage.blocks);
         let block_mode = convert_block_mode(raw_stage.block_mode);
@@ -785,23 +779,13 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
     }
 
     for (i, raw_pss) in raw.pre_study_stages.into_iter().enumerate() {
-        let start_date = parse_date(
+        let (start_date, end_date) = parse_stage_date_range(
+            "pre_study_stages",
+            i,
             &raw_pss.start_date,
-            &format!("pre_study_stages[{i}].start_date"),
-            path,
-        )?;
-        let end_date = parse_date(
             &raw_pss.end_date,
-            &format!("pre_study_stages[{i}].end_date"),
             path,
         )?;
-        if start_date >= end_date {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("pre_study_stages[{i}].end_date"),
-                message: format!("end_date ({end_date}) must be after start_date ({start_date})"),
-            });
-        }
 
         all_stages.push(Stage {
             index: 0,
@@ -1066,6 +1050,27 @@ fn parse_date(s: &str, field: &str, path: &Path) -> Result<NaiveDate, LoadError>
         field: field.to_string(),
         message: format!("invalid date '{s}', expected format YYYY-MM-DD"),
     })
+}
+
+/// Parse and order-validate one stage's `start_date`/`end_date` pair, field-pathed
+/// under `prefix[i]` (`"stages"` or `"pre_study_stages"`).
+fn parse_stage_date_range(
+    prefix: &str,
+    i: usize,
+    start_date: &str,
+    end_date: &str,
+    path: &Path,
+) -> Result<(NaiveDate, NaiveDate), LoadError> {
+    let start_date = parse_date(start_date, &format!("{prefix}[{i}].start_date"), path)?;
+    let end_date = parse_date(end_date, &format!("{prefix}[{i}].end_date"), path)?;
+    if start_date >= end_date {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("{prefix}[{i}].end_date"),
+            message: format!("end_date ({end_date}) must be after start_date ({start_date})"),
+        });
+    }
+    Ok((start_date, end_date))
 }
 
 fn convert_season_definitions(
@@ -1805,8 +1810,8 @@ mod tests {
 
     /// Chain dialect (no `nodes[]`): a departing-edge `annual_discount_rate_override`
     /// folds onto its source stage in `stage_discount_rate_overrides`, so the edge
-    /// spelling still applies (C1), and a `stages[].annual_discount_rate_override`
-    /// lands there directly (B2).
+    /// spelling still applies, and a `stages[].annual_discount_rate_override`
+    /// lands there directly.
     #[test]
     fn test_discount_override_folds_onto_stage_chain_dialect() {
         let json = r#"{
@@ -2332,7 +2337,7 @@ mod tests {
     /// The removed per-stage `num_scenarios` spelling is a deserialize error
     /// naming the offending field (`deny_unknown_fields` rejects it at parse,
     /// surfaced as [`LoadError::ParseError`]); the canonical `num_openings`
-    /// spelling loads and its count reaches `branching_factor` (B1).
+    /// spelling loads and its count reaches `branching_factor`.
     #[test]
     fn test_num_scenarios_removed_field_rejected() {
         let rejected = r#"{

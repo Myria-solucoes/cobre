@@ -186,7 +186,7 @@ pub struct StudySetup {
 
     /// The runtime node graph (F7): node identity/order, the `node → pool`
     /// map, and per-node Ω views/out-edges. Absent `nodes[]` this is the
-    /// byte-exact chain degeneracy (C1). Reached through
+    /// byte-exact chain degeneracy. Reached through
     /// [`crate::context::TrainingContext::node_graph`] on the hot path.
     pub node_graph: node_graph::NodeGraph,
     /// Iteration-loop parameters projected from [`crate::config::LoopConfig`].
@@ -1792,6 +1792,17 @@ fn resolve_enumerated_simulation_count(node_graph: &NodeGraph) -> Result<u32, Sd
     enumerated_admissible_count(node_graph, "simulation", "scenario")
 }
 
+/// The first node pinning an [`OpeningSource::External`] scenario column, in
+/// canonical position order — the shared trigger condition
+/// [`reject_scenario_id_under_sampled_selection`] and
+/// [`reject_insample_class_under_external_nodes`] both gate on.
+fn find_external_bound_node(node_graph: &NodeGraph) -> Option<(NodePos, &NodeRuntime)> {
+    node_graph
+        .nodes
+        .iter_indexed()
+        .find(|(_, n)| n.openings.source == OpeningSource::External)
+}
+
 /// Reject a node carrying a scenario pointer under sampled forward selection: a
 /// node's `scenario_id` (surfaced as an `External` opening) selects a
 /// deterministic external-library column, which only the enumerated forward
@@ -1811,11 +1822,7 @@ fn reject_scenario_id_under_sampled_selection(
     if training_enumerated {
         return Ok(());
     }
-    if let Some((pos, node)) = node_graph
-        .nodes
-        .iter_indexed()
-        .find(|(_, n)| n.openings.source == OpeningSource::External)
-    {
+    if let Some((pos, node)) = find_external_bound_node(node_graph) {
         return Err(SddpError::Validation(format!(
             "node {} (stage {}) declares a scenario_id but training uses sampled forward \
              selection; scenario_id requires enumerated selection",
@@ -1848,11 +1855,7 @@ fn reject_insample_class_under_external_nodes(
     load: (Option<SamplingScheme>, usize),
     ncs: (Option<SamplingScheme>, usize),
 ) -> Result<(), SddpError> {
-    let Some((pos, node)) = node_graph
-        .nodes
-        .iter_indexed()
-        .find(|(_, n)| n.openings.source == OpeningSource::External)
-    else {
+    let Some((pos, node)) = find_external_bound_node(node_graph) else {
         return Ok(());
     };
     for (class, (scheme, count)) in [("inflow", inflow), ("load", load), ("ncs", ncs)] {

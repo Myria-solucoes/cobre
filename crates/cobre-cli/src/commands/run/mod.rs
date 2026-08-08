@@ -280,7 +280,6 @@ pub(super) fn build_distribution_info(
     n_threads: usize,
     ranks_participated: u32,
 ) -> DistributionInfo {
-    use cobre_comm::BackendKind;
     DistributionInfo {
         backend: match topology.backend {
             BackendKind::Mpi => "mpi",

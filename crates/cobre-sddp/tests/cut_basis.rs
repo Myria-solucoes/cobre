@@ -510,7 +510,7 @@ mod cut_subgradient_parity {
         ProductionModelSet::new(models, 1, 1)
     }
 
-    fn fpha_evap_evaporation(system: &cobre_core::System) -> EvaporationModelSet {
+    fn fpha_evap_evaporation() -> EvaporationModelSet {
         let models = vec![EvaporationModel::Linearized {
             coefficients: vec![LinearizedEvaporation {
                 intercept_m3s: INTERCEPT_M3S,
@@ -518,7 +518,6 @@ mod cut_subgradient_parity {
             }],
             reference_volumes_hm3: vec![100.0],
         }];
-        let _ = system;
         EvaporationModelSet::new(models)
     }
 
@@ -533,7 +532,7 @@ mod cut_subgradient_parity {
     fn cut_subgradient_parity_with_fpha_and_evaporation() {
         let system = fpha_evap_system();
         let production = fpha_production();
-        let evaporation = fpha_evap_evaporation(&system);
+        let evaporation = fpha_evap_evaporation();
 
         let result = build_stage_templates_resolving_layout(
             &system,
@@ -1131,10 +1130,8 @@ mod basis_reconstruct_churn {
             }
         }
 
-        {
-            config.training.stopping_rules =
-                Some(vec![StoppingRuleConfig::IterationLimit { limit: 2 }]);
-        }
+        config.training.stopping_rules =
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 2 }]);
 
         setup.set_start_iteration(1);
 

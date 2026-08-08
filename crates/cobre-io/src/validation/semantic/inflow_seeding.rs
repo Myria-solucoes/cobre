@@ -377,12 +377,11 @@ fn warn_unresolvable_first_stage_season(data: &ParsedData, ctx: &mut ValidationC
         return;
     };
 
-    let unresolvable = match &data.stages.policy_graph.season_map {
-        None => true,
-        Some(season_map) => match first_stage.season_id {
-            None => true,
-            Some(season_id) => !season_map.seasons.iter().any(|s| s.id == season_id),
-        },
+    let unresolvable = match (&data.stages.policy_graph.season_map, first_stage.season_id) {
+        (Some(season_map), Some(season_id)) => {
+            !season_map.seasons.iter().any(|s| s.id == season_id)
+        }
+        _ => true,
     };
     if !unresolvable {
         return;

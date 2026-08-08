@@ -45,8 +45,9 @@ pub(crate) fn push_scaled_coefficient(
 ///
 /// The caller pushes this row's `row_starts` offset before calling and the
 /// terminator / `num_rows` / `add_rows` afterward; this helper appends only the
-/// non-zeros and bounds. Shared by [`append_new_cuts_to_lp`] and the DCS
-/// [`append_slots_to_lp`] so the two cannot drift apart.
+/// non-zeros and bounds. Shared by [`build_cut_row_batch_into`],
+/// [`append_new_cuts_to_lp`], and the DCS [`append_slots_to_lp`] so the three
+/// cannot drift apart.
 ///
 /// `coefficients` has length `cut_state.n_slots()` (the pool's enabled cut-state
 /// dimensions); the row places each enabled non-padding coefficient onto the
@@ -129,30 +130,14 @@ pub fn build_cut_row_batch_into(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch.row_starts.push(nz_offset as i32);
 
-        // render_pairs maps each enabled non-padding reduced index j to its
-        // outgoing LP column: identity for storage; for lag dimensions the
-        // outgoing state after shift_lag_state holds z_inflow at lag 0 and shifted
-        // incoming lags at lag 1+, so the cut references z_inflow and incoming lag
-        // l−1. Padding slots are dropped (no row entry), never zero-filled.
-        for (j, lp_col) in cut_state.render_pairs() {
-            push_scaled_coefficient(batch, lp_col, coefficients[j.get()], col_scale);
-        }
-
-        debug_assert!(
-            i32::try_from(theta_col).is_ok(),
-            "theta_col={theta_col} exceeds i32::MAX"
+        push_cut_row(
+            batch,
+            intercept,
+            coefficients,
+            cut_state,
+            theta_col,
+            col_scale,
         );
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        batch.col_indices.push(theta_col as i32);
-        let d_theta = if col_scale.is_empty() {
-            1.0
-        } else {
-            col_scale[theta_col]
-        };
-        batch.values.push(d_theta);
-
-        batch.row_lower.push(intercept);
-        batch.row_upper.push(f64::INFINITY);
 
         nz_offset += nnz_per_cut;
     }

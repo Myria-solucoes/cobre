@@ -75,8 +75,7 @@ pub(super) fn run_simulation_phase(
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity.max(1));
 
     let parquet_config = ParquetWriterConfig::default();
-    let mut sim_writer = SimulationParquetWriter::new(&ctx.output_dir, system, &parquet_config)
-        .map_err(CliError::from)?;
+    let mut sim_writer = SimulationParquetWriter::new(&ctx.output_dir, system, &parquet_config)?;
 
     // Drain straight to Parquet rather than collecting into a Vec and gathering
     // on rank 0 via MPI, which overflows i32 on large cases.

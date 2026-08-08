@@ -383,10 +383,10 @@ pub fn build_training_output(
 
     let worker_timing_records = build_worker_timing_records(events, &convergence_records);
 
-    // The bound regime is set by the forward variant ticket-012 selects: an
-    // enumerated forward is exact (no sampling distribution, so std is NULL), a
-    // sampled forward is statistical. This site WRITES the kind; it does not
-    // decide the bound semantics.
+    // The bound regime is set by the forward variant `ForwardPassesResolution`
+    // selects: an enumerated forward is exact (no sampling distribution, so std
+    // is NULL), a sampled forward is statistical. This site WRITES the kind; it
+    // does not decide the bound semantics.
     let (final_upper_bound_kind, final_upper_bound_std) = if upper_bound_exact {
         ("exact".to_string(), None)
     } else {

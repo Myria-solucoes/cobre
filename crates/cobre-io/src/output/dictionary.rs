@@ -219,7 +219,7 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
 
 /// Every `(file, schema)` pair `variables.csv` documents — the single owner of
 /// the list, shared with the no-empty-description test that guards it.
-fn variables_csv_schemas() -> Vec<(&'static str, arrow::datatypes::Schema)> {
+fn variables_csv_schemas() -> Vec<(&'static str, Schema)> {
     vec![
         ("costs", costs_schema()),
         ("hydros", hydros_schema()),

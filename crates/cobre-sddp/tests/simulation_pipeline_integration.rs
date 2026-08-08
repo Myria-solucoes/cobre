@@ -142,13 +142,13 @@ struct MockSolver {
 }
 
 impl MockSolver {
-    fn always_ok(solution: LpSolution) -> Self {
+    fn new(solution: LpSolution, infeasible_at: Option<usize>) -> Self {
         let buf_primal = solution.primal.clone();
         let buf_dual = solution.dual.clone();
         let buf_reduced_costs = solution.reduced_costs.clone();
         Self {
             solution,
-            infeasible_at: None,
+            infeasible_at,
             call_count: 0,
             buf_primal,
             buf_dual,
@@ -161,23 +161,12 @@ impl MockSolver {
         }
     }
 
+    fn always_ok(solution: LpSolution) -> Self {
+        Self::new(solution, None)
+    }
+
     fn infeasible_on(solution: LpSolution, n: usize) -> Self {
-        let buf_primal = solution.primal.clone();
-        let buf_dual = solution.dual.clone();
-        let buf_reduced_costs = solution.reduced_costs.clone();
-        Self {
-            solution,
-            infeasible_at: Some(n),
-            call_count: 0,
-            buf_primal,
-            buf_dual,
-            buf_reduced_costs,
-            load_count: 0,
-            add_rows_count: 0,
-            solve_count: 0,
-            solve_with_basis_count: 0,
-            recorded_basis: None,
-        }
+        Self::new(solution, Some(n))
     }
 
     fn do_solve(&mut self) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
@@ -1036,7 +1025,6 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
     let objective = 100.0_f64;
     let theta_val = 30.0_f64;
     let expected_stage_cost = (objective - theta_val) * 1_000_000.0;
-    #[allow(clippy::cast_precision_loss)]
     let expected_total_cost = expected_stage_cost * n_stages as f64;
 
     let solution = fixed_solution(objective, theta_val);

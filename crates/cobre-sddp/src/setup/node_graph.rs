@@ -749,6 +749,19 @@ pub(crate) fn backward_cut_levels(graph: &NodeGraph) -> Vec<Vec<NodePos>> {
     levels
 }
 
+/// Per-node predecessor flag: `false` at position `i` iff no edge names node
+/// `i` as its child — a predecessor-free node is a traversal root. Shared by
+/// every enumerated/pool walk below that needs to find the graph's roots.
+fn build_has_predecessor(graph: &NodeGraph) -> TypedVec<NodePos, bool> {
+    let mut has_predecessor: TypedVec<NodePos, bool> = vec![false; graph.nodes.len()].into();
+    for succs in &graph.successors {
+        for succ in succs {
+            has_predecessor[succ.child] = true;
+        }
+    }
+    has_predecessor
+}
+
 /// Number of fully-enumerated scenarios the node graph encodes: the sum over
 /// every root→leaf path of the product of `openings.len` along that path
 /// (`f(n) = |Ω_n| · Σ_child f(child)`, `f(leaf) = |Ω_leaf|`, then summed over
@@ -773,12 +786,7 @@ pub(crate) fn enumerated_scenario_count(graph: &NodeGraph) -> Result<u64, SddpEr
     }
 
     let n = graph.nodes.len();
-    let mut has_predecessor: TypedVec<NodePos, bool> = vec![false; n].into();
-    for succs in &graph.successors {
-        for succ in succs {
-            has_predecessor[succ.child] = true;
-        }
-    }
+    let has_predecessor = build_has_predecessor(graph);
 
     // Resolve `f` in descending-stage order: every successor sits exactly one
     // stage downstream (t -> t+1), so a node's children are already resolved
@@ -850,12 +858,7 @@ const VISIT_BOUND_SIGMA_MULTIPLIER: f64 = 3.0;
 )]
 pub(crate) fn pool_cut_stride(graph: &NodeGraph, forward_passes: u32) -> Vec<u64> {
     let n = graph.nodes.len();
-    let mut has_predecessor: TypedVec<NodePos, bool> = vec![false; n].into();
-    for succs in &graph.successors {
-        for succ in succs {
-            has_predecessor[succ.child] = true;
-        }
-    }
+    let has_predecessor = build_has_predecessor(graph);
 
     // Ascending-stage order: every successor sits exactly one stage
     // downstream (t -> t+1), so a node's own probability is fully
@@ -935,12 +938,7 @@ pub(crate) fn enumerated_node_visit_counts(
     }
 
     let n = graph.nodes.len();
-    let mut has_predecessor: TypedVec<NodePos, bool> = vec![false; n].into();
-    for succs in &graph.successors {
-        for succ in succs {
-            has_predecessor[succ.child] = true;
-        }
-    }
+    let has_predecessor = build_has_predecessor(graph);
 
     let mut order: Vec<NodePos> = (0..n).map(NodePos).collect();
     order.sort_by_key(|&i| graph.nodes[i].stage);
@@ -1096,8 +1094,8 @@ pub(crate) fn any_stage_node(node_graph: &NodeGraph, stage: StageIdx) -> Option<
 
 /// Advance a sampled trajectory from `node` to the node it visits at the next
 /// stage: a single out-edge is taken with probability 1 WITHOUT deriving a
-/// seed, so a chain never perturbs the within-node noise stream (C1
-/// chain-parity). Single owner for the training forward pass
+/// seed, so a chain never perturbs the within-node noise stream
+/// (chain-parity). Single owner for the training forward pass
 /// (`training::forward_pass_state::run_forward_worker`) and the simulation
 /// pass (`simulation::pipeline::advance_simulation_node`) — both delegate here
 /// so the chain-parity contract is stated once.
@@ -1247,13 +1245,7 @@ pub(crate) fn enumerate_forward_paths(node_graph: &NodeGraph) -> EnumeratedForwa
         }
     }
 
-    let n = node_graph.nodes.len();
-    let mut has_predecessor: TypedVec<NodePos, bool> = vec![false; n].into();
-    for succs in &node_graph.successors {
-        for succ in succs {
-            has_predecessor[succ.child] = true;
-        }
-    }
+    let has_predecessor = build_has_predecessor(node_graph);
     let mut paths = EnumeratedForwardPaths {
         leaf: Vec::new(),
         weight: Vec::new(),

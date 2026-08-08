@@ -488,7 +488,6 @@ mod tests {
         assert_eq!(group.name, "all_hydros");
         assert_eq!(group.entities.len(), 3);
         assert!((group.matrix[1][1] - 1.0).abs() < f64::EPSILON);
-        assert_eq!(group.entities.len(), 3);
         assert_eq!(group.entities[0].id, EntityId(10));
         assert_eq!(group.entities[0].entity_type, "inflow");
         assert_eq!(group.entities[1].id, EntityId(20));

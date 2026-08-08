@@ -176,27 +176,7 @@ impl SolverStatsDelta {
     pub fn aggregate<'a>(deltas: impl Iterator<Item = &'a Self>) -> Self {
         let mut result = Self::default();
         for d in deltas {
-            result.lp_solves += d.lp_solves;
-            result.lp_successes += d.lp_successes;
-            result.first_try_successes += d.first_try_successes;
-            result.lp_failures += d.lp_failures;
-            result.retry_attempts += d.retry_attempts;
-            result.basis_offered += d.basis_offered;
-            result.basis_consistency_failures += d.basis_consistency_failures;
-            result.simplex_iterations += d.simplex_iterations;
-            result.solve_time_ms += d.solve_time_ms;
-            result.load_model_count += d.load_model_count;
-            result.load_model_time_ms += d.load_model_time_ms;
-            result.set_bounds_time_ms += d.set_bounds_time_ms;
-            result.basis_set_time_ms += d.basis_set_time_ms;
-            ensure_histogram_capacity(&mut result.retry_level_histogram, &d.retry_level_histogram);
-            for (dst, src) in result
-                .retry_level_histogram
-                .iter_mut()
-                .zip(&d.retry_level_histogram)
-            {
-                *dst += src;
-            }
+            Self::accumulate_into(&mut result, d);
         }
         result
     }

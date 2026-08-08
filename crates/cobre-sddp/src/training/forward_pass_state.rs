@@ -809,7 +809,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(params.noise_dim, 0.0_f64);
     let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
-    perm_scratch.resize((params.total_forward_passes).max(1), 0_usize);
+    perm_scratch.resize(params.total_forward_passes.max(1), 0_usize);
 
     // Per-trajectory sampled-walk node carrier, root-initialized: each
     // trajectory advances its own entry by the transition draw at the end of
@@ -881,7 +881,6 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             };
             ws.current_state.extend_from_slice(src);
 
-            // Seed (or zero) the lag accumulator at trajectory start.
             if t.0 == 0 {
                 if params.lag_accum_seed.is_empty() {
                     ws.scratch.lag_accumulator.fill(0.0);
@@ -972,7 +971,6 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
         }
     }
 
-    // Restore taken scratch buffers so they survive into the next iteration.
     ws.scratch.raw_noise_buf = raw_noise_buf;
     ws.scratch.perm_scratch = perm_scratch;
     ws.scratch.current_node_buf = current_node_buf;

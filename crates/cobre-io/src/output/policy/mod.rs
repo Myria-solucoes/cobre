@@ -380,23 +380,19 @@ mod tests {
         write_policy_checkpoint(tmp.path(), &stage_cuts, &basis_records, &metadata, &[])
             .expect("write_policy_checkpoint must succeed");
 
-        // Directories must exist.
         assert!(tmp.path().join("cuts").is_dir(), "cuts/ must exist");
         assert!(tmp.path().join("basis").is_dir(), "basis/ must exist");
 
-        // All pool-keyed cut files must exist.
         for i in 0..3u32 {
             let p = tmp.path().join(format!("cuts/{i:03}.bin"));
             assert!(p.is_file(), "cuts/{i:03}.bin must exist");
         }
 
-        // All basis files must exist.
         for i in 0..3u32 {
             let p = tmp.path().join(format!("basis/{i:03}.bin"));
             assert!(p.is_file(), "basis/{i:03}.bin must exist");
         }
 
-        // metadata.json must exist.
         assert!(
             tmp.path().join("metadata.json").is_file(),
             "metadata.json must exist"
@@ -518,13 +514,11 @@ mod tests {
             "write_policy_checkpoint must return Ok(()) with empty stage_bases"
         );
 
-        // basis/ directory must exist.
         assert!(
             tmp.path().join("basis").is_dir(),
             "basis/ directory must exist even with empty stage_bases"
         );
 
-        // No .bin files inside basis/.
         let entries: Vec<_> = std::fs::read_dir(tmp.path().join("basis"))
             .unwrap()
             .filter_map(std::result::Result::ok)
@@ -1097,12 +1091,10 @@ mod tests {
 
         let checkpoint = read_policy_checkpoint(tmp.path()).expect("read must succeed");
 
-        // Metadata fields.
         assert_eq!(checkpoint.metadata.producer.completed_iterations, 10);
         assert_eq!(checkpoint.metadata.num_stages, 2);
         assert_eq!(checkpoint.metadata.producer.rng_seed, 42);
 
-        // Cuts: two stages, sorted by stage_id.
         assert_eq!(
             checkpoint.stage_cuts.len(),
             2,
@@ -1113,7 +1105,6 @@ mod tests {
         assert_eq!(checkpoint.stage_cuts[0].cuts.len(), 2);
         assert_eq!(checkpoint.stage_cuts[1].cuts.len(), 1);
 
-        // Stage 0 cut fields.
         let cut00 = &checkpoint.stage_cuts[0].cuts[0];
         assert_eq!(cut00.cut_id, 1);
         assert_eq!(cut00.coefficients, &[1.0f64, 2.0, 3.0]);
@@ -1124,12 +1115,10 @@ mod tests {
         assert_eq!(cut01.cut_id, 2);
         assert_eq!(cut01.coefficients, &[4.0f64, 5.0, 6.0]);
 
-        // Stage 1 cut fields.
         let cut10 = &checkpoint.stage_cuts[1].cuts[0];
         assert_eq!(cut10.cut_id, 3);
         assert_eq!(cut10.coefficients, &[7.0f64, 8.0, 9.0]);
 
-        // Bases: two stages, sorted by stage_id.
         assert_eq!(checkpoint.stage_bases.len(), 2, "must have two stage bases");
         assert_eq!(checkpoint.stage_bases[0].stage_id, 0);
         assert_eq!(checkpoint.stage_bases[1].stage_id, 1);

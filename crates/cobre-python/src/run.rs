@@ -438,9 +438,7 @@ fn drain_training_events(
                 let mut request_stop = |err: Option<PyErr>| {
                     shutdown_flag.store(true, Ordering::Relaxed);
                     if let Some(err) = err {
-                        if captured_pyerr.is_none() {
-                            captured_pyerr = Some(err);
-                        }
+                        captured_pyerr.get_or_insert(err);
                     }
                 };
 

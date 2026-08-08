@@ -635,7 +635,6 @@ mod tests {
         ];
         let buf = serialize_cuts_to_buffer(cuts_data, n_state);
 
-        // New path: into pre-allocated buffers.
         let mut headers_out: Vec<CutWireHeader> = Vec::new();
         let mut coefficients_flat_out: Vec<f64> = Vec::new();
         deserialize_cuts_from_buffer_into(
@@ -653,11 +652,9 @@ mod tests {
             "flat coefficient buffer must have 3 * n_state entries"
         );
 
-        // Old path: allocating reference.
         let reference = deserialize_cuts_from_buffer(&buf, n_state).unwrap();
         assert_eq!(reference.len(), 3);
 
-        // Values must be bit-for-bit identical.
         for (i, (ref_header, ref_coeffs)) in reference.iter().enumerate() {
             assert_eq!(headers_out[i], *ref_header, "header mismatch at cut {i}");
             let start = i * n_state;
@@ -687,7 +684,6 @@ mod tests {
         let mut headers_out: Vec<CutWireHeader> = Vec::new();
         let mut coefficients_flat_out: Vec<f64> = Vec::new();
 
-        // First call: buffers grow to hold 3 cuts.
         deserialize_cuts_from_buffer_into(
             &buf,
             n_state,
@@ -703,8 +699,6 @@ mod tests {
             "headers capacity must be >= 3 after first call, got {cap_headers_after_first}"
         );
 
-        // Second call: buffers are cleared then re-populated without
-        // releasing the previous allocation.
         deserialize_cuts_from_buffer_into(
             &buf,
             n_state,
