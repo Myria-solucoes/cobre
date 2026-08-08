@@ -44,11 +44,13 @@ pub enum SimulationWeighting<'a> {
 /// Aggregate per-scenario cost data across all MPI ranks into a
 /// [`SimulationSummary`] that is identical on all ranks.
 ///
-/// `weighting` selects the reduction:
-/// [`SimulationWeighting::Uniform`] is the sampled Monte-Carlo estimator
-/// (`mean_cost = Σ cᵢ/n`); [`SimulationWeighting::Census`] is the exact
-/// probability-weighted expectation (`mean_cost = Σ wᵢ·cᵢ`) over a declared
-/// census's leaf-path probabilities.
+/// `weighting` selects the reduction: [`SimulationWeighting::Uniform`] is the
+/// sampled Monte-Carlo estimator (`mean_cost = Σ cᵢ/n`, `std_cost` the
+/// Bessel-corrected sample std); [`SimulationWeighting::Census`] is the exact
+/// probability-weighted expectation over a declared census's leaf-path
+/// probabilities (`mean_cost = Σ wᵢ·cᵢ`, `std_cost = √(Σ wᵢ·(cᵢ − mean_cost)²)`,
+/// the true weighted population variance — no Bessel correction, since the
+/// census is exhaustive rather than sampled).
 ///
 /// Also returns the gathered canonical-order per-scenario `(scenario_id,
 /// total_cost, weight)` rows — `weight` is `Some` only under `Census` — for
@@ -153,9 +155,12 @@ pub fn aggregate_simulation<C: Communicator>(
     let weights = resolve_weights(weighting, n);
 
     let mean_cost = RiskMeasure::Expectation.evaluate_risk(&cost_recv, &weights);
-    let std_cost = compute_std(&cost_recv, mean_cost);
-
     let is_census = matches!(weighting, SimulationWeighting::Census { .. });
+    let std_cost = if is_census {
+        compute_weighted_std(&cost_recv, &weights, mean_cost)
+    } else {
+        compute_std(&cost_recv, mean_cost)
+    };
     let gathered: GatheredScenarioCosts = cost_recv
         .iter()
         .zip(&weights)
@@ -231,6 +236,24 @@ fn compute_std(costs: &[f64], mean: f64) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     let variance = sum_sq_diff / (n as f64 - 1.0);
     variance.max(0.0).sqrt()
+}
+
+/// True weighted population variance of `costs` around `mean`, weighted by
+/// `weights` (canonical gathered order, summing to `1.0`).
+///
+/// No Bessel correction: unlike [`compute_std`], a census is an exhaustive
+/// population, not a sample. Returns `0.0` for `costs.len() <= 1`.
+fn compute_weighted_std(costs: &[f64], weights: &[f64], mean: f64) -> f64 {
+    if costs.len() <= 1 {
+        return 0.0;
+    }
+
+    let weighted_sum_sq_diff: f64 = costs
+        .iter()
+        .zip(weights)
+        .map(|(&c, &w)| w * (c - mean) * (c - mean))
+        .sum();
+    weighted_sum_sq_diff.max(0.0).sqrt()
 }
 
 #[cfg(test)]
@@ -318,6 +341,61 @@ mod tests {
             gathered,
             vec![(0, 10.0, Some(0.5)), (1, 30.0, Some(0.5))],
             "gathered rows must carry the census weight, canonical scenario-id order"
+        );
+    }
+
+    // ── Census weighted variance: exactness ────────────────────────────────────
+
+    #[test]
+    fn aggregate_census_weighted_std_exact() {
+        let local_costs = vec![(0u32, 10.0, zero_cats()), (1u32, 30.0, zero_cats())];
+        let config = make_config(2);
+        let comm = LocalBackend;
+        let weights = [0.5, 0.5];
+
+        let (summary, _gathered) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .unwrap();
+
+        // 0.5*(10-20)^2 + 0.5*(30-20)^2 = 0.5*100 + 0.5*100 = 100, sqrt(100) = 10.
+        assert_eq!(summary.mean_cost, 20.0);
+        assert_eq!(summary.std_cost, 10.0);
+    }
+
+    #[test]
+    fn aggregate_census_weighted_std_three_point_unequal_weights() {
+        let local_costs = vec![
+            (0u32, 10.0, zero_cats()),
+            (1u32, 20.0, zero_cats()),
+            (2u32, 50.0, zero_cats()),
+        ];
+        let config = make_config(3);
+        let comm = LocalBackend;
+        let weights = [0.25, 0.25, 0.5];
+
+        let (summary, _gathered) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .unwrap();
+
+        let mean: f64 = 0.25 * 10.0 + 0.25 * 20.0 + 0.5 * 50.0;
+        let expected_std: f64 = (0.25 * (10.0 - mean) * (10.0 - mean)
+            + 0.25 * (20.0 - mean) * (20.0 - mean)
+            + 0.5 * (50.0 - mean) * (50.0 - mean))
+            .sqrt();
+
+        assert_eq!(summary.mean_cost, mean);
+        assert!(
+            (summary.std_cost - expected_std).abs() < 1e-9,
+            "expected std={expected_std}, got {}",
+            summary.std_cost
         );
     }
 
@@ -420,6 +498,44 @@ mod tests {
             single_rank.std_cost.to_bits(),
             repeat.std_cost.to_bits(),
             "std_cost must be bit-identical across repeated identical-shape runs"
+        );
+    }
+
+    #[test]
+    fn aggregate_census_std_bit_identical_across_repeated_calls() {
+        let local_costs = vec![
+            (0u32, 10.0, zero_cats()),
+            (1u32, 20.0, zero_cats()),
+            (2u32, 50.0, zero_cats()),
+        ];
+        let config = make_config(3);
+        let comm = LocalBackend;
+        let weights = [0.25, 0.25, 0.5];
+
+        let (single_rank, _) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .unwrap();
+        let (repeat, _) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .unwrap();
+
+        assert_eq!(
+            single_rank.mean_cost.to_bits(),
+            repeat.mean_cost.to_bits(),
+            "census mean_cost must be bit-identical across repeated identical-shape runs"
+        );
+        assert_eq!(
+            single_rank.std_cost.to_bits(),
+            repeat.std_cost.to_bits(),
+            "census std_cost must be bit-identical across repeated identical-shape runs"
         );
     }
 
