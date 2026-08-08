@@ -1803,7 +1803,6 @@ mod determinism {
         const N_SCENARIOS: u32 = 20;
 
         let fx = Fixture3H::new();
-        // Train once with 1 workspace to get a stable FCF for simulation.
         let (_training_result, fcf) = run_training(1, &fx, N_ITERATIONS);
 
         let costs_1 = run_simulation(1, &fx, &fcf, N_SCENARIOS);
@@ -2071,13 +2070,9 @@ mod water_travel_time_no_arc_byte_identity {
             water_withdrawal_m3s: 0.0,
         };
         let default_hydro_bounds_block = || HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         };
 
         let bounds = ResolvedBounds::new(

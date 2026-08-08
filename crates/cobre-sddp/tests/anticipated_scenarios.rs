@@ -289,13 +289,9 @@ mod anticipated_5stage_k2_smoke {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -767,13 +763,9 @@ mod anticipated_two_plants_smoke {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -1234,13 +1226,9 @@ mod anticipated_simulation_ring_buffer {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 1.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 1.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -1789,15 +1777,7 @@ mod anticipated_generic_constraint_e2e {
                     filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
-                hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                },
+                hydro_block: HydroBlockBounds::default(),
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
@@ -2817,13 +2797,9 @@ mod anticipated_commitment_at_cap {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 

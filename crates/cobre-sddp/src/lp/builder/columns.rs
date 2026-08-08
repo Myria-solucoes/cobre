@@ -378,12 +378,14 @@ fn fill_turbine_columns(
 /// Spillage columns per hydro per block.
 ///
 /// CONTRACT: a `PreFilling` hydro's spillage is pinned `[0, 0]` (no dam exists yet
-/// to spill from), gated on `Phase::PreFilling` ALONE. Two forbidden alternatives:
-/// extending the freeze to `Filling` kills the legitimate over-dam relief valve an
-/// impounding reservoir needs (D40); gating on `filling.is_none()` leaves the
-/// phantom-spill hole open for a filling hydro in its own `PreFilling` sub-phase
-/// (D38/D39), where a free spillage column decoupled from frozen storage injects
-/// water it does not have onto the downstream balance row.
+/// to spill from), gated on `Phase::PreFilling` ALONE, and the pin outranks any
+/// resolved `min_spillage_m3s`/`max_spillage_m3s` — a user bound never lifts it.
+/// Two forbidden alternatives: extending the freeze to `Filling` kills the
+/// legitimate over-dam relief valve an impounding reservoir needs (D40); gating on
+/// `filling.is_none()` leaves the phantom-spill hole open for a filling hydro in
+/// its own `PreFilling` sub-phase (D38/D39), where a free spillage column
+/// decoupled from frozen storage injects water it does not have onto the
+/// downstream balance row.
 fn fill_spillage_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -405,7 +407,20 @@ fn fill_spillage_columns(
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout.spillage_col(HydroSys::new(h_idx), BlockIdx::new(blk));
-            bufs.col_upper[col] = if prefilling { 0.0 } else { f64::INFINITY };
+            let (min_spill, max_spill) = if prefilling {
+                (0.0, 0.0)
+            } else {
+                let hb = ctx
+                    .resolved
+                    .bounds
+                    .hydro_bounds_at_block(h_idx, stage_idx, blk);
+                (
+                    hb.min_spillage_m3s.unwrap_or(0.0),
+                    hb.max_spillage_m3s.unwrap_or(f64::INFINITY),
+                )
+            };
+            bufs.col_lower[col] = min_spill;
+            bufs.col_upper[col] = max_spill;
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col] = hp.spillage_cost * block_hours;
         }
@@ -415,9 +430,11 @@ fn fill_spillage_columns(
 /// Diversion columns per hydro per block (dense; non-diverting hydros get `[0, 0]`
 /// and are presolve-eliminated).
 ///
-/// A filling hydro (`hydro.filling.is_some()`) is forced to `[0, 0]` in ALL phases —
-/// gated on `is_some()`, NOT the `Phase`: phase-gating would wrongly re-enable diversion
-/// at `Operating`, but a filling hydro never diverts.
+/// A dormant hydro (`hydro.filling.is_some()` OR suspended) forces BOTH bounds to
+/// `[0, 0]`: both must drop, or a positive `min_diversion_m3s` floor leaves the
+/// infeasible `[min > 0, 0]`. The gate is `is_some()`, NOT the `Phase`, alone —
+/// phase-gating would wrongly re-enable diversion at `Operating`, but a filling
+/// hydro never diverts.
 fn fill_diversion_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -438,21 +455,23 @@ fn fill_diversion_columns(
         );
         let dormant = hydro.filling.is_some() || suspended;
         for blk in 0..layout.n_blks {
-            // CONTRACT: read the per-stage RESOLVED `max_diversion_m3s`, NOT the
-            // declaration-time `hydro.diversion.max_flow_m3s` — the entity read silently
-            // drops any wired per-stage (or per-block) override (mirrors every sibling
-            // column family).
-            let max_div = if dormant {
-                0.0
+            // CONTRACT: read the per-stage RESOLVED bounds, NOT the declaration-time
+            // `hydro.diversion.max_flow_m3s` — the entity read silently drops any wired
+            // per-stage (or per-block) override (mirrors every sibling column family).
+            let (min_div, max_div) = if dormant {
+                (0.0, 0.0)
             } else {
-                ctx.resolved
+                let hb = ctx
+                    .resolved
                     .bounds
-                    .hydro_bounds_at_block(h_idx, stage_idx, blk)
-                    .max_diversion_m3s
-                    .unwrap_or(0.0)
+                    .hydro_bounds_at_block(h_idx, stage_idx, blk);
+                (
+                    hb.min_diversion_m3s.unwrap_or(0.0),
+                    hb.max_diversion_m3s.unwrap_or(0.0),
+                )
             };
             let col = layout.diversion_col(HydroSys::new(h_idx), BlockIdx::new(blk));
-            bufs.col_lower[col] = 0.0;
+            bufs.col_lower[col] = min_div;
             bufs.col_upper[col] = max_div;
             if max_div > 0.0 {
                 let block_hours = stage.blocks[blk].duration_hours;
@@ -1352,13 +1371,9 @@ mod interior_storage_bound_tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
                     max_turbined_m3s: 100.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
@@ -1874,13 +1889,9 @@ mod diversion_bound_tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
                     max_turbined_m3s: 100.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
@@ -2000,6 +2011,13 @@ mod diversion_bound_tests {
                 .max_diversion_m3s = value;
         }
 
+        /// Set the per-stage resolved `min_diversion_m3s` override for hydro 0.
+        fn set_resolved_diversion_min(&mut self, value: Option<f64>) {
+            self.bounds
+                .hydro_block_base_mut(0, STAGE_IDX)
+                .min_diversion_m3s = value;
+        }
+
         fn make_ctx(&self) -> TemplateBuildCtx<'_> {
             let mut hydro_pos = BTreeMap::new();
             hydro_pos.insert(self.hydros[0].id, 0_usize);
@@ -2061,14 +2079,14 @@ mod diversion_bound_tests {
         }
     }
 
-    /// Run `fill_diversion_columns` against the fixture and return `col_upper`
-    /// plus the two layout offsets the assertions read.
+    /// Run `fill_diversion_columns` against the fixture and return `col_lower`,
+    /// `col_upper`, plus the two layout offsets the assertions read.
     ///
     /// Returns the layout's `(n_blks, col_diversion_start)` by value rather than
     /// the `StageLayout` itself: the layout borrows the function-local
     /// `StateSpace`, so it cannot escape — the caller only needs these two
-    /// offsets to index `col_upper`.
-    fn run_fill(fixtures: &DivFixtures) -> (Vec<f64>, usize, usize) {
+    /// offsets to index `col_lower`/`col_upper`.
+    fn run_fill(fixtures: &DivFixtures) -> (Vec<f64>, Vec<f64>, usize, usize) {
         let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
         let ctx = fixtures.make_ctx();
         let state = state_layout_for(&ctx);
@@ -2082,7 +2100,12 @@ mod diversion_bound_tests {
             objective: &mut objective,
         };
         fill_diversion_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
-        (col_upper, layout.n_blks, layout.equipment.diversion.start)
+        (
+            col_lower,
+            col_upper,
+            layout.n_blks,
+            layout.equipment.diversion.start,
+        )
     }
 
     /// A per-stage resolved override distinct from the declaration value flows
@@ -2098,7 +2121,7 @@ mod diversion_bound_tests {
         let mut fixtures = DivFixtures::new();
         fixtures.set_resolved_diversion(Some(override_value));
 
-        let (col_upper, n_blks, col_diversion_start) = run_fill(&fixtures);
+        let (_col_lower, col_upper, n_blks, col_diversion_start) = run_fill(&fixtures);
         for blk in 0..n_blks {
             let col = col_diversion_start + blk;
             assert_eq!(
@@ -2120,13 +2143,53 @@ mod diversion_bound_tests {
         // resolver does for a diverting hydro with no per-stage override.
         fixtures.set_resolved_diversion(Some(DECLARATION_MAX_FLOW_M3S));
 
-        let (col_upper, n_blks, col_diversion_start) = run_fill(&fixtures);
+        let (_col_lower, col_upper, n_blks, col_diversion_start) = run_fill(&fixtures);
         for blk in 0..n_blks {
             let col = col_diversion_start + blk;
             assert_eq!(
                 col_upper[col], DECLARATION_MAX_FLOW_M3S,
                 "blk {blk}: col_upper[{col}] must equal the declaration default \
                  {DECLARATION_MAX_FLOW_M3S} when no override tightens it"
+            );
+        }
+    }
+
+    /// An active hydro with a resolved floor below its resolved max writes both:
+    /// `col_lower` gets the floor, `col_upper` keeps the max — the floor is a
+    /// genuine two-sided bound, not a repricing of the existing upper bound.
+    #[test]
+    fn active_floor_flows_into_col_lower_alongside_max() {
+        let mut fixtures = DivFixtures::new();
+        fixtures.set_resolved_diversion(Some(20.0));
+        fixtures.set_resolved_diversion_min(Some(5.0));
+
+        let (col_lower, col_upper, n_blks, col_diversion_start) = run_fill(&fixtures);
+        for blk in 0..n_blks {
+            let col = col_diversion_start + blk;
+            assert_eq!(
+                col_lower[col], 5.0,
+                "blk {blk}: col_lower[{col}] must equal the resolved floor 5.0"
+            );
+            assert_eq!(
+                col_upper[col], 20.0,
+                "blk {blk}: col_upper[{col}] must equal the resolved max 20.0"
+            );
+        }
+    }
+
+    /// No resolved floor (`min_diversion_m3s = None`) preserves today's `col_lower`
+    /// of `0.0` — bit-identical byte-neutrality for every study that never sets it.
+    #[test]
+    fn absent_floor_preserves_zero_col_lower() {
+        let mut fixtures = DivFixtures::new();
+        fixtures.set_resolved_diversion(Some(DECLARATION_MAX_FLOW_M3S));
+
+        let (col_lower, _col_upper, n_blks, col_diversion_start) = run_fill(&fixtures);
+        for blk in 0..n_blks {
+            let col = col_diversion_start + blk;
+            assert_eq!(
+                col_lower[col], 0.0,
+                "blk {blk}: col_lower[{col}] stays 0.0 with no resolved floor"
             );
         }
     }
@@ -2144,12 +2207,12 @@ mod filling_phase_gating_tests {
 
     use cobre_core::entities::hydro::{FillingConfig, HydroGenerationModel};
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology, ContractBlockBounds,
-        EntityId, Hydro, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
-        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
-        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalBlockBounds,
-        ThermalStageBounds,
+        BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroStageBounds,
+        HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBlockBounds,
+        ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, Stage, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2162,7 +2225,9 @@ mod filling_phase_gating_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
-    use super::super::test_support::{state_layout_for, two_block_stage, zero_hydro_penalties};
+    use super::super::test_support::{
+        state_layout_for, three_block_stage, two_block_stage, zero_hydro_penalties,
+    };
     use super::{
         ColumnBufs, StageLayout, TemplateBuildCtx, fill_diversion_columns,
         fill_fpha_generation_columns, fill_spillage_columns, fill_turbine_columns,
@@ -2246,13 +2311,10 @@ mod filling_phase_gating_tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
                     max_turbined_m3s: MAX_TURBINED_M3S,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
                     max_generation_mw: MAX_GENERATION_MW,
                     max_diversion_m3s: Some(MAX_DIVERSION_M3S),
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
@@ -2489,23 +2551,47 @@ mod filling_phase_gating_tests {
     }
 
     /// Run `fill_spillage_columns` against the fixture at `stage_id`, returning
-    /// `col_upper` and the spillage column start. Isolated like `run_storage_fill`:
-    /// the spillage freeze is independent of the turbine/diversion/generation gates,
-    /// so it is exercised on its own.
-    fn run_spillage_fill(fixtures: &Fixtures, stage_id: i32) -> (Vec<f64>, usize, usize) {
+    /// `(col_lower, col_upper)`, the spillage column start, and the block count.
+    /// Isolated like `run_storage_fill`: the spillage freeze is independent of the
+    /// turbine/diversion/generation gates, so it is exercised on its own.
+    fn run_spillage_fill(fixtures: &Fixtures, stage_id: i32) -> (Vec<f64>, Vec<f64>, usize, usize) {
         let stage_index = usize::try_from(stage_id).expect("test stage ids are non-negative");
         let stage = two_block_stage(stage_index, [372.0, 372.0]);
+        run_spillage_fill_at(fixtures, &stage)
+    }
+
+    /// [`run_spillage_fill`], but over a three-block stage — needed for the
+    /// per-block override AC, whose `block_id = 2` target has no counterpart on a
+    /// two-block stage.
+    fn run_spillage_fill_three_block(
+        fixtures: &Fixtures,
+        stage_id: i32,
+    ) -> (Vec<f64>, Vec<f64>, usize, usize) {
+        let stage_index = usize::try_from(stage_id).expect("test stage ids are non-negative");
+        let stage = three_block_stage(stage_index);
+        run_spillage_fill_at(fixtures, &stage)
+    }
+
+    fn run_spillage_fill_at(
+        fixtures: &Fixtures,
+        stage: &Stage,
+    ) -> (Vec<f64>, Vec<f64>, usize, usize) {
         let ctx = fixtures.make_ctx();
         let state = state_layout_for(&ctx);
-        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
+        let layout = StageLayout::new(&ctx, &state, stage, STAGE_IDX);
         let (mut col_lower, mut col_upper, mut objective) = fresh_bufs(layout.num_cols);
         let mut bufs = ColumnBufs {
             col_lower: &mut col_lower,
             col_upper: &mut col_upper,
             objective: &mut objective,
         };
-        fill_spillage_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
-        (col_upper, layout.equipment.spillage.start, layout.n_blks)
+        fill_spillage_columns(&ctx, stage, STAGE_IDX, &layout, &mut bufs);
+        (
+            col_lower,
+            col_upper,
+            layout.equipment.spillage.start,
+            layout.n_blks,
+        )
     }
 
     fn filling_config() -> FillingConfig {
@@ -2523,7 +2609,8 @@ mod filling_phase_gating_tests {
     #[test]
     fn filling_hydro_spillage_frozen_in_prefilling_free_in_filling_and_operating() {
         let fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
-        let (upper_pre, spill_start, n_blks) = run_spillage_fill(&fixtures, PREFILLING_ID);
+        let (_lower_pre, upper_pre, spill_start, n_blks) =
+            run_spillage_fill(&fixtures, PREFILLING_ID);
         for blk in 0..n_blks {
             assert_eq!(
                 upper_pre[spill_start + blk],
@@ -2532,7 +2619,7 @@ mod filling_phase_gating_tests {
             );
         }
         for stage_id in [FILLING_ID, OPERATING_ID] {
-            let (upper, start, n) = run_spillage_fill(&fixtures, stage_id);
+            let (_lower, upper, start, n) = run_spillage_fill(&fixtures, stage_id);
             for blk in 0..n {
                 assert_eq!(
                     upper[start + blk],
@@ -2552,7 +2639,7 @@ mod filling_phase_gating_tests {
         // With filling = None, both ids < entry are PreFilling (no Filling phase
         // exists for a non-filling hydro): FILLING_ID here is just a second dormant id.
         for stage_id in [PREFILLING_ID, FILLING_ID] {
-            let (upper, start, n_blks) = run_spillage_fill(&fixtures, stage_id);
+            let (_lower, upper, start, n_blks) = run_spillage_fill(&fixtures, stage_id);
             for blk in 0..n_blks {
                 assert_eq!(
                     upper[start + blk],
@@ -2561,7 +2648,7 @@ mod filling_phase_gating_tests {
                 );
             }
         }
-        let (upper, start, n_blks) = run_spillage_fill(&fixtures, OPERATING_ID);
+        let (_lower, upper, start, n_blks) = run_spillage_fill(&fixtures, OPERATING_ID);
         for blk in 0..n_blks {
             assert_eq!(
                 upper[start + blk],
@@ -2578,7 +2665,7 @@ mod filling_phase_gating_tests {
     fn non_filling_hydro_spillage_free_at_every_stage() {
         let fixtures = Fixtures::new(None, None, false);
         for stage_id in [PREFILLING_ID, FILLING_ID, OPERATING_ID] {
-            let (upper, start, n_blks) = run_spillage_fill(&fixtures, stage_id);
+            let (_lower, upper, start, n_blks) = run_spillage_fill(&fixtures, stage_id);
             for blk in 0..n_blks {
                 assert_eq!(
                     upper[start + blk],
@@ -2587,6 +2674,117 @@ mod filling_phase_gating_tests {
                 );
             }
         }
+    }
+
+    /// A resolved `min_spillage_m3s`/`max_spillage_m3s` band flows into both
+    /// bounds while `Filling` — the `PreFilling` pin fires only in its own phase,
+    /// so a filling hydro's `Filling`-phase spillage takes the ordinary two-sided
+    /// resolved read.
+    #[test]
+    fn filling_phase_resolved_band_flows_into_both_bounds() {
+        let mut fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
+        let hb = fixtures.bounds.hydro_block_base_mut(0, STAGE_IDX);
+        hb.min_spillage_m3s = Some(2.0);
+        hb.max_spillage_m3s = Some(30.0);
+
+        let (lower, upper, start, n_blks) = run_spillage_fill(&fixtures, FILLING_ID);
+        for blk in 0..n_blks {
+            assert_eq!(
+                lower[start + blk],
+                2.0,
+                "spillage col_lower at Filling, blk {blk}"
+            );
+            assert_eq!(
+                upper[start + blk],
+                30.0,
+                "spillage col_upper at Filling, blk {blk}"
+            );
+        }
+    }
+
+    /// The `PreFilling` pin outranks a resolved spillage band: even with
+    /// `min_spillage_m3s = Some(2.0)` and `max_spillage_m3s = Some(30.0)`
+    /// resolved, both bounds are `[0, 0]` — the pin is a conservation contract,
+    /// never a default a user bound can override.
+    #[test]
+    fn prefilling_pin_outranks_resolved_spillage_band() {
+        let mut fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), false);
+        let hb = fixtures.bounds.hydro_block_base_mut(0, STAGE_IDX);
+        hb.min_spillage_m3s = Some(2.0);
+        hb.max_spillage_m3s = Some(30.0);
+
+        let (lower, upper, start, n_blks) = run_spillage_fill(&fixtures, PREFILLING_ID);
+        for blk in 0..n_blks {
+            assert_eq!(
+                lower[start + blk],
+                0.0,
+                "PreFilling pin wins col_lower over the resolved floor, blk {blk}"
+            );
+            assert_eq!(
+                upper[start + blk],
+                0.0,
+                "PreFilling pin wins col_upper over the resolved ceiling, blk {blk}"
+            );
+        }
+    }
+
+    /// With no resolved spillage bounds, an `Operating`-phase hydro's spillage
+    /// stays `[0, +∞)` on both sides — extends
+    /// `non_filling_hydro_spillage_free_at_every_stage`'s `col_upper` coverage to
+    /// `col_lower`.
+    #[test]
+    fn operating_no_bounds_preserves_free_range_both_sides() {
+        let fixtures = Fixtures::new(None, None, false);
+        let (lower, upper, start, n_blks) = run_spillage_fill(&fixtures, OPERATING_ID);
+        for blk in 0..n_blks {
+            assert_eq!(
+                lower[start + blk],
+                0.0,
+                "col_lower stays 0.0 with no resolved floor, blk {blk}"
+            );
+            assert_eq!(
+                upper[start + blk],
+                f64::INFINITY,
+                "col_upper stays +∞ with no resolved ceiling, blk {blk}"
+            );
+        }
+    }
+
+    /// A three-block `Operating` stage with a stage-wide `max_spillage_m3s =
+    /// Some(50.0)` and a `block_id = 2` override to `10.0` binds ONLY block 2 —
+    /// the spillage analogue of the diversion/turbine per-block cap.
+    #[test]
+    fn per_block_spillage_cap_binds_only_its_own_block() {
+        let mut fixtures = Fixtures::new(None, None, false);
+        fixtures
+            .bounds
+            .hydro_block_base_mut(0, STAGE_IDX)
+            .max_spillage_m3s = Some(50.0);
+        fixtures
+            .bounds
+            .set_block_overlay(ResolvedBlockBounds::new(&BlockBoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                max_blocks: 3,
+            }));
+        fixtures
+            .bounds
+            .block_overlay_mut()
+            .hydro_override_mut(0, STAGE_IDX, 2)
+            .expect("overlay cell must exist for a fixture-sized overlay")
+            .max_spillage_m3s = Some(10.0);
+
+        let (_lower, upper, start, n_blks) = run_spillage_fill_three_block(&fixtures, OPERATING_ID);
+        assert_eq!(n_blks, 3, "three-block fixture");
+        assert_eq!(
+            [upper[start], upper[start + 1], upper[start + 2]],
+            [50.0, 50.0, 10.0],
+            "only block 2 is bound to the override"
+        );
     }
 
     /// A filling FPHA hydro pins its turbine column to `[0, 0]` in `PreFilling`
@@ -2648,6 +2846,32 @@ mod filling_phase_gating_tests {
                     "diversion col_upper blk {blk} at {stage_id}"
                 );
             }
+        }
+    }
+
+    /// A filling hydro's diversion floor drops with the freeze: a resolved
+    /// `min_diversion_m3s = Some(5.0)` at an `Operating`-phase stage still yields
+    /// `[0, 0]`, never the infeasible `[5.0, 0.0]` — the dormant gate on
+    /// `filling.is_some()` drops both bounds together regardless of a floor.
+    #[test]
+    fn filling_hydro_diversion_floor_dropped_at_operating() {
+        let mut fixtures = Fixtures::new(Some(filling_config()), Some(ENTRY_STAGE_ID), true);
+        fixtures
+            .bounds
+            .hydro_block_base_mut(0, STAGE_IDX)
+            .min_diversion_m3s = Some(5.0);
+
+        let (lower, upper, [_turb, div, _gen_col]) = run_fills(&fixtures, OPERATING_ID);
+        for blk in 0..2 {
+            let col = div + blk;
+            assert_eq!(
+                lower[col], 0.0,
+                "diversion col_lower blk {blk} at Operating with a floor set"
+            );
+            assert_eq!(
+                upper[col], 0.0,
+                "diversion col_upper blk {blk} at Operating with a floor set"
+            );
         }
     }
 
@@ -3314,13 +3538,7 @@ mod anticipated_objective_tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
@@ -3463,13 +3681,7 @@ mod anticipated_objective_tests {
                         water_withdrawal_m3s: 0.0,
                     },
                     hydro_block: HydroBlockBounds {
-                        min_turbined_m3s: 0.0,
-                        max_turbined_m3s: 0.0,
-                        min_outflow_m3s: 0.0,
-                        max_outflow_m3s: None,
-                        min_generation_mw: 0.0,
-                        max_generation_mw: 0.0,
-                        max_diversion_m3s: None,
+                        ..Default::default()
                     },
                     thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                     thermal_block: ThermalBlockBounds {
@@ -3830,13 +4042,9 @@ mod block_family_slack_tests {
 
     fn zero_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 50.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 45.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -4287,13 +4495,9 @@ mod evaporation_slack_objective_tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
                     max_turbined_m3s: 50.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
                     max_generation_mw: 45.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
@@ -4689,13 +4893,7 @@ mod contract_column_tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
@@ -5009,13 +5207,7 @@ mod thermal_block_bound_tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
@@ -5477,13 +5669,7 @@ mod line_contract_pumping_block_bound_tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
@@ -6207,6 +6393,7 @@ mod hydro_block_bound_tests {
             min_generation_mw,
             max_generation_mw,
             max_diversion_m3s,
+            ..Default::default()
         }
     }
 
@@ -6871,6 +7058,37 @@ mod hydro_block_bound_tests {
         );
     }
 
+    /// A hydro with stage-wide `min_diversion_m3s = Some(2.0)` and a `block_id = 1`
+    /// override to `7.0` on a three-block stage binds ONLY block 1 — the floor
+    /// analogue of [`test_per_block_diversion_cap_binds_only_its_own_block`].
+    #[test]
+    fn test_per_block_diversion_floor_binds_only_its_own_block() {
+        let hydros = vec![fixture_hydro(1, None)];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[1.0]);
+        let mut hb = hydro_block_bounds(0.0, 0.0, 0.0, None, 0.0, 0.0, Some(20.0));
+        hb.min_diversion_m3s = Some(2.0);
+        fixtures.set_hydro_bounds(0, STAGE_IDX, hb);
+        fixtures.install_block_overlay();
+        fixtures.set_hydro_block_override(
+            0,
+            STAGE_IDX,
+            1,
+            HydroBlockOverride {
+                min_diversion_m3s: Some(7.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+        let lower = per_block(&result.col_lower, off, off.diversion);
+        assert_eq!(
+            lower,
+            vec![2.0, 7.0, 2.0],
+            "only block 1 is bound to the floor override"
+        );
+    }
+
     /// A filling-suspended hydro (`filling = None`, `entry_stage_id` after the
     /// build stage — `PreFilling`) carrying a `block_id` override setting
     /// `max_turbined_m3s = 400.0` still gets `[0, 0]` at every block: the
@@ -7309,13 +7527,9 @@ mod cell_column_bound_tests {
     /// fills under test.
     fn hydro_block_bounds(max_turbined_m3s: f64, max_generation_mw: f64) -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 

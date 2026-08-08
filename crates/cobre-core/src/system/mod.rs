@@ -1833,6 +1833,7 @@ mod tests {
                     min_generation_mw: 5.0,
                     max_generation_mw: 200.0,
                     max_diversion_m3s: Some(20.0),
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 85.0 },
                 thermal_block: ThermalBlockBounds {

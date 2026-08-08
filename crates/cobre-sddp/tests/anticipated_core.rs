@@ -270,15 +270,7 @@ mod anticipated_backward_cut {
                     filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
-                hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                },
+                hydro_block: HydroBlockBounds::default(),
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
@@ -1043,13 +1035,9 @@ mod anticipated_pre_horizon_seed_delivery {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 1.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 1.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -2040,13 +2028,9 @@ mod anticipated_d_t_saturation {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 1.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 1.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -2646,13 +2630,9 @@ mod anticipated_forward_pass {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -3272,15 +3252,7 @@ mod anticipated_closed_form_lb_k1_single_thermal {
                     filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
-                hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                },
+                hydro_block: HydroBlockBounds::default(),
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
@@ -3659,15 +3631,7 @@ mod lead_time_single_decider_end_to_end {
                     filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
-                hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                },
+                hydro_block: HydroBlockBounds::default(),
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
@@ -4124,13 +4088,9 @@ mod anticipated_numerical_reconciliation_k2 {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 1.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 1.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -4702,13 +4662,9 @@ mod anticipated_bridge_st_cruz_nova_k1 {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 1.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 1.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -5255,13 +5211,9 @@ mod anticipated_convergence_slow {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -5707,15 +5659,7 @@ mod a1b_value_cut_identity_anchor {
                     filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
-                hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                },
+                hydro_block: HydroBlockBounds::default(),
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
@@ -6371,15 +6315,7 @@ mod a1c_stage_count_mode_anchor {
                     filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
-                hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                },
+                hydro_block: HydroBlockBounds::default(),
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,

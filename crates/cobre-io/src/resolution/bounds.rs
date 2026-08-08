@@ -162,7 +162,10 @@ pub struct BoundsOverrides<'a> {
 ///     max_outflow_m3s: None,
 ///     min_generation_mw: None,
 ///     max_generation_mw: None,
+///     min_diversion_m3s: None,
 ///     max_diversion_m3s: None,
+///     min_spillage_m3s: None,
+///     max_spillage_m3s: None,
 ///     filling_min_rate_m3s: None,
 ///     water_withdrawal_m3s: None,
 ///     block_id: None,
@@ -458,8 +461,17 @@ pub fn resolve_bounds(
         if let Some(v) = row.max_generation_mw {
             block_cell.max_generation_mw = v;
         }
+        if let Some(v) = row.min_diversion_m3s {
+            block_cell.min_diversion_m3s = Some(v);
+        }
         if let Some(v) = row.max_diversion_m3s {
             block_cell.max_diversion_m3s = Some(v);
+        }
+        if let Some(v) = row.min_spillage_m3s {
+            block_cell.min_spillage_m3s = Some(v);
+        }
+        if let Some(v) = row.max_spillage_m3s {
+            block_cell.max_spillage_m3s = Some(v);
         }
     }
 
@@ -669,10 +681,10 @@ fn block_slot(
 }
 
 /// Write a hydro block row's present columns into a per-block overlay cell.
-/// Only the seven block-eligible columns are read from `row` — the four
-/// stage-level columns (`min`/`max_storage_hm3`, `filling_min_rate_m3s`,
-/// `water_withdrawal_m3s`) have no field on [`HydroBlockOverride`] and are
-/// never written here.
+/// Only the block-eligible columns are read from `row` — every field on
+/// [`HydroBlockOverride`]; the four stage-level columns (`min`/
+/// `max_storage_hm3`, `filling_min_rate_m3s`, `water_withdrawal_m3s`) have no
+/// field there and are never written here.
 fn apply_hydro_block_row(row: &HydroBoundsRow, over: &mut HydroBlockOverride) {
     if let Some(v) = row.min_turbined_m3s {
         over.min_turbined_m3s = Some(v);
@@ -692,8 +704,17 @@ fn apply_hydro_block_row(row: &HydroBoundsRow, over: &mut HydroBlockOverride) {
     if let Some(v) = row.max_generation_mw {
         over.max_generation_mw = Some(v);
     }
+    if let Some(v) = row.min_diversion_m3s {
+        over.min_diversion_m3s = Some(v);
+    }
     if let Some(v) = row.max_diversion_m3s {
         over.max_diversion_m3s = Some(v);
+    }
+    if let Some(v) = row.min_spillage_m3s {
+        over.min_spillage_m3s = Some(v);
+    }
+    if let Some(v) = row.max_spillage_m3s {
+        over.max_spillage_m3s = Some(v);
     }
 }
 
@@ -753,7 +774,10 @@ fn hydro_base_stage_bounds(hydro: &Hydro) -> HydroStageBounds {
 }
 
 /// Derive the base block-eligible [`HydroBlockBounds`] from a `Hydro` entity's
-/// fields. `max_diversion_m3s` is `None` without a diversion channel.
+/// fields. `max_diversion_m3s` is `None` without a diversion channel;
+/// `min_diversion_m3s`, `min_spillage_m3s`, and `max_spillage_m3s` have no
+/// entity-level declaration source at all, so they are always `None` here —
+/// `None` on that axis means "unbounded on that side".
 #[inline]
 fn hydro_base_block_bounds(hydro: &Hydro) -> HydroBlockBounds {
     HydroBlockBounds {
@@ -763,7 +787,10 @@ fn hydro_base_block_bounds(hydro: &Hydro) -> HydroBlockBounds {
         max_outflow_m3s: hydro.max_outflow_m3s,
         min_generation_mw: hydro.min_generation_mw,
         max_generation_mw: hydro.max_generation_mw,
+        min_diversion_m3s: None,
         max_diversion_m3s: hydro.diversion.as_ref().map(|d| d.max_flow_m3s),
+        min_spillage_m3s: None,
+        max_spillage_m3s: None,
     }
 }
 
@@ -788,7 +815,10 @@ fn zero_hydro_block_bounds() -> HydroBlockBounds {
         max_outflow_m3s: None,
         min_generation_mw: 0.0,
         max_generation_mw: 0.0,
+        min_diversion_m3s: None,
         max_diversion_m3s: None,
+        min_spillage_m3s: None,
+        max_spillage_m3s: None,
     }
 }
 
@@ -990,18 +1020,7 @@ mod tests {
         HydroBoundsRow {
             hydro_id: EntityId::from(hydro_id),
             stage_id,
-            min_turbined_m3s: None,
-            max_turbined_m3s: None,
-            min_storage_hm3: None,
-            max_storage_hm3: None,
-            min_outflow_m3s: None,
-            max_outflow_m3s: None,
-            min_generation_mw: None,
-            max_generation_mw: None,
-            max_diversion_m3s: None,
-            filling_min_rate_m3s: None,
-            water_withdrawal_m3s: None,
-            block_id: None,
+            ..Default::default()
         }
     }
 

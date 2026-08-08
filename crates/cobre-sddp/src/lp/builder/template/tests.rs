@@ -54,13 +54,9 @@ fn default_hydro_bounds() -> HydroStageBounds {
 
 fn default_hydro_block_bounds() -> HydroBlockBounds {
     HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 250.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     }
 }
 
@@ -2170,7 +2166,7 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
                 max_outflow_m3s: Some(800.0),
                 min_generation_mw: 5.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -4056,13 +4052,9 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {

@@ -1562,6 +1562,175 @@ fn hydro_bound_pipeline_presort_key_matches_builder_canonical_key() {
     );
 }
 
+// ─── Stage-wide vs. per-block spillage override resolution ────────────────
+
+/// A single hydro on a three-block stage with a `constraints/hydro_bounds.parquet`
+/// stage-wide `max_spillage_m3s=12.0` override and a `block_id=1` override
+/// tightening it to `4.0` — `hydro_bounds_at_block` must apply the per-block
+/// override only to its own block, falling back to the stage-wide value on the
+/// other two.
+fn make_hydro_spillage_stage_and_block_override_case(dir: &TempDir) {
+    let root = dir.path();
+
+    helpers::write_file(root, "config.json", helpers::VALID_CONFIG_JSON);
+    helpers::write_file(root, "penalties.json", helpers::VALID_PENALTIES_JSON);
+    helpers::write_file(
+        root,
+        "initial_conditions.json",
+        helpers::VALID_INITIAL_CONDITIONS_JSON,
+    );
+
+    helpers::write_file(
+        root,
+        "stages.json",
+        r#"{
+    "policy_graph": {
+        "type": "finite_horizon",
+        "annual_discount_rate": 0.06,
+        "transitions": []
+    },
+    "stages": [
+        {
+            "id": 0,
+            "start_date": "2024-01-01",
+            "end_date": "2024-02-01",
+            "blocks": [
+                { "id": 0, "name": "B0", "hours": 248.0 },
+                { "id": 1, "name": "B1", "hours": 248.0 },
+                { "id": 2, "name": "B2", "hours": 248.0 }
+            ],
+            "num_openings": 1
+        }
+    ]
+}"#,
+    );
+
+    helpers::write_file(
+        root,
+        "system/buses.json",
+        r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#,
+    );
+    helpers::write_file(root, "system/lines.json", r#"{ "lines": [] }"#);
+    helpers::write_file(root, "system/thermals.json", r#"{ "thermals": [] }"#);
+
+    helpers::write_file(
+        root,
+        "system/hydros.json",
+        r#"{
+    "hydros": [
+        {
+            "id": 1,
+            "name": "HYDRO_1",
+            "operational_start_date": "2024-01-01",
+            "downstream_id": null,
+            "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
+            "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
+            "generation": {
+                "model": "constant_productivity",
+                "min_turbined_m3s": 0.0,
+                "max_turbined_m3s": 200.0,
+                "min_generation_mw": 0.0,
+                "max_generation_mw": 200.0
+            },
+            "unit_groups": [
+                {
+                    "id": 0,
+                    "name": "HYDRO_1",
+                    "bus_id": 1,
+                    "min_generation_mw": 0.0,
+                    "max_generation_mw": 200.0,
+                    "min_turbined_m3s": 0.0,
+                    "max_turbined_m3s": 200.0
+                }
+            ]
+        }
+    ]
+}"#,
+    );
+
+    helpers::write_file(
+        root,
+        "system/hydro_production_models.json",
+        r#"{
+    "production_models": [
+        {
+            "hydro_id": 1,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [
+                { "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }
+            ]
+        }
+    ]
+}"#,
+    );
+
+    std::fs::create_dir_all(root.join("constraints")).unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("max_spillage_m3s", DataType::Float64, true),
+        Field::new("block_id", DataType::Int32, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 1])),
+            Arc::new(Int32Array::from(vec![0, 0])),
+            Arc::new(Float64Array::from(vec![Some(12.0), Some(4.0)])),
+            Arc::new(Int32Array::from(vec![None, Some(1)])),
+        ],
+    )
+    .unwrap();
+    let file = std::fs::File::create(root.join("constraints/hydro_bounds.parquet")).unwrap();
+    let mut writer = ArrowWriter::try_new(file, batch.schema(), None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// AC: a stage-wide `max_spillage_m3s` override and a `block_id=1` override on
+/// the same stage resolve per block — block 1 reads back its own tighter value,
+/// blocks 0 and 2 fall through to the stage-wide value.
+#[test]
+fn hydro_spillage_override_resolves_stage_wide_and_per_block() {
+    let dir = TempDir::new().unwrap();
+    make_hydro_spillage_stage_and_block_override_case(&dir);
+
+    let system = load_case(dir.path()).unwrap_or_else(|e| panic!("expected Ok(System): {e}"));
+
+    let hydros = system.hydros();
+    assert_eq!(hydros.len(), 1, "expected exactly 1 hydro");
+    let pos = hydros
+        .iter()
+        .position(|h| h.id == EntityId::from(1))
+        .expect("hydro 1 present in System::hydros()");
+
+    let bounds = system.bounds();
+    let stage_idx = 0;
+
+    let block0 = bounds.hydro_bounds_at_block(pos, stage_idx, 0);
+    let block1 = bounds.hydro_bounds_at_block(pos, stage_idx, 1);
+    let block2 = bounds.hydro_bounds_at_block(pos, stage_idx, 2);
+
+    assert!(
+        matches!(block0.max_spillage_m3s, Some(v) if (v - 12.0).abs() < f64::EPSILON),
+        "block 0 has no per-block override, so it reads back the stage-wide \
+         max_spillage_m3s=12.0, got {:?}",
+        block0.max_spillage_m3s
+    );
+    assert!(
+        matches!(block1.max_spillage_m3s, Some(v) if (v - 4.0).abs() < f64::EPSILON),
+        "block 1's own override (4.0) takes precedence over the stage-wide \
+         value (12.0), got {:?}",
+        block1.max_spillage_m3s
+    );
+    assert!(
+        matches!(block2.max_spillage_m3s, Some(v) if (v - 12.0).abs() < f64::EPSILON),
+        "block 2 has no per-block override, so it reads back the stage-wide \
+         max_spillage_m3s=12.0, got {:?}",
+        block2.max_spillage_m3s
+    );
+}
+
 // ─── The sort runs after validation, not before ───────────────────────────
 
 /// Two hydros, dated the REVERSE of their id order (hydro 1 dated 2030, hydro

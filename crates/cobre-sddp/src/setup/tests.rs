@@ -191,13 +191,9 @@ fn minimal_system_with_policy_graph(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -436,13 +432,9 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -1916,13 +1908,9 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -2338,13 +2326,9 @@ fn minimal_system_2_hydros_with_history(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -2782,13 +2766,9 @@ fn staggered_dates_system_2_hydros(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -3125,13 +3105,9 @@ fn filling_system_2_hydros(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -3697,13 +3673,9 @@ fn system_with_anticipated_thermals(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -3967,13 +3939,9 @@ fn system_with_two_anticipated_thermals_staggered_dates(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -4583,13 +4551,9 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -5018,13 +4982,9 @@ fn external_inflow_library_built_when_scheme_is_external() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -5291,13 +5251,9 @@ fn external_load_library_built_when_scheme_is_external() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -5596,13 +5552,9 @@ fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -5904,13 +5856,9 @@ fn external_ncs_library_built_when_scheme_is_external() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -6167,13 +6115,9 @@ fn historical_library_fails_when_no_valid_windows() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -6537,13 +6481,9 @@ fn minimal_system_with_anticipated(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -7233,13 +7173,9 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -7762,13 +7698,9 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 200.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 200.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -8338,15 +8270,7 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
                 filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
-            hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
-                max_turbined_m3s: 0.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
-                max_generation_mw: 0.0,
-                max_diversion_m3s: None,
-            },
+            hydro_block: HydroBlockBounds::default(),
             thermal: ThermalStageBounds { cost_per_mwh: 50.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
@@ -8561,15 +8485,7 @@ fn zero_bounds_defaults(contract_price: f64) -> BoundsDefaults {
             filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         },
-        hydro_block: HydroBlockBounds {
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 0.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 0.0,
-            max_diversion_m3s: None,
-        },
+        hydro_block: HydroBlockBounds::default(),
         thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
         thermal_block: ThermalBlockBounds {
             min_generation_mw: 0.0,

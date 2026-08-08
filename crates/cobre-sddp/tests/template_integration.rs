@@ -91,13 +91,9 @@ fn default_hydro_bounds() -> HydroStageBounds {
 
 fn default_hydro_block_bounds() -> HydroBlockBounds {
     HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 250.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     }
 }
 
@@ -588,13 +584,9 @@ fn fpha_system_with_turbined_cost(
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 150.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 300.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -1073,13 +1065,9 @@ fn one_fpha_hydro_system(n_planes: usize) -> (cobre_core::System, ProductionMode
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 150.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 300.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -1700,13 +1688,9 @@ fn evap_hydro_system_with_violation_cost(
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -2043,13 +2027,9 @@ fn one_hydro_system_with_withdrawal(
                 water_withdrawal_m3s,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -2544,7 +2524,6 @@ fn one_bus_one_thermal_system(
         std_mw: 0.0,
     }];
 
-    // Resolved bounds: 0 hydros, 1 thermal, 0 lines, 0 pumping, 0 contracts, 1 stage.
     let resolved_bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 0,
@@ -2772,7 +2751,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
                 max_outflow_m3s: Some(800.0),
                 min_generation_mw: 5.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -3315,7 +3294,6 @@ fn two_thermal_one_anticipated_system(n_stages: usize, lead_stages: u32) -> cobr
             ..Default::default()
         },
     );
-    // Thermal 1: non-anticipated.
     let thermal_non = make_thermal(
         EntityId(3),
         ThermalSpec {
@@ -4384,9 +4362,8 @@ fn rt_col_ant_state_incoming_start(k: usize) -> usize {
 ///
 /// The anticipated ring contributes `2*k` columns (outgoing `anticipated_slots_out`
 /// AND incoming `anticipated_state`, each width `k`) before `theta`.
-/// = decision_start + 3*N*n_blks = (theta+1) + 6 = (2*k+1) + 6 = 7+2K,
-/// wait: theta = N*(3+L) + 2*k = 3 + 2*k, decision_start = theta+1 = 4+2k,
-/// col_thermal_start = decision_start + 6 = 10+2K.
+/// theta = N*(3+L) + 2*k = 3 + 2*k, decision_start = theta+1 = 4+2k, so
+/// col_thermal_start = decision_start + 3*N*n_blks = decision_start + 6 = 10+2K.
 fn rt_col_thermal_start(k: usize) -> usize {
     10 + 2 * k
 }

@@ -257,7 +257,10 @@ pub(super) fn check_duplicate_bound_rows(data: &ParsedData, ctx: &mut Validation
                 ("max_outflow_m3s", row.max_outflow_m3s),
                 ("min_generation_mw", row.min_generation_mw),
                 ("max_generation_mw", row.max_generation_mw),
+                ("min_diversion_m3s", row.min_diversion_m3s),
                 ("max_diversion_m3s", row.max_diversion_m3s),
+                ("min_spillage_m3s", row.min_spillage_m3s),
+                ("max_spillage_m3s", row.max_spillage_m3s),
                 ("filling_min_rate_m3s", row.filling_min_rate_m3s),
                 ("water_withdrawal_m3s", row.water_withdrawal_m3s),
             ],
@@ -810,18 +813,8 @@ mod tests {
         HydroBoundsRow {
             hydro_id: EntityId::from(id),
             stage_id,
-            min_turbined_m3s: None,
-            max_turbined_m3s: None,
-            min_storage_hm3: None,
-            max_storage_hm3: None,
-            min_outflow_m3s: None,
-            max_outflow_m3s: None,
-            min_generation_mw: None,
-            max_generation_mw: None,
-            max_diversion_m3s: None,
-            filling_min_rate_m3s: None,
-            water_withdrawal_m3s: None,
             block_id,
+            ..Default::default()
         }
     }
 
@@ -1224,6 +1217,44 @@ mod tests {
         assert!(
             errors.is_empty(),
             "a key discriminating entity, stage, and block must not false-report: {errors:?}"
+        );
+    }
+
+    /// Two rows for the same `(hydro_id, stage_id, block_id)` both setting
+    /// `min_spillage_m3s` collide — pins that the widened duplicate-row column
+    /// list registers the new spillage/diversion axes, not just the
+    /// pre-existing seven.
+    #[test]
+    fn test_duplicate_min_spillage_m3s_rejected() {
+        let mut data = make_data(
+            vec![],
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![
+            HydroBoundsRow {
+                min_spillage_m3s: Some(1.0),
+                ..hydro_row(1, 0, Some(0))
+            },
+            HydroBoundsRow {
+                min_spillage_m3s: Some(2.0),
+                ..hydro_row(1, 0, Some(0))
+            },
+        ];
+
+        let errors = duplicate_errors(&data);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, got: {errors:?}"
+        );
+        assert!(
+            errors[0].message.contains("min_spillage_m3s"),
+            "message: {}",
+            errors[0].message
         );
     }
 

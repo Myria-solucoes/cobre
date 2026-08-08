@@ -1564,13 +1564,9 @@ mod tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
                     max_turbined_m3s: 100.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {

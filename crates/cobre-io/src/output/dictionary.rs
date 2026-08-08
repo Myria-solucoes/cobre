@@ -1501,13 +1501,9 @@ mod tests {
 
     fn hydro_block_bounds_default() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 50.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 45.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 

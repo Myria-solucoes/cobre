@@ -71,13 +71,9 @@ fn hydro_stage_bounds() -> HydroStageBounds {
 
 fn hydro_block_bounds() -> HydroBlockBounds {
     HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 100.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     }
 }
 
@@ -1102,7 +1098,6 @@ fn build_resolved_penalties_with_ncs(
     )
 }
 
-/// Assert that all external libraries are None.
 fn assert_no_external_libraries(setup: &StudySetup) {
     assert!(setup.scenario_libraries.training.historical.is_none());
     assert!(setup.scenario_libraries.training.external_inflow.is_none());

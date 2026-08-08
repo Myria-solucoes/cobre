@@ -67,10 +67,6 @@ mod common;
 use common::StubComm;
 use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
-// ===========================================================================
-// Communicator stub
-// ===========================================================================
-
 /// Build the role-(a) [`StateSpace`] via the public [`StateSpace::new`] (full
 /// `max_par_order` lag stride per hydro). This external test crate cannot see the
 /// parent's `#[cfg(test)]`/`test-support` surface, so it constructs from explicit
@@ -273,13 +269,9 @@ fn build_system() -> cobre_core::System {
         water_withdrawal_m3s: 0.0,
     };
     let hydro_bounds_default_block = HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 50.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 50.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     };
     let resolved_bounds = ResolvedBounds::new(
         &BoundsCountsSpec {

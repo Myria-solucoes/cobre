@@ -1215,13 +1215,10 @@ fn make_min_outflow_system() -> cobre_core::System {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
                 min_outflow_m3s: 50.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -1567,14 +1564,11 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     assert_eq!(results.len(), 1, "expected exactly 1 scenario result");
 
     let scenario = &results[0];
-    let mut found_nonzero_slack = false;
-    for stage_result in &scenario.stages {
-        for hydro_result in &stage_result.hydros {
-            if (hydro_result.outflow_slack_below_m3s - expected_slack_m3s).abs() < 1e-6 {
-                found_nonzero_slack = true;
-            }
-        }
-    }
+    let found_nonzero_slack = scenario.stages.iter().any(|stage_result| {
+        stage_result.hydros.iter().any(|hydro_result| {
+            (hydro_result.outflow_slack_below_m3s - expected_slack_m3s).abs() < 1e-6
+        })
+    });
     assert!(
         found_nonzero_slack,
         "Expected at least one hydro result with outflow_slack_below_m3s = {expected_slack_m3s:.6} \

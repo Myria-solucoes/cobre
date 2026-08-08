@@ -1691,13 +1691,9 @@ mod parameter_resolution_tests {
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -2239,15 +2235,7 @@ mod zero_cost_tests {
                         filling_min_rate_m3s: 0.0,
                         water_withdrawal_m3s: 0.0,
                     },
-                    hydro_block: HydroBlockBounds {
-                        min_turbined_m3s: 0.0,
-                        max_turbined_m3s: 0.0,
-                        min_outflow_m3s: 0.0,
-                        max_outflow_m3s: None,
-                        min_generation_mw: 0.0,
-                        max_generation_mw: 0.0,
-                        max_diversion_m3s: None,
-                    },
+                    hydro_block: HydroBlockBounds::default(),
                     thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                     thermal_block: ThermalBlockBounds {
                         min_generation_mw: 0.0,
@@ -3169,13 +3157,9 @@ mod pumping_water_tests {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 50.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 45.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {

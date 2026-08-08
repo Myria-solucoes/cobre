@@ -182,7 +182,7 @@ fn test_multi_segment_deficit_column_count() {
         "deficit region must be B*S_max*K = 2*3*2 = 12"
     );
     let col_excess_start = col_deficit_start + deficit_region;
-    let excess_region = n_buses * n_blks; // 2*2 = 4
+    let excess_region = n_buses * n_blks;
     let expected_num_cols = col_excess_start + excess_region;
     assert_eq!(
         t.num_cols, expected_num_cols,
@@ -639,7 +639,6 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
         },
     );
 
-    #[allow(clippy::cast_possible_wrap)]
     let stages = vec![make_stage(
         0,
         StageSpec {
@@ -700,13 +699,9 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
         water_withdrawal_m3s: 0.0,
     };
     let hydro_bounds_default_block = HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 250.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     };
     let mut bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -1028,13 +1023,9 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
                 water_withdrawal_m3s: 5.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {

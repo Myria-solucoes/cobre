@@ -61,6 +61,7 @@
 //! |43 | `hydro_bounds` row `max_turbined_m3s`/`max_generation_mw` must not exceed the hydro's own declared value (checked independently); scope is these two columns only — lowering, `min_*`/storage/filling/withdrawal, and the other four bound families are untouched, each a separate decision with its own back-compat surface | `constraints/hydro_bounds.parquet` | `InvalidValue` |
 //! |44 | Sum of unit group minima (`min_turbined_m3s`, `min_generation_mw`, checked independently) must reach the plant's own declared value — the flipped direction of rule 41: rule 41 caps `Σ group max ≤ plant max`, this floors `Σ group min ≥ plant min`; checked against the entity declaration only, never against per-stage resolved bounds | `system/hydros.json` | `InvalidValue` |
 //! |45 | `hydro_unit_group_bounds` row `max_turbined_m3s`/`max_generation_mw` must not exceed that GROUP's own declared value (checked independently) — the group-axis mirror of rule 43, which checks the plant's own declared value instead | `constraints/hydro_unit_group_bounds.parquet` | `InvalidValue` |
+//! |46 | `hydro_bounds` row `min_diversion_m3s` set for a hydro declaring no `diversion` channel (the channel is pinned `[0, 0]` with none declared, making a positive floor infeasible); cross-row/cross-source min/max inversion is deliberately out of scope for this rule | `constraints/hydro_bounds.parquet` | `InvalidValue` |
 //!
 //! A hydro unit group bounds row's `block_id` range and duplicate-row keying
 //! are covered by rules 35 and 36 above; a row referencing a non-existent
@@ -152,6 +153,7 @@ mod test_support;
 pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut ValidationContext) {
     hydro::check_cascade_acyclic(data, ctx);
     hydro::check_hydro_bounds(data, ctx);
+    hydro::check_diversion_floor_requires_channel(data, ctx);
     hydro::check_lifecycle_consistency(data, ctx);
     hydro::check_lifecycle_consistency_remaining(data, ctx);
     hydro::check_filling_config(data, ctx);

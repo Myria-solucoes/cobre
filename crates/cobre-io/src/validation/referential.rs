@@ -768,7 +768,7 @@ fn check_generic_constraint_expression_references(
 
 /// `GenericConstraintBoundsRow` `block_id` validity and duplicate key detection.
 fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut ValidationContext) {
-    let stage_block_counts: std::collections::HashMap<i32, usize> = data
+    let stage_block_counts: HashMap<i32, usize> = data
         .stages
         .stages
         .iter()
@@ -1900,18 +1900,7 @@ mod tests {
         data.hydro_bounds = vec![HydroBoundsRow {
             hydro_id: EntityId::from(555),
             stage_id: 0,
-            min_turbined_m3s: None,
-            max_turbined_m3s: None,
-            min_storage_hm3: None,
-            max_storage_hm3: None,
-            min_outflow_m3s: None,
-            max_outflow_m3s: None,
-            min_generation_mw: None,
-            max_generation_mw: None,
-            max_diversion_m3s: None,
-            filling_min_rate_m3s: None,
-            water_withdrawal_m3s: None,
-            block_id: None,
+            ..Default::default()
         }];
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);

@@ -171,7 +171,6 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         },
     );
 
-    // season_id = stage_idx % 12
     let study_stages: Vec<Stage> = (0..N_STUDY)
         .map(|i| {
             make_stage(
@@ -216,8 +215,6 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         std_m3s: SIGMA_A,
     };
 
-    // Pre-study entries at stage ids -1 and -2 let PrecomputedPar resolve the AR
-    // lag statistics for stage 0.
     let mut all_inflow_models: Vec<InflowModel> = Vec::new();
 
     for pre_id in [-2_i32, -1_i32] {
@@ -258,13 +255,9 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         water_withdrawal_m3s: 0.0,
     };
     let hydro_bounds_default_block = HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 200.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 200.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     };
     let bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -502,13 +495,9 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
         water_withdrawal_m3s: 0.0,
     };
     let hydro_bounds_default_block = HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 200.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 200.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     };
     let bounds = ResolvedBounds::new(
         &BoundsCountsSpec {

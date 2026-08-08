@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use cobre_core::{EntityId, Hydro};
+
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::ENVELOPE_TOLERANCE;
 
@@ -125,6 +127,49 @@ pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext)
                 ),
             );
         }
+    }
+}
+
+/// Rejects a `min_diversion_m3s` override on a hydro that declares no `diversion`
+/// channel: with no channel, [`resolve_bounds`](crate::resolution::resolve_bounds)
+/// pins the diversion column to `[0, 0]`, so a positive floor is the infeasible
+/// `[min > 0, 0]`.
+///
+/// This is a same-column, override-vs-declaration check only. Cross-row and
+/// cross-source min/max inversion — an override floor exceeding a maximum
+/// declared elsewhere, whether from a differently-keyed override row or from the
+/// entity's own `DiversionChannel.max_flow_m3s` — is deliberately not validated
+/// here: a combinatorial checker re-implementing the resolver's precedence would
+/// duplicate it and drift. That residual surfaces as LP infeasibility instead.
+pub(super) fn check_diversion_floor_requires_channel(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    let declared: HashMap<EntityId, &Hydro> = data.hydros.iter().map(|h| (h.id, h)).collect();
+
+    for row in &data.hydro_bounds {
+        let Some(min_diversion) = row.min_diversion_m3s.filter(|&m| m > 0.0) else {
+            continue;
+        };
+        let Some(&hydro) = declared.get(&row.hydro_id) else {
+            continue;
+        };
+        if hydro.diversion.is_some() {
+            continue;
+        }
+
+        let entity_str = format!("Hydro {}", hydro.id.0);
+        ctx.add_error(
+            ErrorKind::InvalidValue,
+            "constraints/hydro_bounds.parquet",
+            Some(&entity_str),
+            format!(
+                "{entity_str}: hydro_bounds row at stage_id={} sets min_diversion_m3s=\
+                 {min_diversion}, but the hydro declares no diversion channel; diversion is \
+                 pinned [0, 0] with no channel, making a positive floor infeasible",
+                row.stage_id
+            ),
+        );
     }
 }
 
@@ -701,8 +746,10 @@ mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use crate::FphaHyperplaneRow;
+    use crate::constraints::HydroBoundsRow;
     use crate::validation::{ErrorKind, ValidationContext};
     use chrono::NaiveDate;
+    use cobre_core::DiversionChannel;
 
     // ── Cascade acyclicity tests ───────────────────────────────────────────────
 
@@ -929,6 +976,119 @@ mod tests {
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
         assert!(ctx.has_errors());
+    }
+
+    // ── Diversion floor requires channel tests ────────────────────────────────
+
+    /// A `min_diversion_m3s` override on a hydro declaring no `diversion` channel
+    /// emits exactly one InvalidValue finding naming the hydro and the column.
+    #[test]
+    fn test_min_diversion_without_channel_emits_one_finding() {
+        let hydro = make_hydro(7, None);
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![HydroBoundsRow {
+            hydro_id: EntityId::from(7),
+            stage_id: 0,
+            min_diversion_m3s: Some(5.0),
+            ..Default::default()
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        let findings: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::InvalidValue && e.message.contains("min_diversion_m3s")
+            })
+            .collect();
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one min_diversion_m3s finding, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            findings[0].message.contains("Hydro 7"),
+            "message should name Hydro 7, got: {}",
+            findings[0].message
+        );
+    }
+
+    #[test]
+    fn test_min_diversion_zero_without_channel_emits_no_finding() {
+        let hydro = make_hydro(7, None);
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![HydroBoundsRow {
+            hydro_id: EntityId::from(7),
+            stage_id: 0,
+            min_diversion_m3s: Some(0.0),
+            ..Default::default()
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("min_diversion_m3s")),
+            "a zero floor resolves the channel-less diversion column to [0, 0] (feasible), \
+             so it must not be rejected, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// The same override on a hydro that DOES declare a diversion channel emits
+    /// no finding.
+    #[test]
+    fn test_min_diversion_with_channel_emits_no_finding() {
+        let mut hydro = make_hydro(7, None);
+        hydro.diversion = Some(DiversionChannel {
+            downstream_id: EntityId::from(9),
+            max_flow_m3s: 10.0,
+        });
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![HydroBoundsRow {
+            hydro_id: EntityId::from(7),
+            stage_id: 0,
+            min_diversion_m3s: Some(5.0),
+            ..Default::default()
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("min_diversion_m3s")),
+            "a hydro with a declared diversion channel should not trigger the \
+             no-channel finding, got: {:?}",
+            ctx.errors()
+        );
     }
 
     // ── Lifecycle consistency tests ───────────────────────────────────────────
