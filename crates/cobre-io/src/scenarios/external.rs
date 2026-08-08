@@ -33,7 +33,7 @@
 //! | `stage_id`            | INT32  | Yes      | Stage ID                         |
 //! | `scenario_id`         | INT32  | Yes      | Scenario index (0-based)         |
 //! | `ncs_id`              | INT32  | Yes      | NCS source ID                    |
-//! | `availability_factor` | DOUBLE | Yes      | Dimensionless availability factor (accepts legacy `value`) |
+//! | `availability_factor` | DOUBLE | Yes      | Dimensionless availability factor |
 //!
 //! ## Output ordering
 //!
@@ -59,9 +59,7 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{
-    extract_required_float64, extract_required_float64_aliased, extract_required_int32,
-};
+use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
 
 pub use cobre_core::scenario::{ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow};
 
@@ -347,8 +345,7 @@ pub fn parse_external_ncs_scenarios(path: &Path) -> Result<Vec<ExternalNcsRow>, 
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
         let scenario_id_col = extract_required_int32(&batch, "scenario_id", path)?;
         let ncs_id_col = extract_required_int32(&batch, "ncs_id", path)?;
-        let value_col =
-            extract_required_float64_aliased(&batch, &["availability_factor", "value"], path)?;
+        let value_col = extract_required_float64(&batch, "availability_factor", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -505,7 +502,7 @@ mod tests {
             Field::new("stage_id", DataType::Int32, false),
             Field::new("scenario_id", DataType::Int32, false),
             Field::new("ncs_id", DataType::Int32, false),
-            Field::new("value", DataType::Float64, false),
+            Field::new("availability_factor", DataType::Float64, false),
         ]))
     }
 
@@ -517,31 +514,6 @@ mod tests {
     ) -> RecordBatch {
         RecordBatch::try_new(
             ncs_schema(),
-            vec![
-                Arc::new(Int32Array::from(stage_ids.to_vec())),
-                Arc::new(Int32Array::from(scenario_ids.to_vec())),
-                Arc::new(Int32Array::from(ncs_ids.to_vec())),
-                Arc::new(Float64Array::from(values.to_vec())),
-            ],
-        )
-        .expect("valid batch")
-    }
-
-    fn make_ncs_batch_value_col(
-        value_col: &str,
-        stage_ids: &[i32],
-        scenario_ids: &[i32],
-        ncs_ids: &[i32],
-        values: &[f64],
-    ) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("stage_id", DataType::Int32, false),
-            Field::new("scenario_id", DataType::Int32, false),
-            Field::new("ncs_id", DataType::Int32, false),
-            Field::new(value_col, DataType::Float64, false),
-        ]));
-        RecordBatch::try_new(
-            schema,
             vec![
                 Arc::new(Int32Array::from(stage_ids.to_vec())),
                 Arc::new(Int32Array::from(scenario_ids.to_vec())),
@@ -807,36 +779,7 @@ mod tests {
         assert!(result.is_empty(), "expected empty vec for None path");
     }
 
-    /// Alias: the legacy `value` column name still loads.
-    #[test]
-    fn test_parse_external_ncs_value_alias_legacy_loads() {
-        let batch = make_ncs_batch_value_col("value", &[0], &[0], &[1], &[0.9]);
-        let tmp = write_parquet(&batch);
-        let rows = parse_external_ncs_scenarios(tmp.path()).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert!((rows[0].value - 0.9).abs() < 1e-10);
-    }
-
-    /// Alias: the preferred `availability_factor` column loads identically to `value`.
-    #[test]
-    fn test_parse_external_ncs_availability_factor_alias_loads() {
-        let legacy = make_ncs_batch_value_col("value", &[0, 1], &[0, 1], &[1, 2], &[0.9, 0.8]);
-        let preferred = make_ncs_batch_value_col(
-            "availability_factor",
-            &[0, 1],
-            &[0, 1],
-            &[1, 2],
-            &[0.9, 0.8],
-        );
-        let tmp_legacy = write_parquet(&legacy);
-        let tmp_preferred = write_parquet(&preferred);
-        let rows_legacy = parse_external_ncs_scenarios(tmp_legacy.path()).unwrap();
-        let rows_preferred = parse_external_ncs_scenarios(tmp_preferred.path()).unwrap();
-        assert_eq!(rows_legacy, rows_preferred);
-    }
-
-    /// Neither the preferred nor the legacy value column present -> error names
-    /// the preferred `availability_factor` spelling.
+    /// Missing value column -> error names the `availability_factor` spelling.
     #[test]
     fn test_parse_external_ncs_missing_value_column_errors_new_spelling() {
         let schema = Arc::new(Schema::new(vec![

@@ -683,7 +683,7 @@ fn test_external_ncs_scenarios_wired_into_system() {
         Field::new("stage_id", DataType::Int32, false),
         Field::new("scenario_id", DataType::Int32, false),
         Field::new("ncs_id", DataType::Int32, false),
-        Field::new("value", DataType::Float64, false),
+        Field::new("availability_factor", DataType::Float64, false),
     ]));
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),

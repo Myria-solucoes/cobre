@@ -804,7 +804,7 @@ fn make_pumping_id_date_misaligned_case(dir: &TempDir) {
 
     std::fs::create_dir_all(root.join("constraints")).unwrap();
     let schema = Arc::new(Schema::new(vec![
-        Field::new("station_id", DataType::Int32, false),
+        Field::new("pumping_station_id", DataType::Int32, false),
         Field::new("stage_id", DataType::Int32, false),
         Field::new("min_m3s", DataType::Float64, true),
         Field::new("max_m3s", DataType::Float64, true),

@@ -50,7 +50,7 @@
 //!
 //! | Column               | Type   | Required | Description                        |
 //! | -------------------- | ------ | -------- | ---------------------------------- |
-//! | `pumping_station_id` | INT32  | Yes      | Pumping station ID (accepts legacy `station_id`) |
+//! | `pumping_station_id` | INT32  | Yes      | Pumping station ID                               |
 //! | `stage_id`           | INT32  | Yes      | Stage ID                           |
 //! | `min_m3s`            | DOUBLE | No       | Minimum pumping flow (m3/s)        |
 //! | `max_m3s`            | DOUBLE | No       | Maximum pumping flow (m3/s)        |
@@ -141,7 +141,6 @@ use std::path::Path;
 use crate::LoadError;
 use crate::parquet_helpers::{
     extract_optional_float64, extract_optional_int32, extract_required_int32,
-    extract_required_int32_aliased,
 };
 
 // ── Row types ─────────────────────────────────────────────────────────────────
@@ -750,8 +749,7 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        let station_id_col =
-            extract_required_int32_aliased(&batch, &["pumping_station_id", "station_id"], path)?;
+        let station_id_col = extract_required_int32(&batch, "pumping_station_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
         let min_col = extract_optional_float64(&batch, "min_m3s", path)?;
@@ -1747,7 +1745,7 @@ mod tests {
 
     fn pumping_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("station_id", DataType::Int32, false),
+            Field::new("pumping_station_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
             Field::new("min_m3s", DataType::Float64, true),
             Field::new("max_m3s", DataType::Float64, true),
@@ -1764,31 +1762,6 @@ mod tests {
             pumping_schema(),
             vec![
                 Arc::new(Int32Array::from(station_ids.to_vec())),
-                Arc::new(Int32Array::from(stage_ids.to_vec())),
-                Arc::new(Float64Array::from(min_m3s)),
-                Arc::new(Float64Array::from(max_m3s)),
-            ],
-        )
-        .expect("valid batch")
-    }
-
-    fn make_pumping_batch_id_col(
-        id_col: &str,
-        ids: &[i32],
-        stage_ids: &[i32],
-        min_m3s: Vec<Option<f64>>,
-        max_m3s: Vec<Option<f64>>,
-    ) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(id_col, DataType::Int32, false),
-            Field::new("stage_id", DataType::Int32, false),
-            Field::new("min_m3s", DataType::Float64, true),
-            Field::new("max_m3s", DataType::Float64, true),
-        ]));
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(Int32Array::from(ids.to_vec())),
                 Arc::new(Int32Array::from(stage_ids.to_vec())),
                 Arc::new(Float64Array::from(min_m3s)),
                 Arc::new(Float64Array::from(max_m3s)),
@@ -1819,44 +1792,7 @@ mod tests {
         assert_eq!(rows[2].station_id, EntityId::from(3));
     }
 
-    /// Alias: the legacy `station_id` column name still loads.
-    #[test]
-    fn test_pumping_station_id_alias_legacy_loads() {
-        let batch =
-            make_pumping_batch_id_col("station_id", &[3], &[2], vec![Some(0.0)], vec![Some(100.0)]);
-        let tmp = write_parquet(&batch);
-        let rows = parse_pumping_bounds(tmp.path()).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].station_id, EntityId::from(3));
-        assert!((rows[0].max_m3s.unwrap() - 100.0).abs() < f64::EPSILON);
-    }
-
-    /// Alias: the preferred `pumping_station_id` column loads identically to `station_id`.
-    #[test]
-    fn test_pumping_pumping_station_id_alias_loads() {
-        let legacy = make_pumping_batch_id_col(
-            "station_id",
-            &[3, 1],
-            &[0, 1],
-            vec![Some(0.0), Some(5.0)],
-            vec![Some(80.0), Some(90.0)],
-        );
-        let preferred = make_pumping_batch_id_col(
-            "pumping_station_id",
-            &[3, 1],
-            &[0, 1],
-            vec![Some(0.0), Some(5.0)],
-            vec![Some(80.0), Some(90.0)],
-        );
-        let tmp_legacy = write_parquet(&legacy);
-        let tmp_preferred = write_parquet(&preferred);
-        let rows_legacy = parse_pumping_bounds(tmp_legacy.path()).unwrap();
-        let rows_preferred = parse_pumping_bounds(tmp_preferred.path()).unwrap();
-        assert_eq!(rows_legacy, rows_preferred);
-    }
-
-    /// Neither the preferred nor the legacy id column present -> error names the
-    /// preferred `pumping_station_id` spelling.
+    /// Missing id column -> error names the `pumping_station_id` spelling.
     #[test]
     fn test_pumping_missing_id_column_errors_new_spelling() {
         let schema = Arc::new(Schema::new(vec![
@@ -1889,7 +1825,7 @@ mod tests {
     #[test]
     fn test_pumping_missing_stage_id() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("station_id", DataType::Int32, false),
+            Field::new("pumping_station_id", DataType::Int32, false),
             Field::new("min_m3s", DataType::Float64, true),
         ]));
         let batch = RecordBatch::try_new(
@@ -2257,7 +2193,7 @@ mod tests {
         assert_eq!(contract_rows[1].block_id, Some(2));
 
         let pumping_schema = Arc::new(Schema::new(vec![
-            Field::new("station_id", DataType::Int32, false),
+            Field::new("pumping_station_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
             Field::new("max_m3s", DataType::Float64, true),
             Field::new("block_id", DataType::Int32, true),
