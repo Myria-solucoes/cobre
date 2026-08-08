@@ -2540,6 +2540,63 @@ mod simulation_aggregation_determinism {
             "2-rank stub std_cost must be bitwise identical"
         );
     }
+
+    /// The `K >= 2` census mirror of [`mean_std_bit_identical_across_rank_shapes`]:
+    /// same rank-shape axis, `SimulationWeighting::Census` instead of `Uniform`.
+    /// The enumerated simulation performs no cross-rank exchange (every rank
+    /// owns the full ancestor subtree of its assigned leaves), so
+    /// `aggregate_simulation`'s canonical gather-then-sum reduction is the only
+    /// externally observable rank-shape dependency for a census summary too.
+    fn run_census(comm: &impl Communicator) -> (u64, u64) {
+        let local_costs = four_scenario_costs();
+        let weights = [0.1_f64, 0.2, 0.3, 0.4];
+        let config = SimulationConfig {
+            n_scenarios: 4,
+            io_channel_capacity: 1,
+            profile: Phase::Simulation.profile(),
+        };
+        let (summary, _gathered) = aggregate_simulation(
+            &local_costs,
+            &config,
+            comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .expect("aggregate_simulation must succeed");
+        (summary.mean_cost.to_bits(), summary.std_cost.to_bits())
+    }
+
+    #[test]
+    fn census_mean_std_bit_identical_across_rank_shapes() {
+        let (mean_local, std_local) = run_census(&LocalBackend);
+        let (mean_stub, std_stub) = run_census(&StubComm);
+        let (mean_repeat, std_repeat) = run_census(&LocalBackend);
+        let (mean_2rank, std_2rank) = run_census(&Rank0Of2);
+
+        assert_eq!(
+            mean_local, mean_stub,
+            "census: LocalBackend vs StubComm mean_cost must be bitwise identical"
+        );
+        assert_eq!(
+            std_local, std_stub,
+            "census: LocalBackend vs StubComm std_cost must be bitwise identical"
+        );
+        assert_eq!(
+            mean_local, mean_repeat,
+            "census: same-shape repeat mean_cost must be bitwise identical"
+        );
+        assert_eq!(
+            std_local, std_repeat,
+            "census: same-shape repeat std_cost must be bitwise identical"
+        );
+        assert_eq!(
+            mean_local, mean_2rank,
+            "census: 2-rank stub mean_cost must be bitwise identical"
+        );
+        assert_eq!(
+            std_local, std_2rank,
+            "census: 2-rank stub std_cost must be bitwise identical"
+        );
+    }
 }
 
 mod uniform_weight_left_to_right_reduction {
