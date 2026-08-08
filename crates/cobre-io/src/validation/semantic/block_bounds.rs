@@ -52,7 +52,7 @@ const LINE: FamilyMeta = FamilyMeta {
 
 const PUMPING: FamilyMeta = FamilyMeta {
     family: "Pumping",
-    entity_label: "station_id",
+    entity_label: "pumping_station_id",
     row_label: "pumping_bounds",
     file: "constraints/pumping_bounds.parquet",
 };
