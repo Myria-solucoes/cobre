@@ -192,9 +192,10 @@ pub use training::training_output::{
     PhaseTimingTotals, build_training_output, sum_phase_timing_ms,
 };
 // ── resolved_parameters ───────────────────────────────────────────────────────
+// `serialize_resolved_parameters` / `deserialize_resolved_parameters` are
+// `pub(crate)` (CD-024, no production caller) and cannot be re-exported here.
 pub use policy::resolved_parameters::{
     ResolvedParameters, ResolvedParametersError, build_resolved_parameters,
-    deserialize_resolved_parameters, serialize_resolved_parameters,
 };
 // ── state_exchange ────────────────────────────────────────────────────────────
 pub use training::state_exchange::ExchangeBuffers;

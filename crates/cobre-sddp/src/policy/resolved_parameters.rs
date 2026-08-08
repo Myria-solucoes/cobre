@@ -429,6 +429,10 @@ pub const RESOLVED_PARAMETERS_WIRE_VERSION: u32 = 2;
 
 /// Version-tagged envelope wrapping a [`ResolvedParameters`] payload for MPI
 /// broadcast; decode rejects a non-matching `version`.
+// Reserved seam (CD-024): constructed only by `serialize_resolved_parameters` /
+// `deserialize_resolved_parameters`, neither of which has a production caller yet.
+// `#[allow(dead_code)]` refires once one lands.
+#[allow(dead_code)]
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ResolvedParametersWireEnvelope {
     version: u32,
@@ -438,43 +442,19 @@ struct ResolvedParametersWireEnvelope {
 /// Serialize a [`ResolvedParameters`] table to a versioned postcard envelope for
 /// MPI broadcast. Pure ser/de; the caller owns the broadcast call.
 ///
+/// `pub(crate)`: an MPI-internal reserved seam with no current production
+/// caller — see `docs/design/reserved-seams-and-deferred-debt.md`.
+///
 /// # Errors
 ///
 /// Returns [`crate::SddpError::Validation`] if postcard serialization fails (not
 /// reachable with the current struct layout; the path satisfies the
 /// `Result<_, SddpError>` contract shared by other broadcast helpers).
-///
-/// # Examples
-///
-/// ```
-/// use cobre_sddp::resolved_parameters::{
-///     build_resolved_parameters, deserialize_resolved_parameters,
-///     serialize_resolved_parameters,
-/// };
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
-/// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-///
-/// let params = vec![ScalarParameter {
-///     id: EntityId(1),
-///     name: "rho_eq".to_string(),
-///     kind: ParameterKind::Constant { value: 3.6 },
-/// }];
-/// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
-/// let overrides = HydroEnergyProductivityOverride::default();
-/// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
-/// let table = build_resolved_parameters(
-///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4, 1_000_000.0,
-/// )
-///     .unwrap();
-///
-/// let bytes = serialize_resolved_parameters(&table).unwrap();
-/// let restored = deserialize_resolved_parameters(&bytes).unwrap();
-/// assert_eq!(
-///     table.get(EntityId(1), 0).to_bits(),
-///     restored.get(EntityId(1), 0).to_bits()
-/// );
-/// ```
-pub fn serialize_resolved_parameters(table: &ResolvedParameters) -> Result<Vec<u8>, SddpError> {
+// `#[allow(dead_code)]`: reserved MPI broadcast seam, no production caller yet.
+#[allow(dead_code)]
+pub(crate) fn serialize_resolved_parameters(
+    table: &ResolvedParameters,
+) -> Result<Vec<u8>, SddpError> {
     let envelope = ResolvedParametersWireEnvelope {
         version: RESOLVED_PARAMETERS_WIRE_VERSION,
         payload: table.clone(),
@@ -489,44 +469,20 @@ pub fn serialize_resolved_parameters(table: &ResolvedParameters) -> Result<Vec<u
 /// A version mismatch returns a distinct error from corruption, never silently
 /// accepting stale bytes.
 ///
+/// `pub(crate)`: an MPI-internal reserved seam with no current production
+/// caller — see `docs/design/reserved-seams-and-deferred-debt.md`.
+///
 /// # Errors
 ///
 /// - [`crate::SddpError::Validation`] — byte slice is corrupted, truncated, or not a
 ///   valid postcard encoding of the versioned envelope.
 /// - [`crate::SddpError::WireVersionMismatch`] — the encoded version does not match
 ///   [`RESOLVED_PARAMETERS_WIRE_VERSION`]; a binary mismatch across MPI ranks.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_sddp::resolved_parameters::{
-///     deserialize_resolved_parameters, serialize_resolved_parameters,
-/// };
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
-/// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-/// use cobre_sddp::resolved_parameters::build_resolved_parameters;
-///
-/// let params = vec![ScalarParameter {
-///     id: EntityId(1),
-///     name: "rho_eq".to_string(),
-///     kind: ParameterKind::Constant { value: 3.6 },
-/// }];
-/// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
-/// let overrides = HydroEnergyProductivityOverride::default();
-/// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
-/// let table = build_resolved_parameters(
-///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4, 1_000_000.0,
-/// )
-///     .unwrap();
-///
-/// let bytes = serialize_resolved_parameters(&table).unwrap();
-/// let restored = deserialize_resolved_parameters(&bytes).unwrap();
-/// assert_eq!(
-///     table.get(EntityId(1), 2).to_bits(),
-///     restored.get(EntityId(1), 2).to_bits()
-/// );
-/// ```
-pub fn deserialize_resolved_parameters(bytes: &[u8]) -> Result<ResolvedParameters, SddpError> {
+// `#[allow(dead_code)]`: reserved MPI broadcast seam, no production caller yet.
+#[allow(dead_code)]
+pub(crate) fn deserialize_resolved_parameters(
+    bytes: &[u8],
+) -> Result<ResolvedParameters, SddpError> {
     let envelope: ResolvedParametersWireEnvelope = postcard::from_bytes(bytes)
         .map_err(|e| Validation(format!("postcard resolved_parameters: {e}")))?;
     if envelope.version != RESOLVED_PARAMETERS_WIRE_VERSION {

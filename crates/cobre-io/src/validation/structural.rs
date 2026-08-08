@@ -94,8 +94,6 @@ pub struct FileManifest {
     pub scenarios_load_factors_json: bool,
     /// `scenarios/correlation.json` — optional
     pub scenarios_correlation_json: bool,
-    /// `scenarios/noise_openings.parquet` — optional
-    pub scenarios_noise_openings_parquet: bool,
     /// `scenarios/non_controllable_factors.json` — optional
     pub scenarios_non_controllable_factors_json: bool,
     /// `scenarios/non_controllable_stats.parquet` — optional
@@ -254,10 +252,6 @@ const FILE_ENTRIES: &[FileEntry] = &[
         required: false,
     },
     FileEntry {
-        relative: "scenarios/noise_openings.parquet",
-        required: false,
-    },
-    FileEntry {
         relative: "scenarios/non_controllable_factors.json",
         required: false,
     },
@@ -386,7 +380,7 @@ pub fn validate_structure(case_root: &Path, ctx: &mut ValidationContext) -> File
 /// Returns mutable references to every `bool` field of [`FileManifest`] in the
 /// same order as [`FILE_ENTRIES`] — `validate_structure` zips the two positionally,
 /// so a divergence here silently misassigns presence flags.
-fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
+fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 42] {
     [
         // Root
         &mut m.config_json,
@@ -419,7 +413,6 @@ fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
         &mut m.scenarios_load_seasonal_stats_parquet,
         &mut m.scenarios_load_factors_json,
         &mut m.scenarios_correlation_json,
-        &mut m.scenarios_noise_openings_parquet,
         &mut m.scenarios_non_controllable_factors_json,
         &mut m.scenarios_non_controllable_stats_parquet,
         // constraints/
@@ -752,46 +745,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_manifest_noise_openings_absent() {
-        let dir = TempDir::new().unwrap();
-        make_case_with_required(&dir);
-        // No scenarios/noise_openings.parquet created
-
-        let mut ctx = ValidationContext::new();
-        let manifest = validate_structure(dir.path(), &mut ctx);
-
-        assert!(
-            !ctx.has_errors(),
-            "absent optional file should not produce errors"
-        );
-        assert!(
-            !manifest.scenarios_noise_openings_parquet,
-            "scenarios_noise_openings_parquet should be false when file is absent"
-        );
-    }
-
-    #[test]
-    fn test_manifest_noise_openings_present() {
-        let dir = TempDir::new().unwrap();
-        make_case_with_required(&dir);
-        let scenarios_dir = dir.path().join("scenarios");
-        fs::create_dir_all(&scenarios_dir).unwrap();
-        fs::write(scenarios_dir.join("noise_openings.parquet"), b"").unwrap();
-
-        let mut ctx = ValidationContext::new();
-        let manifest = validate_structure(dir.path(), &mut ctx);
-
-        assert!(
-            !ctx.has_errors(),
-            "present optional file should not produce errors"
-        );
-        assert!(
-            manifest.scenarios_noise_openings_parquet,
-            "scenarios_noise_openings_parquet should be true when file is present"
-        );
-    }
-
     /// AC #5: `scenarios/inflow_annual_component.parquet` present → manifest flag `true`.
     #[test]
     fn test_manifest_detects_inflow_annual_component_present() {
@@ -981,7 +934,6 @@ mod tests {
         assert!(!manifest.scenarios_external_ncs_scenarios_parquet);
         assert!(!manifest.scenarios_load_seasonal_stats_parquet);
         assert!(!manifest.scenarios_correlation_json);
-        assert!(!manifest.scenarios_noise_openings_parquet);
         assert!(!manifest.scenarios_non_controllable_factors_json);
         assert!(!manifest.scenarios_non_controllable_stats_parquet);
 

@@ -252,11 +252,9 @@ pub fn load_noise_openings(path: Option<&Path>) -> Result<Vec<NoiseOpeningRow>, 
 ///     external_load_scenarios: vec![],
 ///     external_ncs_scenarios: vec![],
 ///     load_factors: vec![],
-///     noise_openings: vec![],
 /// };
 /// assert!(data.inflow_models.is_empty());
 /// assert!(data.correlation.profiles.is_empty());
-/// assert!(data.noise_openings.is_empty());
 /// ```
 #[derive(Debug, Clone)]
 pub struct ScenarioData {
@@ -278,8 +276,6 @@ pub struct ScenarioData {
     pub external_ncs_scenarios: Vec<ExternalNcsRow>,
     /// Load factor entries, sorted by `(bus_id, stage_id)`.
     pub load_factors: Vec<LoadFactorEntry>,
-    /// Noise opening rows, sorted by `(stage_id, opening_index, entity_index)`.
-    pub noise_openings: Vec<NoiseOpeningRow>,
 }
 
 // ── load_scenarios ────────────────────────────────────────────────────────────
@@ -389,12 +385,6 @@ pub fn load_scenarios(
             .then(|| scenarios_dir.join("external_ncs_scenarios.parquet"))
             .as_deref(),
     )?;
-    let noise_openings = load_noise_openings(
-        manifest
-            .scenarios_noise_openings_parquet
-            .then(|| scenarios_dir.join("noise_openings.parquet"))
-            .as_deref(),
-    )?;
     let ncs_models = load_ncs_stats(
         manifest
             .scenarios_non_controllable_stats_parquet
@@ -424,7 +414,6 @@ pub fn load_scenarios(
         external_load_scenarios,
         external_ncs_scenarios,
         load_factors,
-        noise_openings,
     })
 }
 
@@ -548,20 +537,6 @@ mod tests {
     fn test_load_noise_openings_none_returns_empty() {
         let result = load_noise_openings(None).unwrap();
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_load_scenarios_noise_openings_absent() {
-        let dir = TempDir::new().unwrap();
-        let manifest = FileManifest::default();
-
-        let data =
-            load_scenarios(dir.path(), &manifest).expect("empty manifest should always succeed");
-
-        assert!(
-            data.noise_openings.is_empty(),
-            "noise_openings should be empty when scenarios_noise_openings_parquet flag is false"
-        );
     }
 
     #[test]
