@@ -27,10 +27,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     noise::AccumSnapshot,
-    setup::node_graph::{
-        EnumeratedPlan, NodeId, NodePos, StageIdx, TypedVec, node_opening_range,
-        node_pinned_scenario, stage_frontier,
-    },
+    setup::node_graph::{EnumeratedPlan, NodeId, NodePos, StageIdx, TypedVec},
     simulation::{
         error::SimulationError,
         extraction::assign_scenarios,
@@ -210,8 +207,8 @@ fn enumerated_sim_stage_worker<S: SolverInterface + Send>(
             );
         }
 
-        let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
-        let pinned_scenario = node_pinned_scenario(node_graph, node);
+        let (node_opening_offset, node_opening_len) = node_graph.node_opening_range(node);
+        let pinned_scenario = node_graph.node_pinned_scenario(node);
         #[allow(clippy::cast_possible_truncation)]
         let t32 = t.0 as u32;
         let noise = params.sampler.sample(SampleRequest {
@@ -304,7 +301,7 @@ fn run_sweep<S: SolverInterface + Send>(
 
     for t in (0..num_stages).map(StageIdx) {
         scratch.stage_units.clear();
-        for node in stage_frontier(node_graph, t) {
+        for node in node_graph.stage_frontier(t) {
             if scratch.on_my_paths[node] {
                 scratch.stage_units.push(node);
             }

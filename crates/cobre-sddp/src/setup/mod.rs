@@ -596,7 +596,7 @@ impl StudySetup {
         // backward never fills.
         let visit_bounds = match &traversal {
             node_graph::Traversal::Sampled { forward_passes } => {
-                node_graph::pool_cut_stride(&node_graph, *forward_passes)
+                node_graph.pool_cut_stride(*forward_passes)
             }
             node_graph::Traversal::Enumerated(_) => {
                 node_graph::enumerated_pool_cut_stride(&node_graph)
@@ -1906,7 +1906,7 @@ fn reject_within_node_opening_enumeration(node_graph: &NodeGraph) -> Result<(), 
 /// from two or more predecessor nodes (in-degree ≥ 2, counting how many
 /// successor edges name it as a child). Every enumerated axis reconstructs
 /// each visited node's incoming state through the single-predecessor
-/// [`node_graph::build_parent_map`] (via [`EnumeratedPlan`]); a multi-parent
+/// [`node_graph::NodeGraph::build_parent_map`] (via [`EnumeratedPlan`]); a multi-parent
 /// node would, in a release build, be solved once under one arbitrarily
 /// chosen parent's outgoing state while paths arriving through its other
 /// parent silently read that wrong state — an invalid exact bound, not a

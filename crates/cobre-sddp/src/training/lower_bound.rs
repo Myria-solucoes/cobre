@@ -27,7 +27,7 @@ use crate::{
     risk_measure::RiskMeasure,
     setup::{
         NodeGraph, NodeSuccessor, OpeningSource,
-        node_graph::{NodePos, StageIdx, frontier_node},
+        node_graph::{NodePos, StageIdx},
     },
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
@@ -120,9 +120,12 @@ fn lb_init_rank0<S: SolverInterface>(
     // nodes[0] is the smallest-id node, not necessarily the root — reading
     // nodes[0].pool_id would inject a sibling's cuts onto the root's stage-0 LP.
     // On a chain the root IS nodes[0] (pool 0).
-    let root = frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
-        SddpError::Validation("lower bound: stage 0 carries no alive node".to_string())
-    })?;
+    let root = training_ctx
+        .node_graph
+        .frontier_node(StageIdx(0))
+        .ok_or_else(|| {
+            SddpError::Validation("lower bound: stage 0 carries no alive node".to_string())
+        })?;
     let pool_id = training_ctx.node_graph.nodes[root].pool_id;
     let cut_state = &training_ctx.cut_state_layouts[pool_id];
     let template = ctx.template(StageIdx(0));

@@ -35,7 +35,7 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     cut::row::build_cut_row_batch_into,
-    setup::node_graph::{NodePos, StageIdx, Traversal, frontier_node},
+    setup::node_graph::{NodePos, StageIdx, Traversal},
     simulation::{
         config::SimulationConfig,
         enumerated::run_enumerated_simulation,
@@ -239,7 +239,6 @@ impl SimulationState {
             ..
         } = training_ctx;
         let num_stages = horizon.num_stages();
-        let rank = inputs.comm.rank();
 
         debug_assert_inputs(inputs.ctx, num_stages, initial_state.len(), state.n_state);
 
@@ -273,7 +272,6 @@ impl SimulationState {
         let n_workers = inputs.workspaces.len().max(1);
         let world_size = u32::try_from(inputs.comm.size()).unwrap_or(1).max(1);
         let sim_start = Instant::now();
-        let scenarios_complete = AtomicU32::new(0);
 
         // Before the parallel region so rank 0's progress thread can render a
         // banner before any scenario completes (no-op on non-root ranks: sender None).
@@ -300,66 +298,7 @@ impl SimulationState {
 
         let (all_costs, all_stats): (WorkerCosts, WorkerStats) = match inputs.traversal {
             Traversal::Sampled { .. } => {
-                let scenario_range =
-                    assign_scenarios(inputs.config.n_scenarios, rank, inputs.comm.size());
-                #[allow(clippy::cast_possible_truncation)]
-                let local_count = (scenario_range.end - scenario_range.start) as usize;
-                let scenario_start = scenario_range.start as usize;
-
-                // Every scenario's sampled walk starts at the same stage-0 root —
-                // resolved once, mirroring the training forward pass's own root_node.
-                let root_node =
-                    frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
-                        SimulationError::InvalidConfiguration(
-                            "node graph: stage 0 carries no alive node".to_string(),
-                        )
-                    })?;
-
-                let params = SimWorkerParams {
-                    ctx: inputs.ctx,
-                    fcf: inputs.fcf,
-                    training_ctx,
-                    output: &inputs.output,
-                    config: inputs.config,
-                    node_bases: inputs.node_bases,
-                    frozen_templates,
-                    scenarios_complete: &scenarios_complete,
-                    sim_start,
-                    local_count,
-                    n_workers,
-                    scenario_start,
-                    sampler: &sampler,
-                    num_stages,
-                    world_size,
-                    root_node,
-                };
-
-                let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> =
-                    inputs
-                        .workspaces
-                        .par_iter_mut()
-                        .enumerate()
-                        .map(|(w, ws)| run_worker_scenarios(w, ws, &params))
-                        .collect();
-
-                let mut all_costs = Vec::with_capacity(local_count);
-                let mut all_stats = Vec::with_capacity(local_count);
-                for result in worker_results {
-                    let (costs, stats) = result?;
-                    all_costs.extend(costs);
-                    all_stats.extend(stats);
-                }
-                // Each worker emits a contiguous ascending scenario_id range, so the
-                // sequential `extend` leaves `all_costs`/`all_stats` sorted — no sort needed.
-                debug_assert!(
-                    all_costs.windows(2).all(|w| w[0].0 <= w[1].0),
-                    "all_costs not pre-sorted: workers must emit ascending scenario_id"
-                );
-                debug_assert!(
-                    all_stats.windows(2).all(|w| w[0].0 <= w[1].0),
-                    "all_stats not pre-sorted: workers must emit ascending scenario_id"
-                );
-                (all_costs, all_stats)
+                run_sampled_simulation(inputs, frozen_templates, &sampler, sim_start)?
             }
             Traversal::Enumerated(plan) => {
                 let k = plan.paths.leaf.len();
@@ -415,6 +354,94 @@ fn debug_assert_inputs(
         n_initial, n_state,
         "initial_state.len()={n_initial} != n_state={n_state}"
     );
+}
+
+/// Monte-Carlo simulation for one call: dispatched from [`SimulationState::run`]
+/// under `Traversal::Sampled`. Partitions `inputs.config.n_scenarios` across
+/// rayon workers, each running its own scenario range via
+/// [`run_worker_scenarios`].
+///
+/// # Errors
+///
+/// Returns `Err(SimulationError::InvalidConfiguration { .. })` if stage 0
+/// carries no alive node. Returns `Err(SimulationError::LpInfeasible { .. })`
+/// when a stage LP has no feasible solution, `Err(SimulationError::SolverError
+/// { .. })` for other terminal LP solver failures, and
+/// `Err(SimulationError::ChannelClosed)` when the channel receiver has been
+/// dropped.
+fn run_sampled_simulation<S: SolverInterface + Send, C: Communicator>(
+    inputs: &mut SimulationInputs<'_, S, C>,
+    frozen_templates: &[StageTemplate],
+    sampler: &ForwardSampler<'_>,
+    sim_start: Instant,
+) -> Result<(WorkerCosts, WorkerStats), SimulationError> {
+    let training_ctx = inputs.training_ctx;
+    let num_stages = training_ctx.horizon.num_stages();
+    let rank = inputs.comm.rank();
+    let n_workers = inputs.workspaces.len().max(1);
+    let world_size = u32::try_from(inputs.comm.size()).unwrap_or(1).max(1);
+    let scenarios_complete = AtomicU32::new(0);
+
+    let scenario_range = assign_scenarios(inputs.config.n_scenarios, rank, inputs.comm.size());
+    #[allow(clippy::cast_possible_truncation)]
+    let local_count = (scenario_range.end - scenario_range.start) as usize;
+    let scenario_start = scenario_range.start as usize;
+
+    // Every scenario's sampled walk starts at the same stage-0 root —
+    // resolved once, mirroring the training forward pass's own root_node.
+    let root_node = training_ctx
+        .node_graph
+        .frontier_node(StageIdx(0))
+        .ok_or_else(|| {
+            SimulationError::InvalidConfiguration(
+                "node graph: stage 0 carries no alive node".to_string(),
+            )
+        })?;
+
+    let params = SimWorkerParams {
+        ctx: inputs.ctx,
+        fcf: inputs.fcf,
+        training_ctx,
+        output: &inputs.output,
+        config: inputs.config,
+        node_bases: inputs.node_bases,
+        frozen_templates,
+        scenarios_complete: &scenarios_complete,
+        sim_start,
+        local_count,
+        n_workers,
+        scenario_start,
+        sampler,
+        num_stages,
+        world_size,
+        root_node,
+    };
+
+    let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> = inputs
+        .workspaces
+        .par_iter_mut()
+        .enumerate()
+        .map(|(w, ws)| run_worker_scenarios(w, ws, &params))
+        .collect();
+
+    let mut all_costs = Vec::with_capacity(local_count);
+    let mut all_stats = Vec::with_capacity(local_count);
+    for result in worker_results {
+        let (costs, stats) = result?;
+        all_costs.extend(costs);
+        all_stats.extend(stats);
+    }
+    // Each worker emits a contiguous ascending scenario_id range, so the
+    // sequential `extend` leaves `all_costs`/`all_stats` sorted — no sort needed.
+    debug_assert!(
+        all_costs.windows(2).all(|w| w[0].0 <= w[1].0),
+        "all_costs not pre-sorted: workers must emit ascending scenario_id"
+    );
+    debug_assert!(
+        all_stats.windows(2).all(|w| w[0].0 <= w[1].0),
+        "all_stats not pre-sorted: workers must emit ascending scenario_id"
+    );
+    Ok((all_costs, all_stats))
 }
 
 /// Execute one worker's share of scenarios in the rayon parallel region.

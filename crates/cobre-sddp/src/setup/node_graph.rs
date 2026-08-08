@@ -696,57 +696,58 @@ fn successor_outcome_count(node_graph: &NodeGraph, successors: &[NodeSuccessor])
         .sum()
 }
 
-/// Maximum, over every node, of its own [`successor_outcome_count`] — the
-/// backward pass's true per-node `n_openings` upper bound
-/// (`compute_one_backward_node`'s `n_openings` is exactly this quantity for
-/// whichever node it processes). A leaf's empty successor list contributes
-/// `0`. Absent `nodes[]`, node `t`'s successor is stage `t+1`, so this is
-/// `max` over stages `1..num_stages` of `tree.n_openings` — it excludes stage
-/// 0's own opening count (no node's successor is ever the first stage), a
-/// DIFFERENT quantity the lower-bound evaluation needs separately: a caller
-/// sizing a buffer shared with that evaluation takes the max of both, rather
-/// than assuming this function alone covers it.
-pub(crate) fn max_successor_outcome_count(graph: &NodeGraph) -> usize {
-    graph
-        .successors
-        .iter()
-        .map(|succs| successor_outcome_count(graph, succs))
-        .max()
-        .unwrap_or(0)
-}
+impl NodeGraph {
+    /// Maximum, over every node, of its own [`successor_outcome_count`] — the
+    /// backward pass's true per-node `n_openings` upper bound
+    /// (`compute_one_backward_node`'s `n_openings` is exactly this quantity for
+    /// whichever node it processes). A leaf's empty successor list contributes
+    /// `0`. Absent `nodes[]`, node `t`'s successor is stage `t+1`, so this is
+    /// `max` over stages `1..num_stages` of `tree.n_openings` — it excludes stage
+    /// 0's own opening count (no node's successor is ever the first stage), a
+    /// DIFFERENT quantity the lower-bound evaluation needs separately: a caller
+    /// sizing a buffer shared with that evaluation takes the max of both, rather
+    /// than assuming this function alone covers it.
+    pub(crate) fn max_successor_outcome_count(&self) -> usize {
+        self.successors
+            .iter()
+            .map(|succs| successor_outcome_count(self, succs))
+            .max()
+            .unwrap_or(0)
+    }
 
-/// Reverse-topological cut-sharing levels: cut-generating nodes (those with at
-/// least one successor — a leaf produces no cut) grouped by stage, the outer
-/// list descending by stage and each inner list ascending by canonical node
-/// position. Sibling subtrees at one level are independent (nested per-node
-/// risk), so a level is one cut-sharing barrier. Absent `nodes[]` every stage
-/// carries one such node, so each level holds exactly one node (== that stage)
-/// and the sweep reduces to the reversed stage loop.
-pub(crate) fn backward_cut_levels(graph: &NodeGraph) -> Vec<Vec<NodePos>> {
-    let cut_generating = |pos: NodePos| !graph.successors[pos].is_empty();
-    let Some(max_stage) = graph
-        .nodes
-        .iter_indexed()
-        .filter(|&(pos, _)| cut_generating(pos))
-        .map(|(_, n)| n.stage)
-        .max()
-    else {
-        return Vec::new();
-    };
-
-    let mut levels: Vec<Vec<NodePos>> = Vec::new();
-    for stage in (0..=max_stage.0).rev().map(StageIdx) {
-        let level: Vec<NodePos> = graph
+    /// Reverse-topological cut-sharing levels: cut-generating nodes (those with at
+    /// least one successor — a leaf produces no cut) grouped by stage, the outer
+    /// list descending by stage and each inner list ascending by canonical node
+    /// position. Sibling subtrees at one level are independent (nested per-node
+    /// risk), so a level is one cut-sharing barrier. Absent `nodes[]` every stage
+    /// carries one such node, so each level holds exactly one node (== that stage)
+    /// and the sweep reduces to the reversed stage loop.
+    pub(crate) fn backward_cut_levels(&self) -> Vec<Vec<NodePos>> {
+        let cut_generating = |pos: NodePos| !self.successors[pos].is_empty();
+        let Some(max_stage) = self
             .nodes
             .iter_indexed()
-            .filter(|&(pos, n)| n.stage == stage && cut_generating(pos))
-            .map(|(pos, _)| pos)
-            .collect();
-        if !level.is_empty() {
-            levels.push(level);
+            .filter(|&(pos, _)| cut_generating(pos))
+            .map(|(_, n)| n.stage)
+            .max()
+        else {
+            return Vec::new();
+        };
+
+        let mut levels: Vec<Vec<NodePos>> = Vec::new();
+        for stage in (0..=max_stage.0).rev().map(StageIdx) {
+            let level: Vec<NodePos> = self
+                .nodes
+                .iter_indexed()
+                .filter(|&(pos, n)| n.stage == stage && cut_generating(pos))
+                .map(|(pos, _)| pos)
+                .collect();
+            if !level.is_empty() {
+                levels.push(level);
+            }
         }
+        levels
     }
-    levels
 }
 
 /// Per-node predecessor flag: `false` at position `i` iff no edge names node
@@ -820,74 +821,76 @@ pub(crate) fn enumerated_scenario_count(graph: &NodeGraph) -> Result<u64, SddpEr
     Ok(total)
 }
 
-/// Standard-deviation multiplier for [`pool_cut_stride`]'s per-node
+/// Standard-deviation multiplier for [`NodeGraph::pool_cut_stride`]'s per-node
 /// margin (mean + this many σ under the binomial approximation for a node's
 /// realized visit count). A chain node's probability is exactly `1.0`, so its
 /// variance term is exactly `0.0` regardless of this value — the chain
 /// identity does not depend on the multiplier chosen here.
 const VISIT_BOUND_SIGMA_MULTIPLIER: f64 = 3.0;
 
-/// Per-pool construction-time visit floor under sampled forward-pass
-/// selection: for each node `n`, `⌈F·P(n) + σ·√(F·P(n)·(1−P(n)))⌉` where
-/// `P(n)` is the root→`n` product of (already load-time-normalized) edge
-/// probabilities (`P(root) = 1`, `P(m) = Σ_{n: m∈n's successors} P(n)·prob(n→m)`),
-/// summed over the nodes sharing a pool id and capped at `F` (only `F` passes
-/// exist, so no pool can realize more visits than that). This is the
-/// top-down dual of [`enumerated_scenario_count`]'s bottom-up opening-count
-/// walk, propagated in the same ascending/descending-stage order.
-///
-/// A cut-receipt stride — how many times a pool's cuts get a fresh slot per
-/// iteration — distinct from [`forward_solve_counts`]'s per-node LP-solve
-/// count; the two coincide only where the graph makes visits statically known
-/// (a derived-count-one enumerated graph).
-///
-/// This floor is statistical, not a guarantee: a rare iteration's realized
-/// routed count can exceed it whenever `0 < P(n) < 1`. The training backward
-/// pass rejects that excess rather than silently addressing past the pool's
-/// slot block — see `check_visit_bound` in `training/backward_pass_state.rs`.
-///
-/// A chain node's single successor normalizes to exactly `1.0`
-/// (`chain_transition_probability`), so `P(n) = 1.0`, the variance term is
-/// exactly `0.0`, and the floor is `F` bit-for-bit for every pool — the
-/// sacred-parity chain identity falls out of this one formula with no shape
-/// branch.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
-)]
-pub(crate) fn pool_cut_stride(graph: &NodeGraph, forward_passes: u32) -> Vec<u64> {
-    let n = graph.nodes.len();
-    let has_predecessor = build_has_predecessor(graph);
+impl NodeGraph {
+    /// Per-pool construction-time visit floor under sampled forward-pass
+    /// selection: for each node `n`, `⌈F·P(n) + σ·√(F·P(n)·(1−P(n)))⌉` where
+    /// `P(n)` is the root→`n` product of (already load-time-normalized) edge
+    /// probabilities (`P(root) = 1`, `P(m) = Σ_{n: m∈n's successors} P(n)·prob(n→m)`),
+    /// summed over the nodes sharing a pool id and capped at `F` (only `F` passes
+    /// exist, so no pool can realize more visits than that). This is the
+    /// top-down dual of [`enumerated_scenario_count`]'s bottom-up opening-count
+    /// walk, propagated in the same ascending/descending-stage order.
+    ///
+    /// A cut-receipt stride — how many times a pool's cuts get a fresh slot per
+    /// iteration — distinct from [`Self::forward_solve_counts`]'s per-node LP-solve
+    /// count; the two coincide only where the graph makes visits statically known
+    /// (a derived-count-one enumerated graph).
+    ///
+    /// This floor is statistical, not a guarantee: a rare iteration's realized
+    /// routed count can exceed it whenever `0 < P(n) < 1`. The training backward
+    /// pass rejects that excess rather than silently addressing past the pool's
+    /// slot block — see `check_visit_bound` in `training/backward_pass_state.rs`.
+    ///
+    /// A chain node's single successor normalizes to exactly `1.0`
+    /// (`chain_transition_probability`), so `P(n) = 1.0`, the variance term is
+    /// exactly `0.0`, and the floor is `F` bit-for-bit for every pool — the
+    /// sacred-parity chain identity falls out of this one formula with no shape
+    /// branch.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation
+    )]
+    pub(crate) fn pool_cut_stride(&self, forward_passes: u32) -> Vec<u64> {
+        let n = self.nodes.len();
+        let has_predecessor = build_has_predecessor(self);
 
-    // Ascending-stage order: every successor sits exactly one stage
-    // downstream (t -> t+1), so a node's own probability is fully
-    // accumulated from its predecessors before it propagates to its children.
-    let mut order: Vec<NodePos> = (0..n).map(NodePos).collect();
-    order.sort_by_key(|&i| graph.nodes[i].stage);
+        // Ascending-stage order: every successor sits exactly one stage
+        // downstream (t -> t+1), so a node's own probability is fully
+        // accumulated from its predecessors before it propagates to its children.
+        let mut order: Vec<NodePos> = (0..n).map(NodePos).collect();
+        order.sort_by_key(|&i| self.nodes[i].stage);
 
-    let mut prob: TypedVec<NodePos, f64> = vec![0.0f64; n].into();
-    for &i in &order {
-        if !has_predecessor[i] {
-            prob[i] = 1.0;
+        let mut prob: TypedVec<NodePos, f64> = vec![0.0f64; n].into();
+        for &i in &order {
+            if !has_predecessor[i] {
+                prob[i] = 1.0;
+            }
+            for succ in &self.successors[i] {
+                prob[succ.child] += prob[i] * succ.probability;
+            }
         }
-        for succ in &graph.successors[i] {
-            prob[succ.child] += prob[i] * succ.probability;
+
+        let f = f64::from(forward_passes);
+        let mut pool_sum = vec![0u64; self.n_pools];
+        for (i, node) in self.nodes.iter_indexed() {
+            let p = prob[i];
+            let mean = f * p;
+            let variance = (f * p * (1.0 - p)).max(0.0);
+            let margin = mean + VISIT_BOUND_SIGMA_MULTIPLIER * variance.sqrt();
+            pool_sum[node.pool_id] += margin.ceil() as u64;
         }
-    }
 
-    let f = f64::from(forward_passes);
-    let mut pool_sum = vec![0u64; graph.n_pools];
-    for (i, node) in graph.nodes.iter_indexed() {
-        let p = prob[i];
-        let mean = f * p;
-        let variance = (f * p * (1.0 - p)).max(0.0);
-        let margin = mean + VISIT_BOUND_SIGMA_MULTIPLIER * variance.sqrt();
-        pool_sum[node.pool_id] += margin.ceil() as u64;
+        let cap = u64::from(forward_passes);
+        pool_sum.into_iter().map(|s| s.min(cap)).collect()
     }
-
-    let cap = u64::from(forward_passes);
-    pool_sum.into_iter().map(|s| s.min(cap)).collect()
 }
 
 /// Per-pool cut-receipt stride under exhaustive (`enumerated`) node-native
@@ -898,12 +901,12 @@ pub(crate) fn pool_cut_stride(graph: &NodeGraph, forward_passes: u32) -> Vec<u64
 /// appends exactly one cut per node per iteration; a leaf generates no cut, so
 /// its pool receives none.
 ///
-/// The enumerated counterpart of [`pool_cut_stride`]'s sampled statistical
-/// margin (mean + σ, capped at `forward_passes`): under node-native enumeration
-/// the true stride is known exactly, so sizing at the sampled bound would keep
-/// the per-pool capacity/basis/broadcast/checkpoint reservation the enumerated
-/// engine never fills. The [`Traversal::Enumerated`] arm routes here; the
-/// [`Traversal::Sampled`] arm keeps [`pool_cut_stride`] unchanged.
+/// The enumerated counterpart of [`NodeGraph::pool_cut_stride`]'s sampled
+/// statistical margin (mean + σ, capped at `forward_passes`): under node-native
+/// enumeration the true stride is known exactly, so sizing at the sampled bound
+/// would keep the per-pool capacity/basis/broadcast/checkpoint reservation the
+/// enumerated engine never fills. The [`Traversal::Enumerated`] arm routes here;
+/// the [`Traversal::Sampled`] arm keeps [`NodeGraph::pool_cut_stride`] unchanged.
 pub(crate) fn enumerated_pool_cut_stride(graph: &NodeGraph) -> Vec<u64> {
     let mut stride = vec![0u64; graph.n_pools];
     for (pos, node) in graph.nodes.iter_indexed() {
@@ -919,7 +922,7 @@ pub(crate) fn enumerated_pool_cut_stride(graph: &NodeGraph) -> Vec<u64> {
 /// `π(n) = Σ_{(parent, n) edges} π(parent)·|Ω_parent|`, `π(root) = 1`, in
 /// canonical node-position order. The per-node dual of
 /// [`enumerated_scenario_count`]'s bottom-up opening walk;
-/// [`forward_solve_counts`] sums it per pool. The enumerated forward driver
+/// [`NodeGraph::forward_solve_counts`] sums it per pool. The enumerated forward driver
 /// solves node `n` exactly `π(n)` times per iteration. Overflow-safe
 /// (`checked_mul`/`checked_add`), mirroring [`enumerated_scenario_count`].
 ///
@@ -959,37 +962,39 @@ pub(crate) fn enumerated_node_visit_counts(
     Ok(prefix_count)
 }
 
-/// Per-pool exact visit count under exhaustive (`enumerated`) forward-pass
-/// selection: [`enumerated_node_visit_counts`] summed over the nodes sharing
-/// each pool id (leaf-sharing aggregates several nodes into one pool). The
-/// top-down dual of [`enumerated_scenario_count`]'s bottom-up walk:
-/// `Σ_leaf π(leaf)·|Ω_leaf| == enumerated_scenario_count(graph)`, and the
-/// enumerated forward driver's single-rank per-iteration solve total is
-/// `Σ` of this vector. Overflow-safe, mirroring that function's guard.
-///
-/// A per-node forward-solve count — how many times the enumerated engine
-/// actually solves each pool's LP — distinct from [`pool_cut_stride`]'s
-/// cut-receipt stride; the two coincide only where the graph makes visits
-/// statically known (a derived-count-one enumerated graph).
-///
-/// # Errors
-///
-/// Returns [`SddpError::Validation`] when a path-product-sum exceeds `u64`.
-pub(crate) fn forward_solve_counts(graph: &NodeGraph) -> Result<Vec<u64>, SddpError> {
-    let prefix_count = enumerated_node_visit_counts(graph)?;
-    let mut pool_sum = vec![0_u64; graph.n_pools];
-    for (i, node) in graph.nodes.iter_indexed() {
-        pool_sum[node.pool_id] = pool_sum[node.pool_id]
-            .checked_add(prefix_count[i])
-            .ok_or_else(|| {
-                SddpError::Validation(
-                    "enumerated visit bound exceeds u64: the policy graph's root→node \
-                     path-product-sum overflows"
-                        .to_string(),
-                )
-            })?;
+impl NodeGraph {
+    /// Per-pool exact visit count under exhaustive (`enumerated`) forward-pass
+    /// selection: [`enumerated_node_visit_counts`] summed over the nodes sharing
+    /// each pool id (leaf-sharing aggregates several nodes into one pool). The
+    /// top-down dual of [`enumerated_scenario_count`]'s bottom-up walk:
+    /// `Σ_leaf π(leaf)·|Ω_leaf| == enumerated_scenario_count(graph)`, and the
+    /// enumerated forward driver's single-rank per-iteration solve total is
+    /// `Σ` of this vector. Overflow-safe, mirroring that function's guard.
+    ///
+    /// A per-node forward-solve count — how many times the enumerated engine
+    /// actually solves each pool's LP — distinct from [`Self::pool_cut_stride`]'s
+    /// cut-receipt stride; the two coincide only where the graph makes visits
+    /// statically known (a derived-count-one enumerated graph).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SddpError::Validation`] when a path-product-sum exceeds `u64`.
+    pub(crate) fn forward_solve_counts(&self) -> Result<Vec<u64>, SddpError> {
+        let prefix_count = enumerated_node_visit_counts(self)?;
+        let mut pool_sum = vec![0_u64; self.n_pools];
+        for (i, node) in self.nodes.iter_indexed() {
+            pool_sum[node.pool_id] = pool_sum[node.pool_id]
+                .checked_add(prefix_count[i])
+                .ok_or_else(|| {
+                    SddpError::Validation(
+                        "enumerated visit bound exceeds u64: the policy graph's root→node \
+                         path-product-sum overflows"
+                            .to_string(),
+                    )
+                })?;
+        }
+        Ok(pool_sum)
     }
-    Ok(pool_sum)
 }
 
 /// Whether the enumerated forward's cross-rank state elision at world >= 2 is
@@ -1050,46 +1055,44 @@ pub(crate) fn enumerated_requires_state_exchange(graph: &NodeGraph) -> Option<No
 // (`simulation::pipeline`/`simulation::state`) — both walk this graph the
 // same way, so the resolution logic has one owner.
 
-/// Ascending node-graph positions with `nodes[pos].stage == stage` — the
-/// stage's alive frontier. Structural only (reads [`NodeGraph::nodes`]; no
-/// sampling or enumeration selection): a synthesized or declared chain's
-/// frontier is always a singleton, and below a recombination join a declared
-/// graph's frontier carries more than one node.
-pub(crate) fn stage_frontier(
-    node_graph: &NodeGraph,
-    stage: StageIdx,
-) -> impl Iterator<Item = NodePos> + '_ {
-    node_graph
-        .nodes
-        .iter_indexed()
-        .filter(move |(_, n)| n.stage == stage)
-        .map(|(pos, _)| pos)
-}
+impl NodeGraph {
+    /// Ascending node-graph positions with `nodes[pos].stage == stage` — the
+    /// stage's alive frontier. Structural only (reads [`NodeGraph::nodes`]; no
+    /// sampling or enumeration selection): a synthesized or declared chain's
+    /// frontier is always a singleton, and below a recombination join a declared
+    /// graph's frontier carries more than one node.
+    pub(crate) fn stage_frontier(&self, stage: StageIdx) -> impl Iterator<Item = NodePos> + '_ {
+        self.nodes
+            .iter_indexed()
+            .filter(move |(_, n)| n.stage == stage)
+            .map(|(pos, _)| pos)
+    }
 
-/// The study's sole root: stage `stage`'s one alive node, or `None` if the
-/// stage carries no alive node. Used only for stage-0 root resolution — every
-/// sampled trajectory starts here (a multi-root graph is out of scope for the
-/// sampled walk) — so a stage carrying more than one node here is a
-/// `debug_assert`-checked construction invariant, never silently resolved to
-/// the first candidate.
-pub(crate) fn frontier_node(node_graph: &NodeGraph, stage: StageIdx) -> Option<NodePos> {
-    let mut frontier = stage_frontier(node_graph, stage);
-    let node = frontier.next();
-    debug_assert!(
-        frontier.next().is_none(),
-        "frontier_node: stage {stage} carries more than one alive node"
-    );
-    node
-}
+    /// The study's sole root: stage `stage`'s one alive node, or `None` if the
+    /// stage carries no alive node. Used only for stage-0 root resolution — every
+    /// sampled trajectory starts here (a multi-root graph is out of scope for the
+    /// sampled walk) — so a stage carrying more than one node here is a
+    /// `debug_assert`-checked construction invariant, never silently resolved to
+    /// the first candidate.
+    pub(crate) fn frontier_node(&self, stage: StageIdx) -> Option<NodePos> {
+        let mut frontier = self.stage_frontier(stage);
+        let node = frontier.next();
+        debug_assert!(
+            frontier.next().is_none(),
+            "frontier_node: stage {stage} carries more than one alive node"
+        );
+        node
+    }
 
-/// Any one node at `stage` — the first in ascending canonical order, or
-/// `None` if the stage carries no alive node. Unlike [`frontier_node`], this
-/// tolerates a stage carrying several nodes: every node at the terminal stage
-/// is a leaf (no edge crosses the horizon), and leaves sharing a stage share
-/// ONE pool (this module's leaf-sharing rule), so any representative
-/// resolves the same pool.
-pub(crate) fn any_stage_node(node_graph: &NodeGraph, stage: StageIdx) -> Option<NodePos> {
-    stage_frontier(node_graph, stage).next()
+    /// Any one node at `stage` — the first in ascending canonical order, or
+    /// `None` if the stage carries no alive node. Unlike [`Self::frontier_node`],
+    /// this tolerates a stage carrying several nodes: every node at the terminal
+    /// stage is a leaf (no edge crosses the horizon), and leaves sharing a stage
+    /// share ONE pool (this module's leaf-sharing rule), so any representative
+    /// resolves the same pool.
+    pub(crate) fn any_stage_node(&self, stage: StageIdx) -> Option<NodePos> {
+        self.stage_frontier(stage).next()
+    }
 }
 
 /// Advance a sampled trajectory from `node` to the node it visits at the next
@@ -1130,75 +1133,77 @@ pub(crate) fn advance_sampled_node(
     }
 }
 
-/// `node`'s single canonical predecessor, or `None` at a root. A node reached
-/// by more than one edge is a recombination join — `debug_assert`-checked
-/// (construction invariant), never silently resolved to an arbitrary
-/// predecessor. A structural inspection utility, not a hot-path call — the
-/// forward walk needs no parent lookup (every trajectory carries its own
-/// previous-stage record directly); its only callers today are tests.
-#[cfg(test)]
-pub(crate) fn node_parent(node_graph: &NodeGraph, node: NodePos) -> Option<NodePos> {
-    let mut candidates = node_graph
-        .successors
-        .iter_indexed()
-        .filter(|(_, succs)| succs.iter().any(|s| s.child == node))
-        .map(|(pos, _)| pos);
-    let parent = candidates.next();
-    debug_assert!(
-        candidates.next().is_none(),
-        "node_parent: node {node} has more than one predecessor (a recombination join)"
-    );
-    parent
-}
-
-/// A visit's node-Ω sub-range for the within-node opening draw: `node`'s own
-/// `(offset, len)`. A `Generated` view addresses its stage's generated tree (a
-/// chain-degenerate node's spans the whole stage); an `External` view addresses
-/// its own scenario column `k` as the degenerate `(k, 1)` — within-node
-/// weighted openings are deferred, so an External view's `len` is always `1`.
-pub(crate) fn node_opening_range(node_graph: &NodeGraph, node: NodePos) -> (usize, usize) {
-    let openings = node_graph.nodes[node].openings;
-    match openings.source {
-        OpeningSource::Generated => (openings.offset, openings.len),
-        OpeningSource::External => (openings.offset, 1),
+impl NodeGraph {
+    /// `node`'s single canonical predecessor, or `None` at a root. A node reached
+    /// by more than one edge is a recombination join — `debug_assert`-checked
+    /// (construction invariant), never silently resolved to an arbitrary
+    /// predecessor. A structural inspection utility, not a hot-path call — the
+    /// forward walk needs no parent lookup (every trajectory carries its own
+    /// previous-stage record directly); its only callers today are tests.
+    #[cfg(test)]
+    pub(crate) fn node_parent(&self, node: NodePos) -> Option<NodePos> {
+        let mut candidates = self
+            .successors
+            .iter_indexed()
+            .filter(|(_, succs)| succs.iter().any(|s| s.child == node))
+            .map(|(pos, _)| pos);
+        let parent = candidates.next();
+        debug_assert!(
+            candidates.next().is_none(),
+            "node_parent: node {node} has more than one predecessor (a recombination join)"
+        );
+        parent
     }
-}
 
-/// The scenario column to pin for a node's within-node draw, or `None` for a
-/// `Generated` node — the value `SampleRequest`/`ClassSampleRequest.pinned_scenario`
-/// takes. Single owner for the forward training driver and the simulation walk so
-/// the two cannot drift: an `External` node pins its declared column `k`
-/// (`openings.offset`), so forward, backward, and simulation all read the same
-/// `eta_slice(stage, k)`; a `Generated` node yields `None`, so the sampler
-/// hash-selects exactly as it does today (the sampled/generated byte-parity path).
-pub(crate) fn node_pinned_scenario(node_graph: &NodeGraph, node: NodePos) -> Option<usize> {
-    let openings = node_graph.nodes[node].openings;
-    match openings.source {
-        OpeningSource::External => Some(openings.offset),
-        OpeningSource::Generated => None,
-    }
-}
-
-/// Single canonical predecessor of every node (`None` at a root), indexed by
-/// canonical node position. The enumerated forward driver reads it to pin each
-/// visited node's incoming state to its parent visit's outgoing state (every
-/// edge is `t -> t+1`, so a node's parent sits exactly one stage upstream). A
-/// node reached by more than one edge is a recombination join, which the graph
-/// does not yet admit — `debug_assert`-checked, never silently resolved to an
-/// arbitrary predecessor.
-pub(crate) fn build_parent_map(node_graph: &NodeGraph) -> TypedVec<NodePos, Option<NodePos>> {
-    let mut parent: TypedVec<NodePos, Option<NodePos>> = vec![None; node_graph.nodes.len()].into();
-    for (pos, succs) in node_graph.successors.iter_indexed() {
-        for succ in succs {
-            debug_assert!(
-                parent[succ.child].is_none(),
-                "build_parent_map: node {} has more than one predecessor (a recombination join)",
-                succ.child
-            );
-            parent[succ.child] = Some(pos);
+    /// A visit's node-Ω sub-range for the within-node opening draw: `node`'s own
+    /// `(offset, len)`. A `Generated` view addresses its stage's generated tree (a
+    /// chain-degenerate node's spans the whole stage); an `External` view addresses
+    /// its own scenario column `k` as the degenerate `(k, 1)` — within-node
+    /// weighted openings are deferred, so an External view's `len` is always `1`.
+    pub(crate) fn node_opening_range(&self, node: NodePos) -> (usize, usize) {
+        let openings = self.nodes[node].openings;
+        match openings.source {
+            OpeningSource::Generated => (openings.offset, openings.len),
+            OpeningSource::External => (openings.offset, 1),
         }
     }
-    parent
+
+    /// The scenario column to pin for a node's within-node draw, or `None` for a
+    /// `Generated` node — the value `SampleRequest`/`ClassSampleRequest.pinned_scenario`
+    /// takes. Single owner for the forward training driver and the simulation walk so
+    /// the two cannot drift: an `External` node pins its declared column `k`
+    /// (`openings.offset`), so forward, backward, and simulation all read the same
+    /// `eta_slice(stage, k)`; a `Generated` node yields `None`, so the sampler
+    /// hash-selects exactly as it does today (the sampled/generated byte-parity path).
+    pub(crate) fn node_pinned_scenario(&self, node: NodePos) -> Option<usize> {
+        let openings = self.nodes[node].openings;
+        match openings.source {
+            OpeningSource::External => Some(openings.offset),
+            OpeningSource::Generated => None,
+        }
+    }
+
+    /// Single canonical predecessor of every node (`None` at a root), indexed by
+    /// canonical node position. The enumerated forward driver reads it to pin each
+    /// visited node's incoming state to its parent visit's outgoing state (every
+    /// edge is `t -> t+1`, so a node's parent sits exactly one stage upstream). A
+    /// node reached by more than one edge is a recombination join, which the graph
+    /// does not yet admit — `debug_assert`-checked, never silently resolved to an
+    /// arbitrary predecessor.
+    pub(crate) fn build_parent_map(&self) -> TypedVec<NodePos, Option<NodePos>> {
+        let mut parent: TypedVec<NodePos, Option<NodePos>> = vec![None; self.nodes.len()].into();
+        for (pos, succs) in self.successors.iter_indexed() {
+            for succ in succs {
+                debug_assert!(
+                    parent[succ.child].is_none(),
+                    "build_parent_map: node {} has more than one predecessor (a recombination join)",
+                    succ.child
+                );
+                parent[succ.child] = Some(pos);
+            }
+        }
+        parent
+    }
 }
 
 /// Canonical root→leaf path enumeration for the exhaustive (`enumerated`)
@@ -1356,7 +1361,7 @@ impl EnumeratedPlan {
     fn new(node_graph: &NodeGraph) -> Self {
         Self {
             paths: enumerate_forward_paths(node_graph),
-            parent: build_parent_map(node_graph),
+            parent: node_graph.build_parent_map(),
         }
     }
 
@@ -1959,7 +1964,7 @@ mod tests {
             ng.nodes[NodePos(0)].openings.source,
             OpeningSource::External
         );
-        assert_eq!(node_opening_range(&ng, NodePos(0)), (4, 1));
+        assert_eq!(ng.node_opening_range(NodePos(0)), (4, 1));
 
         assert_eq!(
             ng.nodes[NodePos(1)].openings.source,
@@ -1967,7 +1972,7 @@ mod tests {
         );
         let generated = ng.nodes[NodePos(1)].openings;
         assert_eq!(
-            node_opening_range(&ng, NodePos(1)),
+            ng.node_opening_range(NodePos(1)),
             (generated.offset, generated.len)
         );
     }
@@ -1987,13 +1992,13 @@ mod tests {
         // External node pins its declared column `k`, and it is exactly the
         // `node_opening_range` offset the forward driver reads — the single-owner
         // agreement the training and simulation sites depend on.
-        assert_eq!(node_pinned_scenario(&ng, NodePos(0)), Some(4));
+        assert_eq!(ng.node_pinned_scenario(NodePos(0)), Some(4));
         assert_eq!(
-            node_pinned_scenario(&ng, NodePos(0)),
-            Some(node_opening_range(&ng, NodePos(0)).0)
+            ng.node_pinned_scenario(NodePos(0)),
+            Some(ng.node_opening_range(NodePos(0)).0)
         );
         // Generated node yields `None` → the sampler hash-selects unchanged.
-        assert_eq!(node_pinned_scenario(&ng, NodePos(1)), None);
+        assert_eq!(ng.node_pinned_scenario(NodePos(1)), None);
     }
 
     // ── Discount: per-stage, never per-node ─────────────────────────────────
@@ -2096,7 +2101,7 @@ mod tests {
             (7, 37, 13),
             (12, 1, 1),
         ] {
-            let visit_bound = pool_cut_stride(&ng, forward_passes);
+            let visit_bound = ng.pool_cut_stride(forward_passes);
             assert_eq!(visit_bound.len(), ng.n_pools);
             for &vb in &visit_bound {
                 assert_eq!(
@@ -2147,8 +2152,8 @@ mod tests {
         let ng_declared = build_node_graph(&declared, n_stages, &resolver, &stochastic_b).unwrap();
 
         assert_eq!(
-            pool_cut_stride(&ng_synthesized, forward_passes),
-            pool_cut_stride(&ng_declared, forward_passes),
+            ng_synthesized.pool_cut_stride(forward_passes),
+            ng_declared.pool_cut_stride(forward_passes),
             "a declared chain and the synthesized one must derive identical visit bounds"
         );
     }
@@ -2237,7 +2242,7 @@ mod tests {
         let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
         assert_eq!(ng.n_pools, 2, "one pool for the root, one shared leaf pool");
 
-        let visit_bound = forward_solve_counts(&ng).unwrap();
+        let visit_bound = ng.forward_solve_counts().unwrap();
         let root_pool = ng.nodes[NodePos(0)].pool_id;
         let leaf_pool = ng.nodes[NodePos(1)].pool_id;
         assert_eq!(
@@ -2296,7 +2301,7 @@ mod tests {
         };
         let ng_branchy =
             build_node_graph(&graph_branchy, 2, &resolver, &stochastic_branchy).unwrap();
-        let visit_bound = forward_solve_counts(&ng_branchy).unwrap();
+        let visit_bound = ng_branchy.forward_solve_counts().unwrap();
         assert_eq!(
             visit_bound[ng_branchy.nodes[NodePos(1)].pool_id],
             6,
@@ -2403,7 +2408,7 @@ mod tests {
         let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
         let ng = build_node_graph(&empty_graph(), n_stages, &resolver, &stochastic).unwrap();
 
-        let levels = backward_cut_levels(&ng);
+        let levels = ng.backward_cut_levels();
         // The terminal leaf (stage 3) generates no cut; stages 2,1,0 each hold
         // exactly one cut-generating node, descending.
         assert_eq!(
@@ -2442,7 +2447,7 @@ mod tests {
         let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
         let ng = build_node_graph(&graph, 3, &resolver, &stochastic).unwrap();
 
-        let levels = backward_cut_levels(&ng);
+        let levels = ng.backward_cut_levels();
         // Stage 1 (both interior nodes, ascending position) before stage 0.
         assert_eq!(levels, vec![vec![NodePos(1), NodePos(2)], vec![NodePos(0)]]);
         for level in &levels {
@@ -2459,11 +2464,11 @@ mod tests {
     }
 
     /// `Σ_leaf π(leaf)·|Ω_leaf| == enumerated_scenario_count(graph)` — the
-    /// prefix-count/scenario-count duality [`forward_solve_counts`] cites.
+    /// prefix-count/scenario-count duality [`NodeGraph::forward_solve_counts`] cites.
     /// Assumes every leaf sharing a pool carries the same `openings.len`
     /// (true of every fixture this helper is called on).
     fn assert_prefix_duality(graph: &NodeGraph) {
-        let visit_bound = forward_solve_counts(graph).unwrap();
+        let visit_bound = graph.forward_solve_counts().unwrap();
         let expected = enumerated_scenario_count(graph).unwrap();
 
         let mut leaf_len_by_pool: HashMap<usize, usize> = HashMap::new();
@@ -2525,7 +2530,7 @@ mod tests {
             "every |Ω|=1 tree node has exactly one root->node prefix: {counts:?}"
         );
 
-        let total: u64 = forward_solve_counts(&ng).unwrap().into_iter().sum();
+        let total: u64 = ng.forward_solve_counts().unwrap().into_iter().sum();
         assert_eq!(
             total,
             ng.nodes.len() as u64,
@@ -2576,7 +2581,7 @@ mod tests {
     #[test]
     fn build_parent_map_resolves_the_single_predecessor() {
         let ng = enumerated_k_fan(3);
-        let parent = build_parent_map(&ng);
+        let parent = ng.build_parent_map();
         let root = (0..ng.nodes.len())
             .map(NodePos)
             .find(|&p| ng.nodes[p].stage == StageIdx(0))

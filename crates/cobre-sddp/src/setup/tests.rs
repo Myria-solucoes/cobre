@@ -9205,7 +9205,7 @@ fn resolve_enumerated_simulation_count_rejects_recombining_node() {
 #[test]
 fn sampled_admits_the_recombining_node_graph() {
     let ng = recombining_tree_node_graph();
-    let bound = super::node_graph::pool_cut_stride(&ng, 8);
+    let bound = ng.pool_cut_stride(8);
     assert_eq!(
         bound.len(),
         ng.n_pools,

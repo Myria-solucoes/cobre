@@ -50,10 +50,7 @@ use crate::{
     lower_bound::evaluate_lower_bound,
     rank_reconcile::{reconcile_error_flag, reconcile_result},
     setup::NodeGraph,
-    setup::node_graph::{
-        NodePos, StageIdx, Traversal, enumerated_requires_state_exchange, frontier_node,
-        max_successor_outcome_count,
-    },
+    setup::node_graph::{NodePos, StageIdx, Traversal, enumerated_requires_state_exchange},
     solver_stats::{
         SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
@@ -190,7 +187,7 @@ where
             .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
             .max()
             .unwrap_or(0)
-            .max(max_successor_outcome_count(training_ctx.node_graph));
+            .max(training_ctx.node_graph.max_successor_outcome_count());
         let mut fwd_pool = WorkspacePool::try_new(
             ranks.fwd_rank,
             n_threads,
@@ -304,8 +301,10 @@ where
         // position: nodes[0] is the smallest-id node, not necessarily the root, so
         // fcf.pools[0] could under-size the map for a root pool larger than pool 0.
         // On a chain the root IS nodes[0] (pool 0), so this equals pools[0].
-        let lb_root_node =
-            frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
+        let lb_root_node = training_ctx
+            .node_graph
+            .frontier_node(StageIdx(0))
+            .ok_or_else(|| {
                 SddpError::Validation("training session: stage 0 carries no alive node".to_string())
             })?;
         let lb_root_pool = training_ctx.node_graph.nodes[lb_root_node].pool_id;
@@ -976,7 +975,7 @@ where
             // Root pool resolved by STAGE (the sole stage-0 node), never by array
             // position: nodes[0] is the smallest-id node, not necessarily the
             // root on a branching graph (the same resolution the LB path uses).
-            let root_node = frontier_node(node_graph, StageIdx(0)).ok_or_else(|| {
+            let root_node = node_graph.frontier_node(StageIdx(0)).ok_or_else(|| {
                 SddpError::Validation("training session: stage 0 carries no alive node".to_string())
             })?;
             let root_pool = node_graph.nodes[root_node].pool_id;
@@ -1372,7 +1371,7 @@ fn selection_record_index_by_pool(
 /// iteration from [`TrainingSession::run_iteration`], never inside the
 /// forward/backward sweep. A chain pool's construction-time floor already
 /// equals exactly `forward_passes` per iteration
-/// ([`crate::setup::node_graph::pool_cut_stride`]), so feeding it the
+/// ([`crate::setup::node_graph::NodeGraph::pool_cut_stride`]), so feeding it the
 /// same value here never triggers growth; a declared graph's realized
 /// per-pool visit source is supplied once a general-graph traversal is
 /// wired.
@@ -1453,7 +1452,7 @@ mod tests {
         indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
-        setup::node_graph::{StageIdx, frontier_node},
+        setup::node_graph::StageIdx,
         setup::{
             NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         },
@@ -2483,7 +2482,7 @@ mod tests {
         };
 
         // root_pool + interior_nodes computed exactly as run_cut_management does.
-        let root_pool = node_graph.nodes[frontier_node(&node_graph, StageIdx(0)).unwrap()].pool_id;
+        let root_pool = node_graph.nodes[node_graph.frontier_node(StageIdx(0)).unwrap()].pool_id;
         let interior_nodes: Vec<NodePos> = node_graph
             .nodes
             .iter_indexed()

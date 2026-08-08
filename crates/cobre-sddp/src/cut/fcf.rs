@@ -123,9 +123,9 @@ impl FutureCostFunction {
     /// `visit_bounds[p]` is pool `p`'s per-iteration visit bound — exact where
     /// the graph makes visits statically known (a chain node's is
     /// `forward_passes`; see
-    /// [`node_graph::pool_cut_stride`](crate::setup::node_graph::pool_cut_stride)
+    /// [`NodeGraph::pool_cut_stride`](crate::setup::node_graph::NodeGraph::pool_cut_stride)
     /// and
-    /// [`node_graph::forward_solve_counts`](crate::setup::node_graph::forward_solve_counts))
+    /// [`NodeGraph::forward_solve_counts`](crate::setup::node_graph::NodeGraph::forward_solve_counts))
     /// or an expected-value floor otherwise. [`pool_capacity`] sizes the pool
     /// from it, and each pool's own [`CutPool::visit_stride`] is set from the
     /// SAME value — capacity and stride must agree, or the slot formula can
@@ -246,7 +246,7 @@ impl FutureCostFunction {
     /// path builds pools identically to the cold path. Neither array may be
     /// omitted in favor of a scalar broadcast to every pool: a resumed pool's
     /// stride must equal the value the cold-start run derived for it
-    /// (`node_graph::pool_cut_stride`), never `forward_passes` uniformly.
+    /// (`NodeGraph::pool_cut_stride`), never `forward_passes` uniformly.
     ///
     /// `_proof` is compile-time evidence from
     /// [`validate_policy_load`](crate::validate_policy_load) that

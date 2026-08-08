@@ -2755,7 +2755,7 @@ mod anticipated_ring_matches_forward_propagation {
 fn simulation_node_pin_is_none_for_generated_and_declared_column_for_external() {
     use crate::setup::node_graph::{
         NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
-        StageIdx, node_pinned_scenario,
+        StageIdx,
     };
 
     let external = NodeRuntime {
@@ -2793,6 +2793,6 @@ fn simulation_node_pin_is_none_for_generated_and_declared_column_for_external() 
         pool_stage: vec![StageIdx(0), StageIdx(1)],
     };
 
-    assert_eq!(node_pinned_scenario(&ng, NodePos(0)), Some(5));
-    assert_eq!(node_pinned_scenario(&ng, NodePos(1)), None);
+    assert_eq!(ng.node_pinned_scenario(NodePos(0)), Some(5));
+    assert_eq!(ng.node_pinned_scenario(NodePos(1)), None);
 }

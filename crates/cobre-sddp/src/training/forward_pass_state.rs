@@ -36,10 +36,7 @@ use crate::{
         StageKey, run_enumerated_forward, run_forward_stage,
     },
     indexer::StateSpace,
-    setup::node_graph::{
-        EnumeratedPlan, NodePos, StageIdx, Traversal, advance_sampled_node, any_stage_node,
-        frontier_node, node_opening_range,
-    },
+    setup::node_graph::{EnumeratedPlan, NodePos, StageIdx, Traversal, advance_sampled_node},
     solve::partition,
     solver_phase::Phase,
     solver_stats::SolverStatsDelta,
@@ -348,8 +345,6 @@ impl ForwardPassState {
             state,
             stochastic,
             initial_state,
-            lag_accum_seed,
-            lag_weight_seed,
             ..
         } = training_ctx;
 
@@ -392,132 +387,161 @@ impl ForwardPassState {
         let traversal = std::mem::take(&mut self.traversal);
         let result = match &traversal {
             Traversal::Enumerated(plan) => self.run_enumerated(inputs, &sampler, plan),
-            Traversal::Sampled { .. } => 'sampled: {
-                let n_workers = inputs.workspaces.len().max(1);
-                let start = Instant::now();
-
-                let mut remaining: &mut [TrajectoryRecord] = inputs.records;
-                let mut record_slices: Vec<&mut [TrajectoryRecord]> = Vec::with_capacity(n_workers);
-                for w in 0..n_workers {
-                    let (start_m, end_m) = partition(forward_passes, n_workers, w);
-                    let (slice, rest) = remaining.split_at_mut((end_m - start_m) * num_stages);
-                    record_slices.push(slice);
-                    remaining = rest;
-                }
-                let basis_slices = inputs.basis_store.split_workers_mut(n_workers);
-
-                let noise_dim = stochastic.dim();
-
-                let (root_node, terminal_has_boundary_cuts) =
-                    match Self::resolve_root_and_terminal_cuts(training_ctx, num_stages, inputs.fcf)
-                    {
-                        Ok(pair) => pair,
-                        Err(e) => break 'sampled Err(e),
-                    };
-
-                // Re-size the per-worker per-stage accumulators: the worker count may
-                // differ from `new()` if the pool shrank. Fast path resets in place when
-                // the shape is unchanged; otherwise rebuild to `(n_workers, num_stages)`.
-                let shape_matches = self.worker_stage_stats.len() == n_workers
-                    && self.worker_stage_stats.first().map_or(0, Vec::len) == num_stages;
-                if shape_matches {
-                    for inner in &mut self.worker_stage_stats {
-                        for d in inner.iter_mut() {
-                            d.reset_in_place();
-                        }
-                    }
-                } else {
-                    self.worker_stage_stats.clear();
-                    for _ in 0..n_workers {
-                        self.worker_stage_stats.push(
-                            (0..num_stages)
-                                .map(|_| SolverStatsDelta::default())
-                                .collect(),
-                        );
-                    }
-                }
-
-                self.worker_stats_before.clear();
-                self.worker_stats_before
-                    .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
-
-                // Apply the forward-phase solver profile to every workspace. `set_profile`
-                // is delta-tracked: it issues solver-option FFI calls only for fields that
-                // differ from each solver's current state.
-                let forward_profile = self.profile;
-                for ws in inputs.workspaces.iter_mut() {
-                    ws.solver.set_profile(&forward_profile);
-                    debug_assert!(
-                        ws.solver.current_profile() == &forward_profile,
-                        "solver profile must equal the profile passed to set_profile"
-                    );
-                }
-
-                for ws in inputs.workspaces.iter_mut() {
-                    ws.worker_timing_buf = WorkerPhaseTimings::default();
-                }
-
-                let parallel_start = Instant::now();
-                // Drain `worker_stage_stats` into the parallel closure; the updated stats
-                // come back via each `ForwardWorkerResult` so the allocation is recycled.
-                let worker_stage_stats_for_par: Vec<Vec<SolverStatsDelta>> =
-                    std::mem::take(&mut self.worker_stage_stats);
-
-                let params = ForwardWorkerParams {
-                    forward_passes,
-                    total_forward_passes: inputs.total_forward_passes,
-                    num_stages,
-                    n_workers,
-                    iteration: inputs.iteration,
-                    fwd_offset: inputs.fwd_offset,
-                    terminal_has_boundary_cuts,
-                    root_node,
-                    noise_dim,
-                    initial_state,
-                    lag_accum_seed,
-                    lag_weight_seed,
-                    state,
-                    ctx: inputs.ctx,
-                    frozen: inputs.frozen,
-                    fcf: inputs.fcf,
-                    training_ctx,
-                    sampler: &sampler,
-                };
-                let worker_results: Vec<Result<ForwardWorkerResult, SddpError>> = inputs
-                    .workspaces
-                    .par_iter_mut()
-                    .zip(record_slices.par_iter_mut())
-                    .zip(basis_slices.into_par_iter())
-                    .zip(worker_stage_stats_for_par.into_par_iter())
-                    .enumerate()
-                    .map(
-                        |(w, (((ws, worker_records), mut basis_slice), mut per_stage_stats))| {
-                            run_forward_worker(
-                                w,
-                                ws,
-                                worker_records,
-                                &mut basis_slice,
-                                &mut per_stage_stats,
-                                &params,
-                            )
-                        },
-                    )
-                    .collect();
-
-                #[allow(clippy::cast_possible_truncation)]
-                let parallel_wall_ms = parallel_start.elapsed().as_millis() as u64;
-
-                let ppc = PostProcessContext {
-                    n_workers,
-                    num_stages,
-                    parallel_wall_ms,
-                    start,
-                };
-                self.post_process_worker_results(inputs, worker_results, &ppc)
-            }
+            Traversal::Sampled { .. } => self.run_sampled(inputs, &sampler),
         };
         self.traversal = traversal;
         result
+    }
+
+    /// Monte-Carlo forward for one iteration: dispatched from [`Self::run`]
+    /// under `Traversal::Sampled`. Partitions `inputs.local_forward_passes`
+    /// trajectories across rayon workers, each walking the sampled node
+    /// graph one stage at a time via [`run_forward_worker`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates `SddpError::Infeasible`/`SddpError::Solver` from any stage
+    /// solve, and `SddpError::Validation` from
+    /// [`Self::resolve_root_and_terminal_cuts`] if stage 0 or the terminal
+    /// stage carries no alive node.
+    fn run_sampled<S>(
+        &mut self,
+        inputs: &mut ForwardPassInputs<'_, S>,
+        sampler: &ForwardSampler<'_>,
+    ) -> Result<ForwardResult, SddpError>
+    where
+        S: SolverInterface<Profile = ActiveProfile> + Send,
+    {
+        let training_ctx = inputs.training_ctx;
+        let TrainingContext {
+            horizon,
+            state,
+            stochastic,
+            initial_state,
+            lag_accum_seed,
+            lag_weight_seed,
+            ..
+        } = training_ctx;
+        let num_stages = horizon.num_stages();
+        let forward_passes = inputs.local_forward_passes;
+
+        let n_workers = inputs.workspaces.len().max(1);
+        let start = Instant::now();
+
+        let mut remaining: &mut [TrajectoryRecord] = inputs.records;
+        let mut record_slices: Vec<&mut [TrajectoryRecord]> = Vec::with_capacity(n_workers);
+        for w in 0..n_workers {
+            let (start_m, end_m) = partition(forward_passes, n_workers, w);
+            let (slice, rest) = remaining.split_at_mut((end_m - start_m) * num_stages);
+            record_slices.push(slice);
+            remaining = rest;
+        }
+        let basis_slices = inputs.basis_store.split_workers_mut(n_workers);
+
+        let noise_dim = stochastic.dim();
+
+        let (root_node, terminal_has_boundary_cuts) =
+            Self::resolve_root_and_terminal_cuts(training_ctx, num_stages, inputs.fcf)?;
+
+        // Re-size the per-worker per-stage accumulators: the worker count may
+        // differ from `new()` if the pool shrank. Fast path resets in place when
+        // the shape is unchanged; otherwise rebuild to `(n_workers, num_stages)`.
+        let shape_matches = self.worker_stage_stats.len() == n_workers
+            && self.worker_stage_stats.first().map_or(0, Vec::len) == num_stages;
+        if shape_matches {
+            for inner in &mut self.worker_stage_stats {
+                for d in inner.iter_mut() {
+                    d.reset_in_place();
+                }
+            }
+        } else {
+            self.worker_stage_stats.clear();
+            for _ in 0..n_workers {
+                self.worker_stage_stats.push(
+                    (0..num_stages)
+                        .map(|_| SolverStatsDelta::default())
+                        .collect(),
+                );
+            }
+        }
+
+        self.worker_stats_before.clear();
+        self.worker_stats_before
+            .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
+
+        // Apply the forward-phase solver profile to every workspace. `set_profile`
+        // is delta-tracked: it issues solver-option FFI calls only for fields that
+        // differ from each solver's current state.
+        let forward_profile = self.profile;
+        for ws in inputs.workspaces.iter_mut() {
+            ws.solver.set_profile(&forward_profile);
+            debug_assert!(
+                ws.solver.current_profile() == &forward_profile,
+                "solver profile must equal the profile passed to set_profile"
+            );
+        }
+
+        for ws in inputs.workspaces.iter_mut() {
+            ws.worker_timing_buf = WorkerPhaseTimings::default();
+        }
+
+        let parallel_start = Instant::now();
+        // Drain `worker_stage_stats` into the parallel closure; the updated stats
+        // come back via each `ForwardWorkerResult` so the allocation is recycled.
+        let worker_stage_stats_for_par: Vec<Vec<SolverStatsDelta>> =
+            std::mem::take(&mut self.worker_stage_stats);
+
+        let params = ForwardWorkerParams {
+            forward_passes,
+            total_forward_passes: inputs.total_forward_passes,
+            num_stages,
+            n_workers,
+            iteration: inputs.iteration,
+            fwd_offset: inputs.fwd_offset,
+            terminal_has_boundary_cuts,
+            root_node,
+            noise_dim,
+            initial_state,
+            lag_accum_seed,
+            lag_weight_seed,
+            state,
+            ctx: inputs.ctx,
+            frozen: inputs.frozen,
+            fcf: inputs.fcf,
+            training_ctx,
+            sampler,
+        };
+        let worker_results: Vec<Result<ForwardWorkerResult, SddpError>> = inputs
+            .workspaces
+            .par_iter_mut()
+            .zip(record_slices.par_iter_mut())
+            .zip(basis_slices.into_par_iter())
+            .zip(worker_stage_stats_for_par.into_par_iter())
+            .enumerate()
+            .map(
+                |(w, (((ws, worker_records), mut basis_slice), mut per_stage_stats))| {
+                    run_forward_worker(
+                        w,
+                        ws,
+                        worker_records,
+                        &mut basis_slice,
+                        &mut per_stage_stats,
+                        &params,
+                    )
+                },
+            )
+            .collect();
+
+        #[allow(clippy::cast_possible_truncation)]
+        let parallel_wall_ms = parallel_start.elapsed().as_millis() as u64;
+
+        let ppc = PostProcessContext {
+            n_workers,
+            num_stages,
+            parallel_wall_ms,
+            start,
+        };
+        self.post_process_worker_results(inputs, worker_results, &ppc)
     }
 
     /// Enumerated all-paths forward for one iteration: dispatched from
@@ -614,7 +638,9 @@ impl ForwardPassState {
         if num_stages == 0 {
             return Ok(false);
         }
-        let terminal_node = any_stage_node(training_ctx.node_graph, StageIdx(num_stages - 1))
+        let terminal_node = training_ctx
+            .node_graph
+            .any_stage_node(StageIdx(num_stages - 1))
             .ok_or_else(|| {
                 SddpError::Validation(
                     "forward pass: terminal stage carries no alive node".to_string(),
@@ -635,9 +661,12 @@ impl ForwardPassState {
         num_stages: usize,
         fcf: &FutureCostFunction,
     ) -> Result<(NodePos, bool), SddpError> {
-        let root_node = frontier_node(training_ctx.node_graph, StageIdx(0)).ok_or_else(|| {
-            SddpError::Validation("forward pass: stage 0 carries no alive node".to_string())
-        })?;
+        let root_node = training_ctx
+            .node_graph
+            .frontier_node(StageIdx(0))
+            .ok_or_else(|| {
+                SddpError::Validation("forward pass: stage 0 carries no alive node".to_string())
+            })?;
         let terminal_has_boundary_cuts =
             Self::resolve_terminal_has_boundary_cuts(training_ctx, num_stages, fcf)?;
         Ok((root_node, terminal_has_boundary_cuts))
@@ -901,7 +930,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             #[allow(clippy::cast_possible_truncation)]
             let (i32, s32, t32) = (params.iteration as u32, global_scenario as u32, t.0 as u32);
 
-            let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
+            let (node_opening_offset, node_opening_len) = node_graph.node_opening_range(node);
 
             if t.0 == 0 {
                 let class_req = ClassSampleRequest {
@@ -1020,7 +1049,6 @@ mod tests {
         indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
-        setup::node_graph::{node_parent, stage_frontier},
         test_support::{state_layout, study_dims},
         trajectory::TrajectoryRecord,
         workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
@@ -2343,7 +2371,7 @@ mod tests {
             .expect("declared K-fan graph must build");
 
         let root = NodePos(0);
-        let leaves: Vec<NodePos> = stage_frontier(&node_graph, StageIdx(1)).collect();
+        let leaves: Vec<NodePos> = node_graph.stage_frontier(StageIdx(1)).collect();
         assert_eq!(leaves.len(), 4, "all 4 leaves must be alive at stage 1");
 
         let expected_leaf_pool = node_graph.nodes[leaves[0]].pool_id;
@@ -2378,7 +2406,7 @@ mod tests {
                 "leaf {leaf} must read its own pool_id (the shared leaf pool)"
             );
 
-            let parent = node_parent(&node_graph, leaf);
+            let parent = node_graph.node_parent(leaf);
             assert_eq!(
                 parent,
                 Some(root),

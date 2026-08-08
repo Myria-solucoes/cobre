@@ -611,6 +611,36 @@ impl SimulationParquetWriter {
         })
     }
 
+    /// Create the partition directory, write `batch` as `data.parquet`, and
+    /// record the partition in [`Self::partitions_written`] — the single
+    /// owner of the create-dir / write / push tail every entity type in
+    /// [`Self::write_scenario`] shares. `subpath` is the entity's directory
+    /// under `simulation/` (`"costs"`, `"violations/generic"`, ...).
+    ///
+    /// # Errors
+    ///
+    /// - [`OutputError::SerializationError`] if a `RecordBatch` cannot be
+    ///   constructed (array length mismatch).
+    /// - [`OutputError::IoError`] if any filesystem operation fails.
+    fn write_partition(
+        &mut self,
+        subpath: &str,
+        suffix: &str,
+        batch: &RecordBatch,
+    ) -> Result<(), OutputError> {
+        let part_dir = self
+            .output_dir
+            .join("simulation")
+            .join(subpath)
+            .join(suffix);
+        std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
+        let file_path = part_dir.join("data.parquet");
+        write_parquet_atomic(&file_path, batch, &self.config)?;
+        self.partitions_written
+            .push(format!("simulation/{subpath}/{suffix}/data.parquet"));
+        Ok(())
+    }
+
     /// Write one scenario's results to Hive-partitioned Parquet files.
     ///
     /// Entity types with empty Vecs (zero entities in the system) are skipped
@@ -621,13 +651,12 @@ impl SimulationParquetWriter {
     /// - [`OutputError::SerializationError`] if a `RecordBatch` cannot be
     ///   constructed (array length mismatch).
     /// - [`OutputError::IoError`] if any filesystem operation fails.
-    #[allow(clippy::too_many_lines)] // 10 entity types × ~10 lines each is inherently long
+    #[allow(clippy::too_many_lines)] // 12 entity types, each its own skip-if-empty block
     #[allow(clippy::needless_pass_by_value)] // consuming by value is intentional: payload drives output
     #[allow(clippy::cast_possible_wrap)] // scenario/stage ids are small non-negative indices
     pub fn write_scenario(&mut self, result: ScenarioWritePayload) -> Result<(), OutputError> {
         let id = result.scenario_id;
         let scenario_id = id as i32;
-        let sim_dir = self.output_dir.join("simulation");
         let partition_suffix = format!("scenario_id={id:04}");
 
         // One path row per visited (scenario, stage); node_id is stage-uniform.
@@ -639,23 +668,16 @@ impl SimulationParquetWriter {
             }));
 
         if result.stages.iter().any(|s| !s.costs.is_empty()) {
-            let part_dir = sim_dir.join("costs").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.costs.len()).sum();
             let batch = build_costs_batch(
                 result.stages.iter().flat_map(|s| s.costs.iter()),
                 scenario_id,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written
-                .push(format!("simulation/costs/{partition_suffix}/data.parquet"));
+            self.write_partition("costs", &partition_suffix, &batch)?;
         }
 
         if result.stages.iter().any(|s| !s.hydros.is_empty()) {
-            let part_dir = sim_dir.join("hydros").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.hydros.len()).sum();
             let batch = build_hydros_batch(
                 result.stages.iter().flat_map(|s| s.hydros.iter()),
@@ -663,10 +685,7 @@ impl SimulationParquetWriter {
                 &self.block_durations,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written
-                .push(format!("simulation/hydros/{partition_suffix}/data.parquet"));
+            self.write_partition("hydros", &partition_suffix, &batch)?;
         }
 
         if result
@@ -674,8 +693,6 @@ impl SimulationParquetWriter {
             .iter()
             .any(|s| !s.hydro_bus_generation.is_empty())
         {
-            let part_dir = sim_dir.join("hydro_bus_generation").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result
                 .stages
                 .iter()
@@ -690,16 +707,10 @@ impl SimulationParquetWriter {
                 &self.block_durations,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written.push(format!(
-                "simulation/hydro_bus_generation/{partition_suffix}/data.parquet"
-            ));
+            self.write_partition("hydro_bus_generation", &partition_suffix, &batch)?;
         }
 
         if result.stages.iter().any(|s| !s.thermals.is_empty()) {
-            let part_dir = sim_dir.join("thermals").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.thermals.len()).sum();
             let batch = build_thermals_batch(
                 result.stages.iter().flat_map(|s| s.thermals.iter()),
@@ -707,16 +718,10 @@ impl SimulationParquetWriter {
                 &self.block_durations,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written.push(format!(
-                "simulation/thermals/{partition_suffix}/data.parquet"
-            ));
+            self.write_partition("thermals", &partition_suffix, &batch)?;
         }
 
         if result.stages.iter().any(|s| !s.exchanges.is_empty()) {
-            let part_dir = sim_dir.join("exchanges").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.exchanges.len()).sum();
             let batch = build_exchanges_batch(
                 result.stages.iter().flat_map(|s| s.exchanges.iter()),
@@ -725,16 +730,10 @@ impl SimulationParquetWriter {
                 &self.loss_factors,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written.push(format!(
-                "simulation/exchanges/{partition_suffix}/data.parquet"
-            ));
+            self.write_partition("exchanges", &partition_suffix, &batch)?;
         }
 
         if result.stages.iter().any(|s| !s.buses.is_empty()) {
-            let part_dir = sim_dir.join("buses").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.buses.len()).sum();
             let batch = build_buses_batch(
                 result.stages.iter().flat_map(|s| s.buses.iter()),
@@ -742,15 +741,10 @@ impl SimulationParquetWriter {
                 &self.block_durations,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written
-                .push(format!("simulation/buses/{partition_suffix}/data.parquet"));
+            self.write_partition("buses", &partition_suffix, &batch)?;
         }
 
         if result.stages.iter().any(|s| !s.pumping_stations.is_empty()) {
-            let part_dir = sim_dir.join("pumping_stations").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.pumping_stations.len()).sum();
             let batch = build_pumping_batch(
                 result.stages.iter().flat_map(|s| s.pumping_stations.iter()),
@@ -758,16 +752,10 @@ impl SimulationParquetWriter {
                 &self.block_durations,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written.push(format!(
-                "simulation/pumping_stations/{partition_suffix}/data.parquet"
-            ));
+            self.write_partition("pumping_stations", &partition_suffix, &batch)?;
         }
 
         if result.stages.iter().any(|s| !s.contracts.is_empty()) {
-            let part_dir = sim_dir.join("contracts").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.contracts.len()).sum();
             let batch = build_contracts_batch(
                 result.stages.iter().flat_map(|s| s.contracts.iter()),
@@ -775,11 +763,7 @@ impl SimulationParquetWriter {
                 &self.block_durations,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written.push(format!(
-                "simulation/contracts/{partition_suffix}/data.parquet"
-            ));
+            self.write_partition("contracts", &partition_suffix, &batch)?;
         }
 
         if result
@@ -787,8 +771,6 @@ impl SimulationParquetWriter {
             .iter()
             .any(|s| !s.non_controllables.is_empty())
         {
-            let part_dir = sim_dir.join("non_controllables").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result
                 .stages
                 .iter()
@@ -803,43 +785,27 @@ impl SimulationParquetWriter {
                 &self.block_durations,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written.push(format!(
-                "simulation/non_controllables/{partition_suffix}/data.parquet"
-            ));
+            self.write_partition("non_controllables", &partition_suffix, &batch)?;
         }
 
         if result.stages.iter().any(|s| !s.inflow_lags.is_empty()) {
-            let part_dir = sim_dir.join("inflow_lags").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.inflow_lags.len()).sum();
             let batch = build_inflow_lags_batch(
                 result.stages.iter().flat_map(|s| s.inflow_lags.iter()),
                 scenario_id,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written.push(format!(
-                "simulation/inflow_lags/{partition_suffix}/data.parquet"
-            ));
+            self.write_partition("inflow_lags", &partition_suffix, &batch)?;
         }
 
         if result.stages.iter().any(|s| !s.transit_buckets.is_empty()) {
-            let part_dir = sim_dir.join("in_transit").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result.stages.iter().map(|s| s.transit_buckets.len()).sum();
             let batch = build_in_transit_batch(
                 result.stages.iter().flat_map(|s| s.transit_buckets.iter()),
                 scenario_id,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written.push(format!(
-                "simulation/in_transit/{partition_suffix}/data.parquet"
-            ));
+            self.write_partition("in_transit", &partition_suffix, &batch)?;
         }
 
         if result
@@ -847,8 +813,6 @@ impl SimulationParquetWriter {
             .iter()
             .any(|s| !s.generic_violations.is_empty())
         {
-            let part_dir = sim_dir.join("violations/generic").join(&partition_suffix);
-            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
             let n: usize = result
                 .stages
                 .iter()
@@ -862,11 +826,7 @@ impl SimulationParquetWriter {
                 scenario_id,
                 n,
             )?;
-            let file_path = part_dir.join("data.parquet");
-            write_parquet_atomic(&file_path, &batch, &self.config)?;
-            self.partitions_written.push(format!(
-                "simulation/violations/generic/{partition_suffix}/data.parquet"
-            ));
+            self.write_partition("violations/generic", &partition_suffix, &batch)?;
         }
 
         self.scenarios_written += 1;

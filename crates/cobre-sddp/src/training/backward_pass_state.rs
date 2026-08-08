@@ -19,9 +19,7 @@ use rayon::iter::{
 use crate::risk_measure::BackwardOutcome;
 #[cfg(test)]
 use crate::setup::node_graph::NodeId;
-use crate::setup::node_graph::{
-    EnumeratedPlan, NodeGraph, NodePos, StageIdx, Traversal, backward_cut_levels,
-};
+use crate::setup::node_graph::{EnumeratedPlan, NodeGraph, NodePos, StageIdx, Traversal};
 use crate::{
     backward::{
         BackwardResult, ReplicatedScratch, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut,
@@ -634,7 +632,7 @@ impl BackwardPassState {
         // within a level processed independently (nested per-node risk makes
         // siblings barrier-free). Absent `nodes[]` every level is one node
         // (== stage), reducing to the reversed stage loop byte-for-byte.
-        let levels = backward_cut_levels(training_ctx.node_graph);
+        let levels = training_ctx.node_graph.backward_cut_levels();
         for level in &levels {
             let out = run_one_backward_level(self, inputs, level, &params)?;
             cuts_generated += out.cuts_generated;
@@ -740,7 +738,7 @@ impl BackwardPassState {
         #[cfg(debug_assertions)]
         debug_assert_node_predecessor_states_distinct(node_graph, inputs.enumerated_state);
 
-        let levels = backward_cut_levels(node_graph);
+        let levels = node_graph.backward_cut_levels();
         let mut cuts_generated: usize = 0;
         for level in &levels {
             for &node_pos in level {
@@ -1411,7 +1409,7 @@ fn build_trial_routing(
 /// Guard the visit-bound overflow once per `(pool, iteration)`, at the routing
 /// site and ahead of any per-node compute: [`CutPool::visit_stride`] is a
 /// statistical floor under sampled branching
-/// ([`node_graph::pool_cut_stride`](crate::setup::node_graph::pool_cut_stride)),
+/// ([`node_graph::NodeGraph::pool_cut_stride`](crate::setup::node_graph::NodeGraph::pool_cut_stride)),
 /// never a guarantee, so a realized routed count above it would address the
 /// next iteration's slot block (`cut/pool.rs`'s append-only slot formula).
 /// Rejects rather than clamps: the run is seed-deterministic, so the
@@ -2146,9 +2144,7 @@ mod tests {
         indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::{BackwardOutcome, RiskMeasure},
-        setup::node_graph::{
-            NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource, max_successor_outcome_count,
-        },
+        setup::node_graph::{NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         state_exchange::ExchangeBuffers,
         test_support::{
@@ -2812,7 +2808,7 @@ mod tests {
         let n_state = state.n_state;
         let trial_count = records.len() / n_stages;
         let forward_passes = u32::try_from(trial_count).expect("trial_count fits u32");
-        let bwd_max_openings = max_successor_outcome_count(node_graph).max(1);
+        let bwd_max_openings = node_graph.max_successor_outcome_count().max(1);
 
         let mut fcf = FutureCostFunction::new(
             node_graph.n_pools,

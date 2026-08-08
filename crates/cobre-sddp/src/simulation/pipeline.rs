@@ -33,10 +33,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     indexer::{HydroCellIndex, StateSpace},
-    setup::node_graph::{
-        NodeId, NodePos, StageIdx, Traversal, advance_sampled_node, node_opening_range,
-        node_pinned_scenario,
-    },
+    setup::node_graph::{NodeId, NodePos, StageIdx, Traversal, advance_sampled_node},
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -785,7 +782,7 @@ pub(crate) fn reset_scenario_state<S: SolverInterface>(
         node_graph,
         ..
     } = training_ctx;
-    let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, root_node);
+    let (node_opening_offset, node_opening_len) = node_graph.node_opening_range(root_node);
     ws.current_state.clear();
     ws.current_state.extend_from_slice(initial_state);
     sampler.apply_initial_state(
@@ -798,7 +795,7 @@ pub(crate) fn reset_scenario_state<S: SolverInterface>(
             noise_group_id: 0,
             node_opening_offset,
             node_opening_len,
-            pinned_scenario: node_pinned_scenario(node_graph, root_node),
+            pinned_scenario: node_graph.node_pinned_scenario(root_node),
         },
         &mut ws.current_state,
         inflow_lags_start,
@@ -875,7 +872,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
         let output_stage_id = ctx
             .study_stage_id(t)
             .unwrap_or_else(|| i32::try_from(t.0).unwrap_or(i32::MAX));
-        let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
+        let (node_opening_offset, node_opening_len) = node_graph.node_opening_range(node);
         let noise = ids.sampler.sample(SampleRequest {
             iteration: SIMULATION_ITERATION,
             scenario: ids.global_scenario,
@@ -887,7 +884,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             noise_group_id: ctx.noise_group_id_at(t),
             node_opening_offset,
             node_opening_len,
-            pinned_scenario: node_pinned_scenario(node_graph, node),
+            pinned_scenario: node_graph.node_pinned_scenario(node),
         })?;
         let raw_noise = noise.as_slice();
 

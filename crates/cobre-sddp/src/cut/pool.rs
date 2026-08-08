@@ -84,7 +84,7 @@ pub struct CutPool {
     /// per iteration, a factor in the slot formula. Exact where the graph
     /// makes visits statically known (a chain node's is `forward_passes`),
     /// or an expected-value floor otherwise — see
-    /// [`node_graph::pool_cut_stride`](crate::setup::node_graph::pool_cut_stride).
+    /// [`NodeGraph::pool_cut_stride`](crate::setup::node_graph::NodeGraph::pool_cut_stride).
     /// Fixed after construction.
     pub visit_stride: u32,
 

@@ -26,10 +26,7 @@ use crate::{
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
     noise::{AccumSnapshot, DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
-    setup::node_graph::{
-        EnumeratedPlan, NodeGraph, NodeId, NodePos, StageIdx, TypedVec, forward_solve_counts,
-        node_opening_range, node_pinned_scenario, stage_frontier,
-    },
+    setup::node_graph::{EnumeratedPlan, NodeGraph, NodeId, NodePos, StageIdx, TypedVec},
     solver_stats::SolverStatsDelta,
     stage_solve::{StageInputs, fill_unscaled, run_stage_solve},
     training::stage_solve_prep::{
@@ -447,7 +444,7 @@ where
     for t in (0..num_stages).map(StageIdx) {
         // Units: the nodes at stage `t` on this rank's paths, canonical order.
         scratch.stage_units.clear();
-        for node in stage_frontier(node_graph, t) {
+        for node in node_graph.stage_frontier(t) {
             if scratch.on_my_paths[node] {
                 scratch.stage_units.push(node);
             }
@@ -651,8 +648,8 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
 
         #[allow(clippy::cast_possible_truncation)]
         let (i32_it, s32, t32) = (params.iteration as u32, global_scenario as u32, t.0 as u32);
-        let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
-        let pinned_scenario = node_pinned_scenario(node_graph, node);
+        let (node_opening_offset, node_opening_len) = node_graph.node_opening_range(node);
+        let pinned_scenario = node_graph.node_pinned_scenario(node);
 
         if parent[node].is_none() {
             let class_req = ClassSampleRequest {
@@ -758,5 +755,5 @@ fn seed_root_accumulators<S: SolverInterface + Send>(
 ///
 /// Propagates the `u64` path-product overflow guard.
 pub(crate) fn expected_single_rank_solves(node_graph: &NodeGraph) -> Result<u64, SddpError> {
-    Ok(forward_solve_counts(node_graph)?.into_iter().sum())
+    Ok(node_graph.forward_solve_counts()?.into_iter().sum())
 }
