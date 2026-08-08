@@ -32,8 +32,8 @@ These are non-negotiable. Violations must be fixed before committing.
   (`crates/cobre-solver/tests/clp_determinism.rs` is the reference harness)
 - **Unwired config is reserved, not dead** — several config sections are
   loaded, validated, and schema-exported without yet being consumed (e.g.
-  the hydro storage-violation / filling-target penalties: storage bounds
-  are HARD in the LP today, so those output columns are always 0). They
+  the vertex-based upper-bound-evaluation config `LipschitzConfig.mode`, a
+  one-valued enum with no LP consumer). They
   reserve seams for planned features — do not remove unconsumed config in
   a dead-code sweep without owner sign-off
 - **Infrastructure crate genericity** — `cobre-core`, `cobre-io`, `cobre-solver`,
