@@ -1687,7 +1687,7 @@ fn make_hydro_spillage_stage_and_block_override_case(dir: &TempDir) {
     writer.close().unwrap();
 }
 
-/// AC: a stage-wide `max_spillage_m3s` override and a `block_id=1` override on
+/// A stage-wide `max_spillage_m3s` override and a `block_id=1` override on
 /// the same stage resolve per block — block 1 reads back its own tighter value,
 /// blocks 0 and 2 fall through to the stage-wide value.
 #[test]

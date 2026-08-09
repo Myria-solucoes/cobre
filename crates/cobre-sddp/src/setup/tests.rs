@@ -9028,7 +9028,7 @@ fn within_node_multi_opening_node_graph() -> super::NodeGraph {
 /// A within-node multi-opening node (`|Ω| > 1`) under enumerated SIMULATION is
 /// a named `Validation` rejection — the sibling requirement to the
 /// recombination guard tested below, both preconditions the exact node-dedup
-/// traversal needs (design §1.4).
+/// traversal needs.
 #[test]
 fn resolve_enumerated_simulation_count_rejects_within_node_multi_opening() {
     let ng = within_node_multi_opening_node_graph();

@@ -718,7 +718,7 @@ fn generic_constraint_thermal_ge_row_bounds() {
     );
 }
 
-/// AC: a lower-only row (`bound_lower` present, `bound_upper` absent) on a
+/// A lower-only row (`bound_lower` present, `bound_upper` absent) on a
 /// slack-enabled constraint allocates exactly ONE slack column with `+1.0` at
 /// the generic row — the mirror image of the upper-only `-1.0` case above.
 #[test]

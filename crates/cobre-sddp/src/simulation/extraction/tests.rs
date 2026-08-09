@@ -6743,7 +6743,7 @@ fn generic_only_spec<'a>(
     }
 }
 
-/// AC: a two-sided entry with `slack_enabled = true`, `slack_penalty = 100.0`,
+/// A two-sided entry with `slack_enabled = true`, `slack_penalty = 100.0`,
 /// `block_hours = 730.0`, `s_plus = 3.0`, `s_minus = 1.0` reports the signed net
 /// (`2.0`) as `slack_value` while charging BOTH slacks
 /// (`4.0 * 100.0 * 730.0`) as `slack_cost`.
@@ -6773,7 +6773,7 @@ fn two_sided_net_report_reads_signed_net_and_charges_both_slacks() {
     assert_eq!(total_cost, 4.0 * 100.0 * 730.0);
 }
 
-/// AC: a stage-level two-sided entry (`is_stage_level = true`) over a 2-block
+/// A stage-level two-sided entry (`is_stage_level = true`) over a 2-block
 /// stage with block hours `[400.0, 330.0]` reports `block_id = None` and prices
 /// its slack cost on the SUMMED stage hours (`730.0`), not either individual
 /// block's.
@@ -6825,7 +6825,7 @@ fn per_block_two_sided_prices_its_own_block_duration() {
     assert_eq!(results[0].slack_cost, 2.5 * 10.0 * 330.0);
 }
 
-/// AC: a two-sided entry with `slack_enabled = false` reports `slack_value ==
+/// A two-sided entry with `slack_enabled = false` reports `slack_value ==
 /// 0.0` and `slack_cost == 0.0` and contributes nothing to the returned total
 /// cost — the `map_or(0.0, ...)` fallback path, never reading the (absent)
 /// slack columns.

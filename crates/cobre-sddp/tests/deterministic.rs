@@ -1663,7 +1663,7 @@ fn d13_generic_constraint() {
 ///
 /// Total (2 stages) = 2 x $19,345,073 = **$38,690,146**
 ///
-/// ## Discriminating power (AC4)
+/// ## Discriminating power
 ///
 /// A hypothetical implementation that applies only `bound_upper` and silently
 /// drops `bound_lower` (the lower half of the band) would build a row with
@@ -1674,7 +1674,7 @@ fn d13_generic_constraint() {
 /// stages) = **$1,460,000** — two orders of magnitude below the correct
 /// $38,690,146, so the broken implementation fails this case's cost assertion.
 ///
-/// ## Violation record (AC7)
+/// ## Violation record
 ///
 /// The band cannot be fully satisfied (35 MW > T0's 30 MW cap), so the
 /// optimum leaves a genuine 5 MW shortfall below the lower bound: each

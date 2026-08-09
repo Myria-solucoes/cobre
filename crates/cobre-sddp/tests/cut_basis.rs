@@ -2158,7 +2158,7 @@ mod group_state_invariance {
 
 mod range_warm_start_determinism {
     //! Empirical evidence for the range-row basis-reconstruction safety argument
-    //! (the epic's highest-risk coverage gap): `BasisStatus::Upper` on a real,
+    //! (the highest-risk coverage gap): `BasisStatus::Upper` on a real,
     //! solved range row surviving `reconstruct_basis`, warm-start/cold objective
     //! agreement, run-to-run reproducibility, `generic_constraints.json`
     //! declaration-order invariance, and range-vs-two-row solution equivalence.
@@ -2304,7 +2304,7 @@ mod range_warm_start_determinism {
     }
 
     // ---------------------------------------------------------------------------
-    // Band-only fixture (range vs. two-row equivalence, AC5)
+    // Band-only fixture (range vs. two-row equivalence)
     // ---------------------------------------------------------------------------
 
     /// The same `[3, 8]` band on `thermal_generation(0)`, expressed either as one
@@ -2361,7 +2361,7 @@ mod range_warm_start_determinism {
     }
 
     // ---------------------------------------------------------------------------
-    // System / config builders (in-code, no case directory — AC1, AC2, AC3, AC5)
+    // System / config builders (in-code, no case directory)
     // ---------------------------------------------------------------------------
 
     /// A 2-stage, 1-bus, 1-thermal, 0-hydro system: bus deficit cost 1000/MWh,
@@ -2641,15 +2641,15 @@ mod range_warm_start_determinism {
     }
 
     // ---------------------------------------------------------------------------
-    // AC1 — BasisStatus::Upper round-trips through reconstruct_basis
+    // BasisStatus::Upper round-trips through reconstruct_basis
     // ---------------------------------------------------------------------------
 
-    /// Requirement 1 / AC1: a range row whose optimum rests on its upper bound
+    /// A range row whose optimum rests on its upper bound
     /// captures `BasisStatus::Upper`, and `reconstruct_basis` (the sole hot-path
     /// entry point over `reconstruct_template_row_statuses`) preserves it
     /// verbatim. Runs on both backends: HiGHS validates a warm-start basis and
     /// would reject a corrupted one loudly; CLP would accept it silently, so this
-    /// test alone cannot prove backend-acceptance — AC2 below does, on HiGHS.
+    /// test alone cannot prove backend-acceptance — the HiGHS test below does.
     #[test]
     fn range_row_rests_at_upper_and_survives_reconstruction() {
         let system = build_system(build_range_constraints(), build_range_bounds());
@@ -2722,10 +2722,10 @@ mod range_warm_start_determinism {
     }
 
     // ---------------------------------------------------------------------------
-    // AC2 — basic-count invariant survives; warm objective matches cold
+    // basic-count invariant survives; warm objective matches cold
     // ---------------------------------------------------------------------------
 
-    /// Requirement 2 / AC2: with a range row present, training accepts every
+    /// With a range row present, training accepts every
     /// reconstructed basis (zero `basis_consistency_failures`, meaningful on
     /// HiGHS — CLP would accept a corrupted basis silently), and a checkpoint
     /// warm-started resume reaches the same converged objective as an
@@ -2860,10 +2860,10 @@ mod range_warm_start_determinism {
     }
 
     // ---------------------------------------------------------------------------
-    // AC3 — run-to-run reproducibility
+    // run-to-run reproducibility
     // ---------------------------------------------------------------------------
 
-    /// Requirement 3 / AC3: two fresh solver instances over the same
+    /// Two fresh solver instances over the same
     /// range-constraint study produce bit-identical results — compared via
     /// `to_bits()`/`==`, never a tolerance (mirrors
     /// `crates/cobre-solver/tests/clp_determinism.rs`'s determinism harness).
@@ -2940,7 +2940,7 @@ mod range_warm_start_determinism {
     }
 
     // ---------------------------------------------------------------------------
-    // AC4 — declaration-order invariance for generic_constraints.json
+    // declaration-order invariance for generic_constraints.json
     // ---------------------------------------------------------------------------
 
     /// `(id, name)` for the three constraints declared in every permutation test.
@@ -2975,7 +2975,7 @@ mod range_warm_start_determinism {
         )
     }
 
-    /// Requirement 4 / AC4 (sort-contract tier): `cobre_io::parse_generic_constraints`
+    /// Sort-contract tier: `cobre_io::parse_generic_constraints`
     /// sorts by id regardless of the JSON array's declared order — the mechanism
     /// that makes declaration-order invariance hold. Exhaustive over every
     /// ordering of 3 elements, not one hand-picked reordering.
@@ -3106,7 +3106,7 @@ mod range_warm_start_determinism {
         tmp
     }
 
-    /// Requirement 4 / AC4 (end-to-end tier): every ordering of
+    /// End-to-end tier: every ordering of
     /// `generic_constraints.json`'s 3 constraints (including `band`, the range
     /// one) produces a bit-identical LP (`frozen_templates`' CSC arrays and row
     /// bounds) and a bit-identical result (`final_lb`) through the real
@@ -3237,10 +3237,10 @@ mod range_warm_start_determinism {
     }
 
     // ---------------------------------------------------------------------------
-    // AC5 — range vs. two-row solution equivalence
+    // range vs. two-row solution equivalence
     // ---------------------------------------------------------------------------
 
-    /// Requirement 5 / AC5: the same `[3, 8]` band expressed as one `range`
+    /// The same `[3, 8]` band expressed as one `range`
     /// constraint versus a `>= 3` plus a `<= 8` constraint reaches equal optimal
     /// objective and equal primals within the suite's tolerance. Duals and row
     /// counts are never compared — the two formulations have different row
