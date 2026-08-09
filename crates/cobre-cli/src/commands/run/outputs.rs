@@ -31,6 +31,7 @@ use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::build_evaporation_model_rows;
 use cobre_sddp::build_fpha_deviation_point_rows;
+use cobre_sddp::build_generic_constraint_echo_rows;
 use cobre_sddp::delta_to_stats_row;
 use cobre_sddp::orchestration::CheckpointParams;
 use cobre_sddp::orchestration::write_checkpoint;
@@ -118,6 +119,19 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
             write_fpha_deviation_points(&deviation_points_path, deviation_point_rows)
                 .map_err(CliError::from)?;
         }
+    }
+
+    // No generic constraint writes no file, so a default run stays byte-identical;
+    // mirror on the Python side: `write_generic_constraint_echo_if_any`. The writer
+    // is called fully qualified, not imported, so the Python-parity checker's
+    // `cobre_io::write_*` match sees it.
+    if !args.system.generic_constraints().is_empty() {
+        let rows = build_generic_constraint_echo_rows(args.setup, args.system);
+        let echo_path = args
+            .output_dir
+            .join("generic_constraints")
+            .join("resolved_echo.parquet");
+        cobre_io::write_generic_constraint_echo(&echo_path, &rows).map_err(CliError::from)?;
     }
 
     if !args.training_result.solver_stats_log.is_empty() {

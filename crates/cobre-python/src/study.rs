@@ -35,7 +35,7 @@ use crate::run::{
     build_study_setup, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
     run_simulation_phase_py, run_training_phase_py, run_training_phase_py_streaming,
     write_evaporation_models_if_any, write_fpha_deviation_points_if_any,
-    write_fpha_hyperplanes_if_any, write_training_artifacts,
+    write_fpha_hyperplanes_if_any, write_generic_constraint_echo_if_any, write_training_artifacts,
 };
 
 /// Map a [`PhaseError`] to a Python exception through the single
@@ -455,6 +455,7 @@ impl Study {
                     write_fpha_hyperplanes_if_any(&output_dir, setup)?;
                     write_evaporation_models_if_any(&output_dir, setup, system)?;
                     write_fpha_deviation_points_if_any(&output_dir, setup, config)?;
+                    write_generic_constraint_echo_if_any(&output_dir, setup, system)?;
 
                     Ok::<_, PhaseError>((training, callback_error))
                 })?

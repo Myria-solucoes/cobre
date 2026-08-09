@@ -26,6 +26,7 @@ pub mod convergence;
 pub mod cut;
 pub mod error;
 pub(crate) mod gemm;
+pub(crate) mod generic_constraint_echo;
 pub mod horizon_mode;
 pub(crate) mod hull;
 pub mod lead_time;
@@ -128,6 +129,8 @@ pub use cobre_io::scenarios::estimation::{
 };
 // ── forward ───────────────────────────────────────────────────────────────────
 pub use training::forward::SyncResult;
+// ── generic_constraint_echo ───────────────────────────────────────────────────
+pub use generic_constraint_echo::build_generic_constraint_echo_rows;
 // ── hydro_models ──────────────────────────────────────────────────────────────
 pub use production::hydro_models::{
     FphaFitDeviationEntry, FphaHydroDetail, HydroFitTimings, HydroModelSummary,

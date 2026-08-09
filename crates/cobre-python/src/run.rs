@@ -82,6 +82,7 @@ use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::build_deviation_summary;
 use cobre_sddp::build_evaporation_model_rows;
 use cobre_sddp::build_fpha_deviation_point_rows;
+use cobre_sddp::build_generic_constraint_echo_rows;
 use cobre_sddp::delta_to_stats_row;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::inject_boundary_cuts;
@@ -580,6 +581,30 @@ pub(crate) fn write_evaporation_models_if_any(
             .join("evaporation_models.parquet");
         write_evaporation_models(&evaporation_path, &rows)
             .map_err(|e| format!("output write error: failed to write evaporation_models: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Write the resolved generic-constraint echo sidecar, when the case declares at
+/// least one generic constraint.
+///
+/// Both Python write sites ([`run_via_study`] and `Study::train`) must emit this
+/// to match the CLI's `write_generic_constraint_echo` output (the Python-parity
+/// hard rule). The write is fully qualified, not imported, so the parity checker's
+/// `cobre_io::write_*` match sees both sides.
+pub(crate) fn write_generic_constraint_echo_if_any(
+    output_dir: &Path,
+    setup: &StudySetup,
+    system: &System,
+) -> Result<(), String> {
+    if !system.generic_constraints().is_empty() {
+        let rows = build_generic_constraint_echo_rows(setup, system);
+        let echo_path = output_dir
+            .join("generic_constraints")
+            .join("resolved_echo.parquet");
+        cobre_io::write_generic_constraint_echo(&echo_path, &rows).map_err(|e| {
+            format!("output write error: failed to write generic_constraint_echo: {e}")
+        })?;
     }
     Ok(())
 }
@@ -1331,6 +1356,7 @@ pub(crate) fn run_via_study(
         write_fpha_hyperplanes_if_any(&output_dir, &setup)?;
         write_evaporation_models_if_any(&output_dir, &setup, &system)?;
         write_fpha_deviation_points_if_any(&output_dir, &setup, &config)?;
+        write_generic_constraint_echo_if_any(&output_dir, &setup, &system)?;
 
         // Propagate a captured callback exception only AFTER all training
         // artifacts are written, so a raising or Ctrl-C-stopped run still persists

@@ -45,7 +45,7 @@ use cobre_stochastic::season_cast::{DatedWindow, StageCalendar};
 
 use crate::StageTemplates;
 use crate::config::LoopParams;
-use crate::resolved_parameters::build_resolved_parameters;
+use crate::resolved_parameters::{ResolvedParameters, build_resolved_parameters};
 use crate::scaling_report::ScalingReport;
 use crate::simulation::SimulationConfig;
 use crate::solve::solver_phase::{Phase, validate_phase_solver_config};
@@ -180,6 +180,10 @@ pub struct StudySetup {
     /// context borrows it to map a delivery stage index to its commissioning id
     /// for the `anticipated_windows` gate.
     pub(crate) study_stage_ids: Vec<i32>,
+
+    /// Resolved `(parameter_id, stage)` coefficients; consumed by the LP builder
+    /// and the generic-constraint echo.
+    pub(crate) resolved_parameters: ResolvedParameters,
 
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     pub scenario_libraries: ScenarioLibraries,
@@ -450,6 +454,7 @@ impl StudySetup {
             energy_conversion,
             stage_templates,
             scaling_report,
+            resolved_parameters,
         } = build_energy_and_templates(
             system,
             inflow_method,
@@ -676,6 +681,7 @@ impl StudySetup {
             ncs_allow_curtailment,
             anticipated_windows,
             study_stage_ids,
+            resolved_parameters,
             scenario_libraries,
             node_graph,
             loop_params: LoopParams {
@@ -806,6 +812,7 @@ struct EnergyAndTemplates {
     energy_conversion: EnergyConversionSet,
     stage_templates: StageTemplates,
     scaling_report: ScalingReport,
+    resolved_parameters: ResolvedParameters,
 }
 
 /// Build the energy-conversion set, the resolved parameter table, and the
@@ -813,9 +820,9 @@ struct EnergyAndTemplates {
 ///
 /// The energy-conversion set and resolved parameter table are built before the
 /// LP templates so the builder can resolve `CoefficientRef::Parameter` values.
-/// The resolved parameter table is consumed only by `build_stage_templates`, so
-/// it is not returned. Seasonless stages collapse to season 0, consistent with
-/// every other season-indexed lookup.
+/// The resolved parameter table feeds `build_stage_templates` and is returned
+/// for the generic-constraint echo. Seasonless stages collapse to season 0,
+/// consistent with every other season-indexed lookup.
 ///
 /// # Errors
 ///
@@ -922,6 +929,7 @@ fn build_energy_and_templates(
         energy_conversion,
         stage_templates,
         scaling_report,
+        resolved_parameters,
     })
 }
 

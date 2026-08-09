@@ -476,6 +476,32 @@ pub(crate) fn row_selection_schema() -> Schema {
     ])
 }
 
+/// Schema for the resolved generic-constraint echo — one row per
+/// `(constraint, stage, block, term)`.
+///
+/// `bound_lower`/`bound_upper` are the resolved interval endpoints (min before
+/// max), each `None` where unbounded on that side; `derived_shape` labels the
+/// shape those endpoints imply. The per-term columns (`term_index`,
+/// `variable_kind`, `variable`, `coefficient`) are `None` on a term-less
+/// constraint's placeholder row, and `slack_penalty` is `None` when slack is off.
+pub(crate) fn generic_constraint_echo_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("block_id", DataType::Int32, true),
+        Field::new("constraint_id", DataType::Int32, false),
+        Field::new("constraint_name", DataType::Utf8, false),
+        Field::new("term_index", DataType::Int32, true),
+        Field::new("variable_kind", DataType::Utf8, true),
+        Field::new("variable", DataType::Utf8, true),
+        Field::new("coefficient", DataType::Float64, true),
+        Field::new("bound_lower", DataType::Float64, true),
+        Field::new("bound_upper", DataType::Float64, true),
+        Field::new("derived_shape", DataType::Utf8, false),
+        Field::new("slack_enabled", DataType::Boolean, false),
+        Field::new("slack_penalty", DataType::Float64, true),
+    ])
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 mod tests {
@@ -1138,6 +1164,7 @@ mod tests {
             (row_selection_schema(), "cut_selection"),
             (solver_iterations_schema(), "solver_iterations"),
             (retry_histogram_schema(), "retry_histogram"),
+            (generic_constraint_echo_schema(), "generic_constraint_echo"),
         ];
         for (schema, name) in &schemas {
             assert!(
@@ -1169,6 +1196,7 @@ mod tests {
             ("cut_selection", 10),
             ("solver_iterations", 19),
             ("retry_histogram", 5),
+            ("generic_constraint_echo", 13),
         ];
         for ((name, actual), (_, exp)) in counts.iter().zip(expected.iter()) {
             assert_eq!(
@@ -1204,6 +1232,7 @@ mod tests {
             solver_iterations_schema(),
             retry_histogram_schema(),
             hydro_energy_productivity_schema(),
+            generic_constraint_echo_schema(),
         ];
         let names: Vec<String> = schemas
             .iter()
@@ -1280,5 +1309,40 @@ mod tests {
             field_type(&schema, "specific_productivity_mw_per_m3s_per_m"),
             DataType::Float64
         );
+    }
+
+    #[test]
+    fn generic_constraint_echo_schema_field_count_and_names() {
+        let schema = generic_constraint_echo_schema();
+        assert_eq!(
+            schema.fields().len(),
+            13,
+            "generic_constraint_echo schema must have 13 fields"
+        );
+        let expected: &[(&str, DataType, bool)] = &[
+            ("stage_id", DataType::Int32, false),
+            ("block_id", DataType::Int32, true),
+            ("constraint_id", DataType::Int32, false),
+            ("constraint_name", DataType::Utf8, false),
+            ("term_index", DataType::Int32, true),
+            ("variable_kind", DataType::Utf8, true),
+            ("variable", DataType::Utf8, true),
+            ("coefficient", DataType::Float64, true),
+            ("bound_lower", DataType::Float64, true),
+            ("bound_upper", DataType::Float64, true),
+            ("derived_shape", DataType::Utf8, false),
+            ("slack_enabled", DataType::Boolean, false),
+            ("slack_penalty", DataType::Float64, true),
+        ];
+        for (i, (name, dtype, nullable)) in expected.iter().enumerate() {
+            let field = &schema.fields()[i];
+            assert_eq!(field.name(), name, "field {i} name mismatch");
+            assert_eq!(field.data_type(), dtype, "field {i} ({name}) type mismatch");
+            assert_eq!(
+                field.is_nullable(),
+                *nullable,
+                "field {i} ({name}) nullability mismatch"
+            );
+        }
     }
 }

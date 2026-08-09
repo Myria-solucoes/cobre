@@ -11,6 +11,7 @@ pub(crate) mod atomic;
 pub mod convergence_reader;
 pub mod dictionary;
 pub mod error;
+pub mod generic_constraints_echo;
 pub mod hydro_models;
 pub mod manifest;
 pub mod parquet_config;
@@ -29,6 +30,7 @@ pub use convergence_reader::{
 };
 pub use dictionary::write_dictionaries;
 pub use error::OutputError;
+pub use generic_constraints_echo::{GenericConstraintEchoRow, write_generic_constraint_echo};
 pub use hydro_models::{
     read_hydro_model_summary, write_evaporation_models, write_fpha_deviation_points,
     write_fpha_hyperplanes, write_hydro_model_summary,
