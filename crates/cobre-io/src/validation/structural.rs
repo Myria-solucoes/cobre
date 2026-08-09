@@ -67,8 +67,6 @@ pub struct FileManifest {
     pub system_hydro_production_models_json: bool,
     /// `system/fpha_hyperplanes.parquet` — optional
     pub system_fpha_hyperplanes_parquet: bool,
-    /// `system/scalar_parameters.json` — optional
-    pub system_scalar_parameters_json: bool,
     /// `system/hydro_energy_productivity.parquet` — optional
     pub system_hydro_energy_productivity_parquet: bool,
     /// `system/tailrace_curves.parquet` — optional
@@ -113,6 +111,8 @@ pub struct FileManifest {
     pub constraints_generic_constraints_json: bool,
     /// `constraints/generic_constraint_bounds.parquet` — optional
     pub constraints_generic_constraint_bounds_parquet: bool,
+    /// `constraints/generic_parameters.json` — optional
+    pub constraints_generic_parameters_json: bool,
     /// `constraints/penalty_overrides_bus.parquet` — optional
     pub constraints_penalty_overrides_bus_parquet: bool,
     /// `constraints/penalty_overrides_line.parquet` — optional
@@ -196,10 +196,6 @@ const FILE_ENTRIES: &[FileEntry] = &[
     },
     FileEntry {
         relative: "system/fpha_hyperplanes.parquet",
-        required: false,
-    },
-    FileEntry {
-        relative: "system/scalar_parameters.json",
         required: false,
     },
     FileEntry {
@@ -289,6 +285,10 @@ const FILE_ENTRIES: &[FileEntry] = &[
         required: false,
     },
     FileEntry {
+        relative: "constraints/generic_parameters.json",
+        required: false,
+    },
+    FileEntry {
         relative: "constraints/penalty_overrides_bus.parquet",
         required: false,
     },
@@ -324,13 +324,21 @@ struct RemovedFile {
 
 /// An input file no longer read by any loader is rejected when present —
 /// never accepted and silently ignored.
-const REMOVED_FILES: &[RemovedFile] = &[RemovedFile {
-    relative: "constraints/exchange_factors.json",
-    replacement: "per-block line capacity is now declared as absolute MW in \
-        constraints/line_bounds.parquet via direct_mw / reverse_mw rows \
-        carrying a block_id (use base_capacity * factor for each block). \
-        Remove the file.",
-}];
+const REMOVED_FILES: &[RemovedFile] = &[
+    RemovedFile {
+        relative: "constraints/exchange_factors.json",
+        replacement: "per-block line capacity is now declared as absolute MW in \
+            constraints/line_bounds.parquet via direct_mw / reverse_mw rows \
+            carrying a block_id (use base_capacity * factor for each block). \
+            Remove the file.",
+    },
+    RemovedFile {
+        relative: "system/scalar_parameters.json",
+        replacement: "scalar parameters are now read from \
+            constraints/generic_parameters.json, beside the constraints that \
+            reference them by @name. Move the file (its contents are unchanged).",
+    },
+];
 
 /// Performs Layer 1 structural validation on the case directory at `case_root`,
 /// returning a [`FileManifest`] of which files are present.
@@ -399,7 +407,6 @@ fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 42] {
         &mut m.system_hydro_geometry_parquet,
         &mut m.system_hydro_production_models_json,
         &mut m.system_fpha_hyperplanes_parquet,
-        &mut m.system_scalar_parameters_json,
         &mut m.system_hydro_energy_productivity_parquet,
         &mut m.system_tailrace_curves_parquet,
         // scenarios/
@@ -423,6 +430,7 @@ fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 42] {
         &mut m.constraints_contract_bounds_parquet,
         &mut m.constraints_generic_constraints_json,
         &mut m.constraints_generic_constraint_bounds_parquet,
+        &mut m.constraints_generic_parameters_json,
         &mut m.constraints_penalty_overrides_bus_parquet,
         &mut m.constraints_penalty_overrides_line_parquet,
         &mut m.constraints_penalty_overrides_hydro_parquet,
@@ -610,8 +618,9 @@ mod tests {
     fn test_scalar_parameters_json_and_hydro_energy_productivity_present() {
         let dir = TempDir::new().unwrap();
         make_case_with_required(&dir);
+        fs::create_dir_all(dir.path().join("constraints")).unwrap();
         fs::write(
-            dir.path().join("system/scalar_parameters.json"),
+            dir.path().join("constraints/generic_parameters.json"),
             b"{\"scalar_parameters\":[]}",
         )
         .unwrap();
@@ -629,8 +638,8 @@ mod tests {
             "no errors expected when all required files present"
         );
         assert!(
-            manifest.system_scalar_parameters_json,
-            "system_scalar_parameters_json should be true"
+            manifest.constraints_generic_parameters_json,
+            "constraints_generic_parameters_json should be true"
         );
         assert!(
             manifest.system_hydro_energy_productivity_parquet,
@@ -652,8 +661,8 @@ mod tests {
             "absent optional files must not produce errors"
         );
         assert!(
-            !manifest.system_scalar_parameters_json,
-            "system_scalar_parameters_json should be false when file is absent"
+            !manifest.constraints_generic_parameters_json,
+            "constraints_generic_parameters_json should be false when file is absent"
         );
         assert!(
             !manifest.system_hydro_energy_productivity_parquet,
@@ -661,14 +670,15 @@ mod tests {
         );
     }
 
-    /// AC: a case directory containing `system/scalar_parameters.json` must set
-    /// `manifest.system_scalar_parameters_json == true`.
+    /// AC: a case directory containing `constraints/generic_parameters.json` must set
+    /// `manifest.constraints_generic_parameters_json == true`.
     #[test]
     fn manifest_detects_scalar_parameters_json_when_present() {
         let dir = TempDir::new().unwrap();
         make_case_with_required(&dir);
+        fs::create_dir_all(dir.path().join("constraints")).unwrap();
         fs::write(
-            dir.path().join("system/scalar_parameters.json"),
+            dir.path().join("constraints/generic_parameters.json"),
             b"{\"scalar_parameters\":[]}",
         )
         .unwrap();
@@ -681,18 +691,18 @@ mod tests {
             "no errors expected when all required files are present"
         );
         assert!(
-            manifest.system_scalar_parameters_json,
-            "system_scalar_parameters_json must be true when system/scalar_parameters.json exists"
+            manifest.constraints_generic_parameters_json,
+            "constraints_generic_parameters_json must be true when constraints/generic_parameters.json exists"
         );
     }
 
     /// AC: a case directory with no scalar parameter file must report
-    /// `manifest.system_scalar_parameters_json == false` without producing an error.
+    /// `manifest.constraints_generic_parameters_json == false` without producing an error.
     #[test]
     fn manifest_reports_absent_when_no_parameter_file() {
         let dir = TempDir::new().unwrap();
         make_case_with_required(&dir);
-        // system/scalar_parameters.json is deliberately absent.
+        // constraints/generic_parameters.json is deliberately absent.
 
         let mut ctx = ValidationContext::new();
         let manifest = validate_structure(dir.path(), &mut ctx);
@@ -702,8 +712,8 @@ mod tests {
             "absent optional file must not produce errors"
         );
         assert!(
-            !manifest.system_scalar_parameters_json,
-            "system_scalar_parameters_json must be false when system/scalar_parameters.json is absent"
+            !manifest.constraints_generic_parameters_json,
+            "constraints_generic_parameters_json must be false when constraints/generic_parameters.json is absent"
         );
     }
 
@@ -875,6 +885,51 @@ mod tests {
     }
 
     #[test]
+    fn removed_scalar_parameters_file_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        make_case_with_required(&dir);
+        // The relocated parameters file at its old system/ path: Layer 1 rejects
+        // on presence alone and never parses, so a well-formed empty list is
+        // still refused rather than silently read.
+        fs::write(
+            dir.path().join("system/scalar_parameters.json"),
+            b"{\"scalar_parameters\": []}",
+        )
+        .unwrap();
+
+        let mut ctx = ValidationContext::new();
+        let _manifest = validate_structure(dir.path(), &mut ctx);
+
+        assert_eq!(
+            ctx.errors().len(),
+            1,
+            "should have exactly 1 error when system/scalar_parameters.json is present, got: {:?}",
+            ctx.errors()
+        );
+        let entry = ctx.errors()[0];
+        assert_eq!(
+            entry.kind,
+            ErrorKind::BusinessRuleViolation,
+            "removed-file rejection should carry BusinessRuleViolation"
+        );
+        assert!(
+            entry
+                .file
+                .to_string_lossy()
+                .contains("system/scalar_parameters.json"),
+            "error file should reference the withdrawn path, got: {}",
+            entry.file.display()
+        );
+        assert!(
+            entry
+                .message
+                .contains("constraints/generic_parameters.json"),
+            "message should name the new path so the old file is rejected loudly, got: {}",
+            entry.message
+        );
+    }
+
+    #[test]
     fn absent_removed_file_produces_no_finding() {
         let dir = TempDir::new().unwrap();
         make_case_with_required(&dir);
@@ -921,7 +976,6 @@ mod tests {
         assert!(!manifest.system_hydro_geometry_parquet);
         assert!(!manifest.system_hydro_production_models_json);
         assert!(!manifest.system_fpha_hyperplanes_parquet);
-        assert!(!manifest.system_scalar_parameters_json);
         assert!(!manifest.system_hydro_energy_productivity_parquet);
         assert!(!manifest.system_tailrace_curves_parquet);
 
@@ -942,6 +996,7 @@ mod tests {
         assert!(!manifest.constraints_contract_bounds_parquet);
         assert!(!manifest.constraints_generic_constraints_json);
         assert!(!manifest.constraints_generic_constraint_bounds_parquet);
+        assert!(!manifest.constraints_generic_parameters_json);
         assert!(!manifest.constraints_penalty_overrides_bus_parquet);
         assert!(!manifest.constraints_penalty_overrides_line_parquet);
         assert!(!manifest.constraints_penalty_overrides_hydro_parquet);

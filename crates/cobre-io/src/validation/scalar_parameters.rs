@@ -2,7 +2,7 @@
 //!
 //! Provides [`validate_scalar_parameters`], which performs three checks on a
 //! [`Vec<ScalarParameter>`] that has already passed the per-file structural and
-//! schema validations from `system/scalar_parameters.json`:
+//! schema validations from `constraints/generic_parameters.json`:
 //!
 //! - **Check A** — every [`ParameterKind::Computed`] references a `hydro_id`
 //!   that exists in the supplied hydro slice.
@@ -56,7 +56,7 @@ fn check_computed_hydro_references(
             if !hydro_ids.contains(&hid) {
                 ctx.add_error(
                     ErrorKind::InvalidReference,
-                    "system/scalar_parameters.json",
+                    "constraints/generic_parameters.json",
                     Some(format!("{}.computed_spec.hydro_id", param.name)),
                     format!(
                         "parameter '{}' references non-existent hydro id {}",
@@ -79,7 +79,7 @@ fn check_per_stage_lengths(
             if actual != n_stages {
                 ctx.add_error(
                     ErrorKind::SchemaViolation,
-                    "system/scalar_parameters.json",
+                    "constraints/generic_parameters.json",
                     Some(param.name.as_str()),
                     format!(
                         "parameter '{}' has {} values but expected {} (n_stages)",
@@ -99,7 +99,7 @@ fn check_global_uniqueness(parameters: &[ScalarParameter], ctx: &mut ValidationC
         if !seen_ids.insert(param.id) {
             ctx.add_error(
                 ErrorKind::SchemaViolation,
-                "system/scalar_parameters.json",
+                "constraints/generic_parameters.json",
                 Some(format!("id={}", param.id.0)),
                 format!(
                     "duplicate parameter id {} (name: '{}')",
@@ -111,7 +111,7 @@ fn check_global_uniqueness(parameters: &[ScalarParameter], ctx: &mut ValidationC
         if !seen_names.insert(param.name.as_str()) {
             ctx.add_error(
                 ErrorKind::SchemaViolation,
-                "system/scalar_parameters.json",
+                "constraints/generic_parameters.json",
                 Some(param.name.as_str()),
                 format!("duplicate parameter name '{}'", param.name),
             );
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(entry.kind, ErrorKind::InvalidReference);
         assert_eq!(
             entry.file.to_str().unwrap(),
-            "system/scalar_parameters.json"
+            "constraints/generic_parameters.json"
         );
         assert!(
             entry.message.contains("99"),
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(entry.kind, ErrorKind::SchemaViolation);
         assert_eq!(
             entry.file.to_str().unwrap(),
-            "system/scalar_parameters.json"
+            "constraints/generic_parameters.json"
         );
         assert!(
             entry.message.contains('2'),

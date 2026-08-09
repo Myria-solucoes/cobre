@@ -47,7 +47,7 @@ fn load_case_rejects_scalar_parameter_with_missing_hydro_reference() {
     helpers::make_minimal_case(&dir);
     helpers::write_file(
         dir.path(),
-        "system/scalar_parameters.json",
+        "constraints/generic_parameters.json",
         PARAMS_DANGLING_HYDRO,
     );
 
@@ -73,7 +73,7 @@ fn load_case_rejects_per_stage_length_mismatch() {
     helpers::make_minimal_case(&dir);
     helpers::write_file(
         dir.path(),
-        "system/scalar_parameters.json",
+        "constraints/generic_parameters.json",
         PARAMS_PER_STAGE_LENGTH_MISMATCH,
     );
 
@@ -101,7 +101,7 @@ fn load_case_rejects_duplicate_parameter_id() {
     helpers::make_minimal_case(&dir);
     helpers::write_file(
         dir.path(),
-        "system/scalar_parameters.json",
+        "constraints/generic_parameters.json",
         PARAMS_DUPLICATE_ID,
     );
 
@@ -123,7 +123,7 @@ fn load_case_accepts_valid_scalar_parameters() {
     helpers::make_minimal_case(&dir);
     helpers::write_file(
         dir.path(),
-        "system/scalar_parameters.json",
+        "constraints/generic_parameters.json",
         r#"{
             "scalar_parameters": [
                 { "id": 1, "name": "alpha", "kind": "constant", "value": 0.5 },

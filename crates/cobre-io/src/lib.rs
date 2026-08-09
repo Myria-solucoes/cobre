@@ -177,7 +177,7 @@ pub struct CaseArtifacts {
     /// Rows from `system/fpha_hyperplanes.parquet`.
     pub fpha_hyperplanes: Vec<extensions::FphaHyperplaneRow>,
 
-    /// Assembled scalar parameters from `system/scalar_parameters.json`.
+    /// Assembled scalar parameters from `constraints/generic_parameters.json`.
     pub scalar_parameters: Vec<ScalarParameter>,
 
     /// Rows from `system/tailrace_curves.parquet`.

@@ -1,6 +1,6 @@
 //! Parsing for the scalar parameters JSON case file.
 //!
-//! ## JSON schema (`system/scalar_parameters.json`)
+//! ## JSON schema (`constraints/generic_parameters.json`)
 //!
 //! The case file stores scalar parameters as a JSON object with a single
 //! top-level key `"scalar_parameters"` whose value is an array of parameter
@@ -140,7 +140,7 @@ pub(crate) struct ScalarParameterJsonEntry {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Parse `system/scalar_parameters.json` and return a fully-assembled,
+/// Parse `constraints/generic_parameters.json` and return a fully-assembled,
 /// sorted parameter vector.
 ///
 /// Reads the JSON file at `path`, validates all entries against the rejection
@@ -169,7 +169,7 @@ pub(crate) struct ScalarParameterJsonEntry {
 /// use std::path::Path;
 ///
 /// let params = parse_scalar_parameters_json(
-///     Path::new("system/scalar_parameters.json")
+///     Path::new("constraints/generic_parameters.json")
 /// ).expect("valid parameters file");
 /// println!("loaded {} parameters", params.len());
 /// ```
@@ -233,9 +233,9 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
     Ok(result)
 }
 
-/// Load `system/scalar_parameters.json` relative to `case_dir`.
+/// Load `constraints/generic_parameters.json` relative to `case_dir`.
 ///
-/// Resolves the path as `case_dir.join("system/scalar_parameters.json")` and
+/// Resolves the path as `case_dir.join("constraints/generic_parameters.json")` and
 /// delegates to [`parse_scalar_parameters_json`].
 ///
 /// # Errors
@@ -253,7 +253,7 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
 /// println!("loaded {} parameters", params.len());
 /// ```
 pub fn load_scalar_parameters_json(case_dir: &Path) -> Result<Vec<ScalarParameter>, LoadError> {
-    parse_scalar_parameters_json(&case_dir.join("system/scalar_parameters.json"))
+    parse_scalar_parameters_json(&case_dir.join("constraints/generic_parameters.json"))
 }
 
 // ── Private conversion helpers ────────────────────────────────────────────────

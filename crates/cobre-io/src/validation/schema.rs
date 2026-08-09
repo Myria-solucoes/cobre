@@ -103,7 +103,7 @@ pub(crate) struct ParsedData {
     pub(crate) hydro_energy_productivity_rows: Vec<HydroEnergyProductivityRow>,
     /// `system/fpha_hyperplanes.parquet`.
     pub(crate) fpha_hyperplanes: Vec<FphaHyperplaneRow>,
-    /// `system/scalar_parameters.json`.
+    /// `constraints/generic_parameters.json`.
     // Rationale: the field is populated by the schema-validation layer for the expression-resolution
     // step that substitutes `@name` sigils in constraint expressions; removing it would discard
     // the parsed data and require re-parsing from disk at that step.
@@ -528,10 +528,10 @@ pub(crate) fn validate_schema(
     // Must load BEFORE generic_constraints below: it resolves the `@name` sigils
     // in constraint expressions. Reordering breaks that resolution.
     let scalar_parameters: Vec<ScalarParameter> = optional_or_error(
-        manifest.system_scalar_parameters_json,
-        || parse_scalar_parameters_json(&case_root.join("system/scalar_parameters.json")),
+        manifest.constraints_generic_parameters_json,
+        || parse_scalar_parameters_json(&case_root.join("constraints/generic_parameters.json")),
         Vec::new,
-        "system/scalar_parameters.json",
+        "constraints/generic_parameters.json",
         ctx,
     );
 

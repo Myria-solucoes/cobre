@@ -422,8 +422,8 @@ pub struct ConstructionConfig {
     /// cut selection strategy. Defaults to `false`; set based on
     /// `exports.states`.
     pub export_states: bool,
-    /// Loaded `system/scalar_parameters.json` entries, or empty when the file is
-    /// absent or the manifest flag `system_scalar_parameters_json` is `false`.
+    /// Loaded `constraints/generic_parameters.json` entries, or empty when the file is
+    /// absent or the manifest flag `constraints_generic_parameters_json` is `false`.
     /// Consumed by `build_resolved_parameters` to populate the per-`(parameter_id,
     /// stage_idx)` lookup table used by the LP builder.
     pub scalar_parameters: Vec<ScalarParameter>,

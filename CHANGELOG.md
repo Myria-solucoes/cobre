@@ -155,6 +155,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a finite-horizon chain with a zero terminal value — the declared
   cyclic type was never read by anything downstream.
 
+- **BREAKING — the scalar-parameters input moved from
+  `system/scalar_parameters.json` to `constraints/generic_parameters.json`,**
+  beside the generic constraints that reference its `@name` parameters. The
+  file's contents and schema are unchanged; only its directory and filename
+  changed. A case still carrying `system/scalar_parameters.json` now fails to
+  load with an error naming `constraints/generic_parameters.json` — a clean
+  break with no silent fallback.
+
 ### Removed
 
 - **BREAKING — three legacy Parquet input-column spellings are rejected;
@@ -215,6 +223,9 @@ Moving a study from 0.13 to 0.14, in order:
    alongside `policy_graph.nodes[]` or under enumerated forward selection —
    each of these previously loaded and produced a wrong or ignored result
    rather than an error.
+6. **Move the scalar-parameters file** into the constraints directory,
+   contents unchanged:
+   `mkdir -p <case>/constraints && git mv <case>/system/scalar_parameters.json <case>/constraints/generic_parameters.json`.
 
 ## [0.13.0] - 2026-07-30
 

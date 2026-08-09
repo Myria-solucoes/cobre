@@ -64,7 +64,7 @@ use serde_json::{Error, Value};
 /// | `correlation.schema.json`             | `scenarios/correlation.json`           |
 /// | `initial_conditions.schema.json`      | `initial_conditions.json`              |
 /// | `production_models.schema.json`       | `system/hydro_production_models.json`  |
-/// | `scalar_parameters.schema.json`       | `system/scalar_parameters.json`        |
+/// | `generic_parameters.schema.json`      | `constraints/generic_parameters.json`  |
 ///
 /// # Errors
 ///
@@ -132,7 +132,7 @@ pub fn generate_schemas() -> Result<Vec<(String, Value)>, Error> {
             schemars::schema_for!(RawProductionModelFile),
         ),
         (
-            "scalar_parameters.schema.json",
+            "generic_parameters.schema.json",
             schemars::schema_for!(ScalarParametersFile),
         ),
     ];

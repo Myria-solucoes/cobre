@@ -79,7 +79,7 @@ the same entities in different input orders are structurally identical.
 | Feature  | Default | Description                                                                                                                                                                                                                                                                               |
 | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `serde`  | off     | Enables `serde::Serialize`/`Deserialize` for all public types (and `chrono/serde`, needed because `Stage` carries `NaiveDate` fields). Required by `cobre-io` (JSON loading), MPI broadcast via `postcard` in `cobre-comm`, checkpoint serialization in `cobre-sddp`, and `cobre-python`. |
-| `schema` | off     | Enables `schemars::JsonSchema` for public types referenced from auto-generated JSON Schemas (e.g. `ComputedParameter` embedded in `system/scalar_parameters.json`). Implies `serde`.                                                                                                      |
+| `schema` | off     | Enables `schemars::JsonSchema` for public types referenced from auto-generated JSON Schemas (e.g. `ComputedParameter` embedded in `constraints/generic_parameters.json`). Implies `serde`.                                                                                                |
 
 Every public type carries a `#[cfg_attr(feature = "serde", derive(...))]`
 attribute, so the derive — and the `serde`/`schemars` dependencies — are
