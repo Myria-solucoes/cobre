@@ -10,12 +10,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use cobre_core::{
-    Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractBlockBounds,
-    EntityId, FillingConfig, Hydro, HydroBlockBounds, HydroGenerationModel, HydroStageBounds,
-    LineBlockBounds, NoiseMethod, PumpingBlockBounds, PumpingStation, ResolvedBounds,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
-    ThermalBlockBounds, ThermalStageBounds,
+    Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ConstraintExpression,
+    ContractBlockBounds, EntityId, FillingConfig, GenericConstraint, Hydro, HydroBlockBounds,
+    HydroGenerationModel, HydroStageBounds, LineBlockBounds, NoiseMethod, PumpingBlockBounds,
+    PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+    ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, SlackConfig,
+    Stage, StageRiskConfig, StageStateConfig, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -78,6 +78,7 @@ struct ZeroEntityFixtures {
     resolved_parameters: ResolvedParameters,
     production_models: ProductionModelSet,
     evaporation_models: EvaporationModelSet,
+    generic_constraints: Vec<GenericConstraint>,
 }
 
 impl ZeroEntityFixtures {
@@ -99,7 +100,48 @@ impl ZeroEntityFixtures {
             },
             production_models: ProductionModelSet::new(vec![], 0, 1),
             evaporation_models: EvaporationModelSet::new(vec![]),
+            generic_constraints: Vec::new(),
         }
+    }
+
+    /// Install one generic constraint (id 5, slack enabled) whose UPPER bound is a
+    /// symbolic reference to a `PerStageBlock` parameter (id 42) carrying two
+    /// distinct values `[100.0, 200.0]` at stage 0, and whose LOWER bound is a
+    /// numeric parquet endpoint `5.0`. The activation row is `block_id = None`, both
+    /// numeric columns null on the upper side. Exercises the effective-endpoint
+    /// resolution, the block-varying collapse suppression, and the two-sided slack
+    /// shape in one fixture.
+    fn install_symbolic_upper_bound(&mut self) {
+        self.generic_constraints = vec![GenericConstraint {
+            id: EntityId(5),
+            name: "demand_cap".to_string(),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: true,
+                penalty: Some(10.0),
+            },
+            bound_lower_ref: None,
+            bound_upper_ref: Some(EntityId(42)),
+        }];
+        let id_map: HashMap<i32, usize> = [(5, 0)].into_iter().collect();
+        self.resolved_generic_bounds = ResolvedGenericConstraintBounds::new(
+            &id_map,
+            std::iter::once((5i32, 0i32, None::<i32>, Some(5.0f64), None::<f64>)),
+        );
+        self.resolved_parameters = ResolvedParameters {
+            per_param: vec![vec![vec![100.0, 200.0]]],
+            id_to_slot: vec![(42, 0)],
+            cost_scale_factor: 1_000_000.0,
+        };
+    }
+
+    /// A zero-anticipated `TemplateBuildCtx` that carries the fixture's own
+    /// generic constraints (rather than the empty slice `make_ctx` installs).
+    fn make_ctx_generic(&self) -> TemplateBuildCtx<'_> {
+        let mut ctx = self.make_ctx(0, 0, vec![], vec![]);
+        ctx.generic_constraints = &self.generic_constraints;
+        ctx
     }
 
     /// Build a zero-entity `TemplateBuildCtx` with the supplied
@@ -291,6 +333,70 @@ fn stage_layout_zero_anticipated_matches_pre_anticipated_offsets() {
         idx.theta + 1,
         "col_turbine_start must equal idx.theta + 1 with zero anticipated"
     );
+}
+
+/// A symbolic upper bound resolves per `(stage, block)` through the referenced
+/// `PerStageBlock` parameter, and the block-varying reference suppresses the
+/// stage-level collapse: one row per block, each carrying the parameter's own
+/// block value, distinct between blocks.
+#[test]
+fn symbolic_upper_bound_resolves_per_block_and_suppresses_collapse() {
+    let mut fixtures = ZeroEntityFixtures::new();
+    fixtures.install_symbolic_upper_bound();
+    let ctx = fixtures.make_ctx_generic();
+    let state = state_layout_for(&ctx);
+    let stage = stage_with_blocks(BlockMode::Parallel, 2);
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    assert_eq!(
+        layout.generic_constraint_rows.len(),
+        2,
+        "a block-varying bound reference must not collapse to a single stage-level row"
+    );
+    let b0 = &layout.generic_constraint_rows[0];
+    let b1 = &layout.generic_constraint_rows[1];
+    assert_eq!((b0.block_idx, b1.block_idx), (0, 1));
+    assert!(!b0.is_stage_level && !b1.is_stage_level);
+
+    assert_eq!(
+        b0.bound_upper.expect("upper present").to_bits(),
+        100.0_f64.to_bits(),
+        "block 0 upper must equal get(42, 0, 0)"
+    );
+    assert_eq!(
+        b1.bound_upper.expect("upper present").to_bits(),
+        200.0_f64.to_bits(),
+        "block 1 upper must equal get(42, 0, 1)"
+    );
+    assert_ne!(
+        b0.bound_upper.expect("upper present").to_bits(),
+        b1.bound_upper.expect("upper present").to_bits(),
+        "distinct per-block parameter values must produce distinct row_upper"
+    );
+
+    // The numeric parquet lower endpoint flows through unchanged on both rows.
+    assert_eq!(b0.bound_lower, Some(5.0));
+    assert_eq!(b1.bound_lower, Some(5.0));
+}
+
+/// A symbolic endpoint counts as present when shaping the slack: the fixture's
+/// numeric lower and symbolic upper make each row two-sided, so an enabled slack
+/// gets both a plus and a minus column.
+#[test]
+fn symbolic_endpoint_makes_row_two_sided_for_slack() {
+    let mut fixtures = ZeroEntityFixtures::new();
+    fixtures.install_symbolic_upper_bound();
+    let ctx = fixtures.make_ctx_generic();
+    let state = state_layout_for(&ctx);
+    let stage = stage_with_blocks(BlockMode::Parallel, 2);
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    for row in &layout.generic_constraint_rows {
+        assert!(
+            row.slack_plus_col.is_some() && row.slack_minus_col.is_some(),
+            "a numeric-lower + symbolic-upper row is two-sided, so slack needs both columns"
+        );
+    }
 }
 
 // ── storage_internal interior-boundary sizing ────────────────────────────

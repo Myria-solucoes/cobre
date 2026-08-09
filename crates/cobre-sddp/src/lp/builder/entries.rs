@@ -1308,7 +1308,9 @@ pub(super) fn fill_generic_constraint_entries(
                 let coef = match term.coefficient {
                     CoefficientRef::Literal(v) => v,
                     CoefficientRef::Parameter(param_id) => {
-                        ctx.resolved.resolved_parameters.get(param_id, stage_idx)
+                        ctx.resolved
+                            .resolved_parameters
+                            .get(param_id, stage_idx, entry.block_idx)
                     }
                 };
                 col_entries[col].push((row, coef * term.scale * multiplier));
@@ -1887,6 +1889,7 @@ mod parameter_resolution_tests {
             &[],
             &stage_to_season,
             &stage_ids,
+            &vec![1usize; n_stages],
             n_stages,
             1_000_000.0,
         )
@@ -1916,6 +1919,7 @@ mod parameter_resolution_tests {
             &[],
             &stage_to_season,
             &stage_ids,
+            &vec![1usize; n_stages],
             n_stages,
             1_000_000.0,
         )
@@ -1942,6 +1946,7 @@ mod parameter_resolution_tests {
             &[],
             &stage_to_season,
             &stage_ids,
+            &vec![1usize; n_stages],
             n_stages,
             1_000_000.0,
         )
@@ -1973,6 +1978,8 @@ mod parameter_resolution_tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         }
     }
 
@@ -2001,6 +2008,8 @@ mod parameter_resolution_tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         }
     }
 
@@ -4159,6 +4168,8 @@ mod pumping_water_tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         let fixtures = PumpFixtures::new_with_contracts(
             vec![fixture_hydro(1), fixture_hydro(2)],
@@ -4361,6 +4372,8 @@ mod pumping_water_tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
 
         // Run the production assemble sequence into a CSC for a fixture. Takes the
@@ -7204,6 +7217,8 @@ mod pumping_water_tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
 
         let fixtures = PumpFixtures::new(
@@ -7296,6 +7311,8 @@ mod pumping_water_tests {
                 enabled: true,
                 penalty: Some(penalty),
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
 
         let fixtures = PumpFixtures::new(

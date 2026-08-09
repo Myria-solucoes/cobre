@@ -3,10 +3,10 @@ use std::ops::Range;
 
 use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{
-    BlockMode, Bus, CascadeTopology, EnergyContract, EntityId, GenericConstraint, Hydro, Line,
-    LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, SlackConfig, Stage, Thermal,
+    BlockMode, Bus, CascadeTopology, CoefficientRef, ConstraintExpression, EnergyContract,
+    EntityId, GenericConstraint, Hydro, Line, LoadModel, NonControllableSource, PumpingStation,
+    ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+    ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -44,7 +44,7 @@ pub(crate) struct ResolvedTables<'a> {
     pub(crate) resolved_ncs_bounds: &'a ResolvedNcsBounds,
     /// Per-block NCS generation scaling factors.
     pub(crate) resolved_ncs_factors: &'a ResolvedNcsFactors,
-    /// `(parameter_id, stage_idx)` → resolved `f64`, queried for a
+    /// `(parameter_id, stage_idx, block_idx)` → resolved `f64`, queried for a
     /// [`cobre_core::CoefficientRef::Parameter`] term.
     pub(crate) resolved_parameters: &'a ResolvedParameters,
 }
@@ -931,6 +931,37 @@ fn allocate_generic_slack_cols(
     (Some(plus_col), minus_col)
 }
 
+/// Whether a `block_id = None` bound over `expression` collapses to a single
+/// stage-level row: only when every term is block-independent in BOTH its variable
+/// ([`expression_is_block_independent`]) AND its coefficient. A term whose
+/// coefficient references a block-varying (`PerStageBlock`) parameter makes the
+/// expression block-dependent, so the collapsed single row cannot stand in for one
+/// arbitrary block's coefficient — it stays a per-block row set.
+fn expression_collapses_to_stage_level(
+    expression: &ConstraintExpression,
+    resolved: &ResolvedParameters,
+) -> bool {
+    expression_is_block_independent(expression)
+        && !expression.terms.iter().any(|term| match term.coefficient {
+            CoefficientRef::Parameter(id) => resolved.is_block_varying(id),
+            CoefficientRef::Literal(_) => false,
+        })
+}
+
+/// Whether either bound reference on `constraint` names a block-varying
+/// (`PerStageBlock`) parameter. When true, the stage-level collapse is suppressed:
+/// a single collapsed row would resolve one arbitrary block's bound value, losing
+/// the per-block variation.
+fn bound_ref_is_block_varying(
+    constraint: &GenericConstraint,
+    resolved: &ResolvedParameters,
+) -> bool {
+    [constraint.bound_lower_ref, constraint.bound_upper_ref]
+        .into_iter()
+        .flatten()
+        .any(|id| resolved.is_block_varying(id))
+}
+
 /// Enumerate active generic constraint rows and assign their slack column indices.
 ///
 /// One [`GenericConstraintRowEntry`] per active `(constraint, block)` pair, except
@@ -939,12 +970,14 @@ fn allocate_generic_slack_cols(
 fn enumerate_generic_constraint_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
+    stage_idx: usize,
     n_blks: usize,
     col_generic_slack_start: usize,
 ) -> GenericConstraintLayout {
     let mut n_generic_rows: usize = 0;
     let mut n_generic_slack_cols: usize = 0;
     let mut generic_constraint_rows: Vec<GenericConstraintRowEntry> = Vec::new();
+    let resolved_parameters = ctx.resolved.resolved_parameters;
 
     for (constraint_idx, constraint) in ctx.generic_constraints.iter().enumerate() {
         if !ctx
@@ -960,7 +993,9 @@ fn enumerate_generic_constraint_rows(
             .resolved_generic_bounds
             .bounds_for_stage(constraint_idx, stage.id);
 
-        let collapse_stage_level = expression_is_block_independent(&constraint.expression);
+        let collapse_stage_level =
+            expression_collapses_to_stage_level(&constraint.expression, resolved_parameters)
+                && !bound_ref_is_block_varying(constraint, resolved_parameters);
 
         for entry in bound_entries {
             // entry.block_id is a non-negative 0-indexed block position (upstream
@@ -972,10 +1007,22 @@ fn enumerate_generic_constraint_rows(
                 Some(blk_id) => (blk_id as usize, 1, false),
             };
             for block_idx in block_start..block_start + block_count {
+                // A symbolic endpoint resolves through its parameter's (stage, block)
+                // axis and is therefore "present"; a literal endpoint keeps its
+                // parquet Option. The effective pair drives both the row bound and,
+                // below, the two-sided slack shape.
+                let effective_lower = match constraint.bound_lower_ref {
+                    Some(id) => Some(resolved_parameters.get(id, stage_idx, block_idx)),
+                    None => entry.bound_lower,
+                };
+                let effective_upper = match constraint.bound_upper_ref {
+                    Some(id) => Some(resolved_parameters.get(id, stage_idx, block_idx)),
+                    None => entry.bound_upper,
+                };
                 let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
                     &constraint.slack,
-                    entry.bound_lower,
-                    entry.bound_upper,
+                    effective_lower,
+                    effective_upper,
                     col_generic_slack_start,
                     &mut n_generic_slack_cols,
                 );
@@ -985,8 +1032,8 @@ fn enumerate_generic_constraint_rows(
                     entity_id: constraint.id.0,
                     block_idx,
                     is_stage_level,
-                    bound_lower: entry.bound_lower,
-                    bound_upper: entry.bound_upper,
+                    bound_lower: effective_lower,
+                    bound_upper: effective_upper,
                     slack_enabled: constraint.slack.enabled,
                     slack_penalty: constraint.slack.penalty.unwrap_or(0.0),
                     slack_plus_col,
@@ -1209,8 +1256,13 @@ impl<'a> StageLayout<'a> {
         let contract_export = col.alloc(n_contract_export * n_blks);
 
         let col_generic_slack_start = col.pos();
-        let generic =
-            enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
+        let generic = enumerate_generic_constraint_rows(
+            ctx,
+            stage,
+            stage_idx,
+            n_blks,
+            col_generic_slack_start,
+        );
         col.alloc(generic.n_generic_slack_cols);
 
         // σ_fill then σ^{v-} are the last two per-stage column families; σ^{v-}
@@ -1716,3 +1768,99 @@ impl<'a> StageLayout<'a> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod collapse_stage_level_tests {
+    use super::*;
+    use cobre_core::{LinearTerm, VariableRef};
+
+    fn expr(term: LinearTerm) -> ConstraintExpression {
+        ConstraintExpression { terms: vec![term] }
+    }
+
+    fn hydro_storage() -> VariableRef {
+        VariableRef::HydroStorage {
+            hydro_id: EntityId(1),
+        }
+    }
+
+    /// Slot 42 stores two block values at stage 0 (block-varying); slot 43 stores a
+    /// length-1 inner (block-invariant broadcast).
+    fn resolved() -> ResolvedParameters {
+        ResolvedParameters {
+            per_param: vec![vec![vec![1.0, 2.0]], vec![vec![5.0]]],
+            id_to_slot: vec![(42, 0), (43, 1)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn block_varying_coefficient_suppresses_collapse() {
+        let e = expr(LinearTerm::parameter(EntityId(42), 1.0, hydro_storage()));
+        assert!(
+            !expression_collapses_to_stage_level(&e, &resolved()),
+            "a block-varying coefficient over a block-independent variable must not collapse"
+        );
+    }
+
+    #[test]
+    fn block_invariant_coefficient_still_collapses() {
+        let param = expr(LinearTerm::parameter(EntityId(43), 1.0, hydro_storage()));
+        let literal = expr(LinearTerm::literal(1.0, hydro_storage()));
+        let r = resolved();
+        assert!(expression_collapses_to_stage_level(&param, &r));
+        assert!(expression_collapses_to_stage_level(&literal, &r));
+    }
+
+    #[test]
+    fn block_dependent_variable_never_collapses() {
+        let e = expr(LinearTerm::literal(
+            1.0,
+            VariableRef::ThermalGeneration {
+                thermal_id: EntityId(0),
+                block_id: None,
+            },
+        ));
+        assert!(!expression_collapses_to_stage_level(&e, &resolved()));
+    }
+
+    fn constraint_with_refs(
+        lower_ref: Option<EntityId>,
+        upper_ref: Option<EntityId>,
+    ) -> GenericConstraint {
+        GenericConstraint {
+            id: EntityId(0),
+            name: "c".to_string(),
+            description: None,
+            expression: expr(LinearTerm::literal(1.0, hydro_storage())),
+            slack: cobre_core::SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_ref: lower_ref,
+            bound_upper_ref: upper_ref,
+        }
+    }
+
+    #[test]
+    fn bound_ref_block_varying_truth_table() {
+        let r = resolved();
+        // Slot 42 is block-varying, slot 43 broadcasts.
+        assert!(bound_ref_is_block_varying(
+            &constraint_with_refs(None, Some(EntityId(42))),
+            &r
+        ));
+        assert!(bound_ref_is_block_varying(
+            &constraint_with_refs(Some(EntityId(42)), None),
+            &r
+        ));
+        assert!(!bound_ref_is_block_varying(
+            &constraint_with_refs(None, Some(EntityId(43))),
+            &r
+        ));
+        assert!(!bound_ref_is_block_varying(
+            &constraint_with_refs(None, None),
+            &r
+        ));
+    }
+}

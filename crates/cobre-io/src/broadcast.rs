@@ -66,6 +66,8 @@ pub enum BroadcastParameterKind {
     Seasonal(Vec<(i32, f64)>),
     /// Computed-parameter specification.
     Computed(BroadcastComputedParameter),
+    /// Sorted, unique-keyed `(stage_id, block_id, value)` triples.
+    PerStageBlock(Vec<(i32, i32, f64)>),
 }
 
 /// Postcard-safe mirror of [`ComputedParameter`]. Externally-tagged.
@@ -116,6 +118,7 @@ impl From<&ParameterKind> for BroadcastParameterKind {
             ParameterKind::Computed { computed_spec } => {
                 Self::Computed(BroadcastComputedParameter::from(*computed_spec))
             }
+            ParameterKind::PerStageBlock { values } => Self::PerStageBlock(values.clone()),
         }
     }
 }
@@ -129,6 +132,7 @@ impl From<BroadcastParameterKind> for ParameterKind {
             BroadcastParameterKind::Computed(c) => Self::Computed {
                 computed_spec: ComputedParameter::from(c),
             },
+            BroadcastParameterKind::PerStageBlock(values) => Self::PerStageBlock { values },
         }
     }
 }
@@ -457,6 +461,56 @@ mod tests {
         assert_eq!(restored, system);
     }
 
+    /// A generic constraint's symbolic bound reference (`bound_upper_ref`) rides the
+    /// constraint's derived serde through the `System` postcard wire — there is no
+    /// hand-written mirror for `GenericConstraint`, so the restored System must equal
+    /// the original.
+    #[test]
+    fn test_round_trip_generic_constraint_bound_ref() {
+        use cobre_core::{
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+        };
+
+        let gc = GenericConstraint {
+            id: EntityId(0),
+            name: "demand_cap".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroGeneration {
+                        hydro_id: EntityId(1),
+                        block_id: None,
+                        bus_id: None,
+                    },
+                )],
+            },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_ref: None,
+            bound_upper_ref: Some(EntityId(7)),
+        };
+
+        let system = SystemBuilder::new()
+            .buses(vec![minimal_bus(1)])
+            .hydros(vec![minimal_hydro(1, 1)])
+            .generic_constraints(vec![gc])
+            .build()
+            .unwrap();
+
+        let bytes = serialize_system(&system).unwrap();
+        let restored = deserialize_system(&bytes).unwrap();
+
+        assert_eq!(restored, system);
+        assert_eq!(
+            restored.generic_constraints()[0].bound_upper_ref,
+            Some(EntityId(7)),
+            "symbolic bound reference must survive broadcast round-trip"
+        );
+    }
+
     #[test]
     fn test_round_trip_anticipated_thermal_system() {
         // Guards against a future Thermal field reorder or AnticipatedConfig schema
@@ -522,10 +576,10 @@ mod tests {
         assert!(bytes.len() < 1024);
     }
 
-    /// Build a `Vec<ScalarParameter>` with one instance of each of the four
+    /// Build a `Vec<ScalarParameter>` with one instance of each of the five
     /// `ParameterKind` variants, covering all code paths through the
     /// postcard serialization layer.
-    fn four_kinds_fixture() -> Vec<ScalarParameter> {
+    fn five_kinds_fixture() -> Vec<ScalarParameter> {
         vec![
             ScalarParameter {
                 id: EntityId(1),
@@ -553,12 +607,19 @@ mod tests {
                     },
                 },
             },
+            ScalarParameter {
+                id: EntityId(5),
+                name: "per_stage_block_param".to_string(),
+                kind: ParameterKind::PerStageBlock {
+                    values: vec![(0, 0, 1.0), (0, 1, 2.0), (1, 0, 3.0)],
+                },
+            },
         ]
     }
 
     #[test]
-    fn round_trip_all_four_parameter_kinds() {
-        let original = four_kinds_fixture();
+    fn round_trip_all_five_parameter_kinds() {
+        let original = five_kinds_fixture();
         let bytes = serialize_parameters(&original).unwrap();
         assert!(!bytes.is_empty());
         let restored = deserialize_parameters(&bytes).unwrap();
@@ -567,7 +628,7 @@ mod tests {
 
     #[test]
     fn serialize_parameters_is_deterministic() {
-        let params = four_kinds_fixture();
+        let params = five_kinds_fixture();
         let bytes_a = serialize_parameters(&params).unwrap();
         let bytes_b = serialize_parameters(&params).unwrap();
         assert_eq!(bytes_a, bytes_b);

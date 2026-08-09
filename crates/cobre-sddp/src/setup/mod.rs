@@ -880,6 +880,12 @@ fn build_energy_and_templates(
         Some(&hydro_models.production),
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
+    let stage_block_counts: Vec<usize> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.blocks.len())
+        .collect();
     let resolved_parameters = build_resolved_parameters(
         scalar_parameters,
         &energy_conversion,
@@ -887,6 +893,7 @@ fn build_energy_and_templates(
         system.hydros(),
         &stage_to_season,
         &study_stage_ids,
+        &stage_block_counts,
         n_stages_pre,
         cost_scale_factor,
     )

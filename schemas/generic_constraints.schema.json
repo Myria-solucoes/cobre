@@ -4,6 +4,22 @@
       "additionalProperties": false,
       "description": "Intermediate type for a single constraint entry.",
       "properties": {
+        "bound_lower_ref": {
+          "default": null,
+          "description": "Optional `@name` naming the scalar parameter that supplies this constraint's\nlower RHS bound, resolved per `(stage, block)` at LP build. A leading `@` is\naccepted and stripped. When present, the bounds parquet leaves the lower\nendpoint numeric-null for this constraint — an endpoint is literal XOR symbolic.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bound_upper_ref": {
+          "default": null,
+          "description": "Upper-bound counterpart of `bound_lower_ref`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "description": {
           "description": "Optional human-readable description.",
           "type": [

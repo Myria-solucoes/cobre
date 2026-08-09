@@ -13,11 +13,18 @@
 //!       "name": "min_southeast_hydro",
 //!       "description": "...",
 //!       "expression": "hydro_generation(0) + hydro_generation(1)",
-//!       "slack": { "enabled": true, "penalty": 5000.0 }
+//!       "slack": { "enabled": true, "penalty": 5000.0 },
+//!       "bound_upper_ref": "demanda_sin"
 //!     }
 //!   ]
 //! }
 //! ```
+//!
+//! `bound_lower_ref` / `bound_upper_ref` are optional. Each names a scalar
+//! parameter (with or without a leading `@`) whose per-`(stage, block)` value
+//! supplies that RHS endpoint; the endpoint's numeric column in
+//! `generic_constraint_bounds.parquet` is then left null. An endpoint is literal
+//! XOR symbolic.
 //!
 //! ## Expression grammar (spec SS3)
 //!
@@ -137,6 +144,17 @@ struct RawConstraint {
 
     /// Slack variable configuration.
     slack: RawSlackConfig,
+
+    /// Optional `@name` naming the scalar parameter that supplies this constraint's
+    /// lower RHS bound, resolved per `(stage, block)` at LP build. A leading `@` is
+    /// accepted and stripped. When present, the bounds parquet leaves the lower
+    /// endpoint numeric-null for this constraint — an endpoint is literal XOR symbolic.
+    #[serde(default)]
+    bound_lower_ref: Option<String>,
+
+    /// Upper-bound counterpart of `bound_lower_ref`.
+    #[serde(default)]
+    bound_upper_ref: Option<String>,
 }
 
 /// Intermediate type for the slack configuration.
@@ -456,6 +474,23 @@ fn convert(
             penalty: c.slack.penalty,
         };
 
+        let bound_lower_ref =
+            resolve_bound_ref(c.bound_lower_ref.as_deref(), name_to_id).map_err(|message| {
+                LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("constraints[{i}].bound_lower_ref"),
+                    message,
+                }
+            })?;
+        let bound_upper_ref =
+            resolve_bound_ref(c.bound_upper_ref.as_deref(), name_to_id).map_err(|message| {
+                LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("constraints[{i}].bound_upper_ref"),
+                    message,
+                }
+            })?;
+
         let mut expression = ConstraintExpression { terms };
         expression.canonicalize();
 
@@ -465,6 +500,8 @@ fn convert(
             description: c.description,
             expression,
             slack,
+            bound_lower_ref,
+            bound_upper_ref,
         });
     }
 
@@ -859,6 +896,22 @@ fn resolve_param_ref(
     name_to_id.get(name).copied().ok_or_else(|| {
         format!("unknown parameter \"@{name}\": no definition with this name was loaded")
     })
+}
+
+/// Resolve an optional bound reference. A bound reference must name a parameter —
+/// `name_to_id` holds no named expressions, so a name that resolves as one
+/// elsewhere still errors here as "unknown parameter".
+fn resolve_bound_ref(
+    reference: Option<&str>,
+    name_to_id: &HashMap<String, EntityId>,
+) -> Result<Option<EntityId>, String> {
+    match reference {
+        Some(raw) => {
+            let name = raw.strip_prefix('@').unwrap_or(raw);
+            resolve_param_ref(name, name_to_id).map(Some)
+        }
+        None => Ok(None),
+    }
 }
 
 // ── Integer conversion helpers ────────────────────────────────────────────────
@@ -2342,6 +2395,101 @@ mod tests {
                 block_id: None,
             }
         );
+    }
+
+    /// A present `bound_upper_ref` resolves to the named parameter's `EntityId`;
+    /// an absent `bound_lower_ref` stays `None`.
+    #[test]
+    fn test_parse_bound_upper_ref_resolves_to_entity_id() {
+        let json = r#"{
+  "constraints": [
+    {
+      "id": 0,
+      "name": "demand_cap",
+      "expression": "hydro_generation(3)",
+      "slack": { "enabled": false },
+      "bound_upper_ref": "rho_eq"
+    }
+  ]
+}"#;
+        let f = write_json(json);
+        let tbl = one_param_table();
+        let result =
+            parse_generic_constraints(f.path(), &tbl, &LineBusPairIndex::default()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].bound_upper_ref, Some(EntityId(7)));
+        assert_eq!(result[0].bound_lower_ref, None);
+    }
+
+    /// A leading `@` on a bound reference is accepted and stripped, resolving to the
+    /// same parameter as the bare name.
+    #[test]
+    fn test_parse_bound_ref_strips_leading_at() {
+        let json = r#"{
+  "constraints": [
+    {
+      "id": 0,
+      "name": "demand_floor",
+      "expression": "hydro_generation(3)",
+      "slack": { "enabled": false },
+      "bound_lower_ref": "@rho_eq"
+    }
+  ]
+}"#;
+        let f = write_json(json);
+        let tbl = one_param_table();
+        let result =
+            parse_generic_constraints(f.path(), &tbl, &LineBusPairIndex::default()).unwrap();
+        assert_eq!(result[0].bound_lower_ref, Some(EntityId(7)));
+    }
+
+    /// A bound reference naming a parameter absent from `name_to_id` is a
+    /// `SchemaError` whose field names the endpoint and whose message names the
+    /// missing parameter.
+    #[test]
+    fn test_parse_unknown_bound_ref_returns_schema_error() {
+        let json = r#"{
+  "constraints": [
+    {
+      "id": 0,
+      "name": "bad_bound",
+      "expression": "hydro_generation(0)",
+      "slack": { "enabled": false },
+      "bound_lower_ref": "missing_param"
+    }
+  ]
+}"#;
+        let f = write_json(json);
+        let err =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("bound_lower_ref"),
+                    "field should name the endpoint, got: {field}"
+                );
+                assert!(
+                    message.contains("missing_param"),
+                    "message should name the missing parameter, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A constraint declaring neither bound reference parses with both fields `None`
+    /// (existing files are unaffected).
+    #[test]
+    fn test_parse_absent_bound_refs_are_none() {
+        let f = write_json(VALID_JSON);
+        let result =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap();
+        for gc in &result {
+            assert_eq!(gc.bound_lower_ref, None);
+            assert_eq!(gc.bound_upper_ref, None);
+        }
     }
 
     /// Unknown `@param` in JSON expression → SchemaError with "expression" field and

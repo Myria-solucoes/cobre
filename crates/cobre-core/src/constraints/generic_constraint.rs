@@ -61,6 +61,8 @@
 //!     description: Some("Minimum hydro generation in Southeast region".to_string()),
 //!     expression: expr,
 //!     slack: SlackConfig { enabled: true, penalty: Some(5_000.0) },
+//!     bound_lower_ref: None,
+//!     bound_upper_ref: None,
 //! };
 //!
 //! assert_eq!(gc.expression.terms.len(), 2);
@@ -512,6 +514,14 @@ pub struct GenericConstraint {
     pub expression: ConstraintExpression,
     /// Slack variable configuration.
     pub slack: SlackConfig,
+    /// Lower RHS bound named by a scalar parameter instead of a literal. When
+    /// `Some(id)`, the lower endpoint resolves through that parameter's
+    /// `(stage, block)` axis at LP build; the bounds parquet leaves this side
+    /// numeric-null. An endpoint is literal XOR symbolic.
+    pub bound_lower_ref: Option<EntityId>,
+    /// Upper RHS bound named by a scalar parameter; upper counterpart of
+    /// `bound_lower_ref`.
+    pub bound_upper_ref: Option<EntityId>,
 }
 
 #[cfg(test)]
@@ -787,6 +797,8 @@ mod tests {
                 enabled: true,
                 penalty: Some(5_000.0),
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
 
         assert_eq!(gc.expression.terms.len(), 2);
@@ -1145,11 +1157,14 @@ mod tests {
                 enabled: true,
                 penalty: Some(5_000.0),
             },
+            bound_lower_ref: None,
+            bound_upper_ref: Some(EntityId(42)),
         };
 
         let json = serde_json::to_string(&gc).unwrap();
         let deserialized: GenericConstraint = serde_json::from_str(&json).unwrap();
         assert_eq!(gc, deserialized);
         assert_eq!(deserialized.expression.terms.len(), 2);
+        assert_eq!(deserialized.bound_upper_ref, Some(EntityId(42)));
     }
 }

@@ -31,6 +31,7 @@
 //! | `per_stage` | `"values": [[stage_id, value], ...]` — contiguous from 0, sorted     |
 //! | `seasonal`  | `"values": [[season_id, value], ...]`                                 |
 //! | `computed`  | `"computed_spec": { "tag": "<variant>", "hydro_id": <int> }`         |
+//! | `per_stage_block` | `"block_values": [[stage_id, block_id, value], ...]` — unique `(stage_id, block_id)`, sorted |
 //!
 //! ### `per_stage` contiguity rule
 //!
@@ -67,6 +68,9 @@
 //! - `"seasonal"` entries with duplicate `season_id` keys.
 //! - `"per_stage"` entries whose `stage_id` keys are not a contiguous range
 //!   from 0, or that contain duplicates.
+//! - `"per_stage_block"` entries with a duplicate `(stage_id, block_id)` pair.
+//! - `block_values` present on a non-`"per_stage_block"` entry, or absent on a
+//!   `"per_stage_block"` entry.
 //! - Non-finite `value` fields (NaN, ±∞).
 //! - Unknown JSON fields (caught by `#[serde(deny_unknown_fields)]`); for
 //!   example, a stale `"values_source"` field from an old fixture is rejected.
@@ -136,6 +140,10 @@ pub(crate) struct ScalarParameterJsonEntry {
     /// Computed-parameter specification. Required when `kind == "computed"`;
     /// must be absent for all other kinds.
     computed_spec: Option<ComputedParameter>,
+    /// `[[stage_id, block_id, value], ...]` triples. Required when
+    /// `kind == "per_stage_block"` (each `(stage_id, block_id)` pair unique);
+    /// must be absent for all other kinds.
+    block_values: Option<Vec<(i32, i32, f64)>>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -160,6 +168,8 @@ pub(crate) struct ScalarParameterJsonEntry {
 /// | Duplicate `season_id` in `"seasonal"` values  | [`LoadError::SchemaError`]     |
 /// | Non-contiguous `stage_id` in `"per_stage"`    | [`LoadError::SchemaError`]     |
 /// | Duplicate `stage_id` in `"per_stage"` values  | [`LoadError::SchemaError`]     |
+/// | Duplicate `(stage_id, block_id)` in `"per_stage_block"` | [`LoadError::SchemaError`] |
+/// | `block_values` on wrong kind / absent on `"per_stage_block"` | [`LoadError::SchemaError`] |
 /// | Non-finite numeric value                      | [`LoadError::SchemaError`]     |
 ///
 /// # Examples
@@ -265,16 +275,28 @@ fn convert_entry_to_kind(
     entry: &ScalarParameterJsonEntry,
     path: &Path,
 ) -> Result<ParameterKind, LoadError> {
+    if entry.kind != "per_stage_block" && entry.block_values.is_some() {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("scalar_parameters[{i}].block_values"),
+            message: format!(
+                "\"block_values\" is only valid for kind \"per_stage_block\", not {:?}",
+                entry.kind
+            ),
+        });
+    }
+
     match entry.kind.as_str() {
         "constant" => convert_constant(i, entry, path),
         "per_stage" => convert_per_stage(i, entry, path),
         "seasonal" => convert_seasonal(i, entry, path),
         "computed" => convert_computed(i, entry, path),
+        "per_stage_block" => convert_per_stage_block(i, entry, path),
         other => Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: format!("scalar_parameters[{i}].kind"),
             message: format!(
-                "unknown kind {other:?}; legal values are: constant, per_stage, seasonal, computed"
+                "unknown kind {other:?}; legal values are: constant, per_stage, seasonal, computed, per_stage_block"
             ),
         }),
     }
@@ -428,6 +450,62 @@ fn convert_computed(
         message: "\"computed\" kind requires a \"computed_spec\" field".to_string(),
     })?;
     Ok(ParameterKind::Computed { computed_spec })
+}
+
+/// Build a `ParameterKind::PerStageBlock`, rejecting non-finite values and a
+/// duplicate `(stage_id, block_id)` pair. Per-stage block-count coverage is
+/// validated later, at resolution, not here — parse time has no block counts.
+fn convert_per_stage_block(
+    i: usize,
+    entry: &ScalarParameterJsonEntry,
+    path: &Path,
+) -> Result<ParameterKind, LoadError> {
+    let triples = entry
+        .block_values
+        .as_deref()
+        .ok_or_else(|| LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("scalar_parameters[{i}].block_values"),
+            message: "\"per_stage_block\" kind requires a \"block_values\" field".to_string(),
+        })?;
+
+    if triples.is_empty() {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("scalar_parameters[{i}].block_values"),
+            message: "\"per_stage_block\" kind requires at least one entry".to_string(),
+        });
+    }
+
+    let mut sorted: Vec<(i32, i32, f64)> = triples.to_vec();
+    sorted.sort_by_key(|&(stage_id, block_id, _)| (stage_id, block_id));
+
+    for window in sorted.windows(2) {
+        if window[0].0 == window[1].0 && window[0].1 == window[1].1 {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].block_values"),
+                message: format!(
+                    "duplicate (stage_id, block_id) pair ({}, {}) in per_stage_block values",
+                    window[0].0, window[0].1
+                ),
+            });
+        }
+    }
+
+    for &(stage_id, block_id, v) in &sorted {
+        if !v.is_finite() {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].block_values"),
+                message: format!(
+                    "value for (stage_id {stage_id}, block_id {block_id}) must be finite, got {v}"
+                ),
+            });
+        }
+    }
+
+    Ok(ParameterKind::PerStageBlock { values: sorted })
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -689,6 +767,7 @@ mod tests {
                 value: Some(f64::NAN),
                 values: None,
                 computed_spec: None,
+                block_values: None,
             },
             std::path::Path::new("/test.json"),
         );
@@ -789,6 +868,125 @@ mod tests {
                 assert!(
                     message.contains("at least one entry"),
                     "message should mention 'at least one entry', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── per_stage_block: happy path ────────────────────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_parses_per_stage_block() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "block_p", "kind": "per_stage_block",
+                  "block_values": [[0, 0, 1.0], [0, 1, 2.0]] }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let params = parse_scalar_parameters_json(tmp.path()).unwrap();
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].id, EntityId(1));
+        assert_eq!(
+            params[0].kind,
+            ParameterKind::PerStageBlock {
+                values: vec![(0, 0, 1.0), (0, 1, 2.0)]
+            }
+        );
+    }
+
+    // ── per_stage_block: triples stored sorted ─────────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_per_stage_block_sorts_triples() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "block_p", "kind": "per_stage_block",
+                  "block_values": [[1, 0, 3.0], [0, 1, 2.0], [0, 0, 1.0]] }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let params = parse_scalar_parameters_json(tmp.path()).unwrap();
+        assert_eq!(
+            params[0].kind,
+            ParameterKind::PerStageBlock {
+                values: vec![(0, 0, 1.0), (0, 1, 2.0), (1, 0, 3.0)]
+            }
+        );
+    }
+
+    // ── per_stage_block: duplicate pair rejected ───────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_per_stage_block_duplicate_pair() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "b", "kind": "per_stage_block",
+                  "block_values": [[0, 0, 1.0], [0, 0, 2.0]] }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("duplicate"),
+                    "message should contain 'duplicate', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── per_stage_block: block_values on a non-block kind rejected ──────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_block_values_on_wrong_kind() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "c", "kind": "constant", "value": 3.6,
+                  "block_values": [[0, 0, 1.0]] }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("block_values"),
+                    "field should contain 'block_values', got: {field}"
+                );
+                assert!(
+                    message.contains("per_stage_block"),
+                    "message should mention 'per_stage_block', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── per_stage_block: block_values absent rejected ──────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_per_stage_block_missing_block_values() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "b", "kind": "per_stage_block" }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("block_values"),
+                    "field should contain 'block_values', got: {field}"
+                );
+                assert!(
+                    message.contains("requires"),
+                    "message should mention 'requires', got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),

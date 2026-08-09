@@ -140,6 +140,32 @@
       "additionalProperties": false,
       "description": "Per-entry intermediate representation.\n\n`#[serde(deny_unknown_fields)]` ensures that any unknown field (e.g. a\nstale `\"values_source\"`) causes an immediate parse error with the field name\nin the message, rather than being silently ignored.",
       "properties": {
+        "block_values": {
+          "description": "`[[stage_id, block_id, value], ...]` triples. Required when\n`kind == \"per_stage_block\"` (each `(stage_id, block_id)` pair unique);\nmust be absent for all other kinds.",
+          "items": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "format": "int32",
+                "type": "integer"
+              },
+              {
+                "format": "int32",
+                "type": "integer"
+              },
+              {
+                "format": "double",
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "computed_spec": {
           "anyOf": [
             {

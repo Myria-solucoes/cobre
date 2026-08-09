@@ -30,6 +30,8 @@ use crate::constraints::GenericConstraintBoundsRow;
 ///     description: None,
 ///     expression: ConstraintExpression { terms: vec![] },
 ///     slack: SlackConfig { enabled: false, penalty: None },
+///     bound_lower_ref: None,
+///     bound_upper_ref: None,
 /// };
 ///
 /// let row = GenericConstraintBoundsRow {
@@ -103,6 +105,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         }
     }
 

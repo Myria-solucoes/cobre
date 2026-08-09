@@ -797,22 +797,67 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
         }
     }
 
+    // Which endpoints each constraint fills symbolically (via a bound reference on
+    // the constraint object), keyed by constraint id: (has_lower_ref, has_upper_ref).
+    // An endpoint is literal (a numeric parquet column) XOR symbolic (a reference).
+    let constraint_refs: HashMap<i32, (bool, bool)> = data
+        .generic_constraints
+        .iter()
+        .map(|gc| {
+            (
+                gc.id.0,
+                (gc.bound_lower_ref.is_some(), gc.bound_upper_ref.is_some()),
+            )
+        })
+        .collect();
+
     // The interval IS the constraint: shape derives from which endpoints a row
-    // carries. A row is checked independently of its constraint — no registry
-    // lookup, and a dangling `constraint_id` is reported separately by
-    // `check_bounds_references`.
+    // carries — a numeric column here or a symbolic reference on the constraint.
+    // A dangling `constraint_id` is reported separately by `check_bounds_references`.
     for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
+        let (has_lower_ref, has_upper_ref) = constraint_refs
+            .get(&row.constraint_id)
+            .copied()
+            .unwrap_or((false, false));
+
+        if row.bound_lower.is_some() && has_lower_ref {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "constraints/generic_constraint_bounds.parquet",
+                Some(format!("GenericConstraintBoundsRow[{i}]")),
+                format!(
+                    "GenericConstraintBoundsRow[{i}] sets a numeric bound_lower but constraint {} also declares bound_lower_ref: an endpoint is literal XOR symbolic",
+                    row.constraint_id
+                ),
+            );
+        }
+        if row.bound_upper.is_some() && has_upper_ref {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "constraints/generic_constraint_bounds.parquet",
+                Some(format!("GenericConstraintBoundsRow[{i}]")),
+                format!(
+                    "GenericConstraintBoundsRow[{i}] sets a numeric bound_upper but constraint {} also declares bound_upper_ref: an endpoint is literal XOR symbolic",
+                    row.constraint_id
+                ),
+            );
+        }
+
         match (row.bound_lower, row.bound_upper) {
             (None, None) => {
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "constraints/generic_constraint_bounds.parquet",
-                    Some(format!("GenericConstraintBoundsRow[{i}]")),
-                    format!(
-                        "GenericConstraintBoundsRow[{i}] on constraint {} has neither bound_lower nor bound_upper: at least one endpoint is required",
-                        row.constraint_id
-                    ),
-                );
+                // A symbolic reference fills its side, so a both-numeric-null row is
+                // valid when the constraint supplies a reference for either endpoint.
+                if !has_lower_ref && !has_upper_ref {
+                    ctx.add_error(
+                        ErrorKind::InvalidValue,
+                        "constraints/generic_constraint_bounds.parquet",
+                        Some(format!("GenericConstraintBoundsRow[{i}]")),
+                        format!(
+                            "GenericConstraintBoundsRow[{i}] on constraint {} has neither bound_lower nor bound_upper: at least one endpoint is required",
+                            row.constraint_id
+                        ),
+                    );
+                }
             }
             (Some(bound_lower), Some(bound_upper)) if bound_upper < bound_lower => {
                 ctx.add_error(
@@ -840,6 +885,30 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
                 format!(
                     "Duplicate key (constraint_id={}, stage_id={}, block_id={:?}) in generic constraint bounds",
                     row.constraint_id, row.stage_id, row.block_id
+                ),
+            );
+        }
+    }
+
+    // The parquet is the activation grid: a symbolic bound supplies a value, but the
+    // constraint's applicable (stage, block) cells still come from its parquet rows.
+    // A reference with no rows would apply to nothing and be silently inert.
+    let constraints_with_rows: HashSet<i32> = data
+        .generic_constraint_bounds
+        .iter()
+        .map(|row| row.constraint_id)
+        .collect();
+    for gc in &data.generic_constraints {
+        if (gc.bound_lower_ref.is_some() || gc.bound_upper_ref.is_some())
+            && !constraints_with_rows.contains(&gc.id.0)
+        {
+            ctx.add_error(
+                ErrorKind::InvalidReference,
+                "constraints/generic_constraints.json",
+                Some(format!("GenericConstraint {}", gc.id.0)),
+                format!(
+                    "GenericConstraint {} declares a bound reference but has no activation rows in generic_constraint_bounds.parquet: the reference would apply to nothing",
+                    gc.id.0
                 ),
             );
         }
@@ -2190,6 +2259,115 @@ mod tests {
         assert!(inv[0].message.contains("constraint 1"));
     }
 
+    fn symbolic_constraint(
+        id: i32,
+        lower_ref: Option<i32>,
+        upper_ref: Option<i32>,
+    ) -> cobre_core::GenericConstraint {
+        use cobre_core::{ConstraintExpression, GenericConstraint, SlackConfig};
+
+        GenericConstraint {
+            id: EntityId(id),
+            name: format!("sym{id}"),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_ref: lower_ref.map(EntityId),
+            bound_upper_ref: upper_ref.map(EntityId),
+        }
+    }
+
+    /// A numeric parquet endpoint whose constraint also declares a reference for the
+    /// same endpoint is a literal-XOR-symbolic conflict: exactly one InvalidValue
+    /// naming the offending endpoint.
+    #[test]
+    fn test_generic_constraint_bounds_same_endpoint_literal_and_ref_conflict() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraints = vec![symbolic_constraint(5, None, Some(99))];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: Some(100.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidValue, got: {inv:?}"
+        );
+        assert!(inv[0].message.contains("bound_upper_ref"));
+    }
+
+    /// A both-numeric-null row is valid when the constraint supplies a reference for
+    /// a side (the reference fills it): no InvalidValue.
+    #[test]
+    fn test_generic_constraint_bounds_ref_fills_side_allows_both_null() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraints = vec![symbolic_constraint(5, None, Some(99))];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: None,
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a reference fills the endpoint, so a both-null row is valid, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A constraint declaring a reference but with no rows in the bounds parquet is an
+    /// InvalidReference naming the constraint id — the reference would apply to nothing.
+    #[test]
+    fn test_generic_constraint_bounds_ref_with_no_rows_is_invalid_reference() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraints = vec![symbolic_constraint(5, None, Some(99))];
+        data.generic_constraint_bounds = vec![];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {inv:?}"
+        );
+        assert!(inv[0].message.contains("GenericConstraint 5"));
+    }
+
     /// A bounds row with `bound_upper < bound_lower` (an inverted interval)
     /// emits exactly one finding naming the constraint id.
     #[test]
@@ -2719,6 +2897,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2776,6 +2956,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2830,6 +3012,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2884,6 +3068,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2976,6 +3162,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -3044,6 +3232,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         let gc_generation = GenericConstraint {
             id: EntityId::from(2),
@@ -3063,6 +3253,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         data.generic_constraints = vec![gc_turbined, gc_generation];
 
@@ -3113,6 +3305,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -3174,6 +3368,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         };
         data.generic_constraints = vec![gc];
 

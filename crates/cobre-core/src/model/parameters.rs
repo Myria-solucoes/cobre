@@ -118,8 +118,8 @@ pub enum ComputedParameter {
 
 /// How the numeric value of a [`ScalarParameter`] is determined at solve time.
 ///
-/// The four variants cover the full range from compile-time constants to
-/// values computed from physical plant data:
+/// The variants cover the full range from compile-time constants to values
+/// computed from physical plant data, plus a `(stage, block)`-indexed table:
 ///
 /// - [`Constant`](ParameterKind::Constant) — one value for all stages.
 /// - [`PerStage`](ParameterKind::PerStage) — one value per study stage;
@@ -129,6 +129,8 @@ pub enum ComputedParameter {
 ///   this variant with the sort-and-dedup invariant enforced.
 /// - [`Computed`](ParameterKind::Computed) — derived by the resolver from
 ///   hydro geometry data; no explicit user value is required.
+/// - [`PerStageBlock`](ParameterKind::PerStageBlock) — one value per
+///   `(stage_id, block_id)` pair, keys unique and stored sorted.
 ///
 /// # JSON schema
 ///
@@ -168,10 +170,17 @@ pub enum ComputedParameter {
 ///     serde_json::to_string(&comp).unwrap(),
 ///     r#"{"kind":"computed","computed_spec":{"tag":"equivalent_productivity","hydro_id":7}}"#
 /// );
+///
+/// // {"kind":"per_stage_block","values":[[0,0,1.0],[0,1,2.0]]}
+/// let psb = ParameterKind::PerStageBlock { values: vec![(0, 0, 1.0), (0, 1, 2.0)] };
+/// assert_eq!(
+///     serde_json::to_string(&psb).unwrap(),
+///     r#"{"kind":"per_stage_block","values":[[0,0,1.0],[0,1,2.0]]}"#
+/// );
 /// # }
 /// ```
 ///
-/// All four variants round-trip through `serde_json::from_str` back to the same
+/// Every variant round-trips through `serde_json::from_str` back to the same
 /// in-memory value.
 ///
 /// # Examples
@@ -223,6 +232,16 @@ pub enum ParameterKind {
     Computed {
         /// The computed quantity specification.
         computed_spec: ComputedParameter,
+    },
+    /// One scalar value per `(stage_id, block_id)` pair.
+    ///
+    /// Entries are stored sorted ascending by `(stage_id, block_id)` with unique
+    /// keys. A flat triple list is used rather than a nested `[stage][block]`
+    /// array because block counts vary per stage, so no rectangular array
+    /// expresses every study.
+    PerStageBlock {
+        /// Sorted, unique-keyed `(stage_id, block_id, value)` triples.
+        values: Vec<(i32, i32, f64)>,
     },
 }
 
@@ -301,6 +320,7 @@ enum ParameterKindJson {
     PerStage { values: Vec<(i32, f64)> },
     Seasonal { values: Vec<(i32, f64)> },
     Computed { computed_spec: ComputedParameter },
+    PerStageBlock { values: Vec<(i32, i32, f64)> },
 }
 
 #[cfg(feature = "serde")]
@@ -322,6 +342,7 @@ impl From<ParameterKind> for ParameterKindJson {
             ParameterKind::Computed { computed_spec } => {
                 ParameterKindJson::Computed { computed_spec }
             }
+            ParameterKind::PerStageBlock { values } => ParameterKindJson::PerStageBlock { values },
         }
     }
 }
@@ -377,6 +398,20 @@ impl<'de> serde::Deserialize<'de> for ParameterKind {
             }
             ParameterKindJson::Computed { computed_spec } => {
                 Ok(ParameterKind::Computed { computed_spec })
+            }
+            ParameterKindJson::PerStageBlock { mut values } => {
+                values.sort_by_key(|&(stage_id, block_id, _)| (stage_id, block_id));
+
+                for window in values.windows(2) {
+                    if window[0].0 == window[1].0 && window[0].1 == window[1].1 {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate (stage_id, block_id) pair ({}, {}) in per_stage_block values",
+                            window[0].0, window[0].1
+                        )));
+                    }
+                }
+
+                Ok(ParameterKind::PerStageBlock { values })
             }
         }
     }
@@ -435,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn parameter_kind_four_variants() {
+    fn parameter_kind_five_variants() {
         let variants = [
             ParameterKind::Constant { value: 1.0 },
             ParameterKind::PerStage {
@@ -449,6 +484,9 @@ mod tests {
                     hydro_id: EntityId(1),
                 },
             },
+            ParameterKind::PerStageBlock {
+                values: vec![(0, 0, 1.0)],
+            },
         ];
 
         // No `_` arm: adding a variant without updating here is a compile error.
@@ -458,6 +496,7 @@ mod tests {
                 ParameterKind::PerStage { .. } => "PerStage",
                 ParameterKind::Seasonal { .. } => "Seasonal",
                 ParameterKind::Computed { .. } => "Computed",
+                ParameterKind::PerStageBlock { .. } => "PerStageBlock",
             };
         }
     }
@@ -549,6 +588,47 @@ mod tests {
         );
         let roundtrip: ParameterKind = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip, kind);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn parameter_kind_serde_per_stage_block_form() {
+        let kind = ParameterKind::PerStageBlock {
+            values: vec![(0, 0, 1.0), (1, 0, 2.0)],
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"per_stage_block","values":[[0,0,1.0],[1,0,2.0]]}"#
+        );
+        let roundtrip: ParameterKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, kind);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn parameter_kind_per_stage_block_sorts_on_deserialize() {
+        let json = r#"{"kind":"per_stage_block","values":[[1,0,2.0],[0,1,9.0],[0,0,1.0]]}"#;
+        let parsed: ParameterKind = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed,
+            ParameterKind::PerStageBlock {
+                values: vec![(0, 0, 1.0), (0, 1, 9.0), (1, 0, 2.0)]
+            }
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn parameter_kind_per_stage_block_rejects_duplicate_pair_via_serde() {
+        let json = r#"{"kind":"per_stage_block","values":[[0,0,1.0],[0,0,2.0]]}"#;
+        let result: Result<ParameterKind, _> = serde_json::from_str(json);
+        let err = result.expect_err("expected an error for duplicate (stage_id, block_id) pair");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate") && msg.contains("(0, 0)"),
+            "error message must mention the duplicate pair; got: {err}"
+        );
     }
 
     #[cfg(feature = "serde")]

@@ -792,6 +792,8 @@ mod proptests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         }
     }
 

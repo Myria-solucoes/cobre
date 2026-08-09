@@ -14,7 +14,9 @@ use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
 use cobre_sddp::build_resolved_parameters;
 use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
 
-/// Return the three fixed [`ScalarParameter`] entries permuted by `order`.
+/// Return the four fixed [`ScalarParameter`] entries permuted by `order`. The
+/// last is a `PerStageBlock` parameter (a per-`(stage, block)` value) so the
+/// permutation exercises the block axis, not only the stage axis.
 fn make_params(order: &[usize]) -> Vec<ScalarParameter> {
     let alpha = ScalarParameter {
         id: EntityId(10),
@@ -35,7 +37,25 @@ fn make_params(order: &[usize]) -> Vec<ScalarParameter> {
             values: vec![(0, 0.9), (1, 1.1)],
         },
     };
-    let pool = [alpha, beta, gamma];
+    // Distinct value per (stage, block) across 4 stages x 2 blocks; block 1 always
+    // differs from block 0 within a stage.
+    let delta = ScalarParameter {
+        id: EntityId(40),
+        name: "delta".to_string(),
+        kind: ParameterKind::PerStageBlock {
+            values: vec![
+                (0, 0, 0.0),
+                (0, 1, 10.0),
+                (1, 0, 1.0),
+                (1, 1, 11.0),
+                (2, 0, 2.0),
+                (2, 1, 12.0),
+                (3, 0, 3.0),
+                (3, 1, 13.0),
+            ],
+        },
+    };
+    let pool = [alpha, beta, gamma, delta];
     order.iter().map(|&i| pool[i].clone()).collect()
 }
 
@@ -43,13 +63,14 @@ fn make_params(order: &[usize]) -> Vec<ScalarParameter> {
 fn scalar_parameters_resolution_is_declaration_order_invariant() {
     let stage_to_season: [i32; 4] = [0, 1, 0, 1];
     let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
+    let stage_block_counts: [usize; 4] = [2, 2, 2, 2];
     let n_stages = 4;
     let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
     let overrides = HydroEnergyProductivityOverride::default();
     let hydros: Vec<cobre_core::Hydro> = Vec::new();
 
-    let order_a = make_params(&[0, 1, 2]);
-    let order_b = make_params(&[2, 0, 1]);
+    let order_a = make_params(&[0, 1, 2, 3]);
+    let order_b = make_params(&[3, 1, 0, 2]);
 
     let resolved_a = build_resolved_parameters(
         &order_a,
@@ -58,6 +79,7 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
         &hydros,
         &stage_to_season,
         &stage_ids,
+        &stage_block_counts,
         n_stages,
         1_000_000.0,
     )
@@ -69,28 +91,41 @@ fn scalar_parameters_resolution_is_declaration_order_invariant() {
         &hydros,
         &stage_to_season,
         &stage_ids,
+        &stage_block_counts,
         n_stages,
         1_000_000.0,
     )
     .expect("ResolvedParameters builds for order_b");
 
-    for id_raw in [10_i32, 20, 30] {
-        for stage_idx in 0..n_stages {
-            let va = resolved_a.get(EntityId(id_raw), stage_idx);
-            let vb = resolved_b.get(EntityId(id_raw), stage_idx);
-            assert_eq!(
-                va.to_bits(),
-                vb.to_bits(),
-                "mismatch at id={id_raw}, stage={stage_idx}: a={va} b={vb}",
-            );
+    // Every id resolves bit-identically under both orders, at every (stage, block).
+    for id_raw in [10_i32, 20, 30, 40] {
+        for (stage_idx, &n_blocks) in stage_block_counts.iter().enumerate() {
+            for block_idx in 0..n_blocks {
+                let va = resolved_a.get(EntityId(id_raw), stage_idx, block_idx);
+                let vb = resolved_b.get(EntityId(id_raw), stage_idx, block_idx);
+                assert_eq!(
+                    va.to_bits(),
+                    vb.to_bits(),
+                    "mismatch at id={id_raw}, stage={stage_idx}, block={block_idx}: a={va} b={vb}",
+                );
+            }
         }
     }
 
-    assert_eq!(resolved_a.id_to_slot.len(), 3);
-    assert_eq!(resolved_b.id_to_slot.len(), 3);
+    // The block-varying parameter genuinely carries a different value per block.
+    for stage_idx in 0..n_stages {
+        assert_ne!(
+            resolved_a.get(EntityId(40), stage_idx, 0).to_bits(),
+            resolved_a.get(EntityId(40), stage_idx, 1).to_bits(),
+            "delta must differ between block 0 and block 1 at stage {stage_idx}",
+        );
+    }
+
+    assert_eq!(resolved_a.id_to_slot.len(), 4);
+    assert_eq!(resolved_b.id_to_slot.len(), 4);
 
     let keys_a: Vec<i32> = resolved_a.id_to_slot.iter().map(|(k, _)| *k).collect();
     let keys_b: Vec<i32> = resolved_b.id_to_slot.iter().map(|(k, _)| *k).collect();
-    assert_eq!(keys_a, vec![10, 20, 30]);
-    assert_eq!(keys_b, vec![10, 20, 30]);
+    assert_eq!(keys_a, vec![10, 20, 30, 40]);
+    assert_eq!(keys_b, vec![10, 20, 30, 40]);
 }

@@ -555,6 +555,8 @@ fn generic_constraint_thermal_le_row_bounds_and_csc_entry() {
             enabled: false,
             penalty: None,
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(10_i32, 0)].into_iter().collect();
@@ -621,6 +623,8 @@ fn generic_constraint_thermal_le_slack_column_and_csc_entry() {
             enabled: true,
             penalty: Some(penalty),
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(20_i32, 0)].into_iter().collect();
@@ -696,6 +700,8 @@ fn generic_constraint_thermal_ge_row_bounds() {
             enabled: false,
             penalty: None,
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(30_i32, 0)].into_iter().collect();
@@ -750,6 +756,8 @@ fn generic_constraint_thermal_ge_slack_column_and_csc_entry() {
             enabled: true,
             penalty: Some(penalty),
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(35_i32, 0)].into_iter().collect();
@@ -819,6 +827,8 @@ fn generic_constraint_two_sided_thermal_row_bounds_and_csc_entry() {
             enabled: false,
             penalty: None,
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(72_i32, 0)].into_iter().collect();
@@ -874,6 +884,8 @@ fn generic_constraint_degenerate_band_thermal_two_slacks() {
             enabled: true,
             penalty: Some(penalty),
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(40_i32, 0)].into_iter().collect();
@@ -962,6 +974,8 @@ fn generic_constraint_two_sided_thermal_two_slacks() {
             enabled: true,
             penalty: Some(penalty),
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(73_i32, 0)].into_iter().collect();
@@ -1055,6 +1069,8 @@ fn generic_constraint_degenerate_band_gets_equality_row_and_two_slacks() {
             enabled: true,
             penalty: Some(penalty),
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
     let id_map: HashMap<i32, usize> = [(id, 0_usize)].into_iter().collect();
     let rows = vec![(id, 0_i32, None::<i32>, Some(10.0_f64), Some(10.0_f64))];
@@ -1291,6 +1307,8 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
             enabled: false,
             penalty: None,
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(100_i32, 0)].into_iter().collect();
@@ -1615,6 +1633,8 @@ fn generic_constraint_chronological_stage_net_storage_one_row() {
             enabled: false,
             penalty: None,
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(100_i32, 0)].into_iter().collect();
@@ -1696,6 +1716,8 @@ fn generic_constraint_chronological_specific_block_ramp_one_row() {
             enabled: false,
             penalty: None,
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
 
     let id_map: HashMap<i32, usize> = [(100_i32, 0)].into_iter().collect();
@@ -1733,5 +1755,361 @@ fn generic_constraint_chronological_specific_block_ramp_one_row() {
     assert!(
         (initial_total + 1.0).abs() < f64::EPSILON,
         "expected -1.0 on S¹ (col 4), got {initial_total}"
+    );
+}
+
+// ── Parameter (stage, block) axis + symbolic RHS bound byte-identity twins ──
+//
+// These twins prove the resolved parameter axis and `@name`-bounded constraints
+// desugar to the unchanged LP core. Unlike the named-expression twins above, the
+// sugared and hand-flattened forms are NOT equal as `Vec<GenericConstraint>` (a
+// parameter coefficient / symbolic bound vs literals) and need different resolved
+// parameters per side, so `assert_lp_byte_identical` (which asserts flat-form
+// identity under one shared parameter table) does not apply — the identity lives
+// only at the built `StageTemplates`, compared by the full Debug digest below.
+
+/// Resolve `params` over a single stage with `n_blks` blocks through the real
+/// resolver (the path `scalar_parameters_declaration_order.rs` exercises).
+/// `cost_scale_factor` is the default so a twin built here divides its objective
+/// column identically to one built with [`ResolvedParameters::default`].
+fn resolved_params_single_stage(
+    n_blks: usize,
+    params: &[cobre_core::ScalarParameter],
+) -> ResolvedParameters {
+    use cobre_core::StageId;
+    use cobre_sddp::build_resolved_parameters;
+    use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
+
+    let n_stages = 1_usize;
+    let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
+    let overrides = HydroEnergyProductivityOverride::default();
+    let hydros: Vec<cobre_core::Hydro> = Vec::new();
+    build_resolved_parameters(
+        params,
+        &ec,
+        &overrides,
+        &hydros,
+        &[0_i32],
+        &[StageId(0)],
+        &[n_blks],
+        n_stages,
+        COST_SCALE_FACTOR,
+    )
+    .expect("resolved parameters build")
+}
+
+/// Build the stage templates for `system` under `resolved` — the `build_templates_for`
+/// path with a caller-supplied parameter table instead of the default empty one.
+fn build_templates_with_params(
+    system: &cobre_core::System,
+    resolved: &ResolvedParameters,
+) -> Vec<cobre_solver::StageTemplate> {
+    build_stage_templates_resolving_layout(
+        system,
+        no_penalty_config(),
+        &PrecomputedPar::default(),
+        &PrecomputedNormal::default(),
+        &default_production(system),
+        &default_evaporation(system),
+        resolved,
+    )
+    .expect("build templates with params")
+    .templates
+}
+
+/// Discharge the desugaring invariant on one twin whose sugared and hand-flattened
+/// forms differ in their flat representation: build each study under its own
+/// resolved parameters and assert the full `StageTemplates` Debug digest matches.
+#[allow(clippy::too_many_arguments)]
+fn assert_templates_byte_identical(
+    n_blks: usize,
+    sugared_constraints: Vec<cobre_core::GenericConstraint>,
+    sugared_bounds: cobre_core::ResolvedGenericConstraintBounds,
+    sugared_params: &ResolvedParameters,
+    flat_constraints: Vec<cobre_core::GenericConstraint>,
+    flat_bounds: cobre_core::ResolvedGenericConstraintBounds,
+    flat_params: &ResolvedParameters,
+) {
+    let sugared_tpl = build_templates_with_params(
+        &one_bus_system_n_blks_with_generic(n_blks, sugared_constraints, sugared_bounds),
+        sugared_params,
+    );
+    let flat_tpl = build_templates_with_params(
+        &one_bus_system_n_blks_with_generic(n_blks, flat_constraints, flat_bounds),
+        flat_params,
+    );
+    assert_eq!(
+        format!("{sugared_tpl:?}"),
+        format!("{flat_tpl:?}"),
+        "sugared and hand-flattened LP templates must be byte-identical"
+    );
+}
+
+/// A `PerStageBlock` parameter used as a coefficient resolves to its own block's
+/// value on each per-block row. The sugared study places two terms — each a
+/// distinct block-varying parameter — on the SAME excess column, so the CSC values
+/// sequence for that column (column-major with a per-column row sort) is
+/// order-observable; a single-term twin cannot detect a term-ordering regression.
+/// The hand-flattened twin writes the resolved per-block literals directly, one
+/// block-confined constraint per block, and must build the identical LP.
+#[test]
+fn per_stage_block_coefficient_twin_matches_hand_flattened_literals() {
+    use cobre_core::{
+        ConstraintExpression, GenericConstraint, LinearTerm, ParameterKind,
+        ResolvedGenericConstraintBounds, ScalarParameter, SlackConfig, VariableRef,
+    };
+    use std::collections::HashMap;
+
+    let n_blks = 2_usize;
+    let upper = 400.0_f64;
+    let excess = |block_id: Option<usize>| VariableRef::BusExcess {
+        bus_id: EntityId(1),
+        block_id,
+    };
+
+    // Sugared: one block-varying constraint, two per-block parameter coefficients
+    // on the same excess column. Block 0 resolves to {2.0, 3.0}; block 1 to {5.0,
+    // 7.0}. Parameter ids ascend with their per-block values so the parameter-keyed
+    // and literal-keyed canonical orders agree.
+    let mut sugared_expr = ConstraintExpression {
+        terms: vec![
+            LinearTerm::parameter(EntityId(200), 1.0, excess(None)),
+            LinearTerm::parameter(EntityId(201), 1.0, excess(None)),
+        ],
+    };
+    sugared_expr.canonicalize();
+    let sugared_constraint = GenericConstraint {
+        id: EntityId(300),
+        name: "gc_block_coef".to_string(),
+        description: None,
+        expression: sugared_expr,
+        slack: SlackConfig {
+            enabled: false,
+            penalty: None,
+        },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
+    };
+    let sugared_id_map: HashMap<i32, usize> = [(300_i32, 0)].into_iter().collect();
+    let sugared_rows = vec![(300_i32, 0_i32, None::<i32>, None, Some(upper))];
+    let sugared_bounds =
+        ResolvedGenericConstraintBounds::new(&sugared_id_map, sugared_rows.into_iter());
+    let sugared_params = resolved_params_single_stage(
+        n_blks,
+        &[
+            ScalarParameter {
+                id: EntityId(200),
+                name: "coef_a".to_string(),
+                kind: ParameterKind::PerStageBlock {
+                    values: vec![(0, 0, 2.0), (0, 1, 5.0)],
+                },
+            },
+            ScalarParameter {
+                id: EntityId(201),
+                name: "coef_b".to_string(),
+                kind: ParameterKind::PerStageBlock {
+                    values: vec![(0, 0, 3.0), (0, 1, 7.0)],
+                },
+            },
+        ],
+    );
+
+    // Hand-flattened: one block-confined constraint per block, each carrying the
+    // resolved per-block literals directly. Block-specific terms keep every entry
+    // in its own block's column, matching the sugared per-block rows.
+    let flat_constraint = |id: i32, block: usize, a: f64, b: f64| {
+        let mut expr = ConstraintExpression {
+            terms: vec![
+                LinearTerm::literal(a, excess(Some(block))),
+                LinearTerm::literal(b, excess(Some(block))),
+            ],
+        };
+        expr.canonicalize();
+        GenericConstraint {
+            id: EntityId(id),
+            name: format!("gc_lit_{id}"),
+            description: None,
+            expression: expr,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
+        }
+    };
+    let flat_constraints = vec![
+        flat_constraint(100, 0, 2.0, 3.0),
+        flat_constraint(101, 1, 5.0, 7.0),
+    ];
+    let flat_id_map: HashMap<i32, usize> = [(100_i32, 0), (101_i32, 1)].into_iter().collect();
+    let flat_rows = vec![
+        (100_i32, 0_i32, Some(0_i32), None, Some(upper)),
+        (101_i32, 0_i32, Some(1_i32), None, Some(upper)),
+    ];
+    let flat_bounds = ResolvedGenericConstraintBounds::new(&flat_id_map, flat_rows.into_iter());
+
+    assert_templates_byte_identical(
+        n_blks,
+        vec![sugared_constraint],
+        sugared_bounds,
+        &sugared_params,
+        flat_constraints,
+        flat_bounds,
+        &ResolvedParameters::default(),
+    );
+}
+
+/// A symbolic upper bound (`bound_upper_ref` naming a `PerStageBlock` parameter,
+/// with the numeric `bound_upper` left null in the activation rows) resolves per
+/// `(stage, block)` and builds the identical LP to a study whose rows carry the
+/// resolved literal `bound_upper` per block and no reference. The block-varying
+/// reference keeps the rows per-block on both sides.
+#[test]
+fn symbolic_upper_bound_ref_twin_matches_literal_per_block_bounds() {
+    use cobre_core::{
+        ConstraintExpression, GenericConstraint, LinearTerm, ParameterKind,
+        ResolvedGenericConstraintBounds, ScalarParameter, SlackConfig, VariableRef,
+    };
+    use std::collections::HashMap;
+
+    let n_blks = 2_usize;
+    let cap_block0 = 120.0_f64;
+    let cap_block1 = 340.0_f64;
+    let expr = || ConstraintExpression {
+        terms: vec![LinearTerm::literal(
+            1.0,
+            VariableRef::BusExcess {
+                bus_id: EntityId(1),
+                block_id: None,
+            },
+        )],
+    };
+    let no_slack = SlackConfig {
+        enabled: false,
+        penalty: None,
+    };
+
+    // Sugared: the reference lives on the constraint; the activation row's numeric
+    // upper endpoint stays null, so the parameter's (stage, block) axis supplies it.
+    let sugared_constraint = GenericConstraint {
+        id: EntityId(300),
+        name: "gc_sym_cap".to_string(),
+        description: None,
+        expression: expr(),
+        slack: no_slack.clone(),
+        bound_lower_ref: None,
+        bound_upper_ref: Some(EntityId(200)),
+    };
+    let sugared_id_map: HashMap<i32, usize> = [(300_i32, 0)].into_iter().collect();
+    let sugared_rows = vec![(300_i32, 0_i32, None::<i32>, None, None)];
+    let sugared_bounds =
+        ResolvedGenericConstraintBounds::new(&sugared_id_map, sugared_rows.into_iter());
+    let sugared_params = resolved_params_single_stage(
+        n_blks,
+        &[ScalarParameter {
+            id: EntityId(200),
+            name: "cap".to_string(),
+            kind: ParameterKind::PerStageBlock {
+                values: vec![(0, 0, cap_block0), (0, 1, cap_block1)],
+            },
+        }],
+    );
+
+    // Hand-flattened: no reference, resolved literal upper per (stage, block).
+    let flat_constraint = GenericConstraint {
+        id: EntityId(300),
+        name: "gc_sym_cap".to_string(),
+        description: None,
+        expression: expr(),
+        slack: no_slack,
+        bound_lower_ref: None,
+        bound_upper_ref: None,
+    };
+    let flat_id_map: HashMap<i32, usize> = [(300_i32, 0)].into_iter().collect();
+    let flat_rows = vec![
+        (300_i32, 0_i32, Some(0_i32), None, Some(cap_block0)),
+        (300_i32, 0_i32, Some(1_i32), None, Some(cap_block1)),
+    ];
+    let flat_bounds = ResolvedGenericConstraintBounds::new(&flat_id_map, flat_rows.into_iter());
+
+    assert_templates_byte_identical(
+        n_blks,
+        vec![sugared_constraint],
+        sugared_bounds,
+        &sugared_params,
+        vec![flat_constraint],
+        flat_bounds,
+        &ResolvedParameters::default(),
+    );
+}
+
+/// A block-independent expression whose symbolic lower bound (`bound_lower_ref`)
+/// names a stage-level (broadcast) parameter collapses to a single stage-level row,
+/// and the collapse path resolves the reference to the parameter's one-per-stage
+/// value — byte-identical to the same study written with a literal `bound_lower`
+/// and no reference.
+#[test]
+fn symbolic_lower_bound_ref_stage_level_collapse_twin() {
+    use cobre_core::{
+        ConstraintExpression, GenericConstraint, ParameterKind, ResolvedGenericConstraintBounds,
+        ScalarParameter, SlackConfig,
+    };
+    use std::collections::HashMap;
+
+    let n_blks = 3_usize;
+    let floor = 275.0_f64;
+    let empty_expr = || ConstraintExpression { terms: vec![] };
+    let no_slack = SlackConfig {
+        enabled: false,
+        penalty: None,
+    };
+
+    // Sugared: block-independent (empty) expression, stage-level floor reference,
+    // numeric lower endpoint null in the activation row.
+    let sugared_constraint = GenericConstraint {
+        id: EntityId(300),
+        name: "gc_sym_floor".to_string(),
+        description: None,
+        expression: empty_expr(),
+        slack: no_slack.clone(),
+        bound_lower_ref: Some(EntityId(200)),
+        bound_upper_ref: None,
+    };
+    let sugared_id_map: HashMap<i32, usize> = [(300_i32, 0)].into_iter().collect();
+    let sugared_rows = vec![(300_i32, 0_i32, None::<i32>, None, None)];
+    let sugared_bounds =
+        ResolvedGenericConstraintBounds::new(&sugared_id_map, sugared_rows.into_iter());
+    let sugared_params = resolved_params_single_stage(
+        n_blks,
+        &[ScalarParameter {
+            id: EntityId(200),
+            name: "floor".to_string(),
+            kind: ParameterKind::Constant { value: floor },
+        }],
+    );
+
+    // Hand-flattened: no reference, literal lower endpoint on the same collapsing row.
+    let flat_constraint = GenericConstraint {
+        id: EntityId(300),
+        name: "gc_sym_floor".to_string(),
+        description: None,
+        expression: empty_expr(),
+        slack: no_slack,
+        bound_lower_ref: None,
+        bound_upper_ref: None,
+    };
+    let flat_id_map: HashMap<i32, usize> = [(300_i32, 0)].into_iter().collect();
+    let flat_rows = vec![(300_i32, 0_i32, None::<i32>, Some(floor), None)];
+    let flat_bounds = ResolvedGenericConstraintBounds::new(&flat_id_map, flat_rows.into_iter());
+
+    assert_templates_byte_identical(
+        n_blks,
+        vec![sugared_constraint],
+        sugared_bounds,
+        &sugared_params,
+        vec![flat_constraint],
+        flat_bounds,
+        &ResolvedParameters::default(),
     );
 }

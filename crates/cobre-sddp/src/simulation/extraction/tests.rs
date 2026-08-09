@@ -6887,6 +6887,8 @@ fn two_sided_real_layout_allocates_minus_slack_column() {
             enabled: true,
             penalty: Some(10.0),
         },
+        bound_lower_ref: None,
+        bound_upper_ref: None,
     };
     let generic_constraints = [constraint];
 

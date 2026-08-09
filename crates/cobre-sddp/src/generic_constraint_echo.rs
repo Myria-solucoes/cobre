@@ -92,7 +92,7 @@ fn build_echo_rows_from_parts(
                     term_index: Some(term_idx as i32),
                     variable_kind: Some(kind.to_string()),
                     variable: Some(rendered),
-                    coefficient: Some(resolve_coef(term, resolved, stage_idx)),
+                    coefficient: Some(resolve_coef(term, resolved, stage_idx, entry.block_idx)),
                     bound_lower: entry.bound_lower,
                     bound_upper: entry.bound_upper,
                     derived_shape: shape.to_string(),
@@ -117,13 +117,20 @@ fn build_echo_rows_from_parts(
 }
 
 /// Resolve a term's coefficient exactly as `fill_generic_constraint_entries`:
-/// `resolve(coefficient, stage) * scale`. The per-column `multiplier` from
-/// `resolve_variable_ref` is a column-expansion detail deliberately absent here —
-/// the echo is the term-level flat form, not the per-cell LP-column expansion.
-fn resolve_coef(term: &LinearTerm, resolved: &ResolvedParameters, stage_idx: usize) -> f64 {
+/// `resolve(coefficient, stage, block) * scale`, reading the parameter at the
+/// row's own block so a block-varying coefficient echoes its per-block value, not
+/// a stage-level one. The per-column `multiplier` from `resolve_variable_ref` is a
+/// column-expansion detail deliberately absent here — the echo is the term-level
+/// flat form, not the per-cell LP-column expansion.
+fn resolve_coef(
+    term: &LinearTerm,
+    resolved: &ResolvedParameters,
+    stage_idx: usize,
+    block_idx: usize,
+) -> f64 {
     let base = match term.coefficient {
         CoefficientRef::Literal(v) => v,
-        CoefficientRef::Parameter(id) => resolved.get(id, stage_idx),
+        CoefficientRef::Parameter(id) => resolved.get(id, stage_idx, block_idx),
     };
     base * term.scale
 }
@@ -340,6 +347,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         }
     }
 
@@ -417,7 +426,7 @@ mod tests {
         assert_eq!(r.slack_penalty, None);
     }
 
-    /// A `Parameter(id)` term resolves to `resolved.get(id, stage) * scale`,
+    /// A `Parameter(id)` term resolves to `resolved.get(id, stage, block) * scale`,
     /// matching `fill_generic_constraint_entries`, at each stage.
     #[test]
     fn parameter_coefficient_resolves_like_lp() {
@@ -431,8 +440,9 @@ mod tests {
             vec![entry(0, 1, 0, true, Some(0.0), None, false, 0.0)],
             vec![entry(0, 1, 0, true, Some(0.0), None, false, 0.0)],
         ];
+        // Two stages, one block each (length-1 inner), so any block broadcasts.
         let resolved = ResolvedParameters {
-            per_param: vec![vec![2.0, 3.0]],
+            per_param: vec![vec![vec![2.0], vec![3.0]]],
             id_to_slot: vec![(42, 0)],
             ..Default::default()
         };
@@ -443,12 +453,48 @@ mod tests {
         assert_eq!(rows[0].stage_id, 0);
         assert_eq!(
             rows[0].coefficient,
-            Some(resolved.get(EntityId(42), 0) * scale)
+            Some(resolved.get(EntityId(42), 0, 0) * scale)
         );
         assert_eq!(rows[1].stage_id, 1);
         assert_eq!(
             rows[1].coefficient,
-            Some(resolved.get(EntityId(42), 1) * scale)
+            Some(resolved.get(EntityId(42), 1, 0) * scale)
+        );
+    }
+
+    /// A block-varying (`PerStageBlock`) coefficient echoes its own block's value:
+    /// the block-0 and block-1 rows carry the distinct per-block coefficients, not
+    /// a single stage-level one.
+    #[test]
+    fn parameter_coefficient_reads_the_rows_own_block() {
+        let scale = 1.0;
+        let constraints = vec![constraint(
+            1,
+            "per_block",
+            vec![LinearTerm::parameter(EntityId(42), scale, thermal(0))],
+        )];
+        // One stage, two per-block rows (is_stage_level = false) at blocks 0 and 1.
+        let entries = vec![vec![
+            entry(0, 1, 0, false, Some(0.0), None, false, 0.0),
+            entry(0, 1, 1, false, Some(0.0), None, false, 0.0),
+        ]];
+        // Slot 0, stage 0 carries two blocks: [10.0, 20.0].
+        let resolved = ResolvedParameters {
+            per_param: vec![vec![vec![10.0, 20.0]]],
+            id_to_slot: vec![(42, 0)],
+            ..Default::default()
+        };
+
+        let rows = build_echo_rows_from_parts(&entries, &[0], &resolved, &constraints);
+
+        assert_eq!(rows.len(), 2);
+        let block0 = rows.iter().find(|r| r.block_id == Some(0)).unwrap();
+        let block1 = rows.iter().find(|r| r.block_id == Some(1)).unwrap();
+        assert_eq!(block0.coefficient, Some(10.0));
+        assert_eq!(block1.coefficient, Some(20.0));
+        assert_ne!(
+            block0.coefficient, block1.coefficient,
+            "a block-varying coefficient must differ between the block-0 and block-1 rows"
         );
     }
 

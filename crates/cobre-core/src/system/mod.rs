@@ -2006,6 +2006,8 @@ mod tests {
                 enabled: true,
                 penalty: Some(2500.0),
             },
+            bound_lower_ref: None,
+            bound_upper_ref: None,
         }];
 
         let inflow_history = vec![
