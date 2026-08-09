@@ -33,7 +33,7 @@
 //!
 //! ```
 //! use cobre_core::{
-//!     EntityId, GenericConstraint, ConstraintExpression, ConstraintSense,
+//!     EntityId, GenericConstraint, ConstraintExpression,
 //!     LinearTerm, SlackConfig, VariableRef,
 //! };
 //!
@@ -60,7 +60,6 @@
 //!     name: "min_southeast_hydro".to_string(),
 //!     description: Some("Minimum hydro generation in Southeast region".to_string()),
 //!     expression: expr,
-//!     sense: ConstraintSense::GreaterEqual,
 //!     slack: SlackConfig { enabled: true, penalty: Some(5_000.0) },
 //! };
 //!
@@ -345,18 +344,6 @@ pub struct ConstraintExpression {
     pub terms: Vec<LinearTerm>,
 }
 
-/// Comparison sense for a generic constraint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum ConstraintSense {
-    /// The expression must be greater than or equal to the bound (`>=`).
-    GreaterEqual,
-    /// The expression must be less than or equal to the bound (`<=`).
-    LessEqual,
-    /// The expression must be exactly equal to the bound (`==`).
-    Equal,
-}
-
 /// Slack variable configuration for a generic constraint.
 ///
 /// An enabled slack lets the constraint be violated at a cost (entering the LP
@@ -386,8 +373,6 @@ pub struct GenericConstraint {
     pub description: Option<String>,
     /// Parsed left-hand-side expression of the constraint.
     pub expression: ConstraintExpression,
-    /// Comparison sense (`>=`, `<=`, or `==`).
-    pub sense: ConstraintSense,
     /// Slack variable configuration.
     pub slack: SlackConfig,
 }
@@ -661,7 +646,6 @@ mod tests {
             name: "min_southeast_hydro".to_string(),
             description: Some("Minimum hydro generation in Southeast region".to_string()),
             expression: expr,
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: true,
                 penalty: Some(5_000.0),
@@ -672,7 +656,6 @@ mod tests {
         assert_eq!(gc.id, EntityId(0));
         assert_eq!(gc.name, "min_southeast_hydro");
         assert!(gc.description.is_some());
-        assert_eq!(gc.sense, ConstraintSense::GreaterEqual);
         assert!(gc.slack.enabled);
         assert_eq!(gc.slack.penalty, Some(5_000.0));
     }
@@ -685,13 +668,6 @@ mod tests {
         };
         assert!(!slack.enabled);
         assert!(slack.penalty.is_none());
-    }
-
-    #[test]
-    fn test_constraint_sense_variants() {
-        assert_ne!(ConstraintSense::GreaterEqual, ConstraintSense::LessEqual);
-        assert_ne!(ConstraintSense::GreaterEqual, ConstraintSense::Equal);
-        assert_ne!(ConstraintSense::LessEqual, ConstraintSense::Equal);
     }
 
     fn lit(term: &LinearTerm) -> f64 {
@@ -886,7 +862,6 @@ mod tests {
                     ),
                 ],
             },
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: true,
                 penalty: Some(5_000.0),

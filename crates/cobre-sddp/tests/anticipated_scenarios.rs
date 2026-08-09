@@ -1611,7 +1611,7 @@ mod anticipated_generic_constraint_e2e {
 
     use chrono::NaiveDate;
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ConstraintExpression, ConstraintSense,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ConstraintExpression,
         ContractBlockBounds, EntityId, GenericConstraint, HydroBlockBounds, HydroStageBounds,
         HydroStagePenalties, InitialConditions, LineBlockBounds, LineStagePenalties, LinearTerm,
         NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
@@ -1948,7 +1948,6 @@ mod anticipated_generic_constraint_e2e {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -1960,9 +1959,17 @@ mod anticipated_generic_constraint_e2e {
 
         let id_map: std::collections::HashMap<i32, usize> =
             [(1_i32, 0_usize)].into_iter().collect();
-        let raw_bounds: Vec<(i32, i32, Option<i32>, f64)> = (0..N_STAGES as i32)
-            .map(|stage_id| (1_i32, stage_id, None::<i32>, CONSTRAINT_BOUND_MW))
-            .collect();
+        let raw_bounds = (0..N_STAGES as i32)
+            .map(|stage_id| {
+                (
+                    1_i32,
+                    stage_id,
+                    None::<i32>,
+                    None,
+                    Some(CONSTRAINT_BOUND_MW),
+                )
+            })
+            .collect::<Vec<_>>();
         let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, raw_bounds.into_iter());
 
         let constrained_system = build_system(vec![constraint], generic_bounds);
@@ -2082,7 +2089,6 @@ mod anticipated_generic_constraint_e2e {
       "id": 1,
       "name": "bad_constraint",
       "expression": "anticipated_decision(3)",
-      "sense": "<=",
       "slack": { "enabled": false }
     }
   ]
@@ -2096,7 +2102,7 @@ mod anticipated_generic_constraint_e2e {
             &constraints_dir.join("generic_constraint_bounds.parquet"),
             1,    // constraint_id
             0,    // stage_id
-            25.0, // bound
+            25.0, // bound_upper
         )
         .expect("write generic_constraint_bounds.parquet");
 
@@ -2218,7 +2224,7 @@ mod anticipated_generic_constraint_e2e {
         path: &Path,
         constraint_id: i32,
         stage_id: i32,
-        bound: f64,
+        bound_upper: f64,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use arrow::array::{Float64Array, Int32Array};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -2230,7 +2236,8 @@ mod anticipated_generic_constraint_e2e {
             Field::new("constraint_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
             Field::new("block_id", DataType::Int32, true),
-            Field::new("bound", DataType::Float64, false),
+            Field::new("bound_lower", DataType::Float64, true),
+            Field::new("bound_upper", DataType::Float64, true),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -2239,7 +2246,8 @@ mod anticipated_generic_constraint_e2e {
                 Arc::new(Int32Array::from(vec![constraint_id])),
                 Arc::new(Int32Array::from(vec![stage_id])),
                 Arc::new(Int32Array::new_null(1)),
-                Arc::new(Float64Array::from(vec![bound])),
+                Arc::new(Float64Array::new_null(1)),
+                Arc::new(Float64Array::from(vec![bound_upper])),
             ],
         )?;
 

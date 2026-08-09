@@ -609,9 +609,8 @@ mod tests {
 mod proptests {
     use super::*;
     use crate::{
-        Block, BlockMode, ConstraintExpression, ConstraintSense, ContractType, DeficitSegment,
-        HydroGenerationModel, NoiseMethod, ScenarioSourceConfig, SlackConfig, StageRiskConfig,
-        StageStateConfig,
+        Block, BlockMode, ConstraintExpression, ContractType, DeficitSegment, HydroGenerationModel,
+        NoiseMethod, ScenarioSourceConfig, SlackConfig, StageRiskConfig, StageStateConfig,
     };
     use proptest::prelude::*;
 
@@ -789,7 +788,6 @@ mod proptests {
             name: format!("gc{id}"),
             description: None,
             expression: ConstraintExpression { terms: vec![] },
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,

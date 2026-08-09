@@ -52,7 +52,7 @@ pub use model::{parameters, penalty, resolved, scenario, temporal};
 pub use constraints::{generic_constraint, initial_conditions, training_event};
 
 pub use constraints::generic_constraint::{
-    ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+    ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
 };
 pub use constraints::initial_conditions::{
     AnticipatedCommitmentHistory, HydroPastDefluence, HydroStorage, InitialConditions,

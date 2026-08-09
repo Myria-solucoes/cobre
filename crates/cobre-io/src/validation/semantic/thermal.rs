@@ -2022,8 +2022,7 @@ mod tests {
     #[test]
     fn test_anticipated_decision_on_non_anticipated_thermal_error() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let thermal = make_thermal(7, 0.0, 500.0); // NOT anticipated
@@ -2039,7 +2038,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2099,8 +2097,8 @@ mod tests {
     #[test]
     fn test_anticipated_decision_on_anticipated_thermal_ok() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef, entities::AnticipatedConfig,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+            entities::AnticipatedConfig,
         };
 
         let thermal = Thermal {
@@ -2119,7 +2117,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2154,8 +2151,8 @@ mod tests {
     #[test]
     fn test_thermal_generation_on_anticipated_thermal_warns() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef, entities::AnticipatedConfig,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+            entities::AnticipatedConfig,
         };
 
         let thermal = Thermal {
@@ -2175,7 +2172,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2240,8 +2236,7 @@ mod tests {
     #[test]
     fn test_thermal_generation_on_non_anticipated_thermal_no_warn() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let thermal = make_thermal(9, 0.0, 200.0); // NOT anticipated
@@ -2258,7 +2253,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,

@@ -1,5 +1,5 @@
 use cobre_core::commissioning::{Phase, filling_phase};
-use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, EntityId, Stage};
+use cobre_core::{BlockMode, CoefficientRef, ContractType, EntityId, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
@@ -1285,20 +1285,12 @@ pub(super) fn fill_generic_constraint_entries(
             stage.blocks[entry.block_idx].duration_hours
         };
 
-        match entry.sense {
-            ConstraintSense::LessEqual => {
-                row_lower[row] = f64::NEG_INFINITY;
-                row_upper[row] = entry.bound;
-            }
-            ConstraintSense::GreaterEqual => {
-                row_lower[row] = entry.bound;
-                row_upper[row] = f64::INFINITY;
-            }
-            ConstraintSense::Equal => {
-                row_lower[row] = entry.bound;
-                row_upper[row] = entry.bound;
-            }
-        }
+        // The interval IS the constraint: shape derives from the null-pattern.
+        // A missing endpoint falls back to the unbounded direction (visibly open),
+        // never a cross-fill from the other endpoint (would silently fabricate a
+        // bound) — referential validation guarantees at least one is present.
+        row_lower[row] = entry.bound_lower.unwrap_or(f64::NEG_INFINITY);
+        row_upper[row] = entry.bound_upper.unwrap_or(f64::INFINITY);
 
         for term in &constraint.expression.terms {
             let pairs = resolve_variable_ref(
@@ -1330,11 +1322,14 @@ pub(super) fn fill_generic_constraint_entries(
             col_upper[plus_col] = f64::INFINITY;
             objective[plus_col] = obj_coeff;
 
-            // Slack sign convention: `LHS - s_g <= bound`, `LHS + s_g >= bound`, and
-            // `LHS + s_g_plus - s_g_minus == bound`.
-            let plus_coeff = match entry.sense {
-                ConstraintSense::LessEqual => -1.0,
-                ConstraintSense::GreaterEqual | ConstraintSense::Equal => 1.0,
+            // Slack sign convention: `LHS - s_plus <= upper` (upper-only, relaxing
+            // downward) or `LHS + s_plus >= lower` (lower-only or two-sided,
+            // relaxing upward); a two-sided row additionally gets `s_minus` below,
+            // relaxing the upper bound the same way `s_plus` relaxes the lower one.
+            let plus_coeff = if entry.bound_upper.is_some() && entry.bound_lower.is_none() {
+                -1.0
+            } else {
+                1.0
             };
             col_entries[plus_col].push((row, plus_coeff));
 
@@ -1643,9 +1638,9 @@ mod assemble_csc_tests {
 mod parameter_resolution_tests {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CoefficientRef,
-        ConstraintExpression, ConstraintSense, ContractBlockBounds, DeficitSegment, EntityId,
-        GenericConstraint, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        LineBlockBounds, LineStagePenalties, NcsStagePenalties, ParameterKind, PenaltiesCountsSpec,
+        ConstraintExpression, ContractBlockBounds, DeficitSegment, EntityId, GenericConstraint,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+        LineStagePenalties, NcsStagePenalties, ParameterKind, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
         ResolvedPenalties, ScalarParameter, SlackConfig, StageId, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -1974,7 +1969,6 @@ mod parameter_resolution_tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2003,7 +1997,6 @@ mod parameter_resolution_tests {
                     },
                 }],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2018,9 +2011,9 @@ mod parameter_resolution_tests {
         n_stages: usize,
     ) -> ResolvedGenericConstraintBounds {
         let id_map: HashMap<i32, usize> = [(constraint_id.0, 0)].into_iter().collect();
-        let rows: Vec<(i32, i32, Option<i32>, f64)> = (0..n_stages)
-            .map(|s| (constraint_id.0, s as i32, None, 50.0_f64))
-            .collect();
+        let rows = (0..n_stages)
+            .map(|s| (constraint_id.0, s as i32, None, None, Some(50.0_f64)))
+            .collect::<Vec<_>>();
         ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter())
     }
 
@@ -3069,14 +3062,13 @@ mod pumping_water_tests {
 
     use cobre_core::{
         BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology,
-        CoefficientRef, ConstraintExpression, ConstraintSense, ContractBlockBounds, ContractType,
-        DeficitSegment, EnergyContract, EntityId, GenericConstraint, Hydro, HydroBlockBounds,
-        HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroUnitGroup, Line,
-        LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingBlockBounds, PumpingStation, ResolvedBounds,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal, ThermalBlockBounds,
-        ThermalStageBounds, VariableRef,
+        CoefficientRef, ConstraintExpression, ContractBlockBounds, ContractType, DeficitSegment,
+        EnergyContract, EntityId, GenericConstraint, Hydro, HydroBlockBounds, HydroGenerationModel,
+        HydroStageBounds, HydroStagePenalties, HydroUnitGroup, Line, LineBlockBounds,
+        LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingBlockBounds, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig,
+        Stage, Thermal, ThermalBlockBounds, ThermalStageBounds, VariableRef,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -3554,15 +3546,46 @@ mod pumping_water_tests {
             }
         }
 
-        /// Attach a generic constraint (and its active-at-stage-0 bound) so the
-        /// LP builder resolves the constraint's expression against the pumping
-        /// columns. Used by the end-to-end resolver-integration test.
-        fn with_generic_constraint(mut self, constraint: GenericConstraint, bound: f64) -> Self {
+        /// Attach a generic constraint (and its active-at-stage-0 upper-only bound)
+        /// so the LP builder resolves the constraint's expression against the
+        /// pumping columns. Used by the end-to-end resolver-integration test.
+        fn with_generic_constraint(
+            mut self,
+            constraint: GenericConstraint,
+            bound_upper: f64,
+        ) -> Self {
             let constraint_id = constraint.id.0;
             let id_map: HashMap<i32, usize> = [(constraint_id, 0)].into_iter().collect();
             let rows = (0..N_STAGES).map(|s| {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                (constraint_id, s as i32, None, bound)
+                (constraint_id, s as i32, None, None, Some(bound_upper))
+            });
+            self.resolved_generic_bounds =
+                ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+            self.generic_constraints = vec![constraint];
+            self
+        }
+
+        /// Like [`Self::with_generic_constraint`], but sets BOTH endpoints — a
+        /// two-sided row, whose slack allocation and net-report path differ from
+        /// the one-sided row above.
+        fn with_generic_constraint_range(
+            mut self,
+            constraint: GenericConstraint,
+            bound_lower: f64,
+            bound_upper: f64,
+        ) -> Self {
+            let constraint_id = constraint.id.0;
+            let id_map: HashMap<i32, usize> = [(constraint_id, 0)].into_iter().collect();
+            let rows = (0..N_STAGES).map(|s| {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                (
+                    constraint_id,
+                    s as i32,
+                    None,
+                    Some(bound_lower),
+                    Some(bound_upper),
+                )
             });
             self.resolved_generic_bounds =
                 ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
@@ -4132,7 +4155,6 @@ mod pumping_water_tests {
             expression: ConstraintExpression {
                 terms: vec![import_term],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -4335,7 +4357,6 @@ mod pumping_water_tests {
                     },
                 ],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -7179,7 +7200,6 @@ mod pumping_water_tests {
                     },
                 ],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -7235,9 +7255,138 @@ mod pumping_water_tests {
                 1.0 + consumption,
                 "blk {blk}: pumping column {col} must carry flow(1.0) + power({consumption}) on generic row {row}"
             );
-            // The row bound proves the constraint participates with the right sense.
-            assert_eq!(row_upper[row], 40.0, "blk {blk}: <= row upper bound");
-            assert_eq!(row_lower[row], f64::NEG_INFINITY, "blk {blk}: <= row lower");
+            // The row bound proves the constraint participates as an upper-only row.
+            assert_eq!(
+                row_upper[row], 40.0,
+                "blk {blk}: upper-only row upper bound"
+            );
+            assert_eq!(
+                row_lower[row],
+                f64::NEG_INFINITY,
+                "blk {blk}: upper-only row lower"
+            );
+        }
+    }
+
+    /// AC: a two-sided row (both `bound_lower` and `bound_upper` present) carries
+    /// `row_lower = bound_lower` and `row_upper = bound_upper`, and — with slack
+    /// enabled — TWO slack columns (plus then minus): the two-sidedness test in
+    /// `allocate_generic_slack_cols` must derive from the row's own endpoint pair,
+    /// not a constraint-level label, or a two-sided row's upper bound would carry
+    /// no relaxation and no error would surface anywhere downstream.
+    #[test]
+    fn two_sided_row_bounds_and_two_slack_columns() {
+        let station_id = EntityId(10);
+        let penalty = 25.0_f64;
+        let constraint = GenericConstraint {
+            id: EntityId(7),
+            name: "gc_range".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm {
+                    coefficient: CoefficientRef::Literal(1.0),
+                    scale: 1.0,
+                    variable: VariableRef::PumpingFlow {
+                        station_id,
+                        block_id: None,
+                    },
+                }],
+            },
+            slack: SlackConfig {
+                enabled: true,
+                penalty: Some(penalty),
+            },
+        };
+
+        let fixtures = PumpFixtures::new(
+            vec![fixture_hydro(1), fixture_hydro(2)],
+            vec![station_full(station_id.0, 1, 2, 0.0, 50.0, 1, 0.5)],
+        )
+        .with_generic_constraint_range(constraint, 5.0, 20.0);
+        let ctx = fixtures.make_ctx();
+        let block_hours = [300.0, 444.0];
+        let stage = two_block_stage(0, block_hours);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let n_blks = layout.n_blks;
+        assert_eq!(
+            layout.rows.n_generic_rows, n_blks,
+            "block-dependent two-sided constraint must expand to one row per block"
+        );
+        assert_eq!(
+            layout.generic_constraint_rows.len(),
+            n_blks,
+            "one GenericConstraintRowEntry per block"
+        );
+
+        for (blk, entry) in layout.generic_constraint_rows.iter().enumerate() {
+            let plus_col = entry
+                .slack_plus_col
+                .unwrap_or_else(|| panic!("blk {blk}: a slack-enabled row must get a plus column"));
+            let minus_col = entry.slack_minus_col.unwrap_or_else(|| {
+                panic!(
+                    "blk {blk}: a two-sided row with slack enabled must get a minus slack column"
+                )
+            });
+            assert_eq!(
+                minus_col,
+                plus_col + 1,
+                "blk {blk}: minus slack must be a DISTINCT column immediately after plus slack"
+            );
+        }
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut row_lower = vec![f64::NEG_INFINITY; layout.rows.num_rows];
+        let mut row_upper = vec![f64::INFINITY; layout.rows.num_rows];
+        let mut buffers = LpMatrixBuffers {
+            col_entries: &mut col_entries,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+            row_lower: &mut row_lower,
+            row_upper: &mut row_upper,
+        };
+
+        fill_generic_constraint_entries(&ctx, &stage, 0, &layout, &mut buffers);
+
+        assert_eq!(
+            block_hours.len(),
+            n_blks,
+            "fixture has exactly n_blks blocks"
+        );
+        for (blk, &hours) in block_hours.iter().enumerate() {
+            let row = layout.rows.row_generic_start + blk;
+            assert_eq!(
+                row_lower[row], 5.0,
+                "blk {blk}: two-sided row lower = bound_lower"
+            );
+            assert_eq!(
+                row_upper[row], 20.0,
+                "blk {blk}: two-sided row upper = bound_upper"
+            );
+
+            let entry = &layout.generic_constraint_rows[blk];
+            let plus_col = entry.slack_plus_col.unwrap();
+            let minus_col = entry.slack_minus_col.unwrap();
+            assert!(
+                col_entries[plus_col].contains(&(row, 1.0)),
+                "blk {blk}: plus-slack coefficient must be +1.0 (relaxes the lower bound)"
+            );
+            assert!(
+                col_entries[minus_col].contains(&(row, -1.0)),
+                "blk {blk}: minus-slack coefficient must be -1.0 (relaxes the upper bound)"
+            );
+            let expected_obj = penalty * hours;
+            assert_eq!(
+                objective[plus_col], expected_obj,
+                "blk {blk}: plus-slack objective coefficient"
+            );
+            assert_eq!(
+                objective[minus_col], expected_obj,
+                "blk {blk}: minus-slack objective coefficient"
+            );
         }
     }
 

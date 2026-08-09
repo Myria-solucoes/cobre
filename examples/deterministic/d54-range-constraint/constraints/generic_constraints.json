@@ -2,8 +2,8 @@
   "constraints": [
     {
       "id": 1,
-      "name": "cap_T0",
-      "description": "Cap thermal T0 generation at 10 MW",
+      "name": "band_T0",
+      "description": "Force thermal T0 generation into the band [35, 100] MW",
       "expression": "thermal_generation(0)",
       "slack": {
         "enabled": true,

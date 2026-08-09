@@ -404,7 +404,8 @@ pub struct SimulationGenericViolationResult {
     pub block_id: Option<u32>,
     /// Generic constraint entity ID.
     pub constraint_id: i32,
-    /// Violation slack value (non-negative).
+    /// Violation slack value: non-negative for a one-sided constraint, the signed net
+    /// `s_plus - s_minus` (may be negative) for a two-sided constraint (both bounds finite).
     pub slack_value: f64,
     /// Cost incurred for this violation.
     pub slack_cost: f64,

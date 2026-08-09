@@ -182,6 +182,46 @@ distributed-generation aggregates) stay user-declared parameters.
 
 ## 6. Open decisions / correctness forks
 
+0. **Bounds/sense model — DECIDED (owner 2026-08-08, FINAL, supersedes the interim F2): F3 —
+   the interval IS the constraint; drop the authored `sense`.** A generic constraint carries two
+   nullable endpoint columns, `bound_lower` / `bound_upper` (both `Option<f64>`), per
+   `(stage, block)`. `sense` is **removed from the authored `generic_constraints.json`** — it is
+   redundant, because the shape is fully derivable from which endpoints are finite: lower-only ⇒
+   `>=`, upper-only ⇒ `<=`, both-equal ⇒ `==`, both-differ ⇒ range, both-null ⇒ error. Internally,
+   shape is **derived from the bounds** wherever the LP builder / slack allocation / violation
+   reporting need it (a one-sided row ⇒ one slack + single-slack report; a two-sided row ⇒ two
+   slacks + net report) — never a second authored field that could disagree with the bounds.
+   `generic_constraints.json` becomes `{id, name, description, expression, slack}`.
+
+   **Why F3 over F2 (the reversal, owner-confirmed):** F2 kept `sense` as a per-constraint fixed
+   shape, which (a) is a second source of truth the whole per-sense validation existed only to
+   reconcile, and (b) **cannot represent a constraint whose active sides vary by period** — exactly
+   what DECOMP produces, since its per-(period,patamar) `LI`/`LS` allow either side to be
+   independently unbounded (`±1e21`). F3 models that natively (a row leaves an endpoint `null`);
+   F2 would force a `1e21` sentinel or a constraint split. F3 also simplifies the LP builder to
+   `row_lower = bound_lower.unwrap_or(-inf); row_upper = bound_upper.unwrap_or(+inf)` and dissolves
+   the sense-token question.
+
+   **Accepted costs:** no author-declared shape to catch a typo (a stray endpoint silently reshapes
+   a row — mitigated by requiring ≥1 endpoint per row and `bound_upper >= bound_lower` when both
+   present); shape is read from the bounds / the epic-03 echo output rather than a JSON field; a
+   declared `==` is indistinguishable from a degenerate `[v,v]` band (LP-identical, moot).
+
+   **Rejected:** F2 (keep `sense`) — the ratified-then-reversed interim; and `==`-uses-lower-only
+   (asymmetric). This is a **clean break** to the released `generic_constraints.json` (drops the
+   `sense` field) and its schema — sanctioned pre-release, all writers in-house, matches the
+   clean-break directive.
+
+   **Blast radius / sequencing:** larger than F2 — it partially unwinds ticket-006 (removes the
+   `Range` sense variant/token/schema entry and the per-sense validation) and drops `sense` from
+   every `generic_constraints.json` fixture + the `sense` field in
+   `schemas/generic_constraints.schema.json` (schema **is** regenerated here, unlike F2). Landed by
+   a re-scoped ticket-041 as the epic-02 capstone (after tickets 005–010, all uncommitted). The
+   two-nullable-column work from 005/006 is reused; the sense machinery is removed. Lock-step
+   cobre-bridge follow-up: its writer drops the `sense` output and emits `bound_lower`/`bound_upper`
+   per the interval (4 sites: `pipeline.py:678`, `converters/constraints.py:735/1444/1765`, plus
+   wherever it writes `sense`).
+
 1. **Two-sided constraint internal representation — DECIDED (owner 2026-08-08, confirmed after
    specialist review): (B) native range row.** Implement as a `ConstraintSense::Range` arm that
    reuses the existing `Equal` two-slack / net-reporting stack. This reverses the initial (A)

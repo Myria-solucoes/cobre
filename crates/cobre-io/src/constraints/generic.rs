@@ -13,7 +13,6 @@
 //!       "name": "min_southeast_hydro",
 //!       "description": "...",
 //!       "expression": "hydro_generation(0) + hydro_generation(1)",
-//!       "sense": ">=",
 //!       "slack": { "enabled": true, "penalty": 5000.0 }
 //!     }
 //!   ]
@@ -55,7 +54,6 @@
 //! After deserializing, the following invariants are checked before conversion:
 //!
 //! - No two constraints share the same `id`.
-//! - `sense` must be `">="`, `"<="`, or `"=="`.
 //! - `slack.enabled = true` requires `slack.penalty` to be present and > 0.0.
 //! - Each `expression` string must parse without error.
 //!
@@ -65,8 +63,7 @@
 //! - Block ID validity for the referenced stage — Layer 3/5.
 
 use cobre_core::{
-    ConstraintExpression, ConstraintSense, EntityId, GenericConstraint, LinearTerm, SlackConfig,
-    VariableRef,
+    ConstraintExpression, EntityId, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
 };
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -111,9 +108,6 @@ struct RawConstraint {
     /// or `"hydro_generation(5, bus=2)"` — the only two variables accepting a `bus=` selector.
     expression: String,
 
-    /// Comparison sense: `">="`, `"<="`, or `"=="`.
-    sense: String,
-
     /// Slack variable configuration.
     slack: RawSlackConfig,
 }
@@ -142,7 +136,6 @@ struct RawSlackConfig {
 /// | File not found / read failure                  | [`LoadError::IoError`]     |
 /// | Invalid JSON syntax or missing required field  | [`LoadError::ParseError`]  |
 /// | Duplicate `id` within the constraints array    | [`LoadError::SchemaError`] |
-/// | Invalid `sense` value                          | [`LoadError::SchemaError`] |
 /// | `slack.enabled = true` with absent or <= 0 penalty | [`LoadError::SchemaError`] |
 /// | Expression syntax error                        | [`LoadError::SchemaError`] |
 /// | Unknown variable name in expression            | [`LoadError::SchemaError`] |
@@ -193,7 +186,6 @@ fn validate_raw(
 ) -> Result<(), LoadError> {
     validate_no_duplicate_ids(&raw.constraints, path)?;
     for (i, constraint) in raw.constraints.iter().enumerate() {
-        validate_sense(&constraint.sense, i, path)?;
         validate_slack(&constraint.slack, i, path)?;
         // Expression is validated here to get accurate field paths; actual
         // parsed result is discarded — re-parsed during convert().
@@ -221,18 +213,6 @@ fn validate_no_duplicate_ids(constraints: &[RawConstraint], path: &Path) -> Resu
         }
     }
     Ok(())
-}
-
-/// Check that the sense string is one of the three allowed values.
-fn validate_sense(sense: &str, constraint_index: usize, path: &Path) -> Result<(), LoadError> {
-    match sense {
-        ">=" | "<=" | "==" => Ok(()),
-        other => Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: format!("constraints[{constraint_index}].sense"),
-            message: format!("unknown variant \"{other}\": expected one of \">=\", \"<=\", \"==\""),
-        }),
-    }
 }
 
 /// Check slack config consistency: `enabled = true` requires `penalty > 0.0`.
@@ -284,20 +264,6 @@ fn convert(
                 message: msg,
             })?;
 
-        let sense = match c.sense.as_str() {
-            ">=" => ConstraintSense::GreaterEqual,
-            "<=" => ConstraintSense::LessEqual,
-            "==" => ConstraintSense::Equal,
-            // Unreachable: already validated.
-            other => {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("constraints[{i}].sense"),
-                    message: format!("unknown sense value \"{other}\""),
-                });
-            }
-        };
-
         let slack = SlackConfig {
             enabled: c.slack.enabled,
             penalty: c.slack.penalty,
@@ -308,7 +274,6 @@ fn convert(
             name: c.name,
             description: c.description,
             expression,
-            sense,
             slack,
         });
     }
@@ -987,14 +952,12 @@ mod tests {
       "id": 1,
       "name": "min_hydro",
       "expression": "hydro_generation(10) + hydro_generation(11)",
-      "sense": ">=",
       "slack": { "enabled": false }
     },
     {
       "id": 0,
       "name": "max_thermal",
       "expression": "2.5 * thermal_generation(5) - hydro_generation(3)",
-      "sense": "<=",
       "slack": { "enabled": true, "penalty": 5000.0 }
     }
   ]
@@ -1647,7 +1610,6 @@ mod tests {
                 bus_id: None,
             }
         );
-        assert_eq!(min_hydro.sense, ConstraintSense::GreaterEqual);
     }
 
     /// Expression `"2.5 * thermal_generation(5) - hydro_generation(3)"`.
@@ -1678,7 +1640,6 @@ mod tests {
                 bus_id: None,
             }
         );
-        assert_eq!(max_thermal.sense, ConstraintSense::LessEqual);
     }
 
     /// AC-5 (ticket): JSON file with `@rho_eq` in expression parses correctly.
@@ -1690,7 +1651,6 @@ mod tests {
       "id": 0,
       "name": "mixed",
       "expression": "thermal_generation(5) - @rho_eq * hydro_generation(3)",
-      "sense": ">=",
       "slack": { "enabled": false }
     }
   ]
@@ -1726,7 +1686,6 @@ mod tests {
       "id": 0,
       "name": "bad_ref",
       "expression": "@missing * hydro_generation(0)",
-      "sense": ">=",
       "slack": { "enabled": false }
     }
   ]
@@ -1757,7 +1716,6 @@ mod tests {
       "id": 0,
       "name": "bad",
       "expression": "invalid_var(0)",
-      "sense": ">=",
       "slack": { "enabled": false }
     }
   ]
@@ -1788,14 +1746,12 @@ mod tests {
       "id": 0,
       "name": "a",
       "expression": "hydro_generation(0)",
-      "sense": ">=",
       "slack": { "enabled": false }
     },
     {
       "id": 0,
       "name": "b",
       "expression": "thermal_generation(1)",
-      "sense": "<=",
       "slack": { "enabled": false }
     }
   ]
@@ -1826,7 +1782,6 @@ mod tests {
       "id": 0,
       "name": "a",
       "expression": "hydro_generation(0)",
-      "sense": ">=",
       "slack": { "enabled": true }
     }
   ]
@@ -1848,31 +1803,28 @@ mod tests {
         }
     }
 
-    /// Invalid sense string → SchemaError.
+    /// Clean break: a constraint object still carrying a `"sense"` key is rejected
+    /// (`RawConstraint` is `deny_unknown_fields`, no alias) — shape is derived from
+    /// the bounds parquet's endpoint pair, never authored on the constraint.
     #[test]
-    fn test_parse_invalid_sense_returns_schema_error() {
+    fn test_parse_unknown_sense_field_returns_parse_error() {
         let json = r#"{
   "constraints": [
     {
       "id": 0,
       "name": "a",
       "expression": "hydro_generation(0)",
-      "sense": "!=",
+      "sense": ">=",
       "slack": { "enabled": false }
     }
   ]
 }"#;
         let f = write_json(json);
         let err = parse_generic_constraints(f.path(), &HashMap::new()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("sense"),
-                    "field should contain 'sense', got: {field}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        assert!(
+            matches!(err, LoadError::ParseError { .. }),
+            "expected ParseError for an unknown 'sense' field, got: {err:?}"
+        );
     }
 
     /// `None` path → `Ok(Vec::new())` (tested via `load_generic_constraints`).
@@ -1895,21 +1847,18 @@ mod tests {
       "id": 5,
       "name": "c",
       "expression": "hydro_generation(0)",
-      "sense": ">=",
       "slack": { "enabled": false }
     },
     {
       "id": 2,
       "name": "b",
       "expression": "thermal_generation(0)",
-      "sense": "<=",
       "slack": { "enabled": false }
     },
     {
       "id": 0,
       "name": "a",
       "expression": "line_direct(0)",
-      "sense": "==",
       "slack": { "enabled": false }
     }
   ]
@@ -1931,7 +1880,6 @@ mod tests {
       "id": 0,
       "name": "net_exchange",
       "expression": "line_exchange(0)",
-      "sense": "==",
       "slack": { "enabled": false }
     }
   ]
@@ -1959,7 +1907,6 @@ mod tests {
       "id": 0,
       "name": "a",
       "expression": "hydro_generation(0)",
-      "sense": ">=",
       "slack": { "enabled": true, "penalty": 0.0 }
     }
   ]
@@ -1990,7 +1937,6 @@ mod tests {
       "id": 0,
       "name": "nodesc",
       "expression": "hydro_generation(0)",
-      "sense": "==",
       "slack": { "enabled": false }
     }
   ]

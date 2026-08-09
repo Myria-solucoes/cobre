@@ -766,7 +766,8 @@ fn check_generic_constraint_expression_references(
     }
 }
 
-/// `GenericConstraintBoundsRow` `block_id` validity and duplicate key detection.
+/// `GenericConstraintBoundsRow` `block_id` validity, per-row endpoint-interval
+/// checks, and duplicate key detection.
 fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut ValidationContext) {
     let stage_block_counts: HashMap<i32, usize> = data
         .stages
@@ -793,6 +794,38 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
                         ),
                     );
             }
+        }
+    }
+
+    // The interval IS the constraint: shape derives from which endpoints a row
+    // carries. A row is checked independently of its constraint — no registry
+    // lookup, and a dangling `constraint_id` is reported separately by
+    // `check_bounds_references`.
+    for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
+        match (row.bound_lower, row.bound_upper) {
+            (None, None) => {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "constraints/generic_constraint_bounds.parquet",
+                    Some(format!("GenericConstraintBoundsRow[{i}]")),
+                    format!(
+                        "GenericConstraintBoundsRow[{i}] on constraint {} has neither bound_lower nor bound_upper: at least one endpoint is required",
+                        row.constraint_id
+                    ),
+                );
+            }
+            (Some(bound_lower), Some(bound_upper)) if bound_upper < bound_lower => {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "constraints/generic_constraint_bounds.parquet",
+                    Some(format!("GenericConstraintBoundsRow[{i}]")),
+                    format!(
+                        "GenericConstraintBoundsRow[{i}] on constraint {} has bound_upper={bound_upper} less than bound_lower={bound_lower}: an inverted interval is not allowed",
+                        row.constraint_id
+                    ),
+                );
+            }
+            _ => {}
         }
     }
 
@@ -2108,7 +2141,8 @@ mod tests {
             constraint_id: 888,
             stage_id: 0,
             block_id: None,
-            bound: 1000.0,
+            bound_lower: Some(1000.0),
+            bound_upper: None,
         }];
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
@@ -2121,6 +2155,190 @@ mod tests {
         assert_eq!(inv.len(), 1);
         assert!(inv[0].message.contains("888"));
         assert!(inv[0].message.contains("constraint_id"));
+    }
+
+    /// A bounds row with neither endpoint present emits exactly one finding
+    /// naming the constraint id — no constraint-registry lookup is needed, the
+    /// check is per-row.
+    #[test]
+    fn test_generic_constraint_bounds_rejects_both_absent() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: None,
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidValue, got: {inv:?}"
+        );
+        assert!(inv[0].message.contains("constraint 1"));
+    }
+
+    /// A bounds row with `bound_upper < bound_lower` (an inverted interval)
+    /// emits exactly one finding naming the constraint id.
+    #[test]
+    fn test_generic_constraint_bounds_rejects_inverted_interval() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(20.0),
+            bound_upper: Some(5.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidValue, got: {inv:?}"
+        );
+        assert!(inv[0].message.contains("constraint 1"));
+        assert!(inv[0].message.contains("bound_upper"));
+    }
+
+    /// A bounds row with `bound_upper == bound_lower` (a degenerate equal band)
+    /// is accepted — it is an equality, not an authoring error.
+    #[test]
+    fn test_generic_constraint_bounds_accepts_degenerate_equal_band() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(10.0),
+            bound_upper: Some(10.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "a degenerate equal band must not be rejected, got: {inv:?}"
+        );
+    }
+
+    /// A lower-only row (one-sided) is accepted.
+    #[test]
+    fn test_generic_constraint_bounds_accepts_lower_only_row() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(5.0),
+            bound_upper: None,
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "a lower-only row must not be rejected, got: {inv:?}"
+        );
+    }
+
+    /// An upper-only row (one-sided) is accepted.
+    #[test]
+    fn test_generic_constraint_bounds_accepts_upper_only_row() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: Some(20.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "an upper-only row must not be rejected, got: {inv:?}"
+        );
+    }
+
+    /// A well-formed two-sided band (`bound_upper > bound_lower`) produces no
+    /// `InvalidValue` finding.
+    #[test]
+    fn test_generic_constraint_bounds_accepts_two_sided_band() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(5.0),
+            bound_upper: Some(20.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "a well-formed two-sided band must not be rejected, got: {inv:?}"
+        );
     }
 
     /// `BusPenaltyOverrideRow` referencing a non-existent bus produces 1 error.
@@ -2477,8 +2695,7 @@ mod tests {
     #[test]
     fn test_anticipated_decision_unknown_thermal_ref() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2498,7 +2715,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2535,8 +2751,7 @@ mod tests {
     #[test]
     fn test_hydro_inflow_unknown_hydro_ref() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2557,7 +2772,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2592,8 +2806,7 @@ mod tests {
     #[test]
     fn test_hydro_inflow_with_block_unknown_hydro_ref() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2613,7 +2826,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2648,8 +2860,7 @@ mod tests {
     #[test]
     fn test_hydro_storage_initial_unknown_hydro_ref() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2669,7 +2880,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2741,8 +2951,7 @@ mod tests {
     #[test]
     fn test_generic_constraint_unknown_bus_selector_rejected() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2763,7 +2972,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2811,8 +3019,7 @@ mod tests {
     #[test]
     fn test_generic_constraint_valid_bus_selector_and_none_accepted() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2833,7 +3040,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2853,7 +3059,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2883,8 +3088,7 @@ mod tests {
     #[test]
     fn test_generic_constraint_unknown_hydro_with_selector_emits_one_finding() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2905,7 +3109,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
@@ -2946,8 +3149,7 @@ mod tests {
     #[test]
     fn test_generic_constraint_nonexistent_bus_selector_emits_one_finding() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2968,7 +3170,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,

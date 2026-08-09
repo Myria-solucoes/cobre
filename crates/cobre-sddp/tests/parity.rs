@@ -557,7 +557,7 @@ mod b6a_hydro_inflow_parity {
     use std::sync::mpsc;
 
     use cobre_core::scenario::ScenarioSource;
-    use cobre_core::{CoefficientRef, ConstraintSense, EntityId, VariableRef};
+    use cobre_core::{CoefficientRef, EntityId, VariableRef};
     use cobre_sddp::{
         SimulationWeighting, aggregate_simulation, hydro_models::prepare_hydro_models,
         setup::prepare_stochastic,
@@ -589,10 +589,24 @@ mod b6a_hydro_inflow_parity {
             constraints.len()
         );
         let gc = &constraints[0];
+        // Shape derives from the resolved bounds row, not an authored sense: the
+        // fixture must be lower-only (`bound_lower` present, `bound_upper` absent),
+        // matching the historical `>=` bound.
+        let bounds = system.resolved_generic_bounds().bounds_for_stage(0, 0);
         assert_eq!(
-            gc.sense,
-            ConstraintSense::GreaterEqual,
-            "fixture constraint must be a `>=` bound"
+            bounds.len(),
+            1,
+            "fixture must carry exactly one bound entry at stage 0, got {}",
+            bounds.len()
+        );
+        assert_eq!(
+            bounds[0].bound_lower,
+            Some(12.0),
+            "fixture constraint must have bound_lower = 12.0"
+        );
+        assert_eq!(
+            bounds[0].bound_upper, None,
+            "fixture constraint must be lower-only (no bound_upper)"
         );
         assert_eq!(
             gc.expression.terms.len(),

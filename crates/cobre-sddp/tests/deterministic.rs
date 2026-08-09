@@ -1588,7 +1588,8 @@ fn d13_generic_constraint() {
         Field::new("constraint_id", DataType::Int32, false),
         Field::new("stage_id", DataType::Int32, false),
         Field::new("block_id", DataType::Int32, true),
-        Field::new("bound", DataType::Float64, false),
+        Field::new("bound_lower", DataType::Float64, true),
+        Field::new("bound_upper", DataType::Float64, true),
     ]));
 
     let batch = RecordBatch::try_new(
@@ -1597,6 +1598,7 @@ fn d13_generic_constraint() {
             Arc::new(Int32Array::from(vec![1, 1])),
             Arc::new(Int32Array::from(vec![0, 1])),
             Arc::new(Int32Array::new_null(2)), // block_id null = all blocks
+            Arc::new(Float64Array::new_null(2)), // upper-only: no bound_lower
             Arc::new(Float64Array::from(vec![10.0, 10.0])),
         ],
     )
@@ -1620,6 +1622,146 @@ fn d13_generic_constraint() {
         "D13: gap={:.2e}",
         result.final_gap
     );
+}
+
+/// Range constraint whose LOWER bound binds, forcing thermal dispatch above
+/// its own physical cap and into a genuine, reported band violation. The
+/// range sibling of `d13`: same system, differing only in the constraint.
+///
+/// ## Case setup
+///
+/// - 1 bus, 1 thermal T0: capacity 30 MW at $50/MWh, deterministic load 20 MW,
+///   2 stages each with 730 hours, no hydro (identical to `d13`'s system).
+/// - 1 generic constraint: `35 <= thermal_generation(0) <= 100`
+///   with slack penalty $5000/MWh (`d13`'s slack config, unchanged).
+/// - Deficit cost: $1000/MWh, excess cost: $0.01/MWh (from `penalties.json`).
+///
+/// ## Expected cost derivation
+///
+/// Unconstrained merit-order dispatch sets T0 = 20 MW (matching load; thermal
+/// is far cheaper than deficit, and any MW above load only adds excess cost).
+/// The band's lower bound of 35 MW exceeds T0's own physical cap of 30 MW, so
+/// full compliance is impossible: the LP is forced to trade off dispatch `t`
+/// against deficit/excess/violation cost. For `t` in `[20, 30]`:
+///
+/// ```text
+/// cost(t) = 50t + 0.01(t - 20) + 5000(35 - t)   [thermal + excess + violation]
+///         = -4949.99 t + 174_999.8
+/// ```
+///
+/// strictly decreasing in `t`, so the minimum sits at the right end of the
+/// feasible interval: T0's own 30 MW column cap (never at an interior point,
+/// and the `[0, 20]` branch is strictly higher — same shape as `d13`'s
+/// deficit-vs-violation trade-off, confirmed by direct substitution below).
+///
+/// Cost per stage at T0 = 30 MW (excess is generation above the 20 MW load,
+/// i.e. 10 MW, not above the band):
+///   thermal:    30 MW x $50/MWh x 730 h    = $1,095,000
+///   excess:     10 MW x $0.01/MWh x 730 h  = $73
+///   violation:  5 MW x $5000/MWh x 730 h   = $18,250,000
+///   total:      $19,345,073
+///
+/// Total (2 stages) = 2 x $19,345,073 = **$38,690,146**
+///
+/// ## Discriminating power (AC4)
+///
+/// A hypothetical implementation that applies only `bound_upper` and silently
+/// drops `bound_lower` (the lower half of the band) would build a row with
+/// `row_lower = -inf`, `row_upper = 100` — never binding, since T0's own cap
+/// (30) is already below 100. Dispatch would then settle back at the
+/// unconstrained merit-order level, T0 = 20 MW (no excess, no deficit, no
+/// violation): cost per stage = 20 MW x $50/MWh x 730 h = $730,000, total (2
+/// stages) = **$1,460,000** — two orders of magnitude below the correct
+/// $38,690,146, so the broken implementation fails this case's cost assertion.
+///
+/// ## Violation record (AC7)
+///
+/// The band cannot be fully satisfied (35 MW > T0's 30 MW cap), so the
+/// optimum leaves a genuine 5 MW shortfall below the lower bound: each
+/// stage's simulation output reports exactly ONE `generic_violations` record
+/// for constraint 1, with `slack_value` (the net `s_plus - s_minus`) equal to
+/// `5.0` — the fixture is in the VIOLATION-PRESENT case, not the feasible one.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d54_range_constraint() {
+    use arrow::array::{Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let case_dir = Path::new("../../examples/deterministic/d54-range-constraint");
+
+    let constraints_dir = case_dir.join("constraints");
+    std::fs::create_dir_all(&constraints_dir).expect("create constraints dir");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("constraint_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("block_id", DataType::Int32, true),
+        Field::new("bound_lower", DataType::Float64, true),
+        Field::new("bound_upper", DataType::Float64, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 1])),
+            Arc::new(Int32Array::from(vec![0, 1])),
+            Arc::new(Int32Array::new_null(2)), // block_id null = all blocks
+            Arc::new(Float64Array::from(vec![35.0, 35.0])),
+            Arc::new(Float64Array::from(vec![100.0, 100.0])),
+        ],
+    )
+    .expect("RecordBatch");
+
+    let bounds_path = constraints_dir.join("generic_constraint_bounds.parquet");
+    let file = std::fs::File::create(&bounds_path).expect("create parquet file");
+    let mut writer = ArrowWriter::try_new(file, schema, None).expect("ArrowWriter");
+    writer.write(&batch).expect("write batch");
+    writer.close().expect("close writer");
+
+    let (result, scenario_results, summary) = run_with_simulation(case_dir);
+
+    assert_cost(result.final_lb, 38_690_146.0, 1e-2, "D54");
+    assert!(
+        result.iterations <= 10,
+        "D54: iterations={}",
+        result.iterations
+    );
+    assert!(
+        result.final_gap.abs() < 1e-4,
+        "D54: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(summary.mean_cost, 38_690_146.0, 1e-2, "D54-sim");
+
+    assert_eq!(
+        scenario_results.len(),
+        1,
+        "D54: simulation must produce exactly 1 scenario"
+    );
+    let stages = &scenario_results[0].stages;
+    assert_eq!(stages.len(), 2, "D54: expected 2 stages");
+    for stage in stages {
+        assert_eq!(
+            stage.generic_violations.len(),
+            1,
+            "D54 stage {}: expected exactly one generic constraint violation record",
+            stage.stage_id
+        );
+        let violation = &stage.generic_violations[0];
+        assert_eq!(violation.constraint_id, 1, "D54: violation constraint id");
+        assert!(
+            (violation.slack_value - 5.0).abs() < 1e-2,
+            "D54 stage {}: expected a 5 MW band shortfall, got {}",
+            stage.stage_id,
+            violation.slack_value
+        );
+    }
 }
 
 /// Two-stage thermal dispatch with per-block load factors.

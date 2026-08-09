@@ -26,7 +26,7 @@ pub use bounds::{
     LineBlockBounds, PumpingBlockBounds, ResolvedBounds, ThermalBlockBounds, ThermalStageBounds,
 };
 pub use factors::{ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors};
-pub use generic::ResolvedGenericConstraintBounds;
+pub use generic::{GenericConstraintBoundEntry, ResolvedGenericConstraintBounds};
 pub use group_bounds::{
     HydroUnitGroupBoundsCountsSpec, HydroUnitGroupOverride, ResolvedHydroUnitGroupBounds,
 };

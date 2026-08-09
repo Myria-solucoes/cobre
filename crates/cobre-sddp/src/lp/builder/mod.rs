@@ -40,8 +40,6 @@
 //! exclusion — recomputes the phase by calling it; no caller may cache a per-stage
 //! [`cobre_core::commissioning::Phase`] mask.
 
-use cobre_core::ConstraintSense;
-
 mod columns;
 pub(crate) mod commitment_reconcile;
 pub(crate) mod delivery_ring;
@@ -139,10 +137,10 @@ pub struct GenericConstraintRowEntry {
     /// Whether this row is a collapsed stage-level row; when `true` the slack column
     /// is priced by the stage's total hours, not `block_idx`'s block hours.
     pub is_stage_level: bool,
-    /// The right-hand-side bound value for this row.
-    pub bound: f64,
-    /// Comparison sense of the constraint (`>=`, `<=`, or `==`).
-    pub sense: ConstraintSense,
+    /// Lower right-hand-side endpoint; `None` when the row is upper-only.
+    pub bound_lower: Option<f64>,
+    /// Upper right-hand-side endpoint; `None` when the row is lower-only.
+    pub bound_upper: Option<f64>,
     /// Whether slack is enabled for this constraint.
     pub slack_enabled: bool,
     /// Penalty cost per unit of slack violation (`0.0` when slack is disabled).
@@ -150,6 +148,7 @@ pub struct GenericConstraintRowEntry {
     /// Positive-violation slack (`slack_plus`) column; `None` when slack is disabled.
     pub slack_plus_col: Option<usize>,
     /// Negative-violation slack (`slack_minus`) column, present only when slack is
-    /// enabled and `sense == Equal`; `None` otherwise.
+    /// enabled and the row is two-sided (both `bound_lower` and `bound_upper`
+    /// present); `None` otherwise.
     pub slack_minus_col: Option<usize>,
 }

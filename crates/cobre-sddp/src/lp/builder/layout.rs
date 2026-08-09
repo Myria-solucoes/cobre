@@ -3,10 +3,10 @@ use std::ops::Range;
 
 use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{
-    BlockMode, Bus, CascadeTopology, ConstraintSense, EnergyContract, EntityId, GenericConstraint,
-    Hydro, Line, LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
+    BlockMode, Bus, CascadeTopology, EnergyContract, EntityId, GenericConstraint, Hydro, Line,
+    LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
     ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal,
+    ResolvedPenalties, SlackConfig, Stage, Thermal,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -78,7 +78,7 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) production_models: &'a ProductionModelSet,
     /// Resolved evaporation models for all hydro plants.
     pub(crate) evaporation_models: &'a EvaporationModelSet,
-    /// Generic constraint definitions (expression, sense, slack config).
+    /// Generic constraint definitions (expression, slack config).
     pub(crate) generic_constraints: &'a [GenericConstraint],
     /// Non-controllable source entities, id-sorted.
     pub(crate) non_controllable_sources: &'a [NonControllableSource],
@@ -900,19 +900,28 @@ fn identify_filled_min_storage_floor_hydros(
 }
 
 /// Allocate the slack column index/indices for one generic-constraint row,
-/// advancing `n_slack_cols`: zero columns when slack is disabled, one for
-/// inequality, two (plus then minus) for equality.
+/// advancing `n_slack_cols`: zero columns when slack is disabled, one for a
+/// one-sided row, two (plus then minus) for a two-sided row — a two-sided
+/// bound pair needs both directions of slack to relax either endpoint
+/// independently.
+///
+/// The two-sided test derives from the row's OWN endpoint pair
+/// (`bound_lower.is_some() && bound_upper.is_some()`), not the constraint —
+/// shape is a per-row property of the resolved bound entry, never a
+/// constraint-level label.
 fn allocate_generic_slack_cols(
-    constraint: &GenericConstraint,
+    slack: &SlackConfig,
+    bound_lower: Option<f64>,
+    bound_upper: Option<f64>,
     col_generic_slack_start: usize,
     n_slack_cols: &mut usize,
 ) -> (Option<usize>, Option<usize>) {
-    if !constraint.slack.enabled {
+    if !slack.enabled {
         return (None, None);
     }
     let plus_col = col_generic_slack_start + *n_slack_cols;
     *n_slack_cols += 1;
-    let minus_col = if constraint.sense == ConstraintSense::Equal {
+    let minus_col = if bound_lower.is_some() && bound_upper.is_some() {
         let mc = col_generic_slack_start + *n_slack_cols;
         *n_slack_cols += 1;
         Some(mc)
@@ -953,18 +962,20 @@ fn enumerate_generic_constraint_rows(
 
         let collapse_stage_level = expression_is_block_independent(&constraint.expression);
 
-        for &(block_id, bound) in bound_entries {
-            // block_id is a non-negative 0-indexed block position (upstream
+        for entry in bound_entries {
+            // entry.block_id is a non-negative 0-indexed block position (upstream
             // validation), so the cast_sign_loss is safe.
             #[allow(clippy::cast_sign_loss)]
-            let (block_start, block_count, is_stage_level) = match block_id {
+            let (block_start, block_count, is_stage_level) = match entry.block_id {
                 None if collapse_stage_level => (0, 1, true),
                 None => (0, n_blks, false),
                 Some(blk_id) => (blk_id as usize, 1, false),
             };
             for block_idx in block_start..block_start + block_count {
                 let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
-                    constraint,
+                    &constraint.slack,
+                    entry.bound_lower,
+                    entry.bound_upper,
                     col_generic_slack_start,
                     &mut n_generic_slack_cols,
                 );
@@ -974,8 +985,8 @@ fn enumerate_generic_constraint_rows(
                     entity_id: constraint.id.0,
                     block_idx,
                     is_stage_level,
-                    bound,
-                    sense: constraint.sense,
+                    bound_lower: entry.bound_lower,
+                    bound_upper: entry.bound_upper,
                     slack_enabled: constraint.slack.enabled,
                     slack_penalty: constraint.slack.penalty.unwrap_or(0.0),
                     slack_plus_col,

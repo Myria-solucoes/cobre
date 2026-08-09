@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use cobre_core::BlockMode;
-use cobre_core::ConstraintSense;
 use cobre_core::EntityId;
 
 use crate::energy_conversion::EnergyConversionSet;
@@ -1581,8 +1580,9 @@ fn compute_cost_result(
 
 /// Extract generic constraint violation results from a solved LP.
 ///
-/// For an `==` constraint (two slack columns) the reported `slack_value` is the
-/// net violation `s_plus - s_minus`, while its cost charges both (`s_plus + s_minus`).
+/// For a two-sided row (`slack_minus_col` present) the reported `slack_value` is
+/// the net violation `s_plus - s_minus`, while its cost charges both
+/// (`s_plus + s_minus`) — one violation record per row either way.
 fn extract_generic_violations(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1608,19 +1608,16 @@ fn extract_generic_violations(
                 .unwrap_or(0.0)
         };
         let (slack_value, slack_cost) = if entry.slack_enabled {
-            match entry.sense {
-                ConstraintSense::Equal => {
-                    let s_plus = entry.slack_plus_col.map_or(0.0, |col| view.primal[col]);
-                    let s_minus = entry.slack_minus_col.map_or(0.0, |col| view.primal[col]);
-                    let net = s_plus - s_minus;
-                    let cost = (s_plus + s_minus) * entry.slack_penalty * block_hours;
-                    (net, cost)
-                }
-                ConstraintSense::LessEqual | ConstraintSense::GreaterEqual => {
-                    let s = entry.slack_plus_col.map_or(0.0, |col| view.primal[col]);
-                    let cost = s * entry.slack_penalty * block_hours;
-                    (s, cost)
-                }
+            if let Some(minus_col) = entry.slack_minus_col {
+                let s_plus = entry.slack_plus_col.map_or(0.0, |col| view.primal[col]);
+                let s_minus = view.primal[minus_col];
+                let net = s_plus - s_minus;
+                let cost = (s_plus + s_minus) * entry.slack_penalty * block_hours;
+                (net, cost)
+            } else {
+                let s = entry.slack_plus_col.map_or(0.0, |col| view.primal[col]);
+                let cost = s * entry.slack_penalty * block_hours;
+                (s, cost)
             }
         } else {
             (0.0, 0.0)

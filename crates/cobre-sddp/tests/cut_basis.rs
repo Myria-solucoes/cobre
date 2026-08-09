@@ -2155,3 +2155,1146 @@ mod group_state_invariance {
         );
     }
 }
+
+mod range_warm_start_determinism {
+    //! Empirical evidence for the range-row basis-reconstruction safety argument
+    //! (the epic's highest-risk coverage gap): `BasisStatus::Upper` on a real,
+    //! solved range row surviving `reconstruct_basis`, warm-start/cold objective
+    //! agreement, run-to-run reproducibility, `generic_constraints.json`
+    //! declaration-order invariance, and range-vs-two-row solution equivalence.
+    //!
+    //! Every fixture pins the range row's upper bound below the cheapest
+    //! generator's unconstrained dispatch and below its own column bound, so the
+    //! LP is economically forced to rest exactly at the row's upper bound — a
+    //! degenerate coincident-bound row (`bound_lower == bound_upper`) could never
+    //! demonstrate this economic forcing, since it would pin there trivially.
+
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use arrow::array::{Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use chrono::NaiveDate;
+    use parquet::arrow::ArrowWriter;
+
+    use cobre_core::scenario::{LoadModel, ScenarioSource};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ConstraintExpression,
+        ContractBlockBounds, DeficitSegment, EntityId, GenericConstraint, HydroBlockBounds,
+        HydroStageBounds, HydroStagePenalties, LineBlockBounds, LineStagePenalties, LinearTerm,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
+        ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties, SlackConfig,
+        SystemBuilder, ThermalBlockBounds, ThermalStageBounds, VariableRef,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, ParallelismConfig,
+        PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
+        SimulationSelection, StateSpaceConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
+        TrainingSelection, TrainingSolverConfig,
+    };
+    use cobre_io::output::policy::{read_policy_checkpoint, write_policy_checkpoint};
+    use cobre_sddp::basis_reconstruct::{
+        ReconstructionTarget, enforce_basic_count_invariant, reconstruct_basis,
+    };
+    use cobre_sddp::hydro_models::{PrepareHydroModelsResult, prepare_hydro_models};
+    use cobre_sddp::inflow_method::InflowNonNegativityMethod;
+    use cobre_sddp::policy_export::{
+        build_active_indices, build_stage_basis_records, build_stage_cut_records,
+        build_stage_cuts_payloads, convert_basis_cache,
+    };
+    use cobre_sddp::resolved_parameters::ResolvedParameters;
+    use cobre_sddp::setup::prepare_stochastic;
+    use cobre_sddp::{
+        FutureCostFunction, SolverStatsDelta, StudySetup, build_stage_templates_resolving_layout,
+    };
+    use cobre_solver::{ActiveSolver, Basis, BasisStatus};
+
+    use super::common::builders::{
+        BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal,
+    };
+    use super::common::{StubComm, build_setup_in_code, run_simulation};
+
+    /// `(constraint_id, stage_id, block_id, bound_lower, bound_upper)` — the
+    /// raw-row shape [`ResolvedGenericConstraintBounds::new`] consumes.
+    type RawBoundRow = (i32, i32, Option<i32>, Option<f64>, Option<f64>);
+
+    // ---------------------------------------------------------------------------
+    // Shared fixture identities
+    // ---------------------------------------------------------------------------
+
+    fn range_bus_id() -> EntityId {
+        EntityId(0)
+    }
+
+    fn range_thermal_id() -> EntityId {
+        EntityId(0)
+    }
+
+    fn thermal_generation_expr() -> ConstraintExpression {
+        ConstraintExpression {
+            terms: vec![LinearTerm::literal(
+                1.0,
+                VariableRef::ThermalGeneration {
+                    thermal_id: range_thermal_id(),
+                    block_id: None,
+                },
+            )],
+        }
+    }
+
+    fn no_slack() -> SlackConfig {
+        SlackConfig {
+            enabled: false,
+            penalty: None,
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // 3-constraint fixture: a range row (binds at upper) plus two loose siblings
+    // ---------------------------------------------------------------------------
+
+    /// `cap_loose (<= 25)`, `band (range [3, 8])`, `floor_trivial (>= 0)` — all on
+    /// `thermal_generation(0)`. T0's cost (50/MWh) is far below the bus deficit
+    /// cost (1000/MWh) and demand (20 MW) exceeds the band's upper bound, so the
+    /// optimum pushes T0 to exactly 8 MW: `cap_loose` and `floor_trivial` stay
+    /// slack (`Basic`), only `band`'s row rests at its upper bound.
+    fn build_range_constraints() -> Vec<GenericConstraint> {
+        vec![
+            GenericConstraint {
+                id: EntityId(1),
+                name: "cap_loose".to_string(),
+                description: None,
+                expression: thermal_generation_expr(),
+                slack: no_slack(),
+            },
+            GenericConstraint {
+                id: EntityId(2),
+                name: "band".to_string(),
+                description: None,
+                expression: thermal_generation_expr(),
+                slack: no_slack(),
+            },
+            GenericConstraint {
+                id: EntityId(3),
+                name: "floor_trivial".to_string(),
+                description: None,
+                expression: thermal_generation_expr(),
+                slack: no_slack(),
+            },
+        ]
+    }
+
+    fn build_range_bounds() -> ResolvedGenericConstraintBounds {
+        let id_map: HashMap<i32, usize> = [(1, 0), (2, 1), (3, 2)].into_iter().collect();
+        let rows: Vec<RawBoundRow> = vec![
+            (1, 0, None, None, Some(25.0)),
+            (1, 1, None, None, Some(25.0)),
+            (2, 0, None, Some(3.0), Some(8.0)),
+            (2, 1, None, Some(3.0), Some(8.0)),
+            (3, 0, None, Some(0.0), None),
+            (3, 1, None, Some(0.0), None),
+        ];
+        ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter())
+    }
+
+    // ---------------------------------------------------------------------------
+    // Band-only fixture (range vs. two-row equivalence, AC5)
+    // ---------------------------------------------------------------------------
+
+    /// The same `[3, 8]` band on `thermal_generation(0)`, expressed either as one
+    /// `range` constraint or as a `>= 3` plus a `<= 8` constraint.
+    fn build_band_constraints(
+        as_range: bool,
+    ) -> (Vec<GenericConstraint>, ResolvedGenericConstraintBounds) {
+        if as_range {
+            let constraints = vec![GenericConstraint {
+                id: EntityId(1),
+                name: "band".to_string(),
+                description: None,
+                expression: thermal_generation_expr(),
+                slack: no_slack(),
+            }];
+            let id_map: HashMap<i32, usize> = [(1, 0)].into_iter().collect();
+            let rows: Vec<RawBoundRow> = vec![
+                (1, 0, None, Some(3.0), Some(8.0)),
+                (1, 1, None, Some(3.0), Some(8.0)),
+            ];
+            (
+                constraints,
+                ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter()),
+            )
+        } else {
+            let constraints = vec![
+                GenericConstraint {
+                    id: EntityId(1),
+                    name: "band_lower".to_string(),
+                    description: None,
+                    expression: thermal_generation_expr(),
+                    slack: no_slack(),
+                },
+                GenericConstraint {
+                    id: EntityId(2),
+                    name: "band_upper".to_string(),
+                    description: None,
+                    expression: thermal_generation_expr(),
+                    slack: no_slack(),
+                },
+            ];
+            let id_map: HashMap<i32, usize> = [(1, 0), (2, 1)].into_iter().collect();
+            let rows: Vec<RawBoundRow> = vec![
+                (1, 0, None, Some(3.0), None),
+                (1, 1, None, Some(3.0), None),
+                (2, 0, None, None, Some(8.0)),
+                (2, 1, None, None, Some(8.0)),
+            ];
+            (
+                constraints,
+                ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter()),
+            )
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // System / config builders (in-code, no case directory — AC1, AC2, AC3, AC5)
+    // ---------------------------------------------------------------------------
+
+    /// A 2-stage, 1-bus, 1-thermal, 0-hydro system: bus deficit cost 1000/MWh,
+    /// thermal T0 [0, 30] MW at 50/MWh, demand 20 MW (`std = 0`) both stages.
+    /// Economics mirror `examples/deterministic/d13-generic-constraint`.
+    fn build_system(
+        constraints: Vec<GenericConstraint>,
+        bounds: ResolvedGenericConstraintBounds,
+    ) -> cobre_core::System {
+        let bus = make_bus(
+            range_bus_id(),
+            BusSpec {
+                name: "B0".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2020, 1, 1).expect("valid date"),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 1000.0,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+
+        let thermal = make_thermal(
+            range_thermal_id(),
+            ThermalSpec {
+                name: "T0".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2020, 1, 1).expect("valid date"),
+                bus_id: range_bus_id(),
+                min_generation_mw: 0.0,
+                max_generation_mw: 30.0,
+                cost_per_mwh: 50.0,
+                anticipated_config: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let stage_dates = [
+            (
+                NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+                NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date"),
+            ),
+            (
+                NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date"),
+                NaiveDate::from_ymd_opt(2024, 3, 1).expect("valid date"),
+            ),
+        ];
+        let stages: Vec<cobre_core::temporal::Stage> = stage_dates
+            .iter()
+            .enumerate()
+            .map(|(i, (start, end))| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: *start,
+                        end_date: *end,
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "SINGLE".to_string(),
+                            duration_hours: 730.0,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: false,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..2)
+            .map(|i| LoadModel {
+                bus_id: range_bus_id(),
+                stage_id: i,
+                mean_mw: 20.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let n_thermals = 1;
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 2,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    max_turbined_m3s: 0.0,
+                    max_generation_mw: 0.0,
+                    ..Default::default()
+                },
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 30.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: 2,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal])
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .generic_constraints(constraints)
+            .resolved_generic_bounds(bounds)
+            .build()
+            .expect("build_system: valid")
+    }
+
+    fn build_config(limit: u32) -> Config {
+        Config {
+            schema: None,
+            state_space: StateSpaceConfig::default(),
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::None,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit }]),
+                stopping_mode: StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: cobre_io::config::UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// The row index in stage 0's structural template whose `(row_lower,
+    /// row_upper)` is exactly `(3.0, 8.0)` — the range row's unique bound pair
+    /// (no other row in the fixture shares it). Located structurally rather than
+    /// by a hand-derived offset so the test stays correct if the LP layout shifts.
+    fn find_range_row_stage0(system: &cobre_core::System) -> usize {
+        let prepared = PrepareHydroModelsResult::default_from_system(system);
+        let templates = build_stage_templates_resolving_layout(
+            system,
+            InflowNonNegativityMethod::None,
+            &cobre_stochastic::par::precompute::PrecomputedPar::default(),
+            &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
+            &prepared.production,
+            &prepared.evaporation,
+            &ResolvedParameters::default(),
+        )
+        .expect("build_stage_templates_resolving_layout: valid")
+        .templates;
+
+        templates[0]
+            .row_lower
+            .iter()
+            .zip(templates[0].row_upper.iter())
+            .position(|(&lo, &hi)| lo == 3.0 && hi == 8.0)
+            .expect("the range row [3, 8] must be present in stage 0's structural template")
+    }
+
+    /// Local mirror of the `warm_start` mod's checkpoint writer (module-scoped
+    /// helpers are not shared across `mod` blocks in this file).
+    fn write_test_checkpoint(
+        policy_dir: &Path,
+        setup: &StudySetup,
+        result: &cobre_sddp::TrainingResult,
+        seed: u64,
+    ) {
+        let fcf = &setup.fcf;
+        let stage_records = build_stage_cut_records(fcf);
+        let stage_active_indices = build_active_indices(&stage_records);
+        let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
+        let stage_cuts =
+            build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
+        let (basis_col, basis_row) = convert_basis_cache(result);
+        let stage_bases =
+            build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);
+        let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
+        let metadata = cobre_io::PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
+            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: "2026-08-08T00:00:00Z".to_string(),
+            num_stages: fcf.pools.len() as u32,
+            graph_manifest: setup.build_graph_manifest(),
+            producer: cobre_io::ProducerBlock {
+                completed_iterations: result.iterations as u32,
+                final_lower_bound: result.final_lb,
+                best_upper_bound: Some(result.final_ub),
+                max_iterations: setup.loop_params.max_iterations as u32,
+                forward_passes: setup.loop_params.forward_passes,
+                warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
+                warm_start_counts,
+                rng_seed: seed,
+                total_visited_states: 0,
+                training_block_mode: "parallel".to_string(),
+                training_block_mode_per_stage: vec![],
+                cost_scale_factor: None,
+            },
+        };
+        write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
+            .expect("write checkpoint");
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC1 — BasisStatus::Upper round-trips through reconstruct_basis
+    // ---------------------------------------------------------------------------
+
+    /// Requirement 1 / AC1: a range row whose optimum rests on its upper bound
+    /// captures `BasisStatus::Upper`, and `reconstruct_basis` (the sole hot-path
+    /// entry point over `reconstruct_template_row_statuses`) preserves it
+    /// verbatim. Runs on both backends: HiGHS validates a warm-start basis and
+    /// would reject a corrupted one loudly; CLP would accept it silently, so this
+    /// test alone cannot prove backend-acceptance — AC2 below does, on HiGHS.
+    #[test]
+    fn range_row_rests_at_upper_and_survives_reconstruction() {
+        let system = build_system(build_range_constraints(), build_range_bounds());
+        let range_row = find_range_row_stage0(&system);
+
+        let config = build_config(2);
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+
+        let stored = outcome.result.basis_cache[0]
+            .as_ref()
+            .expect("stage 0 must have a captured basis after training");
+
+        assert_eq!(
+            stored.basis.row_status[range_row],
+            BasisStatus::Upper,
+            "the range row [3, 8] must rest at BasisStatus::Upper: T0's own [0, 30] \
+             column bound and the loose <=25 sibling row are both slack at the optimum \
+             (T0 = 8, deficit = 12), so only the range row's own upper bound forces the \
+             remaining demand onto the bus deficit"
+        );
+
+        // Round-trip through the production entry point (reconstruct_basis calls
+        // reconstruct_template_row_statuses internally — never bypass it).
+        let target = ReconstructionTarget {
+            base_row_count: stored.base_row_count,
+            num_cols: stored.basis.col_status.len(),
+        };
+        let mut out = Basis::new(0, 0);
+        let mut slot_lookup: Vec<Option<u32>> = vec![None; 16];
+        let stats = reconstruct_basis(
+            stored,
+            target,
+            std::iter::empty::<(usize, f64, &[f64])>(),
+            &mut out,
+            &mut slot_lookup,
+        );
+        assert_eq!(
+            stats.preserved, 0,
+            "this round-trip carries zero cut rows by construction — it isolates the \
+             template-row path"
+        );
+        assert_eq!(
+            out.row_status[range_row],
+            BasisStatus::Upper,
+            "reconstruct_basis must preserve the range row's Upper status verbatim — \
+             it is not folded to Lower, Fixed, or Basic"
+        );
+
+        let num_row = out.row_status.len();
+        enforce_basic_count_invariant(&mut out, num_row, stored.base_row_count).expect(
+            "enforce_basic_count_invariant must accept a same-shape (no-churn) \
+                 reconstruction of a basis captured from a real HiGHS/CLP solve",
+        );
+        assert_eq!(
+            out.row_status[range_row],
+            BasisStatus::Upper,
+            "enforce_basic_count_invariant demotes only cut rows (index >= \
+             base_row_count), never a template row"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC2 — basic-count invariant survives; warm objective matches cold
+    // ---------------------------------------------------------------------------
+
+    /// Requirement 2 / AC2: with a range row present, training accepts every
+    /// reconstructed basis (zero `basis_consistency_failures`, meaningful on
+    /// HiGHS — CLP would accept a corrupted basis silently), and a checkpoint
+    /// warm-started resume reaches the same converged objective as an
+    /// equal-total-iteration cold run, within tolerance. Never `hot == cold`:
+    /// this compares two independent runs' scalar `final_lb`, never a per-solve
+    /// basis or dual.
+    #[test]
+    fn warm_start_matches_cold_objective_with_range_row() {
+        const TOTAL_ITERS: u32 = 3;
+        let comm = StubComm;
+
+        let cold_config = build_config(TOTAL_ITERS);
+        let mut setup_cold = build_setup_in_code(
+            build_system(build_range_constraints(), build_range_bounds()),
+            &cold_config,
+        );
+        let mut solver_cold = ActiveSolver::new().expect("ActiveSolver::new");
+        let cold_outcome = setup_cold
+            .train(&mut solver_cold, &comm, 1, ActiveSolver::new, None, None)
+            .expect("cold train must not return Err");
+        assert!(cold_outcome.error.is_none(), "cold training error");
+        let cold_lb = cold_outcome.result.final_lb;
+        let cold_stats = SolverStatsDelta::aggregate(
+            cold_outcome
+                .result
+                .solver_stats_log
+                .iter()
+                .map(|e| &e.delta),
+        );
+        assert_eq!(
+            cold_stats.basis_consistency_failures, 0,
+            "cold training with a range row present must never have the solver \
+             reject a reconstructed basis"
+        );
+
+        let checkpoint_config = build_config(1);
+        let mut setup_checkpoint = build_setup_in_code(
+            build_system(build_range_constraints(), build_range_bounds()),
+            &checkpoint_config,
+        );
+        let mut solver_checkpoint = ActiveSolver::new().expect("ActiveSolver::new");
+        let checkpoint_outcome = setup_checkpoint
+            .train(
+                &mut solver_checkpoint,
+                &comm,
+                1,
+                ActiveSolver::new,
+                None,
+                None,
+            )
+            .expect("checkpoint train must not return Err");
+        assert!(
+            checkpoint_outcome.error.is_none(),
+            "checkpoint training error"
+        );
+
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let policy_dir = tmpdir.path().join("policy");
+        write_test_checkpoint(
+            &policy_dir,
+            &setup_checkpoint,
+            &checkpoint_outcome.result,
+            42,
+        );
+        let checkpoint = read_policy_checkpoint(&policy_dir).expect("read checkpoint");
+
+        let mut setup_warm = build_setup_in_code(
+            build_system(build_range_constraints(), build_range_bounds()),
+            &cold_config,
+        );
+        let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
+            checkpoint.stage_cuts[0].state_dimension,
+            checkpoint.metadata.num_stages,
+        );
+        let pool_state_dimensions: Vec<usize> = setup_warm
+            .fcf
+            .pools
+            .iter()
+            .map(|p| p.state_dimension)
+            .collect();
+        let visit_bounds: Vec<u64> = setup_warm
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
+        let warm_fcf = FutureCostFunction::new_with_warm_start(
+            &proof,
+            &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
+            setup_warm.loop_params.forward_passes,
+            setup_warm.loop_params.max_iterations.saturating_add(1),
+        )
+        .expect("warm-start FCF");
+        setup_warm.replace_fcf(warm_fcf);
+        setup_warm
+            .set_start_iteration(u64::from(checkpoint.metadata.producer.completed_iterations));
+
+        let mut solver_warm = ActiveSolver::new().expect("ActiveSolver::new");
+        let warm_outcome = setup_warm
+            .train(&mut solver_warm, &comm, 1, ActiveSolver::new, None, None)
+            .expect("warm-start train must not return Err");
+        assert!(warm_outcome.error.is_none(), "warm-start training error");
+        assert_eq!(
+            warm_outcome.result.iterations,
+            u64::from(TOTAL_ITERS),
+            "the warm-started resume must reach the same total iteration count as \
+             the cold run"
+        );
+
+        let warm_stats = SolverStatsDelta::aggregate(
+            warm_outcome
+                .result
+                .solver_stats_log
+                .iter()
+                .map(|e| &e.delta),
+        );
+        assert_eq!(
+            warm_stats.basis_consistency_failures, 0,
+            "warm-started re-solve with a range row present must never have the \
+             solver reject the reconstructed basis"
+        );
+
+        assert!(
+            (warm_outcome.result.final_lb - cold_lb).abs() < 1e-6,
+            "a warm-started re-solve must reach the same objective as an \
+             equal-total-iteration cold solve within tolerance: warm={}, cold={}",
+            warm_outcome.result.final_lb,
+            cold_lb
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC3 — run-to-run reproducibility
+    // ---------------------------------------------------------------------------
+
+    /// Requirement 3 / AC3: two fresh solver instances over the same
+    /// range-constraint study produce bit-identical results — compared via
+    /// `to_bits()`/`==`, never a tolerance (mirrors
+    /// `crates/cobre-solver/tests/clp_determinism.rs`'s determinism harness).
+    #[test]
+    fn range_study_run_to_run_reproducibility() {
+        let config = build_config(3);
+        let comm = StubComm;
+
+        let mut setup1 = build_setup_in_code(
+            build_system(build_range_constraints(), build_range_bounds()),
+            &config,
+        );
+        let mut solver1 = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome1 = setup1
+            .train(&mut solver1, &comm, 1, ActiveSolver::new, None, None)
+            .expect("run 1 must not return Err");
+        assert!(outcome1.error.is_none());
+
+        let mut setup2 = build_setup_in_code(
+            build_system(build_range_constraints(), build_range_bounds()),
+            &config,
+        );
+        let mut solver2 = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome2 = setup2
+            .train(&mut solver2, &comm, 1, ActiveSolver::new, None, None)
+            .expect("run 2 must not return Err");
+        assert!(outcome2.error.is_none());
+
+        assert_eq!(
+            outcome1.result.iterations, outcome2.result.iterations,
+            "both fresh runs must converge in the same iteration count"
+        );
+        assert_eq!(
+            outcome1.result.final_lb.to_bits(),
+            outcome2.result.final_lb.to_bits(),
+            "two fresh solver instances over the same range-constraint study must \
+             produce a bit-identical final_lb: {} vs {}",
+            outcome1.result.final_lb,
+            outcome2.result.final_lb
+        );
+
+        let templates1 = outcome1
+            .result
+            .frozen_templates
+            .expect("run 1 frozen_templates");
+        let templates2 = outcome2
+            .result
+            .frozen_templates
+            .expect("run 2 frozen_templates");
+        assert_eq!(templates1.len(), templates2.len());
+        for (t1, t2) in templates1.iter().zip(templates2.iter()) {
+            assert_eq!(
+                t1.row_lower, t2.row_lower,
+                "row_lower must be bit-identical"
+            );
+            assert_eq!(
+                t1.row_upper, t2.row_upper,
+                "row_upper must be bit-identical"
+            );
+            assert_eq!(
+                t1.objective, t2.objective,
+                "objective must be bit-identical"
+            );
+            assert_eq!(
+                t1.col_starts, t2.col_starts,
+                "col_starts must be bit-identical"
+            );
+            assert_eq!(
+                t1.row_indices, t2.row_indices,
+                "row_indices must be bit-identical"
+            );
+            assert_eq!(t1.values, t2.values, "CSC values must be bit-identical");
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC4 — declaration-order invariance for generic_constraints.json
+    // ---------------------------------------------------------------------------
+
+    /// `(id, name)` for the three constraints declared in every permutation test.
+    const CONSTRAINT_DEFS: [(i32, &str); 3] = [(1, "cap_loose"), (2, "band"), (3, "floor_trivial")];
+
+    /// Every ordering of 3 elements (property-style — a single hand-picked
+    /// reordering can be a tautology).
+    const ALL_ORDERINGS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+
+    fn generic_constraints_json(order: &[usize; 3]) -> String {
+        let entries: Vec<String> = order
+            .iter()
+            .map(|&i| {
+                let (id, name) = CONSTRAINT_DEFS[i];
+                format!(
+                    "    {{\n      \"id\": {id},\n      \"name\": \"{name}\",\n      \
+                     \"expression\": \"thermal_generation(0)\",\n      \
+                     \"slack\": {{ \"enabled\": false }}\n    }}"
+                )
+            })
+            .collect();
+        format!(
+            "{{\n  \"constraints\": [\n{}\n  ]\n}}\n",
+            entries.join(",\n")
+        )
+    }
+
+    /// Requirement 4 / AC4 (sort-contract tier): `cobre_io::parse_generic_constraints`
+    /// sorts by id regardless of the JSON array's declared order — the mechanism
+    /// that makes declaration-order invariance hold. Exhaustive over every
+    /// ordering of 3 elements, not one hand-picked reordering.
+    #[test]
+    fn generic_constraints_json_sorts_by_id_for_every_ordering() {
+        let mut canonical: Option<Vec<cobre_core::GenericConstraint>> = None;
+        for order in ALL_ORDERINGS {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("generic_constraints.json");
+            std::fs::write(&path, generic_constraints_json(&order)).expect("write json");
+            let parsed = cobre_io::parse_generic_constraints(&path, &HashMap::new())
+                .unwrap_or_else(|e| panic!("parse_generic_constraints failed for {order:?}: {e}"));
+            match &canonical {
+                None => canonical = Some(parsed),
+                Some(expected) => assert_eq!(
+                    &parsed, expected,
+                    "ordering {order:?} must parse to the same canonical, id-sorted \
+                     Vec<GenericConstraint> as ordering {:?}",
+                    ALL_ORDERINGS[0]
+                ),
+            }
+        }
+        let ids: Vec<i32> = canonical
+            .expect("at least one ordering ran")
+            .iter()
+            .map(|c| c.id.0)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![1, 2, 3],
+            "parse_generic_constraints must sort by id ascending"
+        );
+    }
+
+    fn d13_case_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/<crate> must have a parent")
+            .parent()
+            .expect("crates/ must have a parent (repo root)")
+            .join("examples/deterministic/d13-generic-constraint")
+    }
+
+    fn copy_dir_recursive(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all");
+        for entry in std::fs::read_dir(src).expect("read_dir") {
+            let entry = entry.expect("dir entry");
+            let file_type = entry.file_type().expect("file_type");
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if file_type.is_dir() {
+                if entry.file_name() == "output" {
+                    continue;
+                }
+                copy_dir_recursive(&src_path, &dst_path);
+            } else {
+                std::fs::copy(&src_path, &dst_path).expect("copy file");
+            }
+        }
+    }
+
+    /// Overwrite `constraints/generic_constraint_bounds.parquet` with bound rows
+    /// for all 3 [`CONSTRAINT_DEFS`] across both d13 stages: `cap_loose <= 25`,
+    /// `band` in `[3, 8]`, `floor_trivial >= 0`.
+    fn write_generic_constraint_bounds_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("constraint_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("block_id", DataType::Int32, true),
+            Field::new("bound_lower", DataType::Float64, true),
+            Field::new("bound_upper", DataType::Float64, true),
+        ]));
+
+        let constraint_ids = vec![1, 1, 2, 2, 3, 3];
+        let stage_ids = vec![0, 1, 0, 1, 0, 1];
+        let block_ids: Int32Array = vec![None, None, None, None, None, None]
+            .into_iter()
+            .collect();
+        // constraint 1 = cap_loose (<=25, upper-only); constraint 2 = band
+        // ([3, 8], two-sided); constraint 3 = floor_trivial (>=0, lower-only).
+        let bound_lowers: Float64Array =
+            vec![None, None, Some(3.0), Some(3.0), Some(0.0), Some(0.0)]
+                .into_iter()
+                .collect();
+        let bound_uppers: Float64Array =
+            vec![Some(25.0), Some(25.0), Some(8.0), Some(8.0), None, None]
+                .into_iter()
+                .collect();
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(constraint_ids)),
+                Arc::new(Int32Array::from(stage_ids)),
+                Arc::new(block_ids),
+                Arc::new(bound_lowers),
+                Arc::new(bound_uppers),
+            ],
+        )
+        .expect("valid record batch");
+
+        let file = std::fs::File::create(path).expect("create parquet file");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("ArrowWriter::try_new");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+    }
+
+    /// A fresh copy of `d13-generic-constraint` with `constraints/generic_constraints.json`
+    /// (3 constraints in `order`) and `constraints/generic_constraint_bounds.parquet`
+    /// (fixed content, order-independent) replaced. Never mutates the committed
+    /// example — everything is written into a fresh `TempDir`.
+    fn build_permuted_case(order: &[usize; 3]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        copy_dir_recursive(&d13_case_dir(), tmp.path());
+        std::fs::write(
+            tmp.path().join("constraints/generic_constraints.json"),
+            generic_constraints_json(order),
+        )
+        .expect("write generic_constraints.json");
+        write_generic_constraint_bounds_parquet(
+            &tmp.path()
+                .join("constraints/generic_constraint_bounds.parquet"),
+        );
+        tmp
+    }
+
+    /// Requirement 4 / AC4 (end-to-end tier): every ordering of
+    /// `generic_constraints.json`'s 3 constraints (including `band`, the range
+    /// one) produces a bit-identical LP (`frozen_templates`' CSC arrays and row
+    /// bounds) and a bit-identical result (`final_lb`) through the real
+    /// `cobre_io::load_case -> train` pipeline. Gated behind `slow-tests`: it
+    /// builds and trains 6 full case directories.
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn declaration_order_invariance_full_pipeline() {
+        #[allow(clippy::type_complexity)]
+        let mut baseline: Option<(
+            u64,
+            Vec<f64>,
+            Vec<Vec<f64>>,
+            Vec<Vec<f64>>,
+            Vec<Vec<i32>>,
+            Vec<Vec<i32>>,
+            Vec<Vec<f64>>,
+        )> = None;
+
+        for order in ALL_ORDERINGS {
+            let tmp = build_permuted_case(&order);
+            let dir = tmp.path();
+
+            let config = cobre_io::parse_config(&dir.join("config.json")).expect("config");
+            let system = cobre_io::load_case(dir).expect("load_case must succeed");
+
+            let ids: Vec<i32> = system
+                .generic_constraints()
+                .iter()
+                .map(|c| c.id.0)
+                .collect();
+            assert_eq!(
+                ids,
+                vec![1, 2, 3],
+                "system.generic_constraints() must be canonically id-sorted regardless \
+                 of generic_constraints.json's declared order {order:?}"
+            );
+
+            let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+                .expect("prepare_stochastic must succeed");
+            let system = pr.system;
+            let stochastic = pr.stochastic;
+            let hydro_models = prepare_hydro_models(&system, dir, false)
+                .expect("prepare_hydro_models must succeed");
+            let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+                .expect("StudySetup::new must succeed");
+
+            let comm = StubComm;
+            let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+            let outcome = setup
+                .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+                .expect("train must not return Err");
+            assert!(
+                outcome.error.is_none(),
+                "training error for ordering {order:?}: {:?}",
+                outcome.error
+            );
+
+            let templates = outcome
+                .result
+                .frozen_templates
+                .expect("frozen_templates must be Some");
+            let signature = (
+                outcome.result.iterations,
+                vec![outcome.result.final_lb],
+                templates
+                    .iter()
+                    .map(|t| t.row_lower.clone())
+                    .collect::<Vec<_>>(),
+                templates
+                    .iter()
+                    .map(|t| t.row_upper.clone())
+                    .collect::<Vec<_>>(),
+                templates
+                    .iter()
+                    .map(|t| t.col_starts.clone())
+                    .collect::<Vec<_>>(),
+                templates
+                    .iter()
+                    .map(|t| t.row_indices.clone())
+                    .collect::<Vec<_>>(),
+                templates
+                    .iter()
+                    .map(|t| t.values.clone())
+                    .collect::<Vec<_>>(),
+            );
+
+            match &baseline {
+                None => baseline = Some(signature),
+                Some(base) => {
+                    assert_eq!(
+                        base.0, signature.0,
+                        "iterations differ for ordering {order:?}"
+                    );
+                    assert_eq!(
+                        base.1[0].to_bits(),
+                        signature.1[0].to_bits(),
+                        "final_lb differs for ordering {order:?}: {} vs baseline {}",
+                        signature.1[0],
+                        base.1[0]
+                    );
+                    assert_eq!(
+                        base.2, signature.2,
+                        "row_lower differs for ordering {order:?}"
+                    );
+                    assert_eq!(
+                        base.3, signature.3,
+                        "row_upper differs for ordering {order:?}"
+                    );
+                    assert_eq!(
+                        base.4, signature.4,
+                        "col_starts differs for ordering {order:?}"
+                    );
+                    assert_eq!(
+                        base.5, signature.5,
+                        "row_indices differs for ordering {order:?}"
+                    );
+                    assert_eq!(
+                        base.6, signature.6,
+                        "CSC values differ for ordering {order:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC5 — range vs. two-row solution equivalence
+    // ---------------------------------------------------------------------------
+
+    /// Requirement 5 / AC5: the same `[3, 8]` band expressed as one `range`
+    /// constraint versus a `>= 3` plus a `<= 8` constraint reaches equal optimal
+    /// objective and equal primals within the suite's tolerance. Duals and row
+    /// counts are never compared — the two formulations have different row
+    /// counts by construction and may settle on a different-but-equally-valid
+    /// vertex.
+    #[test]
+    fn range_matches_two_row_formulation_objective_and_primals() {
+        let mut config = build_config(2);
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 1 });
+
+        let (range_constraints, range_bounds) = build_band_constraints(true);
+        let (two_row_constraints, two_row_bounds) = build_band_constraints(false);
+
+        let mut setup_range =
+            build_setup_in_code(build_system(range_constraints, range_bounds), &config);
+        let mut setup_two_row =
+            build_setup_in_code(build_system(two_row_constraints, two_row_bounds), &config);
+
+        let range_scenarios = run_simulation(&mut setup_range, 1);
+        let two_row_scenarios = run_simulation(&mut setup_two_row, 1);
+
+        assert_eq!(range_scenarios.len(), 1);
+        assert_eq!(two_row_scenarios.len(), 1);
+
+        let range_total = range_scenarios[0].total_cost;
+        let two_row_total = two_row_scenarios[0].total_cost;
+        assert!(
+            (range_total - two_row_total).abs() < 1e-6,
+            "range and two-row formulations of the same band must reach the same \
+             optimal objective: range={range_total}, two_row={two_row_total}"
+        );
+
+        assert_eq!(
+            range_scenarios[0].stages.len(),
+            two_row_scenarios[0].stages.len()
+        );
+        for (rs, ts) in range_scenarios[0]
+            .stages
+            .iter()
+            .zip(two_row_scenarios[0].stages.iter())
+        {
+            assert_eq!(rs.thermals.len(), 1);
+            assert_eq!(ts.thermals.len(), 1);
+            let r_gen = rs.thermals[0].generation_mw;
+            let t_gen = ts.thermals[0].generation_mw;
+            assert!(
+                (r_gen - t_gen).abs() < 1e-6,
+                "stage {}: range T0 generation {r_gen} must match two-row T0 \
+                 generation {t_gen} within tolerance",
+                rs.stage_id
+            );
+            assert!(
+                (r_gen - 8.0).abs() < 1e-6,
+                "stage {}: both formulations must dispatch T0 at the band's upper \
+                 bound (8 MW); got {r_gen}",
+                rs.stage_id
+            );
+        }
+    }
+}

@@ -23,7 +23,7 @@ fn generic_constraints_zero_does_not_change_layout() {
 
 #[test]
 fn generic_constraint_no_slack_block_id_none_3_blocks_collapses() {
-    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use cobre_core::ResolvedGenericConstraintBounds;
     use std::collections::HashMap;
 
     let n_blks = 3_usize;
@@ -32,10 +32,10 @@ fn generic_constraint_no_slack_block_id_none_3_blocks_collapses() {
     let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
 
     let id_map: HashMap<i32, usize> = [(10_i32, 0)].into_iter().collect();
-    let rows = vec![(10_i32, 0_i32, None::<i32>, 500.0_f64)];
+    let rows = vec![(10_i32, 0_i32, None::<i32>, None, Some(500.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
-    let constraint = make_constraint(10, ConstraintSense::LessEqual, false);
+    let constraint = make_constraint(10, false);
     let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
     let t_cols = build_templates_for(&system)[0].num_cols;
@@ -53,7 +53,7 @@ fn generic_constraint_no_slack_block_id_none_3_blocks_collapses() {
 
 #[test]
 fn generic_constraint_no_slack_block_id_none_3_blocks_block_level_per_block() {
-    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use cobre_core::ResolvedGenericConstraintBounds;
     use std::collections::HashMap;
 
     let n_blks = 3_usize;
@@ -62,15 +62,10 @@ fn generic_constraint_no_slack_block_id_none_3_blocks_block_level_per_block() {
     let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
 
     let id_map: HashMap<i32, usize> = [(11_i32, 0)].into_iter().collect();
-    let rows = vec![(11_i32, 0_i32, None::<i32>, 500.0_f64)];
+    let rows = vec![(11_i32, 0_i32, None::<i32>, None, Some(500.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
-    let constraint = make_constraint_with_expr(
-        11,
-        ConstraintSense::LessEqual,
-        false,
-        block_level_excess_expr(1),
-    );
+    let constraint = make_constraint_with_expr(11, false, block_level_excess_expr(1));
     let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
     let t_cols = build_templates_for(&system)[0].num_cols;
@@ -88,7 +83,7 @@ fn generic_constraint_no_slack_block_id_none_3_blocks_block_level_per_block() {
 
 #[test]
 fn generic_constraint_le_slack_enabled_2_blocks_collapses() {
-    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use cobre_core::ResolvedGenericConstraintBounds;
     use std::collections::HashMap;
 
     let n_blks = 2_usize;
@@ -97,10 +92,10 @@ fn generic_constraint_le_slack_enabled_2_blocks_collapses() {
     let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
 
     let id_map: HashMap<i32, usize> = [(20_i32, 0)].into_iter().collect();
-    let rows = vec![(20_i32, 0_i32, None::<i32>, 300.0_f64)];
+    let rows = vec![(20_i32, 0_i32, None::<i32>, None, Some(300.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
-    let constraint = make_constraint(20, ConstraintSense::LessEqual, true);
+    let constraint = make_constraint(20, true);
     let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
     let t_cols = build_templates_for(&system)[0].num_cols;
@@ -119,7 +114,7 @@ fn generic_constraint_le_slack_enabled_2_blocks_collapses() {
 
 #[test]
 fn generic_constraint_le_slack_enabled_2_blocks_block_level_per_block() {
-    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use cobre_core::ResolvedGenericConstraintBounds;
     use std::collections::HashMap;
 
     let n_blks = 2_usize;
@@ -128,15 +123,10 @@ fn generic_constraint_le_slack_enabled_2_blocks_block_level_per_block() {
     let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
 
     let id_map: HashMap<i32, usize> = [(21_i32, 0)].into_iter().collect();
-    let rows = vec![(21_i32, 0_i32, None::<i32>, 300.0_f64)];
+    let rows = vec![(21_i32, 0_i32, None::<i32>, None, Some(300.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
-    let constraint = make_constraint_with_expr(
-        21,
-        ConstraintSense::LessEqual,
-        true,
-        block_level_excess_expr(1),
-    );
+    let constraint = make_constraint_with_expr(21, true, block_level_excess_expr(1));
     let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
     let t_cols = build_templates_for(&system)[0].num_cols;
@@ -154,8 +144,8 @@ fn generic_constraint_le_slack_enabled_2_blocks_block_level_per_block() {
 }
 
 #[test]
-fn generic_constraint_equal_sense_two_slacks_collapses() {
-    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+fn generic_constraint_degenerate_band_two_slacks_collapses() {
+    use cobre_core::ResolvedGenericConstraintBounds;
     use std::collections::HashMap;
 
     let n_blks = 2_usize;
@@ -164,10 +154,10 @@ fn generic_constraint_equal_sense_two_slacks_collapses() {
     let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
 
     let id_map: HashMap<i32, usize> = [(30_i32, 0)].into_iter().collect();
-    let rows = vec![(30_i32, 0_i32, None::<i32>, 100.0_f64)];
+    let rows = vec![(30_i32, 0_i32, None::<i32>, Some(100.0_f64), Some(100.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
-    let constraint = make_constraint(30, ConstraintSense::Equal, true);
+    let constraint = make_constraint(30, true);
     let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
     let t_cols = build_templates_for(&system)[0].num_cols;
@@ -185,8 +175,39 @@ fn generic_constraint_equal_sense_two_slacks_collapses() {
 }
 
 #[test]
-fn generic_constraint_equal_sense_two_slacks_block_level_per_block() {
-    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+fn generic_constraint_two_sided_two_slacks_collapses() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use std::collections::HashMap;
+
+    let n_blks = 2_usize;
+    let baseline_system = one_bus_system_n_blks(n_blks);
+    let baseline_rows = build_templates_for(&baseline_system)[0].num_rows;
+    let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
+
+    let id_map: HashMap<i32, usize> = [(70_i32, 0)].into_iter().collect();
+    let rows = vec![(70_i32, 0_i32, None::<i32>, Some(100.0_f64), Some(200.0_f64))];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let constraint = make_constraint(70, true);
+    let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
+    let t_rows = build_templates_for(&system)[0].num_rows;
+    let t_cols = build_templates_for(&system)[0].num_cols;
+
+    assert_eq!(
+        t_rows,
+        baseline_rows + 1,
+        "num_rows must increase by 1 (collapsed stage-level row)"
+    );
+    assert_eq!(
+        t_cols,
+        baseline_cols + 2,
+        "num_cols must increase by 2 (plus+minus slacks on the single collapsed row)"
+    );
+}
+
+#[test]
+fn generic_constraint_degenerate_band_two_slacks_block_level_per_block() {
+    use cobre_core::ResolvedGenericConstraintBounds;
     use std::collections::HashMap;
 
     let n_blks = 2_usize;
@@ -195,11 +216,10 @@ fn generic_constraint_equal_sense_two_slacks_block_level_per_block() {
     let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
 
     let id_map: HashMap<i32, usize> = [(31_i32, 0)].into_iter().collect();
-    let rows = vec![(31_i32, 0_i32, None::<i32>, 100.0_f64)];
+    let rows = vec![(31_i32, 0_i32, None::<i32>, Some(100.0_f64), Some(100.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
-    let constraint =
-        make_constraint_with_expr(31, ConstraintSense::Equal, true, block_level_excess_expr(1));
+    let constraint = make_constraint_with_expr(31, true, block_level_excess_expr(1));
     let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
     let t_cols = build_templates_for(&system)[0].num_cols;
@@ -217,8 +237,39 @@ fn generic_constraint_equal_sense_two_slacks_block_level_per_block() {
 }
 
 #[test]
+fn generic_constraint_two_sided_two_slacks_block_level_per_block() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use std::collections::HashMap;
+
+    let n_blks = 2_usize;
+    let baseline_system = one_bus_system_n_blks(n_blks);
+    let baseline_rows = build_templates_for(&baseline_system)[0].num_rows;
+    let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
+
+    let id_map: HashMap<i32, usize> = [(71_i32, 0)].into_iter().collect();
+    let rows = vec![(71_i32, 0_i32, None::<i32>, Some(100.0_f64), Some(200.0_f64))];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let constraint = make_constraint_with_expr(71, true, block_level_excess_expr(1));
+    let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
+    let t_rows = build_templates_for(&system)[0].num_rows;
+    let t_cols = build_templates_for(&system)[0].num_cols;
+
+    assert_eq!(
+        t_rows,
+        baseline_rows + 2,
+        "num_rows must increase by 2 (block-level keeps one row per block)"
+    );
+    assert_eq!(
+        t_cols,
+        baseline_cols + 4,
+        "num_cols must increase by 4 (two slacks per per-block row for range)"
+    );
+}
+
+#[test]
 fn generic_constraint_collapsed_slack_priced_by_total_stage_hours() {
-    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use cobre_core::ResolvedGenericConstraintBounds;
     use std::collections::HashMap;
 
     let n_blks = 3_usize;
@@ -230,10 +281,10 @@ fn generic_constraint_collapsed_slack_priced_by_total_stage_hours() {
     let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
 
     let id_map: HashMap<i32, usize> = [(60_i32, 0)].into_iter().collect();
-    let rows = vec![(60_i32, 0_i32, None::<i32>, 500.0_f64)];
+    let rows = vec![(60_i32, 0_i32, None::<i32>, None, Some(500.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
-    let constraint = make_constraint(60, ConstraintSense::LessEqual, true);
+    let constraint = make_constraint(60, true);
     let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
     let t = &build_templates_for(&system)[0];
 
@@ -269,7 +320,7 @@ fn generic_constraint_collapsed_slack_priced_by_total_stage_hours() {
 
 #[test]
 fn generic_constraint_specific_block_id_generates_one_row() {
-    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use cobre_core::ResolvedGenericConstraintBounds;
     use std::collections::HashMap;
 
     let n_blks = 3_usize;
@@ -278,10 +329,10 @@ fn generic_constraint_specific_block_id_generates_one_row() {
     let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
 
     let id_map: HashMap<i32, usize> = [(40_i32, 0)].into_iter().collect();
-    let rows = vec![(40_i32, 0_i32, Some(1_i32), 200.0_f64)];
+    let rows = vec![(40_i32, 0_i32, Some(1_i32), None, Some(200.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
-    let constraint = make_constraint(40, ConstraintSense::LessEqual, false);
+    let constraint = make_constraint(40, false);
     let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
     let t_cols = build_templates_for(&system)[0].num_cols;
@@ -299,7 +350,7 @@ fn generic_constraint_specific_block_id_generates_one_row() {
 
 #[test]
 fn generic_constraint_inactive_does_not_contribute_rows() {
-    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use cobre_core::ResolvedGenericConstraintBounds;
     use std::collections::HashMap;
 
     let n_blks = 2_usize;
@@ -308,11 +359,11 @@ fn generic_constraint_inactive_does_not_contribute_rows() {
 
     // Constraint 51 has no bounds row → inactive.
     let id_map: HashMap<i32, usize> = [(50_i32, 0), (51_i32, 1)].into_iter().collect();
-    let rows = vec![(50_i32, 0_i32, None::<i32>, 400.0_f64)];
+    let rows = vec![(50_i32, 0_i32, None::<i32>, None, Some(400.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
-    let c_active = make_constraint(50, ConstraintSense::LessEqual, false);
-    let c_inactive = make_constraint(51, ConstraintSense::LessEqual, false);
+    let c_active = make_constraint(50, false);
+    let c_inactive = make_constraint(51, false);
     let system =
         one_bus_system_n_blks_with_generic(n_blks, vec![c_active, c_inactive], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
@@ -331,8 +382,7 @@ fn generic_constraint_inactive_does_not_contribute_rows() {
 fn generic_constraint_thermal_le_row_bounds_and_csc_entry() {
     use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
-        ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-        VariableRef,
+        ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
     };
     use std::collections::HashMap;
 
@@ -351,7 +401,6 @@ fn generic_constraint_thermal_le_row_bounds_and_csc_entry() {
                 },
             )],
         },
-        sense: ConstraintSense::LessEqual,
         slack: SlackConfig {
             enabled: false,
             penalty: None,
@@ -359,7 +408,7 @@ fn generic_constraint_thermal_le_row_bounds_and_csc_entry() {
     };
 
     let id_map: HashMap<i32, usize> = [(10_i32, 0)].into_iter().collect();
-    let rows = vec![(10_i32, 0_i32, None::<i32>, 50.0_f64)];
+    let rows = vec![(10_i32, 0_i32, None::<i32>, None, Some(50.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
     let system = one_bus_one_thermal_system(thermal_entity_id, vec![constraint], generic_bounds);
@@ -372,7 +421,7 @@ fn generic_constraint_thermal_le_row_bounds_and_csc_entry() {
 
     assert!(
         t.row_lower[generic_row].is_infinite() && t.row_lower[generic_row] < 0.0,
-        "row_lower must be -INF for <= constraint, got {}",
+        "row_lower must be -INF for an upper-only row, got {}",
         t.row_lower[generic_row]
     );
     assert!(
@@ -397,8 +446,7 @@ fn generic_constraint_thermal_le_row_bounds_and_csc_entry() {
 fn generic_constraint_thermal_le_slack_column_and_csc_entry() {
     use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
-        ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-        VariableRef,
+        ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
     };
     use std::collections::HashMap;
 
@@ -419,7 +467,6 @@ fn generic_constraint_thermal_le_slack_column_and_csc_entry() {
                 },
             )],
         },
-        sense: ConstraintSense::LessEqual,
         slack: SlackConfig {
             enabled: true,
             penalty: Some(penalty),
@@ -427,7 +474,7 @@ fn generic_constraint_thermal_le_slack_column_and_csc_entry() {
     };
 
     let id_map: HashMap<i32, usize> = [(20_i32, 0)].into_iter().collect();
-    let rows = vec![(20_i32, 0_i32, None::<i32>, 50.0_f64)];
+    let rows = vec![(20_i32, 0_i32, None::<i32>, None, Some(50.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
     let system = one_bus_one_thermal_system(thermal_entity_id, vec![constraint], generic_bounds);
@@ -468,7 +515,7 @@ fn generic_constraint_thermal_le_slack_column_and_csc_entry() {
     let total: f64 = entries.iter().sum();
     assert!(
         (total - (-1.0)).abs() < f64::EPSILON,
-        "expected -1.0 at slack col / generic row for <= sense, got {total}"
+        "expected -1.0 at slack col / generic row for an upper-only row, got {total}"
     );
 }
 
@@ -476,8 +523,7 @@ fn generic_constraint_thermal_le_slack_column_and_csc_entry() {
 fn generic_constraint_thermal_ge_row_bounds() {
     use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
-        ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-        VariableRef,
+        ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
     };
     use std::collections::HashMap;
 
@@ -496,7 +542,6 @@ fn generic_constraint_thermal_ge_row_bounds() {
                 },
             )],
         },
-        sense: ConstraintSense::GreaterEqual,
         slack: SlackConfig {
             enabled: false,
             penalty: None,
@@ -504,7 +549,7 @@ fn generic_constraint_thermal_ge_row_bounds() {
     };
 
     let id_map: HashMap<i32, usize> = [(30_i32, 0)].into_iter().collect();
-    let rows = vec![(30_i32, 0_i32, None::<i32>, 10.0_f64)];
+    let rows = vec![(30_i32, 0_i32, None::<i32>, Some(10.0_f64), None)];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
     let system = one_bus_one_thermal_system(thermal_entity_id, vec![constraint], generic_bounds);
@@ -513,20 +558,157 @@ fn generic_constraint_thermal_ge_row_bounds() {
     let generic_row = 1_usize;
     assert!(
         (t.row_lower[generic_row] - 10.0).abs() < f64::EPSILON,
-        "row_lower must be 10.0 for >= constraint, got {}",
+        "row_lower must be 10.0 for a lower-only row, got {}",
         t.row_lower[generic_row]
     );
     assert!(
         t.row_upper[generic_row].is_infinite() && t.row_upper[generic_row] > 0.0,
-        "row_upper must be +INF for >= constraint, got {}",
+        "row_upper must be +INF for a lower-only row, got {}",
         t.row_upper[generic_row]
     );
 }
 
+/// AC: a lower-only row (`bound_lower` present, `bound_upper` absent) on a
+/// slack-enabled constraint allocates exactly ONE slack column with `+1.0` at
+/// the generic row — the mirror image of the upper-only `-1.0` case above.
 #[test]
-fn generic_constraint_thermal_equal_two_slacks() {
+fn generic_constraint_thermal_ge_slack_column_and_csc_entry() {
     use cobre_core::ResolvedGenericConstraintBounds;
-    use cobre_core::{ConstraintExpression, ConstraintSense, GenericConstraint, SlackConfig};
+    use cobre_core::{
+        ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+    };
+    use std::collections::HashMap;
+
+    let thermal_entity_id = EntityId(2);
+    let block_hours = 744.0_f64;
+    let penalty = 5000.0_f64;
+
+    let constraint = GenericConstraint {
+        id: EntityId(35),
+        name: "gc_thermal_ge_slack".to_string(),
+        description: None,
+        expression: ConstraintExpression {
+            terms: vec![LinearTerm::literal(
+                1.0,
+                VariableRef::ThermalGeneration {
+                    thermal_id: thermal_entity_id,
+                    block_id: None,
+                },
+            )],
+        },
+        slack: SlackConfig {
+            enabled: true,
+            penalty: Some(penalty),
+        },
+    };
+
+    let id_map: HashMap<i32, usize> = [(35_i32, 0)].into_iter().collect();
+    let rows = vec![(35_i32, 0_i32, None::<i32>, Some(10.0_f64), None)];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let system = one_bus_one_thermal_system(thermal_entity_id, vec![constraint], generic_bounds);
+    let t = &build_templates_for(&system)[0];
+
+    // Same layout as the upper-only slack test: theta=0, thermal=1, deficit=1,
+    // excess=1 → col_generic_slack_start = 4, slack_plus_col = 4.
+    let slack_col = 4_usize;
+    let generic_row = 1_usize;
+
+    assert_eq!(
+        t.row_lower[generic_row], 10.0,
+        "row_lower must be 10.0 for a lower-only row"
+    );
+    assert!(
+        t.row_upper[generic_row].is_infinite() && t.row_upper[generic_row] > 0.0,
+        "row_upper must be +INF for a lower-only row"
+    );
+
+    let expected_obj = penalty * block_hours / COST_SCALE_FACTOR;
+    assert!(
+        (t.objective[slack_col] - expected_obj).abs() < 1e-12,
+        "slack objective must be {expected_obj}, got {}",
+        t.objective[slack_col]
+    );
+
+    let entries = csc_entries_at(t, slack_col, generic_row);
+    assert!(
+        !entries.is_empty(),
+        "no CSC entry found at (col={slack_col}, row={generic_row})"
+    );
+    let total: f64 = entries.iter().sum();
+    assert!(
+        (total - 1.0).abs() < f64::EPSILON,
+        "expected +1.0 at slack col / generic row for a lower-only row, got {total}"
+    );
+}
+
+#[test]
+fn generic_constraint_two_sided_thermal_row_bounds_and_csc_entry() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use cobre_core::{
+        ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+    };
+    use std::collections::HashMap;
+
+    let thermal_entity_id = EntityId(2);
+
+    let constraint = GenericConstraint {
+        id: EntityId(72),
+        name: "gc_thermal_range".to_string(),
+        description: None,
+        expression: ConstraintExpression {
+            terms: vec![LinearTerm::literal(
+                1.0,
+                VariableRef::ThermalGeneration {
+                    thermal_id: thermal_entity_id,
+                    block_id: None,
+                },
+            )],
+        },
+        slack: SlackConfig {
+            enabled: false,
+            penalty: None,
+        },
+    };
+
+    let id_map: HashMap<i32, usize> = [(72_i32, 0)].into_iter().collect();
+    let rows = vec![(72_i32, 0_i32, None::<i32>, Some(5.0_f64), Some(20.0_f64))];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let system = one_bus_one_thermal_system(thermal_entity_id, vec![constraint], generic_bounds);
+    let t = &build_templates_for(&system)[0];
+
+    // Layout for N=0, T=1, B=1, K=1 (same as generic_constraint_thermal_le_row_bounds_and_csc_entry).
+    let thermal_col = 1_usize;
+    let generic_row = 1_usize;
+
+    assert!(
+        (t.row_lower[generic_row] - 5.0).abs() < f64::EPSILON,
+        "row_lower must be 5.0 (bound_lower) for a two-sided row, got {}",
+        t.row_lower[generic_row]
+    );
+    assert!(
+        (t.row_upper[generic_row] - 20.0).abs() < f64::EPSILON,
+        "row_upper must be 20.0 (bound_upper) for a two-sided row, got {}",
+        t.row_upper[generic_row]
+    );
+
+    let entries = csc_entries_at(t, thermal_col, generic_row);
+    assert!(
+        !entries.is_empty(),
+        "no CSC entry found at (col={thermal_col}, row={generic_row})"
+    );
+    let total: f64 = entries.iter().sum();
+    assert!(
+        (total - 1.0).abs() < f64::EPSILON,
+        "expected +1.0 total at thermal col / generic row, got {total}"
+    );
+}
+
+#[test]
+fn generic_constraint_degenerate_band_thermal_two_slacks() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use cobre_core::{ConstraintExpression, GenericConstraint, SlackConfig};
     use std::collections::HashMap;
 
     let thermal_entity_id = EntityId(2);
@@ -538,7 +720,6 @@ fn generic_constraint_thermal_equal_two_slacks() {
         name: "gc_thermal_eq_slack".to_string(),
         description: None,
         expression: ConstraintExpression { terms: vec![] },
-        sense: ConstraintSense::Equal,
         slack: SlackConfig {
             enabled: true,
             penalty: Some(penalty),
@@ -546,7 +727,7 @@ fn generic_constraint_thermal_equal_two_slacks() {
     };
 
     let id_map: HashMap<i32, usize> = [(40_i32, 0)].into_iter().collect();
-    let rows = vec![(40_i32, 0_i32, None::<i32>, 80.0_f64)];
+    let rows = vec![(40_i32, 0_i32, None::<i32>, Some(80.0_f64), Some(80.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
     let system = one_bus_one_thermal_system(thermal_entity_id, vec![constraint], generic_bounds);
@@ -558,12 +739,12 @@ fn generic_constraint_thermal_equal_two_slacks() {
 
     assert!(
         (t.row_lower[generic_row] - 80.0).abs() < f64::EPSILON,
-        "row_lower must be 80.0 for == constraint, got {}",
+        "row_lower must be 80.0 for a degenerate band, got {}",
         t.row_lower[generic_row]
     );
     assert!(
         (t.row_upper[generic_row] - 80.0).abs() < f64::EPSILON,
-        "row_upper must be 80.0 for == constraint, got {}",
+        "row_upper must be 80.0 for a degenerate band, got {}",
         t.row_upper[generic_row]
     );
 
@@ -589,7 +770,7 @@ fn generic_constraint_thermal_equal_two_slacks() {
     let plus_total: f64 = plus_entries.iter().sum();
     assert!(
         (plus_total - 1.0).abs() < f64::EPSILON,
-        "plus slack CSC must be +1.0 for == sense, got {plus_total}"
+        "plus slack CSC must be +1.0 for a degenerate band, got {plus_total}"
     );
 
     assert!(
@@ -608,7 +789,142 @@ fn generic_constraint_thermal_equal_two_slacks() {
     let minus_total: f64 = minus_entries.iter().sum();
     assert!(
         (minus_total - (-1.0)).abs() < f64::EPSILON,
-        "minus slack CSC must be -1.0 for == sense, got {minus_total}"
+        "minus slack CSC must be -1.0 for a degenerate band, got {minus_total}"
+    );
+}
+
+#[test]
+fn generic_constraint_two_sided_thermal_two_slacks() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use cobre_core::{ConstraintExpression, GenericConstraint, SlackConfig};
+    use std::collections::HashMap;
+
+    let thermal_entity_id = EntityId(2);
+    let penalty = 5000.0_f64;
+    let block_hours = 744.0_f64;
+
+    let constraint = GenericConstraint {
+        id: EntityId(73),
+        name: "gc_thermal_range_slack".to_string(),
+        description: None,
+        expression: ConstraintExpression { terms: vec![] },
+        slack: SlackConfig {
+            enabled: true,
+            penalty: Some(penalty),
+        },
+    };
+
+    let id_map: HashMap<i32, usize> = [(73_i32, 0)].into_iter().collect();
+    let rows = vec![(73_i32, 0_i32, None::<i32>, Some(30.0_f64), Some(80.0_f64))];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let system = one_bus_one_thermal_system(thermal_entity_id, vec![constraint], generic_bounds);
+    let t = &build_templates_for(&system)[0];
+
+    let slack_plus_col = 4_usize;
+    let slack_minus_col = 5_usize;
+    let generic_row = 1_usize;
+
+    assert!(
+        (t.row_lower[generic_row] - 30.0).abs() < f64::EPSILON,
+        "row_lower must be 30.0 for a two-sided row, got {}",
+        t.row_lower[generic_row]
+    );
+    assert!(
+        (t.row_upper[generic_row] - 80.0).abs() < f64::EPSILON,
+        "row_upper must be 80.0 for a two-sided row, got {}",
+        t.row_upper[generic_row]
+    );
+
+    // Two slack columns: num_cols baseline is 4 (theta=0, thermal=1, deficit=1, excess=1,
+    // withdrawal_slack=0), with 2 slacks → num_cols = 6.
+    assert_eq!(t.num_cols, 6, "num_cols must be 6 with 2 slack columns");
+
+    assert!(
+        t.col_upper[slack_plus_col].is_infinite() && t.col_upper[slack_plus_col] > 0.0,
+        "plus slack col_upper must be +INF"
+    );
+    let expected_obj = penalty * block_hours / COST_SCALE_FACTOR;
+    assert!(
+        (t.objective[slack_plus_col] - expected_obj).abs() < 1e-12,
+        "plus slack objective must be {expected_obj}, got {}",
+        t.objective[slack_plus_col]
+    );
+    let plus_entries = csc_entries_at(t, slack_plus_col, generic_row);
+    assert!(
+        !plus_entries.is_empty(),
+        "no CSC entry at plus slack col / generic row"
+    );
+    let plus_total: f64 = plus_entries.iter().sum();
+    assert!(
+        (plus_total - 1.0).abs() < f64::EPSILON,
+        "plus slack CSC must be +1.0 for a two-sided row, got {plus_total}"
+    );
+
+    assert!(
+        t.col_upper[slack_minus_col].is_infinite() && t.col_upper[slack_minus_col] > 0.0,
+        "minus slack col_upper must be +INF"
+    );
+    assert!(
+        (t.objective[slack_minus_col] - expected_obj).abs() < 1e-12,
+        "minus slack objective must be {expected_obj}"
+    );
+    let minus_entries = csc_entries_at(t, slack_minus_col, generic_row);
+    assert!(
+        !minus_entries.is_empty(),
+        "no CSC entry at minus slack col / generic row"
+    );
+    let minus_total: f64 = minus_entries.iter().sum();
+    assert!(
+        (minus_total - (-1.0)).abs() < f64::EPSILON,
+        "minus slack CSC must be -1.0 for a two-sided row, got {minus_total}"
+    );
+}
+
+/// A degenerate two-sided band (`bound_lower == bound_upper`) is still
+/// two-sided by the null-pattern (both endpoints present), so it must get an
+/// equality row (`row_lower == row_upper`) AND the full two-slack allocation
+/// — the shape derivation must not special-case equal endpoints down to a
+/// one-sided row.
+#[test]
+fn generic_constraint_degenerate_band_gets_equality_row_and_two_slacks() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use cobre_core::{ConstraintExpression, GenericConstraint, SlackConfig};
+    use std::collections::HashMap;
+
+    let thermal_entity_id = EntityId(2);
+    let penalty = 5000.0_f64;
+    let id = 74;
+
+    let constraint = GenericConstraint {
+        id: EntityId(id),
+        name: format!("gc_{id}"),
+        description: None,
+        expression: ConstraintExpression { terms: vec![] },
+        slack: SlackConfig {
+            enabled: true,
+            penalty: Some(penalty),
+        },
+    };
+    let id_map: HashMap<i32, usize> = [(id, 0_usize)].into_iter().collect();
+    let rows = vec![(id, 0_i32, None::<i32>, Some(10.0_f64), Some(10.0_f64))];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+    let system = one_bus_one_thermal_system(thermal_entity_id, vec![constraint], generic_bounds);
+
+    let t = &build_templates_for(&system)[0];
+    let generic_row = 1_usize;
+
+    assert_eq!(
+        t.row_lower[generic_row], 10.0,
+        "degenerate band row_lower must equal the shared endpoint value"
+    );
+    assert_eq!(
+        t.row_upper[generic_row], 10.0,
+        "degenerate band row_upper must equal the shared endpoint value"
+    );
+    assert_eq!(
+        t.num_cols, 6,
+        "degenerate two-sided band must still allocate BOTH slack columns"
     );
 }
 
@@ -623,8 +939,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
     use cobre_core::{
-        ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-        VariableRef,
+        ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
     };
     use std::collections::HashMap;
 
@@ -822,7 +1137,6 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
                 ),
             ],
         },
-        sense: ConstraintSense::LessEqual,
         slack: SlackConfig {
             enabled: false,
             penalty: None,
@@ -830,7 +1144,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
     };
 
     let id_map: HashMap<i32, usize> = [(100_i32, 0)].into_iter().collect();
-    let rows = vec![(100_i32, 0_i32, None::<i32>, 200.0_f64)];
+    let rows = vec![(100_i32, 0_i32, None::<i32>, None, Some(200.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
     let resolved_bounds = ResolvedBounds::new(
@@ -1110,8 +1424,7 @@ fn one_hydro_system(
 fn generic_constraint_chronological_stage_net_storage_one_row() {
     use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
-        BlockMode, ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm,
-        SlackConfig, VariableRef,
+        BlockMode, ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
     };
     use std::collections::HashMap;
 
@@ -1148,7 +1461,6 @@ fn generic_constraint_chronological_stage_net_storage_one_row() {
                 ),
             ],
         },
-        sense: ConstraintSense::LessEqual,
         slack: SlackConfig {
             enabled: false,
             penalty: None,
@@ -1156,7 +1468,7 @@ fn generic_constraint_chronological_stage_net_storage_one_row() {
     };
 
     let id_map: HashMap<i32, usize> = [(100_i32, 0)].into_iter().collect();
-    let rows = vec![(100_i32, 0_i32, None::<i32>, 50.0_f64)];
+    let rows = vec![(100_i32, 0_i32, None::<i32>, None, Some(50.0_f64))];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
     let system = one_hydro_system(
@@ -1192,8 +1504,7 @@ fn generic_constraint_chronological_stage_net_storage_one_row() {
 fn generic_constraint_chronological_specific_block_ramp_one_row() {
     use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
-        BlockMode, ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm,
-        SlackConfig, VariableRef,
+        BlockMode, ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
     };
     use std::collections::HashMap;
 
@@ -1231,7 +1542,6 @@ fn generic_constraint_chronological_specific_block_ramp_one_row() {
                 ),
             ],
         },
-        sense: ConstraintSense::LessEqual,
         slack: SlackConfig {
             enabled: false,
             penalty: None,
@@ -1239,7 +1549,13 @@ fn generic_constraint_chronological_specific_block_ramp_one_row() {
     };
 
     let id_map: HashMap<i32, usize> = [(100_i32, 0)].into_iter().collect();
-    let rows = vec![(100_i32, 0_i32, Some(target_block as i32), 50.0_f64)];
+    let rows = vec![(
+        100_i32,
+        0_i32,
+        Some(target_block as i32),
+        None,
+        Some(50.0_f64),
+    )];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
     let system = one_hydro_system(

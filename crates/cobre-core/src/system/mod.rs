@@ -1485,8 +1485,10 @@ mod tests {
 
     #[test]
     fn test_system_resolved_generic_bounds_accessor() {
+        use crate::model::resolved::GenericConstraintBoundEntry;
+
         let id_map: HashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
-        let rows = vec![(0i32, 0i32, None::<i32>, 100.0f64)];
+        let rows = vec![(0i32, 0i32, None::<i32>, Some(100.0f64), None::<f64>)];
         let table = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
         let system = SystemBuilder::new()
@@ -1498,7 +1500,14 @@ mod tests {
         assert!(!system.resolved_generic_bounds().is_active(1, 0));
         let slice = system.resolved_generic_bounds().bounds_for_stage(0, 0);
         assert_eq!(slice.len(), 1);
-        assert_eq!(slice[0], (None, 100.0));
+        assert_eq!(
+            slice[0],
+            GenericConstraintBoundEntry {
+                block_id: None,
+                bound_lower: Some(100.0),
+                bound_upper: None,
+            }
+        );
     }
 
     #[test]
@@ -1686,10 +1695,10 @@ mod tests {
     fn fully_populated_system_survives_postcard_roundtrip_intact() {
         use crate::{
             AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-            ConstraintExpression, ConstraintSense, ContractBlockBounds, CorrelationEntity,
-            CorrelationGroup, CorrelationProfile, CorrelationScheduleEntry, DeficitSegment,
-            HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStagePenalties,
-            HydroStorage, LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
+            ConstraintExpression, ContractBlockBounds, CorrelationEntity, CorrelationGroup,
+            CorrelationProfile, CorrelationScheduleEntry, DeficitSegment, HydroBlockBounds,
+            HydroPastDefluence, HydroStageBounds, HydroStagePenalties, HydroStorage,
+            LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
             PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraphType, PumpingBlockBounds,
             RecentObservation, SlackConfig, ThermalBlockBounds, ThermalStageBounds, Transition,
             VariableRef,
@@ -1858,7 +1867,7 @@ mod tests {
 
         let resolved_generic_bounds = ResolvedGenericConstraintBounds::new(
             &std::collections::HashMap::from([(1i32, 0usize)]),
-            vec![(1i32, 0i32, None::<i32>, 777.0f64)].into_iter(),
+            vec![(1i32, 0i32, None::<i32>, Some(777.0f64), None::<f64>)].into_iter(),
         );
 
         let mut resolved_load_factors = ResolvedLoadFactors::new(2, 2, 1);
@@ -1993,7 +2002,6 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: true,
                 penalty: Some(2500.0),

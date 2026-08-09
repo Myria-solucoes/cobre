@@ -2232,24 +2232,14 @@ fn one_bus_system_n_blks(n_blks: usize) -> cobre_core::System {
 /// `GenericConstraint` with a trivial (no-term) expression. A no-term expression
 /// is vacuously block-independent, so a `block_id = None` bound on it collapses to
 /// a single stage-level row.
-fn make_constraint(
-    id: i32,
-    sense: cobre_core::ConstraintSense,
-    slack_enabled: bool,
-) -> cobre_core::GenericConstraint {
+fn make_constraint(id: i32, slack_enabled: bool) -> cobre_core::GenericConstraint {
     use cobre_core::ConstraintExpression;
-    make_constraint_with_expr(
-        id,
-        sense,
-        slack_enabled,
-        ConstraintExpression { terms: vec![] },
-    )
+    make_constraint_with_expr(id, slack_enabled, ConstraintExpression { terms: vec![] })
 }
 
 /// Make a `GenericConstraint` carrying the given expression.
 fn make_constraint_with_expr(
     id: i32,
-    sense: cobre_core::ConstraintSense,
     slack_enabled: bool,
     expression: cobre_core::ConstraintExpression,
 ) -> cobre_core::GenericConstraint {
@@ -2259,7 +2249,6 @@ fn make_constraint_with_expr(
         name: format!("gc_{id}"),
         description: None,
         expression,
-        sense,
         slack: SlackConfig {
             enabled: slack_enabled,
             penalty: if slack_enabled { Some(5000.0) } else { None },

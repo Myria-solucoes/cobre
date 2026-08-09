@@ -24,10 +24,6 @@
           "description": "Short name used in reports and log output.",
           "type": "string"
         },
-        "sense": {
-          "description": "Comparison sense: `\">=\"`, `\"<=\"`, or `\"==\"`.",
-          "type": "string"
-        },
         "slack": {
           "$ref": "#/$defs/RawSlackConfig",
           "description": "Slack variable configuration."
@@ -37,7 +33,6 @@
         "id",
         "name",
         "expression",
-        "sense",
         "slack"
       ],
       "type": "object"
