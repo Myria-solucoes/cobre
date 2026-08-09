@@ -26,10 +26,11 @@ use crate::{
         BusPenaltyOverrideRow, ContractBoundsRow, GenericConstraintBoundsRow, HydroBoundsRow,
         HydroPenaltyOverrideRow, HydroUnitGroupBoundsRow, LineBoundsRow, LinePenaltyOverrideRow,
         NcsBoundsRow, NcsPenaltyOverrideRow, PumpingBoundsRow, ThermalBoundsRow,
-        load_contract_bounds, load_generic_constraint_bounds, load_generic_constraints,
-        load_hydro_bounds, load_hydro_unit_group_bounds, load_line_bounds, load_ncs_bounds,
-        load_penalty_overrides_bus, load_penalty_overrides_hydro, load_penalty_overrides_line,
-        load_penalty_overrides_ncs, load_pumping_bounds, load_thermal_bounds,
+        build_line_bus_pair_index, load_contract_bounds, load_generic_constraint_bounds,
+        load_generic_constraints, load_hydro_bounds, load_hydro_unit_group_bounds,
+        load_line_bounds, load_ncs_bounds, load_penalty_overrides_bus,
+        load_penalty_overrides_hydro, load_penalty_overrides_line, load_penalty_overrides_ncs,
+        load_pumping_bounds, load_thermal_bounds,
     },
     extensions::{
         FphaHyperplaneRow, HydroEnergyProductivityRow, HydroGeometryRow, PlaneReductionConfig,
@@ -544,9 +545,11 @@ pub(crate) fn validate_schema(
     let generic_constraints = optional_or_error(
         manifest.constraints_generic_constraints_json,
         || {
+            let line_pair_index = build_line_bus_pair_index(lines.as_deref().unwrap_or(&[]))?;
             load_generic_constraints(
                 Some(&case_root.join("constraints/generic_constraints.json")),
                 &scalar_name_to_id,
+                &line_pair_index,
             )
         },
         Vec::new,

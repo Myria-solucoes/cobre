@@ -2,6 +2,156 @@
 
 use super::*;
 
+/// Parse `json` (a `generic_constraints.json` body) through the real
+/// `cobre_io::constraints::parse_generic_constraints` path — the same loader the
+/// CLI uses — into the flat `Vec<GenericConstraint>`. `name_to_id` is empty (these
+/// fixtures carry no `@param` coefficients) and the line topology is empty (no
+/// `line_exchange(source_bus=…, target_bus=…)` form).
+fn parse_generic_from_str(json: &str) -> Vec<cobre_core::GenericConstraint> {
+    use std::collections::HashMap;
+    use std::io::Write;
+
+    let mut file = tempfile::NamedTempFile::new().expect("create tempfile");
+    file.write_all(json.as_bytes()).expect("write json fixture");
+    cobre_io::constraints::parse_generic_constraints(
+        file.path(),
+        &HashMap::new(),
+        &cobre_io::constraints::LineBusPairIndex::default(),
+    )
+    .expect("parse generic constraints")
+}
+
+/// Discharge the desugaring invariant on one twin pair: a sugared study and its
+/// hand-flattened equivalent must desugar to the same flat form AND build a
+/// byte-identical LP. Asserts both the parsed `Vec<GenericConstraint>` (flat-form
+/// identity — implies echo identity, the echo being a pure function of the flat
+/// terms) and the full `StageTemplates` Debug digest (coefficients, bounds, and
+/// slacks — not just row/col counts).
+fn assert_lp_byte_identical(
+    sugared_json: &str,
+    flat_json: &str,
+    n_blks: usize,
+    bounds: &cobre_core::ResolvedGenericConstraintBounds,
+) {
+    let sugared = parse_generic_from_str(sugared_json);
+    let flat = parse_generic_from_str(flat_json);
+    assert_eq!(
+        sugared, flat,
+        "desugared flat form must equal the hand-flattened twin"
+    );
+
+    let sugared_tpl = build_templates_for(&one_bus_system_n_blks_with_generic(
+        n_blks,
+        sugared,
+        bounds.clone(),
+    ));
+    let flat_tpl = build_templates_for(&one_bus_system_n_blks_with_generic(
+        n_blks,
+        flat,
+        bounds.clone(),
+    ));
+    assert_eq!(
+        format!("{sugared_tpl:?}"),
+        format!("{flat_tpl:?}"),
+        "sugared and hand-flattened LP templates must be byte-identical"
+    );
+}
+
+/// Byte-identity twin: a single-column named-expression case (the `d13`/`d54`
+/// anchor shape, `thermal_generation(0)`) declared as `@fnese` and its
+/// hand-flattened twin desugar identically and build the same LP.
+#[test]
+fn desugared_named_expression_lp_matches_hand_flattened_twin() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use std::collections::HashMap;
+
+    let sugared = r#"{
+      "expressions": [ { "name": "fnese", "expression": "thermal_generation(0)" } ],
+      "constraints": [
+        { "id": 1, "name": "cap", "expression": "@fnese", "slack": { "enabled": false } }
+      ]
+    }"#;
+    let flat = r#"{
+      "constraints": [
+        { "id": 1, "name": "cap", "expression": "thermal_generation(0)", "slack": { "enabled": false } }
+      ]
+    }"#;
+
+    let id_map: HashMap<i32, usize> = [(1_i32, 0)].into_iter().collect();
+    let rows = vec![(1_i32, 0_i32, None::<i32>, None, Some(10.0_f64))];
+    let bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    assert_lp_byte_identical(sugared, flat, 1, &bounds);
+}
+
+/// Declaration-order invariance: three named expressions, each a single term on the
+/// SAME LP column (`bus_excess` of the one bus) with DISTINCT literal coefficients
+/// (1, 2, 4). Distinct coefficients give distinct `canonical_term_key`s and distinct
+/// CSC entries, and with `n_blks = 1` all three land on the SAME generic-constraint
+/// row. The constraint sums all three in the permuted order, so their CSC `values`
+/// sequence for that column is observable and order-sensitive. Every one of the
+/// `3! = 6` permutations of the declaration-and-reference order must build a
+/// byte-identical `StageTemplates`.
+///
+/// Guarded mutation: skipping `ConstraintExpression::canonicalize` lets the
+/// inline/reference order — a pure function of write order — leak into the term
+/// sequence, so the six permutations produce six different CSC `values` orderings
+/// and this assertion fails. `canonicalize` sorts the terms by content, collapsing
+/// every write order to one; that is what this test pins.
+#[test]
+fn declaration_order_permutation_is_invariant_in_lp() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use std::collections::HashMap;
+
+    let defs = [
+        ("e1", "1 * bus_excess(1)"),
+        ("e2", "2 * bus_excess(1)"),
+        ("e3", "4 * bus_excess(1)"),
+    ];
+    let perms: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+
+    let id_map: HashMap<i32, usize> = [(1_i32, 0)].into_iter().collect();
+    let rows = vec![(1_i32, 0_i32, None::<i32>, None, Some(500.0_f64))];
+    let bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let digest = |perm: &[usize; 3]| -> String {
+        let expressions: Vec<serde_json::Value> = perm
+            .iter()
+            .map(|&i| serde_json::json!({ "name": defs[i].0, "expression": defs[i].1 }))
+            .collect();
+        let reference = perm
+            .iter()
+            .map(|&i| format!("@{}", defs[i].0))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let file = serde_json::json!({
+            "expressions": expressions,
+            "constraints": [
+                { "id": 1, "name": "c", "expression": reference, "slack": { "enabled": false } }
+            ]
+        });
+        let parsed = parse_generic_from_str(&file.to_string());
+        let system = one_bus_system_n_blks_with_generic(1, parsed, bounds.clone());
+        format!("{:?}", build_templates_for(&system))
+    };
+
+    let first = digest(&perms[0]);
+    for perm in &perms[1..] {
+        assert_eq!(
+            digest(perm),
+            first,
+            "declaration-order permutation {perm:?} changed the LP"
+        );
+    }
+}
+
 #[test]
 fn generic_constraints_zero_does_not_change_layout() {
     let system = one_bus_system_n_blks(1);

@@ -37,6 +37,32 @@
       ],
       "type": "object"
     },
+    "RawNamedExpression": {
+      "additionalProperties": false,
+      "description": "Intermediate type for a named linear-expression declaration.",
+      "properties": {
+        "description": {
+          "description": "Optional human-readable description.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expression": {
+          "description": "Expression string, parsed under the variable + `@param`-coefficient grammar.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name bound to the expression; unique in the file and distinct from every scalar-parameter name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "expression"
+      ],
+      "type": "object"
+    },
     "RawSlackConfig": {
       "additionalProperties": false,
       "description": "Intermediate type for the slack configuration.",
@@ -75,6 +101,13 @@
       "description": "Array of constraint entries.",
       "items": {
         "$ref": "#/$defs/RawConstraint"
+      },
+      "type": "array"
+    },
+    "expressions": {
+      "description": "Named linear-expression declarations sharing the `@name` namespace with\nscalar parameters. Absent ⇒ empty ⇒ no named expressions.",
+      "items": {
+        "$ref": "#/$defs/RawNamedExpression"
       },
       "type": "array"
     }

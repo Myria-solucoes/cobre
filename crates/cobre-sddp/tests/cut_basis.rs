@@ -2986,8 +2986,12 @@ mod range_warm_start_determinism {
             let tmp = tempfile::tempdir().expect("tempdir");
             let path = tmp.path().join("generic_constraints.json");
             std::fs::write(&path, generic_constraints_json(&order)).expect("write json");
-            let parsed = cobre_io::parse_generic_constraints(&path, &HashMap::new())
-                .unwrap_or_else(|e| panic!("parse_generic_constraints failed for {order:?}: {e}"));
+            let parsed = cobre_io::parse_generic_constraints(
+                &path,
+                &HashMap::new(),
+                &cobre_io::LineBusPairIndex::default(),
+            )
+            .unwrap_or_else(|e| panic!("parse_generic_constraints failed for {order:?}: {e}"));
             match &canonical {
                 None => canonical = Some(parsed),
                 Some(expected) => assert_eq!(

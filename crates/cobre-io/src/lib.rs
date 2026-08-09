@@ -68,15 +68,15 @@ pub use config::{
 };
 pub use constraints::{
     BusPenaltyOverrideRow, ContractBoundsRow, GenericConstraintBoundsRow, HydroBoundsRow,
-    HydroPenaltyOverrideRow, LineBoundsRow, LinePenaltyOverrideRow, NcsPenaltyOverrideRow,
-    PumpingBoundsRow, ThermalBoundsRow, load_contract_bounds, load_generic_constraint_bounds,
-    load_generic_constraints, load_hydro_bounds, load_line_bounds, load_penalty_overrides_bus,
-    load_penalty_overrides_hydro, load_penalty_overrides_line, load_penalty_overrides_ncs,
-    load_pumping_bounds, load_thermal_bounds, parse_contract_bounds,
-    parse_generic_constraint_bounds, parse_generic_constraints, parse_hydro_bounds,
-    parse_line_bounds, parse_penalty_overrides_bus, parse_penalty_overrides_hydro,
-    parse_penalty_overrides_line, parse_penalty_overrides_ncs, parse_pumping_bounds,
-    parse_thermal_bounds,
+    HydroPenaltyOverrideRow, LineBoundsRow, LineBusPairIndex, LinePenaltyOverrideRow,
+    NcsPenaltyOverrideRow, PumpingBoundsRow, ThermalBoundsRow, build_line_bus_pair_index,
+    load_contract_bounds, load_generic_constraint_bounds, load_generic_constraints,
+    load_hydro_bounds, load_line_bounds, load_penalty_overrides_bus, load_penalty_overrides_hydro,
+    load_penalty_overrides_line, load_penalty_overrides_ncs, load_pumping_bounds,
+    load_thermal_bounds, parse_contract_bounds, parse_generic_constraint_bounds,
+    parse_generic_constraints, parse_hydro_bounds, parse_line_bounds, parse_penalty_overrides_bus,
+    parse_penalty_overrides_hydro, parse_penalty_overrides_line, parse_penalty_overrides_ncs,
+    parse_pumping_bounds, parse_thermal_bounds,
 };
 pub use error::LoadError;
 pub use extensions::{
