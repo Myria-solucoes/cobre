@@ -461,14 +461,17 @@ mod tests {
         assert_eq!(restored, system);
     }
 
-    /// A generic constraint's symbolic bound reference (`bound_upper_ref`) rides the
+    /// A generic constraint's affine bound remainder (`bound_upper_affine`) rides the
     /// constraint's derived serde through the `System` postcard wire — there is no
     /// hand-written mirror for `GenericConstraint`, so the restored System must equal
-    /// the original.
+    /// the original. Uses a genuine multi-component remainder (a nonzero constant plus
+    /// a scaled term), not just the `single` special case, to prove the whole shape
+    /// round-trips.
     #[test]
     fn test_round_trip_generic_constraint_bound_ref() {
         use cobre_core::{
-            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+            AffineBound, ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
         };
 
         let gc = GenericConstraint {
@@ -489,8 +492,11 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: Some(EntityId(7)),
+            bound_lower_affine: None,
+            bound_upper_affine: Some(AffineBound {
+                constant: 12.0,
+                terms: vec![(0.5, EntityId(7))],
+            }),
         };
 
         let system = SystemBuilder::new()
@@ -505,9 +511,12 @@ mod tests {
 
         assert_eq!(restored, system);
         assert_eq!(
-            restored.generic_constraints()[0].bound_upper_ref,
-            Some(EntityId(7)),
-            "symbolic bound reference must survive broadcast round-trip"
+            restored.generic_constraints()[0].bound_upper_affine,
+            Some(AffineBound {
+                constant: 12.0,
+                terms: vec![(0.5, EntityId(7))],
+            }),
+            "affine bound remainder must survive broadcast round-trip"
         );
     }
 

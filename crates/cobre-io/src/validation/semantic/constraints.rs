@@ -257,8 +257,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         }];
         data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
             constraint_id: 1,

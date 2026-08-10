@@ -3,10 +3,10 @@ use std::ops::Range;
 
 use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{
-    BlockMode, Bus, CascadeTopology, CoefficientRef, ConstraintExpression, EnergyContract,
-    EntityId, GenericConstraint, Hydro, Line, LoadModel, NonControllableSource, PumpingStation,
-    ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-    ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal,
+    AffineBound, BlockMode, Bus, CascadeTopology, CoefficientRef, ConstraintExpression,
+    EnergyContract, EntityId, GenericConstraint, Hydro, Line, LoadModel, NonControllableSource,
+    PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+    ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -948,18 +948,37 @@ fn expression_collapses_to_stage_level(
         })
 }
 
-/// Whether either bound reference on `constraint` names a block-varying
+/// Resolve an affine bound remainder to `f64`: `bound.constant` plus the sum of
+/// each term's coefficient times its parameter's resolved value at
+/// `(stage_idx, block_idx)`. `AffineBound::single(id)` resolves to exactly
+/// `resolved.get(id, stage_idx, block_idx)` (`0.0 + 1.0 * x == x` in `f64`).
+fn resolve_affine(
+    bound: &AffineBound,
+    resolved: &ResolvedParameters,
+    stage_idx: usize,
+    block_idx: usize,
+) -> f64 {
+    bound.terms.iter().fold(bound.constant, |acc, &(coef, id)| {
+        acc + coef * resolved.get(id, stage_idx, block_idx)
+    })
+}
+
+/// Whether either affine bound on `constraint` references a block-varying
 /// (`PerStageBlock`) parameter. When true, the stage-level collapse is suppressed:
 /// a single collapsed row would resolve one arbitrary block's bound value, losing
 /// the per-block variation.
-fn bound_ref_is_block_varying(
+fn bound_affine_is_block_varying(
     constraint: &GenericConstraint,
     resolved: &ResolvedParameters,
 ) -> bool {
-    [constraint.bound_lower_ref, constraint.bound_upper_ref]
-        .into_iter()
-        .flatten()
-        .any(|id| resolved.is_block_varying(id))
+    [
+        &constraint.bound_lower_affine,
+        &constraint.bound_upper_affine,
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(AffineBound::params)
+    .any(|id| resolved.is_block_varying(id))
 }
 
 /// Enumerate active generic constraint rows and assign their slack column indices.
@@ -995,7 +1014,7 @@ fn enumerate_generic_constraint_rows(
 
         let collapse_stage_level =
             expression_collapses_to_stage_level(&constraint.expression, resolved_parameters)
-                && !bound_ref_is_block_varying(constraint, resolved_parameters);
+                && !bound_affine_is_block_varying(constraint, resolved_parameters);
 
         for entry in bound_entries {
             // entry.block_id is a non-negative 0-indexed block position (upstream
@@ -1007,16 +1026,26 @@ fn enumerate_generic_constraint_rows(
                 Some(blk_id) => (blk_id as usize, 1, false),
             };
             for block_idx in block_start..block_start + block_count {
-                // A symbolic endpoint resolves through its parameter's (stage, block)
-                // axis and is therefore "present"; a literal endpoint keeps its
-                // parquet Option. The effective pair drives both the row bound and,
+                // An affine endpoint resolves through its terms' parameters at
+                // (stage, block) and is therefore "present"; a literal endpoint keeps
+                // its parquet Option. The effective pair drives both the row bound and,
                 // below, the two-sided slack shape.
-                let effective_lower = match constraint.bound_lower_ref {
-                    Some(id) => Some(resolved_parameters.get(id, stage_idx, block_idx)),
+                let effective_lower = match &constraint.bound_lower_affine {
+                    Some(bound) => Some(resolve_affine(
+                        bound,
+                        resolved_parameters,
+                        stage_idx,
+                        block_idx,
+                    )),
                     None => entry.bound_lower,
                 };
-                let effective_upper = match constraint.bound_upper_ref {
-                    Some(id) => Some(resolved_parameters.get(id, stage_idx, block_idx)),
+                let effective_upper = match &constraint.bound_upper_affine {
+                    Some(bound) => Some(resolve_affine(
+                        bound,
+                        resolved_parameters,
+                        stage_idx,
+                        block_idx,
+                    )),
                     None => entry.bound_upper,
                 };
                 let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
@@ -1837,30 +1866,61 @@ mod collapse_stage_level_tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: lower_ref,
-            bound_upper_ref: upper_ref,
+            bound_lower_affine: lower_ref.map(AffineBound::single),
+            bound_upper_affine: upper_ref.map(AffineBound::single),
         }
     }
 
     #[test]
-    fn bound_ref_block_varying_truth_table() {
+    fn bound_affine_block_varying_truth_table() {
         let r = resolved();
         // Slot 42 is block-varying, slot 43 broadcasts.
-        assert!(bound_ref_is_block_varying(
+        assert!(bound_affine_is_block_varying(
             &constraint_with_refs(None, Some(EntityId(42))),
             &r
         ));
-        assert!(bound_ref_is_block_varying(
+        assert!(bound_affine_is_block_varying(
             &constraint_with_refs(Some(EntityId(42)), None),
             &r
         ));
-        assert!(!bound_ref_is_block_varying(
+        assert!(!bound_affine_is_block_varying(
             &constraint_with_refs(None, Some(EntityId(43))),
             &r
         ));
-        assert!(!bound_ref_is_block_varying(
+        assert!(!bound_affine_is_block_varying(
             &constraint_with_refs(None, None),
             &r
         ));
+    }
+
+    /// A block-varying parameter reached through a multi-term affine bound (not
+    /// just the `single` special case) still suppresses the collapse.
+    #[test]
+    fn bound_affine_block_varying_detects_multi_term_reference() {
+        let r = resolved();
+        let mut constraint = constraint_with_refs(None, None);
+        constraint.bound_upper_affine = Some(AffineBound {
+            constant: 10.0,
+            terms: vec![(2.0, EntityId(43)), (0.5, EntityId(42))],
+        });
+        assert!(bound_affine_is_block_varying(&constraint, &r));
+    }
+
+    #[test]
+    fn resolve_affine_of_single_equals_get() {
+        let r = resolved();
+        let bound = AffineBound::single(EntityId(42));
+        assert_eq!(resolve_affine(&bound, &r, 0, 1), r.get(EntityId(42), 0, 1));
+    }
+
+    #[test]
+    fn resolve_affine_of_two_term_remainder_sums_constant_and_terms() {
+        let r = resolved();
+        let bound = AffineBound {
+            constant: 100.0,
+            terms: vec![(2.0, EntityId(42)), (-1.0, EntityId(43))],
+        };
+        let expected = 100.0 + 2.0 * r.get(EntityId(42), 0, 1) - 1.0 * r.get(EntityId(43), 0, 1);
+        assert_eq!(resolve_affine(&bound, &r, 0, 1), expected);
     }
 }

@@ -61,8 +61,8 @@
 //!     description: Some("Minimum hydro generation in Southeast region".to_string()),
 //!     expression: expr,
 //!     slack: SlackConfig { enabled: true, penalty: Some(5_000.0) },
-//!     bound_lower_ref: None,
-//!     bound_upper_ref: None,
+//!     bound_lower_affine: None,
+//!     bound_upper_affine: None,
 //! };
 //!
 //! assert_eq!(gc.expression.terms.len(), 2);
@@ -483,6 +483,38 @@ fn canonical_term_key(term: &LinearTerm) -> ((u8, i32, i64, i64), u8, u64, u64) 
     )
 }
 
+/// A generic constraint's symbolic bound endpoint: `constant + Σ coefᵢ·@paramᵢ`.
+///
+/// Each `(coef, param_id)` term resolves through `param_id`'s `(stage, block)`
+/// axis and is summed with `constant`. [`AffineBound::single`] is the
+/// single-`@name`-ref special case: `constant = 0.0` and one term at
+/// coefficient `1.0`, which resolves to exactly the named parameter's value
+/// (`0.0 + 1.0 * x == x` in `f64`).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AffineBound {
+    /// The constant term of the affine remainder.
+    pub constant: f64,
+    /// Ordered `(coefficient, parameter_id)` terms summed onto `constant`.
+    pub terms: Vec<(f64, EntityId)>,
+}
+
+impl AffineBound {
+    /// A single named-parameter reference: `constant = 0.0`, one term at coefficient `1.0`.
+    #[must_use]
+    pub fn single(id: EntityId) -> Self {
+        Self {
+            constant: 0.0,
+            terms: vec![(1.0, id)],
+        }
+    }
+
+    /// Iterate over the parameter ids referenced by this bound's terms.
+    pub fn params(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.terms.iter().map(|&(_, id)| id)
+    }
+}
+
 /// Slack variable configuration for a generic constraint.
 ///
 /// An enabled slack lets the constraint be violated at a cost (entering the LP
@@ -514,14 +546,14 @@ pub struct GenericConstraint {
     pub expression: ConstraintExpression,
     /// Slack variable configuration.
     pub slack: SlackConfig,
-    /// Lower RHS bound named by a scalar parameter instead of a literal. When
-    /// `Some(id)`, the lower endpoint resolves through that parameter's
-    /// `(stage, block)` axis at LP build; the bounds parquet leaves this side
-    /// numeric-null. An endpoint is literal XOR symbolic.
-    pub bound_lower_ref: Option<EntityId>,
-    /// Upper RHS bound named by a scalar parameter; upper counterpart of
-    /// `bound_lower_ref`.
-    pub bound_upper_ref: Option<EntityId>,
+    /// Lower RHS bound as an affine remainder instead of a literal. When
+    /// `Some(bound)`, the lower endpoint resolves by summing `bound`'s
+    /// resolved terms at LP build; the bounds parquet leaves this side
+    /// numeric-null. An endpoint is literal XOR affine.
+    pub bound_lower_affine: Option<AffineBound>,
+    /// Upper RHS bound as an affine remainder; upper counterpart of
+    /// `bound_lower_affine`.
+    pub bound_upper_affine: Option<AffineBound>,
 }
 
 #[cfg(test)]
@@ -797,8 +829,8 @@ mod tests {
                 enabled: true,
                 penalty: Some(5_000.0),
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
 
         assert_eq!(gc.expression.terms.len(), 2);
@@ -1157,14 +1189,50 @@ mod tests {
                 enabled: true,
                 penalty: Some(5_000.0),
             },
-            bound_lower_ref: None,
-            bound_upper_ref: Some(EntityId(42)),
+            bound_lower_affine: None,
+            bound_upper_affine: Some(AffineBound::single(EntityId(42))),
         };
 
         let json = serde_json::to_string(&gc).unwrap();
         let deserialized: GenericConstraint = serde_json::from_str(&json).unwrap();
         assert_eq!(gc, deserialized);
         assert_eq!(deserialized.expression.terms.len(), 2);
-        assert_eq!(deserialized.bound_upper_ref, Some(EntityId(42)));
+        assert_eq!(
+            deserialized.bound_upper_affine,
+            Some(AffineBound::single(EntityId(42)))
+        );
+    }
+
+    #[test]
+    fn affine_bound_single_is_zero_constant_plus_one_term() {
+        let bound = AffineBound::single(EntityId(7));
+        assert_eq!(bound.constant, 0.0);
+        assert_eq!(bound.terms, vec![(1.0, EntityId(7))]);
+    }
+
+    #[test]
+    fn affine_bound_params_iterates_term_ids() {
+        let bound = AffineBound {
+            constant: 12.0,
+            terms: vec![(0.5, EntityId(7)), (-2.0, EntityId(9))],
+        };
+        assert_eq!(
+            bound.params().collect::<Vec<_>>(),
+            vec![EntityId(7), EntityId(9)]
+        );
+    }
+
+    /// The byte-neutral load-bearing identity for `AffineBound::single`: any
+    /// resolved parameter value `x` passed through `single`'s
+    /// `constant + coef * x` shape returns `x` unchanged in `f64` — the
+    /// arithmetic fact that lets a single-ref remainder stand in for the
+    /// bare parameter reference it replaces.
+    #[test]
+    fn affine_bound_single_resolves_to_the_bare_value() {
+        for x in [0.0_f64, 1.0, -3.5, 42.75, f64::MIN_POSITIVE, 1e300] {
+            let bound = AffineBound::single(EntityId(1));
+            let (coef, _) = bound.terms[0];
+            assert_eq!(bound.constant + coef * x, x);
+        }
     }
 }

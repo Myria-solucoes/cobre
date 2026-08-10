@@ -1952,8 +1952,8 @@ mod anticipated_generic_constraint_e2e {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
 
         let config = build_config();

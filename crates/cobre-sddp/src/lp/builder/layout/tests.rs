@@ -10,12 +10,13 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use cobre_core::{
-    Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ConstraintExpression,
-    ContractBlockBounds, EntityId, FillingConfig, GenericConstraint, Hydro, HydroBlockBounds,
-    HydroGenerationModel, HydroStageBounds, LineBlockBounds, NoiseMethod, PumpingBlockBounds,
-    PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
-    ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, SlackConfig,
-    Stage, StageRiskConfig, StageStateConfig, ThermalBlockBounds, ThermalStageBounds,
+    AffineBound, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology,
+    ConstraintExpression, ContractBlockBounds, EntityId, FillingConfig, GenericConstraint, Hydro,
+    HydroBlockBounds, HydroGenerationModel, HydroStageBounds, LineBlockBounds, NoiseMethod,
+    PumpingBlockBounds, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+    ScenarioSourceConfig, SlackConfig, Stage, StageRiskConfig, StageStateConfig,
+    ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -121,8 +122,8 @@ impl ZeroEntityFixtures {
                 enabled: true,
                 penalty: Some(10.0),
             },
-            bound_lower_ref: None,
-            bound_upper_ref: Some(EntityId(42)),
+            bound_lower_affine: None,
+            bound_upper_affine: Some(AffineBound::single(EntityId(42))),
         }];
         let id_map: HashMap<i32, usize> = [(5, 0)].into_iter().collect();
         self.resolved_generic_bounds = ResolvedGenericConstraintBounds::new(

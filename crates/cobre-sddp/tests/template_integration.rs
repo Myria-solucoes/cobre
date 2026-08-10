@@ -2253,8 +2253,8 @@ fn make_constraint_with_expr(
             enabled: slack_enabled,
             penalty: if slack_enabled { Some(5000.0) } else { None },
         },
-        bound_lower_ref: None,
-        bound_upper_ref: None,
+        bound_lower_affine: None,
+        bound_upper_affine: None,
     }
 }
 

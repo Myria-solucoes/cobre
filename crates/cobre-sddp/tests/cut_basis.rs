@@ -2272,8 +2272,8 @@ mod range_warm_start_determinism {
                 description: None,
                 expression: thermal_generation_expr(),
                 slack: no_slack(),
-                bound_lower_ref: None,
-                bound_upper_ref: None,
+                bound_lower_affine: None,
+                bound_upper_affine: None,
             },
             GenericConstraint {
                 id: EntityId(2),
@@ -2281,8 +2281,8 @@ mod range_warm_start_determinism {
                 description: None,
                 expression: thermal_generation_expr(),
                 slack: no_slack(),
-                bound_lower_ref: None,
-                bound_upper_ref: None,
+                bound_lower_affine: None,
+                bound_upper_affine: None,
             },
             GenericConstraint {
                 id: EntityId(3),
@@ -2290,8 +2290,8 @@ mod range_warm_start_determinism {
                 description: None,
                 expression: thermal_generation_expr(),
                 slack: no_slack(),
-                bound_lower_ref: None,
-                bound_upper_ref: None,
+                bound_lower_affine: None,
+                bound_upper_affine: None,
             },
         ]
     }
@@ -2325,8 +2325,8 @@ mod range_warm_start_determinism {
                 description: None,
                 expression: thermal_generation_expr(),
                 slack: no_slack(),
-                bound_lower_ref: None,
-                bound_upper_ref: None,
+                bound_lower_affine: None,
+                bound_upper_affine: None,
             }];
             let id_map: HashMap<i32, usize> = [(1, 0)].into_iter().collect();
             let rows: Vec<RawBoundRow> = vec![
@@ -2345,8 +2345,8 @@ mod range_warm_start_determinism {
                     description: None,
                     expression: thermal_generation_expr(),
                     slack: no_slack(),
-                    bound_lower_ref: None,
-                    bound_upper_ref: None,
+                    bound_lower_affine: None,
+                    bound_upper_affine: None,
                 },
                 GenericConstraint {
                     id: EntityId(2),
@@ -2354,8 +2354,8 @@ mod range_warm_start_determinism {
                     description: None,
                     expression: thermal_generation_expr(),
                     slack: no_slack(),
-                    bound_lower_ref: None,
-                    bound_upper_ref: None,
+                    bound_lower_affine: None,
+                    bound_upper_affine: None,
                 },
             ];
             let id_map: HashMap<i32, usize> = [(1, 0), (2, 1)].into_iter().collect();

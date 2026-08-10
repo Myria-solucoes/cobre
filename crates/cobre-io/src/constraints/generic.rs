@@ -35,7 +35,10 @@
 //!              | coefficient '*' '@' name                (named-expression reference, scaled)
 //!              | '@' name                                (named-expression reference)
 //!              | coefficient '*' variable
+//!              | coefficient '*' group
+//!              | group
 //!              | variable
+//! group      ::= '(' term (('+' | '-') term)* ')'
 //! variable   ::= var_name '(' entity_id (',' block_id)? (',' 'bus' '=' bus_id)? ')'
 //! ```
 //!
@@ -46,6 +49,13 @@
 //! @name` with no trailing variable, is a named-expression reference, resolved
 //! against the file's own `expressions` table, not `name_to_id`. `@param * @name`
 //! (two references in one term) is rejected — it has no linear core representation.
+//!
+//! A `group` — bare, or scaled by a leading literal `coefficient '*'` — distributes
+//! that coefficient into every inner term's scale at parse time (nesting to
+//! arbitrary depth), yielding the same flat term list as the hand-expanded form; a
+//! `group` may itself contain any `term` form, including nested groups. Only a
+//! literal coefficient may scale a `group` — `@param * (...)` is rejected for the
+//! same reason as `@param * @name`.
 //!
 //! An optional top-level `expressions` array declares named linear expressions
 //! (see [`parse_named_expressions`]); a constraint or another expression
@@ -89,7 +99,8 @@
 //! - Block ID validity for the referenced stage — Layer 3/5.
 
 use cobre_core::{
-    ConstraintExpression, EntityId, GenericConstraint, Line, LinearTerm, SlackConfig, VariableRef,
+    AffineBound, ConstraintExpression, EntityId, GenericConstraint, Line, LinearTerm, SlackConfig,
+    VariableRef,
 };
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -474,22 +485,20 @@ fn convert(
             penalty: c.slack.penalty,
         };
 
-        let bound_lower_ref =
-            resolve_bound_ref(c.bound_lower_ref.as_deref(), name_to_id).map_err(|message| {
-                LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("constraints[{i}].bound_lower_ref"),
-                    message,
-                }
-            })?;
-        let bound_upper_ref =
-            resolve_bound_ref(c.bound_upper_ref.as_deref(), name_to_id).map_err(|message| {
-                LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("constraints[{i}].bound_upper_ref"),
-                    message,
-                }
-            })?;
+        let bound_lower_affine = resolve_bound_ref(c.bound_lower_ref.as_deref(), name_to_id)
+            .map_err(|message| LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("constraints[{i}].bound_lower_ref"),
+                message,
+            })?
+            .map(AffineBound::single);
+        let bound_upper_affine = resolve_bound_ref(c.bound_upper_ref.as_deref(), name_to_id)
+            .map_err(|message| LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("constraints[{i}].bound_upper_ref"),
+                message,
+            })?
+            .map(AffineBound::single);
 
         let mut expression = ConstraintExpression { terms };
         expression.canonicalize();
@@ -500,8 +509,8 @@ fn convert(
             description: c.description,
             expression,
             slack,
-            bound_lower_ref,
-            bound_upper_ref,
+            bound_lower_affine,
+            bound_upper_affine,
         });
     }
 
@@ -739,8 +748,8 @@ fn parse_terms(
         }
     }
 
-    let (term, next_pos) = parse_single_term(tokens, pos, sign, name_to_id, line_index)?;
-    terms.push(term);
+    let (mut group, next_pos) = parse_single_term(tokens, pos, sign, name_to_id, line_index)?;
+    terms.append(&mut group);
     pos = next_pos;
 
     while pos < tokens.len() {
@@ -755,26 +764,31 @@ fn parse_terms(
         };
         pos += 1;
 
-        let (term, next_pos) = parse_single_term(tokens, pos, op_sign, name_to_id, line_index)?;
-        terms.push(term);
+        let (mut group, next_pos) =
+            parse_single_term(tokens, pos, op_sign, name_to_id, line_index)?;
+        terms.append(&mut group);
         pos = next_pos;
     }
 
     Ok(terms)
 }
 
-/// Parse one term starting at `tokens[pos]` with the given sign prefix, returning the
-/// [`ParsedTerm`] and the token position after the term.
+/// Parse one term starting at `tokens[pos]` with the given sign prefix, returning
+/// the term(s) it expands to — more than one only for a parenthesized group — and
+/// the token position after the term.
 ///
 /// An `@name` followed by `*` is a scalar-parameter coefficient; an `@name` with no
-/// trailing `*` (standalone or after `coefficient *`) is a named-expression reference.
+/// trailing `*` (standalone or after `coefficient *`) is a named-expression
+/// reference. A parenthesized group — bare, or preceded by `coefficient '*'` —
+/// distributes its leading coefficient into every inner term via
+/// [`distribute_into_group`] (module doc grammar).
 fn parse_single_term(
     tokens: &[Token],
     pos: usize,
     sign: f64,
     name_to_id: &HashMap<String, EntityId>,
     line_index: &LineBusPairIndex,
-) -> Result<(ParsedTerm, usize), String> {
+) -> Result<(Vec<ParsedTerm>, usize), String> {
     if pos >= tokens.len() {
         return Err(format!(
             "unexpected end of expression: expected a term at position {pos}"
@@ -801,16 +815,25 @@ fn parse_single_term(
             let after_star = next + 1;
             if after_star >= tokens.len() {
                 return Err(
-                    "expected variable name or @parameter after '*', got end of expression"
+                    "expected variable name, @parameter, or '(' after '*', got end of expression"
                         .to_string(),
                 );
+            }
+
+            if tokens[after_star] == Token::LParen {
+                let (group, end_pos) =
+                    parse_group_terms(tokens, after_star, name_to_id, line_index)?;
+                return Ok((distribute_into_group(group, literal), end_pos));
             }
 
             if let Token::ParamRef(name) = &tokens[after_star] {
                 let star2 = after_star + 1;
                 if star2 < tokens.len() && tokens[star2] == Token::Star {
-                    let id = resolve_param_ref(name, name_to_id)?;
                     let var_pos = star2 + 1;
+                    if tokens.get(var_pos) == Some(&Token::LParen) {
+                        return Err(param_scaled_group_error(name));
+                    }
+                    let id = resolve_param_ref(name, name_to_id)?;
                     if let Some(Token::ParamRef(second)) = tokens.get(var_pos) {
                         return Err(format!(
                             "only one @parameter reference is allowed per term; found \"@{name}\" and \"@{second}\""
@@ -819,19 +842,19 @@ fn parse_single_term(
                     let (variable, orientation, end_pos) =
                         parse_variable_ref(tokens, var_pos, line_index)?;
                     Ok((
-                        ParsedTerm::Flat(LinearTerm::parameter(
+                        vec![ParsedTerm::Flat(LinearTerm::parameter(
                             id,
                             literal * orientation,
                             variable,
-                        )),
+                        ))],
                         end_pos,
                     ))
                 } else {
                     Ok((
-                        ParsedTerm::Ref {
+                        vec![ParsedTerm::Ref {
                             name: name.clone(),
                             scale: literal,
-                        },
+                        }],
                         after_star + 1,
                     ))
                 }
@@ -839,7 +862,10 @@ fn parse_single_term(
                 let (variable, orientation, end_pos) =
                     parse_variable_ref(tokens, after_star, line_index)?;
                 Ok((
-                    ParsedTerm::Flat(LinearTerm::literal(literal * orientation, variable)),
+                    vec![ParsedTerm::Flat(LinearTerm::literal(
+                        literal * orientation,
+                        variable,
+                    ))],
                     end_pos,
                 ))
             }
@@ -847,8 +873,11 @@ fn parse_single_term(
         Token::ParamRef(name) => {
             let star = pos + 1;
             if star < tokens.len() && tokens[star] == Token::Star {
-                let id = resolve_param_ref(name, name_to_id)?;
                 let var_pos = star + 1;
+                if tokens.get(var_pos) == Some(&Token::LParen) {
+                    return Err(param_scaled_group_error(name));
+                }
+                let id = resolve_param_ref(name, name_to_id)?;
                 if var_pos >= tokens.len() {
                     return Err(format!(
                         "parameter \"@{name}\" must multiply a variable, e.g. \"@{name} * hydro_generation(0)\""
@@ -862,15 +891,19 @@ fn parse_single_term(
                 let (variable, orientation, end_pos) =
                     parse_variable_ref(tokens, var_pos, line_index)?;
                 Ok((
-                    ParsedTerm::Flat(LinearTerm::parameter(id, sign * orientation, variable)),
+                    vec![ParsedTerm::Flat(LinearTerm::parameter(
+                        id,
+                        sign * orientation,
+                        variable,
+                    ))],
                     end_pos,
                 ))
             } else {
                 Ok((
-                    ParsedTerm::Ref {
+                    vec![ParsedTerm::Ref {
                         name: name.clone(),
                         scale: sign,
-                    },
+                    }],
                     pos + 1,
                 ))
             }
@@ -878,14 +911,107 @@ fn parse_single_term(
         Token::Ident(_) => {
             let (variable, orientation, end_pos) = parse_variable_ref(tokens, pos, line_index)?;
             Ok((
-                ParsedTerm::Flat(LinearTerm::literal(sign * orientation, variable)),
+                vec![ParsedTerm::Flat(LinearTerm::literal(
+                    sign * orientation,
+                    variable,
+                ))],
                 end_pos,
             ))
         }
+        Token::LParen => {
+            let (group, end_pos) = parse_group_terms(tokens, pos, name_to_id, line_index)?;
+            Ok((distribute_into_group(group, sign), end_pos))
+        }
         other => Err(format!(
-            "expected a coefficient or variable name at position {pos}, got {other:?}"
+            "expected a coefficient, variable name, or '(' at position {pos}, got {other:?}"
         )),
     }
+}
+
+/// Parse a parenthesized group `'(' term (('+'|'-') term)* ')'` starting at
+/// `tokens[pos]` (the `'('`), returning the un-distributed inner terms and the
+/// position after the matching `')'`. The caller folds the group's leading
+/// coefficient in via [`distribute_into_group`].
+fn parse_group_terms(
+    tokens: &[Token],
+    pos: usize,
+    name_to_id: &HashMap<String, EntityId>,
+    line_index: &LineBusPairIndex,
+) -> Result<(Vec<ParsedTerm>, usize), String> {
+    let mut cursor = pos + 1;
+
+    if tokens.get(cursor) == Some(&Token::RParen) {
+        return Err(format!("empty parenthesized group at position {pos}"));
+    }
+
+    let mut sign: f64 = 1.0;
+    match tokens.get(cursor) {
+        Some(Token::Plus) => cursor += 1,
+        Some(Token::Minus) => {
+            sign = -1.0;
+            cursor += 1;
+        }
+        _ => {}
+    }
+
+    let (mut terms, next_pos) = parse_single_term(tokens, cursor, sign, name_to_id, line_index)?;
+    cursor = next_pos;
+
+    loop {
+        match tokens.get(cursor) {
+            Some(Token::RParen) => {
+                cursor += 1;
+                break;
+            }
+            Some(Token::Plus | Token::Minus) => {
+                let op_sign = if tokens[cursor] == Token::Plus {
+                    1.0
+                } else {
+                    -1.0
+                };
+                cursor += 1;
+                let (mut group, next_pos) =
+                    parse_single_term(tokens, cursor, op_sign, name_to_id, line_index)?;
+                terms.append(&mut group);
+                cursor = next_pos;
+            }
+            Some(other) => {
+                return Err(format!(
+                    "expected '+', '-', or ')' inside parenthesized group opened at position {pos}, got {other:?} at position {cursor}"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "unexpected end of expression: expected ')' to close parenthesized group opened at position {pos}"
+                ));
+            }
+        }
+    }
+
+    Ok((terms, cursor))
+}
+
+/// Multiply `coeff` into every inner term of a parsed group — [`LinearTerm::scale`]
+/// for a [`ParsedTerm::Flat`], the reference `scale` for a [`ParsedTerm::Ref`] — the
+/// same rule the named-expression reference substitution behind [`inline`] uses:
+/// coefficient kind preserved, duplicates left un-merged.
+fn distribute_into_group(mut terms: Vec<ParsedTerm>, coeff: f64) -> Vec<ParsedTerm> {
+    for term in &mut terms {
+        match term {
+            ParsedTerm::Flat(lt) => lt.scale *= coeff,
+            ParsedTerm::Ref { scale, .. } => *scale *= coeff,
+        }
+    }
+    terms
+}
+
+/// The `@param * (` rejection: a parenthesized group has no flat linear-core
+/// representation when scaled by a runtime parameter, mirroring the `@param *
+/// @name` precedent — only a literal coefficient may scale a group.
+fn param_scaled_group_error(name: &str) -> String {
+    format!(
+        "parameter \"@{name}\" cannot scale a parenthesized group: a group takes only a literal coefficient, not \"@{name} * (...)\""
+    )
 }
 
 /// Look up `name` in `name_to_id`, returning its [`EntityId`] or a descriptive error.
@@ -1762,6 +1888,204 @@ mod tests {
         );
     }
 
+    // ── Parenthesized group unit tests ────────────────────────────────────────
+
+    /// A distributed group's terms equal the hand-flattened form's terms, each on
+    /// effective coefficient (`coefficient * scale`) and variable.
+    #[test]
+    fn test_expr_group_distribution_equals_hand_flattened() {
+        let grouped = parse_expression(
+            "2 * (hydro_generation(0) - hydro_generation(1))",
+            &HashMap::new(),
+        )
+        .unwrap();
+        let flattened = parse_expression(
+            "2 * hydro_generation(0) - 2 * hydro_generation(1)",
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(grouped.terms.len(), flattened.terms.len());
+        for (g, f) in grouped.terms.iter().zip(flattened.terms.iter()) {
+            assert!(
+                (effective(g) - effective(f)).abs() < f64::EPSILON,
+                "effective coefficients differ: {} vs {}",
+                effective(g),
+                effective(f)
+            );
+            assert_eq!(g.variable, f.variable);
+        }
+    }
+
+    /// Positive inner signs inside a group distribute the same way as negative
+    /// ones.
+    #[test]
+    fn test_expr_group_distribution_positive_inner_signs() {
+        let expr = parse_expression(
+            "3 * (hydro_generation(0) + hydro_generation(1))",
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(expr.terms.len(), 2);
+        assert!((effective(&expr.terms[0]) - 3.0).abs() < f64::EPSILON);
+        assert!((effective(&expr.terms[1]) - 3.0).abs() < f64::EPSILON);
+    }
+
+    /// Nested groups multiply coefficients inward — `2 * (a - 3 * (b + c))`
+    /// distributes `2` then `2*3` — term 0 keeps effective coefficient `2.0`,
+    /// terms 1 and 2 land on `-6.0`.
+    #[test]
+    fn test_expr_group_nested_distribution_multiplies_inward() {
+        let expr = parse_expression(
+            "2 * (hydro_generation(0) - 3 * (hydro_generation(1) + hydro_generation(2)))",
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(expr.terms.len(), 3);
+        assert!((effective(&expr.terms[0]) - 2.0).abs() < f64::EPSILON);
+        assert_eq!(
+            expr.terms[0].variable,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(0),
+                block_id: None,
+                bus_id: None,
+            }
+        );
+        assert!((effective(&expr.terms[1]) - (-6.0)).abs() < f64::EPSILON);
+        assert_eq!(
+            expr.terms[1].variable,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(1),
+                block_id: None,
+                bus_id: None,
+            }
+        );
+        assert!((effective(&expr.terms[2]) - (-6.0)).abs() < f64::EPSILON);
+        assert_eq!(
+            expr.terms[2].variable,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(2),
+                block_id: None,
+                bus_id: None,
+            }
+        );
+    }
+
+    /// A bare group with the implicit `1.0` coefficient reproduces the
+    /// un-grouped term list unchanged.
+    #[test]
+    fn test_expr_bare_group_implicit_unit_coefficient() {
+        let grouped = parse_expression(
+            "(hydro_generation(0) + hydro_generation(1))",
+            &HashMap::new(),
+        )
+        .unwrap();
+        let flat =
+            parse_expression("hydro_generation(0) + hydro_generation(1)", &HashMap::new()).unwrap();
+        assert_eq!(grouped.terms, flat.terms);
+    }
+
+    /// A leading `-` before a bare group negates every inner term.
+    #[test]
+    fn test_expr_negated_bare_group() {
+        let expr = parse_expression(
+            "hydro_generation(5) - (hydro_generation(0) + hydro_generation(1))",
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(expr.terms.len(), 3);
+        assert!((effective(&expr.terms[1]) - (-1.0)).abs() < f64::EPSILON);
+        assert!((effective(&expr.terms[2]) - (-1.0)).abs() < f64::EPSILON);
+    }
+
+    /// `@param * (...)` is rejected, naming the parameter and stating a group
+    /// takes only a literal coefficient.
+    #[test]
+    fn test_expr_param_scaled_group_is_rejected() {
+        let tbl = one_param_table();
+        let err = parse_expression("@rho * (hydro_generation(0) + hydro_generation(1))", &tbl)
+            .unwrap_err();
+        assert!(
+            err.contains("rho"),
+            "error should name the parameter, got: {err}"
+        );
+        assert!(
+            err.contains("literal coefficient"),
+            "error should state a group takes only a literal coefficient, got: {err}"
+        );
+    }
+
+    /// `coefficient * @param * (...)` is rejected the same way as the bare
+    /// `@param * (...)` form.
+    #[test]
+    fn test_expr_literal_times_param_scaled_group_is_rejected() {
+        let tbl = one_param_table();
+        let err = parse_expression(
+            "2.0 * @rho * (hydro_generation(0) + hydro_generation(1))",
+            &tbl,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("rho"),
+            "error should name the parameter, got: {err}"
+        );
+        assert!(
+            err.contains("literal coefficient"),
+            "error should state a group takes only a literal coefficient, got: {err}"
+        );
+    }
+
+    /// An empty group `()` is rejected.
+    #[test]
+    fn test_expr_empty_group_is_rejected() {
+        let err = parse_expression("3 * ()", &HashMap::new()).unwrap_err();
+        assert!(
+            err.contains("empty parenthesized group"),
+            "expected empty group error, got: {err}"
+        );
+    }
+
+    /// An unterminated group (no closing `)`) is rejected.
+    #[test]
+    fn test_expr_unterminated_group_is_rejected() {
+        let err = parse_expression(
+            "hydro_generation(0) + (hydro_generation(1) + hydro_generation(2)",
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("expected ')'") || err.contains("unexpected end"),
+            "expected unterminated-group error, got: {err}"
+        );
+    }
+
+    /// A stray token where an operator or `)` is expected inside a group is
+    /// rejected.
+    #[test]
+    fn test_expr_group_stray_token_is_rejected() {
+        let err = parse_expression(
+            "2 * (hydro_generation(0) hydro_generation(1))",
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("expected '+', '-', or ')'"),
+            "expected stray-token-in-group error, got: {err}"
+        );
+    }
+
+    /// A group containing a `@param * variable` term distributes the literal
+    /// coefficient into the term's `scale` while preserving the `Parameter`
+    /// coefficient kind.
+    #[test]
+    fn test_expr_group_with_param_term_preserves_parameter_kind() {
+        let tbl = one_param_table();
+        let expr = parse_expression("2.0 * (@rho * hydro_generation(0))", &tbl).unwrap();
+        assert_eq!(expr.terms.len(), 1);
+        assert_eq!(param_id(&expr.terms[0]), EntityId(7));
+        assert!((expr.terms[0].scale - 2.0).abs() < f64::EPSILON);
+    }
+
     /// All stage-only and block-capable variable names parse to the right
     /// [`VariableRef`]. Covers the 21 entity-keyed keywords (the stage-level
     /// `anticipated_decision` is exercised by its own dedicated tests).
@@ -2397,8 +2721,8 @@ mod tests {
         );
     }
 
-    /// A present `bound_upper_ref` resolves to the named parameter's `EntityId`;
-    /// an absent `bound_lower_ref` stays `None`.
+    /// A present `bound_upper_ref` resolves to `Some(AffineBound::single(id))` for
+    /// the named parameter; an absent `bound_lower_ref` stays `None`.
     #[test]
     fn test_parse_bound_upper_ref_resolves_to_entity_id() {
         let json = r#"{
@@ -2417,8 +2741,11 @@ mod tests {
         let result =
             parse_generic_constraints(f.path(), &tbl, &LineBusPairIndex::default()).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].bound_upper_ref, Some(EntityId(7)));
-        assert_eq!(result[0].bound_lower_ref, None);
+        assert_eq!(
+            result[0].bound_upper_affine,
+            Some(AffineBound::single(EntityId(7)))
+        );
+        assert_eq!(result[0].bound_lower_affine, None);
     }
 
     /// A leading `@` on a bound reference is accepted and stripped, resolving to the
@@ -2440,7 +2767,10 @@ mod tests {
         let tbl = one_param_table();
         let result =
             parse_generic_constraints(f.path(), &tbl, &LineBusPairIndex::default()).unwrap();
-        assert_eq!(result[0].bound_lower_ref, Some(EntityId(7)));
+        assert_eq!(
+            result[0].bound_lower_affine,
+            Some(AffineBound::single(EntityId(7)))
+        );
     }
 
     /// A bound reference naming a parameter absent from `name_to_id` is a
@@ -2487,8 +2817,8 @@ mod tests {
             parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
                 .unwrap();
         for gc in &result {
-            assert_eq!(gc.bound_lower_ref, None);
-            assert_eq!(gc.bound_upper_ref, None);
+            assert_eq!(gc.bound_lower_affine, None);
+            assert_eq!(gc.bound_upper_affine, None);
         }
     }
 
@@ -3190,6 +3520,32 @@ mod tests {
                 block_id: None,
             }
         );
+    }
+
+    /// A group's inner term list may contain a standalone `@name` reference,
+    /// exactly as a top-level term list may: the group's leading coefficient
+    /// distributes into the reference's own `scale`, composing with the
+    /// reference's own expansion at inline time.
+    #[test]
+    fn parse_generic_constraints_group_distributes_into_named_reference() {
+        let json = r#"{
+  "expressions": [
+    { "name": "fnese", "expression": "hydro_generation(0) + hydro_generation(1)" }
+  ],
+  "constraints": [
+    { "id": 0, "name": "c0", "expression": "2.0 * (@fnese - hydro_generation(2))", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(json);
+        let result =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap();
+        assert_eq!(result.len(), 1);
+        let terms = &result[0].expression.terms;
+        assert_eq!(terms.len(), 3);
+        assert!((effective(&terms[0]) - 2.0).abs() < 1e-10);
+        assert!((effective(&terms[1]) - 2.0).abs() < 1e-10);
+        assert!((effective(&terms[2]) - (-2.0)).abs() < 1e-10);
     }
 
     /// Composition resolves transitively: a constraint referencing `outer`, which

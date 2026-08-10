@@ -1978,8 +1978,8 @@ mod parameter_resolution_tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         }
     }
 
@@ -2008,8 +2008,8 @@ mod parameter_resolution_tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         }
     }
 
@@ -4168,8 +4168,8 @@ mod pumping_water_tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         let fixtures = PumpFixtures::new_with_contracts(
             vec![fixture_hydro(1), fixture_hydro(2)],
@@ -4372,8 +4372,8 @@ mod pumping_water_tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
 
         // Run the production assemble sequence into a CSC for a fixture. Takes the
@@ -7217,8 +7217,8 @@ mod pumping_water_tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
 
         let fixtures = PumpFixtures::new(
@@ -7311,8 +7311,8 @@ mod pumping_water_tests {
                 enabled: true,
                 penalty: Some(penalty),
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
 
         let fixtures = PumpFixtures::new(

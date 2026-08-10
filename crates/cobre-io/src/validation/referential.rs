@@ -797,16 +797,19 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
         }
     }
 
-    // Which endpoints each constraint fills symbolically (via a bound reference on
+    // Which endpoints each constraint fills symbolically (via an affine bound on
     // the constraint object), keyed by constraint id: (has_lower_ref, has_upper_ref).
-    // An endpoint is literal (a numeric parquet column) XOR symbolic (a reference).
+    // An endpoint is literal (a numeric parquet column) XOR affine (a remainder).
     let constraint_refs: HashMap<i32, (bool, bool)> = data
         .generic_constraints
         .iter()
         .map(|gc| {
             (
                 gc.id.0,
-                (gc.bound_lower_ref.is_some(), gc.bound_upper_ref.is_some()),
+                (
+                    gc.bound_lower_affine.is_some(),
+                    gc.bound_upper_affine.is_some(),
+                ),
             )
         })
         .collect();
@@ -899,7 +902,7 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
         .map(|row| row.constraint_id)
         .collect();
     for gc in &data.generic_constraints {
-        if (gc.bound_lower_ref.is_some() || gc.bound_upper_ref.is_some())
+        if (gc.bound_lower_affine.is_some() || gc.bound_upper_affine.is_some())
             && !constraints_with_rows.contains(&gc.id.0)
         {
             ctx.add_error(
@@ -2264,7 +2267,7 @@ mod tests {
         lower_ref: Option<i32>,
         upper_ref: Option<i32>,
     ) -> cobre_core::GenericConstraint {
-        use cobre_core::{ConstraintExpression, GenericConstraint, SlackConfig};
+        use cobre_core::{AffineBound, ConstraintExpression, GenericConstraint, SlackConfig};
 
         GenericConstraint {
             id: EntityId(id),
@@ -2275,8 +2278,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: lower_ref.map(EntityId),
-            bound_upper_ref: upper_ref.map(EntityId),
+            bound_lower_affine: lower_ref.map(|id| AffineBound::single(EntityId(id))),
+            bound_upper_affine: upper_ref.map(|id| AffineBound::single(EntityId(id))),
         }
     }
 
@@ -2897,8 +2900,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2956,8 +2959,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -3012,8 +3015,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -3068,8 +3071,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -3162,8 +3165,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -3232,8 +3235,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         let gc_generation = GenericConstraint {
             id: EntityId::from(2),
@@ -3253,8 +3256,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc_turbined, gc_generation];
 
@@ -3305,8 +3308,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -3368,8 +3371,8 @@ mod tests {
                 enabled: false,
                 penalty: None,
             },
-            bound_lower_ref: None,
-            bound_upper_ref: None,
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
