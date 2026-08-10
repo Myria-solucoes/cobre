@@ -215,6 +215,7 @@ fn base_parsed_data(stages: StagesData) -> ParsedData {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         },
         buses: vec![Bus {
             id: EntityId::from(1),

@@ -413,6 +413,10 @@ mod tests {
                     message.contains("end_date must be after start_date"),
                     "got: {message}"
                 );
+                assert!(
+                    message.contains("hydro_id 1"),
+                    "message should name the entity, got: {message}"
+                );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }

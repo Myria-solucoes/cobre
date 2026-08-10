@@ -1557,6 +1557,7 @@ mod tests {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         let system = SystemBuilder::new()
@@ -1986,6 +1987,7 @@ mod tests {
                 end_date: NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
                 value_m3s: 320.0,
             }],
+            future_anticipated_deliveries: vec![],
         };
 
         let generic_constraints = vec![GenericConstraint {

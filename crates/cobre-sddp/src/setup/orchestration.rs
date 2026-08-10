@@ -347,6 +347,7 @@ impl StudySetup {
                 noise_dim: 0,
                 n_anticipated: self.stage_data.state.n_anticipated,
                 k_max: self.stage_data.state.k_max,
+                n_commitment: self.stage_data.state.n_commitment,
             },
             solver_factory,
         )?;

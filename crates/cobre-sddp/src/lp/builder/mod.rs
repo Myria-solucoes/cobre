@@ -41,6 +41,7 @@
 //! [`cobre_core::commissioning::Phase`] mask.
 
 mod columns;
+pub(crate) mod commitment_block;
 pub(crate) mod commitment_reconcile;
 pub(crate) mod delivery_ring;
 mod entries;
@@ -65,8 +66,8 @@ pub use template::{StageGeometry, StageTemplates, build_stage_templates};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
 pub(crate) use scaling::{
-    apply_anticipated_col_scale_unscale, apply_col_scale, apply_row_scale, compute_col_scale,
-    compute_row_scale,
+    apply_anticipated_col_scale_unscale, apply_col_scale, apply_commitment_block_col_scale_unscale,
+    apply_row_scale, compute_col_scale, compute_row_scale,
 };
 
 // ---------------------------------------------------------------------------

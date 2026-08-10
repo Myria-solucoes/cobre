@@ -285,6 +285,32 @@ mod tests {
         )
     }
 
+    /// Like [`finalized`] but with a declared terminal commitment block.
+    fn finalized_with_commitment_block(
+        hydro_count: usize,
+        max_par_order: usize,
+        n_anticipated: usize,
+        k_max: usize,
+        anticipated_lead_stages: Vec<usize>,
+        n_commitment: usize,
+        commitment_decider_stage: Vec<usize>,
+    ) -> StateSpace {
+        let lag_counts = vec![max_par_order; hydro_count];
+        StateSpace::new_with_commitment_block(
+            hydro_count,
+            max_par_order,
+            0,
+            Vec::new(),
+            n_anticipated,
+            k_max,
+            anticipated_lead_stages,
+            &lag_counts,
+            n_commitment,
+            commitment_decider_stage,
+            vec![cobre_core::EntityId(0); n_commitment],
+        )
+    }
+
     /// Like [`finalized`] but with a declared bucket block.
     fn finalized_with_transit_buckets(
         hydro_count: usize,
@@ -614,6 +640,53 @@ mod tests {
             rendered, global_render,
             "B==0 render must reproduce the global nonzero_state_indices render"
         );
+    }
+
+    // ── Terminal commitment block tests ───────────────────────────────────────
+
+    /// AC1: a declared commitment block joins the projection — `n_slots()`
+    /// grows by exactly the block's width over the pre-block dimension, and
+    /// every block column is present, mirroring the always-included bucket
+    /// and anticipated blocks.
+    #[test]
+    fn commitment_block_joins_the_projection() {
+        let pre_block = finalized(2, 1, 1, 2, vec![2]);
+        let with_block = finalized_with_commitment_block(2, 1, 1, 2, vec![2], 2, vec![0, 1]);
+
+        let cut_pre = CutStateProjection::new(&pre_block, ALL_ENABLED);
+        let cut_with = CutStateProjection::new(&with_block, ALL_ENABLED);
+
+        assert_eq!(
+            cut_with.n_slots(),
+            cut_pre.n_slots() + 2,
+            "n_slots must grow by exactly the block's window count"
+        );
+        assert_eq!(cut_with.n_slots(), with_block.n_state);
+
+        for j in with_block.commitment_block_in.clone() {
+            assert_eq!(
+                cut_with.incoming_column(CutSlot::new(
+                    cut_pre.n_slots() + (j - with_block.commitment_block_in.start)
+                )),
+                InCol::new(j),
+                "commitment-block incoming slot {j} must appear in the projection"
+            );
+        }
+    }
+
+    /// Always included, ignoring [`StageStateConfig`]: the block stays in the
+    /// projection even under `STORAGE_ONLY`, the same "always included"
+    /// contract buckets and anticipated already carry.
+    #[test]
+    fn commitment_block_always_included_regardless_of_state_config() {
+        let global = finalized_with_commitment_block(2, 1, 0, 0, vec![], 2, vec![0, 1]);
+        let cut = CutStateProjection::new(&global, STORAGE_ONLY);
+
+        // storage (2) + commitment block (2), lag/anticipated/buckets absent.
+        assert_eq!(cut.n_slots(), 4);
+        for (i, j) in global.commitment_block_in.clone().enumerate() {
+            assert_eq!(cut.incoming_column(CutSlot::new(2 + i)), InCol::new(j));
+        }
     }
 }
 

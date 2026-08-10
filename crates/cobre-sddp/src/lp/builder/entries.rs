@@ -1537,6 +1537,7 @@ pub(super) fn build_stage_matrix_entries(
     fill_pumping_water_entries(ctx, stage, layout, &mut col_entries);
     fill_anticipated_state_out_def_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_anticipated_slot_definition_entries(layout, &mut col_entries);
+    super::commitment_block::fill_commitment_block_entries(layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
     fill_fpha_entries(ctx, stage, stage_idx, layout, &mut col_entries);

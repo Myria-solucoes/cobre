@@ -43,6 +43,7 @@ pub(super) fn fill_stage_columns(
     fill_anticipated_slot_columns(layout, bufs);
     fill_ar_lag_columns(layout, bufs);
     fill_anticipated_state_columns(layout, bufs);
+    super::commitment_block::fill_commitment_block_columns(layout, bufs);
     fill_theta_column(layout, bufs);
     fill_turbine_columns(ctx, stage, stage_idx, layout, bufs);
     fill_spillage_columns(ctx, stage, stage_idx, layout, bufs);

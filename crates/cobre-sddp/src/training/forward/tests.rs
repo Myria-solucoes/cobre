@@ -553,7 +553,7 @@ fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<M
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(state.n_state),
         scratch: ScratchBuffers {
             noise_buf: Vec::with_capacity(state.hydro_count),
@@ -2678,7 +2678,7 @@ fn forward_pass_load_noise_positive_realization() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
     let state = test_support::state_layout(1, 0);
-    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -2841,7 +2841,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
     let state = test_support::state_layout(1, 0);
-    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -3593,13 +3593,14 @@ mod dcs_forward {
             noise_dim: 1,
             n_anticipated: 0,
             k_max: 0,
+            n_commitment: 0,
         };
         let solver = ActiveSolver::new().expect("ActiveSolver::new()");
         SolverWorkspace::new(
             0,
             0,
             solver,
-            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             1,
             sizing,
         )
@@ -3985,12 +3986,13 @@ mod transit_bucket_copy_gap {
             noise_dim: 1,
             n_anticipated: 1,
             k_max: 1,
+            n_commitment: 0,
         };
         SolverWorkspace::new(
             0,
             0,
             MockSolver::always_ok(transit_bucket_solution()),
-            PatchBuffer::new(1, 1, 0, 0, 1, 1, 1),
+            PatchBuffer::new(1, 1, 0, 0, 1, 1, 1, 0),
             4,
             sizing,
         )

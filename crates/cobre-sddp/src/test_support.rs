@@ -1264,6 +1264,7 @@ fn fan_or_chain_system_ext(
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
 
     SystemBuilder::new()
@@ -1710,6 +1711,7 @@ pub fn capture_patched_node_template(setup: &StudySetup, node_pos: NodePos) -> S
         space.n_buckets,
         space.n_anticipated,
         space.k_max,
+        space.n_commitment,
     );
     let mut scratch = ScratchBuffers::new(WorkspaceSizing {
         hydro_count: space.hydro_count,
@@ -1726,6 +1728,7 @@ pub fn capture_patched_node_template(setup: &StudySetup, node_pos: NodePos) -> S
         noise_dim: 0,
         n_anticipated: space.n_anticipated,
         k_max: space.k_max,
+        n_commitment: space.n_commitment,
     });
 
     let raw_noise = oracle_raw_noise(setup, node_pos);

@@ -512,7 +512,7 @@ fn single_workspace_with_load_buses(
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0, 0),
         current_state: Vec::with_capacity(1),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -561,7 +561,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0), // N=1, L=0
+        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0), // N=1, L=0
         current_state: Vec::with_capacity(1),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -1563,7 +1563,7 @@ fn single_workspace_with_hydros(
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(hydro_count),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -2036,13 +2036,14 @@ mod dcs_simulation {
             noise_dim: 1,
             n_anticipated: 0,
             k_max: 0,
+            n_commitment: 0,
         };
         let solver = ActiveSolver::new().expect("ActiveSolver::new()");
         SolverWorkspace::new(
             0,
             0,
             solver,
-            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             1,
             sizing,
         )
@@ -2486,6 +2487,7 @@ mod anticipated_ring_matches_forward_propagation {
             noise_dim: 0,
             n_anticipated: 1,
             k_max: 2,
+            n_commitment: 0,
         }
     }
 
@@ -2503,7 +2505,7 @@ mod anticipated_ring_matches_forward_propagation {
             0,
             0,
             SequencedSolver::new(ring_sequence(num_cols)),
-            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2),
+            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2, 0),
             state.n_state,
             ring_sizing(state.n_state),
         );
@@ -2566,7 +2568,7 @@ mod anticipated_ring_matches_forward_propagation {
             0,
             0,
             SequencedSolver::new(ring_sequence(num_cols)),
-            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2),
+            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2, 0),
             state.n_state,
             ring_sizing(state.n_state),
         );

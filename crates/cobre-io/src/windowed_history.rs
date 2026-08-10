@@ -60,9 +60,9 @@ pub(crate) fn validate_windowed_records(
                 path: path.to_path_buf(),
                 field: format!("{surface_label}[{i}].end_date"),
                 message: format!(
-                    "{surface_label}[{i}]: end_date must be after start_date \
-                     (start_date={}, end_date={})",
-                    r.start_date, r.end_date
+                    "{surface_label}[{i}]: end_date must be after start_date for \
+                     {entity_label} {} (start_date={}, end_date={})",
+                    r.entity_id, r.start_date, r.end_date
                 ),
             });
         }
@@ -141,6 +141,10 @@ mod tests {
             LoadError::SchemaError { field, message, .. } => {
                 assert!(field.contains("end_date"));
                 assert!(message.contains("end_date must be after start_date"));
+                assert!(
+                    message.contains("hydro_id 1"),
+                    "message should name the entity, got: {message}"
+                );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
@@ -155,6 +159,10 @@ mod tests {
         match err {
             LoadError::SchemaError { message, .. } => {
                 assert!(message.contains("end_date must be after start_date"));
+                assert!(
+                    message.contains("hydro_id 1"),
+                    "message should name the entity, got: {message}"
+                );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }

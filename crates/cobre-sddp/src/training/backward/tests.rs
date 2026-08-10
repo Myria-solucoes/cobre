@@ -552,7 +552,7 @@ fn single_workspace<S: SolverInterface + Send>(
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -603,7 +603,7 @@ fn transit_bucket_only_workspace(
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(0, 0, 0, 0, n_buckets, 0, 0),
+        patch_buf: PatchBuffer::new(0, 0, 0, 0, n_buckets, 0, 0, 0),
         current_state: Vec::new(),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -2614,7 +2614,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver_1),
-        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -2732,7 +2732,7 @@ fn test_backward_pass_parallel_cut_determinism() {
             rank: 0,
             worker_id: idx,
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -3052,7 +3052,7 @@ fn backward_pass_load_patches_applied() {
     let state = test_support::state_layout(1, 0);
 
     // PatchBuffer: n_hydros=1, max_par_order=0, n_load_buses=1, max_blocks=1.
-    let patch_buf = PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, 1, 1, 0, 0, 0, 0);
 
     // Template: 2 rows (row 0 = state-fixing, row 1 = water-balance).
     // base_rows=[1] → inflow RHS row starts at index 1.
@@ -3244,7 +3244,7 @@ fn backward_pass_no_load_buses_unchanged() {
     let state = test_support::state_layout(1, 0);
 
     // PatchBuffer with no load buses: n_load_buses=0, max_blocks=1.
-    let patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0);
 
     let template = StageTemplate {
         num_cols: 3,
@@ -3426,7 +3426,7 @@ fn backward_pass_cut_coefficients_unaffected() {
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 200.0, 20.0);
     let state = test_support::state_layout(1, 0);
 
-    let patch_buf = PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, 1, 1, 0, 0, 0, 0);
 
     let template = StageTemplate {
         num_cols: 3,
@@ -3943,7 +3943,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             rank: 0,
             worker_id: i32::try_from(idx).expect("worker_id fits in i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -4315,7 +4315,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             rank: 0,
             worker_id: i32::try_from(idx).expect("idx fits in i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -4548,7 +4548,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             rank: 0,
             worker_id: i32::try_from(idx).expect("idx fits in i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -5347,7 +5347,7 @@ fn handshake_passes_with_local_backend() {
             rank: 0,
             worker_id: i32::try_from(idx).expect("idx fits i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -5794,13 +5794,14 @@ fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
         noise_dim: 1,
         n_anticipated: 0,
         k_max: 0,
+        n_commitment: 0,
     };
     let solver = ActiveSolver::new().expect("ActiveSolver::new()");
     vec![SolverWorkspace::new(
         0,
         0,
         solver,
-        PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+        PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
         1,
         sizing,
     )]

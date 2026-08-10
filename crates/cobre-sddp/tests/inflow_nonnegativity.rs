@@ -602,7 +602,16 @@ fn simulate_fixture(
         0,
         0,
         ActiveSolver::new().expect("ActiveSolver::new must succeed"),
-        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
+        PatchBuffer::new(
+            fx.state.hydro_count,
+            fx.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ),
         fx.state.n_state,
         WorkspaceSizing {
             hydro_count: fx.state.hydro_count,

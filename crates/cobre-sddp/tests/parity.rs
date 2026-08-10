@@ -1380,7 +1380,16 @@ mod determinism {
                     0,
                     i32::try_from(idx).expect("worker_id fits in i32"),
                     MockSolver3H::new(100.0),
-                    PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
+                    PatchBuffer::new(
+                        fx.state.hydro_count,
+                        fx.state.max_par_order,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ),
                     fx.state.n_state,
                     WorkspaceSizing {
                         hydro_count: fx.state.hydro_count,
@@ -2152,6 +2161,7 @@ mod water_travel_time_no_arc_byte_identity {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()

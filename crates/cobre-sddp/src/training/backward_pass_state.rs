@@ -2355,7 +2355,7 @@ mod tests {
             rank: 0,
             worker_id: 0,
             solver: ProfiledSolver::new(solver),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),

@@ -43,14 +43,21 @@ fn year_month_day_anchor(date: chrono::NaiveDate) -> i32 {
 /// Build the per-slot entity-identity manifest for one stage's cut pool: one
 /// [`EntitySlot`] per enabled cut-state dimension of `projection`.
 ///
-/// Slots are emitted in `projection`'s storage → lag → buckets → anticipated order, so slot
-/// `j` describes the entity owning positional coefficient `j` — the order a
-/// consumer matches the manifest against the cut coefficients. Each slot is
-/// classified by the global [`StateSpace`] region containing its incoming-state
-/// column ([`CutStateProjection::incoming_column`]), never by
-/// re-deriving column arithmetic.
+/// Slots are emitted in `projection`'s storage → lag → buckets → anticipated →
+/// commitment-block order, so slot `j` describes the entity owning positional
+/// coefficient `j` — the order a consumer matches the manifest against the cut
+/// coefficients. Each slot is classified by the global [`StateSpace`] region
+/// containing its incoming-state column ([`CutStateProjection::incoming_column`]),
+/// never by re-deriving column arithmetic.
 ///
-/// Each hydro-region slot's `was_active` comes from [`hydro_operating_active`].
+/// Each hydro-region slot's `was_active` comes from [`hydro_operating_active`]. A
+/// commitment-block slot reuses `EntityType::AnticipatedThermalState` (no new
+/// discriminant), keyed on its owning thermal's id with
+/// `subindex = k_max + local_window_index` — offset past the ring's own
+/// `[0, k_max)` domain so a thermal owning both ring slots and commitment
+/// windows never collides on `(entity_type, entity_id, subindex)`; its
+/// `delivery_date` is always the sentinel (real per-window dates are a
+/// separate concern this manifest does not resolve).
 ///
 /// # Panics (debug builds only)
 ///
@@ -140,6 +147,40 @@ pub fn build_stage_entity_manifest(
         }
     };
 
+    // Reuses the anticipated-thermal family (no new EntityType discriminant):
+    // `subindex = k_max + local_window_index`, where `local_window_index` is
+    // the count of prior windows sharing this owner in
+    // `commitment_window_thermal_id`'s canonical order. Offsetting past
+    // `[0, k_max)` — the ring's own subindex domain — is what keeps a thermal
+    // owning both ring slots and commitment windows collision-free on
+    // `(entity_type, entity_id, subindex)`; dropping the `k_max` offset would
+    // silently alias a commitment window onto a genuine ring slot.
+    let commitment_slot = |w: usize| -> EntitySlot {
+        let thermal_id = global_layout.commitment_window_thermal_id[w];
+        let local_window_index = global_layout.commitment_window_thermal_id[..w]
+            .iter()
+            .filter(|&&id| id == thermal_id)
+            .count();
+        let subindex = global_layout.k_max + local_window_index;
+        debug_assert!(
+            subindex >= global_layout.k_max,
+            "commitment-block subindex must land outside the ring's [0, k_max) domain"
+        );
+        let owning_thermal = anticipated_thermals.iter().find(|t| t.id == thermal_id);
+        debug_assert!(
+            owning_thermal.is_some(),
+            "commitment window {w}'s owning thermal {thermal_id:?} must be an anticipated thermal"
+        );
+        EntitySlot {
+            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_id: thermal_id.0,
+            subindex: subindex as u32,
+            was_active: owning_thermal
+                .is_some_and(|t| commissioning_active(t.entry_stage_id, t.exit_stage_id, stage_id)),
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        }
+    };
+
     let mut manifest = Vec::with_capacity(projection.n_slots());
     for j in 0..projection.n_slots() {
         let (region, offset) =
@@ -195,6 +236,7 @@ pub fn build_stage_entity_manifest(
                 }
             }
             StateRegion::Anticipated => anticipated_slot(offset),
+            StateRegion::CommitmentBlock => commitment_slot(offset),
         };
         manifest.push(slot);
     }
@@ -1149,6 +1191,96 @@ mod tests {
         assert_eq!(
             manifest[5].delivery_date, 20240501,
             "ℓ=2 plant slot 1 delivers at index 1 (2024-05)"
+        );
+    }
+
+    // -- Terminal commitment block: real manifest arm --
+
+    /// A declared commitment block joins the manifest with a real
+    /// `EntitySlot`: reused `AnticipatedThermalState` type, the owning
+    /// thermal's id, and the sentinel delivery date (real dates are a
+    /// separate concern this manifest does not resolve).
+    #[test]
+    fn commitment_block_slot_carries_real_identity_and_sentinel_date() {
+        let system = system_2h_1ant((None, None), (None, None));
+        let global = StateSpace::new_with_commitment_block(
+            2,
+            2,
+            0,
+            Vec::new(),
+            1,
+            2,
+            vec![2],
+            &[2, 2],
+            1,
+            vec![0],
+            vec![EntityId(1)],
+        );
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        // Layout N=2, L=2, A=1, k_max=2, W=1: storage 0..2, lag 2..6,
+        // anticipated 6..8, commitment block at 8.
+        assert_eq!(manifest.len(), 9);
+        let slot = &manifest[8];
+        assert_eq!(slot.entity_type, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE);
+        assert_eq!(slot.entity_id, 1, "commitment window owned by thermal 1");
+        assert_eq!(
+            slot.subindex, 2,
+            "k_max (2) + local_window_index (0), the sole window for this thermal"
+        );
+        assert_eq!(slot.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+    }
+
+    /// User-ratified subindex formula (`k_max + local_window_index`): a
+    /// thermal owning BOTH ring slots (`[0, k_max)`) and commitment-block
+    /// windows gets fully disjoint subindices on `(entity_type, entity_id)`
+    /// — the collision the `k_max` offset exists to forbid. Two windows for
+    /// the SAME thermal also get distinct subindices from each other.
+    #[test]
+    fn commitment_block_subindex_never_collides_with_ring_subindex() {
+        let system = system_2h_1ant((None, None), (None, None));
+        let global = StateSpace::new_with_commitment_block(
+            2,
+            2,
+            0,
+            Vec::new(),
+            1,
+            2,
+            vec![2],
+            &[2, 2],
+            2,
+            vec![0, 0],
+            vec![EntityId(1), EntityId(1)],
+        );
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        let same_family_subindices: Vec<u32> = manifest
+            .iter()
+            .filter(|s| s.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE && s.entity_id == 1)
+            .map(|s| s.subindex)
+            .collect();
+        assert_eq!(
+            same_family_subindices.len(),
+            4,
+            "thermal 1 must own 2 ring slots + 2 commitment windows"
+        );
+
+        let distinct: std::collections::BTreeSet<u32> =
+            same_family_subindices.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            4,
+            "every slot sharing (entity_type, entity_id) must carry a distinct subindex; \
+             got {same_family_subindices:?}"
+        );
+        assert_eq!(
+            distinct,
+            std::collections::BTreeSet::from([0, 1, 2, 3]),
+            "ring occupies [0, k_max), commitment windows occupy k_max.."
         );
     }
 

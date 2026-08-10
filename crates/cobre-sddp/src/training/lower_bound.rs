@@ -1078,6 +1078,7 @@ mod tests {
             0,
             0,
             0,
+            0,
         );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1126,6 +1127,7 @@ mod tests {
         let mut patch_buf = PatchBuffer::new(
             fixture.state.hydro_count,
             fixture.state.max_par_order,
+            0,
             0,
             0,
             0,
@@ -1180,6 +1182,7 @@ mod tests {
         let mut patch_buf = PatchBuffer::new(
             fixture.state.hydro_count,
             fixture.state.max_par_order,
+            0,
             0,
             0,
             0,
@@ -1241,6 +1244,7 @@ mod tests {
         let mut patch_buf = PatchBuffer::new(
             fixture.state.hydro_count,
             fixture.state.max_par_order,
+            0,
             0,
             0,
             0,
@@ -1322,6 +1326,7 @@ mod tests {
             0,
             0,
             0,
+            0,
         );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1369,6 +1374,7 @@ mod tests {
         let mut patch_buf = PatchBuffer::new(
             fixture.state.hydro_count,
             fixture.state.max_par_order,
+            0,
             0,
             0,
             0,
@@ -1433,6 +1439,7 @@ mod tests {
                 0,
                 0,
                 0,
+                0,
             );
             let rm = RiskMeasure::Expectation;
             let comm = LbReconcileStub {
@@ -1482,6 +1489,7 @@ mod tests {
             let mut patch_buf = PatchBuffer::new(
                 fixture.state.hydro_count,
                 fixture.state.max_par_order,
+                0,
                 0,
                 0,
                 0,
@@ -1549,6 +1557,7 @@ mod tests {
             0,
             0,
             0,
+            0,
         );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1602,6 +1611,7 @@ mod tests {
         let mut patch_buf = PatchBuffer::new(
             fixture.state.hydro_count,
             fixture.state.max_par_order,
+            0,
             0,
             0,
             0,
@@ -1690,6 +1700,7 @@ mod tests {
             0,
             0,
             0,
+            0,
         );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1748,6 +1759,7 @@ mod tests {
             0,
             0,
             0,
+            0,
         );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1795,6 +1807,7 @@ mod tests {
         let mut patch_buf = PatchBuffer::new(
             fixture.state.hydro_count,
             fixture.state.max_par_order,
+            0,
             0,
             0,
             0,
@@ -2063,7 +2076,7 @@ mod tests {
             dcs: None,
         };
 
-        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0, 0, 0);
         let mut scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut objectives_buf = Vec::new();
         let actual_n_openings = stoch.opening_tree().n_openings(0);
@@ -2122,6 +2135,7 @@ mod tests {
         let mut patch_buf = PatchBuffer::new(
             fixture.state.hydro_count,
             fixture.state.max_par_order,
+            0,
             0,
             0,
             0,
@@ -2794,7 +2808,8 @@ mod tests {
         let state = test_support::state_layout(2, 0);
         let fcf = make_fcf(templates.templates.len(), state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0, 0);
         let opening_tree = filling_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let stochastic = wrap_opening_tree(opening_tree);
@@ -2902,7 +2917,7 @@ mod tests {
         let base_rows = vec![0_usize];
         let fcf = make_fcf(1, state.n_state);
         let initial_state = vec![7.0_f64, 11.0];
-        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, state.n_buckets, 0, 0);
+        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, state.n_buckets, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;

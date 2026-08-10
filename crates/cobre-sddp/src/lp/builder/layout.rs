@@ -22,6 +22,7 @@ use crate::indexer::{
 };
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
+use super::commitment_block;
 use super::template::StageGeometry;
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
@@ -243,6 +244,28 @@ pub(crate) struct AnticipatedLayout {
     /// study horizon, or not yet ready (`PointResolution::is_ready_at`,
     /// stage-invariant padding). Length `n_anticipated * k_max`.
     pub(crate) anticipated_slot_row_pos: Vec<Option<usize>>,
+}
+
+/// Column/row offsets for one stage's terminal commitment-block layout.
+///
+/// Unlike [`AnticipatedLayout`]'s ring, the block has no depth axis and no
+/// padding: every declared window gets exactly one row every stage (dense,
+/// `state.n_commitment` wide), either the latch-deposit row (at the window's
+/// own [`StateSpace::commitment_decider_stage`]) or the carry-by-identity row
+/// (every other stage) — so no `Option<usize>` row-position map is needed, only
+/// which windows decide THIS stage (sparse, for the decision-column family).
+pub(crate) struct CommitmentBlockLayout {
+    /// Row index of window `w`'s per-stage row: `row_commitment_start + w`.
+    /// Dense — every window gets exactly one row every stage.
+    pub(crate) row_commitment_start: usize,
+    /// Start of this stage's decision-column family (sparse: one column per
+    /// window whose decider is this stage, `col_commitment_decision_start +
+    /// local_idx`).
+    pub(crate) col_commitment_decision_start: usize,
+    /// Global window indices deciding at this stage, ascending — parallel to
+    /// the decision columns above; the [`Self::row_commitment_start`] row for
+    /// window `w` is a latch iff `w` appears here, else a carry.
+    pub(crate) commitment_decision_windows: Vec<usize>,
 }
 
 /// Equipment column ranges and their block-start cursors: every dispatchable
@@ -542,6 +565,8 @@ pub(crate) struct StageLayout<'a> {
     pub(crate) n_ant_state: usize,
     /// Anticipated-thermal column/row offsets (see [`AnticipatedLayout`]).
     pub(crate) anticipated: AnticipatedLayout,
+    /// Terminal commitment-block column/row offsets (see [`CommitmentBlockLayout`]).
+    pub(crate) commitment: CommitmentBlockLayout,
     /// Equipment column ranges (see [`EquipmentColumns`]).
     pub(crate) equipment: EquipmentColumns,
     /// Slack columns, including the paired operational-violation rows (see
@@ -1155,6 +1180,8 @@ impl<'a> StageLayout<'a> {
             BlockMode::Chronological => n_blks.saturating_sub(1),
             BlockMode::Parallel => 0,
         };
+        let commitment_decision_windows =
+            commitment_block::commitment_decision_windows_at(state, stage_idx);
         let mut col = RangeCursor::new(state.control_region_start());
         let storage_internal = col.alloc(n_h * n_interior);
         let storage_internal_start = storage_internal.start;
@@ -1165,6 +1192,7 @@ impl<'a> StageLayout<'a> {
         let thermal = col.alloc(ctx.n_thermals * n_blks);
         let thermal_end = thermal.end;
         col.alloc(ctx.n_anticipated);
+        let col_commitment_decision_start = col.alloc(commitment_decision_windows.len()).start;
         let line_fwd = col.alloc(ctx.n_lines * n_blks);
         let line_rev = col.alloc(ctx.n_lines * n_blks);
         let deficit = col.alloc(ctx.n_buses * max_deficit_segments * n_blks);
@@ -1286,6 +1314,12 @@ impl<'a> StageLayout<'a> {
             build_anticipated_slot_row_pos(state, n_stages, stage_idx);
         let row_anticipated_slot_definition_start =
             row.alloc(n_anticipated_slot_definition_rows).start;
+
+        // Terminal commitment-block rows: dense, one per declared window every
+        // stage (latch at its own decider, carry-by-identity otherwise — see
+        // `CommitmentBlockLayout`).
+        let row_commitment_start = row.alloc(state.n_commitment).start;
+
         // Peeked before `generic` below is computed: the generic row block's
         // length depends on `col_generic_slack_start` (the column axis), but its
         // own start does not depend on that length.
@@ -1343,6 +1377,12 @@ impl<'a> StageLayout<'a> {
             row_anticipated_slot_definition_start,
             n_anticipated_slot_definition_rows,
             anticipated_slot_row_pos,
+        };
+
+        let commitment = CommitmentBlockLayout {
+            row_commitment_start,
+            col_commitment_decision_start,
+            commitment_decision_windows,
         };
 
         let anticipated_local_by_sys_pos = ctx
@@ -1416,6 +1456,7 @@ impl<'a> StageLayout<'a> {
             k_max: ctx.k_max,
             n_ant_state,
             anticipated,
+            commitment,
             equipment,
             slack,
             rows,

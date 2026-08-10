@@ -44,6 +44,7 @@ pub(super) fn fill_stage_rows(
     fill_anticipated_fishing_rows(layout, &mut row_lower, &mut row_upper);
     fill_anticipated_state_out_def_rows(layout, &mut row_lower, &mut row_upper);
     fill_anticipated_slot_definition_rows(layout, &mut row_lower, &mut row_upper);
+    super::commitment_block::fill_commitment_block_rows(layout, &mut row_lower, &mut row_upper);
     fill_z_inflow_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
 
     (row_lower, row_upper)

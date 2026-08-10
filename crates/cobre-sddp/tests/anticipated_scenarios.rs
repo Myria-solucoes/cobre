@@ -382,6 +382,7 @@ mod anticipated_5stage_k2_smoke {
             ),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -862,6 +863,7 @@ mod anticipated_two_plants_smoke {
             .concat(),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -1332,6 +1334,7 @@ mod anticipated_simulation_ring_buffer {
             ),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -1867,6 +1870,7 @@ mod anticipated_generic_constraint_e2e {
             ),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         let mut builder = SystemBuilder::new()
@@ -2899,6 +2903,7 @@ mod anticipated_commitment_at_cap {
             ),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()

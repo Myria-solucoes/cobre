@@ -100,7 +100,10 @@ use crate::{
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
     indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
-    lead_time::{AnticipatedResolution, LeadTime, PointResolution, SpreadResolution},
+    lead_time::{
+        AnticipatedResolution, LeadTime, PointResolution, SpreadResolution,
+        resolve_future_delivery_decider,
+    },
     lp_builder::{M3S_TO_HM3, build_stage_templates},
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
@@ -1053,10 +1056,13 @@ pub(crate) fn resolve_state_layout(
         vec![0; hydro_count]
     };
 
+    let (n_commitment, commitment_decider_stage, commitment_window_thermal_id) =
+        resolve_commitment_block_windows(system, &anticipated_thermal_indices);
+
     // `StateSpace` is the sole role-(a) owner; its constructor finalizes the
     // nonzero mask unconditionally, so every study (storage-only or pure-thermal)
     // has a finalized mask for the single-path mask-driven cut-row loop.
-    let mut state = StateSpace::new(
+    let mut state = StateSpace::new_with_commitment_block(
         hydro_count,
         max_par_order,
         transit_bucket_topology.n_buckets,
@@ -1065,10 +1071,103 @@ pub(crate) fn resolve_state_layout(
         k_max,
         anticipated_lead_stages,
         &effective_lag_counts,
+        n_commitment,
+        commitment_decider_stage,
+        commitment_window_thermal_id,
     );
     state.set_anticipated_resolution(anticipated_resolution);
 
     Ok((state, hydro_count, anticipated_thermal_indices))
+}
+
+/// Resolve every declared post-horizon delivery window
+/// ([`cobre_core::FutureAnticipatedDelivery`]) to its in-study decider stage
+/// ([`resolve_future_delivery_decider`], spec #1 §4.3 step 2), in canonical
+/// `(anticipated thermal system position, delivery_start)` order — canonical
+/// thermal order, not raw `thermal_id` order, keeps the block's column order
+/// declaration-invariant under staggered commissioning the same way
+/// [`build_initial_state`]'s id-position-map contract does.
+///
+/// A window whose thermal has no physical lead time
+/// (`AnticipatedConfig::LeadStages`, which never consults the calendar) or
+/// whose resolved decider precedes the study horizon
+/// (`resolve_future_delivery_decider` returning `None`) is dropped with a
+/// setup-time advisory, never a hard error — mirrors
+/// [`warn_on_sub_stage_lead`]'s exclude-with-advisory convention. Returns the
+/// resolved window count and its parallel decider-stage and owning-thermal-id
+/// vectors, all three in the canonical order [`StateSpace::commitment_block_out`]
+/// uses. `future_anticipated_deliveries`' own sorting invariant
+/// (`(thermal_id, delivery_start)` ascending) is what keeps the per-thermal
+/// filter below yielding each thermal's windows in `delivery_start` order —
+/// the order [`crate::policy_export::build_stage_entity_manifest`] derives a
+/// window's local index within its thermal from.
+fn resolve_commitment_block_windows(
+    system: &System,
+    anticipated_thermal_indices: &[usize],
+) -> (usize, Vec<usize>, Vec<EntityId>) {
+    let Some(start_0) = study_start_date(system) else {
+        return (0, Vec::new(), Vec::new());
+    };
+    let stage_lengths_hours = bucket_topology::study_stage_durations(system);
+    let thermals = system.thermals();
+    let ic = system.initial_conditions();
+
+    let mut commitment_decider_stage = Vec::new();
+    let mut commitment_window_thermal_id = Vec::new();
+    for &t_idx in anticipated_thermal_indices {
+        let thermal = &thermals[t_idx];
+        let entries: Vec<_> = ic
+            .future_anticipated_deliveries
+            .iter()
+            .filter(|d| d.thermal_id == thermal.id)
+            .collect();
+        if entries.is_empty() {
+            continue;
+        }
+
+        let Some(AnticipatedConfig::LeadTime(delta_hours)) = thermal.anticipated_config else {
+            for entry in &entries {
+                tracing::warn!(
+                    "anticipated thermal {} ({}): future_anticipated_deliveries window \
+                     [{}, {}) dropped — anticipated_config has no physical lead time \
+                     (LeadStages never consults the calendar) to resolve a post-horizon \
+                     in-study decider",
+                    thermal.id,
+                    thermal.name,
+                    entry.delivery_start,
+                    entry.delivery_end,
+                );
+            }
+            continue;
+        };
+
+        for entry in entries {
+            let window_end_hours = hours_between(entry.delivery_end, start_0);
+            if let Some((decider_stage, _kind)) =
+                resolve_future_delivery_decider(delta_hours, &stage_lengths_hours, window_end_hours)
+            {
+                commitment_decider_stage.push(decider_stage);
+                commitment_window_thermal_id.push(thermal.id);
+            } else {
+                tracing::warn!(
+                    "anticipated thermal {} ({}): future_anticipated_deliveries window \
+                     [{}, {}) dropped — out of the lead's reach (its decider precedes \
+                     the study horizon)",
+                    thermal.id,
+                    thermal.name,
+                    entry.delivery_start,
+                    entry.delivery_end,
+                );
+            }
+        }
+    }
+
+    let n_commitment = commitment_decider_stage.len();
+    (
+        n_commitment,
+        commitment_decider_stage,
+        commitment_window_thermal_id,
+    )
 }
 
 /// Build the study-invariant, non-state [`StudyDimensions`] from the system

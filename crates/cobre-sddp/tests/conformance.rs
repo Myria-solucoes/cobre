@@ -859,6 +859,7 @@ mod lb_conformance {
             0,
             0,
             0,
+            0,
         );
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;

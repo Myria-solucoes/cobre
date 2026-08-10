@@ -2429,6 +2429,7 @@ fn minimal_system_2_hydros_with_history(
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("minimal_system_2_hydros_with_history: valid")
@@ -2905,6 +2906,7 @@ fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = staggered_dates_system_2_hydros(1, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3220,6 +3222,7 @@ fn build_initial_state_seeds_filling_storage() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3253,6 +3256,7 @@ fn build_initial_state_filling_empty_pit_is_zero() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 1, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3279,6 +3283,7 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let baseline_system = filling_system_2_hydros(1, 0, baseline_ic);
     let baseline = build_initial_state(&baseline_system, &study_dims, &layout, &[0.0; 4]);
@@ -3292,6 +3297,7 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let state = build_initial_state(&system, &study_dims, &layout, &[0.0; 4]);
@@ -3321,6 +3327,7 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3767,6 +3774,7 @@ fn system_with_anticipated_thermals(
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_anticipated_thermals: valid")
@@ -4033,6 +4041,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_two_anticipated_thermals_staggered_dates: valid");
@@ -7270,6 +7279,7 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_travel_time_arc: valid")
@@ -8349,6 +8359,7 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("two-thermal fan-out system: valid")
