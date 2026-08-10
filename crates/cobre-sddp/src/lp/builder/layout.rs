@@ -963,6 +963,29 @@ fn resolve_affine(
     })
 }
 
+/// Fold a generic-constraint endpoint's parquet base with its affine remainder:
+/// a present remainder SHIFTS the base by `resolve_affine`'s value rather than
+/// replacing it, so `(Some(base), Some(bound))` folds to `base +
+/// resolve_affine(bound, ...)`, never `resolve_affine(bound, ...)` alone. A
+/// `(None, None)` endpoint is untargeted and stays `None` (the open LP
+/// direction), never shifted.
+fn fold_endpoint(
+    parquet: Option<f64>,
+    affine: Option<&AffineBound>,
+    resolved: &ResolvedParameters,
+    stage_idx: usize,
+    block_idx: usize,
+) -> Option<f64> {
+    match (parquet, affine) {
+        (None, None) => None,
+        (Some(base), None) => Some(base),
+        (None, Some(bound)) => Some(resolve_affine(bound, resolved, stage_idx, block_idx)),
+        (Some(base), Some(bound)) => {
+            Some(base + resolve_affine(bound, resolved, stage_idx, block_idx))
+        }
+    }
+}
+
 /// Whether either affine bound on `constraint` references a block-varying
 /// (`PerStageBlock`) parameter. When true, the stage-level collapse is suppressed:
 /// a single collapsed row would resolve one arbitrary block's bound value, losing
@@ -1026,28 +1049,22 @@ fn enumerate_generic_constraint_rows(
                 Some(blk_id) => (blk_id as usize, 1, false),
             };
             for block_idx in block_start..block_start + block_count {
-                // An affine endpoint resolves through its terms' parameters at
-                // (stage, block) and is therefore "present"; a literal endpoint keeps
-                // its parquet Option. The effective pair drives both the row bound and,
-                // below, the two-sided slack shape.
-                let effective_lower = match &constraint.bound_lower_affine {
-                    Some(bound) => Some(resolve_affine(
-                        bound,
-                        resolved_parameters,
-                        stage_idx,
-                        block_idx,
-                    )),
-                    None => entry.bound_lower,
-                };
-                let effective_upper = match &constraint.bound_upper_affine {
-                    Some(bound) => Some(resolve_affine(
-                        bound,
-                        resolved_parameters,
-                        stage_idx,
-                        block_idx,
-                    )),
-                    None => entry.bound_upper,
-                };
+                // The folded pair drives both the row bound and, below, the
+                // two-sided slack shape.
+                let effective_lower = fold_endpoint(
+                    entry.bound_lower,
+                    constraint.bound_lower_affine.as_ref(),
+                    resolved_parameters,
+                    stage_idx,
+                    block_idx,
+                );
+                let effective_upper = fold_endpoint(
+                    entry.bound_upper,
+                    constraint.bound_upper_affine.as_ref(),
+                    resolved_parameters,
+                    stage_idx,
+                    block_idx,
+                );
                 let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
                     &constraint.slack,
                     effective_lower,

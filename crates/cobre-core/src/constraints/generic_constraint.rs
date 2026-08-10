@@ -546,10 +546,10 @@ pub struct GenericConstraint {
     pub expression: ConstraintExpression,
     /// Slack variable configuration.
     pub slack: SlackConfig,
-    /// Lower RHS bound as an affine remainder instead of a literal. When
-    /// `Some(bound)`, the lower endpoint resolves by summing `bound`'s
-    /// resolved terms at LP build; the bounds parquet leaves this side
-    /// numeric-null. An endpoint is literal XOR affine.
+    /// Lower RHS bound as an affine remainder, composed with any numeric
+    /// parquet base on the same endpoint: the LP builder's `fold_endpoint`
+    /// resolves the endpoint to `base + bound` when both are present, or
+    /// either alone when only one is.
     pub bound_lower_affine: Option<AffineBound>,
     /// Upper RHS bound as an affine remainder; upper counterpart of
     /// `bound_lower_affine`.

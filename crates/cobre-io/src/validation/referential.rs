@@ -9,6 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use cobre_core::AffineBound;
+
 use super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 // ── validate_referential_integrity ───────────────────────────────────────────
@@ -766,6 +768,20 @@ fn check_generic_constraint_expression_references(
     }
 }
 
+/// A generic-constraint endpoint's fold, resolved to one scalar only when it is
+/// static: `literal` alone with no affine remainder, or
+/// `literal.unwrap_or(0.0) + affine.constant` when the remainder carries no
+/// `@param` terms. A `@param`-bearing remainder makes the endpoint
+/// stage-varying — `None` here, deferring its value (and any inversion
+/// against the other endpoint) to the LP builder's `fold_endpoint`.
+fn static_fold(literal: Option<f64>, affine: Option<&AffineBound>) -> Option<f64> {
+    match affine {
+        None => literal,
+        Some(bound) if bound.terms.is_empty() => Some(literal.unwrap_or(0.0) + bound.constant),
+        Some(_) => None,
+    }
+}
+
 /// `GenericConstraintBoundsRow` `block_id` validity, per-row endpoint-interval
 /// checks, and duplicate key detection.
 fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -797,83 +813,70 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
         }
     }
 
-    // Which endpoints each constraint fills symbolically (via an affine bound on
-    // the constraint object), keyed by constraint id: (has_lower_ref, has_upper_ref).
-    // An endpoint is literal (a numeric parquet column) XOR affine (a remainder).
-    let constraint_refs: HashMap<i32, (bool, bool)> = data
+    // Which affine remainder (if any) each constraint assigns to each endpoint,
+    // keyed by constraint id. A parquet numeric endpoint and an affine remainder
+    // on the same endpoint compose (`base + R`, `fold_endpoint` in the LP
+    // builder) rather than conflict — any remainder shape, constant-only or
+    // `@param`-bearing, is a legal fold.
+    let constraint_affines: HashMap<i32, (Option<&AffineBound>, Option<&AffineBound>)> = data
         .generic_constraints
         .iter()
         .map(|gc| {
             (
                 gc.id.0,
                 (
-                    gc.bound_lower_affine.is_some(),
-                    gc.bound_upper_affine.is_some(),
+                    gc.bound_lower_affine.as_ref(),
+                    gc.bound_upper_affine.as_ref(),
                 ),
             )
         })
         .collect();
 
     // The interval IS the constraint: shape derives from which endpoints a row
-    // carries — a numeric column here or a symbolic reference on the constraint.
+    // carries — a numeric column here or an affine remainder on the constraint.
     // A dangling `constraint_id` is reported separately by `check_bounds_references`.
     for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
-        let (has_lower_ref, has_upper_ref) = constraint_refs
+        let (lower_affine, upper_affine) = constraint_affines
             .get(&row.constraint_id)
             .copied()
-            .unwrap_or((false, false));
+            .unwrap_or((None, None));
 
-        if row.bound_lower.is_some() && has_lower_ref {
+        if row.bound_lower.is_none()
+            && row.bound_upper.is_none()
+            && lower_affine.is_none()
+            && upper_affine.is_none()
+        {
             ctx.add_error(
                 ErrorKind::InvalidValue,
                 "constraints/generic_constraint_bounds.parquet",
                 Some(format!("GenericConstraintBoundsRow[{i}]")),
                 format!(
-                    "GenericConstraintBoundsRow[{i}] sets a numeric bound_lower but constraint {} also declares bound_lower_ref: an endpoint is literal XOR symbolic",
-                    row.constraint_id
-                ),
-            );
-        }
-        if row.bound_upper.is_some() && has_upper_ref {
-            ctx.add_error(
-                ErrorKind::InvalidValue,
-                "constraints/generic_constraint_bounds.parquet",
-                Some(format!("GenericConstraintBoundsRow[{i}]")),
-                format!(
-                    "GenericConstraintBoundsRow[{i}] sets a numeric bound_upper but constraint {} also declares bound_upper_ref: an endpoint is literal XOR symbolic",
+                    "GenericConstraintBoundsRow[{i}] on constraint {} has neither bound_lower nor bound_upper: at least one endpoint is required",
                     row.constraint_id
                 ),
             );
         }
 
-        match (row.bound_lower, row.bound_upper) {
-            (None, None) => {
-                // A symbolic reference fills its side, so a both-numeric-null row is
-                // valid when the constraint supplies a reference for either endpoint.
-                if !has_lower_ref && !has_upper_ref {
-                    ctx.add_error(
-                        ErrorKind::InvalidValue,
-                        "constraints/generic_constraint_bounds.parquet",
-                        Some(format!("GenericConstraintBoundsRow[{i}]")),
-                        format!(
-                            "GenericConstraintBoundsRow[{i}] on constraint {} has neither bound_lower nor bound_upper: at least one endpoint is required",
-                            row.constraint_id
-                        ),
-                    );
-                }
-            }
-            (Some(bound_lower), Some(bound_upper)) if bound_upper < bound_lower => {
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "constraints/generic_constraint_bounds.parquet",
-                    Some(format!("GenericConstraintBoundsRow[{i}]")),
-                    format!(
-                        "GenericConstraintBoundsRow[{i}] on constraint {} has bound_upper={bound_upper} less than bound_lower={bound_lower}: an inverted interval is not allowed",
-                        row.constraint_id
-                    ),
-                );
-            }
-            _ => {}
+        // Only a same-row STATIC fold is checked here (an affine remainder with
+        // no `@param` terms resolves to one scalar regardless of stage/block); a
+        // `@param`-bearing remainder makes the endpoint stage-varying, so its
+        // inversion is left to LP infeasibility rather than a combinatorial
+        // pre-solve check — matching how a cross-source bound is validated only
+        // for its same-row static interval elsewhere in this module.
+        let static_lower = static_fold(row.bound_lower, lower_affine);
+        let static_upper = static_fold(row.bound_upper, upper_affine);
+        if let (Some(bound_lower), Some(bound_upper)) = (static_lower, static_upper)
+            && bound_upper < bound_lower
+        {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "constraints/generic_constraint_bounds.parquet",
+                Some(format!("GenericConstraintBoundsRow[{i}]")),
+                format!(
+                    "GenericConstraintBoundsRow[{i}] on constraint {} has bound_upper={bound_upper} less than bound_lower={bound_lower}: an inverted interval is not allowed",
+                    row.constraint_id
+                ),
+            );
         }
     }
 
@@ -2283,11 +2286,43 @@ mod tests {
         }
     }
 
-    /// A numeric parquet endpoint whose constraint also declares a reference for the
-    /// same endpoint is a literal-XOR-symbolic conflict: exactly one InvalidValue
-    /// naming the offending endpoint.
+    /// A numeric parquet endpoint composed with a constant-only affine remainder
+    /// on the same endpoint folds (`base + R`) rather than conflicts: zero errors.
     #[test]
-    fn test_generic_constraint_bounds_same_endpoint_literal_and_ref_conflict() {
+    fn test_generic_constraint_bounds_literal_and_constant_affine_fold_adds_no_error() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let mut constraint = symbolic_constraint(5, None, None);
+        constraint.bound_upper_affine = Some(AffineBound {
+            constant: -5.0,
+            terms: vec![],
+        });
+        data.generic_constraints = vec![constraint];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: Some(100.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a literal base composed with a constant-only remainder is a legal fold, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A numeric parquet endpoint composed with a `@param`-bearing affine
+    /// remainder on the same endpoint also folds — the fold does not
+    /// distinguish a constant remainder from a symbolic one: zero errors.
+    #[test]
+    fn test_generic_constraint_bounds_literal_and_param_affine_fold_adds_no_error() {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
@@ -2304,6 +2339,41 @@ mod tests {
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
 
+        assert!(
+            !ctx.has_errors(),
+            "a literal base composed with a @param-bearing remainder is a legal fold, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A constant-only affine remainder can fold an endpoint below the other
+    /// side even when the raw parquet columns alone are not inverted: here
+    /// `bound_lower=50`, `bound_upper=60` compare fine on their own, but the
+    /// upper endpoint's `-30` remainder folds it to `30`, which IS below the
+    /// lower endpoint — the inversion check must catch this static fold.
+    #[test]
+    fn test_generic_constraint_bounds_constant_fold_reveals_inversion() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let mut constraint = symbolic_constraint(5, None, None);
+        constraint.bound_upper_affine = Some(AffineBound {
+            constant: -30.0,
+            terms: vec![],
+        });
+        data.generic_constraints = vec![constraint];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(50.0),
+            bound_upper: Some(60.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
         let inv: Vec<_> = ctx
             .errors()
             .into_iter()
@@ -2312,9 +2382,39 @@ mod tests {
         assert_eq!(
             inv.len(),
             1,
-            "expected exactly 1 InvalidValue, got: {inv:?}"
+            "the folded upper (60 + -30 = 30) is below the lower (50); expected exactly 1 InvalidValue, got: {inv:?}"
         );
-        assert!(inv[0].message.contains("bound_upper_ref"));
+        assert!(inv[0].message.contains("constraint 5"));
+        assert!(inv[0].message.contains("bound_upper"));
+    }
+
+    /// A `@param`-bearing remainder that COULD invert its endpoint is not
+    /// statically resolvable, so the inversion check must defer to the LP
+    /// rather than false-reject: same shape as the constant-fold case above,
+    /// but the upper remainder carries a parameter term.
+    #[test]
+    fn test_generic_constraint_bounds_param_fold_defers_inversion_check() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraints = vec![symbolic_constraint(5, None, Some(99))];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(50.0),
+            bound_upper: Some(60.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a @param-bearing remainder is stage-varying; its inversion is left to LP infeasibility, got: {:?}",
+            ctx.errors()
+        );
     }
 
     /// A both-numeric-null row is valid when the constraint supplies a reference for

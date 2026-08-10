@@ -32,7 +32,7 @@ use crate::test_support::{make_unit_group, state_layout};
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, RangeCursor,
-    ResolvedTables, StageLayout, TemplateBuildCtx, build_transit_bucket_row_pos,
+    ResolvedTables, StageLayout, TemplateBuildCtx, build_transit_bucket_row_pos, fold_endpoint,
 };
 
 // ── RangeCursor ──────────────────────────────────────────────────────────
@@ -135,6 +135,32 @@ impl ZeroEntityFixtures {
             id_to_slot: vec![(42, 0)],
             cost_scale_factor: 1_000_000.0,
         };
+    }
+
+    /// Install one generic constraint (id 5, no slack) whose UPPER bound carries
+    /// BOTH a numeric parquet base (`100.0`) and a constant-only affine remainder
+    /// (`-5.0`): the fold arm `fold_endpoint` newly reaches, `base + R`.
+    fn install_folded_upper_bound_constant(&mut self) {
+        self.generic_constraints = vec![GenericConstraint {
+            id: EntityId(5),
+            name: "folded_cap".to_string(),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: None,
+            bound_upper_affine: Some(AffineBound {
+                constant: -5.0,
+                terms: vec![],
+            }),
+        }];
+        let id_map: HashMap<i32, usize> = [(5, 0)].into_iter().collect();
+        self.resolved_generic_bounds = ResolvedGenericConstraintBounds::new(
+            &id_map,
+            std::iter::once((5i32, 0i32, None::<i32>, None::<f64>, Some(100.0f64))),
+        );
     }
 
     /// A zero-anticipated `TemplateBuildCtx` that carries the fixture's own
@@ -398,6 +424,114 @@ fn symbolic_endpoint_makes_row_two_sided_for_slack() {
             "a numeric-lower + symbolic-upper row is two-sided, so slack needs both columns"
         );
     }
+}
+
+/// A parquet upper base composed with a constant-only affine remainder folds
+/// (`base + R`) into one row bound, byte-identical to a hand-flattened literal.
+#[test]
+fn folded_upper_bound_constant_shifts_parquet_base() {
+    let mut fixtures = ZeroEntityFixtures::new();
+    fixtures.install_folded_upper_bound_constant();
+    let ctx = fixtures.make_ctx_generic();
+    let state = state_layout_for(&ctx);
+    let stage = minimal_stage();
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    assert_eq!(layout.generic_constraint_rows.len(), 1);
+    let row = &layout.generic_constraint_rows[0];
+    assert_eq!(row.bound_lower, None);
+    assert_eq!(
+        row.bound_upper.expect("upper present").to_bits(),
+        95.0_f64.to_bits(),
+        "row_upper = 100 + (-5) = 95, to_bits() equality"
+    );
+}
+
+// ── fold_endpoint ─────────────────────────────────────────────────────────
+
+/// A `ResolvedParameters` fixture with one `PerStageBlock` parameter at the
+/// given id, one stage of per-block values.
+fn resolved_with_param(id: i32, values: Vec<f64>) -> ResolvedParameters {
+    ResolvedParameters {
+        per_param: vec![vec![values]],
+        id_to_slot: vec![(id, 0)],
+        ..ResolvedParameters::default()
+    }
+}
+
+/// `(None, None)`: an endpoint neither side targets stays untargeted.
+#[test]
+fn fold_endpoint_both_absent_stays_none() {
+    let resolved = ResolvedParameters::default();
+    assert_eq!(fold_endpoint(None, None, &resolved, 0, 0), None);
+}
+
+/// `(Some(base), None)`: a pure literal passes through unchanged.
+#[test]
+fn fold_endpoint_pure_literal_is_unchanged() {
+    let resolved = ResolvedParameters::default();
+    assert_eq!(fold_endpoint(Some(95.0), None, &resolved, 0, 0), Some(95.0));
+}
+
+/// `(None, Some(bound))`: with no parquet base, the remainder alone
+/// establishes the endpoint.
+#[test]
+fn fold_endpoint_pure_affine_establishes_endpoint() {
+    let resolved = resolved_with_param(42, vec![7.0]);
+    let bound = AffineBound::single(EntityId(42));
+    assert_eq!(
+        fold_endpoint(None, Some(&bound), &resolved, 0, 0),
+        Some(7.0)
+    );
+}
+
+/// `(Some(base), Some(bound))` with a constant-only remainder shifts the base
+/// by the constant — the fold is `base + R`, never `R` replacing `base`.
+#[test]
+fn fold_endpoint_literal_and_constant_affine_composes() {
+    let resolved = ResolvedParameters::default();
+    let bound = AffineBound {
+        constant: -5.0,
+        terms: vec![],
+    };
+    assert_eq!(
+        fold_endpoint(Some(100.0), Some(&bound), &resolved, 0, 0),
+        Some(95.0)
+    );
+}
+
+/// `(Some(base), Some(bound))` with a `@param`-bearing remainder folds the base
+/// with the resolved parameter value at `(stage_idx, block_idx)`, exactly as a
+/// constant-only remainder does — the fold does not distinguish the shape.
+#[test]
+fn fold_endpoint_literal_and_param_affine_composes() {
+    let resolved = resolved_with_param(42, vec![3.0, 4.0]);
+    let bound = AffineBound::single(EntityId(42));
+    assert_eq!(
+        fold_endpoint(Some(100.0), Some(&bound), &resolved, 0, 1),
+        Some(104.0)
+    );
+}
+
+/// An `==`-normalized remainder assigned to both endpoints folds each
+/// independently against its own parquet base.
+#[test]
+fn fold_endpoint_equals_normalized_folds_both_endpoints() {
+    let resolved = ResolvedParameters::default();
+    let bound = AffineBound {
+        constant: 2.0,
+        terms: vec![],
+    };
+    assert_eq!(
+        fold_endpoint(Some(10.0), Some(&bound), &resolved, 0, 0),
+        Some(12.0),
+        "lower endpoint folds against its own base"
+    );
+    assert_eq!(
+        fold_endpoint(Some(50.0), Some(&bound), &resolved, 0, 0),
+        Some(52.0),
+        "upper endpoint folds against its own base"
+    );
 }
 
 // ── storage_internal interior-boundary sizing ────────────────────────────

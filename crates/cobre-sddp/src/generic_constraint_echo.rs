@@ -393,6 +393,51 @@ mod tests {
         assert_eq!(r.slack_penalty, Some(5000.0));
     }
 
+    /// The echo shows the POST-NORMALIZATION flat form, not the authored
+    /// `LHS op RHS` string: `thermal_generation(0) <= 73` echoes one term and
+    /// the resolved `bound_upper` — there is no authored-expression field in
+    /// [`GenericConstraintEchoRow`] to diverge from.
+    #[test]
+    fn constant_rhs_echoes_resolved_flat_form_not_authored_string() {
+        let constraints = vec![constraint(
+            1,
+            "cap73",
+            vec![LinearTerm::literal(1.0, thermal(0))],
+        )];
+        let entries = vec![vec![entry(0, 1, 0, true, None, Some(73.0), false, 0.0)]];
+        let resolved = ResolvedParameters::default();
+
+        let rows = build_echo_rows_from_parts(&entries, &[0], &resolved, &constraints);
+
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.term_index, Some(0));
+        assert_eq!(r.variable_kind.as_deref(), Some("thermal_generation"));
+        assert_eq!(r.bound_upper, Some(73.0));
+        assert_eq!(r.bound_lower, None);
+        assert_eq!(r.derived_shape, "cap");
+    }
+
+    /// A folded endpoint (a parquet base composed with an inline affine
+    /// remainder) echoes the already-composed `f64` verbatim — the echo reads
+    /// the resolved bound, with no separate base/remainder breakdown.
+    #[test]
+    fn folded_endpoint_echoes_composed_value() {
+        let constraints = vec![constraint(
+            2,
+            "folded",
+            vec![LinearTerm::literal(1.0, thermal(0))],
+        )];
+        let entries = vec![vec![entry(0, 2, 0, true, None, Some(95.0), false, 0.0)]];
+        let resolved = ResolvedParameters::default();
+
+        let rows = build_echo_rows_from_parts(&entries, &[0], &resolved, &constraints);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bound_upper, Some(95.0));
+        assert_eq!(rows[0].derived_shape, "cap");
+    }
+
     /// A two-endpoint per-block entry (the d54 shape) renders a `band` row with
     /// `block_id = Some(block_idx)` and both bounds carried through.
     #[test]
