@@ -7,6 +7,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use crate::visited_states::VisitedStatesArchive;
+use cobre_core::EntityId;
 use cobre_core::System;
 use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
@@ -40,6 +41,37 @@ fn year_month_day_anchor(date: chrono::NaiveDate) -> i32 {
     date.year() * 10_000 + i32::try_from(date.month()).unwrap_or(1) * 100 + 1
 }
 
+/// Post-horizon window `w`'s delivery date: the `YYYYMM01` anchor of its
+/// resolved destination post-study stage
+/// ([`StateSpace::commitment_window_dest_stage`]). `thermal_id` is carried
+/// only for the debug assertion message.
+///
+/// # Panics (debug builds only)
+///
+/// Panics if the window's destination does not resolve to a real post-study
+/// stage — an uncovered window is rejected at read time, so a covered lane
+/// never observes this.
+fn post_horizon_delivery_date(
+    system: &System,
+    global_layout: &StateSpace,
+    w: usize,
+    thermal_id: EntityId,
+) -> i32 {
+    let dest = global_layout.commitment_window_dest_stage[w];
+    let delivery_date = system
+        .post_study_stages()
+        .and_then(|post_study| post_study.stages.get(dest))
+        .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |stage| {
+            year_month_day_anchor(stage.start_date)
+        });
+    debug_assert!(
+        delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        "commitment window {w} (thermal {thermal_id:?}) destination stage {dest} must \
+         resolve a real delivery date"
+    );
+    delivery_date
+}
+
 /// Build the per-slot entity-identity manifest for one stage's cut pool: one
 /// [`EntitySlot`] per enabled cut-state dimension of `projection`.
 ///
@@ -57,8 +89,8 @@ fn year_month_day_anchor(date: chrono::NaiveDate) -> i32 {
 /// owning thermal's id with `subindex = k_max + local_window_index` — offset
 /// past the ring's own `[0, k_max)` domain so a thermal owning both ring slots
 /// and post-horizon lanes never collides on `(entity_type, entity_id,
-/// subindex)`; its `delivery_date` is always the sentinel (real per-lane dates
-/// are a separate concern this manifest does not resolve).
+/// subindex)`; its `delivery_date` is the `YYYYMM01` anchor of the window's
+/// resolved destination post-study stage (`StateSpace::commitment_window_dest_stage`).
 ///
 /// # Panics (debug builds only)
 ///
@@ -178,13 +210,14 @@ pub fn build_stage_entity_manifest(
             owning_thermal.is_some(),
             "commitment window {w}'s owning thermal {thermal_id:?} must be an anticipated thermal"
         );
+        let delivery_date = post_horizon_delivery_date(system, global_layout, w, thermal_id);
         EntitySlot {
             entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
             entity_id: thermal_id.0,
             subindex: subindex as u32,
             was_active: owning_thermal
                 .is_some_and(|t| commissioning_active(t.entry_stage_id, t.exit_stage_id, stage_id)),
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            delivery_date,
         }
     };
 
@@ -584,8 +617,8 @@ mod tests {
     use cobre_core::temporal::StageStateConfig;
     use cobre_core::{
         AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
-        HydroGenerationModel, HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage,
-        StageRiskConfig, System, SystemBuilder, Thermal,
+        HydroGenerationModel, HydroPenalties, NoiseMethod, PostStudyStage, PostStudyStages,
+        ScenarioSourceConfig, Stage, StageRiskConfig, System, SystemBuilder, Thermal,
         resolved::{
             BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, HydroBlockBounds,
             HydroStageBounds, LineBlockBounds, PumpingBlockBounds, ResolvedBounds,
@@ -748,9 +781,12 @@ mod tests {
     /// `System` with 2 hydros and 1 anticipated thermal (`lead_stages = 2`),
     /// matching the `N=2, L=2, A=1, k_max=2` layout fixture. `hydros` carry the
     /// supplied commissioning windows so `was_active` can be exercised.
+    /// `post_study_stages` threads straight to the builder — `None` for a
+    /// fixture with no post-horizon lane.
     fn system_2h_1ant(
         h1_window: (Option<i32>, Option<i32>),
         h2_window: (Option<i32>, Option<i32>),
+        post_study_stages: Option<PostStudyStages>,
     ) -> System {
         let bounds = ResolvedBounds::new(
             &BoundsCountsSpec {
@@ -773,8 +809,21 @@ mod tests {
             .thermals(vec![anticipated_thermal(1, 2)])
             .stages(vec![make_stage()])
             .bounds(bounds)
+            .post_study_stages(post_study_stages)
             .build()
             .expect("valid system")
+    }
+
+    /// A single post-study stage starting `start_date`, covering exactly one
+    /// destination window (`commitment_window_dest_stage[w] == 0`).
+    fn post_study_stages_from(start_date: chrono::NaiveDate) -> PostStudyStages {
+        PostStudyStages {
+            stages: vec![PostStudyStage {
+                start_date,
+                duration_hours: 720.0,
+            }],
+            thermal_bounds: Vec::new(),
+        }
     }
 
     /// The `N=2, L=2, A=1, k_max=2` global layout the fixture system maps onto.
@@ -788,7 +837,7 @@ mod tests {
     /// slots typed 2 (plant id 1, ring subindex 0,1).
     #[test]
     fn all_enabled_classification_identity_and_subindex() {
-        let system = system_2h_1ant((None, None), (None, None));
+        let system = system_2h_1ant((None, None), (None, None), None);
         let global = layout_2h_1ant();
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
@@ -844,7 +893,7 @@ mod tests {
     /// `subindex ==` the maturity lag `d` (`transit_bucket_column_order[b].1`).
     #[test]
     fn bucket_slots_classify_as_transit_bucket_with_downstream_id_and_lag() {
-        let system = system_2h_1ant((None, None), (None, None));
+        let system = system_2h_1ant((None, None), (None, None), None);
         let global = test_support::state_layout_with_transit_buckets(
             2,
             2,
@@ -895,7 +944,7 @@ mod tests {
     /// (`HydroInflowLag`) slot. Anticipated state is always included.
     #[test]
     fn storage_only_drops_lag_slots() {
-        let system = system_2h_1ant((None, None), (None, None));
+        let system = system_2h_1ant((None, None), (None, None), None);
         let global = layout_2h_1ant();
         let projection = CutStateProjection::new(&global, STORAGE_ONLY);
 
@@ -930,7 +979,7 @@ mod tests {
     #[test]
     fn was_active_matches_hydro_operating_active_for_dormant_window() {
         let h1_window = (Some(2), Some(5));
-        let system = system_2h_1ant(h1_window, (None, None));
+        let system = system_2h_1ant(h1_window, (None, None), None);
         let global = layout_2h_1ant();
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
         let stage_id = 1;
@@ -1210,11 +1259,17 @@ mod tests {
 
     /// A declared post-horizon commitment window joins the manifest with a
     /// real `EntitySlot`: reused `AnticipatedThermalState` type, the owning
-    /// thermal's id, and the sentinel delivery date (real dates are a
-    /// separate concern this manifest does not resolve).
+    /// thermal's id, and the real `YYYYMM01` delivery date of its resolved
+    /// destination post-study stage — never the sentinel. The in-study ring
+    /// and storage/lag slots' own delivery dates are unaffected.
     #[test]
-    fn commitment_hold_post_horizon_slot_carries_real_identity_and_sentinel_date() {
-        let system = system_2h_1ant((None, None), (None, None));
+    fn commitment_hold_post_horizon_slot_carries_real_delivery_date() {
+        let dest_start = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let system = system_2h_1ant(
+            (None, None),
+            (None, None),
+            Some(post_study_stages_from(dest_start)),
+        );
         let global = StateSpace::new_with_commitment_hold_windows(
             2,
             2,
@@ -1244,7 +1299,28 @@ mod tests {
             slot.subindex, 2,
             "k_max (2) + local_window_index (0), the sole window for this thermal"
         );
-        assert_eq!(slot.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+        assert_eq!(
+            slot.delivery_date, 20261101,
+            "delivery date is the destination post-study stage's day-01 anchor"
+        );
+
+        // Feature-interaction guard: storage/lag never carry a delivery date,
+        // and the in-study ring's own dates (the sole stage, then past-horizon)
+        // are unaffected by post-horizon resolution.
+        for storage_or_lag in &manifest[0..6] {
+            assert_eq!(
+                storage_or_lag.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                "storage/lag slots carry no delivery date"
+            );
+        }
+        assert_eq!(
+            manifest[6].delivery_date, 20240101,
+            "ring slot 0 delivers at the system's only stage (2024-01)"
+        );
+        assert_eq!(
+            manifest[7].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "ring slot 1 delivers past the single-stage horizon"
+        );
     }
 
     /// User-ratified subindex formula (`k_max + local_window_index`): a
@@ -1255,7 +1331,12 @@ mod tests {
     /// other.
     #[test]
     fn commitment_hold_post_horizon_subindex_never_collides_with_ring_subindex() {
-        let system = system_2h_1ant((None, None), (None, None));
+        let dest_start = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let system = system_2h_1ant(
+            (None, None),
+            (None, None),
+            Some(post_study_stages_from(dest_start)),
+        );
         let global = StateSpace::new_with_commitment_hold_windows(
             2,
             2,
