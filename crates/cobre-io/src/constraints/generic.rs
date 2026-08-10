@@ -57,12 +57,12 @@
 //!
 //! A bare `coefficient` — a standalone numeric literal with no trailing `*` — is
 //! valid only on a relational side; it has no linear-core representation, so an
-//! operator-free `expression` rejects it exactly as before this grammar addition.
+//! operator-free `expression` rejects it.
 //! At most one top-level relational operator (`<=`, `>=`, `==`, outside any
 //! parenthesis or variable argument list) is accepted; a second one is a
 //! descriptive error — an inline double-relational range (`LI <= expr <= LS`) is
-//! not supported. With no operator, `expression` is the flat one-sided LHS form
-//! exactly as before this grammar addition. With one, [`normalize`] folds every
+//! not supported. With no operator, `expression` is the flat one-sided LHS form.
+//! With one, [`normalize`] folds every
 //! variable term onto the merged left-hand side (the right side's sign-flipped,
 //! same-variable terms merged, a net-zero column dropped) and collects every
 //! non-variable term — a literal or a `@name` that resolves as a parameter, never
@@ -1078,23 +1078,20 @@ enum SplitTerm {
 /// relational operator (grammar: module doc).
 #[derive(Debug)]
 enum ParsedRelation {
-    /// No relational operator: today's one-sided form.
+    /// No relational operator: the flat one-sided form.
     Plain(ParsedExpression),
     /// Exactly one top-level relational operator; each side is parsed but
     /// not yet resolved against the named-expression table.
     Relational {
-        /// Left-hand side terms.
         lhs: Vec<SplitTerm>,
-        /// The split operator.
         op: RelOp,
-        /// Right-hand side terms.
         rhs: Vec<SplitTerm>,
     },
 }
 
 /// Tokenize `input` and, when it carries exactly one top-level relational
 /// operator, split it into [`ParsedRelation::Relational`]; otherwise parse it
-/// as today's one-sided [`ParsedRelation::Plain`] form.
+/// as the one-sided [`ParsedRelation::Plain`] form.
 ///
 /// # Errors
 ///
