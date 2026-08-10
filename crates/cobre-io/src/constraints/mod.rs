@@ -29,6 +29,7 @@ pub mod hydro_unit_group_bounds;
 pub(crate) mod named_expression_inline;
 pub mod ncs_bounds;
 pub mod penalty_overrides;
+pub(crate) mod rhs_normalize;
 
 pub use bounds::{
     ContractBoundsRow, HydroBoundsRow, LineBoundsRow, PumpingBoundsRow, ThermalBoundsRow,

@@ -12,24 +12,21 @@
 //!       "id": 0,
 //!       "name": "min_southeast_hydro",
 //!       "description": "...",
-//!       "expression": "hydro_generation(0) + hydro_generation(1)",
-//!       "slack": { "enabled": true, "penalty": 5000.0 },
-//!       "bound_upper_ref": "demanda_sin"
+//!       "expression": "hydro_generation(0) + hydro_generation(1) <= @demanda_sin",
+//!       "slack": { "enabled": true, "penalty": 5000.0 }
 //!     }
 //!   ]
 //! }
 //! ```
 //!
-//! `bound_lower_ref` / `bound_upper_ref` are optional. Each names a scalar
-//! parameter (with or without a leading `@`) whose per-`(stage, block)` value
-//! supplies that RHS endpoint; the endpoint's numeric column in
-//! `generic_constraint_bounds.parquet` is then left null. An endpoint is literal
-//! XOR symbolic.
+//! An RHS endpoint is authored inline, in the `expression` string itself — see
+//! the relational grammar below — rather than as a separate JSON field.
 //!
 //! ## Expression grammar (spec SS3)
 //!
 //! ```text
-//! expression ::= term (('+' | '-') term)*
+//! relation   ::= side (('<=' | '>=' | '==') side)?
+//! side       ::= term (('+' | '-') term)*
 //! term       ::= coefficient '*' '@' name '*' variable   (parameter coefficient, scaled)
 //!              | '@' name '*' variable                   (parameter coefficient)
 //!              | coefficient '*' '@' name                (named-expression reference, scaled)
@@ -38,6 +35,7 @@
 //!              | coefficient '*' group
 //!              | group
 //!              | variable
+//!              | coefficient                             (relational side only)
 //! group      ::= '(' term (('+' | '-') term)* ')'
 //! variable   ::= var_name '(' entity_id (',' block_id)? (',' 'bus' '=' bus_id)? ')'
 //! ```
@@ -56,6 +54,20 @@
 //! `group` may itself contain any `term` form, including nested groups. Only a
 //! literal coefficient may scale a `group` — `@param * (...)` is rejected for the
 //! same reason as `@param * @name`.
+//!
+//! A bare `coefficient` — a standalone numeric literal with no trailing `*` — is
+//! valid only on a relational side; it has no linear-core representation, so an
+//! operator-free `expression` rejects it exactly as before this grammar addition.
+//! At most one top-level relational operator (`<=`, `>=`, `==`, outside any
+//! parenthesis or variable argument list) is accepted; a second one is a
+//! descriptive error — an inline double-relational range (`LI <= expr <= LS`) is
+//! not supported. With no operator, `expression` is the flat one-sided LHS form
+//! exactly as before this grammar addition. With one, [`normalize`] folds every
+//! variable term onto the merged left-hand side (the right side's sign-flipped,
+//! same-variable terms merged, a net-zero column dropped) and collects every
+//! non-variable term — a literal or a `@name` that resolves as a parameter, never
+//! a named expression — into the affine remainder the operator assigns to
+//! `bound_lower_affine` (`>=`), `bound_upper_affine` (`<=`), or both (`==`).
 //!
 //! An optional top-level `expressions` array declares named linear expressions
 //! (see [`parse_named_expressions`]); a constraint or another expression
@@ -99,8 +111,7 @@
 //! - Block ID validity for the referenced stage — Layer 3/5.
 
 use cobre_core::{
-    AffineBound, ConstraintExpression, EntityId, GenericConstraint, Line, LinearTerm, SlackConfig,
-    VariableRef,
+    ConstraintExpression, EntityId, GenericConstraint, Line, LinearTerm, SlackConfig, VariableRef,
 };
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -109,7 +120,11 @@ use std::path::{Path, PathBuf};
 use super::named_expression_inline::{
     ParsedExpression, ParsedTerm, detect_cycles, inline, validate_references_resolve,
 };
+use super::rhs_normalize::{RelOp, SideTerm, normalize};
 use crate::LoadError;
+
+#[cfg(test)]
+use cobre_core::AffineBound;
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
 
@@ -151,21 +166,12 @@ struct RawConstraint {
     /// To constrain an anticipated thermal's commitment, use `"anticipated_decision(5)"` (stage-level scalar, no block index).
     /// To constrain one bus of a plant split across several buses, use `"hydro_turbined(5, bus=2)"`
     /// or `"hydro_generation(5, bus=2)"` — the only two variables accepting a `bus=` selector.
+    /// An optional inline relational operator (`<=`, `>=`, `==`) followed by a
+    /// right-hand side normalizes onto the F3 interval — see the module doc.
     expression: String,
 
     /// Slack variable configuration.
     slack: RawSlackConfig,
-
-    /// Optional `@name` naming the scalar parameter that supplies this constraint's
-    /// lower RHS bound, resolved per `(stage, block)` at LP build. A leading `@` is
-    /// accepted and stripped. When present, the bounds parquet leaves the lower
-    /// endpoint numeric-null for this constraint — an endpoint is literal XOR symbolic.
-    #[serde(default)]
-    bound_lower_ref: Option<String>,
-
-    /// Upper-bound counterpart of `bound_lower_ref`.
-    #[serde(default)]
-    bound_upper_ref: Option<String>,
 }
 
 /// Intermediate type for the slack configuration.
@@ -395,7 +401,7 @@ fn validate_raw(
         // Parsed here for accurate field paths; the result is discarded and the
         // expression is re-parsed and inlined during convert(). This is a syntax
         // check only — reference resolution needs the full table, built later.
-        parse_expression_terms(&constraint.expression, name_to_id, line_index).map_err(|msg| {
+        parse_relation(&constraint.expression, name_to_id, line_index).map_err(|msg| {
             LoadError::SchemaError {
                 path: path.to_path_buf(),
                 field: format!("constraints[{i}].expression"),
@@ -453,8 +459,11 @@ fn validate_slack(
 
 /// Convert the validated raw data to `Vec<GenericConstraint>`, sorted by `id`.
 ///
-/// Each constraint expression is parsed and its `@name` references inlined
-/// against `table` to produce the flat `ConstraintExpression` the core consumes.
+/// An operator-free expression is parsed and its `@name` references inlined
+/// against `table` to produce the flat `ConstraintExpression` the core
+/// consumes. An expression carrying a relational operator instead resolves
+/// each side to [`SideTerm`]s and hands them to [`normalize`], which supplies
+/// the merged LHS and the operator's targeted affine-bound endpoint(s).
 fn convert(
     raw: RawGenericConstraintsFile,
     path: &Path,
@@ -466,39 +475,31 @@ fn convert(
 
     for (i, c) in raw.constraints.into_iter().enumerate() {
         let field = || format!("constraints[{i}].expression");
-        let parsed =
-            parse_expression_terms(&c.expression, name_to_id, line_index).map_err(|message| {
-                LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: field(),
-                    message,
-                }
-            })?;
-        let terms = inline(&parsed, table).map_err(|message| LoadError::SchemaError {
+        let expression_err = |message: String| LoadError::SchemaError {
             path: path.to_path_buf(),
             field: field(),
             message,
-        })?;
+        };
+
+        let relation =
+            parse_relation(&c.expression, name_to_id, line_index).map_err(expression_err)?;
+
+        let (terms, bound_lower_affine, bound_upper_affine) = match relation {
+            ParsedRelation::Plain(parsed) => {
+                let terms = inline(&parsed, table).map_err(expression_err)?;
+                (terms, None, None)
+            }
+            ParsedRelation::Relational { lhs, op, rhs } => {
+                let lhs = resolve_split_side(lhs, name_to_id, table).map_err(expression_err)?;
+                let rhs = resolve_split_side(rhs, name_to_id, table).map_err(expression_err)?;
+                normalize(lhs, rhs, op)
+            }
+        };
 
         let slack = SlackConfig {
             enabled: c.slack.enabled,
             penalty: c.slack.penalty,
         };
-
-        let bound_lower_affine = resolve_bound_ref(c.bound_lower_ref.as_deref(), name_to_id)
-            .map_err(|message| LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("constraints[{i}].bound_lower_ref"),
-                message,
-            })?
-            .map(AffineBound::single);
-        let bound_upper_affine = resolve_bound_ref(c.bound_upper_ref.as_deref(), name_to_id)
-            .map_err(|message| LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("constraints[{i}].bound_upper_ref"),
-                message,
-            })?
-            .map(AffineBound::single);
 
         let mut expression = ConstraintExpression { terms };
         expression.canonicalize();
@@ -611,6 +612,12 @@ enum Token {
     Comma,
     /// The `=` in a named `bus=` argument.
     Equals,
+    /// `<=` — a relational upper-bound split point.
+    Le,
+    /// `>=` — a relational lower-bound split point.
+    Ge,
+    /// `==` — a relational both-endpoints split point.
+    EqEq,
     /// A non-negative literal — the tokenizer never emits a sign.
     Number(f64),
     Ident(String),
@@ -658,8 +665,33 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             '=' => {
-                tokens.push(Token::Equals);
-                i += 1;
+                if chars.get(i + 1) == Some(&'=') {
+                    tokens.push(Token::EqEq);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Equals);
+                    i += 1;
+                }
+            }
+            '<' => {
+                if chars.get(i + 1) == Some(&'=') {
+                    tokens.push(Token::Le);
+                    i += 2;
+                } else {
+                    return Err(format!(
+                        "bare '<' at position {i} is not a valid operator; use '<=' for a relational bound"
+                    ));
+                }
+            }
+            '>' => {
+                if chars.get(i + 1) == Some(&'=') {
+                    tokens.push(Token::Ge);
+                    i += 2;
+                } else {
+                    return Err(format!(
+                        "bare '>' at position {i} is not a valid operator; use '>=' for a relational bound"
+                    ));
+                }
             }
             c if c.is_ascii_digit() || c == '.' => {
                 let start = i;
@@ -744,7 +776,10 @@ fn parse_terms(
             | Token::LParen
             | Token::RParen
             | Token::Comma
-            | Token::Equals => {}
+            | Token::Equals
+            | Token::Le
+            | Token::Ge
+            | Token::EqEq => {}
         }
     }
 
@@ -1024,20 +1059,212 @@ fn resolve_param_ref(
     })
 }
 
-/// Resolve an optional bound reference. A bound reference must name a parameter —
-/// `name_to_id` holds no named expressions, so a name that resolves as one
-/// elsewhere still errors here as "unknown parameter".
-fn resolve_bound_ref(
-    reference: Option<&str>,
+// ── Relational split ──────────────────────────────────────────────────────────
+
+/// One term of a relational side before named-expression/parameter
+/// resolution: either the shape [`parse_single_term`] already produces, or a
+/// standalone numeric literal with no variable — the leaf a plain, one-sided
+/// expression rejects but a relational side's affine remainder may carry.
+#[derive(Debug)]
+enum SplitTerm {
+    /// The existing parsed-term shape: a flat variable term, or an
+    /// unresolved named-expression/parameter reference.
+    Named(ParsedTerm),
+    /// A standalone numeric literal with no variable.
+    Constant(f64),
+}
+
+/// A constraint expression, optionally split by exactly one top-level
+/// relational operator (grammar: module doc).
+#[derive(Debug)]
+enum ParsedRelation {
+    /// No relational operator: today's one-sided form.
+    Plain(ParsedExpression),
+    /// Exactly one top-level relational operator; each side is parsed but
+    /// not yet resolved against the named-expression table.
+    Relational {
+        /// Left-hand side terms.
+        lhs: Vec<SplitTerm>,
+        /// The split operator.
+        op: RelOp,
+        /// Right-hand side terms.
+        rhs: Vec<SplitTerm>,
+    },
+}
+
+/// Tokenize `input` and, when it carries exactly one top-level relational
+/// operator, split it into [`ParsedRelation::Relational`]; otherwise parse it
+/// as today's one-sided [`ParsedRelation::Plain`] form.
+///
+/// # Errors
+///
+/// Returns `Err(String)` on a tokenizer or parse failure, or when the
+/// expression carries two or more top-level relational operators.
+fn parse_relation(
+    input: &str,
     name_to_id: &HashMap<String, EntityId>,
-) -> Result<Option<EntityId>, String> {
-    match reference {
-        Some(raw) => {
-            let name = raw.strip_prefix('@').unwrap_or(raw);
-            resolve_param_ref(name, name_to_id).map(Some)
+    line_index: &LineBusPairIndex,
+) -> Result<ParsedRelation, String> {
+    let tokens = tokenize(input)?;
+    match split_relational(&tokens)? {
+        None => Ok(ParsedRelation::Plain(parse_terms(
+            &tokens, name_to_id, line_index,
+        )?)),
+        Some((lhs_tokens, op, rhs_tokens)) => {
+            let lhs = parse_split_side(lhs_tokens, name_to_id, line_index)?;
+            let rhs = parse_split_side(rhs_tokens, name_to_id, line_index)?;
+            Ok(ParsedRelation::Relational { lhs, op, rhs })
         }
-        None => Ok(None),
     }
+}
+
+/// A tokenized expression split at its single top-level relational operator:
+/// the left slice, the operator, and the right slice.
+type RelationalSplit<'a> = (&'a [Token], RelOp, &'a [Token]);
+
+/// Scan `tokens` for a top-level (paren-depth-0) relational operator — the
+/// depth check also excludes any operator-shaped token inside a variable's
+/// argument list, since every argument list opens its own real `(`/`)` pair.
+///
+/// Returns `Ok(None)` for zero operators, `Ok(Some((lhs, op, rhs)))` split
+/// around the single operator found; `Err` for two or more.
+fn split_relational(tokens: &[Token]) -> Result<Option<RelationalSplit<'_>>, String> {
+    let mut depth: i32 = 0;
+    let mut found: Option<(usize, RelOp)> = None;
+
+    for (i, tok) in tokens.iter().enumerate() {
+        match tok {
+            Token::LParen => depth += 1,
+            Token::RParen => depth -= 1,
+            _ => {}
+        }
+
+        if depth != 0 {
+            continue;
+        }
+        let op = match tok {
+            Token::Le => RelOp::Le,
+            Token::Ge => RelOp::Ge,
+            Token::EqEq => RelOp::Eq,
+            _ => continue,
+        };
+        if found.is_some() {
+            return Err(
+                "a generic constraint expression carries at most one relational operator \
+                 (<=, >=, ==); an inline double-relational range is not supported — split \
+                 into two constraints"
+                    .to_string(),
+            );
+        }
+        found = Some((i, op));
+    }
+
+    Ok(found.map(|(i, op)| (&tokens[..i], op, &tokens[i + 1..])))
+}
+
+/// Parse one side of a relational split (grammar: module doc) — the same
+/// leading-sign-then-`(+|-)`-separated-list structure as [`parse_terms`],
+/// extended with the standalone-constant leaf a relational side's affine
+/// remainder may carry (`... <= 73`).
+fn parse_split_side(
+    tokens: &[Token],
+    name_to_id: &HashMap<String, EntityId>,
+    line_index: &LineBusPairIndex,
+) -> Result<Vec<SplitTerm>, String> {
+    if tokens.is_empty() {
+        return Err("expression must not be empty".to_string());
+    }
+
+    let mut terms = Vec::new();
+    let mut pos = 0;
+
+    let mut sign: f64 = 1.0;
+    match tokens.first() {
+        Some(Token::Plus) => pos += 1,
+        Some(Token::Minus) => {
+            sign = -1.0;
+            pos += 1;
+        }
+        _ => {}
+    }
+
+    let (mut group, next_pos) = parse_split_single_term(tokens, pos, sign, name_to_id, line_index)?;
+    terms.append(&mut group);
+    pos = next_pos;
+
+    while pos < tokens.len() {
+        let op_sign = match &tokens[pos] {
+            Token::Plus => 1.0,
+            Token::Minus => -1.0,
+            other => {
+                return Err(format!(
+                    "expected '+' or '-' between terms, got {other:?} at position {pos}"
+                ));
+            }
+        };
+        pos += 1;
+
+        let (mut group, next_pos) =
+            parse_split_single_term(tokens, pos, op_sign, name_to_id, line_index)?;
+        terms.append(&mut group);
+        pos = next_pos;
+    }
+
+    Ok(terms)
+}
+
+/// Parse one term of a relational side: a standalone numeric literal with no
+/// following `*` is the new affine-remainder constant leaf; every other shape
+/// delegates to [`parse_single_term`] unchanged (paren groups, `@param`
+/// coefficients, and named-expression/parameter references all work exactly
+/// as they do in the plain grammar).
+fn parse_split_single_term(
+    tokens: &[Token],
+    pos: usize,
+    sign: f64,
+    name_to_id: &HashMap<String, EntityId>,
+    line_index: &LineBusPairIndex,
+) -> Result<(Vec<SplitTerm>, usize), String> {
+    if let Some(Token::Number(v)) = tokens.get(pos)
+        && tokens.get(pos + 1) != Some(&Token::Star)
+    {
+        return Ok((vec![SplitTerm::Constant(v * sign)], pos + 1));
+    }
+
+    let (parsed, next_pos) = parse_single_term(tokens, pos, sign, name_to_id, line_index)?;
+    Ok((parsed.into_iter().map(SplitTerm::Named).collect(), next_pos))
+}
+
+/// Resolve one already-parsed relational side into [`SideTerm`]s: a
+/// [`ParsedTerm::Flat`] term is already a variable term; a [`ParsedTerm::Ref`]
+/// inlines through `table` when declared there (so a genuine named-expression
+/// reference still expands into variable terms that fold, exactly as the
+/// plain grammar's `@expr` does), or — since a bound-position `@name` names a
+/// parameter, never a named expression — resolves directly against
+/// `name_to_id` when it is not, so an undeclared name here reports as
+/// "unknown parameter", never "undeclared reference".
+fn resolve_split_side(
+    raw: Vec<SplitTerm>,
+    name_to_id: &HashMap<String, EntityId>,
+    table: &[(String, ParsedExpression)],
+) -> Result<Vec<SideTerm>, String> {
+    let mut out = Vec::with_capacity(raw.len());
+    for term in raw {
+        match term {
+            SplitTerm::Constant(v) => out.push(SideTerm::Constant(v)),
+            SplitTerm::Named(ParsedTerm::Flat(lt)) => out.push(SideTerm::Variable(lt)),
+            SplitTerm::Named(ParsedTerm::Ref { name, scale }) => {
+                if table.iter().any(|(declared, _)| declared == &name) {
+                    let inlined = inline(&vec![ParsedTerm::Ref { name, scale }], table)?;
+                    out.extend(inlined.into_iter().map(SideTerm::Variable));
+                } else {
+                    let id = resolve_param_ref(&name, name_to_id)?;
+                    out.push(SideTerm::Param(scale, id));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ── Integer conversion helpers ────────────────────────────────────────────────
@@ -1888,6 +2115,302 @@ mod tests {
         );
     }
 
+    // ── Relational split unit tests ────────────────────────────────────────────
+
+    /// The three two-character relational lexemes tokenize to their own tokens,
+    /// distinct from the single-character `Equals` a `bus=` argument emits.
+    #[test]
+    fn tokenize_recognises_relational_operators() {
+        assert_eq!(tokenize("<=").unwrap(), vec![Token::Le]);
+        assert_eq!(tokenize(">=").unwrap(), vec![Token::Ge]);
+        assert_eq!(tokenize("==").unwrap(), vec![Token::EqEq]);
+        assert_eq!(tokenize("=").unwrap(), vec![Token::Equals]);
+    }
+
+    /// A bare `<` or `>` (not part of a two-character operator) is a tokenizer error.
+    #[test]
+    fn tokenize_bare_relational_char_is_error() {
+        for input in ["hydro_generation(0) < 5", "hydro_generation(0) > 5"] {
+            let err = tokenize(input).unwrap_err();
+            assert!(
+                err.contains("not a valid operator"),
+                "expected a bare-operator error for \"{input}\", got: {err}"
+            );
+        }
+    }
+
+    /// An operator-free expression parses to [`ParsedRelation::Plain`] with the
+    /// same terms `parse_terms` alone produces — the split adds no observable
+    /// difference for the zero-operator case.
+    #[test]
+    fn parse_relation_zero_operators_is_plain() {
+        let input = "hydro_generation(10) + hydro_generation(11)";
+        let ParsedRelation::Plain(parsed) =
+            parse_relation(input, &HashMap::new(), &LineBusPairIndex::default()).unwrap()
+        else {
+            panic!("expected ParsedRelation::Plain for an operator-free expression");
+        };
+        let tokens = tokenize(input).unwrap();
+        let direct = parse_terms(&tokens, &HashMap::new(), &LineBusPairIndex::default()).unwrap();
+        assert_eq!(parsed, direct);
+    }
+
+    /// A single top-level operator splits into [`ParsedRelation::Relational`]
+    /// with the right operator and non-empty sides.
+    #[test]
+    fn parse_relation_single_operator_splits() {
+        for (input, expected_op) in [
+            ("hydro_generation(0) <= 5", RelOp::Le),
+            ("hydro_generation(0) >= 5", RelOp::Ge),
+            ("hydro_generation(0) == 5", RelOp::Eq),
+        ] {
+            let ParsedRelation::Relational { lhs, op, rhs } =
+                parse_relation(input, &HashMap::new(), &LineBusPairIndex::default()).unwrap()
+            else {
+                panic!("expected ParsedRelation::Relational for \"{input}\"");
+            };
+            assert_eq!(op, expected_op, "wrong operator for \"{input}\"");
+            assert_eq!(lhs.len(), 1, "lhs for \"{input}\"");
+            assert_eq!(rhs.len(), 1, "rhs for \"{input}\"");
+        }
+    }
+
+    /// A relational operator nested inside a variable's argument list (the
+    /// `bus=` single `=`) is not mistaken for a top-level split point — the
+    /// depth check excludes it.
+    #[test]
+    fn parse_relation_ignores_operator_shaped_tokens_inside_parens() {
+        let input = "hydro_turbined(5, bus=2) <= 10";
+        let ParsedRelation::Relational { op, .. } =
+            parse_relation(input, &HashMap::new(), &LineBusPairIndex::default()).unwrap()
+        else {
+            panic!("expected ParsedRelation::Relational for \"{input}\"");
+        };
+        assert_eq!(op, RelOp::Le);
+    }
+
+    /// Two top-level relational operators (an inline double-relational range)
+    /// is a descriptive error naming the one-operator limit.
+    #[test]
+    fn parse_relation_two_operators_is_error() {
+        let err = parse_relation(
+            "line_exchange(3) <= 10 >= 2",
+            &HashMap::new(),
+            &LineBusPairIndex::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("at most one relational operator"),
+            "expected the too-many-operators error, got: {err}"
+        );
+    }
+
+    /// A standalone numeric literal with no trailing `*` parses as a
+    /// [`SplitTerm::Constant`] on a relational side.
+    #[test]
+    fn parse_split_side_standalone_constant() {
+        let tokens = tokenize("73").unwrap();
+        let terms =
+            parse_split_side(&tokens, &HashMap::new(), &LineBusPairIndex::default()).unwrap();
+        assert_eq!(terms.len(), 1);
+        match &terms[0] {
+            SplitTerm::Constant(v) => assert!((v - 73.0).abs() < f64::EPSILON),
+            SplitTerm::Named(t) => panic!("expected a Constant term, got: {t:?}"),
+        }
+    }
+
+    /// A leading minus on a standalone constant negates it.
+    #[test]
+    fn parse_split_side_negated_standalone_constant() {
+        let tokens = tokenize("10 - 73").unwrap();
+        let terms =
+            parse_split_side(&tokens, &HashMap::new(), &LineBusPairIndex::default()).unwrap();
+        assert_eq!(terms.len(), 2);
+        for (term, expected) in terms.iter().zip([10.0, -73.0]) {
+            match term {
+                SplitTerm::Constant(v) => assert!((v - expected).abs() < f64::EPSILON),
+                SplitTerm::Named(t) => panic!("expected a Constant term, got: {t:?}"),
+            }
+        }
+    }
+
+    /// `thermal_generation(5) <= 0.87 * hydro_generation(140) + 73` normalizes
+    /// to the same terms as the hand-flattened LHS
+    /// `thermal_generation(5) - 0.87 * hydro_generation(140)` after
+    /// canonicalize; `bound_upper_affine` carries the constant,
+    /// `bound_lower_affine` stays `None`.
+    #[test]
+    fn ac1_inline_constant_and_variable_rhs_normalizes() {
+        let json = r#"{
+  "constraints": [
+    { "id": 0, "name": "c0", "expression": "thermal_generation(5) <= 0.87 * hydro_generation(140) + 73", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(json);
+        let result =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap();
+
+        let hand_flattened = parse_expression(
+            "thermal_generation(5) - 0.87 * hydro_generation(140)",
+            &HashMap::new(),
+        )
+        .unwrap();
+        let mut hand_flattened = hand_flattened;
+        hand_flattened.canonicalize();
+
+        assert_eq!(result[0].expression.terms, hand_flattened.terms);
+        assert_eq!(
+            result[0].bound_upper_affine,
+            Some(AffineBound {
+                constant: 73.0,
+                terms: vec![]
+            })
+        );
+        assert_eq!(result[0].bound_lower_affine, None);
+    }
+
+    /// `line_exchange(3) >= @target` where `target` is a loaded parameter
+    /// resolves the lower endpoint to that parameter, leaving the upper `None`.
+    #[test]
+    fn ac2_inline_lower_bound_bare_param_reference() {
+        let json = r#"{
+  "constraints": [
+    { "id": 0, "name": "c0", "expression": "line_exchange(3) >= @target", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(json);
+        let mut tbl = HashMap::new();
+        tbl.insert("target".to_string(), EntityId(99));
+        let result =
+            parse_generic_constraints(f.path(), &tbl, &LineBusPairIndex::default()).unwrap();
+        assert_eq!(
+            result[0].bound_lower_affine,
+            Some(AffineBound::single(EntityId(99)))
+        );
+        assert_eq!(result[0].bound_upper_affine, None);
+    }
+
+    /// `hydro_generation(0) - hydro_generation(0) <= 5` merges to an empty
+    /// term list (the net-zero column dropped) and `bound_upper_affine` carries
+    /// the constant `5`.
+    #[test]
+    fn ac3_net_zero_column_drops_and_constant_bound_survives() {
+        let json = r#"{
+  "constraints": [
+    { "id": 0, "name": "c0", "expression": "hydro_generation(0) - hydro_generation(0) <= 5", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(json);
+        let result =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap();
+        assert!(result[0].expression.terms.is_empty());
+        assert_eq!(
+            result[0].bound_upper_affine,
+            Some(AffineBound {
+                constant: 5.0,
+                terms: vec![]
+            })
+        );
+        assert_eq!(result[0].bound_lower_affine, None);
+    }
+
+    /// DECOMP-shaped form 1: a decision-variable RHS mixing two variable terms
+    /// and a constant (`RSE <= -0.316*FBIPS + 0.5*GPC + 12352`).
+    #[test]
+    fn decomp_shaped_decision_variable_rhs() {
+        let json = r#"{
+  "constraints": [
+    { "id": 0, "name": "rse", "expression": "bus_deficit(0) <= -0.316 * bus_deficit(1) + 0.5 * bus_deficit(2) + 12352", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(json);
+        let result =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap();
+        let terms = &result[0].expression.terms;
+        assert_eq!(terms.len(), 3);
+        let find = |bus_id: i32| {
+            terms
+                .iter()
+                .find(|t| {
+                    t.variable
+                        == VariableRef::BusDeficit {
+                            bus_id: EntityId(bus_id),
+                            block_id: None,
+                        }
+                })
+                .unwrap_or_else(|| panic!("expected bus_deficit({bus_id}) in {terms:?}"))
+        };
+        assert!((effective(find(0)) - 1.0).abs() < f64::EPSILON);
+        assert!((effective(find(1)) - 0.316).abs() < 1e-10);
+        assert!((effective(find(2)) - (-0.5)).abs() < 1e-10);
+        assert_eq!(
+            result[0].bound_upper_affine,
+            Some(AffineBound {
+                constant: 12352.0,
+                terms: vec![]
+            })
+        );
+        assert_eq!(result[0].bound_lower_affine, None);
+    }
+
+    /// DECOMP-shaped form 2: affine parameters plus a constant, no decision
+    /// variable on the RHS at all (`RNE <= 11000 - 0.04*val_demanda(3) +
+    /// 0.06*ger_pee(11)`, authored with cobre's own `@name` scalar-parameter
+    /// grammar).
+    #[test]
+    fn decomp_shaped_affine_param_rhs() {
+        let json = r#"{
+  "constraints": [
+    { "id": 0, "name": "rne", "expression": "bus_deficit(0) <= 11000 - 0.04 * @val_demanda_3 + 0.06 * @ger_pee_11", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(json);
+        let mut tbl = HashMap::new();
+        tbl.insert("val_demanda_3".to_string(), EntityId(50));
+        tbl.insert("ger_pee_11".to_string(), EntityId(51));
+        let result =
+            parse_generic_constraints(f.path(), &tbl, &LineBusPairIndex::default()).unwrap();
+
+        assert_eq!(result[0].expression.terms.len(), 1);
+        assert!((lit(&result[0].expression.terms[0]) - 1.0).abs() < f64::EPSILON);
+
+        let bound = result[0]
+            .bound_upper_affine
+            .as_ref()
+            .expect("upper bound present");
+        assert!((bound.constant - 11000.0).abs() < f64::EPSILON);
+        assert_eq!(bound.terms.len(), 2);
+        assert!(bound.terms.contains(&(-0.04, EntityId(50))));
+        assert!(bound.terms.contains(&(0.06, EntityId(51))));
+        assert_eq!(result[0].bound_lower_affine, None);
+    }
+
+    /// DECOMP-shaped form 3: a pure-constant RHS (`FSIOR <= 73`).
+    #[test]
+    fn decomp_shaped_pure_constant_rhs() {
+        let json = r#"{
+  "constraints": [
+    { "id": 0, "name": "fsior", "expression": "bus_deficit(0) <= 73", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(json);
+        let result =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap();
+        assert_eq!(result[0].expression.terms.len(), 1);
+        assert_eq!(
+            result[0].bound_upper_affine,
+            Some(AffineBound {
+                constant: 73.0,
+                terms: vec![]
+            })
+        );
+        assert_eq!(result[0].bound_lower_affine, None);
+    }
+
     // ── Parenthesized group unit tests ────────────────────────────────────────
 
     /// A distributed group's terms equal the hand-flattened form's terms, each on
@@ -2721,18 +3244,18 @@ mod tests {
         );
     }
 
-    /// A present `bound_upper_ref` resolves to `Some(AffineBound::single(id))` for
-    /// the named parameter; an absent `bound_lower_ref` stays `None`.
+    /// An inline `<=` against a bare `@name` resolves to
+    /// `Some(AffineBound::single(id))` on the upper endpoint; the lower endpoint
+    /// stays `None`.
     #[test]
-    fn test_parse_bound_upper_ref_resolves_to_entity_id() {
+    fn test_parse_inline_upper_bound_resolves_to_entity_id() {
         let json = r#"{
   "constraints": [
     {
       "id": 0,
       "name": "demand_cap",
-      "expression": "hydro_generation(3)",
-      "slack": { "enabled": false },
-      "bound_upper_ref": "rho_eq"
+      "expression": "hydro_generation(3) <= @rho_eq",
+      "slack": { "enabled": false }
     }
   ]
 }"#;
@@ -2748,18 +3271,17 @@ mod tests {
         assert_eq!(result[0].bound_lower_affine, None);
     }
 
-    /// A leading `@` on a bound reference is accepted and stripped, resolving to the
-    /// same parameter as the bare name.
+    /// An inline `>=` against a bare `@name` resolves the same way, on the lower
+    /// endpoint.
     #[test]
-    fn test_parse_bound_ref_strips_leading_at() {
+    fn test_parse_inline_lower_bound_resolves_to_entity_id() {
         let json = r#"{
   "constraints": [
     {
       "id": 0,
       "name": "demand_floor",
-      "expression": "hydro_generation(3)",
-      "slack": { "enabled": false },
-      "bound_lower_ref": "@rho_eq"
+      "expression": "hydro_generation(3) >= @rho_eq",
+      "slack": { "enabled": false }
     }
   ]
 }"#;
@@ -2773,19 +3295,20 @@ mod tests {
         );
     }
 
-    /// A bound reference naming a parameter absent from `name_to_id` is a
-    /// `SchemaError` whose field names the endpoint and whose message names the
-    /// missing parameter.
+    /// A bound-position `@name` naming a parameter absent from `name_to_id` is a
+    /// `SchemaError` on the constraint's `expression` field, naming the missing
+    /// parameter with the "unknown parameter" wording — never the named-expression
+    /// "undeclared reference" wording, since a bound-position `@name` never
+    /// consults the named-expression table.
     #[test]
-    fn test_parse_unknown_bound_ref_returns_schema_error() {
+    fn test_parse_unknown_inline_bound_returns_schema_error() {
         let json = r#"{
   "constraints": [
     {
       "id": 0,
       "name": "bad_bound",
-      "expression": "hydro_generation(0)",
-      "slack": { "enabled": false },
-      "bound_lower_ref": "missing_param"
+      "expression": "hydro_generation(0) >= @missing_param",
+      "slack": { "enabled": false }
     }
   ]
 }"#;
@@ -2796,16 +3319,87 @@ mod tests {
         match &err {
             LoadError::SchemaError { field, message, .. } => {
                 assert!(
-                    field.contains("bound_lower_ref"),
-                    "field should name the endpoint, got: {field}"
+                    field.contains("expression"),
+                    "field should name the expression, got: {field}"
                 );
                 assert!(
-                    message.contains("missing_param"),
-                    "message should name the missing parameter, got: {message}"
+                    message.contains("unknown parameter") && message.contains("missing_param"),
+                    "message should be the unknown-parameter wording naming the missing \
+                     parameter, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
+    }
+
+    /// A relational side referencing a genuinely-declared named expression still
+    /// inlines it — named-expression inlining runs on each side before
+    /// normalization — so its variable terms fold into the merged LHS rather than
+    /// the affine remainder; the bound-position-names-a-parameter carve-out
+    /// applies only to a name that does NOT resolve in the table (the previous
+    /// test).
+    #[test]
+    fn test_parse_bound_side_named_expression_inlines_into_merged_lhs() {
+        let json = r#"{
+  "expressions": [
+    { "name": "fnese", "expression": "hydro_generation(10) + hydro_generation(11)" }
+  ],
+  "constraints": [
+    { "id": 0, "name": "c0", "expression": "hydro_generation(0) >= @fnese", "slack": { "enabled": false } }
+  ]
+}"#;
+        let f = write_json(json);
+        let result =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].bound_lower_affine,
+            Some(AffineBound {
+                constant: 0.0,
+                terms: vec![]
+            }),
+            "an all-variable RHS supplies an explicit zero bound, not \"no bound\""
+        );
+        assert_eq!(result[0].bound_upper_affine, None);
+        let terms = &result[0].expression.terms;
+        assert_eq!(terms.len(), 3, "hydro_generation(0) plus fnese's two terms");
+        for hydro_id in [0, 10, 11] {
+            assert!(
+                terms.iter().any(|t| t.variable
+                    == VariableRef::HydroGeneration {
+                        hydro_id: EntityId(hydro_id),
+                        block_id: None,
+                        bus_id: None,
+                    }),
+                "expected hydro_generation({hydro_id}) in the merged terms, got: {terms:?}"
+            );
+        }
+    }
+
+    /// The retired `bound_upper_ref` JSON field is now an unknown field under
+    /// `deny_unknown_fields` — a symbolic endpoint is authored inline instead.
+    #[test]
+    fn test_parse_retired_bound_upper_ref_field_is_unknown_field_error() {
+        let json = r#"{
+  "constraints": [
+    {
+      "id": 0,
+      "name": "a",
+      "expression": "hydro_generation(0)",
+      "slack": { "enabled": false },
+      "bound_upper_ref": "demanda"
+    }
+  ]
+}"#;
+        let f = write_json(json);
+        let err =
+            parse_generic_constraints(f.path(), &HashMap::new(), &LineBusPairIndex::default())
+                .unwrap_err();
+        assert!(
+            matches!(err, LoadError::ParseError { .. }),
+            "expected ParseError for the retired \"bound_upper_ref\" field, got: {err:?}"
+        );
     }
 
     /// A constraint declaring neither bound reference parses with both fields `None`

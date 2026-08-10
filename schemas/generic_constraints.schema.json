@@ -4,22 +4,6 @@
       "additionalProperties": false,
       "description": "Intermediate type for a single constraint entry.",
       "properties": {
-        "bound_lower_ref": {
-          "default": null,
-          "description": "Optional `@name` naming the scalar parameter that supplies this constraint's\nlower RHS bound, resolved per `(stage, block)` at LP build. A leading `@` is\naccepted and stripped. When present, the bounds parquet leaves the lower\nendpoint numeric-null for this constraint — an endpoint is literal XOR symbolic.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "bound_upper_ref": {
-          "default": null,
-          "description": "Upper-bound counterpart of `bound_lower_ref`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "description": {
           "description": "Optional human-readable description.",
           "type": [
@@ -28,7 +12,7 @@
           ]
         },
         "expression": {
-          "description": "Expression string to be parsed. E.g. `\"2.5 * thermal_generation(5) - hydro_generation(3)\"`.\nTo constrain an anticipated thermal's commitment, use `\"anticipated_decision(5)\"` (stage-level scalar, no block index).\nTo constrain one bus of a plant split across several buses, use `\"hydro_turbined(5, bus=2)\"`\nor `\"hydro_generation(5, bus=2)\"` — the only two variables accepting a `bus=` selector.",
+          "description": "Expression string to be parsed. E.g. `\"2.5 * thermal_generation(5) - hydro_generation(3)\"`.\nTo constrain an anticipated thermal's commitment, use `\"anticipated_decision(5)\"` (stage-level scalar, no block index).\nTo constrain one bus of a plant split across several buses, use `\"hydro_turbined(5, bus=2)\"`\nor `\"hydro_generation(5, bus=2)\"` — the only two variables accepting a `bus=` selector.\nAn optional inline relational operator (`<=`, `>=`, `==`) followed by a\nright-hand side normalizes onto the F3 interval — see the module doc.",
           "type": "string"
         },
         "id": {
