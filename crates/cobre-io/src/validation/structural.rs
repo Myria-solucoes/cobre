@@ -46,6 +46,8 @@ pub struct FileManifest {
     pub stages_json: bool,
     /// `initial_conditions.json` — required
     pub initial_conditions_json: bool,
+    /// `post_study_stages.json` — optional
+    pub post_study_stages_json: bool,
 
     /// `system/buses.json` — required
     pub system_buses_json: bool,
@@ -155,6 +157,11 @@ const FILE_ENTRIES: &[FileEntry] = &[
     FileEntry {
         relative: "initial_conditions.json",
         required: true,
+    },
+    // Root-level — optional
+    FileEntry {
+        relative: "post_study_stages.json",
+        required: false,
     },
     // system/ — required
     FileEntry {
@@ -388,13 +395,14 @@ pub fn validate_structure(case_root: &Path, ctx: &mut ValidationContext) -> File
 /// Returns mutable references to every `bool` field of [`FileManifest`] in the
 /// same order as [`FILE_ENTRIES`] — `validate_structure` zips the two positionally,
 /// so a divergence here silently misassigns presence flags.
-fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 42] {
+fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
     [
         // Root
         &mut m.config_json,
         &mut m.penalties_json,
         &mut m.stages_json,
         &mut m.initial_conditions_json,
+        &mut m.post_study_stages_json,
         // system/ required
         &mut m.system_buses_json,
         &mut m.system_lines_json,

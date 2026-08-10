@@ -217,6 +217,7 @@ fn base_parsed_data(stages: StagesData) -> ParsedData {
             past_defluences: vec![],
             future_anticipated_deliveries: vec![],
         },
+        post_study_stages: None,
         buses: vec![Bus {
             id: EntityId::from(1),
             name: "BUS_1".to_string(),

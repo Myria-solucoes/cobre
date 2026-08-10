@@ -271,6 +271,7 @@ pub(crate) fn run_pipeline_with_artifacts(
         .external_scenarios(data.external_scenarios)
         .external_load_scenarios(data.external_load_scenarios)
         .external_ncs_scenarios(data.external_ncs_scenarios)
+        .post_study_stages(data.post_study_stages)
         .build()
         .map_err(|errs| LoadError::ConstraintError {
             description: errs

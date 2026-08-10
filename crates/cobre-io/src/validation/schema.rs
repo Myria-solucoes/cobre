@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use cobre_core::{
-    EntityId, GenericConstraint, ScalarParameter,
+    EntityId, GenericConstraint, PostStudyStages, ScalarParameter,
     entities::{Bus, EnergyContract, Hydro, Line, NonControllableSource, PumpingStation, Thermal},
     initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
@@ -40,6 +40,7 @@ use crate::{
     },
     initial_conditions::parse_initial_conditions,
     penalties::parse_penalties,
+    post_study_stages::parse_post_study_stages,
     scenarios::{
         ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, InflowAnnualComponentRow,
         InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow, LoadFactorEntry,
@@ -76,6 +77,8 @@ pub(crate) struct ParsedData {
     pub(crate) stages: StagesData,
     /// `initial_conditions.json`.
     pub(crate) initial_conditions: InitialConditions,
+    /// `post_study_stages.json`. `None` when absent.
+    pub(crate) post_study_stages: Option<PostStudyStages>,
 
     /// `system/buses.json`.
     pub(crate) buses: Vec<Bus>,
@@ -253,6 +256,15 @@ pub(crate) fn validate_schema(
     let initial_conditions = parse_or_error(
         parse_initial_conditions(&case_root.join("initial_conditions.json")),
         "initial_conditions.json",
+        ctx,
+    );
+
+    // `Option` (not the aggregate): callers distinguish "no file" from an empty deck.
+    let post_study_stages: Option<PostStudyStages> = optional_or_error(
+        manifest.post_study_stages_json,
+        || parse_post_study_stages(&case_root.join("post_study_stages.json")).map(Some),
+        || None,
+        "post_study_stages.json",
         ctx,
     );
 
@@ -657,6 +669,7 @@ pub(crate) fn validate_schema(
         penalties,
         stages,
         initial_conditions,
+        post_study_stages,
         buses,
         thermals,
         hydros,

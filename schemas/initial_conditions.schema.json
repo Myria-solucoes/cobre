@@ -31,6 +31,43 @@
       ],
       "type": "object"
     },
+    "RawFutureAnticipatedDelivery": {
+      "additionalProperties": false,
+      "description": "One in-study decided delivery window for an anticipated thermal plant,\ndelivered after the study horizon — the right-boundary counterpart to\n[`RawAnticipatedCommitmentHistory`].\n\nA self-describing `[delivery_start, delivery_end)` window (ISO 8601,\n`delivery_end` exclusive and after `delivery_start`) carrying a\n`[min_mw, max_mw]` bound on the delivered MW rate. `min_mw == max_mw` pins\na fixed commitment.",
+      "properties": {
+        "delivery_end": {
+          "description": "End of the delivery window (exclusive), as an ISO 8601 date\n(YYYY-MM-DD). Must be after `delivery_start`.",
+          "type": "string"
+        },
+        "delivery_start": {
+          "description": "Start of the delivery window (inclusive), as an ISO 8601 date\n(YYYY-MM-DD).",
+          "type": "string"
+        },
+        "max_mw": {
+          "description": "Upper bound of the delivered MW rate over the window. Must be finite\nand `>= min_mw`.",
+          "format": "double",
+          "type": "number"
+        },
+        "min_mw": {
+          "description": "Lower bound of the delivered MW rate over the window. Must be finite.",
+          "format": "double",
+          "type": "number"
+        },
+        "thermal_id": {
+          "description": "Thermal plant identifier. Must reference an anticipated thermal.",
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "thermal_id",
+        "delivery_start",
+        "delivery_end",
+        "min_mw",
+        "max_mw"
+      ],
+      "type": "object"
+    },
     "RawHydroPastDefluence": {
       "additionalProperties": false,
       "description": "Past defluence (release) for the arc fed by a single upstream hydro over a\nspecific date range.\n\nMirrors [`RawRecentObservation`]: a self-describing `[start_date, end_date)`\nwindow (ISO 8601, `end_date` exclusive and after `start_date`) carrying the\naverage release rate over the window. Multiple windows per hydro are allowed;\ndate ranges for the same hydro must not overlap, though adjacent ranges\n(`start_date == previous end_date`) are accepted.",
@@ -130,6 +167,13 @@
       "description": "Initial reservoir volumes for filling hydros [hm³].\nA filling hydro may not also appear in `storage`.",
       "items": {
         "$ref": "#/$defs/RawHydroStorage"
+      },
+      "type": "array"
+    },
+    "future_anticipated_deliveries": {
+      "description": "In-study decided delivery windows per anticipated thermal plant,\ndelivered after the study horizon, each a self-describing\n`[delivery_start, delivery_end)` window carrying a `[min_mw, max_mw]`\nbound (`min_mw == max_mw` pins a fixed commitment). Windows for the\nsame thermal must not overlap; adjacent ranges (start == previous end)\nare accepted. Optional; defaults to empty.",
+      "items": {
+        "$ref": "#/$defs/RawFutureAnticipatedDelivery"
       },
       "type": "array"
     },

@@ -5,9 +5,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::{NaiveDate, TimeDelta};
 use cobre_core::commissioning::commissioning_active;
-use cobre_core::temporal::Stage;
-use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, Thermal, VariableRef};
+use cobre_core::temporal::{
+    Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+};
+use cobre_core::{
+    AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, FutureAnticipatedDelivery,
+    PostStudyStages, PostStudyThermalBound, Thermal, VariableRef,
+};
 use cobre_stochastic::season_cast::{DatedWindow, StageCalendar};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
@@ -602,6 +608,325 @@ pub(super) fn check_thermal_bounds_override_stage_range(
             );
         }
     }
+}
+
+/// Layer 5a — validates the standalone `post_study_stages.json` boundary input
+/// against the study calendar and the study's `future_anticipated_deliveries`.
+///
+/// Rejects unless:
+/// - (a) the post-study stages are date-contiguous and the first `start_date`
+///   equals the study horizon end (`study_stages.last().end_date`);
+/// - (b) every `future_anticipated_deliveries` window is covered exactly
+///   (coverage `1.0` per touched stage, no over-reach past the post-study
+///   horizon) by the post-study stages, via the shared [`StageCalendar`];
+/// - (c) a `PostStudyThermalBound` exists for every referenced
+///   `(thermal_id, post_study_stage)` (finiteness / `min_mw <= max_mw` are the
+///   reader's contract);
+/// - (d) the commitment interval `[min_mw, max_mw]` (from
+///   `future_anticipated_deliveries`) and the capability `[min_mw, max_mw]`
+///   (from the `PostStudyThermalBound`) intersect — else the committed amount
+///   is unsatisfiable within capability.
+///
+/// Each failure is a `BusinessRuleViolation` naming the offending
+/// `(thermal_id, delivery_start)` (or the offending post-study stage for (a)).
+/// A study with no `post_study_stages.json` but a non-empty
+/// `future_anticipated_deliveries` is rejected: every delivery is unanchored.
+pub(super) fn check_post_study_stages(data: &ParsedData, ctx: &mut ValidationContext) {
+    let deliveries = &data.initial_conditions.future_anticipated_deliveries;
+
+    let Some(post_study) = data.post_study_stages.as_ref() else {
+        for delivery in deliveries {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "post_study_stages.json",
+                Some(delivery_entity(delivery)),
+                format!(
+                    "Thermal {}: future_anticipated_deliveries window [{}, {}) has no \
+                     post_study_stages.json to resolve against; declare a post-study boundary \
+                     calendar covering it.",
+                    delivery.thermal_id.0, delivery.delivery_start, delivery.delivery_end
+                ),
+            );
+        }
+        return;
+    };
+
+    let study_end = data
+        .stages
+        .stages
+        .iter()
+        .rfind(|s| s.id >= 0)
+        .map(|s| s.end_date);
+
+    let (calendar_stages, well_formed) = build_post_study_calendar(post_study, study_end, ctx);
+    if !well_formed {
+        return;
+    }
+
+    if deliveries.is_empty() || calendar_stages.is_empty() {
+        return;
+    }
+
+    let calendar = StageCalendar::new(&calendar_stages);
+    let horizon_end = calendar_stages[calendar_stages.len() - 1].end_date;
+    let bounds: HashMap<(EntityId, usize), &PostStudyThermalBound> = post_study
+        .thermal_bounds
+        .iter()
+        .map(|b| ((b.thermal_id, b.post_study_stage_index), b))
+        .collect();
+
+    for delivery in deliveries {
+        check_delivery_coverage(
+            delivery,
+            &calendar,
+            &calendar_stages,
+            horizon_end,
+            &bounds,
+            ctx,
+        );
+    }
+}
+
+/// Build the post-study calendar as `Stage`s (each `end_date` = `start_date`
+/// advanced by `duration_hours` rounded to whole days — the whole-day alignment
+/// [`StageCalendar`] coverage needs, mirroring the pre-study duration→days round
+/// in `travel_time`), enforcing invariant (a). Returns the stages and whether
+/// they are well-formed; a non-well-formed calendar suppresses the coverage pass
+/// so its errors are not noise on a broken calendar.
+fn build_post_study_calendar(
+    post_study: &PostStudyStages,
+    study_end: Option<NaiveDate>,
+    ctx: &mut ValidationContext,
+) -> (Vec<Stage>, bool) {
+    let mut calendar_stages: Vec<Stage> = Vec::with_capacity(post_study.stages.len());
+    let mut well_formed = true;
+
+    for (i, stage) in post_study.stages.iter().enumerate() {
+        match post_study_end_date(stage.start_date, stage.duration_hours) {
+            Some(end_date) if end_date > stage.start_date => {
+                calendar_stages.push(make_calendar_stage(
+                    i,
+                    stage.start_date,
+                    end_date,
+                    stage.duration_hours,
+                ));
+            }
+            _ => {
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "post_study_stages.json",
+                    Some(format!("stages[{i}]")),
+                    format!(
+                        "post-study stage starting {} has duration_hours {} that rounds to a \
+                         non-positive whole-day span; declare a duration of at least a day.",
+                        stage.start_date, stage.duration_hours
+                    ),
+                );
+                well_formed = false;
+            }
+        }
+    }
+
+    match (calendar_stages.first(), study_end) {
+        (Some(first), Some(end)) if first.start_date != end => {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "post_study_stages.json",
+                Some("stages[0].start_date"),
+                format!(
+                    "first post-study stage starts {} but the study horizon ends {}; the \
+                     post-study calendar must begin exactly at the study horizon end.",
+                    first.start_date, end
+                ),
+            );
+            well_formed = false;
+        }
+        (Some(_), None) => {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "post_study_stages.json",
+                Some("stages"),
+                "post_study_stages.json is declared but the study has no study stages to anchor \
+                 the post-study calendar against."
+                    .to_string(),
+            );
+            well_formed = false;
+        }
+        _ => {}
+    }
+
+    for pair in calendar_stages.windows(2) {
+        if pair[0].end_date != pair[1].start_date {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "post_study_stages.json",
+                Some(format!("stages start_date={}", pair[1].start_date)),
+                format!(
+                    "post-study stages are not date-contiguous: the stage starting {} ends {} \
+                     but the next stage starts {}; each stage must end exactly where the next \
+                     begins.",
+                    pair[0].start_date, pair[0].end_date, pair[1].start_date
+                ),
+            );
+            well_formed = false;
+        }
+    }
+
+    (calendar_stages, well_formed)
+}
+
+/// Check one `future_anticipated_deliveries` window against the post-study
+/// calendar: invariant (b) coverage, (c) bound existence, and (d) the
+/// commitment∩capability intersection.
+#[allow(clippy::float_cmp)] // whole-day post-study spans keep each coverage fraction bit-exact (mirrors coverage's own contract)
+fn check_delivery_coverage(
+    delivery: &FutureAnticipatedDelivery,
+    calendar: &StageCalendar,
+    calendar_stages: &[Stage],
+    horizon_end: NaiveDate,
+    bounds: &HashMap<(EntityId, usize), &PostStudyThermalBound>,
+    ctx: &mut ValidationContext,
+) {
+    let first_start = calendar_stages[0].start_date;
+    if delivery.delivery_start < first_start || delivery.delivery_end > horizon_end {
+        ctx.add_error(
+            ErrorKind::BusinessRuleViolation,
+            "post_study_stages.json",
+            Some(delivery_entity(delivery)),
+            format!(
+                "Thermal {}: future_anticipated_deliveries window [{}, {}) reaches outside the \
+                 post-study horizon [{}, {}); every delivery must fall within the declared \
+                 post-study stages.",
+                delivery.thermal_id.0,
+                delivery.delivery_start,
+                delivery.delivery_end,
+                first_start,
+                horizon_end
+            ),
+        );
+        return;
+    }
+
+    let window = DatedWindow {
+        start_date: delivery.delivery_start,
+        end_date: delivery.delivery_end,
+    };
+    let coverage = calendar.coverage(&window);
+    let mut covered: Vec<usize> = Vec::new();
+    let mut aligned = true;
+    for (stage_index, fraction) in coverage.iter().enumerate() {
+        if *fraction == 1.0 {
+            covered.push(stage_index);
+        } else if *fraction != 0.0 {
+            aligned = false;
+        }
+    }
+
+    if !aligned || covered.is_empty() {
+        ctx.add_error(
+            ErrorKind::BusinessRuleViolation,
+            "post_study_stages.json",
+            Some(delivery_entity(delivery)),
+            format!(
+                "Thermal {}: future_anticipated_deliveries window [{}, {}) is not covered exactly \
+                 (1.0) by the post-study stages; align the window to whole post-study stage \
+                 boundaries.",
+                delivery.thermal_id.0, delivery.delivery_start, delivery.delivery_end
+            ),
+        );
+        return;
+    }
+
+    for stage_index in covered {
+        match bounds.get(&(delivery.thermal_id, stage_index)) {
+            None => ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "post_study_stages.json",
+                Some(delivery_entity(delivery)),
+                format!(
+                    "Thermal {}: future_anticipated_deliveries window [{}, {}) delivers into \
+                     post-study stage index {stage_index}, but post_study_stages.json has no \
+                     thermal_bounds entry for (thermal_id {}, post_study_stage_index \
+                     {stage_index}).",
+                    delivery.thermal_id.0,
+                    delivery.delivery_start,
+                    delivery.delivery_end,
+                    delivery.thermal_id.0
+                ),
+            ),
+            Some(bound) => {
+                let lower = delivery.min_mw.max(bound.min_mw);
+                let upper = delivery.max_mw.min(bound.max_mw);
+                if lower > upper {
+                    ctx.add_error(
+                        ErrorKind::BusinessRuleViolation,
+                        "post_study_stages.json",
+                        Some(delivery_entity(delivery)),
+                        format!(
+                            "Thermal {}: future_anticipated_deliveries commitment interval \
+                             [{}, {}] and post-study stage index {stage_index} capability \
+                             [{}, {}] do not intersect; the committed amount is unsatisfiable \
+                             within capability.",
+                            delivery.thermal_id.0,
+                            delivery.min_mw,
+                            delivery.max_mw,
+                            bound.min_mw,
+                            bound.max_mw
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Post-study stage end date: `start_date` advanced by `duration_hours` rounded
+/// to whole days. `None` only on calendar overflow.
+#[allow(clippy::cast_possible_truncation)] // a validated finite positive duration yields a small non-negative day count
+fn post_study_end_date(start_date: NaiveDate, duration_hours: f64) -> Option<NaiveDate> {
+    let days = (duration_hours / 24.0).round() as i64;
+    start_date.checked_add_signed(TimeDelta::days(days))
+}
+
+/// Synthesize a `Stage` carrying only the fields [`StageCalendar`] reads
+/// (`start_date`, `end_date`, `blocks`); the rest are inert placeholders.
+fn make_calendar_stage(
+    index: usize,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    duration_hours: f64,
+) -> Stage {
+    Stage {
+        index,
+        id: i32::try_from(index).unwrap_or(i32::MAX),
+        start_date,
+        end_date,
+        season_id: None,
+        blocks: vec![Block {
+            index: 0,
+            name: "post_study".to_string(),
+            duration_hours,
+        }],
+        block_mode: BlockMode::Parallel,
+        state_config: StageStateConfig {
+            storage: true,
+            inflow_lags: false,
+        },
+        risk_config: StageRiskConfig::Expectation,
+        scenario_config: ScenarioSourceConfig {
+            branching_factor: 1,
+            noise_method: NoiseMethod::Saa,
+        },
+    }
+}
+
+/// Canonical `(thermal_id, delivery_start)` entity label for a post-study
+/// delivery diagnostic.
+fn delivery_entity(delivery: &FutureAnticipatedDelivery) -> String {
+    format!(
+        "thermal_id={}, delivery_start={}",
+        delivery.thermal_id.0, delivery.delivery_start
+    )
 }
 
 #[cfg(test)]

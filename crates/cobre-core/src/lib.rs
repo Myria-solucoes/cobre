@@ -78,6 +78,7 @@ pub use model::penalty::{
     resolve_bus_excess_cost, resolve_hydro_penalties, resolve_line_exchange_cost,
     resolve_ncs_curtailment_cost,
 };
+pub use model::post_study::{PostStudyStage, PostStudyStages, PostStudyThermalBound};
 pub use model::resolved::{
     BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
     ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroBlockOverride,

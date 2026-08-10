@@ -580,6 +580,7 @@ mod tests {
                 past_defluences: vec![],
                 future_anticipated_deliveries: vec![],
             },
+            post_study_stages: None,
             buses: vec![],
             thermals: vec![],
             hydros: vec![],

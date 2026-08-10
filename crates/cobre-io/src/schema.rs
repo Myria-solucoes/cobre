@@ -24,6 +24,7 @@ use crate::{
     },
     initial_conditions::RawInitialConditions,
     penalties::RawPenalties,
+    post_study_stages::RawPostStudyStagesFile,
     scenarios::{
         correlation::RawCorrelationFile, load_factors::RawLoadFactorsFile,
         non_controllable_factors::RawNcsFactorsFile,
@@ -63,6 +64,7 @@ use serde_json::{Error, Value};
 /// | `non_controllable_factors.schema.json`| `scenarios/non_controllable_factors.json` |
 /// | `correlation.schema.json`             | `scenarios/correlation.json`           |
 /// | `initial_conditions.schema.json`      | `initial_conditions.json`              |
+/// | `post_study_stages.schema.json`       | `post_study_stages.json`               |
 /// | `production_models.schema.json`       | `system/hydro_production_models.json`  |
 /// | `generic_parameters.schema.json`      | `constraints/generic_parameters.json`  |
 ///
@@ -126,6 +128,10 @@ pub fn generate_schemas() -> Result<Vec<(String, Value)>, Error> {
         (
             "initial_conditions.schema.json",
             schemars::schema_for!(RawInitialConditions),
+        ),
+        (
+            "post_study_stages.schema.json",
+            schemars::schema_for!(RawPostStudyStagesFile),
         ),
         (
             "production_models.schema.json",

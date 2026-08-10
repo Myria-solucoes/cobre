@@ -10,8 +10,9 @@ use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
     InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
-    NonControllableSource, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
-    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
+    NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
+    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
+    ResolvedPenalties, Stage, Thermal,
 };
 
 mod builder;
@@ -128,6 +129,11 @@ pub struct System {
     external_load_scenarios: Vec<ExternalLoadRow>,
     /// Raw external NCS scenario rows, sorted by `(stage_id, scenario_id, ncs_id)` ascending.
     external_ncs_scenarios: Vec<ExternalNcsRow>,
+
+    /// Post-study boundary calendar and per-cell thermal cost/bounds; `None` when
+    /// `post_study_stages.json` is absent (inert). Boundary-only input: never a
+    /// dispatched stage, state region, or cut dimension.
+    post_study_stages: Option<PostStudyStages>,
 }
 
 const _: () = {
@@ -168,6 +174,7 @@ struct SystemRepr {
     external_scenarios: Vec<ExternalScenarioRow>,
     external_load_scenarios: Vec<ExternalLoadRow>,
     external_ncs_scenarios: Vec<ExternalNcsRow>,
+    post_study_stages: Option<PostStudyStages>,
 }
 
 #[cfg(feature = "serde")]
@@ -209,6 +216,7 @@ impl From<SystemRepr> for System {
             external_scenarios: repr.external_scenarios,
             external_load_scenarios: repr.external_load_scenarios,
             external_ncs_scenarios: repr.external_ncs_scenarios,
+            post_study_stages: repr.post_study_stages,
         };
         system.rebuild_indices();
         system
@@ -488,6 +496,13 @@ impl System {
     #[must_use]
     pub fn external_ncs_scenarios(&self) -> &[ExternalNcsRow] {
         &self.external_ncs_scenarios
+    }
+
+    /// Returns the post-study boundary calendar and cost/bounds, or `None` when
+    /// `post_study_stages.json` was absent at case-load time.
+    #[must_use]
+    pub fn post_study_stages(&self) -> Option<&PostStudyStages> {
+        self.post_study_stages.as_ref()
     }
 
     /// Replace `inflow_models` and `correlation`, returning the `System` with all

@@ -351,6 +351,7 @@ mod tests {
                 past_defluences: vec![],
                 future_anticipated_deliveries: vec![],
             },
+            post_study_stages: None,
             buses: vec![Bus {
                 id: EntityId(1),
                 name: "BUS_1".to_string(),

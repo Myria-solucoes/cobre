@@ -8,6 +8,7 @@
 pub mod horizon;
 pub mod parameters;
 pub mod penalty;
+pub mod post_study;
 pub mod resolved;
 pub mod scenario;
 pub mod temporal;

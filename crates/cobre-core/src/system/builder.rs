@@ -13,9 +13,9 @@ use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
     InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
-    NonControllableSource, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
-    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
-    ValidationError,
+    NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
+    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
+    ResolvedPenalties, Stage, Thermal, ValidationError,
 };
 
 /// Builder for constructing a validated, immutable [`System`].
@@ -71,6 +71,7 @@ pub struct SystemBuilder {
     external_scenarios: Vec<ExternalScenarioRow>,
     external_load_scenarios: Vec<ExternalLoadRow>,
     external_ncs_scenarios: Vec<ExternalNcsRow>,
+    post_study_stages: Option<PostStudyStages>,
 }
 
 impl Default for SystemBuilder {
@@ -109,6 +110,7 @@ impl SystemBuilder {
             external_scenarios: Vec::new(),
             external_load_scenarios: Vec::new(),
             external_ncs_scenarios: Vec::new(),
+            post_study_stages: None,
         }
     }
 
@@ -298,6 +300,14 @@ impl SystemBuilder {
         self
     }
 
+    /// Set the post-study boundary calendar and cost/bounds; `None` when
+    /// `post_study_stages.json` is absent.
+    #[must_use]
+    pub fn post_study_stages(mut self, post_study_stages: Option<PostStudyStages>) -> Self {
+        self.post_study_stages = post_study_stages;
+        self
+    }
+
     /// Sort every collection into canonical order, validate, and assemble the
     /// immutable [`System`]. Operational entities sort by
     /// `(operational_start_date, id)`; stages and generic constraints sort by
@@ -466,6 +476,7 @@ impl SystemBuilder {
             external_scenarios: self.external_scenarios,
             external_load_scenarios: self.external_load_scenarios,
             external_ncs_scenarios: self.external_ncs_scenarios,
+            post_study_stages: self.post_study_stages,
         })
     }
 }
