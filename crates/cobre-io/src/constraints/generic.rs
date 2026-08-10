@@ -190,7 +190,7 @@ struct RawSlackConfig {
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawNamedExpression {
+struct RawNamedExpression {
     /// Name bound to the expression; unique in the file and distinct from every scalar-parameter name.
     name: String,
 
@@ -551,7 +551,7 @@ fn parse_expression_terms(
 /// [`LoadError::SchemaError`] — `field = "expressions[i].name"` for a duplicate or
 /// parameter-colliding name; `field = "expressions[i].expression"` for a definition
 /// that fails to parse.
-pub(crate) fn parse_named_expressions(
+fn parse_named_expressions(
     entries: &[RawNamedExpression],
     path: &Path,
     name_to_id: &HashMap<String, EntityId>,
