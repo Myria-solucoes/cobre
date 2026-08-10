@@ -1227,6 +1227,8 @@ mod tests {
             1,
             vec![0],
             vec![EntityId(1)],
+            vec![(0.0, 0.0)],
+            vec![0],
         );
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
@@ -1266,6 +1268,8 @@ mod tests {
             2,
             vec![0, 0],
             vec![EntityId(1), EntityId(1)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+            vec![0, 0],
         );
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 

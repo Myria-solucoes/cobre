@@ -545,6 +545,8 @@ mod tests {
             2,
             vec![0, 0],
             vec![EntityId(0), EntityId(0)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+            vec![0, 0],
         );
 
         assert_eq!(state_layout.commit_out, 2..6);

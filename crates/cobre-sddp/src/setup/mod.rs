@@ -81,8 +81,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cobre_core::{
-    AnticipatedConfig, EntityId, FutureAnticipatedDelivery, HorizonGraph, Hydro, PostStudyStages,
-    PostStudyThermalBound, Stage, StageId, System, Thermal,
+    AnticipatedConfig, EntityId, HorizonGraph, Hydro, PostStudyStages, PostStudyThermalBound,
+    Stage, StageId, System, Thermal,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::StageIdResolver;
@@ -485,7 +485,6 @@ impl StudySetup {
         let post_study_resolved = resolve_post_study_artifacts(
             system.post_study_stages(),
             system.policy_graph(),
-            &system.initial_conditions().future_anticipated_deliveries,
             stage_templates
                 .cumulative_discount_factors()
                 .last()
@@ -1082,7 +1081,7 @@ pub(crate) fn resolve_state_layout(
         vec![0; hydro_count]
     };
 
-    let (n_commitment, commitment_decider_stage, commitment_window_thermal_id) =
+    let commitment_hold_windows =
         resolve_commitment_hold_windows(system, &anticipated_thermal_indices);
 
     // `StateSpace` is the sole role-(a) owner; its constructor finalizes the
@@ -1097,50 +1096,79 @@ pub(crate) fn resolve_state_layout(
         k_max,
         anticipated_lead_stages,
         &effective_lag_counts,
-        n_commitment,
-        commitment_decider_stage,
-        commitment_window_thermal_id,
+        commitment_hold_windows.n_commitment,
+        commitment_hold_windows.decider_stage,
+        commitment_hold_windows.thermal_id,
+        commitment_hold_windows.min_max,
+        commitment_hold_windows.dest_stage,
     );
     state.set_anticipated_resolution(anticipated_resolution);
 
     Ok((state, hydro_count, anticipated_thermal_indices))
 }
 
+/// [`resolve_commitment_hold_windows`]'s return shape: every field is
+/// survivor-indexed and parallel, length [`Self::n_commitment`], in
+/// [`StateSpace::commit_out`]'s post-horizon-lane order — never a raw
+/// `future_anticipated_deliveries` position, which diverges from this index
+/// the moment any window is dropped.
+#[derive(Debug, Default, PartialEq)]
+struct CommitmentHoldWindows {
+    n_commitment: usize,
+    /// Survivor `w`'s in-study decider stage.
+    decider_stage: Vec<usize>,
+    /// Survivor `w`'s owning thermal id.
+    thermal_id: Vec<EntityId>,
+    /// Survivor `w`'s `(min_mw, max_mw)` commitment interval.
+    min_max: Vec<(f64, f64)>,
+    /// Survivor `w`'s resolved post-study destination stage index.
+    dest_stage: Vec<usize>,
+}
+
 /// Resolve every declared post-horizon delivery window
 /// ([`cobre_core::FutureAnticipatedDelivery`]) to its in-study decider stage
-/// ([`resolve_future_delivery_decider`], spec #1 §4.3 step 2), in canonical
-/// `(anticipated thermal system position, delivery_start)` order — canonical
-/// thermal order, not raw `thermal_id` order, keeps the block's column order
-/// declaration-invariant under staggered commissioning the same way
-/// [`build_initial_state`]'s id-position-map contract does.
+/// ([`resolve_future_delivery_decider`], spec #1 §4.3 step 2) and its resolved
+/// post-study destination stage ([`StageCalendar::resolve_window`] against the
+/// post-study calendar), in canonical `(anticipated thermal system position,
+/// delivery_start)` order — canonical thermal order, not raw `thermal_id`
+/// order, keeps the block's column order declaration-invariant under
+/// staggered commissioning the same way [`build_initial_state`]'s
+/// id-position-map contract does.
 ///
 /// A window whose thermal has no physical lead time
 /// (`AnticipatedConfig::LeadStages`, which never consults the calendar) or
 /// whose resolved decider precedes the study horizon
 /// (`resolve_future_delivery_decider` returning `None`) is dropped with a
 /// setup-time advisory, never a hard error — mirrors
-/// [`warn_on_sub_stage_lead`]'s exclude-with-advisory convention. Returns the
-/// resolved window count and its parallel decider-stage and owning-thermal-id
-/// vectors, all three in the canonical order [`StateSpace::commit_out`]'s
-/// post-horizon-lane sub-range uses. `future_anticipated_deliveries`' own
-/// sorting invariant (`(thermal_id, delivery_start)` ascending) is what keeps
-/// the per-thermal filter below yielding each thermal's windows in
+/// [`warn_on_sub_stage_lead`]'s exclude-with-advisory convention. The returned
+/// [`CommitmentHoldWindows`] is entirely survivor-indexed; a dropped window
+/// leaves no trace in it. `future_anticipated_deliveries`' own sorting
+/// invariant (`(thermal_id, delivery_start)` ascending) is what keeps the
+/// per-thermal filter below yielding each thermal's windows in
 /// `delivery_start` order — the order
 /// [`crate::policy_export::build_stage_entity_manifest`] derives a window's
 /// local index within its thermal from.
 fn resolve_commitment_hold_windows(
     system: &System,
     anticipated_thermal_indices: &[usize],
-) -> (usize, Vec<usize>, Vec<EntityId>) {
+) -> CommitmentHoldWindows {
     let Some(start_0) = study_start_date(system) else {
-        return (0, Vec::new(), Vec::new());
+        return CommitmentHoldWindows::default();
     };
     let stage_lengths_hours = bucket_topology::study_stage_durations(system);
     let thermals = system.thermals();
     let ic = system.initial_conditions();
 
-    let mut commitment_decider_stage = Vec::new();
-    let mut commitment_window_thermal_id = Vec::new();
+    let post_study_calendar_stages_vec = system
+        .post_study_stages()
+        .map(|post_study| post_study_calendar_stages(&post_study.stages))
+        .unwrap_or_default();
+    let post_study_calendar = StageCalendar::new(&post_study_calendar_stages_vec);
+
+    let mut decider_stage = Vec::new();
+    let mut thermal_id = Vec::new();
+    let mut min_max = Vec::new();
+    let mut dest_stage = Vec::new();
     for &t_idx in anticipated_thermal_indices {
         let thermal = &thermals[t_idx];
         let entries: Vec<_> = ic
@@ -1170,11 +1198,24 @@ fn resolve_commitment_hold_windows(
 
         for entry in entries {
             let window_end_hours = hours_between(entry.delivery_end, start_0);
-            if let Some((decider_stage, _kind)) =
+            if let Some((decider, _kind)) =
                 resolve_future_delivery_decider(delta_hours, &stage_lengths_hours, window_end_hours)
             {
-                commitment_decider_stage.push(decider_stage);
-                commitment_window_thermal_id.push(thermal.id);
+                let window = DatedWindow {
+                    start_date: entry.delivery_start,
+                    end_date: entry.delivery_end,
+                };
+                let resolved_dest = post_study_calendar.resolve_window(&window);
+                debug_assert!(
+                    resolved_dest.is_some(),
+                    "a surviving future_anticipated_deliveries window must resolve to a \
+                     post-study stage — cobre-io's coverage validator rejects any window it \
+                     cannot cover exactly before setup ever runs this resolution"
+                );
+                decider_stage.push(decider);
+                thermal_id.push(thermal.id);
+                min_max.push((entry.min_mw, entry.max_mw));
+                dest_stage.push(resolved_dest.unwrap_or(0));
             } else {
                 tracing::warn!(
                     "anticipated thermal {} ({}): future_anticipated_deliveries window \
@@ -1189,12 +1230,14 @@ fn resolve_commitment_hold_windows(
         }
     }
 
-    let n_commitment = commitment_decider_stage.len();
-    (
+    let n_commitment = decider_stage.len();
+    CommitmentHoldWindows {
         n_commitment,
-        commitment_decider_stage,
-        commitment_window_thermal_id,
-    )
+        decider_stage,
+        thermal_id,
+        min_max,
+        dest_stage,
+    }
 }
 
 /// Per-`(thermal, post-study stage)` cost/bounds lookup — [`PostStudyStages::
@@ -1258,16 +1301,11 @@ pub(crate) struct PostStudyResolved {
     pub(crate) cumulative_discount_factors: Vec<f64>,
     /// Per-`(thermal, post-study stage)` cost/bounds lookup.
     pub(crate) thermal_bounds: PostStudyThermalLookup,
-    /// Each `future_anticipated_deliveries` window's resolved post-study-stage
-    /// index, aligned 1:1 with
-    /// `InitialConditions::future_anticipated_deliveries`.
-    pub(crate) delivery_stage_index: Vec<usize>,
 }
 
-/// Resolve [`System::post_study_stages`] into the four setup-side artifacts:
-/// post-study `total_hours`, the discount continuation, the per-thermal
-/// cost/bounds lookup, and each `future_anticipated_deliveries` window's
-/// resolved post-study-stage index. `None`/empty `post_study` returns
+/// Resolve [`System::post_study_stages`] into the three setup-side artifacts:
+/// post-study `total_hours`, the discount continuation, and the per-thermal
+/// cost/bounds lookup. `None`/empty `post_study` returns
 /// [`PostStudyResolved::default`] — inert.
 ///
 /// `last_real_cumulative` and `last_real_per_stage` are the study's own last
@@ -1278,13 +1316,9 @@ pub(crate) struct PostStudyResolved {
 /// post-study stage's (`* per_stage_post[0]`): the continuation must equal what
 /// `cumulative_discount_factors` would hold had the horizon been extended to
 /// cover the post-study stages.
-/// `future_anticipated_deliveries` is resolved by iterating the record list
-/// (never a map), so the result stays aligned 1:1 with — and preserves the
-/// declaration order of — its input.
 fn resolve_post_study_artifacts(
     post_study: Option<&PostStudyStages>,
     pg: &HorizonGraph,
-    future_anticipated_deliveries: &[FutureAnticipatedDelivery],
     last_real_cumulative: f64,
     last_real_per_stage: f64,
 ) -> PostStudyResolved {
@@ -1319,30 +1353,10 @@ fn resolve_post_study_artifacts(
 
     let thermal_bounds = PostStudyThermalLookup::new(post_study.thermal_bounds.clone());
 
-    let calendar = StageCalendar::new(&calendar_stages);
-    let delivery_stage_index: Vec<usize> = future_anticipated_deliveries
-        .iter()
-        .map(|delivery| {
-            let window = DatedWindow {
-                start_date: delivery.delivery_start,
-                end_date: delivery.delivery_end,
-            };
-            let resolved = calendar.resolve_window(&window);
-            debug_assert!(
-                resolved.is_some(),
-                "future_anticipated_deliveries window must resolve to a post-study stage \
-                 index — the cobre-io semantic validator rejects any window it cannot \
-                 cover exactly before setup ever runs this resolution"
-            );
-            resolved.unwrap_or(0)
-        })
-        .collect();
-
     PostStudyResolved {
         total_hours,
         cumulative_discount_factors,
         thermal_bounds,
-        delivery_stage_index,
     }
 }
 
@@ -2584,8 +2598,7 @@ mod post_study_resolution_tests {
     use super::{PostStudyResolved, resolve_post_study_artifacts, template_postprocess};
     use chrono::NaiveDate;
     use cobre_core::{
-        EntityId, FutureAnticipatedDelivery, HorizonGraph, PostStudyStage, PostStudyStages,
-        PostStudyThermalBound,
+        EntityId, HorizonGraph, PostStudyStage, PostStudyStages, PostStudyThermalBound,
     };
     use cobre_stochastic::season_cast::post_study_calendar_stages;
 
@@ -2624,7 +2637,7 @@ mod post_study_resolution_tests {
 
     #[test]
     fn post_study_absent_returns_default() {
-        let resolved = resolve_post_study_artifacts(None, &HorizonGraph::default(), &[], 1.0, 1.0);
+        let resolved = resolve_post_study_artifacts(None, &HorizonGraph::default(), 1.0, 1.0);
         assert_eq!(resolved, PostStudyResolved::default());
     }
 
@@ -2635,33 +2648,23 @@ mod post_study_resolution_tests {
             thermal_bounds: Vec::new(),
         };
         let resolved =
-            resolve_post_study_artifacts(Some(&empty), &HorizonGraph::default(), &[], 1.0, 1.0);
+            resolve_post_study_artifacts(Some(&empty), &HorizonGraph::default(), 1.0, 1.0);
         assert_eq!(resolved, PostStudyResolved::default());
     }
 
     #[test]
     fn total_hours_matches_declared_duration() {
         let post_study = two_stage_post_study();
-        let resolved = resolve_post_study_artifacts(
-            Some(&post_study),
-            &HorizonGraph::default(),
-            &[],
-            1.0,
-            1.0,
-        );
+        let resolved =
+            resolve_post_study_artifacts(Some(&post_study), &HorizonGraph::default(), 1.0, 1.0);
         assert_eq!(resolved.total_hours, vec![720.0, 744.0]);
     }
 
     #[test]
     fn continued_cumulative_discount_is_seed_at_zero_rate() {
         let post_study = two_stage_post_study();
-        let resolved = resolve_post_study_artifacts(
-            Some(&post_study),
-            &HorizonGraph::default(),
-            &[],
-            0.9,
-            1.0,
-        );
+        let resolved =
+            resolve_post_study_artifacts(Some(&post_study), &HorizonGraph::default(), 0.9, 1.0);
         assert_eq!(resolved.cumulative_discount_factors, vec![0.9, 0.9]);
     }
 
@@ -2683,7 +2686,6 @@ mod post_study_resolution_tests {
         let resolved = resolve_post_study_artifacts(
             Some(&post_study),
             &pg,
-            &[],
             last_real_cumulative,
             last_real_per_stage,
         );
@@ -2710,13 +2712,8 @@ mod post_study_resolution_tests {
     #[test]
     fn thermal_bound_lookup_returns_declared_triple() {
         let post_study = two_stage_post_study();
-        let resolved = resolve_post_study_artifacts(
-            Some(&post_study),
-            &HorizonGraph::default(),
-            &[],
-            1.0,
-            1.0,
-        );
+        let resolved =
+            resolve_post_study_artifacts(Some(&post_study), &HorizonGraph::default(), 1.0, 1.0);
 
         assert_eq!(
             resolved.thermal_bounds.lookup(EntityId(1), 0),
@@ -2727,70 +2724,5 @@ mod post_study_resolution_tests {
             Some((220.0, 0.0, 300.0))
         );
         assert_eq!(resolved.thermal_bounds.lookup(EntityId(2), 0), None);
-    }
-
-    #[test]
-    fn delivery_window_resolves_to_expected_post_study_stage() {
-        let post_study = two_stage_post_study();
-        let delivery = FutureAnticipatedDelivery {
-            thermal_id: EntityId(1),
-            delivery_start: NaiveDate::from_ymd_opt(2026, 12, 1)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            delivery_end: NaiveDate::from_ymd_opt(2027, 1, 1)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            min_mw: 100.0,
-            max_mw: 200.0,
-        };
-
-        let resolved = resolve_post_study_artifacts(
-            Some(&post_study),
-            &HorizonGraph::default(),
-            &[delivery],
-            1.0,
-            1.0,
-        );
-
-        assert_eq!(resolved.delivery_stage_index, vec![1]);
-    }
-
-    #[test]
-    fn delivery_stage_index_preserves_declaration_order() {
-        let post_study = two_stage_post_study();
-        let delivery_a = FutureAnticipatedDelivery {
-            thermal_id: EntityId(1),
-            delivery_start: NaiveDate::from_ymd_opt(2026, 11, 1)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            delivery_end: NaiveDate::from_ymd_opt(2026, 12, 1)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            min_mw: 50.0,
-            max_mw: 100.0,
-        };
-        let delivery_b = FutureAnticipatedDelivery {
-            thermal_id: EntityId(1),
-            delivery_start: NaiveDate::from_ymd_opt(2026, 12, 1)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            delivery_end: NaiveDate::from_ymd_opt(2027, 1, 1)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            min_mw: 50.0,
-            max_mw: 100.0,
-        };
-
-        let forward = resolve_post_study_artifacts(
-            Some(&post_study),
-            &HorizonGraph::default(),
-            &[delivery_a.clone(), delivery_b.clone()],
-            1.0,
-            1.0,
-        );
-        let reversed = resolve_post_study_artifacts(
-            Some(&post_study),
-            &HorizonGraph::default(),
-            &[delivery_b, delivery_a],
-            1.0,
-            1.0,
-        );
-
-        assert_eq!(forward.delivery_stage_index, vec![0, 1]);
-        assert_eq!(reversed.delivery_stage_index, vec![1, 0]);
     }
 }

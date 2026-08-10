@@ -309,6 +309,8 @@ mod tests {
             n_commitment,
             commitment_decider_stage,
             vec![cobre_core::EntityId(0); n_commitment],
+            vec![(0.0, 0.0); n_commitment],
+            vec![0; n_commitment],
         )
     }
 

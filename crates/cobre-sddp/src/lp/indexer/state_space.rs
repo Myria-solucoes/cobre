@@ -152,6 +152,20 @@ pub struct StateSpace {
     /// same thermal get distinct subindices.
     pub(crate) commitment_window_thermal_id: Vec<EntityId>,
 
+    /// Per-window `(min_mw, max_mw)` commitment interval, length
+    /// [`Self::n_commitment`], parallel to [`Self::commitment_decider_stage`].
+    // No reader yet — the fuel-cost consumer is a later addition.
+    // `#[allow(dead_code)]` refires once one lands.
+    #[allow(dead_code)]
+    pub(crate) commitment_window_min_max: Vec<(f64, f64)>,
+
+    /// Per-window resolved post-study destination stage index, length
+    /// [`Self::n_commitment`], parallel to [`Self::commitment_decider_stage`].
+    // No reader yet — the delivery-date and fuel-cost consumers are a later
+    // addition. `#[allow(dead_code)]` refires once one lands.
+    #[allow(dead_code)]
+    pub(crate) commitment_window_dest_stage: Vec<usize>,
+
     /// Canonical `(plant_canonical_idx, lag)` pair per bucket state-vector
     /// dimension, in [`Self::transit_buckets_out`] order.
     pub transit_bucket_column_order: Vec<(usize, usize)>,
@@ -269,15 +283,18 @@ impl StateSpace {
             0,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
         )
     }
 
     /// [`Self::new`] plus the terminal commitment-hold windows: `n_commitment`
     /// declared post-horizon windows, each latching at its own
-    /// `commitment_decider_stage[w]` and owned by
-    /// `commitment_window_thermal_id[w]` (both length `n_commitment`,
-    /// [`Self::commit_out`]'s post-horizon-lane order). `n_commitment == 0`
-    /// with `n_anticipated * k_max == 0` collapses
+    /// `commitment_decider_stage[w]`, owned by `commitment_window_thermal_id[w]`,
+    /// spanning MW interval `commitment_window_min_max[w]`, and resolving to
+    /// post-study destination stage `commitment_window_dest_stage[w]` (all four
+    /// length `n_commitment`, [`Self::commit_out`]'s post-horizon-lane order).
+    /// `n_commitment == 0` with `n_anticipated * k_max == 0` collapses
     /// [`Self::commit_out`]/[`Self::commit_in`] to `0..0` and reproduces
     /// [`Self::new`]'s layout byte-for-byte — the single owner every other
     /// constructor delegates to.
@@ -285,11 +302,12 @@ impl StateSpace {
     /// # Panics (debug builds only)
     ///
     /// Inherits [`Self::new`]'s panics, plus panics if
-    /// `commitment_decider_stage.len() != n_commitment` or
-    /// `commitment_window_thermal_id.len() != n_commitment`.
+    /// `commitment_decider_stage.len()`, `commitment_window_thermal_id.len()`,
+    /// `commitment_window_min_max.len()`, or `commitment_window_dest_stage.len()`
+    /// differ from `n_commitment`.
     // Rationale: each argument sizes an independent state region (storage, lags,
     // buckets, the anticipated ring, the commitment block); `Self::new` forwards
-    // eight of these unchanged, so splitting the eleven into a sub-struct would just
+    // eight of these unchanged, so splitting the thirteen into a sub-struct would just
     // wrap-then-immediately-destructure at the sole call site (`resolve_state_layout`).
     #[allow(clippy::too_many_arguments)]
     #[must_use]
@@ -305,6 +323,8 @@ impl StateSpace {
         n_commitment: usize,
         commitment_decider_stage: Vec<usize>,
         commitment_window_thermal_id: Vec<EntityId>,
+        commitment_window_min_max: Vec<(f64, f64)>,
+        commitment_window_dest_stage: Vec<usize>,
     ) -> Self {
         debug_assert_eq!(
             transit_bucket_column_order.len(),
@@ -320,6 +340,16 @@ impl StateSpace {
             commitment_window_thermal_id.len(),
             n_commitment,
             "commitment_window_thermal_id must have exactly n_commitment entries"
+        );
+        debug_assert_eq!(
+            commitment_window_min_max.len(),
+            n_commitment,
+            "commitment_window_min_max must have exactly n_commitment entries"
+        );
+        debug_assert_eq!(
+            commitment_window_dest_stage.len(),
+            n_commitment,
+            "commitment_window_dest_stage must have exactly n_commitment entries"
         );
 
         let n = hydro_count;
@@ -399,6 +429,8 @@ impl StateSpace {
             n_commitment,
             commitment_decider_stage,
             commitment_window_thermal_id,
+            commitment_window_min_max,
+            commitment_window_dest_stage,
             transit_bucket_column_order,
             nonzero_state_indices: Vec::new(),
             state_to_lp_column_map: Vec::new(),
@@ -1698,6 +1730,8 @@ mod tests {
             2,
             vec![0, 1],
             vec![EntityId(0), EntityId(0)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+            vec![0, 0],
         );
 
         assert_eq!(idx.n_commitment, 2);
@@ -1728,6 +1762,8 @@ mod tests {
             2,
             vec![0, 1],
             vec![EntityId(0), EntityId(0)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+            vec![0, 0],
         );
         for window in 0..idx.n_commitment {
             let j = idx.commit_out.start + idx.commitment_hold_post_horizon_offset(window);
@@ -1758,6 +1794,8 @@ mod tests {
             2,
             vec![0, 1],
             vec![EntityId(0), EntityId(0)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+            vec![0, 0],
         );
         for window in 0..idx.n_commitment {
             let offset = idx.commitment_hold_post_horizon_offset(window);
@@ -1791,6 +1829,8 @@ mod tests {
             3,
             vec![0, 1, 2],
             vec![EntityId(0), EntityId(0), EntityId(0)],
+            vec![(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
+            vec![0, 0, 0],
         );
         assert_eq!(idx.commit_out, 0..3);
         assert_eq!(idx.nonzero_state_indices, [0, 1, 2].map(StateDim::new));
@@ -1811,6 +1851,8 @@ mod tests {
             vec![1, 2],
             &[2, 2, 2],
             0,
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         );
@@ -1866,6 +1908,8 @@ mod tests {
                 2,
                 vec![0, 1],
                 vec![EntityId(0), EntityId(0)],
+                vec![(0.0, 0.0), (0.0, 0.0)],
+                vec![0, 0],
             ),
             StateSpace::new_with_commitment_hold_windows(
                 3,
@@ -1879,6 +1923,8 @@ mod tests {
                 2,
                 vec![0, 1],
                 vec![EntityId(0), EntityId(0)],
+                vec![(0.0, 0.0), (0.0, 0.0)],
+                vec![0, 0],
             ),
             StateSpace::new_with_commitment_hold_windows(
                 3,
@@ -1890,6 +1936,8 @@ mod tests {
                 vec![1, 2],
                 &[2, 2, 2],
                 0,
+                Vec::new(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             ),
@@ -1950,6 +1998,8 @@ mod tests {
             2,
             vec![0, 1],
             vec![EntityId(0), EntityId(0)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+            vec![0, 0],
         );
 
         for plant in 0..idx.n_anticipated {
@@ -1988,6 +2038,8 @@ mod tests {
             2,
             vec![0, 1],
             vec![EntityId(0), EntityId(0)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+            vec![0, 0],
         );
 
         for j in idx.state_dim_commitment_hold_range() {

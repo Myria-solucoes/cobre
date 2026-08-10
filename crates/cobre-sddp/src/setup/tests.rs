@@ -19,8 +19,8 @@ use cobre_core::{
     ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_core::{
-    ContractType, EnergyContract, EntityId, HorizonGraph, HydroPastDefluence, InitialConditions,
-    SystemBuilder,
+    ContractType, EnergyContract, EntityId, FutureAnticipatedDelivery, HorizonGraph,
+    HydroPastDefluence, InitialConditions, PostStudyStage, PostStudyStages, SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
         hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -6330,6 +6330,9 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
 /// Like [`minimal_system`] but the thermal carries `anticipated_config` and each
 /// stage's block runs for the matching `stage_hours` entry. `k_max_bounds`
 /// widens the thermal stage-bounds axis for delivery-stage padding.
+/// `future_anticipated_deliveries`/`post_study_stages` thread straight onto the
+/// built system for post-horizon commitment-window fixtures; empty/`None`
+/// reproduces the pre-existing thermal-only system every other caller wants.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -6340,6 +6343,8 @@ fn minimal_system_with_anticipated(
     stage_hours: &[f64],
     anticipated_config: AnticipatedConfig,
     k_max_bounds: usize,
+    future_anticipated_deliveries: Vec<FutureAnticipatedDelivery>,
+    post_study_stages: Option<PostStudyStages>,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -6575,6 +6580,11 @@ fn minimal_system_with_anticipated(
         .load_models(load_models)
         .bounds(bounds)
         .penalties(penalties)
+        .initial_conditions(InitialConditions {
+            future_anticipated_deliveries,
+            ..Default::default()
+        })
+        .post_study_stages(post_study_stages)
         .build()
         .expect("minimal_system_with_anticipated: valid")
 }
@@ -6587,6 +6597,8 @@ fn minimal_system_with_anticipated_lead_stages(
         &vec![744.0; n_stages],
         AnticipatedConfig::LeadStages(lead_stages),
         lead_stages as usize,
+        Vec::new(),
+        None,
     )
 }
 
@@ -6700,6 +6712,8 @@ fn test_anticipated_resolve_point_pmo_calendar() {
         &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
         AnticipatedConfig::LeadTime(720.0),
         6,
+        Vec::new(),
+        None,
     );
     let (resolution, _) = super::resolve_anticipated_commitments(&system);
     let point = &resolution.per_plant[0];
@@ -6724,6 +6738,8 @@ fn test_anticipated_resolve_point_fanout_calendar() {
         &[720.0, 168.0, 168.0, 168.0, 168.0, 168.0],
         AnticipatedConfig::LeadTime(720.0),
         6,
+        Vec::new(),
+        None,
     );
     let (resolution, _) = super::resolve_anticipated_commitments(&system);
     let point = &resolution.per_plant[0];
@@ -7984,6 +8000,8 @@ fn test_anticipated_resolve_point_k0_uniform_calendar() {
         &[744.0, 744.0, 744.0, 744.0],
         AnticipatedConfig::LeadTime(720.0),
         0,
+        Vec::new(),
+        None,
     );
     let (resolution, lead_stages) = super::resolve_anticipated_commitments(&system);
     let point = &resolution.per_plant[0];
@@ -8017,6 +8035,8 @@ fn resolve_anticipated_commitments_warns_on_k0_sub_stage_lead() {
         &[744.0, 744.0, 744.0, 744.0],
         AnticipatedConfig::LeadTime(720.0),
         0,
+        Vec::new(),
+        None,
     );
 
     let (subscriber, messages) = WarnRecorder::new();
@@ -8076,6 +8096,8 @@ fn warn_on_sub_stage_lead_emits_once_per_self_delivered_stage() {
         &[168.0, 168.0, 168.0, 744.0],
         AnticipatedConfig::LeadTime(200.0),
         0,
+        Vec::new(),
+        None,
     );
 
     let (subscriber, messages) = WarnRecorder::new();
@@ -8120,6 +8142,8 @@ fn lead_time_fanout_rejected_at_setup() {
         &[744.0, 168.0, 168.0],
         AnticipatedConfig::LeadTime(900.0),
         2,
+        Vec::new(),
+        None,
     );
 
     // Sanity: the fixture genuinely fans out (guards the guard's own fixture).
@@ -8170,6 +8194,125 @@ fn lead_time_fanout_rejected_at_setup() {
         msg.contains("not yet supported"),
         "message should state fan-out output is not yet supported, got: {msg}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// resolve_commitment_hold_windows — survivor-indexed post-horizon windows
+// ---------------------------------------------------------------------------
+
+/// The coordinate-space regression this resolution exists to prevent: a
+/// `LeadTime` thermal declares TWO post-horizon windows in ascending
+/// `delivery_start` order. The FIRST's decider precedes the study horizon
+/// (dropped, logged as a warning) and the SECOND survives. Survivor index 0
+/// must describe the SECOND window's `(min_mw, max_mw)` and destination
+/// stage — a raw-index-by-survivor-position implementation would instead
+/// report the dropped first window's data at index 0.
+#[test]
+fn commitment_hold_windows_survivor_index_diverges_from_raw_index_on_a_drop() {
+    let dropped = FutureAnticipatedDelivery {
+        thermal_id: EntityId(2),
+        delivery_start: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        delivery_end: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        min_mw: 1.0,
+        max_mw: 2.0,
+    };
+    let survives = FutureAnticipatedDelivery {
+        thermal_id: EntityId(2),
+        delivery_start: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+        delivery_end: NaiveDate::from_ymd_opt(2024, 3, 11).unwrap(),
+        min_mw: 10.0,
+        max_mw: 20.0,
+    };
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            duration_hours: 240.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+
+    let system = minimal_system_with_anticipated(
+        &[744.0],
+        AnticipatedConfig::LeadTime(1500.0),
+        0,
+        vec![dropped, survives],
+        Some(post_study),
+    );
+
+    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
+
+    assert_eq!(windows.n_commitment, 1, "the first window must be dropped");
+    assert_eq!(
+        windows.min_max[0],
+        (10.0, 20.0),
+        "survivor 0 must describe the SECOND (surviving) window, not the dropped first"
+    );
+    assert_eq!(
+        windows.dest_stage[0], 0,
+        "survivor 0 must resolve to the post-study stage the surviving window covers"
+    );
+}
+
+/// Happy path: a single surviving post-horizon window resolves its
+/// `(min_mw, max_mw)` interval and its destination post-study stage `j` — here
+/// `j == 1`, the SECOND declared post-study stage, ruling out a resolver that
+/// always reports stage 0.
+#[test]
+fn commitment_hold_windows_happy_path_min_max_and_dest_stage() {
+    let delivery = FutureAnticipatedDelivery {
+        thermal_id: EntityId(2),
+        delivery_start: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+        delivery_end: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+        min_mw: 30.0,
+        max_mw: 40.0,
+    };
+    let post_study = PostStudyStages {
+        stages: vec![
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                duration_hours: 744.0,
+            },
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+                duration_hours: 720.0,
+            },
+        ],
+        thermal_bounds: Vec::new(),
+    };
+
+    let system = minimal_system_with_anticipated(
+        &[744.0],
+        AnticipatedConfig::LeadTime(2400.0),
+        0,
+        vec![delivery],
+        Some(post_study),
+    );
+
+    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
+
+    assert_eq!(windows.n_commitment, 1);
+    assert_eq!(windows.min_max[0], (30.0, 40.0));
+    assert_eq!(
+        windows.dest_stage[0], 1,
+        "must resolve into the second post-study stage"
+    );
+}
+
+/// Inert: a study with no `future_anticipated_deliveries` resolves both
+/// survivor arrays empty and `n_commitment == 0`.
+#[test]
+fn commitment_hold_windows_inert_without_deliveries() {
+    let system = minimal_system_with_anticipated(
+        &[744.0],
+        AnticipatedConfig::LeadTime(720.0),
+        0,
+        Vec::new(),
+        None,
+    );
+
+    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
+
+    assert_eq!(windows, super::CommitmentHoldWindows::default());
 }
 
 /// Two anticipated thermals: id=20 non-fanning `LeadStages(1)`, id=21
