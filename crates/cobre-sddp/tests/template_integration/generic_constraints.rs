@@ -2113,3 +2113,365 @@ fn symbolic_lower_bound_ref_stage_level_collapse_twin() {
         &ResolvedParameters::default(),
     );
 }
+
+/// Parse `json` through the real loader with `name_to_id` supplying `@name`
+/// parameter resolution — the path a study with genuine `@param` coefficients
+/// exercises, unlike [`parse_generic_from_str`]'s empty table.
+fn parse_generic_from_str_with_params(
+    json: &str,
+    name_to_id: &std::collections::HashMap<String, cobre_core::EntityId>,
+) -> Vec<cobre_core::GenericConstraint> {
+    use std::io::Write;
+
+    let mut file = tempfile::NamedTempFile::new().expect("create tempfile");
+    file.write_all(json.as_bytes()).expect("write json fixture");
+    cobre_io::constraints::parse_generic_constraints(
+        file.path(),
+        name_to_id,
+        &cobre_io::constraints::LineBusPairIndex::default(),
+    )
+    .expect("parse generic constraints")
+}
+
+/// A decision-variable RHS (`thermal_generation(0) <= 0.5 * hydro_generation(1) +
+/// 12`) normalizes onto the LHS with the RHS variable sign-flipped and the
+/// constant remainder assigned to the upper endpoint — byte-identical to writing
+/// the already-normalized inequality by hand.
+#[test]
+fn decision_variable_rhs_normalizes_to_hand_flattened_form() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use std::collections::HashMap;
+
+    let sugared = r#"{
+      "constraints": [
+        { "id": 1, "name": "cap", "expression": "thermal_generation(0) <= 0.5 * hydro_generation(1) + 12", "slack": { "enabled": false } }
+      ]
+    }"#;
+    let flat = r#"{
+      "constraints": [
+        { "id": 1, "name": "cap", "expression": "thermal_generation(0) - 0.5 * hydro_generation(1) <= 12", "slack": { "enabled": false } }
+      ]
+    }"#;
+
+    let id_map: HashMap<i32, usize> = [(1_i32, 0)].into_iter().collect();
+    let rows = vec![(1_i32, 0_i32, None::<i32>, None, None)];
+    let bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    assert_lp_byte_identical(sugared, flat, 1, &bounds);
+}
+
+/// A same-variable, same-coefficient-kind repeat on one side (`2 *
+/// hydro_generation(0) - hydro_generation(0)`) merges to its summed effective
+/// coefficient before the bound fold, rather than reaching the LP as two
+/// separate columns.
+#[test]
+fn same_variable_repeat_merges_to_summed_coefficient() {
+    use cobre_core::{CoefficientRef, ResolvedGenericConstraintBounds};
+    use std::collections::HashMap;
+
+    let sugared = r#"{
+      "constraints": [
+        { "id": 2, "name": "merge", "expression": "2 * hydro_generation(0) - hydro_generation(0) <= 5", "slack": { "enabled": false } }
+      ]
+    }"#;
+    let flat = r#"{
+      "constraints": [
+        { "id": 2, "name": "merge", "expression": "hydro_generation(0) <= 5", "slack": { "enabled": false } }
+      ]
+    }"#;
+
+    let parsed = parse_generic_from_str(sugared);
+    assert_eq!(parsed[0].expression.terms.len(), 1);
+    assert_eq!(
+        parsed[0].expression.terms[0].coefficient,
+        CoefficientRef::Literal(1.0)
+    );
+
+    let id_map: HashMap<i32, usize> = [(2_i32, 0)].into_iter().collect();
+    let rows = vec![(2_i32, 0_i32, None::<i32>, None, None)];
+    let bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    assert_lp_byte_identical(sugared, flat, 1, &bounds);
+}
+
+/// A full cancellation (`hydro_generation(0) - hydro_generation(0)`) merges to a
+/// net-zero column and drops it, leaving a term-less LHS whose row still carries
+/// the bound — the same shape a modeller declaring only the bound, with no
+/// expression terms at all, would produce.
+#[test]
+fn full_cancellation_drops_net_zero_column() {
+    use cobre_core::{
+        ConstraintExpression, GenericConstraint, ResolvedGenericConstraintBounds, SlackConfig,
+    };
+    use std::collections::HashMap;
+
+    let sugared = r#"{
+      "constraints": [
+        { "id": 3, "name": "cancel", "expression": "hydro_generation(0) - hydro_generation(0) <= 5", "slack": { "enabled": false } }
+      ]
+    }"#;
+    let sugared_constraints = parse_generic_from_str(sugared);
+    assert!(sugared_constraints[0].expression.terms.is_empty());
+
+    let sugared_id_map: HashMap<i32, usize> = [(3_i32, 0)].into_iter().collect();
+    let sugared_rows = vec![(3_i32, 0_i32, None::<i32>, None, None)];
+    let sugared_bounds =
+        ResolvedGenericConstraintBounds::new(&sugared_id_map, sugared_rows.into_iter());
+
+    let flat_constraint = GenericConstraint {
+        id: EntityId(3),
+        name: "cancel".to_string(),
+        description: None,
+        expression: ConstraintExpression { terms: vec![] },
+        slack: SlackConfig {
+            enabled: false,
+            penalty: None,
+        },
+        bound_lower_affine: None,
+        bound_upper_affine: None,
+    };
+    let flat_id_map: HashMap<i32, usize> = [(3_i32, 0)].into_iter().collect();
+    let flat_rows = vec![(3_i32, 0_i32, None::<i32>, None, Some(5.0_f64))];
+    let flat_bounds = ResolvedGenericConstraintBounds::new(&flat_id_map, flat_rows.into_iter());
+
+    assert_templates_byte_identical(
+        1,
+        sugared_constraints,
+        sugared_bounds,
+        &ResolvedParameters::default(),
+        vec![flat_constraint],
+        flat_bounds,
+        &ResolvedParameters::default(),
+    );
+}
+
+/// A coefficient-scaled paren group (`2 * (hydro_generation(0) -
+/// hydro_generation(1))`) distributes onto a `LinearTerm` as `coefficient: 1.0,
+/// scale: 2.0` — the paren-group shape — while the same effective value written
+/// directly (`2 * hydro_generation(0)`) parses as `coefficient: 2.0, scale: 1.0`;
+/// the two ASTs differ but must build the identical LP.
+#[test]
+fn paren_distribution_normalizes_to_hand_flattened_terms() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use std::collections::HashMap;
+
+    let sugared = r#"{
+      "constraints": [
+        { "id": 4, "name": "paren", "expression": "2 * (hydro_generation(0) - hydro_generation(1)) <= 10", "slack": { "enabled": false } }
+      ]
+    }"#;
+    let flat = r#"{
+      "constraints": [
+        { "id": 4, "name": "paren", "expression": "2 * hydro_generation(0) - 2 * hydro_generation(1) <= 10", "slack": { "enabled": false } }
+      ]
+    }"#;
+
+    let id_map: HashMap<i32, usize> = [(4_i32, 0)].into_iter().collect();
+    let rows = vec![(4_i32, 0_i32, None::<i32>, None, None)];
+    let bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    assert_templates_byte_identical(
+        1,
+        parse_generic_from_str(sugared),
+        bounds.clone(),
+        &ResolvedParameters::default(),
+        parse_generic_from_str(flat),
+        bounds,
+        &ResolvedParameters::default(),
+    );
+}
+
+/// A parquet-base upper endpoint (`100`) folds with an inline affine remainder
+/// established from the LHS constant (`+ 5`, negated to `-5`) to the same
+/// effective bound as the pre-folded literal `95` — `fold_endpoint`'s `base +
+/// resolve_affine` arm, not the base or the remainder alone.
+#[test]
+fn parquet_base_folds_with_inline_affine_remainder() {
+    use cobre_core::{
+        ConstraintExpression, GenericConstraint, LinearTerm, ResolvedGenericConstraintBounds,
+        SlackConfig, VariableRef,
+    };
+    use std::collections::HashMap;
+
+    let sugared = r#"{
+      "constraints": [
+        { "id": 5, "name": "fold", "expression": "thermal_generation(0) + 5 <= 0", "slack": { "enabled": false } }
+      ]
+    }"#;
+    let sugared_constraints = parse_generic_from_str(sugared);
+    let sugared_id_map: HashMap<i32, usize> = [(5_i32, 0)].into_iter().collect();
+    let sugared_rows = vec![(5_i32, 0_i32, None::<i32>, None, Some(100.0_f64))];
+    let sugared_bounds =
+        ResolvedGenericConstraintBounds::new(&sugared_id_map, sugared_rows.into_iter());
+
+    let flat_constraint = GenericConstraint {
+        id: EntityId(5),
+        name: "fold".to_string(),
+        description: None,
+        expression: ConstraintExpression {
+            terms: vec![LinearTerm::literal(
+                1.0,
+                VariableRef::ThermalGeneration {
+                    thermal_id: EntityId(0),
+                    block_id: None,
+                },
+            )],
+        },
+        slack: SlackConfig {
+            enabled: false,
+            penalty: None,
+        },
+        bound_lower_affine: None,
+        bound_upper_affine: None,
+    };
+    let flat_id_map: HashMap<i32, usize> = [(5_i32, 0)].into_iter().collect();
+    let flat_rows = vec![(5_i32, 0_i32, None::<i32>, None, Some(95.0_f64))];
+    let flat_bounds = ResolvedGenericConstraintBounds::new(&flat_id_map, flat_rows.into_iter());
+
+    assert_templates_byte_identical(
+        1,
+        sugared_constraints,
+        sugared_bounds,
+        &ResolvedParameters::default(),
+        vec![flat_constraint],
+        flat_bounds,
+        &ResolvedParameters::default(),
+    );
+}
+
+/// A parameter-coefficient RHS (`@a * bus_excess(1) <= -@b * bus_excess(1) +
+/// 400`) normalizes to two DISTINCT-parameter terms on the same `bus_excess(1)`
+/// column, never merged — different `@param` references have no common scalar
+/// to sum. Two terms sharing one column with distinct effective values makes
+/// the CSC storage order for that column observable; a single-term twin could
+/// not catch a regression there.
+///
+/// Guarded mutation: changing the hand-flattened side's second literal away
+/// from `@b`'s resolved value (`6.0`, independent of the first term's `2.0`)
+/// desyncs that column's second stored entry and fails the digest comparison —
+/// this twin is sensitive to both terms' values, not merely their count.
+#[test]
+fn parameter_rhs_places_two_distinct_terms_on_one_column() {
+    use cobre_core::{
+        ConstraintExpression, GenericConstraint, LinearTerm, ParameterKind,
+        ResolvedGenericConstraintBounds, ScalarParameter, SlackConfig, VariableRef,
+    };
+    use std::collections::HashMap;
+
+    let excess = VariableRef::BusExcess {
+        bus_id: EntityId(1),
+        block_id: None,
+    };
+
+    let sugared_json = r#"{
+      "constraints": [
+        { "id": 6, "name": "param_rhs", "expression": "@a * bus_excess(1) <= -@b * bus_excess(1) + 400", "slack": { "enabled": false } }
+      ]
+    }"#;
+    let name_to_id: HashMap<String, EntityId> = [
+        ("a".to_string(), EntityId(220)),
+        ("b".to_string(), EntityId(221)),
+    ]
+    .into_iter()
+    .collect();
+    let sugared_constraints = parse_generic_from_str_with_params(sugared_json, &name_to_id);
+    let sugared_id_map: HashMap<i32, usize> = [(6_i32, 0)].into_iter().collect();
+    let sugared_rows = vec![(6_i32, 0_i32, None::<i32>, None, None)];
+    let sugared_bounds =
+        ResolvedGenericConstraintBounds::new(&sugared_id_map, sugared_rows.into_iter());
+    let sugared_params = resolved_params_single_stage(
+        1,
+        &[
+            ScalarParameter {
+                id: EntityId(220),
+                name: "a".to_string(),
+                kind: ParameterKind::Constant { value: 2.0 },
+            },
+            ScalarParameter {
+                id: EntityId(221),
+                name: "b".to_string(),
+                kind: ParameterKind::Constant { value: 6.0 },
+            },
+        ],
+    );
+
+    let mut flat_expr = ConstraintExpression {
+        terms: vec![
+            LinearTerm::literal(2.0, excess),
+            LinearTerm::literal(6.0, excess),
+        ],
+    };
+    flat_expr.canonicalize();
+    let flat_constraint = GenericConstraint {
+        id: EntityId(6),
+        name: "param_rhs".to_string(),
+        description: None,
+        expression: flat_expr,
+        slack: SlackConfig {
+            enabled: false,
+            penalty: None,
+        },
+        bound_lower_affine: None,
+        bound_upper_affine: None,
+    };
+    let flat_id_map: HashMap<i32, usize> = [(6_i32, 0)].into_iter().collect();
+    let flat_rows = vec![(6_i32, 0_i32, None::<i32>, None, Some(400.0_f64))];
+    let flat_bounds = ResolvedGenericConstraintBounds::new(&flat_id_map, flat_rows.into_iter());
+
+    assert_templates_byte_identical(
+        1,
+        sugared_constraints,
+        sugared_bounds,
+        &sugared_params,
+        vec![flat_constraint],
+        flat_bounds,
+        &ResolvedParameters::default(),
+    );
+}
+
+/// Two studies whose constraint declaration order differs (id 21 before id 20,
+/// or after) and whose id-20 RHS terms are authored in a different commutative
+/// order build byte-identical flat forms and `StageTemplates` — the id-ascending
+/// constraint sort and the RHS fold are both pure functions of content, never
+/// authoring order.
+#[test]
+fn declaration_order_and_rhs_term_order_are_invariant_in_lp() {
+    use cobre_core::ResolvedGenericConstraintBounds;
+    use std::collections::HashMap;
+
+    let doc_a = r#"{
+      "constraints": [
+        { "id": 20, "name": "c20", "expression": "thermal_generation(0) <= 0.5 * hydro_generation(1) + 3 * hydro_generation(2) + 12", "slack": { "enabled": false } },
+        { "id": 21, "name": "c21", "expression": "bus_excess(1) <= 20", "slack": { "enabled": false } }
+      ]
+    }"#;
+    let doc_b = r#"{
+      "constraints": [
+        { "id": 21, "name": "c21", "expression": "bus_excess(1) <= 20", "slack": { "enabled": false } },
+        { "id": 20, "name": "c20", "expression": "thermal_generation(0) <= 12 + 3 * hydro_generation(2) + 0.5 * hydro_generation(1)", "slack": { "enabled": false } }
+      ]
+    }"#;
+
+    let parsed_a = parse_generic_from_str(doc_a);
+    let parsed_b = parse_generic_from_str(doc_b);
+    assert_eq!(
+        parsed_a, parsed_b,
+        "declaration order and commutative RHS term order must not affect the flat form"
+    );
+
+    let id_map: HashMap<i32, usize> = [(20_i32, 0), (21_i32, 1)].into_iter().collect();
+    let rows = vec![
+        (20_i32, 0_i32, None::<i32>, None, None),
+        (21_i32, 0_i32, None::<i32>, None, None),
+    ];
+    let bounds_a = ResolvedGenericConstraintBounds::new(&id_map, rows.clone().into_iter());
+    let bounds_b = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let tpl_a = build_templates_for(&one_bus_system_n_blks_with_generic(1, parsed_a, bounds_a));
+    let tpl_b = build_templates_for(&one_bus_system_n_blks_with_generic(1, parsed_b, bounds_b));
+    assert_eq!(
+        format!("{tpl_a:?}"),
+        format!("{tpl_b:?}"),
+        "declaration order and commutative RHS term order must build byte-identical LP templates"
+    );
+}
