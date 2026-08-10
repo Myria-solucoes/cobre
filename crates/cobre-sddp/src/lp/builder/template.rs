@@ -220,8 +220,8 @@ impl StageTemplates {
 #[derive(Debug, Clone, Default)]
 pub struct StageGeometry {
     /// Future-cost epigraph (θ) column index — the authoritative value from
-    /// `StageLayout::col_theta`, which accounts for the anticipated ring's
-    /// `anticipated_slots_out`/`anticipated_state` shift when `n_anticipated > 0`.
+    /// `StageLayout::col_theta`, which accounts for the commitment-hold region's
+    /// `commit_out`/`commit_in` column offset when `n_anticipated > 0`.
     /// Single source of truth for code that must address θ outside the builder
     /// (e.g. discount-factor postprocessing); do not re-derive the index from
     /// `n_state`/`n_hydros` by hand.

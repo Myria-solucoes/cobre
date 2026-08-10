@@ -244,7 +244,7 @@ impl PatchBuffer {
     /// Enforces `x == v` by setting `lb = ub = v / col_scale[col]` in the scaled LP
     /// — **divided**, contrast with the row-equality path that **multiplies** by
     /// `row_scale[row]`. `col_scale` may be `&[]` (no scaling); when non-empty it
-    /// must be at least `state_layout.anticipated_state.end` long.
+    /// must be at least `state_layout.commit_in.end` long.
     ///
     /// Bucket incoming columns are pinned to whatever the caller supplies in
     /// `state` at the bucket state-vector indices — pin this **once per

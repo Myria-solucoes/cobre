@@ -472,7 +472,7 @@ mod anticipated_5stage_k2_smoke {
         );
     }
 
-    /// Warm-start regression: the anticipated ring's `anticipated_slots_out` block
+    /// Warm-start regression: the anticipated ring's `commit_out` block
     /// shifts every downstream column by `n_anticipated * k_max`. `reconstruct_basis`
     /// matches stored cut rows by `CutPool` slot identity, never absolute column index,
     /// so the shift must stay transparent — zero `basis_consistency_failures`.
@@ -960,6 +960,29 @@ mod anticipated_two_plants_smoke {
             rel_diff < 1e-6,
             "final_lb mismatch: {actual} vs {expected} (rel_diff={rel_diff}). \
          If intentional, update EXPECTED_LB."
+        );
+
+        // Convergence certificate. This fixture is a single deterministic path
+        // (branching_factor 1, one forward pass), so the forward simulation is a
+        // feasible policy whose cost bounds the optimum from above while the cuts
+        // bound it from below: final_lb <= optimum <= final_ub. A closed gap
+        // therefore certifies final_lb IS the extensive-form optimum, independent
+        // of its magnitude — and covers the heterogeneous-lead ring (a K=2 and a
+        // K=4 plant sharing one k_max=4 ring) the single-plant closed-form anchors
+        // do not reach. final_ub_std == 0 confirms final_ub is that exact point
+        // cost, not a Monte Carlo estimate, so the gap is a point certificate.
+        let lb = result.final_lb;
+        let ub = result.final_ub;
+        let convergence_gap = (lb - ub).abs() / ub.abs().max(1.0);
+        assert!(
+            convergence_gap < 1e-9,
+            "LB==UB convergence certificate failed: final_lb={lb}, final_ub={ub}, \
+         gap={convergence_gap} (must be < 1e-9 for a converged deterministic run)."
+        );
+        assert!(
+            result.final_ub_std < 1e-6,
+            "single deterministic forward path must yield ~zero UB std; got {}",
+            result.final_ub_std
         );
 
         let state = setup.stage_state();

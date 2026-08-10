@@ -28,9 +28,10 @@
 //!
 //! Anticipated-ring slots resolve by identity (`state_to_lp_column`, the
 //! `transit_buckets_out` convention): the in-LP ring's definition rows — a
-//! plain shift for slot `i < K_p-1`, the delivery-decision deposit for plant
-//! `p`'s own newest slot `K_p-1` — resolve the ring transition, so cuts apply
-//! directly against the outgoing `anticipated_slots_out` column. The fishing
+//! same-slot carry (`out − in = 0`) for a not-yet-due slot, the
+//! delivery-decision deposit into the slot of a decision's own delivery target
+//! (`delivery_stage mod k_max`) — resolve the ring transition, so cuts apply
+//! directly against the outgoing `commit_out` column. The fishing
 //! constraint is emitted at every stage unconditionally, so every slot
 //! participates in the dual chain. See the `StateSpace::state_to_lp_column`
 //! rustdoc.

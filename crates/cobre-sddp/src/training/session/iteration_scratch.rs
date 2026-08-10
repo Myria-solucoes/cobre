@@ -345,7 +345,7 @@ mod tests {
     /// LB patch buffer had no slots for the `anticipated_state_fixing` rows.
     /// `fill_forward_patches` then silently skipped the anticipated patches and the LP's
     /// `anticipated_state_fixing` rows kept their template default of `0 == 0`,
-    /// forcing every `anticipated_state` column to zero in the LB solve and
+    /// forcing every `commit_in` column to zero in the LB solve and
     /// ignoring past commitments stored in `initial_state`.
     ///
     /// This test exercises a non-trivial `(n_anticipated, k_max) = (3, 2)` and

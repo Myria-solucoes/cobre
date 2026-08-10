@@ -4103,7 +4103,7 @@ mod transit_bucket_copy_gap {
     }
 
     /// The bucket and anticipated-ring state (`state[transit_buckets_out]`,
-    /// `state[anticipated_slots_out]`) ride the state-assembly plain copy: each
+    /// `state[commit_out]`) ride the state-assembly plain copy: each
     /// equals its own LP primal column, untouched by the lag-shift (the only
     /// remaining state-assembly overwrite, at index 1).
     #[test]

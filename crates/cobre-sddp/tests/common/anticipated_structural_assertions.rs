@@ -139,10 +139,10 @@ pub fn assert_basis_cache_fully_populated(result: &TrainingResult, expected_stag
 ///
 /// # Arguments
 ///
-/// - `anticipated_slots_out_start` — `indexer.anticipated_slots_out.start`, the
+/// - `anticipated_slots_out_start` — `indexer.commit_out.start`, the
 ///   state-vector offset of the anticipated ring's outgoing slots (the domain
 ///   `state_at_capture` is addressed in — never the relocated incoming
-///   `anticipated_state` range).
+///   `commit_in` range).
 /// - `n_anticipated` — `indexer.n_anticipated`.
 /// - `delivery_stages` — pass the indices of stages where `K_i ≤ stage_idx` for
 ///   some plant; slot 0 (slot-major layout) must be populated and non-negative.

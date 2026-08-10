@@ -227,7 +227,7 @@ pub(crate) use cobre_stochastic::par::lag_kernel::PrimaryLagAccum as LagAccumSta
 /// # Anticipated-thermal state
 ///
 /// Does NOT touch the anticipated ring: it transitions in-LP via
-/// `anticipated_slots_out`'s definition rows and rides the same
+/// `commit_out`'s definition rows and rides the same
 /// plain-copy-outgoing path as storage and travel-time buckets.
 pub(crate) fn accumulate_and_shift_lag_state(
     state: &mut [f64],

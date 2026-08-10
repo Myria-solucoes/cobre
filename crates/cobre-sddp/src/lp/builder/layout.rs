@@ -762,13 +762,14 @@ fn build_anticipated_decision_row_pos(
 /// delivery maturing this stage is a `K = 0` self-delivery
 /// (`PointResolution::is_anticipated_at`, exclude-with-advisory) — no
 /// anticipation binds, so the plant's ordinary thermal generation is
-/// unconstrained by any fishing coupling. Unlike the pre-migration fishing
-/// row, a `Some` position here does NOT mean "fish": every plant with a
-/// delivery maturing this stage gets exactly one row regardless of
-/// commissioning activeness — [`super::entries::fill_anticipated_fishing_entries`]'s
-/// `if`/`else` on `is_anticipated_decision_active_for_delivery` decides
-/// whether THAT row renders the fish coupling or a same-slot carry, the
-/// single governing branch. Returns the mapping and the active count.
+/// unconstrained by any fishing coupling. A `Some` position means this plant
+/// fishes this stage: every plant with a delivery maturing this stage gets
+/// exactly one row regardless of commissioning activeness, and
+/// [`super::entries::fill_anticipated_fishing_entries`] ALWAYS renders the
+/// must-generate fish coupling for it (reading `commit_in`, never writing
+/// `commit_out`) — a commissioning-inactive delivery's dormant `commit_in`
+/// simply carries 0, pinning that stage's generation to 0. Returns the
+/// mapping and the active count.
 fn build_anticipated_fishing_row_pos(
     state: &StateSpace,
     n_stages: usize,

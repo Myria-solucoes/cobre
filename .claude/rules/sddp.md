@@ -645,8 +645,8 @@ carries `k_0` onto the balance row — never a separate once-per-stage family
 (the deposit share itself is emitted at the call site, never through
 `DeliveryRing::emit_deposit`, which only the anticipated ring calls). Incoming
 buckets are pinned via column bounds, resolved through
-`StateSpace::state_to_lp_incoming_column`'s explicit bucket arm, never the
-`anticipated_state` catch-all. Subgradient extraction
+`StateSpace::state_to_lp_incoming_column`'s explicit `transit_buckets_in` arm,
+never falling through to the commitment-hold `commit_in` arm. Subgradient extraction
 divides the incoming bucket column's reduced cost by `col_scale`
 (`extract_duals_from_view`, the same rc/col_scale contract as storage); the
 cut row renders the **outgoing** bucket column through
@@ -858,83 +858,171 @@ Read: `crates/cobre-core/src/constraints/initial_conditions.rs`
 Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
 `test_anticipated_lead_time_coverage_pmo_calendar_under_coverage_rejected`.
 
-### In-LP anticipated ring: definition-row sign & two-sided masking
+### In-LP anticipated ring: definition-row sign, hold carry & asymmetric masking
 
-The anticipated ring is `DeliveryRing`'s other instantiation (the shared
-skeleton above): an outgoing block (`StateSpace::anticipated_slots_out`,
+The in-study anticipated ring is `DeliveryRing`'s other instantiation (the shared
+skeleton above), borrowing the LEADING `n_anticipated * k_max` sub-range of the
+merged commitment-hold region: an outgoing block (`StateSpace::commit_out`,
 identity-resolved by `state_to_lp_column`, contributing to `n_state`) and a
-separate incoming block (`StateSpace::anticipated_state`, pinned via
-`state_to_lp_incoming_column`) — never one dual-purpose range shifted
-out-of-LP. There is no Rust-side shift step: the ring transition is resolved
-entirely by the definition rows below, and `current_state`/`state_at_capture`
-read the outgoing block by the same plain copy already used for storage and
-travel-time buckets.
+separate incoming block (`StateSpace::commit_in`, pinned via
+`state_to_lp_incoming_column`) — never one dual-purpose range shifted out-of-LP.
+There is no Rust-side shift step: the ring transition is resolved entirely by the
+definition rows below, and `current_state`/`state_at_capture` read the outgoing
+block by the same plain copy already used for storage and travel-time buckets.
+Slots are keyed by DELIVERY-TARGET RESIDUE, not by distance to maturity: delivery
+target `m`'s slot is `m mod k_max`, slot-major/plant-minor
+(`StateSpace::commitment_hold_in_study_offset(plant, m) = (m mod k_max) *
+n_anticipated + plant`).
 
-An interior slot's outgoing column is pinned to the next slot's incoming value
-by the shared ring-shift row, `slot_k^out − slot_{k+1}^in = 0`
-(`fill_anticipated_slot_definition_entries` routes it through
-`DeliveryRing::emit_shift_rows`); the plant's own newest slot (`k = k_i − 1`)
-is pinned instead to the fresh decision column, `slot_{k_i-1}^out =
-decision_col`, via the shared skeleton's deposit primitive
-(`fill_anticipated_state_out_def_entries` calls `DeliveryRing::emit_deposit`
-directly). Both row families render `[0, 0]`
+The interior transition is the same-slot HOLD identity, not a Markov-1 shift. An
+in-flight, not-yet-due slot's outgoing column is pinned to its OWN incoming column,
+`slot^out − slot^in = 0`, via `DeliveryRing::emit_carry_rows` (`+1` on
+`out_col(slot, lane)`, `−1` on `in_col(slot, lane)` — the SAME slot), routed by
+`fill_anticipated_slot_definition_entries`. This REPLACES the retired Markov-1
+shift `slot_k^out − slot_{k+1}^in = 0` (`emit_shift_rows`, whose `−1` lands on the
+NEXT slot): a commitment does not migrate slots stage-to-stage — it is held at its
+delivery-target residue until it matures. The water travel-time ring keeps
+`emit_shift_rows`, because its physics genuinely shift; only the anticipated family
+carries. `build_anticipated_slot_row_pos` covers only STRICTLY FUTURE, not-yet-due
+slots; the commitment maturing THIS stage is always fished (see the always-fish
+contract below), never carried here.
+
+The deposit / latch pins a plant's fresh decision into the slot of its OWN delivery
+target, `slot^out = decision_col` (`slot = delivery_stage mod k_max`), via the
+shared skeleton's deposit primitive (`DeliveryRing::emit_deposit`, `+1` on
+`out_col(slot, lane)`, `−1` on `decision_col`), routed by
+`fill_anticipated_state_out_def_entries`. Both row families render `[0, 0]` bounds
 (`fill_anticipated_slot_definition_rows` / `fill_anticipated_state_out_def_rows`):
-the `+1`/`−1` structural coefficients on each side of the row do the shift,
-never the bounds.
+the `+1`/`−1` structural coefficients on each side do the carry/deposit, never the
+bounds.
 
-A slot beyond the horizon-reachable window (`build_anticipated_slot_row_pos`'s
-per-slot `Option<usize>`, `None` when unreachable) gets BOTH sides of the
-shared masking contract together via `DeliveryRing::freeze_masked_columns`: no
-definition row (the row-cap side) AND a frozen `[0, 0]` outgoing column
-(`fill_anticipated_slot_columns`, the column-freeze side — the same
-commissioning-dormant-column convention as NCS/thermal/line/station/contract).
+Masking is ASYMMETRIC across the merged region. The in-study slots keep the
+two-sided reachability masking the shared skeleton always ships together: a masked
+position (`build_anticipated_slot_row_pos`'s per-slot `None`) gets NO definition
+row (the row-cap side) AND a frozen `[0, 0]` outgoing column
+(`DeliveryRing::freeze_masked_columns`, the column-freeze side, over the open
+signed `(-inf, inf)` reachable bound a committed MW value needs) in the SAME pass;
+wiring only one side leaves either a dangling row on a frozen column or a free
+column with no defining constraint, both wrong-but-compiling. The trailing
+post-horizon lanes are NOT masked — `freeze_masked_columns` is retired for them
+(`fill_anticipated_slot_columns` keeps them open `(-inf, inf)` at EVERY stage,
+terminal included) so the boundary FCF can price them (pricing not yet wired; the
+keep-live only holds the columns structurally live). Freezing a post-horizon lane
+`[0, 0]` would zero a commitment the terminal boundary must carry.
 
-A slot beyond a plant's OWN `StateSpace::anticipated_lead_stages[plant]`
-bound is structural padding even when `t + slot_idx` itself still lands
-inside the horizon — the multi-plant heterogeneous-lead case, where two
-plants sharing one `k_max`-wide ring have different per-plant reachable
-widths. `policy::policy_export::build_stage_entity_manifest` applies this
-same bound before populating `EntitySlot::delivery_date`, never a depth- or
-decider-only check: `AnticipatedResolution::decision_sets`/`depth` count only
-within-study-decided commitments and silently exclude a still-draining
-pre-study seed, undercounting a ring position that legitimately holds one. The
-manifest resolves a ring column back to `(slot, plant)` via
-`DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col` — never
-a re-derived `offset % n_anticipated`/`offset / n_anticipated` pair.
+The policy manifest resolves a ring column back to `(slot, plant)` via
+`DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col`, never a
+hand-rolled `offset / n_anticipated`/`offset % n_anticipated` pair — and dates it
+at its MODULAR delivery stage: the next `m >= t` in the slot's residue class
+(`delta = (slot_idx + k_max − t mod k_max) mod k_max`, `m = t + delta`), NEVER
+`t + slot_idx` (the retired shift-ring form, wrong whenever `t mod k_max != 0`).
+Reachability uses the plant's OWN `StateSpace::anticipated_lead_stages[plant]`
+bound (`slot_idx < k_i`), not a depth- or decider-only check
+(`AnticipatedResolution::decision_sets`/`depth` count only within-study-decided
+commitments and silently exclude a still-draining pre-study seed): a slot beyond
+that bound is structural padding dated at the sentinel even when its delivery
+target `m` still lands inside the horizon — the multi-plant heterogeneous-lead
+case, where plants sharing one `k_max`-wide ring have different reachable widths.
+`build_stage_entity_manifest` applies this before populating
+`EntitySlot::delivery_date`.
 
-Read: `lp/indexer/state_space.rs` (`StateSpace::state_to_lp_column`,
-`state_to_lp_incoming_column`), `lp/builder/layout.rs`
-(`build_anticipated_slot_row_pos`), `lp/builder/entries.rs`
+The sign / `col_scale` invariants are unchanged from storage and the water buckets:
+the incoming column's reduced cost is DIVIDED by `col_scale` on extract
+(`extract_duals_from_view`) and the outgoing column's cut coefficient is MULTIPLIED
+back on render (`push_scaled_coefficient`); `col_scale` is forced to `1.0` across
+the whole region (the reconcile contract below).
+
+Read: `lp/indexer/state_space.rs` (`StateSpace::commit_out`,
+`StateSpace::commit_in`, `commitment_hold_in_study_offset`, `state_to_lp_column`,
+`state_to_lp_incoming_column`), `lp/builder/delivery_ring.rs`
+(`DeliveryRing::emit_carry_rows`, `emit_deposit`, `freeze_masked_columns`,
+`slot_lane_at`), `lp/builder/entries.rs`
 (`fill_anticipated_slot_definition_entries`,
 `fill_anticipated_state_out_def_entries`, `anticipated_ring`), `lp/builder/rows.rs`
-(`fill_anticipated_slot_definition_rows`), `lp/builder/columns.rs`
+(`fill_anticipated_slot_definition_rows`, `fill_anticipated_state_out_def_rows`),
+`lp/builder/layout.rs` (`build_anticipated_slot_row_pos`), `lp/builder/columns.rs`
 (`fill_anticipated_slot_columns`), `policy/policy_export.rs`
 (`build_stage_entity_manifest`). Pinned by the `state_to_lp_column`
-`anticipated_slots_out`-identity regressions, the combined row-cap-and-
-column-freeze regression asserting both sides in one test, the backward-cut
-coefficient propagation regressions (K=1, K=2, K=3) confirming the ring-routed
-definition rows produce the correct subgradient values, and the manifest's
-padding-vs-reachable delivery-anchor regression.
+`commit_out`-identity regressions
+(`state_to_lp_column_commit_out_is_identity_no_lag`,
+`state_to_lp_column_commit_out_identity_multi_plant_heterogeneous_k`), the
+carry-vs-shift and masking primitives
+(`emit_carry_rows_targets_the_same_slot_where_emit_shift_rows_targets_the_next`,
+`emit_carry_rows_masked_position_emits_no_row`,
+`freeze_masked_columns_masks_identically_across_reachable_bound`), the open-coded
+carry-formula regression
+(`fill_anticipated_slot_definition_entries_matches_open_coded_carry_formula_across_heterogeneous_plants`),
+the backward-cut coefficient-propagation regressions
+(`two_stage_k1_anticipated_cut_coefficient_matches_analytical`,
+`three_stage_k2_anticipated_cut_coefficient_propagates_correctly`,
+`four_stage_k3_anticipated_cut_coefficient_propagates_correctly`), and the
+manifest delivery-anchor regressions
+(`anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`,
+`anticipated_slot_delivery_anchor_past_horizon_is_sentinel`,
+`anticipated_slot_padding_beyond_own_lead_is_sentinel`).
+
+### In-study maturity always fishes; carry-to-terminal is the post-horizon lane's alone
+
+The in-study maturity arm ALWAYS fishes. For every in-study delivery maturing this
+stage (`build_anticipated_fishing_row_pos`'s `Some`, driven by
+`PointResolution::is_anticipated_at`; `None` only at a `K = 0` self-delivery),
+`fill_anticipated_fishing_entries` emits the must-generate coupling
+UNCONDITIONALLY — active OR commissioning-inactive alike: `+h_b` (block hours) on
+each of the plant's per-block thermal generation columns and `−H` (the stage's
+total hours) on the maturing slot's INCOMING column `in_col(stage_idx mod k_max)`.
+It reads `commit_in` and NEVER writes `commit_out`. A commissioning-inactive
+delivery was never latched — its decision column stays dormant `[0, 0]`
+(`fill_anticipated_columns`) — so its `in_col` carries `0` and this equality pins
+that stage's thermal generation to `0`, the correct, harmless outcome for a
+delivery the plant's window cannot receive.
+
+The wrong-but-compiling alternative is a two-way
+`fish-iff-commissioning-active-else-carry` branch. Because fishing reads only
+`in_col` while a carry WRITES `out_col`, the carry arm's `out_col` write collides
+with the SAME stage's fresh delivery latch on that slot whenever a future-entry
+plant's pre-entry ramp shares the maturing slot's modular residue (the case a
+plant's own lead defines `k_max`, so no other plant reaches deeper): two definition
+rows on one `out_col` pin a freshly-costed decision to a stale carried value, a
+release-silent LP corruption surfacing as a false `Infeasible` or a silent
+zero-commit (the guarding `debug_assert` is compiled out of release).
+Carry-to-terminal is owned SOLELY by the post-horizon lane family
+(`fill_commitment_post_horizon_entries`), never the maturity arm. The always-fish
+`+h_b`/`−H` coefficient shape is exactly the pre-migration one; only its slot
+addressing is modular (`stage_idx mod k_max`, via `commitment_hold_in_study_offset`).
+
+Read: `lp/builder/entries.rs` (`fill_anticipated_fishing_entries`,
+`fill_commitment_post_horizon_entries`), `lp/builder/layout.rs`
+(`build_anticipated_fishing_row_pos`), `lp/builder/columns.rs`
+(`fill_anticipated_columns`). Pinned by `fishing_rows_always_active_stage_zero`
+(every plant gets a fishing row regardless of activity, coupling on the maturing
+slot's `commit_in` column at `−H`), `fishing_rows_fill_all_plants`,
+`anticipated_commissioning_window_gates_simulation_output` (a
+commissioning-inactive delivery), and
+`simulation_commitment_hold_carries_anticipated_state_k2` (the maturing seed is
+fished, not carried, across the pre-horizon stages).
 
 ### End-of-horizon masking is exact, never a dropped commitment
 
-Unlike the water ring's Terminal credit deferred subsection, no anticipated
-commitment is ever discarded at the horizon boundary — none is created there
-in the first place. `is_anticipated_decision_active`/
+Unlike the water ring's Terminal credit deferred subsection, no in-study
+anticipated commitment is ever discarded at the horizon boundary — none is
+created there in the first place. `is_anticipated_decision_active`/
 `is_anticipated_decision_active_for_delivery` gate a decision column's
 existence on the strict clause `stage_idx + K_i < n_stages`;
 `PointResolution::decider` itself has a fixed domain `m in [0, n_stages)`, so
 no code path ever computes a commitment targeting a delivery past the
 horizon and then truncates it. `build_anticipated_slot_row_pos`'s per-slot
-`None` (no definition row) and `fill_anticipated_slot_columns`'s frozen
-`[0, 0]` outgoing column, at a `(stage_idx, slot)` pair whose target
-`m = stage_idx + slot + 1 >= n_stages`, are therefore always vacuous: the
-masked slot is provably zero for every valid configuration, never a real
-value the model declines to route anywhere. This differs in kind from
-water's masking: a masked bucket discards a genuine non-zero `k_d`-weighted
-release share deposited every stage regardless of the arc's travel time — an
-admitted target-stage imprecision — while the anticipated gate prevents the
-decision from ever existing, so nothing of value is lost. Crediting a masked
+`None` (no carry row) and `fill_anticipated_slot_columns`'s frozen
+`[0, 0]` outgoing column, at a slot whose delivery target
+`m = stage_idx + depth + 1 >= n_stages` (`depth in 0..k_max`), are therefore
+always vacuous: the masked slot is provably zero for every valid
+configuration, never a real value the model declines to route anywhere. A
+commissioning-inactive in-study delivery is likewise pinned to `0` — not by
+masking but by the always-fish arm reading a dormant slot's `in_col` of `0`
+(the always-fish contract above) — so it too loses nothing of value. This
+differs in kind from water's masking: a masked bucket discards a genuine
+non-zero `k_d`-weighted release share deposited every stage regardless of the
+arc's travel time — an admitted target-stage imprecision — while the
+anticipated gate prevents the decision from ever existing. Crediting a masked
 slot as if it held a dropped commitment would introduce value the model
 never computed, for a delivery stage that does not exist.
 Read: `lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active`,
@@ -951,8 +1039,9 @@ Each anticipated plant gets AT MOST ONE decision column per stage
 (`col_anticipated_decision_start + local_idx`), driven by
 `PointResolution::genuine_decisions_at(stage_idx).next()` (a `K = 0`
 self-delivery already excluded — see below). That decision deposits into its
-OWN ring slot, `slot = delivery_stage − stage_idx − 1` — computed DIRECTLY from
-the decision's own delivery stage, never from a `depth`-derived boundary.
+OWN ring slot, `slot = delivery_stage mod k_max` — computed DIRECTLY from the
+decision's own delivery stage (`fill_anticipated_state_out_def_entries`), never
+from a `depth`-derived boundary.
 
 **`depth[t]` is not the ring's per-stage occupancy boundary.** `depth[t]`
 (`PointResolution::depth`) counts only IN-STUDY decided items still in flight
@@ -962,13 +1051,14 @@ plant can have BOTH an IC-seeded item and a fresh in-study decision occupying
 the ring at the same stage (e.g. a constant-lead plant's stage 0), so
 `depth[t] − genuine_count(t)` under-counts and mis-targets the slot — the
 wrong-but-plausible shortcut `PointResolution::is_ready_at`'s doc comment
-warns against. The correct interior/deposit/padding split is checked PER SLOT
-directly: slot `k`'s target `m = stage_idx + k + 1` is a deposit iff
-`decider[m] == Some(stage_idx)`, an interior shift iff `is_ready_at(m,
-stage_idx)` and not a deposit, else padding. `decider` is nondecreasing in
-`m`, so readiness is monotonic and slots are ready in a contiguous prefix from
-slot 0 — the property that makes the per-slot check well-founded without
-needing an aggregate boundary.
+warns against. The correct interior/deposit/padding split is checked PER
+DELIVERY TARGET directly (`build_anticipated_slot_row_pos`): for each
+`m = stage_idx + depth + 1` (`depth in 0..k_max`), its ring slot `m mod k_max`
+is a deposit iff `decider[m] == Some(stage_idx)`, an interior carry iff
+`is_ready_at(m, stage_idx)` and not a deposit, else padding or past-horizon.
+`decider` is nondecreasing in `m`, so readiness is monotonic and the ready
+delivery targets form a contiguous prefix — the property that makes the
+per-target check well-founded without needing an aggregate boundary.
 
 **`K = 0` (sub-stage lead, `c(m) = m`) is excluded from the ring entirely —
 exclude-with-advisory, never a hard error, never an underflow.** A
@@ -983,8 +1073,12 @@ coupling, no anticipated row at all) at that stage. A setup-time
 stage, and the `lead_stages == 0` alternative — never emitted per-scenario or
 per-trajectory.
 
+The single-decider deposit is TODAY's fill; making a coarse decision stage
+anchor several delivery stages (`|genuine C(t)| > 1`, fan-out) is the deferred
+multi-decider capability the fan-out contract below reserves.
+
 Read: `lead_time/mod.rs` (`PointResolution::genuine_decisions_at`,
-`self_delivered_stages`, `is_anticipated_at`, `is_ready_at`),
+`self_delivered_stages`, `is_anticipated_at`, `is_ready_at`, `depth`),
 `lp/indexer/anticipated_gate.rs`
 (`is_anticipated_decision_active_for_delivery`,
 `anticipated_resolution_for`), `lp/builder/layout.rs`
@@ -992,19 +1086,28 @@ Read: `lead_time/mod.rs` (`PointResolution::genuine_decisions_at`,
 `build_anticipated_fishing_row_pos`), `lp/builder/columns.rs`
 (`fill_anticipated_columns`), `lp/builder/entries.rs`
 (`fill_anticipated_state_out_def_entries`, `fill_anticipated_fishing_entries`),
-`setup/mod.rs` (`warn_on_sub_stage_lead`). Pinned by the `K = 0`
-zero-emission-plus-advisory regression (no anticipated slot/row/fishing
-coupling at any stage, one advisory per self-delivered stage).
+`setup/mod.rs` (`warn_on_sub_stage_lead`). Pinned by
+`k0_sub_stage_lead_emits_no_anticipated_rows_or_fishing_coupling` (no
+anticipated slot/row/fishing coupling at any stage, one advisory per
+self-delivered stage) and `five_stage_k2_anticipated_state_ring_buffer_evolution`
+(the modular deposit/carry occupancy across stages).
 
-### Fan-out configurations are rejected at setup
+### Fan-out is representable, but the LP fill retains its setup-time reject
 
-The LP builder has no fan-out representation: every anticipated plant gets at
-most one decision column per stage (above). A `LeadTime` plant whose
-resolution would fan out (`|genuine C(t)| > 1` at any decision stage) never
-reaches it — `resolve_state_layout` rejects any
+The hold family MAKES fan-out representable: the ring holds N independent fixed
+slots keyed by delivery-target residue, and the modular key `m mod k_max` is a
+bijection on the in-flight set regardless of fan-out — several deliveries
+anchored to one coarse decision stage occupy distinct residues, so there is no
+slot collision and no extra state sizing. What is NOT yet built is the LP FILL:
+every anticipated plant still gets at most one decision column per stage
+(`PointResolution::genuine_decisions_at(stage_idx).next()`, the single-decider
+contract above), so a `LeadTime` plant whose resolution would fan out
+(`|genuine C(t)| > 1` at any decision stage) has no way to deposit its several
+decisions. `resolve_state_layout` therefore RETAINS the reject — it fails any
 `AnticipatedResolution::max_fanout > 1` configuration with
 `SddpError::Validation`, naming the fanning plant (`first_fanned_plant_id`)
-before a study's stage templates exist. This is the SOLE fan-out guard, not a
+before a study's stage templates exist. This is the SOLE fan-out guard: a
+reserved-capability gate pending the deferred multi-decider fill, NOT a
 belt-and-braces check backed by column/entry/row-position handling that no
 longer exists.
 Read: `setup/mod.rs` (`resolve_state_layout`, `first_fanned_plant_id`). Pinned
@@ -1073,7 +1176,7 @@ Delivery-anchoring keeps the committed value inside the delivery stage's
 generation bounds **in exact arithmetic only**. The value that actually reaches
 the delivery stage is the solver's computed value for a **basic** ring-slot
 column: `slot_out` is defined by an equality row (`slot_out − decision = 0`, or
-the interior shift), so the simplex produces it through the basis factorization,
+the interior carry), so the simplex produces it through the basis factorization,
 and it is accurate only to the backend's `primal_feasibility_tolerance` (`1e-9`
 on HiGHS and CLP) — never to 1 ULP. A commitment at its cap therefore arrives a
 hair outside it, and the fishing equality's no-slack pin turns that hair into
@@ -1092,8 +1195,8 @@ plant generating past its cap.
 Two forbidden alternatives, both of which have shipped:
 
 - **Deleting the reconciliation on the premise that unscaling makes it
-  redundant.** `apply_anticipated_col_scale_unscale` (`col_scale = 1.0` on
-  `anticipated_slots_out ∪ anticipated_state`) removes the ring _carry_ drift and
+  redundant.** `apply_commitment_hold_col_scale_unscale` (`col_scale = 1.0` on
+  `commit_out ∪ commit_in`) removes the ring _carry_ drift and
   is retained — the carry is bit-exact and the decision column's own value is
   bit-exact at its bound. It cannot remove the drift the basis factorization
   introduces at the deposit row, because exactness there is the solver's to give
@@ -1107,7 +1210,7 @@ Two forbidden alternatives, both of which have shipped:
 Read: `lp/builder/commitment_reconcile.rs` (`reconcile_commitment`,
 `fill_bound_relaxations`, `drift_margin`), `training/stage_solve_prep.rs`
 (`StageSolvePrep::reconcile_commitments`), `lp/builder/scaling.rs`
-(`apply_anticipated_col_scale_unscale`). Pinned by
+(`apply_commitment_hold_col_scale_unscale`). Pinned by
 `anticipated_commitment_drifted_over_cap_is_absorbed` (a seed a hair past the cap
 trains; it returns `Infeasible` the moment the reconciliation is disabled) and
 `anticipated_commitment_over_cap_seed_is_refused` (a genuine over-commitment is

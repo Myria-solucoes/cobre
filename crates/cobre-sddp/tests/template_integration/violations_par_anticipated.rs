@@ -1761,7 +1761,7 @@ fn test_anticipated_thermals_lp_roundtrip_k0_baseline_parity() {
         "K=0 baseline: n_state must be 1 (no anticipated state)"
     );
     // num_cols = 26: the anticipated geometry's 28+K drops both K-only columns
-    // (1 anticipated_state slot + 1 anticipated_decision) when K=0.
+    // (1 commitment-hold slot + 1 anticipated_decision) when K=0.
     assert_eq!(
         result_baseline.templates[0].num_cols, 26,
         "K=0 baseline: num_cols must be 26 (no anticipated state or decision columns)"

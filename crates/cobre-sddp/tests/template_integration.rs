@@ -3218,8 +3218,8 @@ fn one_anticipated_thermal_system(
 /// Compute `col_anticipated_decision_start` for the minimal geometry used by
 /// the anticipated-decision tests (0 hydros, 1 thermal, 1 anticipated, 1 blk).
 ///
-/// Layout derivation (in-LP anticipated ring, `StateSpace::anticipated_slots_out`
-/// / `anticipated_state`):
+/// Layout derivation (in-LP anticipated ring, `StateSpace::commit_out`
+/// / `commit_in`):
 /// - `n_ant_state = n_anticipated * k_max = 1 * lead_stages`
 /// - the ring contributes `n_ant_state` outgoing columns AND `n_ant_state`
 ///   incoming columns (doubled, unlike the water/lag blocks which are
@@ -3838,7 +3838,7 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
 //   n_ant_state = 1 * K = K
 //   n_state = N*(1+L) + n_ant_state = 1 + K
 //   col_anticipated_state_start = N*(1+L) = 1
-//   col_anticipated_state_out_start = 1+K  (state region: = anticipated_state.end, 1 per plant)
+//   col_anticipated_state_out_start = 1+K  (state region: = commit_in.end, 1 per plant)
 //   z_inflow = [2+K, 2+K+N) = [2+K, 3+K)
 //   storage_in = [3+K, 3+K+N) = [3+K, 4+K)
 //   theta = 4+K
@@ -4340,7 +4340,7 @@ fn build_k0_baseline_system() -> cobre_core::System {
 
 // ── Column layout helpers for the roundtrip geometry ─────────────────────────
 
-/// `anticipated_state.start` (incoming ring, the column the always-active
+/// `commit_in.start` (incoming ring, the column the always-active
 /// fishing row couples) for the roundtrip geometry (N=1, L=0, K=k).
 ///
 /// = N*(3+L) + k = 3 + k: the incoming block sits after
@@ -4351,8 +4351,8 @@ fn rt_col_ant_state_incoming_start(k: usize) -> usize {
 
 /// `col_thermal_start` for the roundtrip geometry (N=1, L=0, K=k).
 ///
-/// The anticipated ring contributes `2*k` columns (outgoing `anticipated_slots_out`
-/// AND incoming `anticipated_state`, each width `k`) before `theta`.
+/// The anticipated ring contributes `2*k` columns (outgoing `commit_out`
+/// AND incoming `commit_in`, each width `k`) before `theta`.
 /// theta = N*(3+L) + 2*k = 3 + 2*k, decision_start = theta+1 = 4+2k, so
 /// col_thermal_start = decision_start + 3*N*n_blks = decision_start + 6 = 10+2K.
 fn rt_col_thermal_start(k: usize) -> usize {
@@ -4376,7 +4376,7 @@ fn rt_row_ant_fishing_start(_k: usize) -> usize {
 /// Expected `num_cols` for the roundtrip geometry with anticipation K=k.
 ///
 /// = 27+2K: the anticipated ring contributes `2*n_ant_state = 2*k` columns
-/// (outgoing `anticipated_slots_out` + incoming `anticipated_state`) plus the
+/// (outgoing `commit_out` + incoming `commit_in`) plus the
 /// stage-level `anticipated_decision` column, one more than the pre-ring
 /// no-anticipated baseline's single combined block.
 fn rt_expected_num_cols(k: usize) -> usize {

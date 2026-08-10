@@ -1674,8 +1674,8 @@ fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
 /// max_par_order=0` has `col_turbine_start == 0*(3+0) + 2*6 + 1 == 13`.
 ///
 /// `n_ant_state = n_anticipated * k_max = 2 * 3 = 6` and the in-LP ring's TWO
-/// `n_ant_state`-wide blocks (`anticipated_slots_out` outgoing +
-/// `anticipated_state` incoming) together shift `theta` from the legacy
+/// `n_ant_state`-wide blocks (`commit_out` outgoing +
+/// `commit_in` incoming) together shift `theta` from the legacy
 /// `N*(3+L) = 0` to `0 + 2*6 = 12`, so decisions begin at 13.
 ///
 /// The general formula (any N, L, B) is
