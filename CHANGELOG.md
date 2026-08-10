@@ -99,6 +99,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the node path each simulated scenario visited, one row per
   `(scenario_id, stage_id)`.
 
+- **Named expressions in generic constraints.** Declare a linear combination
+  once and reference it by `@name` anywhere an expression or a bound is written;
+  references are inlined at load with cycle detection and coefficient
+  distribution, so the solver still sees a flat term list. A net line flow can be
+  addressed by its `(source_bus, target_bus)` pair.
+
+- **An inline relational right-hand side for generic constraints.** A
+  constraint's `expression` may be written as `lhs <op> rhs` (`<=`, `>=`, `==`).
+  At load the two sides are normalized onto the constraint's interval: every
+  variable term folds onto the left, and constants and parameters fold onto the
+  bound. A parenthesised group scaled by a literal coefficient distributes
+  (`0.5 * (a - b)`). The resolved LP is byte-identical to the hand-flattened
+  one-sided form.
+
+- **A per-`(stage, block)` axis for scalar parameters, usable in bound
+  positions.** A parameter may vary by block as well as stage, and a parameter
+  may supply a constraint's bound (resolved per block) — so a value declared once
+  is referenced by `@name` in many bounds instead of being pre-baked into every
+  row.
+
+- **Resolved generic constraints are written to
+  `generic_constraints/resolved_echo.parquet`,** one row per
+  `(constraint, stage, block, term)`, by both the CLI and the Python bindings —
+  the fully desugared flat form the solver receives, for debugging the authoring
+  layer and comparing against an external producer.
+
+- **A minimum-flow floor for hydro diversion and a min/max band for spillage,**
+  authored as per-`(stage, block)` bound columns alongside the existing entity
+  bounds.
+
 ### Changed
 
 - **BREAKING — the policy checkpoint format gains a required version marker;
@@ -163,6 +193,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load with an error naming `constraints/generic_parameters.json` — a clean
   break with no silent fallback.
 
+- **BREAKING — a generic constraint's shape is derived from its bounds; the
+  authored `sense` field is removed.** `constraints/generic_constraints.json` no
+  longer carries `"sense"` (a constraint is `{id, name, description, expression,
+slack}`). The shape comes from which endpoints
+  `constraints/generic_constraint_bounds.parquet` supplies per `(stage, block)`,
+  now two nullable columns `bound_lower` / `bound_upper` in place of the single
+  required `bound`: lower-only is `>=`, upper-only is `<=`, both-equal is `==`,
+  and both-present-and-differing is a two-sided range. A file still carrying
+  `"sense"`, or a bounds table still carrying a single `bound` column, fails to
+  load. This lets a constraint's active sides vary by period — one side unbounded
+  in some periods and present in others — without a sentinel value.
+
 ### Removed
 
 - **BREAKING — three legacy Parquet input-column spellings are rejected;
@@ -226,6 +268,12 @@ Moving a study from 0.13 to 0.14, in order:
 6. **Move the scalar-parameters file** into the constraints directory,
    contents unchanged:
    `mkdir -p <case>/constraints && git mv <case>/system/scalar_parameters.json <case>/constraints/generic_parameters.json`.
+7. **Convert generic constraints to the bounds-derived shape.** Drop `"sense"`
+   from every `constraints/generic_constraints.json`. In
+   `constraints/generic_constraint_bounds.parquet`, replace the single `bound`
+   column with nullable `bound_lower` / `bound_upper`: put the old value in
+   `bound_upper` for a former `<=`, in `bound_lower` for a former `>=`, and in
+   both for a former `==`.
 
 ## [0.13.0] - 2026-07-30
 
