@@ -109,20 +109,22 @@ pub fn build_stage_entity_manifest(
     let anticipated_slot = |offset: usize| -> EntitySlot {
         let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
         let plant = anticipated_thermals[plant_pos];
-        // The ring shifts one stage per transition, so slot `slot_idx` observed
-        // at stage `t` matures at delivery stage `t + slot_idx` regardless of
-        // lead mode (constant `LeadStages` or calendar-derived `LeadTime`).
-        // Reachability uses the SAME per-plant bound the LP masking itself
-        // uses (`anticipated_lead_stages[plant_pos]`, populated from
-        // `AnticipatedResolution` for both lead modes by
-        // `resolve_anticipated_commitments`): a slot beyond it is structural
-        // padding (frozen `[0, 0]`), not a real commitment, even when
-        // `t + slot_idx` itself still lands inside the horizon — the
-        // multi-plant heterogeneous-lead case.
+        // `slot_idx` is the ring's modular residue `m mod k_max`, NOT a
+        // distance-to-maturity: the delivery stage is the next `m >= t` in that
+        // residue class (`t + delta` below), so the slot maturing at `t` is
+        // `t mod k_max` delivering at `m = t` — matching the producer
+        // `fill_anticipated_fishing_entries`. Dating the slot at `t + slot_idx`
+        // (the retired shift-ring form) is wrong whenever `t mod k_max != 0`.
+        // Reachability uses the SAME per-plant bound the LP masking itself uses
+        // (`anticipated_lead_stages[plant_pos]`): a slot beyond it is structural
+        // padding (frozen `[0, 0]`), not a real commitment, even when `m` itself
+        // still lands inside the horizon — the multi-plant heterogeneous-lead case.
         let k_i = global_layout.anticipated_lead_stages[plant_pos];
         let delivery_date = if slot_idx < k_i {
             current_stage_idx.map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |t| {
-                let m = t + slot_idx;
+                let delta = (slot_idx + global_layout.k_max - t % global_layout.k_max)
+                    % global_layout.k_max;
+                let m = t + delta;
                 // Defensive cross-check against the resolver (the single owner
                 // of c(m), from `resolve_point`): a within-study decider must
                 // have already fired by `t`; a pre-study (IC-seeded) delivery
@@ -138,7 +140,7 @@ pub fn build_stage_entity_manifest(
                         .is_none_or(|decided_at| decided_at <= t),
                     "anticipated delivery {m} observed at stage {t} was not yet decided"
                 );
-                anchor_at(slot_idx)
+                anchor_at(delta)
             })
         } else {
             ENTITY_SLOT_DELIVERY_DATE_SENTINEL
@@ -1042,10 +1044,13 @@ mod tests {
     }
 
     /// An `AnticipatedThermalState` ring slot's `delivery_date` is the `YYYYMMDD`
-    /// of its delivery stage (`current index + ring slot`), resolved
-    /// through the attached `AnticipatedResolution`; storage/lag slots stay at the
-    /// sentinel. At stage index 1 (2024-05) with `lead_stages = 2`, ring slot 1
-    /// delivers at index 2 (2024-06 → `20240601`).
+    /// of its delivery stage — the next stage `m >= t` whose residue `m mod k_max`
+    /// equals the slot — resolved through the attached `AnticipatedResolution`;
+    /// storage/lag slots stay at the sentinel. At stage index 1 with `k_max = 2`
+    /// (residue 1), ring slot 1 matures now at index 1 (2024-05) and ring slot 0
+    /// delivers next at index 2 (2024-06). Stage index 1 is chosen because
+    /// `t mod k_max != 0`, where the residue mapping differs from the retired
+    /// shift form `t + slot`.
     #[test]
     fn anticipated_slot_delivery_anchor_matches_delivery_stage_year_month() {
         let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadStages(2));
@@ -1079,8 +1084,8 @@ mod tests {
         );
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
-            manifest[2].delivery_date, 20240501,
-            "ring slot 0 delivers at index 1 (2024-05)"
+            manifest[2].delivery_date, 20240601,
+            "ring slot 0 (residue 0) at stage index 1 delivers next at index 2 (2024-06)"
         );
 
         assert_eq!(
@@ -1089,8 +1094,8 @@ mod tests {
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].delivery_date, 20240601,
-            "ring slot 1 delivers at index 2 (2024-06)"
+            manifest[3].delivery_date, 20240501,
+            "ring slot 1 (residue 1) at stage index 1 matures now at index 1 (2024-05)"
         );
     }
 
@@ -1141,13 +1146,13 @@ mod tests {
 
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
-            manifest[2].delivery_date, 20240501,
-            "ring slot 0 delivers at index 1 (2024-05)"
+            manifest[2].delivery_date, 20240601,
+            "ring slot 0 (residue 0) at stage index 1 delivers next at index 2 (2024-06)"
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].delivery_date, 20240601,
-            "ring slot 1 delivers at index 2 (2024-06)"
+            manifest[3].delivery_date, 20240501,
+            "ring slot 1 (residue 1) at stage index 1 matures now at index 1 (2024-05)"
         );
     }
 

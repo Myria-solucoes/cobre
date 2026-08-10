@@ -35,7 +35,7 @@ use cobre_core::{AnticipatedCommitmentHistory, EntityId};
 /// window's `days_per_stage` must equal the matching `daily_stage_dates` call
 /// that built the fixture's `Stage`s — the two must derive from the same
 /// `anchor`/`days_per_stage`, or the window and the stage it should fully
-/// cover disagree and `build_initial_state`'s ring-buffer seed silently never
+/// cover disagree and `build_initial_state`'s commitment-hold seed silently never
 /// writes the value (`fraction != 1.0`).
 fn windowed_commitments_daily(
     thermal_id: EntityId,
@@ -80,7 +80,7 @@ mod anticipated_5stage_k2_smoke {
     //! so a pinned value would certify stability, not correctness. Value-correctness
     //! is the `anticipated_closed_form_lb_k1_single_thermal` canary in
     //! `anticipated_core.rs`; this defends multi-stage state propagation, the K=2
-    //! ring-buffer shift, and basis-cache capture.
+    //! commitment-hold carry, and basis-cache capture.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -457,7 +457,7 @@ mod anticipated_5stage_k2_smoke {
 
         let result = &outcome.result;
         let state = setup.stage_state();
-        let anticipated_slots_out_start = state.anticipated_slots_out.start;
+        let commit_out_start = state.commit_out.start;
         let n_anticipated = state.n_anticipated;
 
         assert_training_converged_structurally(result, &[], 8);
@@ -466,7 +466,7 @@ mod anticipated_5stage_k2_smoke {
         // at t+K in {2,3,4}.
         assert_anticipated_delivery_slots_populated(
             result,
-            anticipated_slots_out_start,
+            commit_out_start,
             n_anticipated,
             &[2, 3, 4],
         );
@@ -518,25 +518,29 @@ mod anticipated_two_plants_smoke {
     //! Training lower bound for a 6-stage system with 2 anticipated thermals
     //! (K_1=2, K_2=4), 1 backup thermal, and 1 hydro.
     //!
-    //! With `n_anticipated=2` and `K_max=4`, the anticipated-state block has
-    //! `2 * 4 = 8` columns in slot-major, plant-minor order — the index arithmetic
-    //! the assertions below depend on:
+    //! With `n_anticipated=2` and `K_max=4`, the commitment-hold block has
+    //! `2 * 4 = 8` columns in slot-major, plant-minor order
+    //! (`ant_start + slot * n_anticipated + plant`) — the index arithmetic the
+    //! assertions below depend on:
     //!
     //! ```text
-    //! ant_start + 0 = slot 0, plant 0  (K=2 plant — delivery slot)
-    //! ant_start + 1 = slot 0, plant 1  (K=4 plant — delivery slot)
-    //! ant_start + 2 = slot 1, plant 0  (K=2 plant — decision slot)
-    //! ant_start + 3 = slot 1, plant 1  (K=4 plant)
-    //! ant_start + 4 = slot 2, plant 0  (PADDING for K=2 plant)
-    //! ant_start + 5 = slot 2, plant 1  (K=4 plant)
-    //! ant_start + 6 = slot 3, plant 0  (PADDING for K=2 plant)
-    //! ant_start + 7 = slot 3, plant 1  (K=4 plant — decision slot)
+    //! ant_start + 0 = slot 0, plant 0  (K=2)
+    //! ant_start + 1 = slot 0, plant 1  (K=4)
+    //! ant_start + 2 = slot 1, plant 0  (K=2)
+    //! ant_start + 3 = slot 1, plant 1  (K=4)
+    //! ant_start + 4 = slot 2, plant 0  (K=2)
+    //! ant_start + 5 = slot 2, plant 1  (K=4)
+    //! ant_start + 6 = slot 3, plant 0  (K=2)
+    //! ant_start + 7 = slot 3, plant 1  (K=4)
     //! ```
     //!
-    //! The shift invariant asserts slot 1 at stage `t` equals slot 0 at stage `t+1`.
-    //! It uses t=1→t=2, not t=0→t=1: at t=0 `basis_cache[0]` and `basis_cache[1]`
-    //! carry the same state (the trivial identity), so t=1→t=2 exercises a genuine
-    //! backward-to-backward ring advancement.
+    //! Under the HOLD geometry each commitment is held at its delivery-target modular
+    //! slot (`m mod k_max`) until it matures — the ring never shifts slots. The carry
+    //! invariant asserts a not-yet-matured commitment (plant 1's slot-3 delivery, held
+    //! across stages 0-2) keeps the SAME slot across the consecutive forward-outgoing
+    //! captures `basis_cache[1]` (stage 0) and `basis_cache[2]` (stage 1). It uses
+    //! stage 0->1, not the trivial `basis_cache[0] == basis_cache[1]` identity, so it
+    //! exercises a genuine forward-to-forward hold advancement.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -572,7 +576,7 @@ mod anticipated_two_plants_smoke {
 
     // Pinned from a converged run of this fixture (no closed form); re-pin only
     // after a deliberate fixture change.
-    const EXPECTED_LB: f64 = 0.0_f64;
+    const EXPECTED_LB: f64 = 13_020_000.000_000_002_f64;
 
     // ---------------------------------------------------------------------------
     // System builder
@@ -964,7 +968,7 @@ mod anticipated_two_plants_smoke {
 
         let n_anticipated = state.n_anticipated;
         let k_max = state.k_max;
-        let ant_start = state.anticipated_slots_out.start;
+        let ant_start = state.commit_out.start;
         let ant_block_len = n_anticipated * k_max;
 
         let basis_cache = &result.basis_cache;
@@ -993,12 +997,26 @@ mod anticipated_two_plants_smoke {
             .state_at_capture
             .as_slice();
 
-        let slot1_p0_at_stage1 = s1[ant_start + n_anticipated];
-        let slot0_p0_at_stage2 = s2[ant_start];
+        // HOLD (carry, not shift): a not-yet-matured commitment is held in its
+        // OWN modular slot across forward stages, never shifted to a lower slot.
+        // Plant 1 (K=4, id 5) holds its delivery-3 commitment in slot `3 mod 4 = 3`
+        // across stages 0-2, maturing only at stage 3, so the SAME slot carries the
+        // same value across the consecutive forward-outgoing captures bc[1] (stage
+        // 0) and bc[2] (stage 1). Under the retired shift geometry this invariant
+        // instead read `slot 1 @ stage t == slot 0 @ stage t+1`.
+        let plant1 = 1_usize;
+        let slot3_p1 = ant_start + 3 * n_anticipated + plant1;
         assert!(
-            (slot1_p0_at_stage1 - slot0_p0_at_stage2).abs() < 1e-9,
-            "ring-buffer shift invariant violated: slot-1@stage-1={slot1_p0_at_stage1}, \
-         slot-0@stage-2={slot0_p0_at_stage2}"
+            s1[slot3_p1].abs() > 1e-9,
+            "carry check must exercise a non-zero held commitment; got {}",
+            s1[slot3_p1]
+        );
+        assert!(
+            (s1[slot3_p1] - s2[slot3_p1]).abs() < 1e-9,
+            "commitment-hold carry violated: plant 1's slot-3 commitment must be held \
+         in place across the forward transition (bc[1]={}, bc[2]={}), not shifted",
+            s1[slot3_p1],
+            s2[slot3_p1]
         );
     }
 }
@@ -1397,7 +1415,9 @@ mod anticipated_simulation_ring_buffer {
     // ---------------------------------------------------------------------------
 
     /// K=1 case of the module-doc invariant: stage-1 matured commitment equals the
-    /// stage-0 decision, not the non-zero seed a missing ring-buffer shift surfaces.
+    /// stage-0 decision, not the non-zero seed a missing ring carry-advance surfaces.
+    /// (K=1 byte-stable across the shift-to-hold switchover: depth-1 ring, so hold and
+    /// shift render identical rows; the fn name predates the switchover.)
     #[test]
     fn simulation_ring_buffer_shifts_anticipated_state_k1() {
         let k: usize = 1;
@@ -1495,24 +1515,25 @@ mod anticipated_simulation_ring_buffer {
         let c1 = committed_at(1).expect("committed at stage 1 must exist (K <= 1)");
         assert!(
             (c1 - d0).abs() < 1e-6,
-            "REGRESSION (ring-buffer shift): stage 1 committed ({c1}) must equal \
+            "REGRESSION (commitment-hold carry): stage 1 committed ({c1}) must equal \
          stage 0 decision ({d0}). On the buggy code path the ring buffer was \
-         never shifted in simulation, so stage 1's Cat 6 RHS carried the \
+         not advanced in simulation, so stage 1's fishing RHS carried the \
          residual `seed - d_0` (negative when d_0 > seed) and the LP was \
-         infeasible. With the shift, Cat 6 RHS = d_0 and gt_anticipated at \
-         stage 1 saturates at d_0 (cost zeroed at delivery).",
+         infeasible. With the carry advance, the fishing RHS = d_0 and gt_anticipated \
+         at stage 1 saturates at d_0 (cost zeroed at delivery).",
         );
     }
 
-    /// K=2 case of the module-doc invariant: the two pre-horizon stages read the seed
-    /// slots, and from stage 2 the matured commitment equals the decision made K=2
-    /// stages earlier (two shifts carry it into slot 0), never the seed, never zero.
+    /// K=2 case of the module-doc invariant: the two pre-horizon stages fish the seed
+    /// at their maturing modular slots, and from stage 2 the matured commitment equals
+    /// the decision made K=2 stages earlier (held at its slot until maturity), never the
+    /// seed, never zero.
     #[test]
-    fn simulation_ring_buffer_shifts_anticipated_state_k2() {
+    fn simulation_commitment_hold_carries_anticipated_state_k2() {
         let k: usize = 2;
         let n_stages: usize = 6;
         // Seed slots are distinct from d_0 (which saturates near the thermal max of
-        // 100), so neither slot can coincide with a decision and mask a missing shift.
+        // 100), so neither slot can coincide with a decision and mask a missing carry.
         let seed: Vec<f64> = vec![50.0, 30.0];
 
         let system = build_system(k, seed, n_stages);
@@ -1570,8 +1591,9 @@ mod anticipated_simulation_ring_buffer {
                 .and_then(|th| th.anticipated_committed_mw)
         };
 
-        // Pre-horizon: stage 0 reads seed slot 0; stage 1 reads slot 1 after the
-        // stage-0 shift moves it into slot 0.
+        // Pre-horizon: stage 0 fishes its maturing slot `0 mod 2 = 0` (seed[0]);
+        // stage 1 fishes its maturing slot `1 mod 2 = 1` (seed[1]) — each seed is
+        // held at its own modular slot, never shifted.
         let c0 = committed_at(0)
             .expect("committed_at(0) must be Some under always-active fishing with K=2");
         assert!(
@@ -1582,7 +1604,7 @@ mod anticipated_simulation_ring_buffer {
             .expect("committed_at(1) must be Some under always-active fishing with K=2");
         assert!(
             (c1 - 30.0).abs() < 1e-6,
-            "committed_at(1) must equal K=2 seed window[1].value_mw=30.0 (shifted to slot 0); got {c1}",
+            "committed_at(1) must equal K=2 seed window[1].value_mw=30.0 (held at slot 1 mod 2); got {c1}",
         );
 
         let d0 = decision_at(0).expect("decision at stage 0 must exist (0 + K < n_stages)");
@@ -1595,11 +1617,11 @@ mod anticipated_simulation_ring_buffer {
         let c2 = committed_at(2).expect("committed at stage 2 must exist (K <= 2)");
         assert!(
             (c2 - d0).abs() < 1e-6,
-            "REGRESSION (ring-buffer shift, K=2): stage 2 committed ({c2}) must \
+            "REGRESSION (commitment-hold carry, K=2): stage 2 committed ({c2}) must \
          equal stage 0 decision ({d0}). On the buggy code path the ring \
-         buffer was never shifted in simulation, so stage 2's Cat 6 RHS \
-         carried a stale residual instead of the d_0 that the two shifts \
-         (end of stage 0, end of stage 1) propagated into slot 0.",
+         buffer was not advanced in simulation, so stage 2's fishing RHS \
+         carried a stale residual instead of the d_0 that was held at its \
+         modular slot from stage 0 until it matures at stage 2.",
         );
     }
 }
@@ -2514,7 +2536,7 @@ mod d37_anticipated_commissioning_simulation {
 
         // The ring drains within K stages after exit: no in-window decision is made
         // after the last in-window delivery (stage EXIT-1), so by stage EXIT + K - 1
-        // the buffer has shifted all residual commitments out and committed MW reads 0.
+        // the buffer has drained all residual commitments and committed MW reads 0.
         let drain_stage = EXIT + K - 1;
         let committed_drain = t1_at(scenario, drain_stage)
             .anticipated_committed_mw
@@ -2892,9 +2914,9 @@ mod anticipated_commitment_at_cap {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            // Two pre-study commitment windows at `seed_mw`: the stage-0 delivery is
-            // pinned directly, the stage-1 delivery is carried one K=2 ring
-            // shift first.
+            // Two pre-study commitment windows at `seed_mw`: the stage-0 delivery
+            // matures immediately, the stage-1 delivery is held at its own K=2 modular
+            // slot until it matures at stage 1.
             past_anticipated_commitments: super::windowed_commitments_daily(
                 anticipated_id,
                 calendar_anchor,

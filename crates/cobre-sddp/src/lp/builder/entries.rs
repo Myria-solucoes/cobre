@@ -2628,10 +2628,12 @@ mod zero_cost_tests {
             );
         }
 
-        // CSC coupling: anticipated_state slot-0 column carries (row, -block_hours_total)
-        // for each plant under the always-active predicate.
+        // CSC coupling: the maturing slot's incoming (commit_in) column carries
+        // (row, -block_hours_total) for each plant under the always-active
+        // predicate. At stage 0 the maturing slot is 0 (0 mod k_max), so it is
+        // commit_in slot 0 = col_anticipated_state_start() + local_idx.
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
-        fill_anticipated_fishing_entries(&ctx, &stage, &layout, &mut col_entries);
+        fill_anticipated_fishing_entries(&ctx, &stage, 0, &layout, &mut col_entries);
 
         let block_hours_total: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
         let expected_neg = -block_hours_total;
@@ -2714,18 +2716,30 @@ mod zero_cost_tests {
         let layout0 = StageLayout::new(&ctx, &state, &stage0, 0);
         let (col_lower, col_upper, _objective) = fill_stage_columns(&ctx, &stage0, 0, &layout0);
         let leads = [2_usize, 3];
-        for (i, &lead) in leads.iter().enumerate() {
-            let col = layout0.anticipated.col_anticipated_slots_out_start + (lead - 1) * 2 + i;
+        let k_max = 3_usize;
+        // Hold deposit slot = delivery mod k_max (delivery = stage 0 + lead), the
+        // modular slot fill_anticipated_columns re-frees for an active decision —
+        // not the retired shift newest-slot K-1. plant 0 (K=2) -> slot 2, plant 1
+        // (K=3) -> slot 0.
+        let deposit_cols: Vec<usize> = leads
+            .iter()
+            .enumerate()
+            .map(|(i, &lead)| {
+                let slot = lead % k_max;
+                layout0.anticipated.col_anticipated_slots_out_start + slot * 2 + i
+            })
+            .collect();
+        for (i, &col) in deposit_cols.iter().enumerate() {
             assert_eq!(
                 col_lower[col],
                 f64::NEG_INFINITY,
-                "stage 0, plant {i}: col_lower expected -INF, got {}",
+                "stage 0, plant {i}: deposit-slot col_lower expected -INF, got {}",
                 col_lower[col]
             );
             assert_eq!(
                 col_upper[col],
                 f64::INFINITY,
-                "stage 0, plant {i}: col_upper expected +INF, got {}",
+                "stage 0, plant {i}: deposit-slot col_upper expected +INF, got {}",
                 col_upper[col]
             );
         }
@@ -2740,8 +2754,11 @@ mod zero_cost_tests {
             layout5.anticipated.n_anticipated_state_out_def_rows,
         );
         let (col_lower5, col_upper5, _objective5) = fill_stage_columns(&ctx, &stage5, 5, &layout5);
-        for (i, &lead) in leads.iter().enumerate() {
-            let col = layout5.anticipated.col_anticipated_slots_out_start + (lead - 1) * 2 + i;
+        // At the inactive stage every anticipated slot is masked [0, 0] (no
+        // interior carry, no active deposit), so the SAME physical deposit
+        // columns that were free at stage 0 are now frozen. The ring's slot base
+        // is stage-invariant, so reuse the stage-0 deposit columns directly.
+        for (i, &col) in deposit_cols.iter().enumerate() {
             assert_eq!(
                 col_lower5[col], 0.0,
                 "stage 5, plant {i}: col_lower expected 0.0, got {}",
@@ -2799,8 +2816,10 @@ mod zero_cost_tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// At stage 0 with `K=[2,3]` and `n_stages=6`, both plants are active.
-    /// For each active plant `i`, the CSC entry list must contain:
-    /// - `(def_row_i, +1.0)` on plant `i`'s own newest ring slot
+    /// For each active plant `i`, the latch (deposit) CSC entry list must contain:
+    /// - `(def_row_i, +1.0)` on plant `i`'s own delivery slot `delivery mod k_max`
+    ///   (`delivery = 0 + K_i`: plant 0 -> slot 2, plant 1 -> slot 0), not the retired
+    ///   shift newest-slot `K-1`
     /// - `(def_row_i, -1.0)` on `col_anticipated_decision_start + i`
     #[test]
     fn test_fill_anticipated_state_out_def_entries_two_active_plants() {
@@ -2813,10 +2832,11 @@ mod zero_cost_tests {
         fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
 
         let leads = [2_usize, 3];
+        let k_max = 3_usize;
         for (k, &lead) in leads.iter().enumerate() {
             let row = layout.anticipated.row_anticipated_state_out_def_start + k;
-            let col_state_out =
-                layout.anticipated.col_anticipated_slots_out_start + (lead - 1) * 2 + k;
+            let slot = lead % k_max; // delivery (0 + lead) mod k_max
+            let col_state_out = layout.anticipated.col_anticipated_slots_out_start + slot * 2 + k;
             let col_decision = layout.anticipated.col_anticipated_decision_start + k;
 
             assert!(
@@ -2842,15 +2862,16 @@ mod zero_cost_tests {
     // Two-sided masking: row cap and column freeze in one regression
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// An interior ring slot beyond the horizon-reachable cap gets BOTH sides of
-    /// the masking contract together: no definition row AND a frozen `[0, 0]`
-    /// outgoing column — never one without the other.
+    /// A commitment-hold slot whose delivery target lands past the horizon gets
+    /// BOTH sides of the masking contract together: no carry definition row AND a
+    /// frozen `[0, 0]` outgoing column — never one without the other.
     ///
-    /// Fixture: one plant, `K=3`, `n_stages=6`, evaluated at `stage_idx=4`
-    /// (`horizon_cap = 6 - 4 - 1 = 1`). Interior slots are 0 and 1
-    /// (`slot + 1 < K`); slot 0 is `< horizon_cap` (reachable), slot 1 is not
-    /// (masked). Slot 2 is the plant's own newest slot, governed by the
-    /// separate `anticipated_state_out_def` mechanism, not this one.
+    /// Fixture: one plant, `K=3`, `n_stages=6`, evaluated at `stage_idx=4`. The
+    /// depth window is delivery targets `m = 5, 6, 7`; only `m = 5` lands inside
+    /// the horizon, at modular slot `5 mod 3 = 2` (an in-flight interior carry,
+    /// decided at stage 2). Targets `m = 6, 7` map to slots `0` and `1` and are
+    /// past the horizon, so those slots are masked. There is no active deposit at
+    /// this stage (delivery `4 + 3 = 7 >= n_stages`).
     #[test]
     fn anticipated_slot_masking_ships_row_cap_and_column_freeze_together() {
         let mut fixtures = AntFixtures::new();
@@ -2862,9 +2883,9 @@ mod zero_cost_tests {
 
         assert_eq!(
             layout.anticipated.anticipated_slot_row_pos,
-            vec![Some(0), None, None],
-            "slot 0 reachable (row pos 0), slot 1 masked, slot 2 belongs to the \
-             deposit mechanism (never populated here)"
+            vec![None, None, Some(0)],
+            "slot 2 reachable (m=5, row pos 0); slots 0 and 1 map to past-horizon \
+             targets m=6, m=7 and are masked"
         );
         assert_eq!(layout.anticipated.n_anticipated_slot_definition_rows, 1);
 
@@ -2875,51 +2896,60 @@ mod zero_cost_tests {
         let base = layout.anticipated.col_anticipated_slots_out_start;
         let row_start = layout.anticipated.row_anticipated_slot_definition_start;
 
-        // Reachable slot 0: free column, a defining row exists, and the CSC
-        // carries the ring-shift's structural +1/-1 pair.
-        let col0 = base;
+        // Reachable slot 2: free column, a defining row exists, and the CSC
+        // carries the same-slot carry identity `out(2) - in(2) = 0`.
+        let col2 = base + 2;
         assert_eq!(
-            col_lower[col0],
+            col_lower[col2],
             f64::NEG_INFINITY,
-            "slot 0 column must be free"
+            "slot 2 column must be free"
         );
-        assert_eq!(col_upper[col0], f64::INFINITY, "slot 0 column must be free");
+        assert_eq!(col_upper[col2], f64::INFINITY, "slot 2 column must be free");
         let row0 = row_start;
         assert_eq!(
             row_lower[row0], 0.0,
-            "slot 0 definition row must be an equality"
+            "slot 2 definition row must be an equality"
         );
         assert_eq!(
             row_upper[row0], 0.0,
-            "slot 0 definition row must be an equality"
+            "slot 2 definition row must be an equality"
         );
         assert!(
-            col_entries[col0]
+            col_entries[col2]
                 .iter()
                 .any(|&(r, v)| r == row0 && (v - 1.0).abs() < 1e-15),
-            "slot 0 outgoing column must carry the +1.0 structural term at its \
-             definition row; got {:?}",
-            col_entries[col0]
+            "slot 2 outgoing column must carry the +1.0 structural term at its \
+             carry definition row; got {:?}",
+            col_entries[col2]
         );
-        let incoming_slot1 = state.anticipated_state.start + 1;
+        // The carry pins the SAME slot's incoming column (in(2)), never in(slot+1).
+        let incoming_slot2 = state.commit_in.start + 2;
         assert!(
-            col_entries[incoming_slot1]
+            col_entries[incoming_slot2]
                 .iter()
                 .any(|&(r, v)| r == row0 && (v + 1.0).abs() < 1e-15),
-            "slot 1's incoming pin must carry the -1.0 structural term at slot \
-             0's definition row; got {:?}",
-            col_entries[incoming_slot1]
+            "slot 2's own incoming pin must carry the -1.0 structural term at slot \
+             2's carry definition row (same slot); got {:?}",
+            col_entries[incoming_slot2]
         );
 
-        // Masked slot 1: frozen column, no defining row, no CSC entry.
-        let col1 = base + 1;
-        assert_eq!(col_lower[col1], 0.0, "masked slot 1 column must be frozen");
-        assert_eq!(col_upper[col1], 0.0, "masked slot 1 column must be frozen");
-        assert!(
-            col_entries[col1].is_empty(),
-            "masked slot 1 must carry no CSC entries; got {:?}",
-            col_entries[col1]
-        );
+        // Masked slots 0 and 1: frozen columns, no defining row, no CSC entry.
+        for masked_slot in [0_usize, 1] {
+            let col = base + masked_slot;
+            assert_eq!(
+                col_lower[col], 0.0,
+                "masked slot {masked_slot} column must be frozen"
+            );
+            assert_eq!(
+                col_upper[col], 0.0,
+                "masked slot {masked_slot} column must be frozen"
+            );
+            assert!(
+                col_entries[col].is_empty(),
+                "masked slot {masked_slot} must carry no CSC entries; got {:?}",
+                col_entries[col]
+            );
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2927,13 +2957,13 @@ mod zero_cost_tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Equivalence pin: `fill_anticipated_slot_definition_entries`'s
-    /// `DeliveryRing::emit_shift_rows` routing reproduces the open-coded reference
-    /// formula (`+1` on `anticipated_slots_out.start + global_slot`, `-1` on
-    /// `anticipated_state.start + (slot + 1) * n_anticipated + plant`, for every
-    /// reachable global slot) on a fixed two-plant, heterogeneous-`K` fixture
-    /// (`K = [3, 2]`).
+    /// `DeliveryRing::emit_carry_rows` routing reproduces the open-coded carry
+    /// identity (`+1` on `commit_out.start + global_slot`, `-1` on
+    /// `commit_in.start + global_slot` — the SAME slot, `out(slot) - in(slot) = 0`,
+    /// never the retired shift target `in(slot + 1)`) for every reachable global
+    /// slot on a fixed two-plant, heterogeneous-`K` fixture (`K = [3, 2]`).
     #[test]
-    fn fill_anticipated_slot_definition_entries_matches_pre_migration_formula_across_heterogeneous_plants()
+    fn fill_anticipated_slot_definition_entries_matches_open_coded_carry_formula_across_heterogeneous_plants()
      {
         let (fixtures, stage) = build_anticipated_ctx_n_stages_6();
         let ctx = fixtures.make_ctx(2, 3, vec![3, 2], vec![0, 1], 2);
@@ -2943,7 +2973,6 @@ mod zero_cost_tests {
         let mut actual: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
         fill_anticipated_slot_definition_entries(&layout, &mut actual);
 
-        let n_ant = ctx.n_anticipated;
         let row_start = layout.anticipated.row_anticipated_slot_definition_start;
         let mut expected: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
         let mut n_expected_reachable = 0_usize;
@@ -2955,10 +2984,9 @@ mod zero_cost_tests {
         {
             let Some(pos) = *pos else { continue };
             let row = row_start + pos;
-            let slot = global_slot / n_ant;
-            let plant = global_slot % n_ant;
-            expected[state.anticipated_slots_out.start + global_slot].push((row, 1.0));
-            expected[state.anticipated_state.start + (slot + 1) * n_ant + plant].push((row, -1.0));
+            // Carry identity: +1 on the outgoing slot, -1 on the SAME incoming slot.
+            expected[state.commit_out.start + global_slot].push((row, 1.0));
+            expected[state.commit_in.start + global_slot].push((row, -1.0));
             n_expected_reachable += 1;
         }
 
@@ -2983,7 +3011,7 @@ mod zero_cost_tests {
     /// `K = 0` exclusion: a `LeadTime(720.0)` plant on the uniform 31-day-month
     /// calendar `[744,744,744,744]` h resolves `depth == [0,0,0,0]` (every
     /// delivery self-delivers, hand-derived from the calendar). No
-    /// anticipated slot, deposit row, interior-shift row, or fishing row is
+    /// anticipated slot, deposit row, interior carry row, or fishing row is
     /// ever emitted for this plant, at any stage — the stage LP dispatches its
     /// generation as ordinary, unconstrained thermal output (no fishing
     /// coupling), never an underflow.
@@ -3013,7 +3041,7 @@ mod zero_cost_tests {
             );
             assert_eq!(
                 layout.anticipated.n_anticipated_slot_definition_rows, 0,
-                "stage {stage_idx}: K=0 must exclude every interior-shift row"
+                "stage {stage_idx}: K=0 must exclude every interior carry row"
             );
             assert_eq!(
                 layout.anticipated_decision().len(),
@@ -3029,7 +3057,7 @@ mod zero_cost_tests {
             fill_anticipated_state_out_def_rows(&layout, &mut row_lower, &mut row_upper);
 
             let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
-            fill_anticipated_fishing_entries(&ctx, &stage, &layout, &mut col_entries);
+            fill_anticipated_fishing_entries(&ctx, &stage, stage_idx, &layout, &mut col_entries);
             fill_anticipated_state_out_def_entries(&ctx, stage_idx, &layout, &mut col_entries);
 
             // The plant's ordinary thermal generation columns carry no entry

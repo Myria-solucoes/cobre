@@ -1,7 +1,8 @@
-//! Guard test for two wiring assumptions a future terminal-commitment block
-//! depends on: the anticipated-thermal manifest's slot-identity match keys on a
-//! generic `subindex`, and the anticipated ring's LP columns / stored cuts ride
-//! `col_scale`/`cost_scale` exactly like every other state family.
+//! Guard test for two wiring assumptions the terminal (post-horizon)
+//! commitment-hold lane depends on: the anticipated-thermal manifest's
+//! slot-identity match keys on a generic `subindex`, and the commitment-hold
+//! ring's LP columns / stored cuts ride `col_scale`/`cost_scale` exactly like
+//! every other state family.
 
 #![allow(
     clippy::unwrap_used,
@@ -230,18 +231,18 @@ fn manifest_slot_identity_binds_on_subindex_with_no_schema_change() {
     );
 }
 
-/// Invariant 2: `anticipated_slots_out` and `anticipated_state` carry
+/// Invariant 2: `commit_out` and `commit_in` carry
 /// `col_scale == 1.0` on every stage template after construction-time LP
 /// postprocessing — the ring's pin/re-read round-trip depends on this.
 #[test]
 fn anticipated_ring_columns_carry_unit_col_scale() {
     let setup = build_setup_in_code(build_system(), &build_config());
     let state = setup.stage_state();
-    let anticipated_slots_out = state.anticipated_slots_out.clone();
-    let anticipated_state = state.anticipated_state.clone();
+    let commit_out = state.commit_out.clone();
+    let commit_in = state.commit_in.clone();
 
     assert!(
-        !anticipated_slots_out.is_empty() && !anticipated_state.is_empty(),
+        !commit_out.is_empty() && !commit_in.is_empty(),
         "fixture must carry a non-empty anticipated ring (n_anticipated=1, k_max={K_MAX})",
     );
 
@@ -252,16 +253,16 @@ fn anticipated_ring_columns_carry_unit_col_scale() {
         .iter()
         .enumerate()
     {
-        for c in anticipated_slots_out.clone() {
+        for c in commit_out.clone() {
             assert_eq!(
                 template.col_scale[c], 1.0,
-                "stage {stage_idx}: anticipated_slots_out column {c} must carry col_scale == 1.0",
+                "stage {stage_idx}: commit_out column {c} must carry col_scale == 1.0",
             );
         }
-        for c in anticipated_state.clone() {
+        for c in commit_in.clone() {
             assert_eq!(
                 template.col_scale[c], 1.0,
-                "stage {stage_idx}: anticipated_state column {c} must carry col_scale == 1.0",
+                "stage {stage_idx}: commit_in column {c} must carry col_scale == 1.0",
             );
         }
     }

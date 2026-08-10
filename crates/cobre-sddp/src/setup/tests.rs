@@ -3488,7 +3488,7 @@ fn build_initial_state_no_lags_state_is_storage_only() {
 }
 
 // -----------------------------------------------------------------------
-// build_initial_state — anticipated_state seed
+// build_initial_state — commit_in seed
 // -----------------------------------------------------------------------
 
 /// `GeometryDims` for 1 hydro, 0 lags, and the given anticipated metadata. The
@@ -4116,7 +4116,7 @@ fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_da
         &[],
     );
 
-    let s = layout.anticipated_slots_out.start;
+    let s = layout.commit_out.start;
     // plant 0 = thermal id=11 (canonical position 0, K=3, own values [100,200,300])
     // plant 1 = thermal id=10 (canonical position 1, K=2, own values [10,20])
     assert!(
@@ -4168,7 +4168,7 @@ fn build_initial_state_no_anticipated_state_unchanged() {
     let layout = layout_for_lag_test(1, 0);
 
     assert_eq!(layout.n_anticipated, 0);
-    assert!(layout.anticipated_slots_out.is_empty());
+    assert!(layout.commit_out.is_empty());
 
     let state = build_initial_state(&system, &test_support::study_dims(), &layout, &[]);
 
@@ -4226,7 +4226,7 @@ fn build_initial_state_single_anticipated_thermal_k2() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let ant_start = layout.anticipated_slots_out.start;
+    let ant_start = layout.commit_out.start;
     assert!(
         (state[ant_start] - 50.0).abs() < 1e-10,
         "slot 0 expected 50.0, got {}",
@@ -4305,7 +4305,7 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
         "state length must equal n_state"
     );
     // offset from ant_start = slot * n_ant + plant.
-    let s = layout.anticipated_slots_out.start;
+    let s = layout.commit_out.start;
 
     assert!(
         (state[s] - 10.0).abs() < 1e-10,
@@ -4359,13 +4359,10 @@ fn build_initial_state_empty_past_commitments_leaves_zeros() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let ant_start = layout.anticipated_slots_out.start;
-    let ant_end = layout.anticipated_slots_out.end;
+    let ant_start = layout.commit_out.start;
+    let ant_end = layout.commit_out.end;
     for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
-        assert!(
-            v.abs() < 1e-10,
-            "anticipated_state slot {i} expected 0.0, got {v}"
-        );
+        assert!(v.abs() < 1e-10, "commit_in slot {i} expected 0.0, got {v}");
     }
 }
 
@@ -4397,12 +4394,12 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let ant_start = layout.anticipated_slots_out.start;
-    let ant_end = layout.anticipated_slots_out.end;
+    let ant_start = layout.commit_out.start;
+    let ant_end = layout.commit_out.end;
     for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
         assert!(
             v.abs() < 1e-10,
-            "anticipated_state slot {i} expected 0.0 for unknown ID, got {v}"
+            "commit_in slot {i} expected 0.0 for unknown ID, got {v}"
         );
     }
 }
@@ -4463,7 +4460,7 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let s = layout.anticipated_slots_out.start;
+    let s = layout.commit_out.start;
     let n_ant = layout.n_anticipated;
     assert_eq!(n_ant, 2);
     assert_eq!(layout.k_max, 2);
@@ -6773,12 +6770,12 @@ fn assert_state_layout_finalized(state: &StateSpace) {
         "transit_buckets_out range must match"
     );
     assert_eq!(
-        state.anticipated_state, reference.anticipated_state,
-        "anticipated_state range must match"
+        state.commit_in, reference.commit_in,
+        "commit_in range must match"
     );
     assert_eq!(
-        state.anticipated_slots_out, reference.anticipated_slots_out,
-        "anticipated_slots_out range must match"
+        state.commit_out, reference.commit_out,
+        "commit_out range must match"
     );
     assert_eq!(
         state.z_inflow, reference.z_inflow,
@@ -7401,7 +7398,7 @@ fn stage_data_geometry_role_b_matches_reference_build() {
 }
 
 /// `StageData.state` byte-identity with anticipated thermals present (`K_i = 2`),
-/// exercising the `anticipated_slots_out`/`anticipated_state` ranges.
+/// exercising the `commit_out`/`commit_in` ranges.
 #[test]
 fn stage_data_state_matches_indexer_role_a_anticipated() {
     let system = minimal_system_with_anticipated_lead_stages(2, 2);

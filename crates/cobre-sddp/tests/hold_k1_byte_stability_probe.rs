@@ -103,7 +103,7 @@ const AUDITED_FIXTURE_FILES: &[&str] = &[
     "crates/cobre-sddp/tests/anticipated_scenarios.rs",
     "crates/cobre-sddp/tests/lp_builder.rs",
     "crates/cobre-sddp/tests/parity.rs",
-    "crates/cobre-sddp/tests/commitment_block_wiring_probe.rs",
+    "crates/cobre-sddp/tests/commitment_hold_wiring_probe.rs",
 ];
 
 /// Anticipated-thermal fixtures whose ring uses exactly one lead stage
@@ -129,9 +129,9 @@ const K1_SURVIVORS: &[&str] = &[
 
 /// Anticipated-thermal fixtures whose ring reaches `k_max >= 2` — a safe
 /// SUPERSET the switchover must re-verify against, not a claim that every
-/// entry's bytes change. Per fixture, ticket-029/030 confirms empirically
-/// whether the shift-to-hold coordinate permutation actually moves that
-/// fixture's bytes/assertions: a `.sha256` regen for the tier-1 parity case,
+/// entry's bytes change. Per fixture, a later `.sha256` regen or hold-geometry
+/// rewrite confirms empirically whether the shift-to-hold coordinate permutation
+/// actually moves that fixture's bytes/assertions: a `.sha256` regen for the tier-1 parity case,
 /// a hold-geometry rewrite for a shift-geometry-asserting structural test, or
 /// no change at all for an assertion that turns out robust to the
 /// permutation. There are zero `k_max >= 2` tier-1 parity goldens today
@@ -181,7 +181,7 @@ const LEAD_GE2_REBASELINE: &[&str] = &[
     "anticipated_commitment_over_cap_seed_is_refused",
     // tests/lp_builder.rs
     "anticipated_k2_manifest_has_thermal_state_slots",
-    // tests/commitment_block_wiring_probe.rs
+    // tests/commitment_hold_wiring_probe.rs
     "manifest_slot_identity_binds_on_subindex_with_no_schema_change",
     "anticipated_ring_columns_carry_unit_col_scale",
 ];

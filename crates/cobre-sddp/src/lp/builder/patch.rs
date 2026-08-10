@@ -784,8 +784,8 @@ mod tests {
         let state_layout = state_layout_full(0, 0, 1, 2, vec![2]);
 
         let mut state = vec![0.0_f64; state_layout.n_state];
-        state[state_layout.anticipated_slots_out.start] = 7.0;
-        state[state_layout.anticipated_slots_out.start + 1] = 11.0;
+        state[state_layout.commit_out.start] = 7.0;
+        state[state_layout.commit_out.start + 1] = 11.0;
 
         // N=0, A=1, K=2 → row capacity = 0 + 0 + 0 = 0
         let mut buf = PatchBuffer::new(0, 0, 0, 0, 0, 1, 2, 0);
@@ -896,7 +896,7 @@ mod tests {
 
     /// Anticipated column-bound patches for N=0, L=0, A=1, K=2.
     ///
-    /// col_indices[0..2] = [anticipated_state.start, +1],
+    /// col_indices[0..2] = [commit_in.start, +1],
     /// col_lower[0..2] == col_upper[0..2] == [7.0, 11.0] (slot-major / plant-minor).
     #[test]
     fn fill_col_state_patches_anticipated_state() {
@@ -904,10 +904,10 @@ mod tests {
         let state_layout = state_layout_full(0, 0, 1, 2, vec![2]);
 
         // n_state = 0 + 1*2 = 2; the state-VECTOR anticipated block is
-        // `anticipated_slots_out` (== 0 here), NOT the relocated incoming
-        // `anticipated_state` (== 2 here).
-        let ant_state_vec_start = state_layout.anticipated_slots_out.start;
-        let ant_incoming_col_start = state_layout.anticipated_state.start;
+        // `commit_out` (== 0 here), NOT the relocated incoming
+        // `commit_in` (== 2 here).
+        let ant_state_vec_start = state_layout.commit_out.start;
+        let ant_incoming_col_start = state_layout.commit_in.start;
         let mut state = vec![0.0_f64; state_layout.n_state];
         state[ant_state_vec_start] = 7.0;
         state[ant_state_vec_start + 1] = 11.0;
@@ -931,13 +931,13 @@ mod tests {
     #[test]
     fn fill_col_state_patches_anticipated_state_unscaled_is_exact() {
         let state_layout = state_layout_full(0, 0, 1, 2, vec![2]);
-        let ant_state_vec_start = state_layout.anticipated_slots_out.start;
-        let ant_incoming_col_start = state_layout.anticipated_state.start;
+        let ant_state_vec_start = state_layout.commit_out.start;
+        let ant_incoming_col_start = state_layout.commit_in.start;
         let mut state = vec![0.0_f64; state_layout.n_state];
         state[ant_state_vec_start] = 7.0;
         state[ant_state_vec_start + 1] = 11.0;
 
-        let ncols = state_layout.anticipated_state.end;
+        let ncols = state_layout.commit_in.end;
         let mut col_scale = vec![3.0_f64; ncols];
         col_scale[ant_incoming_col_start] = 1.0;
         col_scale[ant_incoming_col_start + 1] = 1.0;
@@ -981,12 +981,9 @@ mod tests {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0, 0);
 
-        // Build a col_scale long enough to cover anticipated_state.end.
+        // Build a col_scale long enough to cover commit_in.end.
         // Fill with 1.0 everywhere, then override the storage_in columns to 2.0.
-        let ncols = state_layout
-            .anticipated_state
-            .end
-            .max(state_layout.storage_in.end);
+        let ncols = state_layout.commit_in.end.max(state_layout.storage_in.end);
         let mut col_scale = vec![1.0_f64; ncols];
         let s = state_layout.storage_in.start;
         col_scale[s] = 2.0;
@@ -1088,21 +1085,18 @@ mod tests {
         let state_layout =
             state_layout_with_transit_buckets(n, l, n_buckets, vec![(0, 0), (0, 1)], 1, 2, vec![2]);
         let unshifted_anticipated_start = n * (1 + l);
-        // The state-VECTOR anticipated position is `anticipated_slots_out`
+        // The state-VECTOR anticipated position is `commit_out`
         // (the `state_to_lp_column` identity domain), shifted by `n_buckets`
         // past the unshifted `N*(1+L)` a hardcoded `anticipated_start =
         // N*(1+L)` would (incorrectly) target.
         let shifted_anticipated_start = unshifted_anticipated_start + n_buckets;
-        assert_eq!(
-            state_layout.anticipated_slots_out.start,
-            shifted_anticipated_start
-        );
+        assert_eq!(state_layout.commit_out.start, shifted_anticipated_start);
 
         let mut state = vec![0.0_f64; state_layout.n_state];
         state[state_layout.transit_buckets_out.start] = 100.0;
         state[state_layout.transit_buckets_out.start + 1] = 200.0;
-        state[state_layout.anticipated_slots_out.start] = 7.0;
-        state[state_layout.anticipated_slots_out.start + 1] = 11.0;
+        state[state_layout.commit_out.start] = 7.0;
+        state[state_layout.commit_out.start + 1] = 11.0;
 
         let mut buf = PatchBuffer::new(n, l, 0, 0, n_buckets, 1, 2, 0);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
@@ -1112,15 +1106,15 @@ mod tests {
         assert_eq!(buf.col_lower[unshifted_anticipated_start + 1], 200.0);
         assert_eq!(buf.col_lower[shifted_anticipated_start], 7.0);
         assert_eq!(buf.col_lower[shifted_anticipated_start + 1], 11.0);
-        // The pinned LP column is the RELOCATED incoming `anticipated_state`
+        // The pinned LP column is the RELOCATED incoming `commit_in`
         // range, not the state-vector index used to populate `state` above.
         assert_eq!(
             buf.col_indices[shifted_anticipated_start],
-            state_layout.anticipated_state.start
+            state_layout.commit_in.start
         );
         assert_eq!(
             buf.col_indices[shifted_anticipated_start + 1],
-            state_layout.anticipated_state.start + 1
+            state_layout.commit_in.start + 1
         );
         assert_eq!(buf.state_col_patch_count(), state_layout.n_state);
     }
@@ -1128,7 +1122,7 @@ mod tests {
     /// `B == 0`: `fill_col_state_patches` output is byte-identical to the
     /// pre-refactor per-family formula (storage → `storage_in`, AR
     /// lags → `inflow_lags.start + lag*N + h`, anticipated →
-    /// `anticipated_state.start + slot*A + plant` at unshifted `anticipated_start =
+    /// `commit_in.start + slot*A + plant` at unshifted `anticipated_start =
     /// N*(1+L)`, which is only correct when `B == 0`).
     #[test]
     #[allow(clippy::cast_precision_loss)] // fixture: small integer indices, no precision lost
@@ -1143,10 +1137,7 @@ mod tests {
         let state: Vec<f64> = (0..state_layout.n_state)
             .map(|i| (i as f64).mul_add(1.5, 1.0))
             .collect();
-        let scale_len = state_layout
-            .anticipated_state
-            .end
-            .max(state_layout.storage_in.end);
+        let scale_len = state_layout.commit_in.end.max(state_layout.storage_in.end);
         let col_scale: Vec<f64> = (0..scale_len)
             .map(|i| (i as f64).mul_add(0.1, 1.0))
             .collect();
@@ -1175,7 +1166,7 @@ mod tests {
             }
         }
         let anticipated_start = n * (1 + l);
-        let ant_state_col_start = state_layout.anticipated_state.start;
+        let ant_state_col_start = state_layout.commit_in.start;
         for slot in 0..k {
             for plant in 0..a {
                 let off = slot * a + plant;

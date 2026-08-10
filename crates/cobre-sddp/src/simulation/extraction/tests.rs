@@ -1146,8 +1146,8 @@ fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
     let study_dims = test_support::study_dims_for(&eq_counts);
     let state = test_support::state_layout_full(0, 0, 1, 1, vec![1]);
     // With N=0, L=0, A=1, K_max=1:
-    //   anticipated_slots_out = [0, 1)  (outgoing ring, A*K_max = 1 slot)
-    //   anticipated_state     = [1, 2)  (incoming, A*K_max = 1 slot)
+    //   commit_out = [0, 1)  (outgoing ring, A*K_max = 1 slot)
+    //   commit_in     = [1, 2)  (incoming, A*K_max = 1 slot)
     //   theta = N*(3+L) + 2*A*K_max = 0 + 2 = 2
     //   thermal = [theta+1, theta+1+T*K) = [3, 5)  — t0→3, t1→4
     assert_eq!(state.theta, 2);
@@ -1237,8 +1237,8 @@ fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
         result.thermals[1].is_anticipated,
         "thermal 20 should be anticipated"
     );
-    // Always-active fishing: committed_mw reads slot 0 of anticipated_state
-    // (primal[anticipated_state.start + 0] = 0.0 in this zero-initialised fixture).
+    // Always-active fishing: committed_mw reads slot 0 of commit_in
+    // (primal[commit_in.start + 0] = 0.0 in this zero-initialised fixture).
     assert_eq!(result.thermals[1].anticipated_committed_mw, Some(0.0));
     // With stage_index=0, n_stages=2, K_i=1: t+K_i=1 <= n_stages -> decision is active.
     // primal[anticipated_decision.start + 0] defaults to 0.0 in this fixture.
@@ -1920,8 +1920,8 @@ fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
 ///
 /// Layout: `n_ant_state = 1*2 = 2`, doubled for the outgoing+incoming ring
 /// blocks → `theta = 4`.
-///   `anticipated_slots_out` (outgoing) = `[0, 2)`
-///   `anticipated_state` (incoming)     = `[2, 4)`
+///   `commit_out` (outgoing) = `[0, 2)`
+///   `commit_in` (incoming)     = `[2, 4)`
 ///   `thermal` = `[5, 8)`          (1 thermal * 3 blocks)
 ///   `anticipated_decision.start = 8`
 /// The `GeometryDims` both
@@ -1950,11 +1950,11 @@ fn make_anticipated_committed_indexer_k2_3blks() -> StageGeometry {
 
 /// Per-block branch, K=2, `stage_index=2` (delivery stage).
 ///
-/// The committed value is the slot-0 entry of the `anticipated_state` ring
+/// The committed value is the slot-0 entry of the `commit_in` ring
 /// buffer (per-plant, per-stage scalar), NOT the per-block thermal
 /// generation. To guard against the regression where the helper
 /// returned `primal[thermal_col]` (the per-block generation) instead of
-/// `primal[anticipated_state.start + local_idx]`, this fixture uses three
+/// `primal[commit_in.start + local_idx]`, this fixture uses three
 /// distinct per-block generation values (50/60/70 MW) and a distinct
 /// slot-0 value (42.0 MW). The fix must read 42.0 for every block; the
 /// bug would read 50/60/70.
@@ -1970,10 +1970,10 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
     // thermal = [5, 8): col 5 = block 0, col 6 = block 1, col 7 = block 2
     // (theta = N*(3+L) + 2*n_ant_state = 0 + 2*2 = 4, control region starts at 5).
     assert_eq!(indexer.thermal.start, 5);
-    // anticipated_state (the incoming, pinned block) = [2, 4): col 2 = slot 0,
-    // col 3 = slot 1 (the outgoing `anticipated_slots_out` ring occupies [0, 2)
+    // commit_in (the incoming, pinned block) = [2, 4): col 2 = slot 0,
+    // col 3 = slot 1 (the outgoing `commit_out` ring occupies [0, 2)
     // instead; `compute_anticipated_committed_mw` reads the INCOMING slot).
-    assert_eq!(state.anticipated_state.start, 2);
+    assert_eq!(state.commit_in.start, 2);
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
     primal[2] = 42.0; // ant_state slot 0 (the committed scalar)
@@ -2058,21 +2058,24 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
     }
 }
 
-/// Per-block branch, K=2, `stage_index=1` (pre-delivery under
-/// a maturity gate, but the always-active fishing predicate reads
-/// slot 0 of `anticipated_state` regardless of `K_i` vs `stage_index`).
-/// With a zero-initialised `primal[anticipated_state.start + 0]`,
-/// expects every block to read `Some(0.0)`.
+/// Per-block branch, K=2, `stage_index=1`. The always-active fishing extraction
+/// reads the maturing `commit_in` slot for THIS stage — `stage_index mod k_max =
+/// 1 mod 2 = 1` (`commit_in` slot 1), never a fixed slot 0. A decoy in slot 0
+/// (col 2) proves the read is stage-keyed; the maturing slot 1 (col 3) is left
+/// zero-seeded, so every block reads `Some(0.0)`.
 #[test]
-fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
+fn extract_thermals_per_block_committed_reads_stage_maturing_slot_when_seed_zero() {
     let indexer = make_anticipated_committed_indexer_k2_3blks();
     let study_dims = test_support::study_dims_for(&anticipated_committed_counts_k2_3blks());
     let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    // commit_in = [2, 4): slot 0 = col 2, slot 1 = col 3. At stage 1 the maturing
+    // slot is 1 mod 2 = 1 (col 3); slot 0 carries a decoy that must NOT be read.
+    assert_eq!(state.commit_in.start, 2);
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
-    primal[3] = 50.0;
-    primal[4] = 60.0;
-    primal[5] = 70.0;
+    primal[2] = 88.0; // slot 0 decoy — not the maturing slot at stage 1
+    // primal[3] (slot 1, the stage-1 maturing slot) stays 0.0.
+    primal[5] = 70.0; // thermal block 0 (distinct, must not alias committed)
     let obj = vec![0.0_f64; n_cols];
 
     let counts = EntityCounts {
@@ -2134,7 +2137,8 @@ fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
         assert_eq!(
             rec.anticipated_committed_mw,
             Some(0.0),
-            "block {blk}: always-active reads slot 0 = 0.0 regardless of stage"
+            "block {blk}: stage 1 maturing slot is 1 mod 2 = 1 (zero-seeded); the \
+             slot-0 decoy (88.0) must not be read"
         );
     }
 }
@@ -2430,7 +2434,7 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
 
 /// No-block branch, K=1, `stage_index=0`, `n_stages=2`. Pre-delivery
 /// under a maturity gate, but the always-active fishing predicate
-/// reads slot 0 of `anticipated_state` regardless. Expects `Some(0.0)`
+/// reads slot 0 of `commit_in` regardless. Expects `Some(0.0)`
 /// (zero-initialised slot 0).
 #[test]
 fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
@@ -2546,11 +2550,11 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
         .anticipated_decision
         .end
         .max(indexer.thermal.end)
-        .max(state.anticipated_state.end)
+        .max(state.commit_in.end)
         .max(state.theta + 1);
     let mut primal = vec![0.0_f64; n_cols];
-    // Slot 0 of anticipated_state = committed MW scalar.
-    primal[state.anticipated_state.start] = 37.5;
+    // Slot 0 of commit_in = committed MW scalar.
+    primal[state.commit_in.start] = 37.5;
     // Anticipated decision column.
     primal[indexer.anticipated_decision.start] = 80.0;
     // Thermal columns: block 0, block 1.

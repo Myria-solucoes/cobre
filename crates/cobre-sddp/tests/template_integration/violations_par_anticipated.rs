@@ -846,10 +846,11 @@ fn test_zero_out_and_fishing_active_predicate_align() {
 
 /// With two anticipated thermals (K_0=1, K_1=2) and n_stages=4, fishing rows are
 /// always 2 per stage (always-active = `n_anticipated`); the `state_out_def`
-/// (newest-slot deposit) count varies with the strict `stage + K_i < 4` gate,
-/// and the interior ring-shift definition row (K_1's only interior slot, slot
-/// 0; K_0=1 has none) varies with the horizon-reachable cap
-/// `slot < n_stages - stage - 1`.
+/// (deposit/latch) count varies with the strict `stage + K_i < 4` gate, and the
+/// interior carry (hold) definition row count varies with how many in-flight,
+/// not-yet-due commitments the plants hold. Under the HOLD geometry a commitment
+/// is carried in place (same-slot `out - in = 0`) until it matures — the interior
+/// row COUNT is a permutation-invariant of the retired shift geometry.
 ///
 /// State_out_def rows per stage:
 ///   stage 0: K_0=1: 0+1=1 < 4 ✓, K_1=2: 0+2=2 < 4 ✓ → 2 rows
@@ -857,11 +858,13 @@ fn test_zero_out_and_fishing_active_predicate_align() {
 ///   stage 2: K_0=1: 2+1=3 < 4 ✓, K_1=2: 2+2=4 < 4 ✗ → 1 row
 ///   stage 3: K_0=1: 3+1=4 < 4 ✗, K_1=2: 3+2=5 < 4 ✗ → 0 rows
 ///
-/// K_1 interior-slot (slot 0) reachability, cap = `4 - stage - 1`:
-///   stage 0: cap=3, 0<3 ✓ → 1 row; stage 1: cap=2, 0<2 ✓ → 1 row
-///   stage 2: cap=1, 0<1 ✓ → 1 row; stage 3: cap=0, 0<0 ✗ → 0 rows
+/// Interior carry rows per stage: K_0=1 has none (its commitment matures the very
+/// next stage — always a deposit-or-fish, never carried); K_1=2 carries its single
+/// in-flight not-yet-due delivery (`m = stage + 1`) while it lands inside the
+/// horizon (`stage + 1 < 4`):
+///   stage 0: 1 row; stage 1: 1 row; stage 2: 1 row; stage 3: 0 (m=4 past horizon).
 ///
-/// Combined fishing + state_out_def + interior-slot counts
+/// Combined fishing + state_out_def + interior counts
 /// (base = stage 0: 2 fishing + 2 def + 1 interior):
 ///   stage 1: 2 fishing + 2 state_out_def + 1 interior = base (same as stage 0)
 ///   stage 2: 2 fishing + 1 state_out_def + 1 interior = base - 1
@@ -881,7 +884,7 @@ fn test_anticipated_fishing_rows_count_by_stage() {
     .expect("build ok");
 
     // base = stage 0: 2 fishing rows (always-active) + 2 state_out_def rows
-    // + 1 interior ring-shift row (K_1's slot 0).
+    // + 1 interior carry row (K_1's single in-flight not-yet-due commitment).
     let base = result.templates[0].num_rows;
     assert_eq!(
         result.templates[1].num_rows, base,
@@ -926,16 +929,18 @@ fn test_anticipated_fishing_same_count_both_stages() {
 }
 
 /// With two anticipated thermals (K_0=1, K_1=2) sharing one `k_max=2` ring at
-/// stage 0 (`n_stages=4`), `anticipated_slots_out` columns are unbounded
-/// (-INF, +INF) at every slot BOTH plants can reach, and frozen `[0, 0]` at a
-/// slot beyond a plant's own lead — the multi-plant heterogeneous-lead
-/// padding case. Slot-major layout: `col = col_anticipated_slots_out_start +
-/// slot * n_anticipated + plant`.
+/// stage 0 (`n_stages=4`), commit_out columns are unbounded (-INF, +INF) at
+/// every slot a plant reaches under the HOLD geometry (interior carry OR active
+/// deposit), and frozen `[0, 0]` at a padding slot. Deposit slots are modular:
+/// slot `delivery mod k_max` (delivery = 0 + K_i). Slot-major layout:
+/// `col = col_anticipated_slots_out_start + slot * n_anticipated + plant`.
 ///
-/// - col 0 (slot 0, plant 0 = K_0=1's own deposit slot): free (active: 0+1<4).
-/// - col 1 (slot 0, plant 1 = K_1=2's interior slot): free (reachable: 0<horizon_cap=3).
-/// - col 2 (slot 1, plant 0 = K_0=1's padding, beyond its own lead): frozen `[0, 0]`.
-/// - col 3 (slot 1, plant 1 = K_1=2's own deposit slot): free (active: 0+2<4).
+/// - col 0 (slot 0, plant 0): PADDING — plant 0 (K=1) delivers at stage 1
+///   (slot `1 mod 2 = 1`); its delivery-2 (slot 0) is not yet decided at stage 0.
+///   frozen `[0, 0]`.
+/// - col 1 (slot 0, plant 1 = K_1=2's deposit slot `2 mod 2 = 0`): free (active: 0+2<4).
+/// - col 2 (slot 1, plant 0 = K_0=1's deposit slot `1 mod 2 = 1`): free (active: 0+1<4).
+/// - col 3 (slot 1, plant 1's interior carry, the delivery-1 pre-study seed): free.
 #[test]
 fn test_anticipated_state_columns_unconstrained() {
     let system = two_anticipated_thermal_system(4);
@@ -952,7 +957,7 @@ fn test_anticipated_state_columns_unconstrained() {
 
     let t = &result.templates[0];
 
-    for &col in &[0_usize, 1, 3] {
+    for &col in &[1_usize, 2, 3] {
         assert!(
             t.col_lower[col].is_infinite() && t.col_lower[col] < 0.0,
             "col {col}: col_lower must be -INF, got {}",
@@ -966,12 +971,12 @@ fn test_anticipated_state_columns_unconstrained() {
     }
 
     assert_eq!(
-        t.col_lower[2], 0.0,
-        "col 2 (K_0=1's padding slot in the shared k_max=2 ring) must be frozen"
+        t.col_lower[0], 0.0,
+        "col 0 (plant 0's padding slot 0 — its delivery-2 not yet decided at stage 0) must be frozen"
     );
     assert_eq!(
-        t.col_upper[2], 0.0,
-        "col 2 (K_0=1's padding slot in the shared k_max=2 ring) must be frozen"
+        t.col_upper[0], 0.0,
+        "col 0 (plant 0's padding slot 0 — its delivery-2 not yet decided at stage 0) must be frozen"
     );
 }
 
@@ -1075,7 +1080,7 @@ fn test_n_state_includes_n_ant_state() {
 }
 
 /// Anticipated state does not participate in the transfer operation (the
-/// ring-buffer shift is handled by PatchBuffer): with n_hydros=0, max_par_order=0,
+/// commitment-hold ring carry is handled in-LP): with n_hydros=0, max_par_order=0,
 /// `n_transfer = n_hydros * max_par_order = 0`.
 #[test]
 fn test_n_transfer_unchanged_by_anticipated() {
@@ -1404,27 +1409,54 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
     }
 
     // K=2, n_stages=4: fishing is 1 row at every stage; state_out_def (s+K<4) is
-    // active at 0,1 but absent at 2,3. The single interior ring slot (slot 0)
-    // is reachable at 0,1,2 (horizon_cap = 3,2,1) but not at 3 (cap = 0), so
-    // stage 2 keeps one more row than stage 3 despite both lacking state_out_def.
+    // active at 0,1 but absent at 2,3. The single interior carry row (one
+    // in-flight not-yet-due commitment) is present at 0,1,2 but not at 3 (its
+    // delivery target m=4 is past the horizon), so stage 2 keeps one more row
+    // than stage 3 despite both lacking state_out_def.
     {
         assert_eq!(
             result.templates[1].num_rows, result.templates[0].num_rows,
             "K=2: stage 1 must have same row count as stage 0 \
-             (both have fishing + state_out_def + the interior ring-shift row active)"
+             (both have fishing + state_out_def + the interior carry row active)"
         );
         assert_eq!(
             result.templates[2].num_rows,
             result.templates[3].num_rows + 1,
             "K=2: stage 2 must have exactly 1 more row than stage 3 \
-             (both lack state_out_def, but stage 2's interior ring-shift slot is \
-             still horizon-reachable while stage 3's is not)"
+             (both lack state_out_def, but stage 2's interior carry commitment is \
+             still inside the horizon while stage 3's is not)"
         );
         assert_eq!(
             result.templates[0].num_rows,
             result.templates[2].num_rows + 1,
             "K=2: stage 0 must have exactly 1 more row than stage 2 \
              (state_out_def active at stage 0, absent at stage 2)"
+        );
+    }
+
+    // ── Interior carry (hold) definition row: the same-slot carry identity ──
+    // At stage 0 the single in-flight not-yet-due commitment is delivery-1 (held
+    // at its modular slot `1 mod k_max = 1`). Its carry row pins
+    // `out(slot 1) - in(slot 1) = 0` — the SAME slot on both columns; the retired
+    // shift geometry instead targeted `in(slot + 1)`. The outgoing anticipated
+    // block is `[n_state - k, n_state)` (storage occupies `[0, n_hydros)` first);
+    // the incoming block starts at `rt_col_ant_state_incoming_start(k)`.
+    {
+        let t0 = &result.templates[0];
+        let out_slot1 = (t0.n_state - k) + 1; // outgoing slot 1
+        let in_slot1 = col_ant_state + 1; // incoming slot 1
+        let in_slot0 = col_ant_state; // incoming slot 0 (the retired shift target)
+        let carry_row = (0..t0.num_rows)
+            .find(|&r| csc_entries_at(t0, out_slot1, r) == vec![1.0])
+            .expect("K=2: a carry definition row with out(slot 1) = +1.0 must exist");
+        assert_eq!(
+            csc_entries_at(t0, in_slot1, carry_row),
+            vec![-1.0],
+            "K=2 carry row: in(slot 1) must carry -1.0 — the SAME slot as out (hold identity)"
+        );
+        assert!(
+            csc_entries_at(t0, in_slot0, carry_row).is_empty(),
+            "K=2 carry row must NOT touch in(slot 0) — the retired shift target in(slot+1)"
         );
     }
 }
@@ -1526,17 +1558,17 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
     );
 
     // K=3, n_stages=4: fishing is always-active (1 row/stage); state_out_def
-    // (s+K<4) is active at stage 0 only. The two interior ring slots (0, 1)
-    // are both reachable at stages 0-1 (horizon_cap = 3, 2), only slot 0 is
-    // reachable at stage 2 (cap = 1), and neither is reachable at stage 3
-    // (cap = 0).
+    // (s+K<4) is active at stage 0 only. Under the HOLD geometry the interior
+    // carry rows count the in-flight not-yet-due commitments whose delivery
+    // target `m in (stage, stage+3]` lands inside the horizon: 2 at stages 0-1,
+    // 1 at stage 2, 0 at stage 3 — a count invariant of the retired shift slots.
     {
         assert_eq!(
             result.templates[1].num_rows,
             result.templates[2].num_rows + 1,
             "K=3: stage 1 must have 1 more row than stage 2 \
-             (both lack state_out_def, but stage 2 has already lost one \
-             horizon-reachable interior ring-shift row)"
+             (both lack state_out_def, but stage 2 has one fewer interior carry \
+             commitment inside the horizon)"
         );
         assert_eq!(
             result.templates[0].num_rows,
@@ -1587,18 +1619,44 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
     // For K=3, n_stages=4:
     //   Fishing: 1 row per stage at every stage (always-active predicate).
     //   State_out_def (s+K<4): active at 0; absent at 1,2,3.
-    //   Interior ring slots (0, 1): both reachable at 0,1; only slot 0 at 2;
-    //   neither at 3 (horizon_cap = 3,2,1,0) — so stage 2 has one more row
-    //   than stage 3, not an equal count.
+    //   Interior carry rows: 2 at stages 0-1, 1 at stage 2, 0 at stage 3 (the
+    //   in-flight not-yet-due commitments whose delivery target stays inside the
+    //   horizon) — so stage 2 has one more row than stage 3, not an equal count.
     {
         assert_eq!(
             result.templates[3].num_rows + 1,
             result.templates[2].num_rows,
             "K=3: stage 2 must have 1 more row than stage 3 \
              (fishing always-active and state_out_def absent at both, but \
-             stage 2's slot-0 interior ring-shift row is still \
-             horizon-reachable while stage 3's is not)"
+             stage 2 still has one interior carry commitment inside the \
+             horizon while stage 3 has none)"
         );
+    }
+
+    // ── Interior carry (hold) definition rows: the same-slot carry identity ──
+    // At stage 0 the two in-flight not-yet-due commitments are delivery-1 (slot
+    // `1 mod 3 = 1`) and delivery-2 (slot `2 mod 3 = 2`); delivery-3 is the fresh
+    // decision (deposit slot `3 mod 3 = 0`, not a carry). Each carry row pins
+    // `out(slot) - in(slot) = 0` on the SAME slot. The outgoing anticipated block
+    // is `[n_state - k, n_state)`; the incoming block starts at
+    // `rt_col_ant_state_incoming_start(k)`.
+    {
+        let t0 = &result.templates[0];
+        let out_start = t0.n_state - k; // outgoing anticipated block start
+        for slot in [1_usize, 2] {
+            let out_col = out_start + slot;
+            let in_col = col_ant_state + slot;
+            let carry_row = (0..t0.num_rows)
+                .find(|&r| csc_entries_at(t0, out_col, r) == vec![1.0])
+                .unwrap_or_else(|| {
+                    panic!("K=3: a carry definition row with out(slot {slot}) = +1.0 must exist")
+                });
+            assert_eq!(
+                csc_entries_at(t0, in_col, carry_row),
+                vec![-1.0],
+                "K=3 carry row (slot {slot}): in(slot) must carry -1.0 — the SAME slot (hold identity)"
+            );
+        }
     }
 }
 

@@ -182,11 +182,6 @@ impl DeliveryRing {
     /// # Panics (debug builds only)
     ///
     /// Panics if `row_pos.len() != n_lanes * depth`.
-    // Voice 4: no production call site wires this in yet — the same-slot
-    // hold transition activates it once its caller switches over from the
-    // open-coded commitment-block pair. The `#[allow(dead_code)]` refires
-    // once that caller lands.
-    #[allow(dead_code)]
     pub fn emit_carry_rows(
         &self,
         row_pos: &[Option<usize>],
