@@ -7,8 +7,10 @@
 //! and both backward pre-study projections behind one resolver.
 
 use chrono::{Datelike, NaiveDate, TimeDelta, Weekday};
+use cobre_core::PostStudyStage;
 use cobre_core::temporal::{
-    SeasonCycleType, SeasonDefinition, SeasonMap, Stage, window_period_overlaps,
+    Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
+    SeasonMap, Stage, StageRiskConfig, StageStateConfig, window_period_overlaps,
 };
 
 /// Compute the exclusive end date of the calendar month identified by
@@ -471,6 +473,50 @@ fn hours_between(later: NaiveDate, earlier: NaiveDate) -> f64 {
     (later - earlier).num_hours() as f64
 }
 
+/// Convert a post-study calendar segment (`PostStudyStages::stages`) into
+/// [`Stage`]s a [`StageCalendar`] can resolve against.
+///
+/// `end_date = start_date + round(duration_hours / 24)` days — the whole-day
+/// rounding the `cobre-io` semantic validator applies when it builds the same
+/// segment, so this resolver and that validator agree on exactly which
+/// post-study stage a window covers. Only `start_date`/`end_date`/`blocks` are
+/// load-bearing (the fields [`StageCalendar`] reads); the rest are inert
+/// placeholders.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)] // a validated finite positive duration yields a small non-negative day count
+pub fn post_study_calendar_stages(stages: &[PostStudyStage]) -> Vec<Stage> {
+    stages
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| {
+            let days = (stage.duration_hours / 24.0).round() as i64;
+            let end_date = stage.start_date + TimeDelta::days(days);
+            Stage {
+                index,
+                id: i32::try_from(index).unwrap_or(i32::MAX),
+                start_date: stage.start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "post_study".to_string(),
+                    duration_hours: stage.duration_hours,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
+        })
+        .collect()
+}
+
 /// Layer-2 resolver over the study's ordered, non-overlapping
 /// `[start_date, end_date)` stage calendar: forward date-window coverage for
 /// windowed inputs, and the two backward pre-study projections that season-
@@ -600,6 +646,45 @@ impl<'a> StageCalendar<'a> {
             .map(|overlap| overlap / period_duration)
             .collect()
     }
+
+    /// Resolve `date`'s containing stage index over this calendar segment:
+    /// the unique stage whose real `[start_date, end_date)` span overlaps the
+    /// one-day window `[date, date + 1 day)`. Built on [`Self::coverage`]'s
+    /// overlap arithmetic rather than a separate date-range walk. `None` when
+    /// `date` falls outside every stage (before the first, at or after the
+    /// last).
+    #[must_use]
+    pub fn resolve_date(&self, date: NaiveDate) -> Option<usize> {
+        let window = DatedWindow {
+            start_date: date,
+            end_date: date + TimeDelta::days(1),
+        };
+        self.coverage(&window)
+            .into_iter()
+            .position(|fraction| fraction > 0.0)
+    }
+
+    /// Resolve `window`'s covering stage index: the one stage [`Self::coverage`]
+    /// reports at fraction `1.0`, with every other stage at `0.0` — i.e.
+    /// `window` aligns exactly to one calendar stage's boundaries. `None` when
+    /// no stage covers it exactly (straddles stages, a partial-day
+    /// misalignment, or falls off the segment).
+    #[must_use]
+    #[allow(clippy::float_cmp)] // coverage's whole-day-hours arithmetic keeps a full-coverage fraction bit-exact
+    pub fn resolve_window(&self, window: &DatedWindow) -> Option<usize> {
+        let mut resolved = None;
+        for (idx, fraction) in self.coverage(window).into_iter().enumerate() {
+            if fraction == 1.0 {
+                if resolved.is_some() {
+                    return None;
+                }
+                resolved = Some(idx);
+            } else if fraction != 0.0 {
+                return None;
+            }
+        }
+        resolved
+    }
 }
 
 #[cfg(test)]
@@ -607,9 +692,10 @@ mod tests {
     use super::{
         DatedWindow, RealizedWindow, SeasonCycleType, SeasonDefinition, SeasonMap,
         SeasonPeriodWindow, Stage, StageCalendar, cast, merge_layered_windows, month_exclusive_end,
-        nth_previous_occurrence, season_period_window,
+        nth_previous_occurrence, post_study_calendar_stages, season_period_window,
     };
     use chrono::NaiveDate;
+    use cobre_core::PostStudyStage;
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
@@ -1118,6 +1204,106 @@ mod tests {
             "beyond-K_i: the second window targets March (index 2) instead of \
              February, leaving the leading stage uncovered"
         );
+    }
+
+    fn two_post_study_stages() -> Vec<PostStudyStage> {
+        vec![
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+                duration_hours: 720.0,
+            },
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
+                duration_hours: 744.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_post_study_calendar_stages_end_date_rounds_duration_to_days() {
+        let stages = post_study_calendar_stages(&two_post_study_stages());
+
+        assert_eq!(stages.len(), 2);
+        assert_eq!(
+            stages[0].start_date,
+            NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+        );
+        assert_eq!(
+            stages[0].end_date,
+            NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()
+        );
+        assert_eq!(
+            stages[1].start_date,
+            NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()
+        );
+        assert_eq!(
+            stages[1].end_date,
+            NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+        );
+
+        // A duration that is not an exact day multiple (700h = 29.1(6) days)
+        // rounds to the nearest whole day, mirroring the `cobre-io` validator's
+        // own `post_study_end_date` convention.
+        let odd = vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+            duration_hours: 700.0,
+        }];
+        let odd_stages = post_study_calendar_stages(&odd);
+        assert_eq!(
+            odd_stages[0].end_date,
+            NaiveDate::from_ymd_opt(2026, 11, 30).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_date_maps_to_expected_post_study_index() {
+        let stages = post_study_calendar_stages(&two_post_study_stages());
+        let calendar = StageCalendar::new(&stages);
+
+        assert_eq!(
+            calendar.resolve_date(NaiveDate::from_ymd_opt(2026, 11, 15).unwrap()),
+            Some(0)
+        );
+        assert_eq!(
+            calendar.resolve_date(NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()),
+            Some(1)
+        );
+        assert_eq!(
+            calendar.resolve_date(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()),
+            Some(1)
+        );
+        assert_eq!(
+            calendar.resolve_date(NaiveDate::from_ymd_opt(2026, 10, 31).unwrap()),
+            None
+        );
+        assert_eq!(
+            calendar.resolve_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_window_spanning_a_stage_resolves_to_it() {
+        let stages = post_study_calendar_stages(&two_post_study_stages());
+        let calendar = StageCalendar::new(&stages);
+
+        let stage_1_window = DatedWindow {
+            start_date: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+        };
+        assert_eq!(calendar.resolve_window(&stage_1_window), Some(1));
+
+        let straddling = DatedWindow {
+            start_date: NaiveDate::from_ymd_opt(2026, 11, 15).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 12, 15).unwrap(),
+        };
+        assert_eq!(calendar.resolve_window(&straddling), None);
+
+        let partial = DatedWindow {
+            start_date: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 11, 15).unwrap(),
+        };
+        assert_eq!(calendar.resolve_window(&partial), None);
     }
 
     /// [`StageCalendar::season_occurrence`] must reproduce the pre-refactor
