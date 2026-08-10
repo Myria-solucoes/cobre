@@ -27,6 +27,7 @@ use crate::indexer::{
 };
 use crate::lead_time::AnticipatedResolution;
 use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::PostStudyResolved;
 use crate::test_support::{make_unit_group, state_layout};
 
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
@@ -221,6 +222,7 @@ impl ZeroEntityFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 0,
             n_thermals: 0,
             n_lines: 0,
@@ -630,6 +632,7 @@ impl TwoHydroFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 2,
             n_thermals: 0,
             n_lines: 0,
@@ -961,6 +964,7 @@ impl FphaMixFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 3,
             n_thermals: 0,
             n_lines: 0,
@@ -1137,6 +1141,7 @@ impl FillingMembershipFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 2,
             n_thermals: 0,
             n_lines: 0,
@@ -1920,6 +1925,7 @@ impl AntFixturesWithNStages {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 0,
             n_thermals: 0,
             n_lines: 0,
@@ -2179,6 +2185,7 @@ impl PumpingFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 0,
             n_thermals: 0,
             n_lines: 0,
@@ -2901,6 +2908,7 @@ impl TwoHydroMultiBusFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 2,
             n_thermals: 0,
             n_lines: 0,
@@ -3148,6 +3156,7 @@ impl FphaMultiBusFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 3,
             n_thermals: 0,
             n_lines: 0,

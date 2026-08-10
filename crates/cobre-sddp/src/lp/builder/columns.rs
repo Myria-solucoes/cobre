@@ -43,7 +43,7 @@ pub(super) fn fill_stage_columns(
     fill_anticipated_slot_columns(layout, bufs);
     fill_ar_lag_columns(layout, bufs);
     fill_anticipated_state_columns(layout, bufs);
-    fill_commitment_decision_columns(layout, bufs);
+    fill_commitment_decision_columns(ctx, layout, bufs);
     fill_theta_column(layout, bufs);
     fill_turbine_columns(ctx, stage, stage_idx, layout, bufs);
     fill_spillage_columns(ctx, stage, stage_idx, layout, bufs);
@@ -188,15 +188,50 @@ fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_
     }
 }
 
-/// This stage's post-horizon decision-column family: open `(-inf, inf)`, no
-/// objective — no in-study cost is ever booked for a post-horizon
-/// commitment; pricing it is the boundary FCF's job (not yet wired).
-fn fill_commitment_decision_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
+/// This stage's post-horizon decision-column family: books the discounted,
+/// delivery-anchored fuel cost onto each decision column (mirroring
+/// [`fill_anticipated_columns`]'s in-study booking, reading post-study hours,
+/// discount, cost, and bounds instead) and bounds it to the intersection of the
+/// commitment interval and the post-study capability. The terminal boundary FCF
+/// prices the carried state fuel-exclusively, so this booking does not
+/// double-count; the carry rows and `commit_out`/`commit_in` stay cost-free.
+fn fill_commitment_decision_columns(
+    ctx: &TemplateBuildCtx<'_>,
+    layout: &StageLayout,
+    bufs: &mut ColumnBufs<'_>,
+) {
     let decision_start = layout.anticipated.col_commitment_decision_start;
-    for local_idx in 0..layout.anticipated.commitment_decision_windows.len() {
+    for (local_idx, &w) in layout
+        .anticipated
+        .commitment_decision_windows
+        .iter()
+        .enumerate()
+    {
         let col = decision_start + local_idx;
-        bufs.col_lower[col] = f64::NEG_INFINITY;
-        bufs.col_upper[col] = f64::INFINITY;
+        let thermal_id = layout.state.commitment_window_thermal_id[w];
+        let (min_c, max_c) = layout.state.commitment_window_min_max[w];
+        let dest = layout.state.commitment_window_dest_stage[w];
+
+        let bounds = ctx
+            .post_study_resolved
+            .thermal_bounds
+            .lookup(thermal_id, dest);
+        debug_assert!(
+            bounds.is_some(),
+            "post-horizon window {w} (thermal {thermal_id}, dest stage {dest}) must resolve a \
+             post-study thermal bound — the commitment-capability intersection is validated \
+             non-empty at read time"
+        );
+        let Some((cost, min_k, max_k)) = bounds else {
+            continue;
+        };
+
+        bufs.col_lower[col] = min_c.max(min_k);
+        bufs.col_upper[col] = max_c.min(max_k);
+
+        let hours = ctx.post_study_resolved.total_hours[dest];
+        let discount = ctx.post_study_resolved.cumulative_discount_factors[dest];
+        bufs.objective[col] = cost * hours * discount;
     }
 }
 
@@ -1581,6 +1616,7 @@ mod interior_storage_bound_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: 1,
                 n_thermals: 0,
                 n_lines: 0,
@@ -2082,6 +2118,7 @@ mod diversion_bound_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: 1,
                 n_thermals: 0,
                 n_lines: 0,
@@ -2510,6 +2547,7 @@ mod filling_phase_gating_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: 1,
                 n_thermals: 0,
                 n_lines: 0,
@@ -3518,6 +3556,7 @@ mod anticipated_objective_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: 0,
                 n_thermals: 2,
                 n_lines: 0,
@@ -3802,6 +3841,7 @@ mod anticipated_objective_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: 0,
                 n_thermals: 1,
                 n_lines: 0,
@@ -3892,6 +3932,316 @@ mod anticipated_objective_tests {
         let (dec_min, dec_max, _) = per_stage[0];
         assert_ne!(max_g, dec_max, "delivery and decision max_gen must differ");
         assert_ne!(min_g, dec_min, "delivery and decision min_gen must differ");
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
+mod commitment_decision_cost_tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use chrono::NaiveDate;
+    use cobre_core::{
+        EntityId, HorizonGraph, PostStudyStage, PostStudyStages, PostStudyThermalBound,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
+    use crate::indexer::StateSpace;
+    use crate::lead_time::AnticipatedResolution;
+    use crate::resolved_parameters::ResolvedParameters;
+    use crate::setup::PostStudyResolved;
+
+    use super::super::layout::ResolvedTables;
+    use super::super::test_support::two_block_stage;
+    use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_commitment_decision_columns};
+    use crate::indexer::HydroCellIndex;
+
+    const STAGE_IDX: usize = 0;
+    const THERMAL_ID: EntityId = EntityId(9);
+    const DEST_STAGE: usize = 0;
+    const COST_PER_MWH: f64 = 25.0;
+    const POST_STUDY_HOURS: f64 = 500.0;
+    /// Chosen so the resolved cumulative discount factor `D` (the product of
+    /// these two) is neither `0.0` nor `1.0` — proving `D` is genuinely
+    /// multiplied into the objective, not just `C * H`.
+    const LAST_REAL_CUMULATIVE: f64 = 0.95;
+    const LAST_REAL_PER_STAGE: f64 = 0.9;
+
+    /// Owns the borrow targets for a `TemplateBuildCtx` isolating the
+    /// post-horizon commitment-hold decision column: zero hydros, zero
+    /// in-study anticipated ring (`n_anticipated == 0`, `k_max == 0`) — only
+    /// [`Self::make_state`]'s `n_commitment` slots exist, so
+    /// `fill_commitment_decision_columns` is the only fill touching anything
+    /// beyond `theta`.
+    struct CommitmentDecisionFixtures {
+        par_lp: PrecomputedPar,
+        cascade: cobre_core::CascadeTopology,
+        hydro_cell_index: HydroCellIndex,
+        bounds: cobre_core::ResolvedBounds,
+        penalties: cobre_core::ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds,
+        resolved_load_factors: cobre_core::ResolvedLoadFactors,
+        resolved_ncs_bounds: cobre_core::ResolvedNcsBounds,
+        resolved_ncs_factors: cobre_core::ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+        post_study_resolved: PostStudyResolved,
+    }
+
+    impl CommitmentDecisionFixtures {
+        /// `min_k`/`max_k` is the post-study capability; the caller declares
+        /// the commitment interval separately via [`Self::make_state`].
+        fn new(min_k: f64, max_k: f64) -> Self {
+            let post_study = PostStudyStages {
+                stages: vec![PostStudyStage {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1)
+                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
+                    duration_hours: POST_STUDY_HOURS,
+                }],
+                thermal_bounds: vec![PostStudyThermalBound {
+                    thermal_id: THERMAL_ID,
+                    post_study_stage_index: DEST_STAGE,
+                    cost_per_mwh: COST_PER_MWH,
+                    min_mw: min_k,
+                    max_mw: max_k,
+                }],
+            };
+            let post_study_resolved = crate::setup::resolve_post_study_artifacts(
+                Some(&post_study),
+                &HorizonGraph::default(),
+                LAST_REAL_CUMULATIVE,
+                LAST_REAL_PER_STAGE,
+            );
+            Self {
+                par_lp: PrecomputedPar::default(),
+                cascade: cobre_core::CascadeTopology::build(&[]),
+                hydro_cell_index: HydroCellIndex::build(&[]),
+                bounds: cobre_core::ResolvedBounds::empty(),
+                penalties: cobre_core::ResolvedPenalties::empty(),
+                production_models: ProductionModelSet::new(vec![], 0, 1),
+                evaporation_models: EvaporationModelSet::new(vec![]),
+                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: cobre_core::ResolvedLoadFactors::empty(),
+                resolved_ncs_bounds: cobre_core::ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: cobre_core::ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
+                },
+                post_study_resolved,
+            }
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            TemplateBuildCtx {
+                hydros: &[],
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                hydro_cell_index: &self.hydro_cell_index,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &[],
+                pumping_pos: BTreeMap::new(),
+                n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
+                diversion_upstream: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
+                arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
+                per_stage_mask: Vec::new(),
+                post_study_resolved: self.post_study_resolved.clone(),
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: Vec::new(),
+                anticipated_thermal_indices: Vec::new(),
+                anticipated_windows: Vec::new(),
+                anticipated_resolution: AnticipatedResolution::default(),
+                study_stage_ids: vec![0],
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0],
+                total_hours_per_stage: vec![744.0],
+                filling_v_target: BTreeMap::new(),
+            }
+        }
+
+        /// One declared post-horizon window, deciding at [`STAGE_IDX`] and
+        /// resolving to [`DEST_STAGE`], spanning `[min_c, max_c]`. No in-study
+        /// ring at all (`n_anticipated == 0`), isolating the lane.
+        fn make_state(min_c: f64, max_c: f64) -> StateSpace {
+            StateSpace::new_with_commitment_hold_windows(
+                0,
+                0,
+                0,
+                Vec::new(),
+                0,
+                0,
+                Vec::new(),
+                &[],
+                1,
+                vec![STAGE_IDX],
+                vec![THERMAL_ID],
+                vec![(min_c, max_c)],
+                vec![DEST_STAGE],
+            )
+        }
+
+        /// The inert sibling: zero declared windows, so `commit_out`/`commit_in`
+        /// collapse to width `0` and no decision column exists anywhere.
+        fn make_state_no_window() -> StateSpace {
+            StateSpace::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[])
+        }
+    }
+
+    /// Run [`fill_commitment_decision_columns`] against raw, default-filled
+    /// buffers (`0.0`/`INFINITY`/`0.0`, matching `fill_stage_columns`'s own
+    /// pre-fill) and return them by value.
+    fn run_fill(
+        ctx: &TemplateBuildCtx<'_>,
+        layout: &StageLayout<'_>,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_commitment_decision_columns(ctx, layout, &mut bufs);
+        (col_lower, col_upper, objective)
+    }
+
+    #[test]
+    fn decision_column_objective_equals_cost_times_hours_times_discount() {
+        let fixtures = CommitmentDecisionFixtures::new(10.0, 50.0);
+        let ctx = fixtures.make_ctx();
+        let state = CommitmentDecisionFixtures::make_state(20.0, 80.0);
+        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
+
+        let (_col_lower, _col_upper, objective) = run_fill(&ctx, &layout);
+        let col = layout.anticipated.col_commitment_decision_start;
+
+        let expected =
+            COST_PER_MWH * POST_STUDY_HOURS * (LAST_REAL_CUMULATIVE * LAST_REAL_PER_STAGE);
+        assert_eq!(
+            objective[col], expected,
+            "unscaled objective must equal C*H*D exactly (analytical derivation)"
+        );
+    }
+
+    #[test]
+    fn decision_column_bound_is_the_intersection_not_either_interval_alone() {
+        // Commitment [20, 80], capability [10, 50] -> intersection [20, 50].
+        let fixtures = CommitmentDecisionFixtures::new(10.0, 50.0);
+        let ctx = fixtures.make_ctx();
+        let state = CommitmentDecisionFixtures::make_state(20.0, 80.0);
+        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
+
+        let (col_lower, col_upper, _objective) = run_fill(&ctx, &layout);
+        let col = layout.anticipated.col_commitment_decision_start;
+
+        assert_eq!(col_lower[col], 20.0, "col_lower must be max(min_c, min_k)");
+        assert_eq!(col_upper[col], 50.0, "col_upper must be min(max_c, max_k)");
+        assert_ne!(col_lower[col], f64::NEG_INFINITY, "must not be left open");
+        assert_ne!(col_upper[col], f64::INFINITY, "must not be left open");
+    }
+
+    #[test]
+    fn pinned_commitment_within_capability_fixes_both_bounds_to_the_same_value() {
+        let pinned = 30.0;
+        let fixtures = CommitmentDecisionFixtures::new(10.0, 50.0);
+        let ctx = fixtures.make_ctx();
+        let state = CommitmentDecisionFixtures::make_state(pinned, pinned);
+        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
+
+        let (col_lower, col_upper, objective) = run_fill(&ctx, &layout);
+        let col = layout.anticipated.col_commitment_decision_start;
+
+        assert_eq!(col_lower[col], pinned);
+        assert_eq!(col_upper[col], pinned);
+        let expected_contribution =
+            pinned * COST_PER_MWH * POST_STUDY_HOURS * (LAST_REAL_CUMULATIVE * LAST_REAL_PER_STAGE);
+        let actual_contribution = pinned * objective[col];
+        assert_eq!(
+            actual_contribution, expected_contribution,
+            "a pinned decision's objective contribution must equal min_c*C*H*D"
+        );
+    }
+
+    /// Byte-identity: with zero declared post-horizon windows,
+    /// `fill_commitment_decision_columns` never runs its loop body, so every
+    /// buffer entry stays exactly at its `fill_stage_columns` pre-fill default
+    /// — never `(-inf, inf)` (the pre-ticket open-bound fill) and never any
+    /// nonzero objective.
+    #[test]
+    fn no_declared_window_leaves_every_buffer_entry_at_its_pre_fill_default() {
+        let fixtures = CommitmentDecisionFixtures::new(10.0, 50.0);
+        let ctx = fixtures.make_ctx();
+        let state = CommitmentDecisionFixtures::make_state_no_window();
+        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
+
+        assert_eq!(
+            layout.anticipated.commitment_decision_windows.len(),
+            0,
+            "fixture must declare zero commitment windows"
+        );
+
+        let (col_lower, col_upper, objective) = run_fill(&ctx, &layout);
+
+        for col in 0..layout.num_cols {
+            assert_eq!(
+                col_lower[col], 0.0,
+                "col_lower[{col}] must stay at its pre-fill default"
+            );
+            assert_eq!(
+                col_upper[col],
+                f64::INFINITY,
+                "col_upper[{col}] must stay at its pre-fill default"
+            );
+            assert_eq!(
+                objective[col], 0.0,
+                "objective[{col}] must stay at its pre-fill default"
+            );
+        }
     }
 }
 
@@ -4273,6 +4623,7 @@ mod block_family_slack_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: N_HYDROS,
                 n_thermals: 0,
                 n_lines: 0,
@@ -4722,6 +5073,7 @@ mod evaporation_slack_objective_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: 1,
                 n_thermals: 0,
                 n_lines: 0,
@@ -5042,6 +5394,7 @@ mod contract_column_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: 0,
                 n_thermals: 0,
                 n_lines: 0,
@@ -5386,6 +5739,7 @@ mod thermal_block_bound_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: 0,
                 n_thermals: self.thermals.len(),
                 n_lines: 0,
@@ -5948,6 +6302,7 @@ mod line_contract_pumping_block_bound_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: 0,
                 n_thermals: 0,
                 n_lines: self.lines.len(),
@@ -6693,6 +7048,7 @@ mod hydro_block_bound_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: self.hydros.len(),
                 n_thermals: 0,
                 n_lines: 0,
@@ -7804,6 +8160,7 @@ mod cell_column_bound_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: crate::setup::PostStudyResolved::default(),
                 n_hydros: self.hydros.len(),
                 n_thermals: 0,
                 n_lines: 0,

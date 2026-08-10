@@ -154,16 +154,10 @@ pub struct StateSpace {
 
     /// Per-window `(min_mw, max_mw)` commitment interval, length
     /// [`Self::n_commitment`], parallel to [`Self::commitment_decider_stage`].
-    // No reader yet — the fuel-cost consumer is a later addition.
-    // `#[allow(dead_code)]` refires once one lands.
-    #[allow(dead_code)]
     pub(crate) commitment_window_min_max: Vec<(f64, f64)>,
 
     /// Per-window resolved post-study destination stage index, length
     /// [`Self::n_commitment`], parallel to [`Self::commitment_decider_stage`].
-    // No reader yet — the delivery-date and fuel-cost consumers are a later
-    // addition. `#[allow(dead_code)]` refires once one lands.
-    #[allow(dead_code)]
     pub(crate) commitment_window_dest_stage: Vec<usize>,
 
     /// Canonical `(plant_canonical_idx, lag)` pair per bucket state-vector

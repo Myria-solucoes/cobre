@@ -33,6 +33,7 @@ use crate::lp_builder::{
     GenericConstraintRowEntry, ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx,
 };
 use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::PostStudyResolved;
 use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
 use crate::test_support;
 
@@ -6971,6 +6972,7 @@ fn two_sided_real_layout_allocates_minus_slack_column() {
         arc_spread_chrono: HashMap::new(),
         arc_arrival_density: HashMap::new(),
         per_stage_mask: Vec::new(),
+        post_study_resolved: PostStudyResolved::default(),
     };
 
     let state = test_support::state_layout(0, 0);

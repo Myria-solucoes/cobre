@@ -906,9 +906,11 @@ wiring only one side leaves either a dangling row on a frozen column or a free
 column with no defining constraint, both wrong-but-compiling. The trailing
 post-horizon lanes are NOT masked — `freeze_masked_columns` is retired for them
 (`fill_anticipated_slot_columns` keeps them open `(-inf, inf)` at EVERY stage,
-terminal included) so the boundary FCF can price them (pricing not yet wired; the
-keep-live only holds the columns structurally live). Freezing a post-horizon lane
-`[0, 0]` would zero a commitment the terminal boundary must carry.
+terminal included) so the boundary FCF prices the carried state (`β·x`) while the
+decision column books the delivery-anchored post-study fuel
+(`fill_commitment_decision_columns`, fuel-exclusive β so the two do not
+double-count). Freezing a post-horizon lane `[0, 0]` would zero a commitment the
+terminal boundary must carry.
 
 The policy manifest resolves a ring column back to `(slot, plant)` via
 `DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col`, never a

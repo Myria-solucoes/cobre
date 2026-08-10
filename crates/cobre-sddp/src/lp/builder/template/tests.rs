@@ -1713,6 +1713,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         arc_spread_chrono: ctx_a.arc_spread_chrono.clone(),
         arc_arrival_density: ctx_a.arc_arrival_density.clone(),
         per_stage_mask: ctx_a.per_stage_mask.clone(),
+        post_study_resolved: ctx_a.post_study_resolved.clone(),
     };
 
     assert_eq!(

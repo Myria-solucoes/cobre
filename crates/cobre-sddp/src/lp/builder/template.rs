@@ -13,6 +13,7 @@ use crate::hydro_models::{EvaporationModelSet, ProductionModelSet, ResolvedProdu
 use crate::inflow_method::InflowNonNegativityMethod;
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::resolve_post_study_artifacts;
 use crate::setup::template_postprocess::{
     compute_cumulative_discount_factors, compute_per_stage_discount_factors,
 };
@@ -240,6 +241,10 @@ pub struct StageGeometry {
     /// stage-level). Starts at `thermal.end`, which is `n_blks`-dependent, so the
     /// cost-breakdown `range_sum` needs the per-stage base.
     pub anticipated_decision: Range<usize>,
+    /// Post-horizon commitment-decision column range (one per declared window
+    /// whose decider stage is this stage — sparse, `0..0` at a stage no window
+    /// decides at).
+    pub commitment_decision: Range<usize>,
     /// Forward line-flow column range (one per line per block).
     pub line_fwd: Range<usize>,
     /// Reverse line-flow column range (one per line per block).
@@ -1000,6 +1005,13 @@ fn build_template_build_ctx<'a>(
         "total_hours_per_stage length must equal n_study_stages"
     );
 
+    let post_study_resolved = resolve_post_study_artifacts(
+        system.post_study_stages(),
+        system.policy_graph(),
+        cumulative_discount_factors.last().copied().unwrap_or(1.0),
+        per_stage_discount.last().copied().unwrap_or(1.0),
+    );
+
     // Study-stage ids by study stage index: the decision gate keys its
     // operation-window clause on the DELIVERY stage's `stage.id`, mapping the
     // delivery index `t + K_i` to its id through this slice.
@@ -1068,6 +1080,7 @@ fn build_template_build_ctx<'a>(
         arc_spread_chrono,
         arc_arrival_density,
         per_stage_mask,
+        post_study_resolved,
     };
 
     (ctx, load_bus_indices, diversion_upstream_output)

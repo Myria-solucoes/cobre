@@ -190,13 +190,6 @@ pub struct StudySetup {
     pub(crate) resolved_parameters: ResolvedParameters,
 
     /// Setup-side resolved post-study boundary artifacts
-    /// ([`System::post_study_stages`]); empty without them. Consumed by the LP
-    /// builder and `policy_export`.
-    // No post-construction reader exists yet — the LP builder / `policy_export`
-    // wiring is a later addition. `#[allow(dead_code)]` refires once one lands.
-    #[allow(dead_code)]
-    pub(crate) post_study_resolved: PostStudyResolved,
-
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     pub scenario_libraries: ScenarioLibraries,
 
@@ -482,21 +475,6 @@ impl StudySetup {
             &hydro_cell_index,
         )?;
 
-        let post_study_resolved = resolve_post_study_artifacts(
-            system.post_study_stages(),
-            system.policy_graph(),
-            stage_templates
-                .cumulative_discount_factors()
-                .last()
-                .copied()
-                .unwrap_or(1.0),
-            stage_templates
-                .discount_factors()
-                .last()
-                .copied()
-                .unwrap_or(1.0),
-        );
-
         let study_dims = build_study_dimensions(
             system,
             &stage_templates,
@@ -709,7 +687,6 @@ impl StudySetup {
             anticipated_windows,
             study_stage_ids,
             resolved_parameters,
-            post_study_resolved,
             scenario_libraries,
             node_graph,
             loop_params: LoopParams {
@@ -1260,9 +1237,6 @@ impl PostStudyThermalLookup {
 
     /// `(cost_per_mwh, min_mw, max_mw)` declared for `(thermal_id,
     /// post_study_stage_index)`; `None` when undeclared.
-    // No caller outside tests yet — the LP builder / `policy_export` wiring is
-    // a later addition. `#[allow(dead_code)]` refires once one lands.
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn lookup(
         &self,
@@ -1309,14 +1283,18 @@ pub(crate) struct PostStudyResolved {
 /// [`PostStudyResolved::default`] — inert.
 ///
 /// `last_real_cumulative` and `last_real_per_stage` are the study's own last
-/// [`crate::StageTemplates::cumulative_discount_factors`] and
-/// [`crate::StageTemplates::discount_factors`] entries. The first post-study
-/// cumulative factor bridges the horizon by the LAST STUDY stage's own one-step
-/// factor (`last_real_cumulative * last_real_per_stage`), NEVER the first
-/// post-study stage's (`* per_stage_post[0]`): the continuation must equal what
+/// cumulative and per-stage discount factors — [`crate::StageTemplates::
+/// cumulative_discount_factors`]/[`crate::StageTemplates::discount_factors`]'s
+/// last entries, or (`crate::lp_builder::build_stage_templates`'s own
+/// `TemplateBuildCtx` build) the identical values computed from the same
+/// `compute_per_stage_discount_factors`/`compute_cumulative_discount_factors`
+/// pair before those output slices exist. The first post-study cumulative
+/// factor bridges the horizon by the LAST STUDY stage's own one-step factor
+/// (`last_real_cumulative * last_real_per_stage`), NEVER the first post-study
+/// stage's (`* per_stage_post[0]`): the continuation must equal what
 /// `cumulative_discount_factors` would hold had the horizon been extended to
 /// cover the post-study stages.
-fn resolve_post_study_artifacts(
+pub(crate) fn resolve_post_study_artifacts(
     post_study: Option<&PostStudyStages>,
     pg: &HorizonGraph,
     last_real_cumulative: f64,

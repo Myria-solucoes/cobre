@@ -57,6 +57,7 @@ use crate::policy::policy_load::{
     FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
 };
 use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::PostStudyResolved;
 use crate::setup::node_graph::{
     NodeGraph, NodeId, NodePos, OpeningSource, StageIdx, build_node_graph,
     enumerated_node_visit_counts, enumerated_scenario_count,
@@ -534,6 +535,7 @@ pub fn geometry(
         arc_spread_chrono: HashMap::new(),
         arc_arrival_density: HashMap::new(),
         per_stage_mask: Vec::new(),
+        post_study_resolved: PostStudyResolved::default(),
     };
 
     let state = state_layout_full(

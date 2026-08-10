@@ -2254,6 +2254,7 @@ mod zero_cost_tests {
     use crate::indexer::{BlockIdx, HydroCellIndex, ThermalSys};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
     use crate::resolved_parameters::ResolvedParameters;
+    use crate::setup::PostStudyResolved;
 
     use super::super::columns::{ColumnBufs, fill_stage_columns, fill_thermal_columns};
     use super::super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
@@ -2407,6 +2408,7 @@ mod zero_cost_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: PostStudyResolved::default(),
                 n_hydros: 0,
                 n_thermals,
                 n_lines: 0,
@@ -3199,6 +3201,7 @@ mod pumping_water_tests {
     };
     use crate::lead_time::{AnticipatedResolution, SpreadResolution, resolve_spread};
     use crate::resolved_parameters::ResolvedParameters;
+    use crate::setup::PostStudyResolved;
     use crate::test_support::make_unit_group;
 
     use super::super::M3S_TO_HM3;
@@ -3855,6 +3858,7 @@ mod pumping_water_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: PostStudyResolved::default(),
                 n_hydros: self.hydros.len(),
                 n_thermals: self.thermals.len(),
                 n_lines: self.lines.len(),

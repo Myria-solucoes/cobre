@@ -21,6 +21,7 @@ use crate::indexer::{
     is_anticipated_decision_active_for_delivery,
 };
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
+use crate::setup::PostStudyResolved;
 
 use super::template::StageGeometry;
 use super::{
@@ -176,6 +177,14 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// Gates which bucket-definition rows [`StageLayout::new`] emits; see
     /// [`crate::setup::bucket_topology::TransitBucketTopology::per_stage_mask`].
     pub(crate) per_stage_mask: Vec<Vec<usize>>,
+    /// Resolved post-study boundary artifacts
+    /// ([`crate::setup::resolve_post_study_artifacts`]) — the fuel cost/bounds
+    /// and discount continuation [`super::columns::fill_commitment_decision_columns`]
+    /// books onto each post-horizon decision column. The sole owner, computed once
+    /// per template build from this function's `system` parameter (see
+    /// [`super::template::build_template_build_ctx`]); `PostStudyResolved::default()`
+    /// (empty) without a declared post-horizon commitment.
+    pub(crate) post_study_resolved: PostStudyResolved,
 }
 
 /// Column/row offsets for one stage's unified commitment-hold layout: the
@@ -1790,6 +1799,22 @@ impl<'a> StageLayout<'a> {
         }
     }
 
+    /// Post-horizon commitment-decision column range: one column per window
+    /// deciding this stage, `col_commitment_decision_start .. + len`. `0..0`
+    /// (never `start..start`, same convention as [`Self::anticipated_decision`])
+    /// when no window decides this stage.
+    #[inline]
+    #[must_use]
+    pub(crate) fn commitment_decision(&self) -> Range<usize> {
+        let n = self.anticipated.commitment_decision_windows.len();
+        if n > 0 {
+            let s = self.anticipated.col_commitment_decision_start;
+            s..s + n
+        } else {
+            0..0
+        }
+    }
+
     /// Owned per-stage equipment-geometry snapshot: every field is a clone or
     /// range accessor of `self`, so `StageLayout` alone owns each family's
     /// start/end arithmetic. Must stay OWNED — the result is cloned into
@@ -1804,6 +1829,7 @@ impl<'a> StageLayout<'a> {
             diversion: self.equipment.diversion.clone(),
             thermal: self.equipment.thermal.clone(),
             anticipated_decision: self.anticipated_decision(),
+            commitment_decision: self.commitment_decision(),
             line_fwd: self.equipment.line_fwd.clone(),
             line_rev: self.equipment.line_rev.clone(),
             deficit: self.equipment.deficit.clone(),

@@ -1085,6 +1085,7 @@ fn build_geometry(
         diversion: diversion_start..thermal_start,
         thermal: thermal_start..thermal_end,
         anticipated_decision: 0..0,
+        commitment_decision: 0..0,
         line_fwd: line_fwd_start..line_rev_start,
         line_rev: line_rev_start..deficit_start,
         deficit: deficit_start..excess_start,

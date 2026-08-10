@@ -1,21 +1,27 @@
-//! Terminal FCF pricing of the commitment block (ticket-006): the block's
-//! state columns join the cut-state projection so a loaded boundary cut's
-//! coefficient `β` reaches the terminal `θ` — `θ` responds to the committed
-//! MW pinned on the block's incoming column, and the shared boundary prices
-//! every terminal fan node against its OWN block state from the ONE shared
-//! `β` (ticket-004's shared-fan injection topology).
+//! Terminal boundary-FCF pricing of the post-horizon carry lanes on the
+//! unified hold geometry: a loaded boundary cut carrying coefficient `β` on a
+//! post-horizon `commit_out`/`commit_in` lane reaches the terminal `θ`, which
+//! responds to the carried committed MW by `β·x`, and the backward pass
+//! propagates that `β` inward to the deciding stage's cut. The one shared
+//! boundary prices every terminal fan leaf against its OWN lane state
+//! (ticket-004's shared-fan injection topology, extended to the lanes). `β`
+//! values the carried STATE; the delivery-anchored fuel is booked separately on
+//! the decision column — the two are disjoint columns, so they compose without
+//! double-counting.
 //!
-//! The fixture is deliberately minimal: zero hydros, one anticipated thermal
-//! declared `LeadTime` with a physical lead shorter than either stage's
-//! duration (so its OWN in-horizon delivery schedule is `K = 0`
-//! self-delivered — no regular ring, `k_max == 0`) plus one
-//! `future_anticipated_deliveries` window whose decider resolves to stage 0
-//! (non-terminal — the terminal's own commitment-block row is therefore a
-//! CARRY, `out = in`, so pinning the incoming column via
-//! `patch_backward_opening_for_probe` controls the terminal's committed MW
-//! directly). With `hydro_count = 0`, `n_buckets = 0`, and `k_max = 0`, the
-//! block is the STUDY's entire state vector (`n_state == 1`), isolating the
-//! pricing arithmetic from every other state family.
+//! The fixture is deliberately minimal: zero hydros, one bus, one anticipated
+//! thermal declared `LeadTime`, two study stages, and one
+//! `future_anticipated_deliveries` window resolving into one declared
+//! `post_study_stages` stage. The lead is long enough that the thermal's own
+//! stage-1 self-delivery keeps `k_max == 1` (the in-study ring sizes
+//! non-degenerately, avoiding the untested `k_max == 0` path) yet the
+//! post-horizon window's decider lands at stage 0 (`DeciderKind::Trunk`, NOT
+//! the terminal) — so the terminal's own lane row is a pure CARRY (`out = in`),
+//! and pinning the incoming lane column via `patch_backward_opening_for_probe`
+//! controls the terminal's priced committed MW directly. With `hydro_count = 0`
+//! and `max_par_order = 0`, the state vector is exactly `[in-study ring slot,
+//! post-horizon lane]` (`n_state == 2`), so a boundary priced ONLY on the lane
+//! slot isolates the pricing arithmetic to the lane.
 
 #![allow(
     clippy::unwrap_used,
@@ -34,22 +40,26 @@ use std::path::Path;
 
 use chrono::NaiveDate;
 use cobre_core::entities::thermal::AnticipatedConfig;
-use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, Transition};
+use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, StageStateConfig, Transition};
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, FutureAnticipatedDelivery,
     HorizonGraph, HydroBlockBounds, HydroStageBounds, InitialConditions, LineBlockBounds,
-    PumpingBlockBounds, ResolvedBounds, System, SystemBuilder, ThermalBlockBounds,
-    ThermalStageBounds,
+    PostStudyStage, PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds,
+    System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_io::{
     FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord,
     ProducerBlock, StageCutsPayload, write_policy_checkpoint,
 };
-use cobre_sddp::setup::{NodeId, NodePos, StageIdx};
+use cobre_sddp::indexer::{CutStateProjection, StateDim};
+use cobre_sddp::setup::{NodeGraph, NodeId, NodePos, StageIdx};
 use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
 use cobre_sddp::workspace::SolverWorkspace;
 use cobre_sddp::{inject_boundary_cuts, load_boundary_cuts};
-use cobre_solver::{ActiveSolver, SolverInterface};
+use cobre_solver::{
+    ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
+    freeze_rows_into_template,
+};
 
 mod common;
 use common::StubComm;
@@ -58,53 +68,99 @@ use common::builders::{BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, ma
 
 const BUS_ID: EntityId = EntityId(1);
 const THERMAL_ID: EntityId = EntityId(2);
-/// Delta well under either stage's 720h duration: every WITHIN-horizon
-/// delivery is `K = 0` self-delivered (`c(m) = m`), so the regular ring never
-/// activates (`k_max == 0`) — isolating the terminal commitment block as the
-/// study's only state dimension.
-const DELTA_HOURS: f64 = 10.0;
-/// `EntityType::AnticipatedThermalState` discriminant (`schemas/policy.fbs`):
-/// the commitment block reuses this type (ratified, no new discriminant).
-const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
+/// `LeadTime` delta (hours), ~60 days. Resolves the thermal's own stage-1
+/// self-delivery to a stage-0 decider (`k_max == 1`), while the post-horizon
+/// window (delivering in the first post-study month) resolves to a stage-0
+/// `DeciderKind::Trunk` decider — the terminal is a carry, not the latch.
+const DELTA_HOURS: f64 = 1450.0;
+/// Boundary cut intercept `α`, positive so the single injected cut binds `θ`
+/// above its zero floor for every committed MW `x >= 0`.
+const ALPHA: f64 = 5.0;
+/// Boundary cut coefficient `β` on the post-horizon lane slot (zero on the
+/// in-study ring slot), so `θ = α + β·x` isolates the lane.
+const BETA: f64 = 3.0;
+/// Post-study fuel `$/MWh` at the resolved cell — booked on the decision column
+/// (ticket-009), disjoint from the terminal `β·state` valuation this file pins.
+const COST_PER_MWH: f64 = 37.5;
+/// Post-study stage duration \[h\]; the study carries a `0.0` discount rate.
+const POST_STUDY_HOURS: f64 = 720.0;
+const TOL: f64 = 1e-6;
 
 fn study_start() -> NaiveDate {
     NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date")
 }
 
-/// Two 720h stages (id 0 non-terminal, id 1 terminal).
-fn stages() -> Vec<cobre_core::temporal::Stage> {
-    let start = study_start();
-    (0..2)
-        .map(|i| {
-            let s = start + chrono::TimeDelta::days(30 * i as i64);
-            make_stage(
-                i,
-                StageSpec {
-                    start_date: s,
-                    end_date: s + chrono::TimeDelta::days(30),
-                    blocks: vec![cobre_core::temporal::Block {
-                        index: 0,
-                        name: "S".to_string(),
-                        duration_hours: 720.0,
-                    }],
-                    ..Default::default()
-                },
-            )
-        })
-        .collect()
+/// Study end date (`stage 1` end) — the first `post_study_stages` stage and the
+/// post-horizon delivery window both anchor here, making the segment
+/// date-contiguous with the horizon (ticket-034a's first-start == study-end
+/// rule).
+fn study_end() -> NaiveDate {
+    study_start() + chrono::TimeDelta::days(61)
 }
 
-/// One declared post-horizon window, decider resolved to stage 0 (Trunk, not
-/// terminal): `delivery_end = start + 3 days` (72h), `target = 72 -
-/// DELTA_HOURS = 62`, inside `(boundaries[0]=0, boundaries[1]=720)`.
-fn future_delivery() -> FutureAnticipatedDelivery {
+/// Two stages matching their real calendar span exactly (`StageCalendar`
+/// coverage): stage 0 January (744h), stage 1 the following 30 days (720h).
+fn stages() -> Vec<cobre_core::temporal::Stage> {
     let start = study_start();
+    let stage0_end = start + chrono::TimeDelta::days(31);
+    vec![
+        make_stage(
+            0,
+            StageSpec {
+                start_date: start,
+                end_date: stage0_end,
+                blocks: vec![cobre_core::temporal::Block {
+                    index: 0,
+                    name: "S0".to_string(),
+                    duration_hours: 744.0,
+                }],
+                ..Default::default()
+            },
+        ),
+        make_stage(
+            1,
+            StageSpec {
+                start_date: stage0_end,
+                end_date: study_end(),
+                blocks: vec![cobre_core::temporal::Block {
+                    index: 0,
+                    name: "S1".to_string(),
+                    duration_hours: 720.0,
+                }],
+                ..Default::default()
+            },
+        ),
+    ]
+}
+
+/// The one declared post-horizon window: the 30-day month beginning at the
+/// study end, resolving (via [`DELTA_HOURS`]) to a stage-0 decider and (via the
+/// post-study calendar below) to post-study destination stage 0.
+fn future_delivery() -> FutureAnticipatedDelivery {
     FutureAnticipatedDelivery {
         thermal_id: THERMAL_ID,
-        delivery_start: start + chrono::TimeDelta::days(2),
-        delivery_end: start + chrono::TimeDelta::days(3),
+        delivery_start: study_end(),
+        delivery_end: study_end() + chrono::TimeDelta::days(30),
         min_mw: 0.0,
         max_mw: 100.0,
+    }
+}
+
+/// The one declared post-study stage: the EXACT span [`future_delivery`]
+/// targets, so `StageCalendar::resolve_window` covers it at destination index 0.
+fn post_study_stages() -> PostStudyStages {
+    PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: study_end(),
+            duration_hours: POST_STUDY_HOURS,
+        }],
+        thermal_bounds: vec![PostStudyThermalBound {
+            thermal_id: THERMAL_ID,
+            post_study_stage_index: 0,
+            cost_per_mwh: COST_PER_MWH,
+            min_mw: 0.0,
+            max_mw: 100.0,
+        }],
     }
 }
 
@@ -117,7 +173,7 @@ fn bounds() -> ResolvedBounds {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 2,
-            k_max: 0,
+            k_max: 1,
         },
         &BoundsDefaults {
             hydro: HydroStageBounds {
@@ -190,9 +246,9 @@ fn penalties() -> cobre_core::resolved::ResolvedPenalties {
     )
 }
 
-/// Two-leaf terminal fan: root (id 0, stage 0) branches into leaves (ids 1
-/// and 2, stage 1) — both terminal, sharing ONE pool
-/// (`build_node_graph`'s leaf-sharing rule, confirmed by ticket-004).
+/// Two-leaf terminal fan: root (id 0, stage 0) branches into leaves (ids 1 and
+/// 2, stage 1) — both terminal, sharing ONE pool (`build_node_graph`'s
+/// leaf-sharing rule, confirmed by ticket-004).
 fn two_leaf_fan_graph() -> HorizonGraph {
     HorizonGraph {
         graph_type: PolicyGraphType::FiniteHorizon,
@@ -236,8 +292,9 @@ fn two_leaf_fan_graph() -> HorizonGraph {
     }
 }
 
-/// `with_window` toggles the single post-horizon commitment window;
-/// `fanned` toggles the two-leaf terminal fan (chain otherwise).
+/// `with_window` toggles the single post-horizon commitment window plus its
+/// covering `post_study_stages`; `fanned` toggles the two-leaf terminal fan
+/// (chain otherwise).
 fn build_system(with_window: bool, fanned: bool) -> System {
     let bus = make_bus(BUS_ID, BusSpec::default());
     let thermal = make_thermal(
@@ -267,6 +324,9 @@ fn build_system(with_window: bool, fanned: bool) -> System {
         .bounds(bounds())
         .penalties(penalties())
         .initial_conditions(initial_conditions);
+    if with_window {
+        builder = builder.post_study_stages(Some(post_study_stages()));
+    }
     if fanned {
         builder = builder.policy_graph(two_leaf_fan_graph());
     }
@@ -287,6 +347,8 @@ fn config() -> cobre_io::config::Config {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: InflowNonNegativityMethod::Penalty,
             },
+            // Unscaled: the priced `θ` and the propagated cut coefficient
+            // compare directly against `α`/`β` with no COST_SCALE_FACTOR back-out.
             cost_scale_factor: Some(1.0),
         },
         training: TrainingConfig {
@@ -308,22 +370,31 @@ fn config() -> cobre_io::config::Config {
     }
 }
 
-/// Write a synthetic single-cut boundary checkpoint carrying coefficient
-/// `beta` on the block's (sole) state dimension and intercept `alpha`. No
-/// entity manifest (`&[]`): the loader's identity check short-circuits with
-/// a warning rather than an error (the established probe pattern —
-/// `shared_boundary_terminal_fan_probe.rs`), so this test controls only the
-/// dimension the ticket-006 wiring is about, not entity-identity matching
-/// (covered separately by the `policy_export` slot-identity unit tests).
-fn write_synthetic_boundary(dir: &Path, state_dimension: u32, alpha: f64, beta: f64) {
-    let coefficients = vec![beta; state_dimension as usize];
+/// State-vector index of the (sole) post-horizon lane: the trailing
+/// `n_commitment` block of `commit_out`, after the leading in-study ring.
+fn lane_state_index(setup: &cobre_sddp::StudySetup) -> usize {
+    let state = setup.stage_state();
+    state.commit_out.end - state.n_commitment
+}
+
+/// Write a synthetic single-cut boundary checkpoint carrying `intercept` and
+/// the explicit per-slot `coefficients`. No entity manifest (`&[]`): the
+/// loader's identity check short-circuits with a warning (the established probe
+/// pattern — `shared_boundary_terminal_fan_probe.rs`), so this test controls
+/// only the state dimension, not entity-identity matching.
+fn write_synthetic_boundary(
+    dir: &Path,
+    state_dimension: u32,
+    intercept: f64,
+    coefficients: &[f64],
+) {
     let cuts = vec![PolicyCutRecord {
         cut_id: 0,
         slot_index: 0,
         iteration: 0,
         forward_pass_index: 0,
-        intercept: alpha,
-        coefficients: &coefficients,
+        intercept,
+        coefficients,
         is_active: true,
     }];
     let payload = StageCutsPayload {
@@ -368,36 +439,43 @@ fn write_synthetic_boundary(dir: &Path, state_dimension: u32, alpha: f64, beta: 
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }
 
-/// Solve the terminal stage's LP with the block's (sole) state dimension
-/// pinned to `x`, against `pool`, and return `theta`'s primal value.
-/// `raw_noise = &[]`: `hydro_count == 0` so the noise transform has no
-/// dimension to iterate.
-/// Build the terminal pool's FROZEN LP template: the base structural
-/// template plus one literal row per active cut in `pool`, exactly as
-/// production freezes a pool once per iteration
-/// (`training/session/iteration_scratch.rs`, `freeze_rows_into_template`).
-/// `solve_stage_for_probe`'s `pool` argument only drives BASIS
-/// reconstruction on a stored warm start — it never appends cut rows to a
-/// cold solve, so pricing an injected cut requires freezing it into the
-/// loaded model first.
-fn freeze_terminal_template(
-    setup: &cobre_sddp::StudySetup,
-    pool_id: usize,
-) -> cobre_solver::StageTemplate {
+/// Load a lane-only boundary (`β` on [`lane_state_index`], zero elsewhere,
+/// intercept `α`) and inject it into `setup`'s terminal pool.
+fn inject_lane_boundary(setup: &mut cobre_sddp::StudySetup, dir: &Path) {
+    let state_dimension = setup.fcf.state_dimension as u32;
+    let lane = lane_state_index(setup);
+    let mut coefficients = vec![0.0_f64; state_dimension as usize];
+    coefficients[lane] = BETA;
+    write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
+
+    let boundary_cuts = load_boundary_cuts(dir, 0, state_dimension, &[], None, 1.0, &mut |_msg| {})
+        .expect("boundary cut must load");
+    inject_boundary_cuts(setup, &boundary_cuts);
+}
+
+/// Build the terminal pool's FROZEN LP template: the base structural template
+/// plus one literal row per active cut in the pool, exactly as production
+/// freezes a pool once per iteration (`freeze_rows_into_template`).
+/// `solve_stage_for_probe`'s `pool` argument only drives basis reconstruction
+/// on a stored warm start — it never appends cut rows to a cold solve, so
+/// pricing an injected cut requires freezing it into the loaded model first.
+fn freeze_terminal_template(setup: &cobre_sddp::StudySetup, pool_id: usize) -> StageTemplate {
     let state = setup.stage_state();
     let terminal_stage = setup.num_stages() - 1;
     let ctx = setup.stage_ctx();
     let base = &ctx.templates[terminal_stage];
 
-    let cut_state = cobre_sddp::indexer::CutStateProjection::new(
+    // The terminal pool projects the full global state, so the all-enabled
+    // projection reproduces exactly the coefficients the boundary cut carries.
+    let cut_state = CutStateProjection::new(
         state,
-        cobre_core::temporal::StageStateConfig {
+        StageStateConfig {
             storage: true,
             inflow_lags: true,
         },
     );
 
-    let mut batch = cobre_solver::RowBatch {
+    let mut batch = RowBatch {
         num_rows: 0,
         row_starts: Vec::new(),
         col_indices: Vec::new(),
@@ -414,21 +492,22 @@ fn freeze_terminal_template(
         &base.col_scale,
     );
 
-    let mut frozen = cobre_solver::StageTemplate::empty();
-    let mut scratch = cobre_solver::FreezeScratch::new();
-    cobre_solver::freeze_rows_into_template(base, &batch, &mut frozen, &mut scratch);
+    let mut frozen = StageTemplate::empty();
+    let mut scratch = FreezeScratch::new();
+    freeze_rows_into_template(base, &batch, &mut frozen, &mut scratch);
     frozen
 }
 
-/// Patch the terminal stage's block dimension to `x` and solve the FROZEN
-/// `template` (see [`freeze_terminal_template`]), returning theta's primal
-/// value.
+/// Solve the terminal stage's frozen `template` against `pool` with the state
+/// vector pinned to `pinned_state` (length `n_state`), returning `θ`'s primal
+/// value. `raw_noise = &[]`: `hydro_count == 0`, so the noise transform has no
+/// dimension to iterate.
 fn terminal_theta(
     setup: &cobre_sddp::StudySetup,
-    template: &cobre_solver::StageTemplate,
+    template: &StageTemplate,
     pool: &cobre_sddp::CutPool,
     node_id: NodeId,
-    x: f64,
+    pinned_state: &[f64],
 ) -> f64 {
     let comm = StubComm;
     let mut workspace_pool = setup
@@ -437,21 +516,37 @@ fn terminal_theta(
     let ws: &mut SolverWorkspace<ActiveSolver> = &mut workspace_pool.workspaces[0];
     let ctx = setup.stage_ctx();
     let training_ctx = setup.training_ctx();
-    let state = setup.stage_state();
+    let theta_col = setup.stage_state().theta;
     let terminal_stage = setup.num_stages() - 1;
 
     ws.solver.reset_solver_state();
     ws.solver.load_model(template);
-    patch_backward_opening_for_probe(ws, &ctx, &training_ctx, StageIdx(terminal_stage), &[x], &[])
-        .expect("StageSolvePrep::run must not error on the minimal fixture");
+    patch_backward_opening_for_probe(
+        ws,
+        &ctx,
+        &training_ctx,
+        StageIdx(terminal_stage),
+        pinned_state,
+        &[],
+    )
+    .expect("StageSolvePrep::run must not error on the minimal fixture");
 
     let view = solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)
         .expect("terminal stage solve must not error");
-    view.primal[state.theta]
+    view.primal[theta_col]
+}
+
+/// Pin the state vector with `x` on the post-horizon lane and `0.0` on every
+/// other component (the in-study ring slot carries a zero boundary coefficient,
+/// so its pinned value never reaches `θ`).
+fn lane_pin(setup: &cobre_sddp::StudySetup, x: f64) -> Vec<f64> {
+    let mut pin = vec![0.0_f64; setup.stage_state().n_state];
+    pin[lane_state_index(setup)] = x;
+    pin
 }
 
 /// Every leaf `NodePos` in `graph` — a node with no successors.
-fn leaf_positions(graph: &cobre_sddp::setup::NodeGraph) -> Vec<NodePos> {
+fn leaf_positions(graph: &NodeGraph) -> Vec<NodePos> {
     graph
         .nodes
         .iter_indexed()
@@ -460,85 +555,32 @@ fn leaf_positions(graph: &cobre_sddp::setup::NodeGraph) -> Vec<NodePos> {
         .collect()
 }
 
-// -- AC1: the block joins the projection and widens fcf.state_dimension --
+// ── AC1: θ prices the carried committed MW by β·x, and β propagates inward ──
 
-#[test]
-fn commitment_block_widens_the_terminal_projection_and_fcf_dimension() {
-    let cfg = config();
-    let setup_without = build_setup_in_code(build_system(false, false), &cfg);
-    let setup_with = build_setup_in_code(build_system(true, false), &cfg);
-    let system_without = build_system(false, false);
-    let system_with = build_system(true, false);
-
-    assert_eq!(
-        setup_with.fcf.state_dimension,
-        setup_without.fcf.state_dimension + 1,
-        "a declared commitment window must widen fcf.state_dimension by exactly \
-         the block's width (1)"
-    );
-
-    let manifest_without = setup_without.build_terminal_entity_manifest(&system_without);
-    let manifest_with = setup_with.build_terminal_entity_manifest(&system_with);
-    assert_eq!(
-        manifest_with.len(),
-        manifest_without.len() + 1,
-        "the terminal manifest must grow by exactly one slot"
-    );
-    let block_slot = manifest_with.last().expect("manifest must be non-empty");
-    assert_eq!(
-        block_slot.entity_type, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
-        "the commitment-block slot reuses the anticipated-thermal-state type"
-    );
-    assert_eq!(block_slot.entity_id, THERMAL_ID.0);
-}
-
-// -- AC2: theta responds to beta*x, K-normalized (read back, relative tolerance) --
-
+/// The terminal value responds to the outstanding committed MW on the lane by
+/// exactly `β·Δx`: with the single injected cut binding (`α > 0`), `θ = α + β·x`
+/// on the lane, so `θ(x1) − θ(x0) = β·(x1 − x0)` — closed-form for the
+/// single-lane single-coefficient case. Repeating the solve at the same pin
+/// reproduces `θ` bit-for-bit (run-to-run reproducibility).
 #[test]
 fn boundary_cut_prices_the_committed_mw_by_beta_times_x() {
-    let cfg = config();
-    let system = build_system(true, false);
-    let mut setup = build_setup_in_code(system, &cfg);
-
-    let state_dimension = setup.fcf.state_dimension as u32;
+    let mut setup = build_setup_in_code(build_system(true, false), &config());
     assert_eq!(
-        state_dimension, 1,
-        "fixture must isolate the block as n_state"
+        setup.fcf.state_dimension, 2,
+        "fixture must be [in-study ring slot, post-horizon lane]"
     );
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let source_dir = tmp.path().join("boundary_source");
-    let alpha = 5.0;
-    let beta_written = 3.0;
-    write_synthetic_boundary(&source_dir, state_dimension, alpha, beta_written);
-
-    let mut warnings: Vec<String> = Vec::new();
-    let boundary_cuts = load_boundary_cuts(
-        &source_dir,
-        0,
-        state_dimension,
-        &[],
-        None,
-        1.0,
-        &mut |msg| warnings.push(msg.to_string()),
-    )
-    .expect("boundary cut must load");
-    inject_boundary_cuts(&mut setup, &boundary_cuts);
+    inject_lane_boundary(&mut setup, &tmp.path().join("boundary"));
 
     let terminal_pool_id = setup.fcf.pools.len() - 1;
-    let pool = &setup.fcf.pools[terminal_pool_id];
-    let (_, _, beta_internal) = pool
-        .active_cuts()
-        .next()
-        .expect("exactly one active cut after injection");
-    let beta_internal = beta_internal[0];
-
     let template = freeze_terminal_template(&setup, terminal_pool_id);
-    let node_id = NodeId(1);
+    let pool = &setup.fcf.pools[terminal_pool_id];
+
     let x0 = 0.0;
     let x1 = 2.0;
-    let theta0 = terminal_theta(&setup, &template, pool, node_id, x0);
-    let theta1 = terminal_theta(&setup, &template, pool, node_id, x1);
+    let theta0 = terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, x0));
+    let theta1 = terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, x1));
 
     assert!(
         theta0 > 0.0 && theta1 > 0.0,
@@ -546,54 +588,143 @@ fn boundary_cut_prices_the_committed_mw_by_beta_times_x() {
          theta1={theta1})"
     );
 
-    let expected_delta = beta_internal * (x1 - x0);
+    let expected_delta = BETA * (x1 - x0);
     let actual_delta = theta1 - theta0;
-    let rel_err = (actual_delta - expected_delta).abs() / expected_delta.abs().max(1.0);
     assert!(
-        rel_err < 1e-6,
-        "theta must respond to the committed MW by beta*x (K-normalized): expected delta \
-         {expected_delta}, got {actual_delta} (beta_internal={beta_internal}, rel_err={rel_err})"
+        (actual_delta - expected_delta).abs() < TOL,
+        "theta must respond to the committed MW by beta*x: expected delta {expected_delta}, \
+         got {actual_delta}"
     );
-}
+    // The closed form is exact: theta = alpha + beta*x on the lane.
+    assert!(
+        (theta0 - ALPHA).abs() < TOL && (theta1 - (ALPHA + BETA * x1)).abs() < TOL,
+        "theta must equal alpha + beta*x: theta0={theta0} (alpha={ALPHA}), \
+         theta1={theta1} (alpha+beta*x1={})",
+        ALPHA + BETA * x1
+    );
 
-// -- AC3: no boundary loaded => theta = 0 on the block dimension, columns still present --
-
-#[test]
-fn no_boundary_leaves_theta_zero_but_block_columns_present() {
-    let cfg = config();
-    let system = build_system(true, false);
-    let setup = build_setup_in_code(system, &cfg);
-
+    let theta1_again = terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, x1));
     assert_eq!(
-        setup.fcf.state_dimension, 1,
-        "the block column must still be present in the state dimension"
-    );
-
-    let terminal_pool_id = setup.fcf.pools.len() - 1;
-    let pool = &setup.fcf.pools[terminal_pool_id];
-    assert_eq!(pool.populated(), 0, "no boundary cut must be loaded");
-
-    let template = freeze_terminal_template(&setup, terminal_pool_id);
-    let theta = terminal_theta(&setup, &template, pool, NodeId(1), 2.0);
-    assert!(
-        theta.abs() < 1e-9,
-        "with no boundary cut, theta must be 0 regardless of the committed MW: got {theta}"
+        theta1.to_bits(),
+        theta1_again.to_bits(),
+        "the priced terminal value must reproduce bit-for-bit across a repeated solve"
     );
 }
 
-// -- AC4: fanned terminal, one shared beta, two nodes reflect their own beta*x --
-
+/// The backward pass propagates the boundary coefficient inward: with the
+/// lane-only boundary injected into the terminal pool, one training iteration
+/// leaves the deciding stage's generated cut carrying a nonzero coefficient on
+/// the post-horizon lane slot. Because the terminal row is a pure carry
+/// (`out = in`) with unit `col_scale` and unit `cost_scale`, the propagated
+/// coefficient is exactly `β` (analytical).
 #[test]
-fn shared_boundary_prices_each_fanned_node_by_its_own_committed_mw() {
-    let cfg = config();
-    let system = build_system(true, true);
-    let mut setup = build_setup_in_code(system, &cfg);
+fn backward_pass_propagates_boundary_coefficient_to_the_deciding_stage() {
+    let mut setup = build_setup_in_code(build_system(true, false), &config());
+    // The window decides at stage 0 (Trunk); pool 0 is the FCF the deciding
+    // stage carries, populated by the backward pass solving the terminal.
+    let deciding_pool = 0;
+    assert_eq!(
+        setup.stage_ctx().geometry_per_stage[deciding_pool]
+            .commitment_decision
+            .len(),
+        1,
+        "the post-horizon window must decide at stage 0"
+    );
+    let lane = lane_state_index(&setup);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    inject_lane_boundary(&mut setup, &tmp.path().join("boundary"));
+
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("train must not return Err");
+    assert!(
+        outcome.error.is_none(),
+        "training error must be None; got {:?}",
+        outcome.error
+    );
+
+    let (_slot, _intercept, coefficients) = setup
+        .fcf
+        .active_cuts(deciding_pool)
+        .next()
+        .expect("the deciding stage's pool must carry a generated cut after training");
+    let lane_coeff = coefficients[lane];
+    assert!(
+        lane_coeff.abs() > TOL,
+        "the deciding stage's cut must carry a nonzero coefficient on the post-horizon lane; \
+         got {lane_coeff}"
+    );
+    assert!(
+        (lane_coeff - BETA).abs() < TOL,
+        "the carried terminal boundary must propagate the coefficient unchanged (out = in, \
+         unit scale): expected {BETA}, got {lane_coeff}"
+    );
+}
+
+// ── Fuel-exclusive composition: β prices the state, 009 books fuel — disjoint ──
+
+/// The terminal `β·state` valuation and ticket-009's delivery-anchored fuel
+/// booking live on DIFFERENT LP columns, so they compose additively with no
+/// double-count: at the deciding stage the decision column carries the fuel in
+/// its objective while the lane's `commit_out` column carries no objective at
+/// all (β reaches it through the boundary cut ROW, never the objective).
+#[test]
+fn terminal_valuation_and_decision_fuel_are_disjoint_columns() {
+    let setup = build_setup_in_code(build_system(true, false), &config());
+    let deciding_stage = 0;
+
+    let decision_range = setup.stage_ctx().geometry_per_stage[deciding_stage]
+        .commitment_decision
+        .clone();
+    assert_eq!(
+        decision_range.len(),
+        1,
+        "one decision column at the decider"
+    );
+    let decision_col = decision_range.start;
+
+    let lane = lane_state_index(&setup);
+    let lane_out_col = setup
+        .stage_state()
+        .state_to_lp_column(StateDim::new(lane))
+        .get();
+
+    assert_ne!(
+        decision_col, lane_out_col,
+        "the fuel-bearing decision column and the beta-priced lane state column must be distinct"
+    );
+
+    let template = &setup.stage_ctx().templates[deciding_stage];
+    assert!(
+        template.objective[decision_col].abs() > TOL,
+        "the decision column must book the delivery-anchored fuel (nonzero objective); got {}",
+        template.objective[decision_col]
+    );
+    assert_eq!(
+        template.objective[lane_out_col], 0.0,
+        "the lane's commit_out column must carry no fuel term — beta prices it via the cut row"
+    );
+}
+
+// ── AC3: one shared boundary prices each fanned leaf by its own lane state ──
+
+/// Extends ticket-004's shared-boundary fan to the `commit_out`/`commit_in`
+/// lanes: both terminal fan leaves resolve to ONE shared pool carrying the
+/// single injected boundary, and each leaf's terminal value is priced by ITS
+/// OWN committed MW from that one shared `β` — `θ = α + β·x_leaf`, distinct
+/// across leaves committing distinct MW.
+#[test]
+fn shared_boundary_prices_each_fanned_leaf_by_its_own_lane_state() {
+    let mut setup = build_setup_in_code(build_system(true, true), &config());
 
     let leaves = leaf_positions(&setup.node_graph);
     assert_eq!(
         leaves.len(),
         2,
-        "fixture must declare a genuine 2-leaf terminal fan"
+        "fixture must declare a 2-leaf terminal fan"
     );
     let leaf_pool_ids: Vec<usize> = leaves
         .iter()
@@ -604,57 +735,121 @@ fn shared_boundary_prices_each_fanned_node_by_its_own_committed_mw() {
         "both terminal fan leaves must share ONE pool"
     );
 
-    let state_dimension = setup.fcf.state_dimension as u32;
     let tmp = tempfile::tempdir().expect("tempdir");
-    let source_dir = tmp.path().join("boundary_source_fan");
-    let alpha = 5.0;
-    let beta_written = 3.0;
-    write_synthetic_boundary(&source_dir, state_dimension, alpha, beta_written);
-
-    let mut warnings: Vec<String> = Vec::new();
-    let boundary_cuts = load_boundary_cuts(
-        &source_dir,
-        0,
-        state_dimension,
-        &[],
-        None,
-        1.0,
-        &mut |msg| warnings.push(msg.to_string()),
-    )
-    .expect("boundary cut must load");
-    inject_boundary_cuts(&mut setup, &boundary_cuts);
+    inject_lane_boundary(&mut setup, &tmp.path().join("boundary"));
 
     let shared_pool_id = leaf_pool_ids[0];
+    assert_eq!(
+        shared_pool_id,
+        setup.fcf.pools.len() - 1,
+        "the shared leaf pool is the terminal pool the boundary overwrites"
+    );
     let pool = &setup.fcf.pools[shared_pool_id];
-    let (_, _, beta_internal) = pool
+    let injected: Vec<(f64, Vec<f64>)> = pool
         .active_cuts()
-        .next()
-        .expect("exactly one active cut after injection");
-    let beta_internal = beta_internal[0];
+        .map(|(_, intercept, coeffs)| (intercept, coeffs.to_vec()))
+        .collect();
+    let lane = lane_state_index(&setup);
+    let mut expected_coeffs = vec![0.0_f64; setup.fcf.state_dimension];
+    expected_coeffs[lane] = BETA;
+    assert_eq!(
+        injected,
+        vec![(ALPHA, expected_coeffs)],
+        "the shared pool must carry exactly the one injected lane boundary"
+    );
 
     let template = freeze_terminal_template(&setup, shared_pool_id);
-    let theta_baseline = terminal_theta(&setup, &template, pool, NodeId(1), 0.0);
-
     let x_leaf1 = 1.5;
-    let x_leaf2 = -1.0;
-    let theta_leaf1 = terminal_theta(&setup, &template, pool, NodeId(1), x_leaf1);
-    let theta_leaf2 = terminal_theta(&setup, &template, pool, NodeId(2), x_leaf2);
+    let x_leaf2 = 4.0;
+    let theta_leaf1 = terminal_theta(
+        &setup,
+        &template,
+        pool,
+        NodeId(1),
+        &lane_pin(&setup, x_leaf1),
+    );
+    let theta_leaf2 = terminal_theta(
+        &setup,
+        &template,
+        pool,
+        NodeId(2),
+        &lane_pin(&setup, x_leaf2),
+    );
 
     for (label, x, theta) in [
         ("leaf1", x_leaf1, theta_leaf1),
         ("leaf2", x_leaf2, theta_leaf2),
     ] {
-        let expected_delta = beta_internal * x;
-        let actual_delta = theta - theta_baseline;
-        let rel_err = (actual_delta - expected_delta).abs() / expected_delta.abs().max(1.0);
+        let expected = ALPHA + BETA * x;
         assert!(
-            rel_err < 1e-6,
-            "{label}: theta must reflect its own committed MW from the SHARED beta: expected \
-             delta {expected_delta}, got {actual_delta} (rel_err={rel_err})"
+            (theta - expected).abs() < TOL,
+            "{label}: the shared beta must price this leaf by its OWN committed MW: \
+             expected {expected}, got {theta}"
         );
     }
     assert!(
-        (theta_leaf1 - theta_leaf2).abs() > 1e-6,
-        "leaf1 and leaf2 committed different MW, so their priced terminal values must differ"
+        (theta_leaf1 - theta_leaf2).abs() > TOL,
+        "leaves committing different MW must be priced to different terminal values"
+    );
+}
+
+// ── AC4: a declared post-horizon window solves the first stage, no walk-off ──
+
+/// End-to-end sizing pin: a study declaring a post-horizon commitment window
+/// solves its first stage without a `fill_col_state_patches` Vec walk-off. One
+/// training iteration exercises the forward pass's stage-0 solve through the
+/// full patch pipeline (`StageSolvePrep::run` → `fill_col_state_patches`), which
+/// panics on an undersized `+ n_commitment` buffer; a clean `Ok` proves the
+/// buffer covers the post-horizon lane end-to-end.
+#[test]
+fn post_horizon_commitment_first_stage_solves_without_patch_walk_off() {
+    let mut setup = build_setup_in_code(build_system(true, false), &config());
+    assert_eq!(
+        setup.stage_state().n_commitment,
+        1,
+        "the fixture must declare exactly one post-horizon commitment window"
+    );
+
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("first stage must solve without a fill_col_state_patches panic");
+    assert!(
+        outcome.error.is_none(),
+        "training over the post-horizon-commitment study must complete; got {:?}",
+        outcome.error
+    );
+}
+
+// ── Inert/bootstrap: no boundary → θ bounded at zero, lane columns present ──
+
+/// Without an injected boundary the terminal carries no future cost, so `θ` is
+/// bounded at zero regardless of the committed MW — yet the post-horizon lane
+/// columns are structurally present (kept open at every stage, per the
+/// keep-live contract), ready to be priced once a boundary is injected.
+#[test]
+fn no_boundary_leaves_theta_zero_with_lane_columns_present() {
+    let setup = build_setup_in_code(build_system(true, false), &config());
+
+    assert_eq!(
+        setup.stage_state().n_commitment,
+        1,
+        "the lane must exist in the state layout"
+    );
+    assert_eq!(
+        setup.fcf.state_dimension, 2,
+        "the post-horizon lane column must be present in the state dimension"
+    );
+
+    let terminal_pool_id = setup.fcf.pools.len() - 1;
+    let pool = &setup.fcf.pools[terminal_pool_id];
+    assert_eq!(pool.populated(), 0, "no boundary cut must be loaded");
+
+    let template = freeze_terminal_template(&setup, terminal_pool_id);
+    let theta = terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, 2.0));
+    assert!(
+        theta.abs() < 1e-9,
+        "with no boundary cut, theta must be 0 regardless of the committed MW: got {theta}"
     );
 }
