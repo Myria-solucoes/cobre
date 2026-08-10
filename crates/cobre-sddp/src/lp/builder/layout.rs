@@ -22,7 +22,6 @@ use crate::indexer::{
 };
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
-use super::commitment_block;
 use super::template::StageGeometry;
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
@@ -179,15 +178,21 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) per_stage_mask: Vec<Vec<usize>>,
 }
 
-/// Column/row offsets for one stage's anticipated-thermal layout.
+/// Column/row offsets for one stage's unified commitment-hold layout: the
+/// in-study anticipated-ring family (latch/carry/fish, modular-slot-addressed)
+/// and the terminal post-horizon lane family (latch/carry only, no fish),
+/// both carved from the same [`StateSpace::commit_out`]/[`StateSpace::commit_in`]
+/// region. There is no separate block-layout struct — [`StageLayout::new`]
+/// allocates both families' columns and rows in one pass.
 pub(crate) struct AnticipatedLayout {
     /// Start of the anticipated-decision column block: `n_anticipated`
     /// columns (`col_anticipated_decision_start + local_idx`). Equals
     /// `col_thermal_end`.
     pub(crate) col_anticipated_decision_start: usize,
-    /// Start of the `anticipated_slots_out` column block (`A * k_max` columns,
-    /// slot-major, plant-minor). Sourced from
-    /// `StateSpace::anticipated_slots_out.start`, so the offset is
+    /// Start of the merged [`StateSpace::commit_out`]/[`StateSpace::commit_in`]
+    /// column block (the leading `A * k_max` in-study slots, slot-major/
+    /// plant-minor, followed by the trailing `n_commitment` post-horizon
+    /// lanes). Sourced from `StateSpace::commit_out.start`, so the offset is
     /// stage-invariant — keeping the global stage-0 cut map on the correct
     /// column at every stage regardless of this stage's block count.
     pub(crate) col_anticipated_slots_out_start: usize,
@@ -195,8 +200,8 @@ pub(crate) struct AnticipatedLayout {
     /// per plant with a genuine, ACTIVE decision this stage
     /// (`PointResolution::genuine_decisions_at(stage_idx).next()`, AND the
     /// delivery stage's commissioning window), pinning that decision's ring
-    /// slot to its decision column. Immediately after
-    /// `row_anticipated_fishing_start`.
+    /// slot (`delivery_stage mod k_max`) to its decision column. Immediately
+    /// after `row_anticipated_fishing_start`.
     pub(crate) row_anticipated_state_out_def_start: usize,
     /// Count of genuine, active decisions this stage (`Some` count of
     /// `anticipated_decision_row_pos`); drives the active-row iteration.
@@ -209,62 +214,59 @@ pub(crate) struct AnticipatedLayout {
     /// genuine decision this stage (`PointResolution::genuine_decisions_at`)
     /// or the delivery is commissioning-inactive. Length `n_anticipated`.
     pub(crate) anticipated_decision_row_pos: Vec<Option<usize>>,
-    /// Start of anticipated-fishing rows (one per GENUINELY anticipated plant
-    /// this stage — `PointResolution::is_anticipated_at`, `false` exactly at a
-    /// `K = 0` self-delivery): `row_anticipated_fishing_start + pos`.
-    /// After operational-violation rows.
+    /// Start of the commitment-MATURITY rows: one per anticipated plant
+    /// whose delivery matures THIS stage (`PointResolution::is_anticipated_at`,
+    /// `false` at a `K = 0` self-delivery). Every such plant gets exactly one
+    /// row here regardless of commissioning activeness — the row renders
+    /// EITHER the fish coupling or a same-slot carry, decided by
+    /// [`super::entries::fill_anticipated_fishing_entries`]'s `if`/`else` on
+    /// `is_anticipated_decision_active_for_delivery` — the single governing
+    /// branch. After operational-violation rows.
     pub(crate) row_anticipated_fishing_start: usize,
-    /// Anticipated-fishing row count this stage (`Some` count of
-    /// `anticipated_fishing_row_pos`); `n_anticipated` unless a `K = 0`
-    /// self-delivery excludes a plant this stage.
+    /// Commitment-maturity row count this stage (`Some` count of
+    /// `anticipated_fishing_row_pos`).
     pub(crate) n_anticipated_fishing_rows: usize,
     /// For each anticipated plant (local order), this stage's compact row
-    /// position within the fishing-row family, or `None` when the delivery
-    /// maturing this stage is a `K = 0` self-delivery — no anticipation binds,
-    /// so the plant's ordinary thermal generation is unconstrained by any
-    /// fishing coupling. Length `n_anticipated`.
+    /// position within the maturity-row family, or `None` when no delivery
+    /// matures this stage (including a `K = 0` self-delivery, which never
+    /// matures through the ring at all). Length `n_anticipated`.
     pub(crate) anticipated_fishing_row_pos: Vec<Option<usize>>,
-    /// Start of the anticipated-ring interior-slot definition equality rows
-    /// (`slot_k^out − slot_{k+1}^in = 0`, the plain-shift rows for every slot
-    /// strictly before this stage's fresh-deposit slots). Immediately after
-    /// `row_anticipated_state_out_def_start`. Mirrors
-    /// [`Self::col_anticipated_slots_out_start`]'s pairing with
-    /// `transit_bucket_definition` in spirit — the anticipated ring's own
-    /// per-slot definition-row family.
+    /// Start of the future-window commitment-carry equality rows (same-slot
+    /// hold, `slot^out − slot^in = 0`,
+    /// [`super::delivery_ring::DeliveryRing::emit_carry_rows`]): every
+    /// STRICTLY FUTURE, not-yet-due in-study slot, modular-addressed
+    /// (`delivery_target mod k_max`). The commitment maturing THIS stage is
+    /// never here even when the single governing branch selects carry over
+    /// fish — that carry renders through the maturity row above instead, so
+    /// this family and `row_anticipated_fishing_start` never double-book the
+    /// same delivery. Immediately after `row_anticipated_state_out_def_start`.
     pub(crate) row_anticipated_slot_definition_start: usize,
-    /// Count of reachable interior-slot definition rows this stage
+    /// Count of future-window carrying slots this stage
     /// (`anticipated_slot_row_pos`'s `Some` count).
     pub(crate) n_anticipated_slot_definition_rows: usize,
-    /// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
-    /// slot-major, matching [`crate::indexer::StateSpace::anticipated_slots_out`]'s
-    /// own layout), this stage's compact row position within the interior-slot
-    /// definition-row family, or `None` when the slot's delivery target is a
-    /// genuine fresh decision this stage (`PointResolution::genuine_decisions_at`,
-    /// handled by `row_anticipated_state_out_def_start` instead), beyond the
-    /// study horizon, or not yet ready (`PointResolution::is_ready_at`,
-    /// stage-invariant padding). Length `n_anticipated * k_max`.
+    /// For each GLOBAL in-study commitment-hold slot (`(m mod k_max) *
+    /// n_anticipated + plant`, modular slot-major/plant-minor —
+    /// [`StateSpace::commitment_hold_in_study_offset`]'s own addressing), this
+    /// stage's compact row position within the future-window carry-row
+    /// family, or `None` when the slot's target is this stage's own latch
+    /// (`row_anticipated_state_out_def_start` owns it), matures THIS stage
+    /// (`row_anticipated_fishing_start` owns it, fish-or-carry), is beyond
+    /// the study horizon, or is not yet ready
+    /// (`PointResolution::is_ready_at`). Length `n_anticipated * k_max`.
     pub(crate) anticipated_slot_row_pos: Vec<Option<usize>>,
-}
-
-/// Column/row offsets for one stage's terminal commitment-block layout.
-///
-/// Unlike [`AnticipatedLayout`]'s ring, the block has no depth axis and no
-/// padding: every declared window gets exactly one row every stage (dense,
-/// `state.n_commitment` wide), either the latch-deposit row (at the window's
-/// own [`StateSpace::commitment_decider_stage`]) or the carry-by-identity row
-/// (every other stage) — so no `Option<usize>` row-position map is needed, only
-/// which windows decide THIS stage (sparse, for the decision-column family).
-pub(crate) struct CommitmentBlockLayout {
-    /// Row index of window `w`'s per-stage row: `row_commitment_start + w`.
-    /// Dense — every window gets exactly one row every stage.
+    /// Row index of post-horizon window `w`'s per-stage row:
+    /// `row_commitment_start + w`. Dense — every declared window gets exactly
+    /// one row every stage (latch at its own
+    /// [`StateSpace::commitment_decider_stage`], carry-by-identity
+    /// otherwise); no fish arm exists for a post-horizon lane.
     pub(crate) row_commitment_start: usize,
-    /// Start of this stage's decision-column family (sparse: one column per
-    /// window whose decider is this stage, `col_commitment_decision_start +
-    /// local_idx`).
+    /// Start of this stage's post-horizon decision-column family (sparse: one
+    /// column per window whose decider is this stage,
+    /// `col_commitment_decision_start + local_idx`).
     pub(crate) col_commitment_decision_start: usize,
-    /// Global window indices deciding at this stage, ascending — parallel to
-    /// the decision columns above; the [`Self::row_commitment_start`] row for
-    /// window `w` is a latch iff `w` appears here, else a carry.
+    /// Global post-horizon window indices deciding at this stage, ascending —
+    /// parallel to the decision columns above; the [`Self::row_commitment_start`]
+    /// row for window `w` is a latch iff `w` appears here, else a carry.
     pub(crate) commitment_decision_windows: Vec<usize>,
 }
 
@@ -458,7 +460,7 @@ pub(crate) struct ConstraintRows {
     /// − deposit_d = 0`, one row per (plant, lag) bucket REACHABLE at this
     /// stage (`state.transit_bucket_column_order[slot]`'s lag within this stage's
     /// `per_stage_mask` cap for that plant — see [`Self::transit_bucket_row_pos`]);
-    /// unlike `anticipated_state`'s active-plant sparseness, a lag beyond the
+    /// unlike `commit_in`'s active-plant sparseness, a lag beyond the
     /// cap targets a stage outside `[0, n_stages)` and gets no row at ANY
     /// stage from here to the horizon (the cap only shrinks). Placed
     /// immediately after [`Self::water_balance`], so `load_balance` and every
@@ -563,10 +565,9 @@ pub(crate) struct StageLayout<'a> {
     // `n_anticipated * k_max` inline, so dead_code fires on the production side.
     #[allow(dead_code)]
     pub(crate) n_ant_state: usize,
-    /// Anticipated-thermal column/row offsets (see [`AnticipatedLayout`]).
+    /// Unified commitment-hold column/row offsets — in-study anticipated ring
+    /// plus terminal post-horizon lanes (see [`AnticipatedLayout`]).
     pub(crate) anticipated: AnticipatedLayout,
-    /// Terminal commitment-block column/row offsets (see [`CommitmentBlockLayout`]).
-    pub(crate) commitment: CommitmentBlockLayout,
     /// Equipment column ranges (see [`EquipmentColumns`]).
     pub(crate) equipment: EquipmentColumns,
     /// Slack columns, including the paired operational-violation rows (see
@@ -659,19 +660,20 @@ fn build_transit_bucket_row_pos(
     (transit_bucket_row_pos, n_reachable)
 }
 
-/// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
-/// slot-major, mirroring [`build_transit_bucket_row_pos`]'s role for buckets),
-/// this stage's compact row position within the interior-slot definition-row
-/// family, or `None` when the slot's delivery target `m = stage_idx + slot + 1`
-/// is a genuine fresh decision this stage (`decider[m] == Some(stage_idx)`,
-/// the deposit-row family `row_anticipated_state_out_def_start` owns it
-/// instead), beyond the study horizon (`m >= n_stages`), or not yet ready
-/// (`decider[m] > Some(stage_idx)`, structural padding). Ready
-/// (`PointResolution::is_ready_at`) is checked PER SLOT directly — never via
-/// a `depth`-derived boundary, which under-counts whenever pre-study (`None`)
-/// occupancy coexists with an in-study decision at the same stage (the
-/// fold-blindness class this per-slot check rules out). Returns the mapping
-/// and the reachable count.
+/// For each GLOBAL in-study commitment-hold slot (`(m mod k_max) *
+/// n_anticipated + plant`, modular slot-major/plant-minor — mirroring
+/// [`build_transit_bucket_row_pos`]'s role for buckets), this stage's compact
+/// row position within the future-window carry-row family, or `None` when
+/// the slot's delivery target `m = stage_idx + depth + 1` is a genuine fresh
+/// decision this stage (`decider[m] == Some(stage_idx)`, the deposit-row
+/// family `row_anticipated_state_out_def_start` owns it instead), beyond the
+/// study horizon (`m >= n_stages`), or not yet ready
+/// (`PointResolution::is_ready_at`, structural padding). This covers only
+/// STRICTLY FUTURE, not-yet-due deliveries; the commitment maturing EXACTLY
+/// this stage (`m == stage_idx`) is the single governing branch's fish-or-
+/// carry decision, owned by [`build_anticipated_fishing_row_pos`] and its
+/// entries-side `if`/`else` — never duplicated here. Returns the mapping and
+/// the reachable count.
 fn build_anticipated_slot_row_pos(
     state: &StateSpace,
     n_stages: usize,
@@ -688,11 +690,16 @@ fn build_anticipated_slot_row_pos(
 
     let mut row_pos = vec![None; n_anticipated * k_max];
     let mut n_reachable = 0_usize;
-    for slot in 0..k_max {
-        let m = stage_idx + slot + 1;
+    for depth in 0..k_max {
+        let m = stage_idx + depth + 1;
         if m >= n_stages {
             continue;
         }
+        // Modular addressing (`m % k_max`) in place of the pre-migration
+        // distance-based `depth`; `depth in 0..k_max` still enumerates
+        // exactly `k_max` consecutive `m` values, so every residue is
+        // visited exactly once — no self-collision within this sweep.
+        let slot = m % k_max;
         for (plant, point) in points.iter().enumerate() {
             let is_deposit = point.decider[m] == Some(stage_idx);
             let is_interior = !is_deposit && point.is_ready_at(m, stage_idx);
@@ -751,12 +758,17 @@ fn build_anticipated_decision_row_pos(
 }
 
 /// For each anticipated plant (local order), this stage's compact row
-/// position within the fishing-row family, or `None` when the delivery
-/// maturing this stage is a `K = 0` self-delivery
+/// position within the commitment-MATURITY family, or `None` when the
+/// delivery maturing this stage is a `K = 0` self-delivery
 /// (`PointResolution::is_anticipated_at`, exclude-with-advisory) — no
 /// anticipation binds, so the plant's ordinary thermal generation is
-/// unconstrained by any fishing coupling. Returns the mapping and the active
-/// count.
+/// unconstrained by any fishing coupling. Unlike the pre-migration fishing
+/// row, a `Some` position here does NOT mean "fish": every plant with a
+/// delivery maturing this stage gets exactly one row regardless of
+/// commissioning activeness — [`super::entries::fill_anticipated_fishing_entries`]'s
+/// `if`/`else` on `is_anticipated_decision_active_for_delivery` decides
+/// whether THAT row renders the fish coupling or a same-slot carry, the
+/// single governing branch. Returns the mapping and the active count.
 fn build_anticipated_fishing_row_pos(
     state: &StateSpace,
     n_stages: usize,
@@ -1180,8 +1192,11 @@ impl<'a> StageLayout<'a> {
             BlockMode::Chronological => n_blks.saturating_sub(1),
             BlockMode::Parallel => 0,
         };
-        let commitment_decision_windows =
-            commitment_block::commitment_decision_windows_at(state, stage_idx);
+        // Global post-horizon window indices deciding at this stage, ascending
+        // — the sparse decision-column family below sizes from this.
+        let commitment_decision_windows: Vec<usize> = (0..state.n_commitment)
+            .filter(|&w| state.commitment_decider_stage[w] == stage_idx)
+            .collect();
         let mut col = RangeCursor::new(state.control_region_start());
         let storage_internal = col.alloc(n_h * n_interior);
         let storage_internal_start = storage_internal.start;
@@ -1287,16 +1302,18 @@ impl<'a> StageLayout<'a> {
         let n_filled_min_storage_floor_rows = filled_min_storage_floor_hydro_indices.len();
         let row_filled_min_storage_floor_start = row.alloc(n_filled_min_storage_floor_rows).start;
 
-        // Fishing rows: one per GENUINELY anticipated plant this stage
-        // (`build_anticipated_fishing_row_pos`) — a `K = 0` self-delivery
-        // excludes a plant's fishing row this stage, so the row family is sparse
-        // like the deposit family below, not the dense `ctx.n_anticipated` count.
+        // Commitment-MATURITY rows: one per GENUINELY anticipated plant whose
+        // delivery matures this stage (`build_anticipated_fishing_row_pos`) —
+        // a `K = 0` self-delivery excludes a plant's row this stage, so the
+        // row family is sparse like the deposit family below, not the dense
+        // `ctx.n_anticipated` count. Content (fish vs carry) is decided by
+        // `entries.rs`'s `if`/`else`, not here.
         let n_stages = ctx.resolved.bounds.n_stages();
         let (anticipated_fishing_row_pos, n_anticipated_fishing_rows) =
             build_anticipated_fishing_row_pos(state, n_stages, stage_idx);
         let row_anticipated_fishing_start = row.alloc(n_anticipated_fishing_rows).start;
 
-        // Anticipated-state-out (deposit) definition rows
+        // Anticipated-state-out (latch/deposit) definition rows
         // (`build_anticipated_decision_row_pos`).
         let (anticipated_decision_row_pos, n_anticipated_state_out_def_rows) =
             build_anticipated_decision_row_pos(
@@ -1308,16 +1325,18 @@ impl<'a> StageLayout<'a> {
             );
         let row_anticipated_state_out_def_start = row.alloc(n_anticipated_state_out_def_rows).start;
 
-        // Anticipated-ring interior-slot definition rows
-        // (`build_anticipated_slot_row_pos`).
+        // Future-window commitment-carry rows, modular-addressed
+        // (`build_anticipated_slot_row_pos`) — strictly future, not-yet-due
+        // deliveries only; the maturing-this-stage carry (when the single
+        // governing branch selects it) is rendered by the maturity row above.
         let (anticipated_slot_row_pos, n_anticipated_slot_definition_rows) =
             build_anticipated_slot_row_pos(state, n_stages, stage_idx);
         let row_anticipated_slot_definition_start =
             row.alloc(n_anticipated_slot_definition_rows).start;
 
-        // Terminal commitment-block rows: dense, one per declared window every
-        // stage (latch at its own decider, carry-by-identity otherwise — see
-        // `CommitmentBlockLayout`).
+        // Terminal post-horizon lane rows: dense, one per declared window
+        // every stage (latch at its own decider, carry-by-identity otherwise
+        // — no fish arm exists for a post-horizon lane).
         let row_commitment_start = row.alloc(state.n_commitment).start;
 
         // Peeked before `generic` below is computed: the generic row block's
@@ -1356,14 +1375,18 @@ impl<'a> StageLayout<'a> {
         let num_rows = row.pos();
         let zeta = stage.blocks.iter().map(|b| b.duration_hours).sum::<f64>() * M3S_TO_HM3;
 
-        // The ring's outgoing columns are sourced from their stage-invariant
-        // state-region position (`state.anticipated_slots_out.start`), NOT
-        // `thermal_end + n_anticipated`, so the global stage-0 cut map lands on the
-        // correct column even when this stage's block count differs from stage 0's.
-        let col_anticipated_slots_out_start = if ctx.n_anticipated > 0 {
-            state.anticipated_slots_out.start
-        } else {
+        // The commitment-hold outgoing columns are sourced from their
+        // stage-invariant state-region position (`state.commit_out.start`),
+        // NOT `thermal_end + n_anticipated`, so the global stage-0 cut map
+        // lands on the correct column even when this stage's block count
+        // differs from stage 0's. `commit_out` collapses to the literal
+        // `0..0` only when BOTH the in-study ring and the post-horizon lanes
+        // are empty, mirroring the same `0..0`-vs-cursor-position fallback
+        // every other optional-block start already needs.
+        let col_anticipated_slots_out_start = if state.commit_out.is_empty() {
             thermal_end
+        } else {
+            state.commit_out.start
         };
         let anticipated = AnticipatedLayout {
             col_anticipated_decision_start: thermal_end,
@@ -1377,9 +1400,6 @@ impl<'a> StageLayout<'a> {
             row_anticipated_slot_definition_start,
             n_anticipated_slot_definition_rows,
             anticipated_slot_row_pos,
-        };
-
-        let commitment = CommitmentBlockLayout {
             row_commitment_start,
             col_commitment_decision_start,
             commitment_decision_windows,
@@ -1456,7 +1476,6 @@ impl<'a> StageLayout<'a> {
             k_max: ctx.k_max,
             n_ant_state,
             anticipated,
-            commitment,
             equipment,
             slack,
             rows,
@@ -1668,11 +1687,16 @@ impl<'a> StageLayout<'a> {
         self.state.z_inflow.start
     }
 
-    /// First anticipated-state column; reads `self.state.anticipated_state.start`.
+    /// First commitment-hold incoming column (in-study + post-horizon);
+    /// reads `self.state.commit_in.start`.
+    // Rationale: mirrors the sibling col_*_start accessors above for
+    // test-fixture symmetry; no production call site reads through it yet
+    // (unlike its siblings, which production code does call).
+    #[allow(dead_code)]
     #[inline]
     #[must_use]
     pub(crate) fn col_anticipated_state_start(&self) -> usize {
-        self.state.anticipated_state.start
+        self.state.commit_in.start
     }
 
     /// Column-side state dimension; reads `self.state.n_state`.

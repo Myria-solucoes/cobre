@@ -16,7 +16,7 @@ use cobre_io::output::policy::{
 };
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
+use crate::indexer::{CommitmentHoldAddress, CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
 use crate::setup::{NodeGraph, NodePos};
 use crate::training::TrainingResult;
@@ -43,21 +43,22 @@ fn year_month_day_anchor(date: chrono::NaiveDate) -> i32 {
 /// Build the per-slot entity-identity manifest for one stage's cut pool: one
 /// [`EntitySlot`] per enabled cut-state dimension of `projection`.
 ///
-/// Slots are emitted in `projection`'s storage → lag → buckets → anticipated →
-/// commitment-block order, so slot `j` describes the entity owning positional
+/// Slots are emitted in `projection`'s storage → lag → buckets →
+/// commitment-hold order, so slot `j` describes the entity owning positional
 /// coefficient `j` — the order a consumer matches the manifest against the cut
 /// coefficients. Each slot is classified by the global [`StateSpace`] region
 /// containing its incoming-state column ([`CutStateProjection::incoming_column`]),
 /// never by re-deriving column arithmetic.
 ///
-/// Each hydro-region slot's `was_active` comes from [`hydro_operating_active`]. A
-/// commitment-block slot reuses `EntityType::AnticipatedThermalState` (no new
-/// discriminant), keyed on its owning thermal's id with
-/// `subindex = k_max + local_window_index` — offset past the ring's own
-/// `[0, k_max)` domain so a thermal owning both ring slots and commitment
-/// windows never collides on `(entity_type, entity_id, subindex)`; its
-/// `delivery_date` is always the sentinel (real per-window dates are a
-/// separate concern this manifest does not resolve).
+/// Each hydro-region slot's `was_active` comes from [`hydro_operating_active`].
+/// The commitment-hold region covers both the in-study anticipated ring and the
+/// terminal post-horizon lanes; a post-horizon lane reuses
+/// `EntityType::AnticipatedThermalState` (no new discriminant), keyed on its
+/// owning thermal's id with `subindex = k_max + local_window_index` — offset
+/// past the ring's own `[0, k_max)` domain so a thermal owning both ring slots
+/// and post-horizon lanes never collides on `(entity_type, entity_id,
+/// subindex)`; its `delivery_date` is always the sentinel (real per-lane dates
+/// are a separate concern this manifest does not resolve).
 ///
 /// # Panics (debug builds only)
 ///
@@ -77,12 +78,16 @@ pub fn build_stage_entity_manifest(
         .iter()
         .filter(|t| t.anticipated_config.is_some())
         .collect();
-    // Single owner of the anticipated ring's slot-major/plant-minor addressing
-    // (see `lp_builder::delivery_ring`); only `slot_lane_at`'s reverse
-    // decomposition is read here — the manifest never emits ring rows/columns.
+    // Single owner of the in-study anticipated ring's slot-major/plant-minor
+    // addressing (see `lp_builder::delivery_ring`); only `slot_lane_at`'s
+    // reverse decomposition is read here — the manifest never emits ring
+    // rows/columns. Built over `commit_out`/`commit_in`'s LEADING in-study
+    // sub-range (width `n_ant_state`); the trailing post-horizon lanes resolve
+    // separately below, never through this ring.
+    let n_ant_state = n_anticipated * global_layout.k_max;
     let anticipated_ring = DeliveryRing::new(
-        global_layout.anticipated_slots_out.clone(),
-        global_layout.anticipated_state.clone(),
+        global_layout.commit_out.start..global_layout.commit_out.start + n_ant_state,
+        global_layout.commit_in.start..global_layout.commit_in.start + n_ant_state,
         n_anticipated,
         global_layout.k_max,
     );
@@ -235,8 +240,10 @@ pub fn build_stage_entity_manifest(
                     delivery_date: anchor_at(lag),
                 }
             }
-            StateRegion::Anticipated => anticipated_slot(offset),
-            StateRegion::CommitmentBlock => commitment_slot(offset),
+            StateRegion::CommitmentHold => match global_layout.commitment_hold_address(offset) {
+                CommitmentHoldAddress::InStudy { .. } => anticipated_slot(offset),
+                CommitmentHoldAddress::PostHorizon { window } => commitment_slot(window),
+            },
         };
         manifest.push(slot);
     }
@@ -1194,16 +1201,16 @@ mod tests {
         );
     }
 
-    // -- Terminal commitment block: real manifest arm --
+    // -- Terminal commitment-hold post-horizon lane: real manifest arm --
 
-    /// A declared commitment block joins the manifest with a real
-    /// `EntitySlot`: reused `AnticipatedThermalState` type, the owning
+    /// A declared post-horizon commitment window joins the manifest with a
+    /// real `EntitySlot`: reused `AnticipatedThermalState` type, the owning
     /// thermal's id, and the sentinel delivery date (real dates are a
     /// separate concern this manifest does not resolve).
     #[test]
-    fn commitment_block_slot_carries_real_identity_and_sentinel_date() {
+    fn commitment_hold_post_horizon_slot_carries_real_identity_and_sentinel_date() {
         let system = system_2h_1ant((None, None), (None, None));
-        let global = StateSpace::new_with_commitment_block(
+        let global = StateSpace::new_with_commitment_hold_windows(
             2,
             2,
             0,
@@ -1221,7 +1228,7 @@ mod tests {
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
 
         // Layout N=2, L=2, A=1, k_max=2, W=1: storage 0..2, lag 2..6,
-        // anticipated 6..8, commitment block at 8.
+        // anticipated 6..8, post-horizon lane at 8.
         assert_eq!(manifest.len(), 9);
         let slot = &manifest[8];
         assert_eq!(slot.entity_type, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE);
@@ -1234,14 +1241,15 @@ mod tests {
     }
 
     /// User-ratified subindex formula (`k_max + local_window_index`): a
-    /// thermal owning BOTH ring slots (`[0, k_max)`) and commitment-block
-    /// windows gets fully disjoint subindices on `(entity_type, entity_id)`
-    /// — the collision the `k_max` offset exists to forbid. Two windows for
-    /// the SAME thermal also get distinct subindices from each other.
+    /// thermal owning BOTH ring slots (`[0, k_max)`) and post-horizon
+    /// commitment windows gets fully disjoint subindices on `(entity_type,
+    /// entity_id)` — the collision the `k_max` offset exists to forbid. Two
+    /// windows for the SAME thermal also get distinct subindices from each
+    /// other.
     #[test]
-    fn commitment_block_subindex_never_collides_with_ring_subindex() {
+    fn commitment_hold_post_horizon_subindex_never_collides_with_ring_subindex() {
         let system = system_2h_1ant((None, None), (None, None));
-        let global = StateSpace::new_with_commitment_block(
+        let global = StateSpace::new_with_commitment_hold_windows(
             2,
             2,
             0,

@@ -1057,12 +1057,12 @@ pub(crate) fn resolve_state_layout(
     };
 
     let (n_commitment, commitment_decider_stage, commitment_window_thermal_id) =
-        resolve_commitment_block_windows(system, &anticipated_thermal_indices);
+        resolve_commitment_hold_windows(system, &anticipated_thermal_indices);
 
     // `StateSpace` is the sole role-(a) owner; its constructor finalizes the
     // nonzero mask unconditionally, so every study (storage-only or pure-thermal)
     // has a finalized mask for the single-path mask-driven cut-row loop.
-    let mut state = StateSpace::new_with_commitment_block(
+    let mut state = StateSpace::new_with_commitment_hold_windows(
         hydro_count,
         max_par_order,
         transit_bucket_topology.n_buckets,
@@ -1095,13 +1095,14 @@ pub(crate) fn resolve_state_layout(
 /// setup-time advisory, never a hard error — mirrors
 /// [`warn_on_sub_stage_lead`]'s exclude-with-advisory convention. Returns the
 /// resolved window count and its parallel decider-stage and owning-thermal-id
-/// vectors, all three in the canonical order [`StateSpace::commitment_block_out`]
-/// uses. `future_anticipated_deliveries`' own sorting invariant
-/// (`(thermal_id, delivery_start)` ascending) is what keeps the per-thermal
-/// filter below yielding each thermal's windows in `delivery_start` order —
-/// the order [`crate::policy_export::build_stage_entity_manifest`] derives a
-/// window's local index within its thermal from.
-fn resolve_commitment_block_windows(
+/// vectors, all three in the canonical order [`StateSpace::commit_out`]'s
+/// post-horizon-lane sub-range uses. `future_anticipated_deliveries`' own
+/// sorting invariant (`(thermal_id, delivery_start)` ascending) is what keeps
+/// the per-thermal filter below yielding each thermal's windows in
+/// `delivery_start` order — the order
+/// [`crate::policy_export::build_stage_entity_manifest`] derives a window's
+/// local index within its thermal from.
+fn resolve_commitment_hold_windows(
     system: &System,
     anticipated_thermal_indices: &[usize],
 ) -> (usize, Vec<usize>, Vec<EntityId>) {
@@ -2204,11 +2205,11 @@ fn build_initial_state(
         }
     }
 
-    // Anticipated ring, slot-major: `state[anticipated_slots_out.start + slot *
+    // Anticipated ring, slot-major: `state[commit_out.start + slot *
     // n_anticipated + local_idx]`. This IS the state-vector numbering
     // (`StateSpace::state_to_lp_column`'s identity domain), the same
-    // `anticipated_slots_out` position every other outgoing-state read uses —
-    // never `anticipated_state` (the relocated, incoming-only pinned block).
+    // `commit_out` position every other outgoing-state read uses — never
+    // `commit_in` (the relocated, incoming-only pinned block).
     // Padding slots `[K_i, k_max)` must stay zero — the in-LP ring's row/column
     // fill in `lp/builder` assumes it.
     if layout.n_anticipated > 0 && layout.k_max > 0 {
@@ -2220,7 +2221,7 @@ fn build_initial_state(
         let thermals = system.thermals();
         let thermal_positions = id_to_position(thermals, |t: &Thermal| t.id.0);
         let n_ant = layout.n_anticipated;
-        let ant_start = layout.anticipated_slots_out.start;
+        let ant_start = layout.commit_out.start;
         let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
             Some(idx) => &system.stages()[idx..],
             None => &[],

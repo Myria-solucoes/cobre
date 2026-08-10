@@ -112,8 +112,7 @@ pub(crate) fn postprocess_templates(
 
         let mut col_scale =
             lp_builder::compute_col_scale(tmpl.num_cols, &tmpl.col_starts, &tmpl.values);
-        lp_builder::apply_anticipated_col_scale_unscale(&mut col_scale, state_layout);
-        lp_builder::apply_commitment_block_col_scale_unscale(&mut col_scale, state_layout);
+        lp_builder::apply_commitment_hold_col_scale_unscale(&mut col_scale, state_layout);
         lp_builder::apply_col_scale(tmpl, &col_scale);
         tmpl.col_scale.clone_from(&col_scale);
         let row_scale = lp_builder::compute_row_scale(

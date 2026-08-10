@@ -105,20 +105,22 @@ pub(crate) fn apply_bucket_col_scale(col_scale: &mut [f64], state_layout: &State
     }
 }
 
-/// Force `col_scale = 1.0` on the anticipated ring's two state ranges
-/// (`anticipated_slots_out`, `anticipated_state`), overriding whatever
-/// `compute_col_scale` derived there. The ring pins a commitment at
-/// `v / col_scale` then re-reads it at `· col_scale` in the fishing row; that
-/// round-trip is exact only at `col_scale = 1.0` (any other factor can drift a
-/// commitment sitting exactly at its delivery-stage generation cap a sub-ULP
-/// outside the bound). No-op when `n_anticipated * k_max == 0` (both ranges empty).
+/// Force `col_scale = 1.0` on the merged commitment-hold region's outgoing and
+/// incoming ranges (`commit_out`, `commit_in`), overriding whatever
+/// `compute_col_scale` derived there. Every hold slot round-trips through a
+/// pin-then-read — the in-study ring's deposit/fishing coupling, the
+/// post-horizon lane's stage-to-stage carry — that is exact only at
+/// `col_scale = 1.0`; any other factor can drift a commitment sitting exactly
+/// at its delivery-stage generation cap a sub-ULP outside the bound. No-op
+/// when `commit_out` is empty (no anticipated thermals, no post-horizon
+/// commitments).
 ///
 /// # Panics (debug builds only)
 ///
 /// Panics if `col_scale` does not cover every state column including `theta` —
 /// the `col_scale.len() > theta_col` contract every render/patch call site
 /// relies on.
-pub(crate) fn apply_anticipated_col_scale_unscale(
+pub(crate) fn apply_commitment_hold_col_scale_unscale(
     col_scale: &mut [f64],
     state_layout: &StateSpace,
 ) {
@@ -128,40 +130,11 @@ pub(crate) fn apply_anticipated_col_scale_unscale(
         state_layout.theta,
         col_scale.len()
     );
-    for c in state_layout.anticipated_slots_out.clone() {
-        col_scale[c] = 1.0;
-    }
-    for c in state_layout.anticipated_state.clone() {
-        col_scale[c] = 1.0;
-    }
-}
-
-/// Force `col_scale = 1.0` on the terminal commitment block's two state ranges
-/// (`commitment_block_out`, `commitment_block_in`), the same round-trip-exactness
-/// reason [`apply_anticipated_col_scale_unscale`] forces it on the ring: the
-/// block's latch pins `v / col_scale` then carries it forward at `· col_scale`
-/// stage to stage, exact only at `col_scale = 1.0`. No-op when `n_commitment ==
-/// 0` (both ranges empty).
-///
-/// # Panics (debug builds only)
-///
-/// Panics if `col_scale` does not cover every state column including `theta` —
-/// the `col_scale.len() > theta_col` contract every render/patch call site
-/// relies on.
-pub(crate) fn apply_commitment_block_col_scale_unscale(
-    col_scale: &mut [f64],
-    state_layout: &StateSpace,
-) {
-    debug_assert!(
-        col_scale.len() > state_layout.theta,
-        "col_scale must cover every state column including theta ({}); got len {}",
-        state_layout.theta,
-        col_scale.len()
-    );
-    for c in state_layout.commitment_block_out.clone() {
-        col_scale[c] = 1.0;
-    }
-    for c in state_layout.commitment_block_in.clone() {
+    for c in state_layout
+        .commit_out
+        .clone()
+        .chain(state_layout.commit_in.clone())
+    {
         col_scale[c] = 1.0;
     }
 }
@@ -549,75 +522,18 @@ mod tests {
     }
 
     // =========================================================================
-    // Anticipated ring col_scale=1.0 override
-    // =========================================================================
-
-    /// `N=2` hydros, `L=0`, `A=1` anticipated plant, `K=2` slots: seeds every
-    /// `col_scale` entry with a distinct non-1.0 value, then asserts the override
-    /// forces exactly the `anticipated_slots_out` and `anticipated_state` indices
-    /// to `1.0` while leaving every other index byte-identical to its seed.
-    #[test]
-    fn apply_anticipated_col_scale_unscale_forces_ring_to_one() {
-        let state_layout = StateSpace::new(2, 0, 0, vec![], 1, 2, vec![2], &[0, 0]);
-
-        assert_eq!(state_layout.anticipated_slots_out, 2..4);
-        assert_eq!(state_layout.anticipated_state, 8..10);
-        assert_eq!(state_layout.theta, 10);
-
-        let mut col_scale: Vec<f64> =
-            vec![2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
-        assert_eq!(col_scale.len(), state_layout.theta + 1);
-        let before = col_scale.clone();
-
-        super::apply_anticipated_col_scale_unscale(&mut col_scale, &state_layout);
-
-        for c in state_layout.anticipated_slots_out.clone() {
-            assert_eq!(col_scale[c], 1.0, "anticipated_slots_out index {c}");
-        }
-        for c in state_layout.anticipated_state.clone() {
-            assert_eq!(col_scale[c], 1.0, "anticipated_state index {c}");
-        }
-        for (i, (&got, &want)) in col_scale.iter().zip(before.iter()).enumerate() {
-            if state_layout.anticipated_slots_out.contains(&i)
-                || state_layout.anticipated_state.contains(&i)
-            {
-                continue;
-            }
-            assert_eq!(got, want, "non-anticipated index {i} must be untouched");
-        }
-    }
-
-    /// `n_anticipated == 0`: both ring ranges are empty, so the override loop
-    /// touches no column — `col_scale` is left exactly as the generic
-    /// computation produced it.
-    #[test]
-    fn apply_anticipated_col_scale_unscale_is_noop_when_a_zero() {
-        let state_layout = StateSpace::new(2, 0, 0, vec![], 0, 0, vec![], &[0, 0]);
-        let mut col_scale = vec![1.0_f64; state_layout.theta + 1];
-        col_scale[0] = 3.0;
-
-        let before = col_scale.clone();
-        super::apply_anticipated_col_scale_unscale(&mut col_scale, &state_layout);
-
-        assert_eq!(
-            col_scale, before,
-            "n_anticipated == 0 must leave col_scale untouched"
-        );
-    }
-
-    // =========================================================================
-    // Terminal commitment-block col_scale=1.0 override
+    // Commitment-hold col_scale=1.0 override
     // =========================================================================
 
     /// `N=2` hydros, `L=0`, `A=1` anticipated plant, `K=2` slots, `W=2` declared
     /// windows: seeds every `col_scale` entry with a distinct non-1.0 value, then
-    /// asserts the override forces exactly the `commitment_block_out`/
-    /// `commitment_block_in` indices to `1.0` while leaving every other index
-    /// (including the anticipated ring's own, untouched by this override)
-    /// byte-identical to its seed.
+    /// asserts the override forces exactly the merged `commit_out`/`commit_in`
+    /// indices (spanning both the in-study ring slots and the post-horizon
+    /// lanes) to `1.0` while leaving every other index byte-identical to its
+    /// seed.
     #[test]
-    fn apply_commitment_block_col_scale_unscale_forces_block_to_one() {
-        let state_layout = StateSpace::new_with_commitment_block(
+    fn apply_commitment_hold_col_scale_unscale_forces_hold_to_one() {
+        let state_layout = StateSpace::new_with_commitment_hold_windows(
             2,
             0,
             0,
@@ -631,50 +547,46 @@ mod tests {
             vec![EntityId(0), EntityId(0)],
         );
 
-        assert_eq!(state_layout.commitment_block_out, 4..6);
-        assert_eq!(state_layout.commitment_block_in, 12..14);
+        assert_eq!(state_layout.commit_out, 2..6);
+        assert_eq!(state_layout.commit_in, 10..14);
         assert_eq!(state_layout.theta, 14);
 
         let mut col_scale: Vec<f64> = (2..17).map(f64::from).collect();
         assert_eq!(col_scale.len(), state_layout.theta + 1);
         let before = col_scale.clone();
 
-        super::apply_commitment_block_col_scale_unscale(&mut col_scale, &state_layout);
+        super::apply_commitment_hold_col_scale_unscale(&mut col_scale, &state_layout);
 
-        for c in state_layout.commitment_block_out.clone() {
-            assert_eq!(col_scale[c], 1.0, "commitment_block_out index {c}");
+        for c in state_layout.commit_out.clone() {
+            assert_eq!(col_scale[c], 1.0, "commit_out index {c}");
         }
-        for c in state_layout.commitment_block_in.clone() {
-            assert_eq!(col_scale[c], 1.0, "commitment_block_in index {c}");
+        for c in state_layout.commit_in.clone() {
+            assert_eq!(col_scale[c], 1.0, "commit_in index {c}");
         }
         for (i, (&got, &want)) in col_scale.iter().zip(before.iter()).enumerate() {
-            if state_layout.commitment_block_out.contains(&i)
-                || state_layout.commitment_block_in.contains(&i)
-            {
+            if state_layout.commit_out.contains(&i) || state_layout.commit_in.contains(&i) {
                 continue;
             }
-            assert_eq!(
-                got, want,
-                "non-commitment-block index {i} must be untouched"
-            );
+            assert_eq!(got, want, "non-commitment-hold index {i} must be untouched");
         }
     }
 
-    /// `n_commitment == 0`: both block ranges are empty, so the override loop
-    /// touches no column — `col_scale` is left exactly as the generic
-    /// computation produced it.
+    /// `n_anticipated * k_max == 0` and `n_commitment == 0`: `commit_out`/
+    /// `commit_in` both collapse to `0..0`, so the override loop touches no
+    /// column — `col_scale` is left exactly as the generic computation
+    /// produced it.
     #[test]
-    fn apply_commitment_block_col_scale_unscale_is_noop_when_w_zero() {
+    fn apply_commitment_hold_col_scale_unscale_is_noop_when_empty() {
         let state_layout = StateSpace::new(2, 0, 0, vec![], 0, 0, vec![], &[0, 0]);
         let mut col_scale = vec![1.0_f64; state_layout.theta + 1];
         col_scale[0] = 3.0;
 
         let before = col_scale.clone();
-        super::apply_commitment_block_col_scale_unscale(&mut col_scale, &state_layout);
+        super::apply_commitment_hold_col_scale_unscale(&mut col_scale, &state_layout);
 
         assert_eq!(
             col_scale, before,
-            "n_commitment == 0 must leave col_scale untouched"
+            "an empty CommitmentHold region must leave col_scale untouched"
         );
     }
 

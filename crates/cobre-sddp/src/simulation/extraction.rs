@@ -242,11 +242,13 @@ fn compute_anticipated_decision_mw(
 
 /// Committed MW for an anticipated thermal, or `None` when not anticipated.
 ///
-/// The committed scalar is slot 0 of the `anticipated_state` ring buffer
-/// (`anticipated_state.start + local_idx`), NOT a per-block thermal generation
-/// column — those differ when block hours or generations are non-uniform, and the
-/// fishing constraint pins slot 0 to the block-hours-weighted average. The read
-/// applies unconditionally for any anticipated plant.
+/// The committed scalar is the commitment-hold ring's maturing in-study slot
+/// for this stage — delivery target `m = spec.stage_index`'s modular slot
+/// (`m mod k_max`, [`StateSpace::commitment_hold_in_study_offset`]), NOT a
+/// per-block thermal generation column: those differ when block hours or
+/// generations are non-uniform, and the fishing constraint pins that slot to
+/// the block-hours-weighted average. The read applies unconditionally for any
+/// anticipated plant.
 #[inline]
 fn compute_anticipated_committed_mw(
     view: &SolutionView<'_>,
@@ -257,10 +259,13 @@ fn compute_anticipated_committed_mw(
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     // Ring buffer lives in the stage-invariant state region, so the base is the
     // role-(a) `StateSpace`, not the geometry indexer.
-    let col = spec.state.anticipated_state.start + local_idx.get();
+    let slot_offset = spec
+        .state
+        .commitment_hold_in_study_offset(local_idx.get(), spec.stage_index);
+    let col = spec.state.commit_in.start + slot_offset;
     debug_assert!(
         col < view.primal.len(),
-        "anticipated_state slot-0 col {col} out of primal bounds {}",
+        "commitment-hold maturing-slot col {col} out of primal bounds {}",
         view.primal.len(),
     );
     Some(view.primal[col])
@@ -429,7 +434,7 @@ pub const ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S: f64 = 1.0e6 / 3600.0;
 /// stage. For uniform-block studies the per-stage and stage-0 reads coincide.
 pub struct StageExtractionSpec<'a> {
     /// Role-(a) state layout: source of the state-region column reads (`storage`,
-    /// `storage_in`, `inflow_lags`, `anticipated_state`, `max_par_order`).
+    /// `storage_in`, `inflow_lags`, `commit_in`, `max_par_order`).
     pub state: &'a StateSpace,
     /// Single owner of the study-invariant, non-state LP shape (entity counts and
     /// optional-column presence flags).

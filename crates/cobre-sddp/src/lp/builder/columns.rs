@@ -43,7 +43,7 @@ pub(super) fn fill_stage_columns(
     fill_anticipated_slot_columns(layout, bufs);
     fill_ar_lag_columns(layout, bufs);
     fill_anticipated_state_columns(layout, bufs);
-    super::commitment_block::fill_commitment_block_columns(layout, bufs);
+    fill_commitment_decision_columns(layout, bufs);
     fill_theta_column(layout, bufs);
     fill_turbine_columns(ctx, stage, stage_idx, layout, bufs);
     fill_spillage_columns(ctx, stage, stage_idx, layout, bufs);
@@ -138,11 +138,17 @@ fn fill_transit_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) 
     }
 }
 
-/// Anticipated-ring outgoing (interior + padding) columns: open `(-inf, inf)` bounds
-/// (a committed MW value carries either sign, unlike the water buckets' `[0, inf)`) for
-/// every reachable slot, frozen `[0, 0]` otherwise (the masked column-freeze, mirroring
-/// [`fill_transit_bucket_columns`]). A plant's own newest slot is bounded later by
-/// [`fill_anticipated_columns`], which overwrites this fill.
+/// Commitment-hold outgoing columns: the leading in-study slots keep the
+/// two-sided reachability masking under the carry geometry — open
+/// `(-inf, inf)` bounds (a committed MW value carries either sign, unlike
+/// the water buckets' `[0, inf)`) for every reachable slot, frozen `[0, 0]`
+/// otherwise (mirroring [`fill_transit_bucket_columns`]; a plant's own
+/// latching slot is bounded later by [`fill_anticipated_columns`], which
+/// overwrites this fill when active). The trailing post-horizon lanes are
+/// NEVER frozen — `freeze_masked_columns`'s masking is retired for them,
+/// replaced with the same keep-live open bound at every stage including the
+/// terminal, so the boundary FCF can price them (pricing not yet wired;
+/// this only keeps the columns structurally live).
 fn fill_anticipated_slot_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     let base = layout.anticipated.col_anticipated_slots_out_start;
     let ring = super::entries::anticipated_ring(layout);
@@ -152,6 +158,12 @@ fn fill_anticipated_slot_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>
         (f64::NEG_INFINITY, f64::INFINITY),
         bufs,
     );
+    let n_ant_state = layout.n_anticipated * layout.k_max;
+    let post_horizon_base = base + n_ant_state;
+    for col in post_horizon_base..post_horizon_base + layout.state.n_commitment {
+        bufs.col_lower[col] = f64::NEG_INFINITY;
+        bufs.col_upper[col] = f64::INFINITY;
+    }
 }
 
 /// AR lag columns: unconstrained (signed).
@@ -163,11 +175,26 @@ fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     }
 }
 
-/// Incoming anticipated-ring columns: open `(-INF, +INF)`, left open because pinning
-/// is via `set_col_bounds` at solve time (`fill_col_state_patches`), not an equality row.
+/// Incoming commitment-hold columns (in-study + post-horizon): open
+/// `(-INF, +INF)` everywhere, left open because pinning is via
+/// `set_col_bounds` at solve time (`fill_col_state_patches`), not an
+/// equality row. Covers the whole merged `commit_in` range directly — the
+/// post-horizon lanes need the identical open bound the in-study slots
+/// already carry, so there is no separate masking to apply here.
 fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
-    let start = layout.col_anticipated_state_start();
-    for col in start..start + layout.k_max * layout.n_anticipated {
+    for col in layout.state.commit_in.clone() {
+        bufs.col_lower[col] = f64::NEG_INFINITY;
+        bufs.col_upper[col] = f64::INFINITY;
+    }
+}
+
+/// This stage's post-horizon decision-column family: open `(-inf, inf)`, no
+/// objective — no in-study cost is ever booked for a post-horizon
+/// commitment; pricing it is the boundary FCF's job (not yet wired).
+fn fill_commitment_decision_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
+    let decision_start = layout.anticipated.col_commitment_decision_start;
+    for local_idx in 0..layout.anticipated.commitment_decision_windows.len() {
+        let col = decision_start + local_idx;
         bufs.col_lower[col] = f64::NEG_INFINITY;
         bufs.col_upper[col] = f64::INFINITY;
     }
@@ -551,10 +578,10 @@ pub(super) fn fill_thermal_columns(
 /// The decision column is bound/costed at ITS OWN delivery stage
 /// (`thermal_block_base` for `[min, max]`, `thermal_bounds` for `cost_per_mwh`,
 /// delivery hours/discount) — never the decision stage `stage_idx`, never
-/// `stage_idx + constant` — and deposits into ring slot `delivery_stage - stage_idx - 1`,
-/// the ring's direct delivery-distance mapping, never a `depth`-derived boundary (which
-/// under-counts when pre-study occupancy coexists with an in-study decision at the same
-/// stage). An inactive plant keeps its decision/state-out columns dormant `[0, 0]`.
+/// `stage_idx + constant` — and deposits into ring slot `delivery_stage mod
+/// k_max`, the ring's modular delivery-target mapping
+/// [`crate::indexer::StateSpace::commitment_hold_in_study_offset`] addresses.
+/// An inactive plant keeps its decision/state-out columns dormant `[0, 0]`.
 ///
 /// Active (`is_anticipated_decision_active_for_delivery`) is evaluated at the decision's
 /// OWN delivery stage; `delivery_stage == n_stages` is INACTIVE (strict gate) — pricing
@@ -593,12 +620,7 @@ pub(super) fn fill_anticipated_columns(
             "a genuine decision's delivery stage must be strictly after the decision \
              stage (K=0 self-delivery must already be excluded)"
         );
-        let slot = delivery_stage - stage_idx - 1;
-        debug_assert!(
-            slot < layout.k_max,
-            "delivery slot {slot} must be within the sized ring depth {}",
-            layout.k_max
-        );
+        let slot = delivery_stage % layout.k_max;
         let state_out_col = ring.out_col(slot, local_idx);
 
         if is_anticipated_decision_active_for_delivery(

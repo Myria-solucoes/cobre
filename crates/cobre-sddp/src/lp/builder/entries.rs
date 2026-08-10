@@ -18,26 +18,66 @@ use crate::generic_constraints::{
 
 use std::ops::Range;
 
-/// The one dense anticipated-thermal ring (`n_lanes = n_anticipated`,
-/// slot-major/plant-minor) every anticipated call site shares — the single owner
-/// of its out/in block construction.
+/// The in-study commitment-hold ring (`n_lanes = n_anticipated`,
+/// slot-major/plant-minor, `depth = k_max`, modular-addressed) every
+/// anticipated call site shares — the single owner of its out/in block
+/// construction. Borrows the LEADING `n_anticipated * k_max` sub-range of the
+/// merged [`StateSpace::commit_out`]/[`StateSpace::commit_in`] region; see
+/// [`commitment_hold_post_horizon_ring`] for the trailing sub-range.
 pub(super) fn anticipated_ring(layout: &StageLayout) -> DeliveryRing {
     let state = layout.state;
+    let n_ant_state = layout.n_anticipated * layout.k_max;
     DeliveryRing::new(
-        state.anticipated_slots_out.clone(),
-        state.anticipated_state.clone(),
+        state.commit_out.start..state.commit_out.start + n_ant_state,
+        state.commit_in.start..state.commit_in.start + n_ant_state,
         layout.n_anticipated,
         layout.k_max,
     )
 }
 
-/// Fishing coupling per genuinely-anticipated plant: summed per-block thermal
-/// energy equals the slot-0 committed power scaled to `MWh` (`MW × block_hours`). A
-/// `K = 0` self-delivery excludes the plant's row (`anticipated_fishing_row_pos`),
-/// so its ordinary thermal generation carries no fishing coupling.
+/// The terminal post-horizon lane ring (`n_lanes = n_commitment`, `depth =
+/// 1` — no lead-stage axis, a window's state never shifts slots). Borrows
+/// the TRAILING `n_commitment` sub-range of the merged
+/// [`StateSpace::commit_out`]/[`StateSpace::commit_in`] region, immediately
+/// after [`anticipated_ring`]'s in-study sub-range.
+pub(super) fn commitment_hold_post_horizon_ring(layout: &StageLayout) -> DeliveryRing {
+    let state = layout.state;
+    let n_ant_state = layout.n_anticipated * layout.k_max;
+    let out_base = state.commit_out.start + n_ant_state;
+    let in_base = state.commit_in.start + n_ant_state;
+    DeliveryRing::new(
+        out_base..out_base + state.n_commitment,
+        in_base..in_base + state.n_commitment,
+        state.n_commitment,
+        1,
+    )
+}
+
+/// Fishing (consumption) coupling: for every anticipated plant whose
+/// delivery matures THIS stage
+/// (`layout.anticipated.anticipated_fishing_row_pos`, `None` at a `K = 0`
+/// self-delivery or when no delivery matures here), fish UNCONDITIONALLY —
+/// active or commissioning-inactive alike. A commissioning-inactive delivery
+/// was never latched (its decision column stays dormant `[0, 0]`,
+/// `fill_anticipated_columns`), so its `in_col` carries `0` and this equality
+/// pins that stage's thermal generation to `0` — the correct, harmless
+/// outcome for a delivery the plant's window cannot receive. Carrying it
+/// instead (the retired alternative) collided with the SAME stage's fresh
+/// latch for the next delivery sharing the same modular residue whenever a
+/// plant's own lead defines `k_max` (no other anticipated plant reaches
+/// deeper): two definition rows on one `out_col` pinned a freshly-costed
+/// decision to a stale carried value, producing a false `Infeasible` or a
+/// silent zero-commit release-mode (`debug_assert` compiled out). Fishing
+/// reads only `in_col` and never writes `out_col`, so it cannot collide with
+/// the latch — sums per-block thermal energy against the maturing slot's
+/// committed power scaled to `MWh` (`MW × block_hours`), preserving the
+/// pre-migration `+h_b`/`−H` coefficient shape exactly; only its slot
+/// addressing is modular (`stage_idx mod k_max`, via
+/// [`crate::indexer::StateSpace::commitment_hold_in_study_offset`]).
 pub(super) fn fill_anticipated_fishing_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
+    stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
@@ -49,6 +89,10 @@ pub(super) fn fill_anticipated_fishing_entries(
         let Some(pos) = layout.anticipated.anticipated_fishing_row_pos[local_idx] else {
             continue;
         };
+        // A `Some` position here implies at least one anticipated plant
+        // exists, so `k_max >= 1` (every anticipated thermal's own
+        // `lead_stages >= 1`) — no divide-by-zero guard needed.
+        let slot = stage_idx % layout.k_max;
         let row = layout.anticipated.row_anticipated_fishing_start + pos;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
@@ -62,7 +106,7 @@ pub(super) fn fill_anticipated_fishing_entries(
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
         }
-        let col_state = ring.in_col(0, local_idx);
+        let col_state = ring.in_col(slot, local_idx);
         col_entries[col_state].push((row, -block_hours_total));
         n_active += 1;
     }
@@ -72,10 +116,12 @@ pub(super) fn fill_anticipated_fishing_entries(
     );
 }
 
-/// Encode the anticipated ring's delivery-decision deposit row
-/// `slot^out − decision_col = 0` for each plant with a genuine, active decision
-/// this stage (`anticipated_decision_row_pos`). `slot = delivery_stage − stage_idx − 1`
-/// — computed directly from the delivery stage, never a `depth`-derived boundary.
+/// Encode the commitment-hold ring's delivery-decision LATCH row
+/// `slot^out − decision_col = 0` for each plant with a genuine, active
+/// decision this stage (`anticipated_decision_row_pos`). `slot =
+/// delivery_stage mod k_max` — the modular, delivery-target-keyed slot
+/// [`crate::indexer::StateSpace::commitment_hold_in_study_offset`] addresses,
+/// never a distance-derived boundary.
 pub(super) fn fill_anticipated_state_out_def_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -102,12 +148,7 @@ pub(super) fn fill_anticipated_state_out_def_entries(
             "a genuine decision's delivery stage must be strictly after the decision \
              stage (K=0 self-delivery must already be excluded)"
         );
-        let slot = delivery_stage - stage_idx - 1;
-        debug_assert!(
-            slot < layout.k_max,
-            "delivery slot {slot} must be within the sized ring depth {}",
-            layout.k_max
-        );
+        let slot = delivery_stage % layout.k_max;
         let col_decision = layout.anticipated.col_anticipated_decision_start + local_idx;
         ring.emit_deposit(slot, local_idx, row, col_decision, col_entries);
         n_active += 1;
@@ -118,17 +159,23 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     );
 }
 
-/// Encode the anticipated ring's interior shift rows `slot_k^out − slot_{k+1}^in = 0`
-/// (`k < K_i − 1`, reachable slots per `anticipated_slot_row_pos`) via
-/// [`DeliveryRing::emit_shift_rows`]. A masked slot gets no row — its outgoing column
-/// is frozen `[0, 0]` by `fill_anticipated_slot_columns` (the two-sided masking contract).
+/// Encode the future-window commitment-carry rows (same-slot hold,
+/// `slot^out − slot^in = 0`) via [`DeliveryRing::emit_carry_rows`] — the
+/// same-slot hold identity replacing the retired Markov-1
+/// [`DeliveryRing::emit_shift_rows`] for the anticipated family (the water
+/// travel-time ring keeps `emit_shift_rows` unchanged; its physics genuinely
+/// shift). `anticipated_slot_row_pos` carries every STRICTLY FUTURE,
+/// not-yet-due in-flight slot; the commitment maturing THIS stage is always
+/// fished ([`fill_anticipated_fishing_entries`], never carried), so this
+/// family never duplicates it. A slot with no row here is beyond the study
+/// horizon, not yet ready, or handled by the latch/maturity rows.
 fn fill_anticipated_slot_definition_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let row_start = layout.anticipated.row_anticipated_slot_definition_start;
     let ring = anticipated_ring(layout);
-    let n_reachable = ring.emit_shift_rows(
+    let n_reachable = ring.emit_carry_rows(
         &layout.anticipated.anticipated_slot_row_pos,
         row_start,
         col_entries,
@@ -138,6 +185,38 @@ fn fill_anticipated_slot_definition_entries(
         "fill_anticipated_slot_definition_entries: reachable-slot count must match \
          n_anticipated_slot_definition_rows"
     );
+}
+
+/// Encode the terminal post-horizon lanes' per-window row: at window `w`'s
+/// own decider stage, the LATCH row (`out_col(w) +1`, `decision_col −1`, via
+/// [`DeliveryRing::emit_deposit`]); every other stage, the CARRY row
+/// (`out_col(w) +1`, `in_col(w) −1`, via [`DeliveryRing::emit_carry_rows`]'s
+/// same-slot hold identity at `depth = 1`). No fish arm exists for a
+/// post-horizon lane — it is never consumed in-study; the boundary FCF
+/// prices it (pricing not yet wired).
+fn fill_commitment_post_horizon_entries(
+    layout: &StageLayout,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
+    let state = layout.state;
+    if state.n_commitment == 0 {
+        return;
+    }
+    let ring = commitment_hold_post_horizon_ring(layout);
+    let row_start = layout.anticipated.row_commitment_start;
+    let decision_start = layout.anticipated.col_commitment_decision_start;
+    let decision_windows = &layout.anticipated.commitment_decision_windows;
+
+    for w in 0..state.n_commitment {
+        let row = row_start + w;
+        if let Ok(local_idx) = decision_windows.binary_search(&w) {
+            let decision_col = decision_start + local_idx;
+            ring.emit_deposit(0, w, row, decision_col, col_entries);
+        } else {
+            col_entries[ring.out_col(0, w)].push((row, 1.0));
+            col_entries[ring.in_col(0, w)].push((row, -1.0));
+        }
+    }
 }
 
 /// Returns `true` when hydro `h_idx` is in the `PreFilling` phase at this stage.
@@ -1537,14 +1616,14 @@ pub(super) fn build_stage_matrix_entries(
     fill_pumping_water_entries(ctx, stage, layout, &mut col_entries);
     fill_anticipated_state_out_def_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_anticipated_slot_definition_entries(layout, &mut col_entries);
-    super::commitment_block::fill_commitment_block_entries(layout, &mut col_entries);
+    fill_commitment_post_horizon_entries(layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
     fill_fpha_entries(ctx, stage, stage_idx, layout, &mut col_entries);
     fill_evaporation_entries(ctx, stage, stage_idx, layout, &mut col_entries);
     fill_z_inflow_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_operational_violation_entries(ctx, stage_idx, layout, &mut col_entries);
-    fill_anticipated_fishing_entries(ctx, stage, layout, &mut col_entries);
+    fill_anticipated_fishing_entries(ctx, stage, stage_idx, layout, &mut col_entries);
 
     col_entries
 }

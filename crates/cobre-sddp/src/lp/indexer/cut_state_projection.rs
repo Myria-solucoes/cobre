@@ -285,8 +285,9 @@ mod tests {
         )
     }
 
-    /// Like [`finalized`] but with a declared terminal commitment block.
-    fn finalized_with_commitment_block(
+    /// Like [`finalized`] but with declared terminal commitment-hold
+    /// post-horizon windows.
+    fn finalized_with_commitment_hold_windows(
         hydro_count: usize,
         max_par_order: usize,
         n_anticipated: usize,
@@ -296,7 +297,7 @@ mod tests {
         commitment_decider_stage: Vec<usize>,
     ) -> StateSpace {
         let lag_counts = vec![max_par_order; hydro_count];
-        StateSpace::new_with_commitment_block(
+        StateSpace::new_with_commitment_hold_windows(
             hydro_count,
             max_par_order,
             0,
@@ -426,8 +427,8 @@ mod tests {
         for i in 0..2 {
             assert_eq!(
                 cut.incoming_column(CutSlot::new(2 + i)),
-                InCol::new(global.anticipated_state.start + i),
-                "anticipated slot {i} must map to anticipated_state.start + {i}"
+                InCol::new(global.commit_in.start + i),
+                "anticipated slot {i} must map to commit_in.start + {i}"
             );
         }
     }
@@ -568,8 +569,8 @@ mod tests {
         for i in 0..2 {
             assert_eq!(
                 cut.incoming_column(CutSlot::new(4 + i)),
-                InCol::new(global.anticipated_state.start + i),
-                "anticipated slot {i} must map to anticipated_state.start + {i}"
+                InCol::new(global.commit_in.start + i),
+                "anticipated slot {i} must map to commit_in.start + {i}"
             );
         }
     }
@@ -642,16 +643,16 @@ mod tests {
         );
     }
 
-    // ── Terminal commitment block tests ───────────────────────────────────────
+    // ── Terminal commitment-hold (post-horizon lanes) tests ────────────────
 
-    /// AC1: a declared commitment block joins the projection — `n_slots()`
-    /// grows by exactly the block's width over the pre-block dimension, and
-    /// every block column is present, mirroring the always-included bucket
-    /// and anticipated blocks.
+    /// A declared commitment-hold post-horizon window joins the projection —
+    /// `n_slots()` grows by exactly the window count over the pre-window
+    /// dimension, and every post-horizon lane is present, mirroring the
+    /// always-included bucket and in-study slots.
     #[test]
-    fn commitment_block_joins_the_projection() {
+    fn commitment_hold_post_horizon_joins_the_projection() {
         let pre_block = finalized(2, 1, 1, 2, vec![2]);
-        let with_block = finalized_with_commitment_block(2, 1, 1, 2, vec![2], 2, vec![0, 1]);
+        let with_block = finalized_with_commitment_hold_windows(2, 1, 1, 2, vec![2], 2, vec![0, 1]);
 
         let cut_pre = CutStateProjection::new(&pre_block, ALL_ENABLED);
         let cut_with = CutStateProjection::new(&with_block, ALL_ENABLED);
@@ -659,32 +660,32 @@ mod tests {
         assert_eq!(
             cut_with.n_slots(),
             cut_pre.n_slots() + 2,
-            "n_slots must grow by exactly the block's window count"
+            "n_slots must grow by exactly the window count"
         );
         assert_eq!(cut_with.n_slots(), with_block.n_state);
 
-        for j in with_block.commitment_block_in.clone() {
+        for window in 0..with_block.n_commitment {
+            let j =
+                with_block.commit_in.start + with_block.commitment_hold_post_horizon_offset(window);
             assert_eq!(
-                cut_with.incoming_column(CutSlot::new(
-                    cut_pre.n_slots() + (j - with_block.commitment_block_in.start)
-                )),
+                cut_with.incoming_column(CutSlot::new(cut_pre.n_slots() + window)),
                 InCol::new(j),
-                "commitment-block incoming slot {j} must appear in the projection"
+                "commitment-hold post-horizon incoming lane {j} must appear in the projection"
             );
         }
     }
 
-    /// Always included, ignoring [`StageStateConfig`]: the block stays in the
-    /// projection even under `STORAGE_ONLY`, the same "always included"
-    /// contract buckets and anticipated already carry.
+    /// Always included, ignoring [`StageStateConfig`]: the post-horizon lanes
+    /// stay in the projection even under `STORAGE_ONLY`, the same "always
+    /// included" contract buckets and the in-study slots already carry.
     #[test]
-    fn commitment_block_always_included_regardless_of_state_config() {
-        let global = finalized_with_commitment_block(2, 1, 0, 0, vec![], 2, vec![0, 1]);
+    fn commitment_hold_post_horizon_always_included_regardless_of_state_config() {
+        let global = finalized_with_commitment_hold_windows(2, 1, 0, 0, vec![], 2, vec![0, 1]);
         let cut = CutStateProjection::new(&global, STORAGE_ONLY);
 
-        // storage (2) + commitment block (2), lag/anticipated/buckets absent.
+        // storage (2) + commitment-hold post-horizon lanes (2), lag/in-study/buckets absent.
         assert_eq!(cut.n_slots(), 4);
-        for (i, j) in global.commitment_block_in.clone().enumerate() {
+        for (i, j) in global.commit_in.clone().enumerate() {
             assert_eq!(cut.incoming_column(CutSlot::new(2 + i)), InCol::new(j));
         }
     }
@@ -788,13 +789,13 @@ mod proptests {
             let storage = global.state_dim_storage_range();
             let lag = global.state_dim_lag_range();
             let bucket = global.state_dim_bucket_range();
-            let anticipated = global.state_dim_anticipated_range();
+            let commitment_hold = global.state_dim_commitment_hold_range();
 
             prop_assert_eq!(storage.start, 0);
             prop_assert_eq!(lag.start, storage.end);
             prop_assert_eq!(bucket.start, lag.end);
-            prop_assert_eq!(anticipated.start, bucket.end);
-            prop_assert_eq!(anticipated.end, global.n_state);
+            prop_assert_eq!(commitment_hold.start, bucket.end);
+            prop_assert_eq!(commitment_hold.end, global.n_state);
         }
 
         /// Generalizes `default_projection_is_identity` and
@@ -866,10 +867,7 @@ mod proptests {
                 ));
             }
             for o in 0..global.n_anticipated * global.k_max {
-                expected.push((
-                    global.anticipated_state.start + o,
-                    global.anticipated_slots_out.start + o,
-                ));
+                expected.push((global.commit_in.start + o, global.commit_out.start + o));
             }
 
             prop_assert_eq!(expected.len(), cut.n_slots());

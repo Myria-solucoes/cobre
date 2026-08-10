@@ -530,11 +530,11 @@ mod tests {
     }
 
     /// `state_col_patch_count` includes `n_commitment` (W) alongside
-    /// storage/lag/buckets/anticipated — the sizing gap ticket-006 closes
-    /// (a commitment-block-bearing `StateSpace` previously overflowed
-    /// `fill_col_state_patches`'s undersized column-bound region).
+    /// storage/lag/buckets/anticipated (a commitment-hold-window-bearing
+    /// `StateSpace` previously overflowed `fill_col_state_patches`'s
+    /// undersized column-bound region).
     #[test]
-    fn state_col_patch_count_includes_commitment_block_count() {
+    fn state_col_patch_count_includes_commitment_hold_window_count() {
         let buf = PatchBuffer::new(3, 2, 0, 0, 4, 1, 2, 5);
         // N*(1+L) + n_buckets + A*K + W = 3*3 + 4 + 1*2 + 5 = 20
         assert_eq!(buf.state_col_patch_count(), 20);

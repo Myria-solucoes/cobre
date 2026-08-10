@@ -183,19 +183,19 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
     }
 }
 
-/// Assert the bucket and anticipated-ring state rode the state-assembly plain
+/// Assert the bucket and commitment-hold state rode the state-assembly plain
 /// copy untouched.
 ///
 /// The forward/simulation assembly plain-copies `unscaled_primal[..n_state]`
 /// into the advanced state, then overwrites only `inflow_lags` in place;
-/// `transit_buckets_out` and `anticipated_slots_out` sit in the shift-gap that
-/// overwrite never reaches, because both outgoing columns equal their
-/// state-vector index (the `storage` identity convention). Call after the lag
-/// overwrite, before the caller moves `unscaled_primal` back into scratch.
+/// `transit_buckets_out` and `commit_out` sit in the shift-gap that overwrite
+/// never reaches, because both outgoing columns equal their state-vector
+/// index (the `storage` identity convention). Call after the lag overwrite,
+/// before the caller moves `unscaled_primal` back into scratch.
 // Rationale: this checks a verbatim copy invariant (`extend_from_slice`), not
 // a numerical result, so exact equality is the correct comparison — a
 // tolerance would mask the one bug this guards against (an overwrite landing
-// on the bucket/anticipated-ring range).
+// on the bucket/commitment-hold range).
 #[allow(clippy::float_cmp)]
 pub(crate) fn debug_assert_bucket_copy_gap_intact(
     assembled_state: &[f64],
@@ -206,10 +206,10 @@ pub(crate) fn debug_assert_bucket_copy_gap_intact(
         layout
             .transit_buckets_out
             .clone()
-            .chain(layout.anticipated_slots_out.clone())
+            .chain(layout.commit_out.clone())
             .all(|j| assembled_state[j] == unscaled_primal[j]),
-        "bucket/anticipated-ring state must equal the LP primal's identity \
-         columns: the lag overwrite must never touch the bucket/anticipated-ring \
+        "bucket/commitment-hold state must equal the LP primal's identity \
+         columns: the lag overwrite must never touch the bucket/commitment-hold \
          shift-gap"
     );
 }

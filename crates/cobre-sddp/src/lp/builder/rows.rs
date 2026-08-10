@@ -44,7 +44,7 @@ pub(super) fn fill_stage_rows(
     fill_anticipated_fishing_rows(layout, &mut row_lower, &mut row_upper);
     fill_anticipated_state_out_def_rows(layout, &mut row_lower, &mut row_upper);
     fill_anticipated_slot_definition_rows(layout, &mut row_lower, &mut row_upper);
-    super::commitment_block::fill_commitment_block_rows(layout, &mut row_lower, &mut row_upper);
+    fill_commitment_post_horizon_rows(layout, &mut row_lower, &mut row_upper);
     fill_z_inflow_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
 
     (row_lower, row_upper)
@@ -505,9 +505,12 @@ pub(super) fn fill_operational_violation_rows(
     }
 }
 
-/// Fill anticipated-fishing equality row bounds: `0 == 0` per GENUINELY
-/// anticipated plant this stage (`layout.anticipated.anticipated_fishing_row_pos`
-/// — a `K = 0` self-delivery excludes a plant's row this stage).
+/// Fill commitment-MATURITY equality row bounds: `0 == 0` per anticipated
+/// plant whose delivery matures THIS stage
+/// (`layout.anticipated.anticipated_fishing_row_pos`; a `K = 0`
+/// self-delivery, or no maturing delivery, excludes a plant's row this
+/// stage). Both branches of the single governing fish/carry decision
+/// (`entries.rs`'s `if`/`else`) render `[0, 0]` here identically.
 pub(super) fn fill_anticipated_fishing_rows(
     layout: &StageLayout,
     row_lower: &mut [f64],
@@ -548,12 +551,13 @@ pub(super) fn fill_anticipated_state_out_def_rows(
     );
 }
 
-/// Fill the anticipated ring's interior plain-shift definition row bounds
-/// (`0 == 0`), one row per (plant, slot) reachable at this stage
-/// (`layout.anticipated.anticipated_slot_row_pos`, sparse like
-/// [`fill_anticipated_state_out_def_rows`]'s `active_pos` offset) — a slot
-/// beyond a plant's own depth or this stage's horizon-reachable cap gets no
-/// row. Empty when `n_anticipated * k_max == 0`.
+/// Fill the future-window commitment-carry equality row bounds (`0 == 0`),
+/// one row per (plant, modular slot) carrying a strictly future, not-yet-due
+/// delivery this stage (`layout.anticipated.anticipated_slot_row_pos`,
+/// sparse like [`fill_anticipated_state_out_def_rows`]'s `active_pos`
+/// offset) — a slot beyond the study horizon, not yet ready, or claimed by
+/// the latch/maturity rows gets no row. Empty when `n_anticipated * k_max ==
+/// 0`.
 fn fill_anticipated_slot_definition_rows(
     layout: &StageLayout,
     row_lower: &mut [f64],
@@ -565,6 +569,22 @@ fn fill_anticipated_slot_definition_rows(
         row_lower,
         row_upper,
     );
+}
+
+/// Fill the terminal post-horizon lanes' per-window equality row bounds
+/// (`0 == 0`): dense, every declared window gets exactly one row every
+/// stage (the latch or the carry — both render `[0, 0]`, mirroring the
+/// in-study families above).
+fn fill_commitment_post_horizon_rows(
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
+    let start = layout.anticipated.row_commitment_start;
+    for w in 0..layout.state.n_commitment {
+        row_lower[start + w] = 0.0;
+        row_upper[start + w] = 0.0;
+    }
 }
 
 /// Write `0 == 0` bounds at each present position of a sparse row-position table.
