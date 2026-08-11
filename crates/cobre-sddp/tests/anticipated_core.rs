@@ -763,6 +763,453 @@ mod anticipated_backward_cut {
         );
     }
 }
+
+mod hm_distribute_conservation {
+    //! Runtime confirmation of the delivery-stage duration-scaling direction: the
+    //! anticipated-state cut coefficient scales linearly with the delivery stage's
+    //! own `block_hours_total`, not the decision stage's. Mirrors
+    //! `anticipated_backward_cut`'s K=1 closed-form fixture, varying only the
+    //! delivery stage's declared hours between a monthly and a weekly duration.
+
+    use cobre_core::entities::{bus::DeficitSegment, thermal::AnticipatedConfig};
+    use cobre_core::scenario::LoadModel;
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    };
+    use cobre_io::config::TrainingSelection;
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal,
+    };
+
+    // ---------------------------------------------------------------------------
+    // Numeric constants (mirrors anticipated_backward_cut's FIXTURE_K1 exactly,
+    // except for the varying delivery-stage duration).
+    // ---------------------------------------------------------------------------
+
+    const C_REG: f64 = 100.0;
+    const C_ANT: f64 = 50.0;
+    const COST_SCALE_FACTOR: f64 = 1_000_000.0;
+    const DECISION_STAGE_HOURS: f64 = 1.0;
+    /// Monthly delivery-stage duration [h].
+    const H_M: f64 = 744.0;
+    /// Weekly delivery-stage duration [h].
+    const H_W: f64 = 168.0;
+    const TOL: f64 = 1e-6;
+
+    const REG_ID: EntityId = EntityId(3);
+    const ANT_ID: EntityId = EntityId(4);
+    const LOADS_MW: [f64; 2] = [10.0, 20.0];
+    const MAX_GEN_REG: f64 = 50.0;
+    const MAX_GEN_ANT: f64 = 30.0;
+    const SEED_MW: f64 = 10.0;
+
+    /// Per-fixture parameters: only `delivery_stage_hours` varies between the two
+    /// `#[test]`-driving fixtures below; every other physical quantity (committed
+    /// MW, fuel cost, load) is shared.
+    struct HmFixture {
+        delivery_stage_hours: f64,
+        expected_coeff: f64,
+    }
+
+    const FIXTURE_MONTHLY: HmFixture = HmFixture {
+        delivery_stage_hours: H_M,
+        expected_coeff: -C_REG / COST_SCALE_FACTOR * H_M,
+    };
+
+    const FIXTURE_WEEKLY: HmFixture = HmFixture {
+        delivery_stage_hours: H_W,
+        expected_coeff: -C_REG / COST_SCALE_FACTOR * H_W,
+    };
+
+    // ---------------------------------------------------------------------------
+    // System builder
+    // ---------------------------------------------------------------------------
+
+    /// Two-stage, K=1 system identical to `anticipated_backward_cut::FIXTURE_K1`
+    /// except that the delivery (stage 1) block carries `delivery_stage_hours`
+    /// instead of a fixed constant; the decision stage (stage 0) keeps
+    /// `DECISION_STAGE_HOURS` unchanged across both fixtures.
+    fn build_system(delivery_stage_hours: f64) -> cobre_core::System {
+        use chrono::{NaiveDate, TimeDelta};
+
+        let stage_date = |offset_days: i64| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date") + TimeDelta::days(offset_days)
+        };
+
+        let bus = make_bus(
+            EntityId(1),
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 1000.0,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+
+        let thermal_reg = make_thermal(
+            REG_ID,
+            ThermalSpec {
+                name: "T_reg".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 4).expect("valid date"),
+                bus_id: EntityId(1),
+                min_generation_mw: 0.0,
+                max_generation_mw: MAX_GEN_REG,
+                cost_per_mwh: C_REG,
+                anticipated_config: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let thermal_ant = make_thermal(
+            ANT_ID,
+            ThermalSpec {
+                name: "T_ant".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 5).expect("valid date"),
+                bus_id: EntityId(1),
+                min_generation_mw: 0.0,
+                max_generation_mw: MAX_GEN_ANT,
+                cost_per_mwh: C_ANT,
+                anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        // StageCalendar requires a chronologically ordered, non-overlapping
+        // calendar; one calendar day per stage keeps it valid while each block's
+        // own duration_hours alone still drives every LP-facing duration.
+        let stages: Vec<Stage> = vec![
+            make_stage(
+                0,
+                StageSpec {
+                    start_date: stage_date(0),
+                    end_date: stage_date(1),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: DECISION_STAGE_HOURS,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: false,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            ),
+            make_stage(
+                1,
+                StageSpec {
+                    start_date: stage_date(1),
+                    end_date: stage_date(2),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: delivery_stage_hours,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: false,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        let load_models: Vec<LoadModel> = LOADS_MW
+            .iter()
+            .enumerate()
+            .map(|(i, &mean_mw)| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 2,
+                k_max: 1,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds::default(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        // K-padded axis: fill_anticipated_columns reads delivery cells at
+        // stage_idx + K_i, so overrides must cover the n_stages + k_max range.
+        // T_reg.id (3) < T_ant.id (4), so System::build's sort_by_key aligns
+        // thermal_idx 0 with T_reg and 1 with T_ant.
+        const THERMAL_AXIS: usize = 2 + 1;
+        for s in 0..THERMAL_AXIS {
+            *bounds.thermal_bounds_mut(0, s) = ThermalStageBounds {
+                cost_per_mwh: C_REG,
+            };
+            *bounds.thermal_block_base_mut(0, s) = ThermalBlockBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: MAX_GEN_REG,
+            };
+            *bounds.thermal_bounds_mut(1, s) = ThermalStageBounds {
+                cost_per_mwh: C_ANT,
+            };
+            *bounds.thermal_block_base_mut(1, s) = ThermalBlockBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: MAX_GEN_ANT,
+            };
+        }
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: 2,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        // One windowed pre-study seed tiling delivery stage 0 exactly (k_max = 1),
+        // matching anticipated_backward_cut::FIXTURE_K1.
+        let initial_conditions = InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
+                thermal_id: ANT_ID,
+                start_date: stage_date(0),
+                end_date: stage_date(1),
+                value_mw: SEED_MW,
+            }],
+            recent_observations: vec![],
+            past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal_reg, thermal_ant])
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid")
+    }
+
+    // ---------------------------------------------------------------------------
+    // Config builder
+    // ---------------------------------------------------------------------------
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+                cost_scale_factor: Some(COST_SCALE_FACTOR),
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Extraction
+    // ---------------------------------------------------------------------------
+
+    /// Trains one backward pass over `fixture`'s system and returns the stage-0
+    /// anticipated-state cut coefficient (the subgradient on the commit-out
+    /// column), analogous to `anticipated_backward_cut`'s per-K extraction.
+    fn extract_anticipated_coefficient(fixture: &HmFixture) -> f64 {
+        let system = build_system(fixture.delivery_stage_hours);
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error must be None; got {:?}",
+            outcome.error
+        );
+
+        let state = setup.stage_state();
+        assert_eq!(
+            state.n_anticipated, 1,
+            "fixture must have exactly one anticipated thermal",
+        );
+        let ant_state_idx = state.commit_out.start;
+
+        let (_slot, _intercept, coefficients) = setup
+            .fcf
+            .active_cuts(0)
+            .next()
+            .expect("stage 0 pool must carry a generated cut after training");
+        coefficients[ant_state_idx]
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test
+    // ---------------------------------------------------------------------------
+
+    /// Runtime confirmation of the `÷H_M` distribute direction: the stage-0
+    /// anticipated-state cut coefficient scales linearly with the delivery
+    /// stage's own `block_hours_total` (the fishing-row `−H` coupling propagated
+    /// backward through the state-fixing dual), never the decision stage's. Two
+    /// fixtures sharing the identical committed MW, fuel cost, and load, and
+    /// differing ONLY in the delivery stage's declared hours (`H_M` = 744 vs
+    /// `H_w` = 168), must produce coefficients in exactly the `H_w / H_M` ratio.
+    /// A runtime that instead replicated the coefficient regardless of delivery
+    /// duration would report a ratio of `≈ 1`, which the final assertion refutes
+    /// loudly by naming both coefficients and both ratios.
+    #[test]
+    fn anticipated_state_coefficient_scales_by_delivery_stage_hours() {
+        let coeff_monthly = extract_anticipated_coefficient(&FIXTURE_MONTHLY);
+        let coeff_weekly = extract_anticipated_coefficient(&FIXTURE_WEEKLY);
+
+        // The ratio check runs FIRST: a runtime that replicates the coefficient
+        // regardless of delivery duration reports a ratio of ~1 here, and this is
+        // the assertion whose message must name it — the per-fixture magnitude
+        // checks below exist only to catch the disjoint "both wrong, ratio
+        // coincidentally right" case, not to preempt this one.
+        let observed_ratio = coeff_weekly / coeff_monthly;
+        let expected_ratio = H_W / H_M;
+        assert!(
+            (observed_ratio - expected_ratio).abs()
+                <= TOL * observed_ratio.abs().max(expected_ratio.abs()),
+            "the anticipated-state cut coefficient must scale by the delivery stage's own \
+         block_hours_total (distribute), not replicate unchanged across delivery \
+         durations: coeff_weekly = {coeff_weekly}, coeff_monthly = {coeff_monthly}, \
+         observed ratio (coeff_weekly/coeff_monthly) = {observed_ratio}, \
+         expected ratio (H_w/H_M) = {expected_ratio}",
+        );
+
+        for (label, coeff, fixture) in [
+            ("monthly", coeff_monthly, &FIXTURE_MONTHLY),
+            ("weekly", coeff_weekly, &FIXTURE_WEEKLY),
+        ] {
+            let expected = fixture.expected_coeff;
+            assert!(
+                (coeff - expected).abs() <= TOL * expected.abs().max(coeff.abs()),
+                "{label} coefficient does not match its closed form -C_REG/COST_SCALE_FACTOR*h: \
+             actual = {coeff}, expected = {expected} \
+             (= -{C_REG}/{COST_SCALE_FACTOR}*{})",
+                fixture.delivery_stage_hours,
+            );
+        }
+    }
+}
+
 mod anticipated_pre_horizon_seed_delivery {
     //! Pre-horizon seed-delivery integration tests for an anticipated thermal across
     //! lead_stages K = 1, 2, 3. Each test trains a small in-code study, runs a

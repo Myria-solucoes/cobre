@@ -1196,12 +1196,14 @@ pub(crate) fn apply_training_policy_mode(
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
+        let target_delivery_intervals = setup.build_terminal_anticipated_delivery_intervals(system);
         let mut on_warning = |msg: &str| eprintln!("cobre-python: boundary cut warning: {msg}");
         let boundary_records = load_boundary_cuts(
             &boundary_path,
             bp.source_stage,
             state_dim,
             &current_manifest,
+            &target_delivery_intervals,
             config.state_space.inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,

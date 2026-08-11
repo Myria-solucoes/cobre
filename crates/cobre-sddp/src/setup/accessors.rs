@@ -1,5 +1,6 @@
 //! Accessor methods and context builders for [`StudySetup`].
 
+use chrono::NaiveDate;
 use cobre_core::System;
 use cobre_core::commissioning::commissioning_active;
 use cobre_core::scenario::SamplingScheme;
@@ -21,7 +22,9 @@ use crate::{
 
 use super::StudySetup;
 use crate::dcs::DcsParams;
-use crate::policy_export::{build_graph_manifest, build_stage_entity_manifest};
+use crate::policy_export::{
+    build_graph_manifest, build_stage_entity_delivery_intervals, build_stage_entity_manifest,
+};
 
 impl StudySetup {
     /// Replace the FCF with a pre-loaded policy.
@@ -127,6 +130,34 @@ impl StudySetup {
             &self.stage_data.state,
             &self.stage_data.cut_state_layouts[terminal_idx],
             stage_id,
+        )
+    }
+
+    /// Build the per-slot post-horizon delivery interval for the terminal cut
+    /// pool, aligned 1:1 with [`Self::build_terminal_entity_manifest`]:
+    /// `Some((start, end))` for a live, dated `AnticipatedThermalState`
+    /// post-horizon lane slot, `None` elsewhere.
+    ///
+    /// Delegates to [`build_stage_entity_delivery_intervals`], the companion
+    /// [`build_stage_entity_manifest`] walks in lockstep, against the SAME
+    /// terminal pool projection — the two outputs are aligned by construction,
+    /// never a re-derived subindex convention. The caller passes the result to
+    /// [`load_boundary_cuts`](crate::load_boundary_cuts) so the boundary
+    /// reconciliation's date-driven fan-out
+    /// (`crate::policy::reconcile::build_rebind`) can resolve each target
+    /// slot's real calendar span.
+    ///
+    /// `system` is passed explicitly because [`StudySetup`] does not own it.
+    #[must_use]
+    pub fn build_terminal_anticipated_delivery_intervals(
+        &self,
+        system: &System,
+    ) -> Vec<Option<(NaiveDate, NaiveDate)>> {
+        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        build_stage_entity_delivery_intervals(
+            system,
+            &self.stage_data.state,
+            &self.stage_data.cut_state_layouts[terminal_idx],
         )
     }
 

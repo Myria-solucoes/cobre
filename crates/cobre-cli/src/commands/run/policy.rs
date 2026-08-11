@@ -238,6 +238,7 @@ pub(super) fn apply_training_policy(
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
+        let target_delivery_intervals = setup.build_terminal_anticipated_delivery_intervals(system);
         let stderr = &ctx.stderr;
         let quiet = ctx.quiet;
         let is_root = ctx.is_root;
@@ -252,6 +253,7 @@ pub(super) fn apply_training_policy(
             bp.source_stage,
             state_dim,
             &current_manifest,
+            &target_delivery_intervals,
             declared_inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,

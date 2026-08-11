@@ -11,23 +11,29 @@
 //! identity match; a miss defaults to [`RebindOp::Zero`] instead of
 //! rejecting — a NEWAVE-shaped source carries no transit slots at all, so a
 //! miss is the expected case, not a boundary the current study is
-//! incompatible with. Anticipated slots dispatch on `delivery_date`:
-//! `SENTINEL` (pre-fan-out padding) defaults to `Zero`; a live, dated slot is
-//! [`RebindOp::Reject`] — the dated fan-out reconciliation is not yet
-//! implemented, so [`RebindOp::Blend`]/[`RebindOp::Renormalize`] stay an
-//! unconstructed seam for that future work, never reached from real input.
-//! Every remaining family falls back to the identity-reject default, pending
-//! its own arm. When every storage/lag/transit/unclassified target slot has a
-//! same-identity source counterpart and every anticipated slot is still
-//! sentinel-dated — the shape an already target-aligned, pre-fan-out boundary
-//! policy has — the rebind reproduces the source cut's own coefficients
-//! bit-for-bit: `Copy` at the matching position for every identity-resolved
-//! family, and `Zero` for the sentinel-anticipated slot, whose source
-//! coefficient there is itself always `0.0` (a masked state dimension never
-//! holds a value). This is the strict-superset guarantee.
+//! incompatible with. Anticipated slots dispatch on `delivery_date` and the
+//! caller-supplied `target_delivery_intervals`: `SENTINEL` (pre-fan-out
+//! padding) always defaults to `Zero`; a live, dated slot fans out against
+//! the source's own anticipated months by calendar overlap — full coverage by
+//! priced source months yields [`RebindOp::Blend`] (the `÷H_M` distribute), a
+//! boundary-edge slot straddling into unpriced time yields
+//! [`RebindOp::Renormalize`] (anti-deflation over the covered span), no
+//! covered month yields `Zero`, and a slot with no resolved interval — an
+//! invariant violation — is [`RebindOp::Reject`]. Every remaining family falls
+//! back to the identity-reject default, pending its own arm. When every
+//! storage/lag/transit/unclassified target slot has a same-identity source
+//! counterpart and every anticipated slot is still sentinel-dated — the shape
+//! an already target-aligned, pre-fan-out boundary policy has — the rebind
+//! reproduces the source cut's own coefficients bit-for-bit: `Copy` at the
+//! matching position for every identity-resolved family, and `Zero` for the
+//! sentinel-anticipated slot, whose source coefficient there is itself always
+//! `0.0` (a masked state dimension never holds a value). This is the
+//! strict-superset guarantee.
 
 use std::collections::HashMap;
 
+use chrono::Months;
+use chrono::NaiveDate;
 use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::OwnedPolicyCutRecord;
@@ -38,43 +44,48 @@ use crate::policy::policy_export::{
     ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
 };
 
+/// Tolerance (hours) for treating a target slot's covered-month overlap as
+/// exactly `H_w` — the `Blend`-vs-`Renormalize` dividing line. Calendar-day
+/// arithmetic converted to hours is exact in `f64` for any realistic
+/// horizon, so this only absorbs a multi-term summation's rounding, never
+/// masks a genuine gap.
+const COVERAGE_TOLERANCE_HOURS: f64 = 1e-6;
+
 /// One reconciliation operation, producing one target-manifest slot's
 /// coefficient from a source cut's coefficients.
 ///
 /// [`build_rebind`] assigns exactly one op per target slot; [`rebind_cut`]
 /// applies the assignment to a source cut.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RebindOp {
     /// Take the source coefficient at this position verbatim.
     Copy(usize),
     /// No source counterpart contributes; the coefficient is `0.0`.
     Zero,
-    /// A calendar-overlap-weighted blend of source positions.
-    ///
-    /// [`build_rebind`] never constructs this from real input today — a
-    /// dated `AnticipatedThermalState` target slot rejects instead, pending
-    /// the dated fan-out reconciliation — so reaching it in [`rebind_cut`] is
-    /// unreachable, a [`build_rebind`] postcondition.
-    // Rationale: constructed only by this module's tests until the dated
-    // fan-out reconciliation lands.
-    #[allow(dead_code)]
-    Blend,
-    /// A [`Self::Blend`] re-normalized over its covered overlap span.
-    ///
-    /// [`build_rebind`] never constructs this from real input today, for the
-    /// same reason as [`Self::Blend`]; reaching it in [`rebind_cut`] is
-    /// likewise unreachable.
-    // Rationale: constructed only by this module's tests until the dated
-    // fan-out reconciliation lands.
-    #[allow(dead_code)]
-    Renormalize,
+    /// An hours-weighted blend of source positions: [`rebind_cut`] applies
+    /// `Σ cut.coefficients[p] · w` over the `(source_position, weight)`
+    /// terms. [`build_rebind`] constructs this for a live, dated
+    /// `AnticipatedThermalState` target slot fully covered by priced source
+    /// months, `weight = overlap(w, M) / H_M` per covered month `M` — the
+    /// `÷H_M` distribute. A monthly target fully inside one source month
+    /// yields a single `1.0` term (copy-equivalent).
+    Blend(Vec<(usize, f64)>),
+    /// A [`Self::Blend`] re-normalized over its covered overlap span:
+    /// [`rebind_cut`] applies the identical weighted sum, but each term's
+    /// weight is additionally scaled by `H_w / Σ_covered overlap(w, M)` so
+    /// the covered months' density replicates across the target slot's
+    /// uncovered span instead of deflating it with an implicit `0.0` term.
+    /// [`build_rebind`] constructs this for a target slot whose interval
+    /// straddles a priced month and an unpriced one.
+    Renormalize(Vec<(usize, f64)>),
     /// The target slot cannot be resolved from `source`: either no
     /// same-identity counterpart exists under a family that requires one
     /// (storage, inflow-lag, the identity fallback — the entity is never
-    /// relaxed), or the family's reconciliation is not yet implemented (a
-    /// dated `AnticipatedThermalState` slot). A sentinel: [`build_rebind`]
-    /// converts this into an [`SddpError::Validation`] rather than returning
-    /// it, so it never appears in a successfully built op vector.
+    /// relaxed), or a dated `AnticipatedThermalState` slot has no resolved
+    /// delivery interval (an invariant violation, never expected on real
+    /// input). A sentinel: [`build_rebind`] converts this into an
+    /// [`SddpError::Validation`] rather than returning it, so it never
+    /// appears in a successfully built op vector.
     Reject {
         /// Human-readable rejection reason.
         reason: String,
@@ -89,10 +100,113 @@ fn slot_key(slot: &EntitySlot) -> SlotKey {
     (slot.entity_type, slot.entity_id, slot.subindex)
 }
 
+/// One anticipated source slot's decoded calendar month: `source_pos` is its
+/// position in `source`; `[month_start, month_end)` and `h_m` come from
+/// [`decode_month_anchor`].
+struct MonthSource {
+    source_pos: usize,
+    month_start: NaiveDate,
+    month_end: NaiveDate,
+    h_m: f64,
+}
+
+/// `(entity_type, entity_id)` — the anticipated fan-out join key. A source
+/// anticipated slot's `entity_type` is always [`ENTITY_TYPE_ANTICIPATED_THERMAL_STATE`],
+/// so the first component never varies; kept for symmetry with [`SlotKey`],
+/// the identity families' join key.
+type MonthKey = (u8, i32);
+
+/// Positive `[start, end)` span in hours; `0.0` for a degenerate or
+/// backwards interval (`end <= start`), never a negative value.
+fn positive_hours(start: NaiveDate, end: NaiveDate) -> f64 {
+    if end <= start {
+        return 0.0;
+    }
+    let days = u32::try_from((end - start).num_days()).unwrap_or(0);
+    f64::from(days) * 24.0
+}
+
+/// Hours of overlap between two `[start, end)` calendar intervals; `0.0` when
+/// they do not intersect.
+fn overlap_hours(a: (NaiveDate, NaiveDate), b: (NaiveDate, NaiveDate)) -> f64 {
+    positive_hours(a.0.max(b.0), a.1.min(b.1))
+}
+
+/// Decode a day-01 `YYYYMM01` anchor into `[month_start, month_end)` and
+/// `H_M = days_in_month · 24` hours — the exact inverse of
+/// `year_month_day_anchor` (`setup/mod.rs`).
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if `delivery_date` does not decode to a
+/// real calendar month.
+fn decode_month_anchor(delivery_date: i32) -> Result<(NaiveDate, NaiveDate, f64), SddpError> {
+    let year = delivery_date / 10_000;
+    let month = u32::try_from(delivery_date / 100 % 100).map_err(|_| {
+        SddpError::Validation(format!(
+            "boundary policy source anticipated slot has a malformed delivery_date anchor \
+             {delivery_date}"
+        ))
+    })?;
+    let month_start = NaiveDate::from_ymd_opt(year, month, 1).ok_or_else(|| {
+        SddpError::Validation(format!(
+            "boundary policy source anticipated slot has an invalid delivery_date anchor \
+             {delivery_date}"
+        ))
+    })?;
+    let month_end = month_start
+        .checked_add_months(Months::new(1))
+        .ok_or_else(|| {
+            SddpError::Validation(format!(
+                "boundary policy source anticipated slot's delivery_date anchor {delivery_date} \
+             overflows the calendar"
+            ))
+        })?;
+    let h_m = positive_hours(month_start, month_end);
+    Ok((month_start, month_end, h_m))
+}
+
+/// Index every LIVE (non-sentinel) anticipated source slot by its owning
+/// [`MonthKey`], decoding each slot's day-01 `delivery_date` anchor into the
+/// calendar month [`resolve_anticipated`] computes `overlap(w, M)` against.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if a live anticipated source slot's
+/// `delivery_date` fails to decode ([`decode_month_anchor`]).
+fn build_by_month_index(
+    source: &[EntitySlot],
+) -> Result<HashMap<MonthKey, Vec<MonthSource>>, SddpError> {
+    let mut by_month: HashMap<MonthKey, Vec<MonthSource>> = HashMap::new();
+    for (pos, slot) in source.iter().enumerate() {
+        if slot.entity_type != ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            || slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        {
+            continue;
+        }
+        let (month_start, month_end, h_m) = decode_month_anchor(slot.delivery_date)?;
+        by_month
+            .entry((slot.entity_type, slot.entity_id))
+            .or_default()
+            .push(MonthSource {
+                source_pos: pos,
+                month_start,
+                month_end,
+                h_m,
+            });
+    }
+    Ok(by_month)
+}
+
 /// Build one [`RebindOp`] per `target` slot, dispatched per target slot's
 /// `entity_type` to [`resolve_storage`], [`resolve_inflow_lag`],
 /// [`resolve_transit_bucket`], [`resolve_anticipated`], or the identity
-/// fallback [`resolve_by_identity`].
+/// fallback [`resolve_by_identity`]. `target_delivery_intervals` is aligned
+/// 1:1 with `target` (`Some((start, end))` for a live, dated
+/// `AnticipatedThermalState` target slot, `None` elsewhere) — the calendar
+/// span [`resolve_anticipated`] resolves `overlap(w, M)` against `source`'s
+/// own anticipated months, reconstructed from their `delivery_date` day-01
+/// anchors ([`build_by_month_index`]; no new source input).
 ///
 /// For a `target` whose every storage/lag/transit/unclassified slot has a
 /// same-identity `source` counterpart, and whose every anticipated slot is
@@ -106,21 +220,30 @@ fn slot_key(slot: &EntitySlot) -> SlotKey {
 ///
 /// Returns [`SddpError::Validation`] if a storage, inflow-lag, or
 /// unclassified `target` slot has no `source` counterpart under identity
-/// resolution, or if a `target` slot is a dated (non-sentinel)
-/// `AnticipatedThermalState` slot — the dated fan-out reconciliation is not
-/// yet implemented.
+/// resolution, a live anticipated `source` slot's `delivery_date` fails to
+/// decode to a real calendar month, or a live, dated `AnticipatedThermalState`
+/// `target` slot has no resolved entry in `target_delivery_intervals`.
 pub(crate) fn build_rebind(
     source: &[EntitySlot],
     target: &[EntitySlot],
+    target_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
 ) -> Result<Vec<RebindOp>, SddpError> {
+    debug_assert_eq!(
+        target_delivery_intervals.len(),
+        target.len(),
+        "target_delivery_intervals must be aligned 1:1 with target"
+    );
+
     let mut by_identity: HashMap<SlotKey, usize> = HashMap::with_capacity(source.len());
     for (pos, slot) in source.iter().enumerate() {
         by_identity.insert(slot_key(slot), pos);
     }
+    let by_month = build_by_month_index(source)?;
 
     let mut ops = Vec::with_capacity(target.len());
     for (i, slot) in target.iter().enumerate() {
-        match resolve_target_slot(i, slot, &by_identity) {
+        let interval = target_delivery_intervals.get(i).copied().flatten();
+        match resolve_target_slot(i, slot, &by_identity, &by_month, interval) {
             RebindOp::Reject { reason } => return Err(SddpError::Validation(reason)),
             op => ops.push(op),
         }
@@ -134,17 +257,21 @@ pub(crate) fn build_rebind(
 /// transit-bucket include it); all three share the one `by_identity` map,
 /// since it already keys on the full `(entity_type, entity_id, subindex)`
 /// triple. Anticipated slots never consult `by_identity` — dispatch is on
-/// `delivery_date` alone.
+/// `delivery_date` and `target_interval`, joined against `by_month`.
 fn resolve_target_slot(
     i: usize,
     slot: &EntitySlot,
     by_identity: &HashMap<SlotKey, usize>,
+    by_month: &HashMap<MonthKey, Vec<MonthSource>>,
+    target_interval: Option<(NaiveDate, NaiveDate)>,
 ) -> RebindOp {
     match slot.entity_type {
         ENTITY_TYPE_HYDRO_STORAGE => resolve_storage(slot, by_identity),
         ENTITY_TYPE_HYDRO_INFLOW_LAG => resolve_inflow_lag(slot, by_identity),
         ENTITY_TYPE_HYDRO_TRANSIT_BUCKET => resolve_transit_bucket(slot, by_identity),
-        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE => resolve_anticipated(slot),
+        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE => {
+            resolve_anticipated(slot, target_interval, by_month)
+        }
         _ => resolve_by_identity(i, slot, by_identity),
     }
 }
@@ -194,24 +321,74 @@ fn resolve_transit_bucket(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usiz
     }
 }
 
-/// `AnticipatedThermalState` resolution, dispatched on `delivery_date` alone
-/// (never `by_identity`): a slot padding beyond its own reachable lead
-/// (`delivery_date == SENTINEL`) never held a value, so it defaults to
-/// `Zero`. A live, dated slot rejects — the dated fan-out reconciliation is
-/// not yet implemented — never silently zeroed.
-fn resolve_anticipated(slot: &EntitySlot) -> RebindOp {
+/// `AnticipatedThermalState` resolution. `slot.delivery_date == SENTINEL`
+/// (pre-fan-out padding) always resolves to `Zero`, regardless of
+/// `target_interval`. A live, dated slot with no resolved `target_interval`
+/// is an invariant violation ([`RebindOp::Reject`], naming the slot) — a
+/// covered post-horizon lane always resolves one
+/// (`post_horizon_delivery_date`'s own debug-assert guarantees this). A live,
+/// dated slot WITH a resolved interval fans out against `by_month`'s
+/// calendar-overlap-weighted source months: no covered month yields `Zero`;
+/// full coverage yields [`RebindOp::Blend`] (`weight = overlap(w, M) / H_M`,
+/// the `÷H_M` distribute); partial coverage (a boundary-edge slot straddling
+/// into unpriced time) yields [`RebindOp::Renormalize`], scaling the covered
+/// months' density up to the full slot instead of an implicit `0.0`
+/// deflation term.
+fn resolve_anticipated(
+    slot: &EntitySlot,
+    target_interval: Option<(NaiveDate, NaiveDate)>,
+    by_month: &HashMap<MonthKey, Vec<MonthSource>>,
+) -> RebindOp {
     if slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
-        RebindOp::Zero
-    } else {
-        RebindOp::Reject {
+        return RebindOp::Zero;
+    }
+    let Some((start_w, end_w)) = target_interval else {
+        return RebindOp::Reject {
             reason: format!(
-                "boundary policy target has a dated anticipated-thermal-state slot \
-                 (entity_id={}, subindex={}, delivery_date={}): post-horizon anticipated date \
-                 reconciliation is not yet supported (the dated fan-out reconciliation is not \
-                 yet implemented)",
+                "boundary policy target has a dated anticipated-thermal-state slot with no \
+                 resolved delivery interval (entity_id={}, subindex={}, delivery_date={}): a \
+                 covered post-horizon lane must always resolve one",
                 slot.entity_id, slot.subindex, slot.delivery_date
             ),
+        };
+    };
+
+    let h_w = positive_hours(start_w, end_w);
+    if h_w <= 0.0 {
+        return RebindOp::Zero;
+    }
+    let Some(months) = by_month.get(&(slot.entity_type, slot.entity_id)) else {
+        return RebindOp::Zero;
+    };
+
+    let mut terms = Vec::new();
+    let mut covered = 0.0;
+    for m in months {
+        let overlap = overlap_hours((start_w, end_w), (m.month_start, m.month_end));
+        if overlap > 0.0 {
+            terms.push((m.source_pos, overlap, m.h_m));
+            covered += overlap;
         }
+    }
+    if terms.is_empty() {
+        return RebindOp::Zero;
+    }
+
+    if (h_w - covered).abs() <= COVERAGE_TOLERANCE_HOURS {
+        RebindOp::Blend(
+            terms
+                .into_iter()
+                .map(|(pos, overlap, h_m)| (pos, overlap / h_m))
+                .collect(),
+        )
+    } else {
+        let scale = h_w / covered;
+        RebindOp::Renormalize(
+            terms
+                .into_iter()
+                .map(|(pos, overlap, h_m)| (pos, (overlap / h_m) * scale))
+                .collect(),
+        )
     }
 }
 
@@ -236,24 +413,26 @@ fn resolve_by_identity(
 
 /// Produce `rebind`'s target-aligned coefficient vector from one source cut.
 ///
+/// `Blend` and `Renormalize` both apply their precomputed `(source_position,
+/// weight)` terms identically — `Σ cut.coefficients[p] · w` — the
+/// distribute-vs-renormalize distinction lives entirely in how
+/// [`build_rebind`] computed the weights, never in this application.
+///
 /// # Panics
 ///
-/// Panics if `rebind` contains a [`RebindOp::Blend`], [`RebindOp::Renormalize`],
-/// or [`RebindOp::Reject`] — each is a [`build_rebind`] postcondition
-/// violation: `build_rebind` converts every `Reject` into an error before
-/// returning, and never constructs `Blend`/`Renormalize` from real input (a
-/// dated `AnticipatedThermalState` target slot rejects instead, pending the
-/// dated fan-out reconciliation).
+/// Panics if `rebind` contains a [`RebindOp::Reject`] — a [`build_rebind`]
+/// postcondition violation: `build_rebind` converts every `Reject` into an
+/// error before returning.
 pub(crate) fn rebind_cut(cut: &OwnedPolicyCutRecord, rebind: &[RebindOp]) -> Vec<f64> {
     rebind
         .iter()
         .map(|op| match op {
             RebindOp::Copy(pos) => cut.coefficients[*pos],
             RebindOp::Zero => 0.0,
-            RebindOp::Blend | RebindOp::Renormalize => unreachable!(
-                "{op:?} is a build_rebind postcondition violation: build_rebind never \
-                 constructs this from real input"
-            ),
+            RebindOp::Blend(terms) | RebindOp::Renormalize(terms) => terms
+                .iter()
+                .map(|&(pos, w)| cut.coefficients[pos] * w)
+                .sum(),
             RebindOp::Reject { reason } => unreachable!(
                 "build_rebind must convert Reject into an error before rebind_cut sees it: \
                  {reason}"
@@ -284,10 +463,12 @@ pub(crate) fn dropped_source_positions(source_len: usize, rebind: &[RebindOp]) -
 
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveDate;
+
     use super::{
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
-        ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, RebindOp, build_rebind, dropped_source_positions,
-        rebind_cut,
+        ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, RebindOp, build_rebind, decode_month_anchor,
+        dropped_source_positions, rebind_cut,
     };
     use crate::SddpError;
     use cobre_io::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyCutRecord};
@@ -354,6 +535,17 @@ mod tests {
         }
     }
 
+    /// All-`None` intervals aligned to `target.len()` — for tests exercising
+    /// only the identity families, which never consult
+    /// `target_delivery_intervals`.
+    fn no_intervals(target: &[EntitySlot]) -> Vec<Option<(NaiveDate, NaiveDate)>> {
+        vec![None; target.len()]
+    }
+
+    fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
+    }
+
     /// Given a `source` and `target` manifest of equal shape (all storage),
     /// when `build_rebind` runs, then it returns one `Copy` per slot at the
     /// matching source position.
@@ -362,7 +554,7 @@ mod tests {
         let source = vec![storage_slot(1), storage_slot(2), storage_slot(3)];
         let target = source.clone();
 
-        let rebind = build_rebind(&source, &target).unwrap();
+        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
 
         assert_eq!(
             rebind,
@@ -384,7 +576,7 @@ mod tests {
         ];
         let target = vec![storage_slot(2), inflow_lag_slot(1, 1)];
 
-        let rebind = build_rebind(&source, &target).unwrap();
+        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
 
         assert_eq!(rebind, vec![RebindOp::Copy(2), RebindOp::Copy(1)]);
     }
@@ -396,7 +588,7 @@ mod tests {
         let source = vec![storage_slot(1)];
         let target = vec![storage_slot(1), storage_slot(42)];
 
-        let err = build_rebind(&source, &target).unwrap_err();
+        let err = build_rebind(&source, &target, &no_intervals(&target)).unwrap_err();
 
         let msg = err.to_string();
         assert!(msg.contains("42"), "must name the unpriced hydro: {msg}");
@@ -410,7 +602,7 @@ mod tests {
         let source = vec![storage_slot(1), inflow_lag_slot(1, 1)];
         let target = vec![storage_slot(1), inflow_lag_slot(1, 2)];
 
-        let err = build_rebind(&source, &target).unwrap_err();
+        let err = build_rebind(&source, &target, &no_intervals(&target)).unwrap_err();
 
         let msg = err.to_string();
         assert!(msg.contains('1'), "must name hydro 1: {msg}");
@@ -426,7 +618,7 @@ mod tests {
         let source = vec![inflow_lag_slot(5, 1)];
         let target = vec![storage_slot(5)];
 
-        let err = build_rebind(&source, &target).unwrap_err();
+        let err = build_rebind(&source, &target, &no_intervals(&target)).unwrap_err();
 
         assert!(matches!(err, SddpError::Validation(_)));
     }
@@ -438,7 +630,7 @@ mod tests {
     fn rebind_cut_all_copy_matches_source_coefficients_verbatim() {
         let source = vec![storage_slot(1), storage_slot(2)];
         let target = source.clone();
-        let rebind = build_rebind(&source, &target).unwrap();
+        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
         let cut = owned_cut(vec![10.0, -5.0]);
 
         let coefficients = rebind_cut(&cut, &rebind);
@@ -458,29 +650,30 @@ mod tests {
         assert_eq!(coefficients, vec![7.0, 0.0]);
     }
 
-    /// Given a `Blend` op reached in violation of `build_rebind`'s
-    /// postcondition (it never constructs one from real input), when
-    /// `rebind_cut` runs, then it panics loudly (never silently returns
-    /// `0.0`).
+    /// Given a `Blend` op with two weighted source positions, when
+    /// `rebind_cut` runs, then it returns their weighted sum — the mechanical
+    /// application `build_rebind`'s weight computation feeds.
     #[test]
-    #[should_panic(expected = "postcondition violation")]
-    fn rebind_cut_blend_op_panics_loudly() {
-        let rebind = vec![RebindOp::Blend];
-        let cut = owned_cut(vec![1.0]);
+    fn rebind_cut_blend_op_sums_weighted_source_positions() {
+        let rebind = vec![RebindOp::Blend(vec![(0, 0.25), (1, 0.75)])];
+        let cut = owned_cut(vec![100.0, 200.0]);
 
-        let _ = rebind_cut(&cut, &rebind);
+        let coefficients = rebind_cut(&cut, &rebind);
+
+        assert_eq!(coefficients, vec![175.0]);
     }
 
-    /// Given a `Renormalize` op reached in violation of `build_rebind`'s
-    /// postcondition, when `rebind_cut` runs, then it panics loudly (never
-    /// silently returns `0.0`).
+    /// Given a `Renormalize` op, when `rebind_cut` runs, then it applies the
+    /// identical weighted-sum mechanics as `Blend` — the distinction is only
+    /// in the weight value, never in how `rebind_cut` uses it.
     #[test]
-    #[should_panic(expected = "postcondition violation")]
-    fn rebind_cut_renormalize_op_panics_loudly() {
-        let rebind = vec![RebindOp::Renormalize];
-        let cut = owned_cut(vec![1.0]);
+    fn rebind_cut_renormalize_op_sums_weighted_source_positions() {
+        let rebind = vec![RebindOp::Renormalize(vec![(0, 0.5)])];
+        let cut = owned_cut(vec![40.0]);
 
-        let _ = rebind_cut(&cut, &rebind);
+        let coefficients = rebind_cut(&cut, &rebind);
+
+        assert_eq!(coefficients, vec![20.0]);
     }
 
     #[test]
@@ -488,7 +681,7 @@ mod tests {
         let source = vec![storage_slot(1)];
         let target = vec![storage_slot(1), storage_slot(2)];
 
-        let err = build_rebind(&source, &target).unwrap_err();
+        let err = build_rebind(&source, &target, &no_intervals(&target)).unwrap_err();
 
         assert!(matches!(err, SddpError::Validation(_)));
     }
@@ -512,7 +705,8 @@ mod tests {
         let source = vec![storage_slot(1), transit_bucket_slot(2, 1)];
         let matching_target = vec![storage_slot(1), transit_bucket_slot(2, 1)];
 
-        let rebind = build_rebind(&source, &matching_target).unwrap();
+        let rebind =
+            build_rebind(&source, &matching_target, &no_intervals(&matching_target)).unwrap();
 
         assert_eq!(rebind, vec![RebindOp::Copy(0), RebindOp::Copy(1)]);
         let cut = owned_cut(vec![10.0, 99.0]);
@@ -520,7 +714,8 @@ mod tests {
 
         let missing_target = vec![storage_slot(1), transit_bucket_slot(3, 1)];
 
-        let rebind = build_rebind(&source, &missing_target).unwrap();
+        let rebind =
+            build_rebind(&source, &missing_target, &no_intervals(&missing_target)).unwrap();
 
         assert_eq!(rebind, vec![RebindOp::Copy(0), RebindOp::Zero]);
         assert_eq!(rebind_cut(&cut, &rebind), vec![10.0, 0.0]);
@@ -535,28 +730,161 @@ mod tests {
         let source = vec![storage_slot(1), anticipated_sentinel_slot(9, 0)];
         let target = vec![storage_slot(1), anticipated_sentinel_slot(9, 0)];
 
-        let rebind = build_rebind(&source, &target).unwrap();
+        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
 
         assert_eq!(rebind, vec![RebindOp::Copy(0), RebindOp::Zero]);
     }
 
-    /// Given a target anticipated slot with a live (non-sentinel)
-    /// `delivery_date`, when `build_rebind` runs, then it returns a graceful
-    /// `Err(SddpError::Validation)` naming the not-yet-supported dated
-    /// fan-out reconciliation — never a panic, and never a silent `Zero`
-    /// over a real dated slot.
+    /// A `YYYYMM01` source anchor decodes to the correct `[month_start,
+    /// month_end)` interval and `H_M = days_in_month · 24` hours.
     #[test]
-    fn build_rebind_dated_anticipated_target_rejects_gracefully() {
+    fn decode_month_anchor_yields_correct_interval_and_hours() {
+        let (start, end, h_m) = decode_month_anchor(20_260_301).unwrap();
+
+        assert_eq!(start, ymd(2026, 3, 1));
+        assert_eq!(end, ymd(2026, 4, 1));
+        assert_eq!(h_m, 31.0 * 24.0, "March 2026 has 31 days");
+    }
+
+    /// Given a source manifest with one monthly anticipated slot and a
+    /// target lane slot whose interval lies fully inside that month, when
+    /// `build_rebind` runs, then it resolves to `Blend` with a single term
+    /// weighted `overlap/H_M` — the flip of the retired
+    /// `build_rebind_dated_anticipated_target_rejects_gracefully` reject
+    /// path.
+    #[test]
+    fn build_rebind_dated_anticipated_target_fully_covered_yields_blend() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let target = vec![anticipated_dated_slot(9, 100, 20_260_301)];
+        let target_interval = (ymd(2026, 3, 1), ymd(2026, 4, 1));
+        let intervals = vec![Some(target_interval)];
+
+        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+
+        assert_eq!(
+            rebind,
+            vec![RebindOp::Blend(vec![(0, 1.0)])],
+            "a monthly target fully inside one source month yields a single unit-weight term"
+        );
+
+        let cut = owned_cut(vec![42.5]);
+        let coefficients = rebind_cut(&cut, &rebind);
+        assert_eq!(
+            coefficients[0].to_bits(),
+            cut.coefficients[0].to_bits(),
+            "a single unit-weight Blend term must reproduce the source coefficient \
+             bit-for-bit, copy-equivalent"
+        );
+    }
+
+    /// Given a target lane slot spanning one week fully inside a priced
+    /// source month, when `build_rebind` runs, then it resolves to `Blend`
+    /// with a fractional `overlap/H_M` weight.
+    #[test]
+    fn build_rebind_anticipated_partial_month_yields_blend_fractional_weight() {
+        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
+        let target = vec![storage_slot(1), anticipated_dated_slot(9, 100, 20_260_401)];
+        let target_interval = (ymd(2026, 4, 8), ymd(2026, 4, 15));
+        let intervals = vec![None, Some(target_interval)];
+
+        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+
+        match &rebind[1] {
+            RebindOp::Blend(terms) => {
+                assert_eq!(terms.len(), 1);
+                assert_eq!(terms[0].0, 1);
+                let expected_weight = (7.0 * 24.0) / (30.0 * 24.0);
+                assert!(
+                    (terms[0].1 - expected_weight).abs() < expected_weight * 1e-9,
+                    "weight {} != expected {expected_weight}",
+                    terms[0].1
+                );
+            }
+            other => panic!("expected Blend, got {other:?}"),
+        }
+    }
+
+    /// Given a target lane slot whose interval straddles a priced month and
+    /// an unpriced one, when `build_rebind` runs, then it resolves to
+    /// `Renormalize` with a single covered term scaled to the full slot —
+    /// never an implicit `0.0` deflation term for the uncovered days.
+    #[test]
+    fn build_rebind_anticipated_straddle_into_unpriced_yields_renormalize_no_zero_term() {
+        let source_coeff = 300.0;
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let target = vec![anticipated_dated_slot(9, 100, 20_260_301)];
+        let start_w = ymd(2026, 2, 26);
+        let end_w = ymd(2026, 3, 5);
+        let intervals = vec![Some((start_w, end_w))];
+
+        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+
+        let h_w = f64::from(u32::try_from((end_w - start_w).num_days()).unwrap()) * 24.0;
+        let h_m = 31.0 * 24.0;
+        match &rebind[0] {
+            RebindOp::Renormalize(terms) => {
+                assert_eq!(
+                    terms.len(),
+                    1,
+                    "no 0.0 deflation term for the uncovered (unpriced February) days"
+                );
+                let (pos, weight) = terms[0];
+                assert_eq!(pos, 0);
+                let expected_weight = h_w / h_m;
+                assert!(
+                    (weight - expected_weight).abs() < expected_weight * 1e-9,
+                    "weight {weight} != expected {expected_weight}"
+                );
+            }
+            other => panic!("expected Renormalize, got {other:?}"),
+        }
+
+        let cut = owned_cut(vec![source_coeff]);
+        let coefficients = rebind_cut(&cut, &rebind);
+        let expected_coeff = source_coeff * h_w / h_m;
+        assert!(
+            (coefficients[0] - expected_coeff).abs() < expected_coeff.abs() * 1e-9,
+            "renormalized coefficient {} != expected {expected_coeff} (source · H_w/H_priced)",
+            coefficients[0]
+        );
+    }
+
+    /// Given a target lane slot whose interval falls in a month the source
+    /// carries no anticipated slot for, when `build_rebind` runs, then it
+    /// resolves to `Zero` — no covered month, nothing to reconcile to.
+    #[test]
+    fn build_rebind_anticipated_no_covered_month_yields_zero() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let target = vec![anticipated_dated_slot(9, 100, 20_260_301)];
+        let intervals = vec![Some((ymd(2026, 5, 1), ymd(2026, 5, 8)))];
+
+        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+
+        assert_eq!(rebind, vec![RebindOp::Zero]);
+    }
+
+    /// Given a live, dated anticipated target slot whose
+    /// `target_delivery_intervals` entry is `None` (an invariant violation —
+    /// a covered post-horizon lane always resolves one), when `build_rebind`
+    /// runs, then it rejects cleanly, naming the offending slot — never a
+    /// panic, and never a silent `Zero`.
+    #[test]
+    fn build_rebind_dated_anticipated_target_with_no_resolved_interval_rejects() {
         let source = vec![storage_slot(1)];
         let target = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_301)];
+        let intervals = vec![None, None];
 
-        let err = build_rebind(&source, &target).unwrap_err();
+        let err = build_rebind(&source, &target, &intervals).unwrap_err();
 
         assert!(matches!(err, SddpError::Validation(_)));
         let msg = err.to_string();
         assert!(
-            msg.contains("post-horizon anticipated date reconciliation is not yet supported"),
-            "must name the not-yet-supported dated fan-out reconciliation: {msg}"
+            msg.contains('9'),
+            "must name the offending entity id: {msg}"
+        );
+        assert!(
+            msg.contains("no resolved delivery interval"),
+            "must name the unresolved-interval invariant violation: {msg}"
         );
     }
 
@@ -576,7 +904,7 @@ mod tests {
             anticipated_sentinel_slot(9, 0),
         ];
         let target = source.clone();
-        let rebind = build_rebind(&source, &target).unwrap();
+        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
         let cut = owned_cut(vec![10.5, -3.25, 0.0]);
 
         let coefficients = rebind_cut(&cut, &rebind);
@@ -604,7 +932,7 @@ mod tests {
             anticipated_sentinel_slot(9, 0),
         ];
         let target = vec![storage_slot(1)];
-        let rebind = build_rebind(&source, &target).unwrap();
+        let rebind = build_rebind(&source, &target, &no_intervals(&target)).unwrap();
 
         let dropped = dropped_source_positions(source.len(), &rebind);
 

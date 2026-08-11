@@ -5,9 +5,9 @@
 //! `load_boundary_cuts`.
 //!
 //! Extended with transit-bucket (identity match copies, a miss defaults to
-//! `0.0`), sentinel-dated-anticipated default-`0.0`, and dated-anticipated
-//! graceful-rejection coverage as those families gain their own reconcile
-//! arms.
+//! `0.0`), sentinel-dated-anticipated default-`0.0`, and the dated-anticipated
+//! date-driven fan-out (`÷H_M` `Blend`, coverage-`Renormalize`) as those
+//! families gain their own reconcile arms.
 
 #![allow(
     clippy::unwrap_used,
@@ -22,6 +22,7 @@
     clippy::too_many_lines
 )]
 
+use chrono::NaiveDate;
 use cobre_io::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
     ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload,
@@ -88,6 +89,16 @@ fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -
         was_active: true,
         delivery_date,
     }
+}
+
+/// All-`None` delivery intervals aligned to `len` — for tests whose
+/// manifests carry no live-dated anticipated slot.
+fn no_intervals(len: usize) -> Vec<Option<(NaiveDate, NaiveDate)>> {
+    vec![None; len]
+}
+
+fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
 }
 
 fn producer_block() -> ProducerBlock {
@@ -166,8 +177,17 @@ fn boundary_injection_storage_lag_identity_match_succeeds() {
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
 
     let current = vec![storage_slot(1), inflow_lag_slot(1, 1)];
-    let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |_| {})
-        .expect("an identity-matching boundary must load");
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        2,
+        &current,
+        &no_intervals(current.len()),
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("an identity-matching boundary must load");
 
     assert_eq!(cuts.len(), 1);
     assert_eq!(
@@ -187,7 +207,16 @@ fn boundary_injection_different_hydro_source_rejects_naming_hydro() {
     write_checkpoint(tmp.path(), &manifest, &[10.0]);
 
     let current = vec![storage_slot(42)];
-    let result = load_boundary_cuts(tmp.path(), 0, 1, &current, None, 1_000_000.0, &mut |_| {});
+    let result = load_boundary_cuts(
+        tmp.path(),
+        0,
+        1,
+        &current,
+        &no_intervals(current.len()),
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    );
 
     let msg = result
         .expect_err("an unpriced hydro must reject")
@@ -248,8 +277,17 @@ fn boundary_injection_transit_bucket_defaults_to_zero() {
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
 
     let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
-    let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |_| {})
-        .expect("a transit-only-target load must succeed via the default-zero arm");
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        2,
+        &current,
+        &no_intervals(current.len()),
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("a transit-only-target load must succeed via the default-zero arm");
 
     assert_eq!(cuts.len(), 1);
     assert_eq!(
@@ -270,8 +308,17 @@ fn boundary_injection_sentinel_anticipated_defaults_to_zero() {
     write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
 
     let current = vec![storage_slot(1), sentinel_anticipated_slot(9, 0)];
-    let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |_| {})
-        .expect("a sentinel-anticipated-target load must succeed via the default-zero arm");
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        2,
+        &current,
+        &no_intervals(current.len()),
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("a sentinel-anticipated-target load must succeed via the default-zero arm");
 
     assert_eq!(cuts.len(), 1);
     assert_eq!(
@@ -299,8 +346,17 @@ fn boundary_injection_target_shaped_source_reconciles_bit_identically() {
     write_checkpoint(tmp.path(), &manifest, &coefficients);
 
     let current = manifest.clone();
-    let cuts = load_boundary_cuts(tmp.path(), 0, 3, &current, None, 1_000_000.0, &mut |_| {})
-        .expect("a target-shaped source must load");
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        3,
+        &current,
+        &no_intervals(current.len()),
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("a target-shaped source must load");
 
     assert_eq!(cuts.len(), 1);
     for (actual, expected) in cuts[0].coefficients.iter().zip(coefficients.iter()) {
@@ -311,28 +367,6 @@ fn boundary_injection_target_shaped_source_reconciles_bit_identically() {
              {actual} != {expected}"
         );
     }
-}
-
-/// Given a current terminal manifest with a dated (non-sentinel) anticipated
-/// slot — the shape a post-horizon commitment lane, dated at every terminal
-/// stage, produces — when the `BoundaryInjection` load runs, then it returns
-/// a clean `Err`, never a panic.
-#[test]
-fn boundary_injection_dated_anticipated_target_rejects_gracefully() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let manifest = vec![storage_slot(1), storage_slot(2)];
-    write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
-
-    let current = vec![storage_slot(1), dated_anticipated_slot(9, 0, 20_260_301)];
-    let result = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |_| {});
-
-    let msg = result
-        .expect_err("a dated anticipated target slot must reject cleanly, never panic")
-        .to_string();
-    assert!(
-        msg.contains("post-horizon anticipated date reconciliation is not yet supported"),
-        "error must name the not-yet-supported dated fan-out reconciliation: {msg}"
-    );
 }
 
 /// Given a current terminal manifest with a transit-bucket slot and a source
@@ -349,13 +383,141 @@ fn boundary_injection_transit_bucket_copies_on_identity_match() {
     write_checkpoint(tmp.path(), &manifest, &[10.0, 30.0]);
 
     let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
-    let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |_| {})
-        .expect("a matching transit-bucket boundary must load");
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        2,
+        &current,
+        &no_intervals(current.len()),
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("a matching transit-bucket boundary must load");
 
     assert_eq!(cuts.len(), 1);
     assert_eq!(
         cuts[0].coefficients,
         vec![10.0, 30.0],
         "the transit slot must copy its identity-matched source coefficient, not zero it"
+    );
+}
+
+/// One source month (April 2026, `π_M = 300.0`) and the four `[start, end)`
+/// week-lane intervals that exactly tile it — shared by the fan-out matrix and
+/// interior-weeks conservation tests below.
+fn april_2026_weekly_intervals() -> [(NaiveDate, NaiveDate); 4] {
+    [
+        (ymd(2026, 4, 1), ymd(2026, 4, 8)),
+        (ymd(2026, 4, 8), ymd(2026, 4, 15)),
+        (ymd(2026, 4, 15), ymd(2026, 4, 22)),
+        (ymd(2026, 4, 22), ymd(2026, 5, 1)),
+    ]
+}
+
+/// Given a source manifest with one monthly anticipated slot for thermal `9`
+/// (`π_M = 300.0`, April 2026) and a target manifest with 4 post-horizon lane
+/// slots for thermal `9` whose `[start, end)` intervals tile that month
+/// exactly, when `load_boundary_cuts` runs end-to-end, then each lane
+/// coefficient lands at `π_M · overlap/H_M` — the `÷H_M` distribute.
+#[test]
+fn boundary_injection_dated_anticipated_fan_out_matrix() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source_manifest = vec![
+        storage_slot(1),
+        dated_anticipated_slot(9, 0, 20_260_401),
+        sentinel_anticipated_slot(9, 1),
+        sentinel_anticipated_slot(9, 2),
+        sentinel_anticipated_slot(9, 3),
+    ];
+    write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0, 0.0, 0.0, 0.0]);
+
+    let weeks = april_2026_weekly_intervals();
+    let current = vec![
+        storage_slot(1),
+        dated_anticipated_slot(9, 100, 20_260_401),
+        dated_anticipated_slot(9, 101, 20_260_401),
+        dated_anticipated_slot(9, 102, 20_260_401),
+        dated_anticipated_slot(9, 103, 20_260_401),
+    ];
+    let intervals: Vec<Option<(NaiveDate, NaiveDate)>> = std::iter::once(None)
+        .chain(weeks.iter().map(|&w| Some(w)))
+        .collect();
+
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        5,
+        &current,
+        &intervals,
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("a fully-covered dated anticipated fan-out must load");
+
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients[0], 10.0,
+        "the storage slot still copies its identity-matched coefficient"
+    );
+
+    let h_m = 30.0 * 24.0;
+    let expected_widths_days = [7.0, 7.0, 7.0, 9.0];
+    for (lane, &width_days) in expected_widths_days.iter().enumerate() {
+        let expected = 300.0 * (width_days * 24.0) / h_m;
+        let actual = cuts[0].coefficients[lane + 1];
+        assert!(
+            (actual - expected).abs() < expected.abs() * 1e-9,
+            "lane {lane}: coefficient {actual} != expected {expected} (π_M · overlap/H_M)"
+        );
+    }
+}
+
+/// Given the same one-source-month → 4-target-lane fan-out as
+/// `boundary_injection_dated_anticipated_fan_out_matrix`, when the fanned lane
+/// coefficients are summed, then the sum reproduces the source's own monthly
+/// valuation `π_M` — the interior-weeks conservation invariant: a
+/// constant per-week commitment `K` sees `Σ_w β_w · K = π_M · K` for any `K`,
+/// so the coefficient-level identity `Σ_w β_w == π_M` holds with `K` divided
+/// out.
+#[test]
+fn boundary_injection_dated_anticipated_interior_weeks_conservation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source_manifest = vec![
+        dated_anticipated_slot(9, 0, 20_260_401),
+        sentinel_anticipated_slot(9, 1),
+        sentinel_anticipated_slot(9, 2),
+        sentinel_anticipated_slot(9, 3),
+    ];
+    let source_coeff = 300.0;
+    write_checkpoint(tmp.path(), &source_manifest, &[source_coeff, 0.0, 0.0, 0.0]);
+
+    let weeks = april_2026_weekly_intervals();
+    let current = vec![
+        dated_anticipated_slot(9, 100, 20_260_401),
+        dated_anticipated_slot(9, 101, 20_260_401),
+        dated_anticipated_slot(9, 102, 20_260_401),
+        dated_anticipated_slot(9, 103, 20_260_401),
+    ];
+    let intervals: Vec<Option<(NaiveDate, NaiveDate)>> = weeks.iter().map(|&w| Some(w)).collect();
+
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        4,
+        &current,
+        &intervals,
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("a fully-covered dated anticipated fan-out must load");
+
+    assert_eq!(cuts.len(), 1);
+    let summed: f64 = cuts[0].coefficients.iter().sum();
+    assert!(
+        (summed - source_coeff).abs() < source_coeff.abs() * 1e-9,
+        "Σ_w β_w = {summed} must reproduce the source monthly valuation π_M = {source_coeff}"
     );
 }

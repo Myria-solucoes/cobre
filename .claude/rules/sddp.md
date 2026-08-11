@@ -571,6 +571,50 @@ Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`,
 (BoundaryInjection defers to reconcile) tests, plus `policy::reconcile`'s unit
 tests and `tests/boundary_reconcile_defaults.rs`.
 
+### Dated anticipated fan-out reconciliation is hour-weighted by the SOURCE month
+
+The calendar-`subindex` relaxation the parent section reserves for a date family
+IS this fan-out, and it is confined to `AnticipatedThermalState` slots inside
+`load_boundary_cuts`. A source study prices its anticipated commitments on a
+monthly delivery calendar; the current study delivers them on a post-study weekly
+(and monthly) calendar. `resolve_anticipated` reconciles each target slot `w`
+against the source months `M` it overlaps **by real calendar date**, not by
+subindex: full coverage yields `RebindOp::Blend` with per-month weight
+`overlap_hours(w, M) / H_M` — divided by the **source** month's hours `H_M`, the
+conservation identity that makes a slot's fanned coefficients sum back to the
+source's (a covered target slot's coeff ratio equals `H_w / H_M`). A target slot
+straddling into unpriced time yields `RebindOp::Renormalize`: the same weights
+additionally scaled by `H_w / Σ_covered overlap`, so the covered months' price
+density replicates across the uncovered span instead of deflating the boundary FCF
+with an implicit `0.0` term. No covered month yields `Zero`; a slot with no
+resolved delivery interval is an `Err`, never a silent pass.
+
+`Blend` and `Renormalize` are semantically distinct and MUST NOT be collapsed:
+`rebind_cut` applies both through the identical weighted-sum, so unifying them
+reads like harmless dedup — but only `build_rebind` carries the `Renormalize`
+anti-deflation scale, and dropping it silently understates the boundary FCF on any
+partial-coverage calendar. Two further wrong-but-compiling alternatives: dividing
+by the **target** slot's `H_w` instead of the source `H_M` (breaks the
+`H_w / H_M` conservation ratio), and joining on `subindex` instead of the real
+interval (anticipated delivery is NON-monotone in subindex — the modular
+delivery-target residue of the ring contract above — so a subindex join misaligns
+months to weeks). Source month intervals are reconstructed from the `YYYYMM01`
+day-01 delivery anchor (`decode_month_anchor`, the exact inverse of
+`year_month_day_anchor`); an exact or superset match reconciles byte-for-byte
+(`Copy`). The `H_w / covered` division is guarded: `resolve_anticipated` returns
+`Zero` on `terms.is_empty()` before it can divide by a zero covered span.
+Read: `policy/reconcile.rs` (`resolve_anticipated`, `build_rebind`, `rebind_cut`,
+`decode_month_anchor`, `overlap_hours`, the `Blend`/`Renormalize` variants),
+`setup/mod.rs` (`year_month_day_anchor`), `setup/accessors.rs`
+(`build_terminal_anticipated_delivery_intervals`, the target-interval companion),
+`policy/policy_load.rs` (`load_boundary_cuts` threads the target delivery
+intervals). Pinned by the `hm_distribute_conservation` fixtures in
+`tests/anticipated_core.rs` (coeff ratio equals `H_w / H_M`, invariant to the
+delivery stage's hours), the `Blend`/`Renormalize` `rebind_cut` unit tests (both
+apply identical mechanics, distinction is only the weight), and
+`tests/boundary_reconcile_defaults.rs` (the fan-out matrix and the superset
+bit-identity `to_bits` pin).
+
 ## Initial-state seeding resolves IDs through a position map, never `binary_search`
 
 `System::hydros()`/`thermals()` sort canonically by `(operational_start_date,

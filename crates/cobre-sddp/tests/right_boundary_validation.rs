@@ -1,5 +1,5 @@
-//! Right-boundary validation suite: consolidates spec #1 §6's core
-//! guarantees for the unified hold-by-identity family, on minimal hermetic
+//! Right-boundary validation suite: consolidates the unified
+//! hold-by-identity family's core guarantees, on minimal hermetic
 //! in-code fixtures mirroring the pattern in `right_boundary_pricing.rs`,
 //! `right_boundary_cost_semantics.rs`, and `right_boundary_output.rs`: zero
 //! hydros, one bus, one anticipated thermal, two study stages matching
@@ -18,7 +18,7 @@
 //!   mechanism-parity, never objective/`final_lb` bit-identity — the two
 //!   directions value the commitment through different mechanisms
 //!   (fuel-at-delivery vs FCF-at-terminal), so a bit-identity claim would
-//!   contradict spec #1 §4.1.
+//!   contradict that design.
 
 #![allow(
     clippy::unwrap_used,
@@ -452,8 +452,9 @@ fn inject_lane_boundary(setup: &mut StudySetup, dir: &Path, beta: f64) {
     coefficients[lane] = beta;
     write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
-    let boundary_cuts = load_boundary_cuts(dir, 0, state_dimension, &[], None, 1.0, &mut |_msg| {})
-        .expect("boundary cut must load");
+    let boundary_cuts =
+        load_boundary_cuts(dir, 0, state_dimension, &[], &[], None, 1.0, &mut |_msg| {})
+            .expect("boundary cut must load");
     inject_boundary_cuts(setup, &boundary_cuts);
 }
 
@@ -541,7 +542,7 @@ fn lane_pin(setup: &StudySetup, x: f64) -> Vec<f64> {
     pin
 }
 
-// ── AC1: a dormant post-horizon carrier is structurally and numerically inert ──
+// ── A dormant post-horizon carrier is structurally and numerically inert ──
 
 mod inert_regression {
     //! A study declaring neither `future_anticipated_deliveries` nor
@@ -627,7 +628,7 @@ mod inert_regression {
     }
 }
 
-// ── AC2: the FCF prices the outstanding committed MW at the bound ──
+// ── The FCF prices the outstanding committed MW at the bound ──
 
 mod fcf_prices_committed_mw {
     use super::*;
@@ -685,16 +686,16 @@ mod fcf_prices_committed_mw {
     }
 }
 
-// ── AC3: left/right symmetry — value-conservation + mechanism-parity ──
+// ── Left/right symmetry — value-conservation + mechanism-parity ──
 
 mod left_right_symmetry {
-    //! Resolved (owner-confirmed): "left/right behaviour matches under
-    //! reflection" is value-conservation + mechanism-parity — the committed
-    //! magnitude `V` is transported without loss in BOTH directions — never
-    //! objective/`final_lb` bit-identity, since spec #1 §4.1 deliberately
-    //! values the two directions differently (fuel-at-delivery vs
-    //! FCF-at-terminal). Asserting objective bit-identity here would
-    //! contradict that design; do not "simplify" this suite toward it.
+    //! "Left/right behaviour matches under reflection" is value-conservation
+    //! and mechanism-parity — the committed magnitude `V` is transported
+    //! without loss in BOTH directions — never objective/`final_lb`
+    //! bit-identity, since the two directions value the commitment through
+    //! different mechanisms (fuel-at-delivery vs FCF-at-terminal). Asserting
+    //! objective bit-identity here would contradict that design; do not
+    //! "simplify" this suite toward it.
 
     use super::*;
 

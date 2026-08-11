@@ -7,6 +7,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use crate::visited_states::VisitedStatesArchive;
+use chrono::NaiveDate;
 use cobre_core::System;
 use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
@@ -18,7 +19,10 @@ use cobre_io::output::policy::{
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CommitmentHoldAddress, CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
-use crate::setup::{NodeGraph, NodePos, post_horizon_delivery_date, year_month_day_anchor};
+use crate::setup::{
+    NodeGraph, NodePos, post_horizon_delivery_date, post_horizon_delivery_interval,
+    year_month_day_anchor,
+};
 use crate::training::TrainingResult;
 
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
@@ -247,6 +251,41 @@ pub fn build_stage_entity_manifest(
         "manifest length must equal projection.n_slots()"
     );
     manifest
+}
+
+/// Build the per-slot post-horizon delivery INTERVAL, in LOCKSTEP with
+/// [`build_stage_entity_manifest`]'s `0..projection.n_slots()` classification
+/// walk: `Some((start, end))` for a live, dated post-horizon commitment-window
+/// lane slot ([`post_horizon_delivery_interval`]'s resolved destination
+/// window), `None` for every other slot (storage/lag/bucket/in-study-ring).
+/// Alignment with [`build_stage_entity_manifest`]'s output is by
+/// construction — both classify the same slot the same way — never a
+/// re-derived subindex convention. The in-study anticipated ring's own
+/// dating (stage-dependent) has no bearing here: a ring slot always reads
+/// `None`, so this function needs no `stage_id` parameter.
+#[must_use]
+pub fn build_stage_entity_delivery_intervals(
+    system: &System,
+    global_layout: &StateSpace,
+    projection: &CutStateProjection,
+) -> Vec<Option<(NaiveDate, NaiveDate)>> {
+    (0..projection.n_slots())
+        .map(|j| {
+            let (region, offset) =
+                global_layout.classify_incoming_column(projection.incoming_column(CutSlot::new(j)));
+            match region {
+                StateRegion::CommitmentHold => {
+                    match global_layout.commitment_hold_address(offset) {
+                        CommitmentHoldAddress::InStudy { .. } => None,
+                        CommitmentHoldAddress::PostHorizon { window } => {
+                            post_horizon_delivery_interval(system, global_layout, window)
+                        }
+                    }
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Build per-stage vectors of **all** populated [`PolicyCutRecord`]s from the FCF pools.

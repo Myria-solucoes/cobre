@@ -12,6 +12,7 @@
 //! [`FutureCostFunction::new_with_warm_start`]: crate::FutureCostFunction::new_with_warm_start
 //! [`FutureCostFunction::from_deserialized`]: crate::FutureCostFunction::from_deserialized
 
+use chrono::NaiveDate;
 use cobre_io::EntitySlot;
 use cobre_io::GraphManifest;
 use cobre_io::OwnedPolicyBasisRecord;
@@ -563,9 +564,14 @@ fn boundary_cut_lag_depth(manifest: &[EntitySlot]) -> u32 {
 /// per-slot identity is then RECONCILED, never exact-matched, via
 /// [`crate::policy::reconcile::build_rebind`]/`rebind_cut` — storage and
 /// inflow-lag reject a target slot with no source counterpart, naming the
-/// offending hydro or lag depth (the entity is never relaxed). An empty
-/// manifest on either side skips reconciliation and warns, relying on
-/// `state_dimension` alone; a `was_active == false` boundary slot whose
+/// offending hydro or lag depth (the entity is never relaxed); a live, dated
+/// anticipated target slot fans out against the source's own priced
+/// anticipated months by calendar overlap
+/// (`target_delivery_intervals`, aligned 1:1 with `current_manifest` — built
+/// via
+/// [`StudySetup::build_terminal_anticipated_delivery_intervals`](crate::StudySetup::build_terminal_anticipated_delivery_intervals)).
+/// An empty manifest on either side skips reconciliation and warns, relying
+/// on `state_dimension` alone; a `was_active == false` boundary slot whose
 /// current counterpart is active warns and loads. Wraps the result in a
 /// [`ValidatedBoundaryCuts`] — the sole constructor [`inject_boundary_cuts`]
 /// accepts.
@@ -585,11 +591,14 @@ fn boundary_cut_lag_depth(manifest: &[EntitySlot]) -> u32 {
 /// - The source stage's state dimension does not match `current_state_dimension`
 /// - A target storage or inflow-lag slot has no source counterpart under
 ///   identity reconciliation
+/// - A live, dated anticipated target slot has no resolved entry in
+///   `target_delivery_intervals` (an invariant violation)
 pub fn load_boundary_cuts(
     boundary_path: &Path,
     source_stage: u32,
     current_state_dimension: u32,
     current_manifest: &[EntitySlot],
+    target_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
     declared_inflow_lag_depth: Option<u32>,
     loading_cost_scale_factor: f64,
     on_warning: &mut dyn FnMut(&str),
@@ -689,7 +698,11 @@ pub fn load_boundary_cuts(
     );
 
     if manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest, on_warning) {
-        let rebind = build_rebind(&stage_result.entity_manifest, current_manifest)?;
+        let rebind = build_rebind(
+            &stage_result.entity_manifest,
+            current_manifest,
+            target_delivery_intervals,
+        )?;
         warn_on_dormant_source_now_active(
             &rebind,
             &stage_result.entity_manifest,
@@ -792,6 +805,7 @@ pub fn inject_boundary_cuts(setup: &mut StudySetup, boundary_cuts: &ValidatedBou
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 mod tests {
+    use chrono::NaiveDate;
     use cobre_io::{
         EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCheckpointMetadata,
         ProducerBlock, StageCutsPayload,
@@ -805,6 +819,13 @@ mod tests {
     use crate::SddpError;
 
     // ── helpers ───────────────────────────────────────────────────────────────
+
+    /// All-`None` delivery intervals aligned to `len` — for
+    /// [`load_boundary_cuts`] tests whose manifests carry no live-dated
+    /// anticipated slot.
+    fn no_intervals(len: usize) -> Vec<Option<(NaiveDate, NaiveDate)>> {
+        vec![None; len]
+    }
 
     /// Discard warnings: a `&mut dyn FnMut(&str)` for tests asserting only the
     /// `Result`.
@@ -1018,6 +1039,7 @@ mod tests {
                 0,
                 2,
                 &[],
+                &[],
                 None,
                 loading_factor,
                 &mut ignore_warnings(),
@@ -1063,6 +1085,7 @@ mod tests {
             0,
             2,
             &[],
+            &[],
             None,
             LEGACY_COST_SCALE_FACTOR,
             &mut ignore_warnings(),
@@ -1087,6 +1110,7 @@ mod tests {
             tmp_nondefault.path(),
             0,
             2,
+            &[],
             &[],
             None,
             loading_factor,
@@ -1283,6 +1307,7 @@ mod tests {
             2,
             10,
             &[],
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1317,6 +1342,7 @@ mod tests {
             99,
             10,
             &[],
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1347,6 +1373,7 @@ mod tests {
             0,
             5,
             &[],
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1368,6 +1395,7 @@ mod tests {
             std::path::Path::new("/nonexistent/path/to/policy"),
             0,
             10,
+            &[],
             &[],
             None,
             1_000_000.0,
@@ -1438,6 +1466,7 @@ mod tests {
             0,
             2,
             &current,
+            &no_intervals(current.len()),
             Some(6),
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1477,6 +1506,7 @@ mod tests {
             0,
             2,
             &current,
+            &no_intervals(current.len()),
             Some(12),
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1501,9 +1531,18 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |m| {
-            warnings.push(m.to_string());
-        })
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            &no_intervals(current.len()),
+            None,
+            1_000_000.0,
+            &mut |m| {
+                warnings.push(m.to_string());
+            },
+        )
         .unwrap();
 
         assert_eq!(cuts.len(), 2, "matching manifest must load all cuts");
@@ -1529,6 +1568,7 @@ mod tests {
             0,
             2,
             &current,
+            &no_intervals(current.len()),
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1562,6 +1602,7 @@ mod tests {
             0,
             2,
             &current,
+            &no_intervals(current.len()),
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1588,9 +1629,18 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |m| {
-            warnings.push(m.to_string());
-        })
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            &no_intervals(current.len()),
+            None,
+            1_000_000.0,
+            &mut |m| {
+                warnings.push(m.to_string());
+            },
+        )
         .unwrap();
 
         assert_eq!(cuts.len(), 2, "absent manifest must still load cuts");
@@ -1615,9 +1665,18 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |m| {
-            warnings.push(m.to_string());
-        })
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            &no_intervals(current.len()),
+            None,
+            1_000_000.0,
+            &mut |m| {
+                warnings.push(m.to_string());
+            },
+        )
         .unwrap();
 
         assert_eq!(cuts.len(), 2, "was_active divergence must still load cuts");
@@ -1642,9 +1701,18 @@ mod tests {
 
         let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |m| {
-            warnings.push(m.to_string());
-        })
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            &no_intervals(current.len()),
+            None,
+            1_000_000.0,
+            &mut |m| {
+                warnings.push(m.to_string());
+            },
+        )
         .unwrap();
 
         assert_eq!(cuts.len(), 2, "matching bucket manifest must load all cuts");
@@ -1672,6 +1740,7 @@ mod tests {
             0,
             2,
             &current,
+            &no_intervals(current.len()),
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1706,6 +1775,7 @@ mod tests {
             0,
             3,
             &current,
+            &no_intervals(current.len()),
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1802,6 +1872,7 @@ mod tests {
             3,
             2,
             &[],
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1832,6 +1903,7 @@ mod tests {
             tmp.path(),
             5,
             2,
+            &[],
             &[],
             None,
             1_000_000.0,

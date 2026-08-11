@@ -1279,6 +1279,32 @@ pub(crate) fn post_horizon_delivery_date(
     delivery_date
 }
 
+/// Post-horizon window `w`'s delivery INTERVAL: `[start_date, start_date +
+/// duration_hours)` of its resolved destination post-study stage
+/// ([`StateSpace::commitment_window_dest_stage`]) — the real calendar span
+/// [`post_horizon_delivery_date`]'s day-01 anchor collapses. `None` when the
+/// window's destination does not resolve to a real post-study stage (mirrors
+/// [`post_horizon_delivery_date`]'s debug-assert precondition: a covered lane
+/// always resolves one). Delegates the `duration_hours` → `end_date` rounding
+/// to [`post_study_calendar_stages`], the single owner shared with the
+/// `cobre-io` semantic validator. Single owner shared by
+/// [`crate::policy_export::build_stage_entity_delivery_intervals`] and the
+/// boundary reconciliation's date-driven fan-out (`crate::policy::reconcile`),
+/// which consumes the interval to compute `overlap(w, M)` — never re-derived.
+#[must_use]
+pub(crate) fn post_horizon_delivery_interval(
+    system: &System,
+    global_layout: &StateSpace,
+    w: usize,
+) -> Option<(NaiveDate, NaiveDate)> {
+    let dest = global_layout.commitment_window_dest_stage[w];
+    let post_study = system.post_study_stages()?;
+    let calendar_stages = post_study_calendar_stages(&post_study.stages);
+    calendar_stages
+        .get(dest)
+        .map(|stage| (stage.start_date, stage.end_date))
+}
+
 /// Every declared post-horizon window's resolved delivery date, in
 /// [`StateSpace::commitment_window_thermal_id`] order — computed once here via
 /// [`post_horizon_delivery_date`] so simulation extraction threads the

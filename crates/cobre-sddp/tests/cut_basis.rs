@@ -144,6 +144,7 @@ mod boundary_cuts {
             source_stage,
             state_dim,
             &current_manifest,
+            &vec![None; current_manifest.len()],
             None,
             1_000_000.0,
             &mut |msg| warnings.push(msg.to_string()),
