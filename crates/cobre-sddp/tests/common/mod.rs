@@ -132,10 +132,11 @@ impl Communicator for Rank0Of2 {
 /// Build a [`StudySetup`] for a case directory.
 ///
 /// The caller's `prepare_hydro_models` has already folded the productivity
-/// override into `hydro_models`; this helper does no parquet I/O, but it does
-/// re-load `case_dir`'s `CaseArtifacts` for `scalar_parameters` —
-/// `StudyParams::into_construction_config` never carries them, so every
-/// caller must patch them in itself (mirrors `cobre-python`'s `run.rs`).
+/// override into `hydro_models`. This helper re-loads `case_dir`'s
+/// `CaseArtifacts` (a second full parse) for `scalar_parameters`, because
+/// `StudyParams::into_construction_config` never carries them — every setup
+/// caller must patch them in itself (cobre-cli via MPI broadcast,
+/// cobre-python directly).
 pub fn build_setup_for_case(
     case_dir: &Path,
     config: &Config,
@@ -169,12 +170,9 @@ pub fn build_setup_for_case(
     .expect("StudySetup::from_broadcast_params must build")
 }
 
-/// Build a fresh [`StudySetup`] from `case_dir`'s config: parse, apply
-/// `mutate` to the config, load the case, prepare the stochastic context
-/// (seed `42`, the training scenario source derived from the mutated
-/// config), prepare hydro models, then build via [`build_setup_for_case`] —
-/// the pipeline shared by every `mpi_wire.rs` determinism gate's
-/// `fresh_setup`.
+/// Build a fresh [`StudySetup`] from `case_dir`'s config: applies `mutate`,
+/// then derives the training scenario source from the mutated config — the
+/// pipeline shared by every `mpi_wire.rs` determinism gate's `fresh_setup`.
 pub fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut Config)) -> StudySetup {
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
