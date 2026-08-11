@@ -411,6 +411,31 @@ pub struct SimulationGenericViolationResult {
     pub slack_cost: f64,
 }
 
+/// Post-horizon commitment lane result for one declared window, one terminal
+/// scenario.
+///
+/// Corresponds to one row in the `anticipated_lanes` output schema, keyed
+/// `(thermal_id, delivery_date)` — distinct from the per-plant
+/// [`SimulationThermalResult::anticipated_committed_mw`]/
+/// [`SimulationThermalResult::anticipated_decision_mw`] columns, which stay
+/// unchanged. Emitted once per lane, at the window's own in-study decider
+/// stage — the only stage whose LP carries both the decision column and this
+/// snapshot of the ring's carried state. Absent for a study with no
+/// `future_anticipated_deliveries`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SimulationAnticipatedLaneResult {
+    /// Stage index (0-based) — the lane's own in-study decider stage.
+    pub stage_id: u32,
+    /// Thermal unit entity ID owning this lane.
+    pub thermal_id: i32,
+    /// `YYYYMM01` anchor of the lane's resolved post-study delivery stage.
+    pub delivery_date: i32,
+    /// Deposited decision in MW, read from the post-horizon decision column.
+    pub deposited_decision_mw: f64,
+    /// Carried committed value in MW, read from the lane's `commit_out` ring slot.
+    pub carried_committed_mw: f64,
+}
+
 /// All simulation results for a single stage within one scenario.
 ///
 /// The simulation loop produces one [`SimulationStageResult`] per stage per
@@ -457,6 +482,9 @@ pub struct SimulationStageResult {
     /// Empty if no generic constraints exist or no violations occurred.
     /// Only non-zero violations are included.
     pub generic_violations: Vec<SimulationGenericViolationResult>,
+    /// Post-horizon commitment lane records for this stage.
+    /// Empty except at a declared window's own in-study decider stage.
+    pub anticipated_lanes: Vec<SimulationAnticipatedLaneResult>,
 }
 
 /// Per-category cost totals for one scenario, summed across all stages.
@@ -959,6 +987,7 @@ mod tests {
             inflow_lags: vec![],
             transit_buckets: vec![],
             generic_violations: vec![],
+            anticipated_lanes: vec![],
         };
 
         assert!(stage.pumping_stations.is_empty());
@@ -967,6 +996,7 @@ mod tests {
         assert!(stage.inflow_lags.is_empty());
         assert!(stage.transit_buckets.is_empty());
         assert!(stage.generic_violations.is_empty());
+        assert!(stage.anticipated_lanes.is_empty());
     }
 
     #[test]
@@ -993,6 +1023,7 @@ mod tests {
                 inflow_lags: vec![],
                 transit_buckets: vec![],
                 generic_violations: vec![],
+                anticipated_lanes: vec![],
             })
             .collect();
 

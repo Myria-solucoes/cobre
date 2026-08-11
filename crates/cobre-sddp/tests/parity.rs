@@ -1487,6 +1487,7 @@ mod determinism {
                         energy_conversion: &ec,
                         hydro_min_storage_hm3: &[0.0; 3],
                         event_sender: None,
+                        commitment_window_delivery_dates: &[],
                     },
                     None,
                     &[],

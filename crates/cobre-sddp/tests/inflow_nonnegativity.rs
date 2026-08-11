@@ -697,6 +697,7 @@ fn simulate_fixture(
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0; N_HYDROS],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
         },
         None,
         &[],

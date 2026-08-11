@@ -245,6 +245,11 @@ pub struct StageGeometry {
     /// whose decider stage is this stage — sparse, `0..0` at a stage no window
     /// decides at).
     pub commitment_decision: Range<usize>,
+    /// Global window index per `commitment_decision` local position, parallel
+    /// to it (`commitment_decision_windows[i]` is the window whose deposited
+    /// decision lives at `commitment_decision.start + i`). Sparse, empty at a
+    /// stage no window decides at.
+    pub commitment_decision_windows: Vec<usize>,
     /// Forward line-flow column range (one per line per block).
     pub line_fwd: Range<usize>,
     /// Reverse line-flow column range (one per line per block).

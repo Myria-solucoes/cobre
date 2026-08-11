@@ -886,6 +886,7 @@ fn simulation_load_patches_applied() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
         },
         None,
         &[],
@@ -1054,6 +1055,7 @@ fn simulation_no_load_buses_unchanged() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
         },
         None,
         &[],
@@ -1193,6 +1195,7 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
         },
         None,
         &[],
@@ -1344,6 +1347,7 @@ fn simulation_inflow_extraction_unaffected() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
         },
         None,
         &[],
@@ -1723,6 +1727,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
         },
         None,
         &[],
@@ -1858,6 +1863,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
         },
         None,
         &[],
@@ -2177,6 +2183,7 @@ mod dcs_simulation {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
         };
         let ids = SimStageIds {
             t: StageIdx(0),
@@ -2615,6 +2622,7 @@ mod anticipated_ring_matches_forward_propagation {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
         };
         let lookups = SimLookups::build(
             training_ctx.study_dims,

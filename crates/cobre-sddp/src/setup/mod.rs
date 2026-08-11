@@ -87,6 +87,7 @@ use cobre_core::{
 };
 use cobre_io::StageIdResolver;
 use cobre_io::build_hydro_reference_volumes_resolved;
+use cobre_io::output::policy::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
     ClassSchemes, ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext,
@@ -184,6 +185,14 @@ pub struct StudySetup {
     /// context borrows it to map a delivery stage index to its commissioning id
     /// for the `anticipated_windows` gate.
     pub(crate) study_stage_ids: Vec<i32>,
+
+    /// Post-horizon window `w`'s resolved delivery date
+    /// ([`build_commitment_window_delivery_dates`]), in
+    /// [`StateSpace::commitment_window_thermal_id`] order. Threaded into the
+    /// simulation [`SimulationOutputSpec`](crate::simulation::SimulationOutputSpec)
+    /// so per-lane output extraction never re-derives the calendar walk. Empty
+    /// when the study declares no post-horizon commitment window.
+    pub(crate) commitment_window_delivery_dates: Vec<i32>,
 
     /// Resolved `(parameter_id, stage)` coefficients; consumed by the LP builder
     /// and the generic-constraint echo.
@@ -652,6 +661,8 @@ impl StudySetup {
         let contract_is_import = build_contract_is_import(system);
 
         let anticipated_windows = build_anticipated_windows(system);
+        let commitment_window_delivery_dates =
+            build_commitment_window_delivery_dates(system, &state_layout);
 
         admission_gate(&risk_measures, &stopping_rule_set, training_enumerated)?;
 
@@ -686,6 +697,7 @@ impl StudySetup {
             ncs_allow_curtailment,
             anticipated_windows,
             study_stage_ids,
+            commitment_window_delivery_dates,
             resolved_parameters,
             scenario_libraries,
             node_graph,
@@ -1215,6 +1227,63 @@ fn resolve_commitment_hold_windows(
         min_max,
         dest_stage,
     }
+}
+
+/// Canonical absolute delivery/arrival calendar date of a stage `start_date`,
+/// encoded `year * 10000 + month * 100 + day` (`YYYYMMDD`). The day is pinned to
+/// `01` so the anchor stays month-granular — the same calendar month maps to the
+/// same date whether resolved from a weekly or a monthly stage.
+pub(crate) fn year_month_day_anchor(date: NaiveDate) -> i32 {
+    use chrono::Datelike;
+    // `month()` is 1..=12, so the conversion never fails.
+    date.year() * 10_000 + i32::try_from(date.month()).unwrap_or(1) * 100 + 1
+}
+
+/// Post-horizon window `w`'s delivery date: the `YYYYMM01` anchor of its
+/// resolved destination post-study stage
+/// ([`StateSpace::commitment_window_dest_stage`]). `thermal_id` is carried
+/// only for the debug assertion message. Single owner shared by the policy
+/// manifest ([`crate::policy_export::build_stage_entity_manifest`]) and the
+/// simulation output's per-window delivery-date array
+/// ([`build_commitment_window_delivery_dates`]) — never re-derived.
+///
+/// # Panics (debug builds only)
+///
+/// Panics if the window's destination does not resolve to a real post-study
+/// stage — an uncovered window is rejected at read time, so a covered lane
+/// never observes this.
+pub(crate) fn post_horizon_delivery_date(
+    system: &System,
+    global_layout: &StateSpace,
+    w: usize,
+    thermal_id: EntityId,
+) -> i32 {
+    let dest = global_layout.commitment_window_dest_stage[w];
+    let delivery_date = system
+        .post_study_stages()
+        .and_then(|post_study| post_study.stages.get(dest))
+        .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |stage| {
+            year_month_day_anchor(stage.start_date)
+        });
+    debug_assert!(
+        delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        "commitment window {w} (thermal {thermal_id:?}) destination stage {dest} must \
+         resolve a real delivery date"
+    );
+    delivery_date
+}
+
+/// Every declared post-horizon window's resolved delivery date, in
+/// [`StateSpace::commitment_window_thermal_id`] order — computed once here via
+/// [`post_horizon_delivery_date`] so simulation extraction threads the
+/// resulting array instead of re-deriving the calendar walk per stage.
+fn build_commitment_window_delivery_dates(system: &System, state: &StateSpace) -> Vec<i32> {
+    (0..state.n_commitment)
+        .map(|w| {
+            let thermal_id = state.commitment_window_thermal_id[w];
+            post_horizon_delivery_date(system, state, w, thermal_id)
+        })
+        .collect()
 }
 
 /// Per-`(thermal, post-study stage)` cost/bounds lookup — [`PostStudyStages::

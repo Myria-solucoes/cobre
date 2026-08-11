@@ -40,7 +40,7 @@ use crate::{
         extraction::EntityCounts,
         extraction::{
             HydroReverseLookup, SolutionView, StageExtractionSpec, ThermalReverseLookup,
-            accumulate_category_costs, extract_stage_result_with_lookups,
+            accumulate_category_costs, extract_commitment_lanes, extract_stage_result_with_lookups,
         },
         types::{ScenarioCategoryCosts, SimulationScenarioResult, SimulationStageResult},
     },
@@ -165,6 +165,12 @@ pub struct SimulationOutputSpec<'a> {
 
     /// Optional event sender for streaming progress events to the CLI/UI.
     pub event_sender: Option<Sender<TrainingEvent>>,
+
+    /// Post-horizon window `w`'s resolved delivery date (the `YYYYMM01`
+    /// anchor of its destination post-study stage), in
+    /// [`StateSpace::commitment_window_thermal_id`] order. Length equals
+    /// `state.n_commitment`; empty without a declared post-horizon commitment.
+    pub commitment_window_delivery_dates: &'a [i32],
 }
 
 /// Per-scenario context bundled for `process_scenario_stages`.
@@ -699,7 +705,7 @@ pub(crate) fn extract_sim_stage_result(
         );
         &hydro_lookup_default
     };
-    let result = extract_stage_result_with_lookups(
+    let mut result = extract_stage_result_with_lookups(
         &SolutionView {
             primal: unscaled_primal,
             dual: unscaled_dual,
@@ -755,6 +761,13 @@ pub(crate) fn extract_sim_stage_result(
         ids.node_id,
         hydro_lookup,
         &lookups.thermal,
+    );
+    result.anticipated_lanes = extract_commitment_lanes(
+        unscaled_primal,
+        geometry,
+        state,
+        output.commitment_window_delivery_dates,
+        ids.stage_id_u32,
     );
     (immediate_cost, result)
 }

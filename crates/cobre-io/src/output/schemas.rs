@@ -268,6 +268,22 @@ pub(crate) fn in_transit_schema() -> Schema {
     Schema::new(fields)
 }
 
+/// Schema for `simulation/anticipated_lanes/` — post-horizon commitment lane
+/// results, keyed `(thermal_id, delivery_date)`.
+///
+/// One row per declared window per terminal scenario, written only when the
+/// system declares a `future_anticipated_deliveries` window.
+pub(crate) fn anticipated_lanes_schema() -> Schema {
+    let mut fields = simulation_row_prefix();
+    fields.extend([
+        Field::new("thermal_id", DataType::Int32, false),
+        Field::new("delivery_date", DataType::Int32, false),
+        Field::new("deposited_decision_mw", DataType::Float64, false),
+        Field::new("carried_committed_mw", DataType::Float64, false),
+    ]);
+    Schema::new(fields)
+}
+
 /// Schema for `simulation/violations/generic/` — generic constraint violations.
 ///
 /// See output-schemas.md SS5.11.

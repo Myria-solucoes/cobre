@@ -7,7 +7,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use crate::visited_states::VisitedStatesArchive;
-use cobre_core::EntityId;
 use cobre_core::System;
 use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
@@ -19,7 +18,7 @@ use cobre_io::output::policy::{
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CommitmentHoldAddress, CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
-use crate::setup::{NodeGraph, NodePos};
+use crate::setup::{NodeGraph, NodePos, post_horizon_delivery_date, year_month_day_anchor};
 use crate::training::TrainingResult;
 
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
@@ -30,47 +29,6 @@ pub(crate) const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
 const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 /// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
 const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
-
-/// Canonical absolute delivery/arrival calendar date of a stage `start_date`,
-/// encoded `year * 10000 + month * 100 + day` (`YYYYMMDD`). The day is pinned to
-/// `01` so the anchor stays month-granular — the same calendar month maps to the
-/// same date whether resolved from a weekly or a monthly stage.
-fn year_month_day_anchor(date: chrono::NaiveDate) -> i32 {
-    use chrono::Datelike;
-    // `month()` is 1..=12, so the conversion never fails.
-    date.year() * 10_000 + i32::try_from(date.month()).unwrap_or(1) * 100 + 1
-}
-
-/// Post-horizon window `w`'s delivery date: the `YYYYMM01` anchor of its
-/// resolved destination post-study stage
-/// ([`StateSpace::commitment_window_dest_stage`]). `thermal_id` is carried
-/// only for the debug assertion message.
-///
-/// # Panics (debug builds only)
-///
-/// Panics if the window's destination does not resolve to a real post-study
-/// stage — an uncovered window is rejected at read time, so a covered lane
-/// never observes this.
-fn post_horizon_delivery_date(
-    system: &System,
-    global_layout: &StateSpace,
-    w: usize,
-    thermal_id: EntityId,
-) -> i32 {
-    let dest = global_layout.commitment_window_dest_stage[w];
-    let delivery_date = system
-        .post_study_stages()
-        .and_then(|post_study| post_study.stages.get(dest))
-        .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |stage| {
-            year_month_day_anchor(stage.start_date)
-        });
-    debug_assert!(
-        delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        "commitment window {w} (thermal {thermal_id:?}) destination stage {dest} must \
-         resolve a real delivery date"
-    );
-    delivery_date
-}
 
 /// Build the per-slot entity-identity manifest for one stage's cut pool: one
 /// [`EntitySlot`] per enabled cut-state dimension of `projection`.

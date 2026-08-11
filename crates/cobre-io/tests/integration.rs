@@ -980,6 +980,7 @@ fn empty_stage_write_payload(
         inflow_lags: vec![],
         transit_buckets: vec![],
         generic_violations: vec![],
+        anticipated_lanes: vec![],
     }
 }
 

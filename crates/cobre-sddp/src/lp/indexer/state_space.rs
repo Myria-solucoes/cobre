@@ -701,10 +701,6 @@ impl StateSpace {
     /// `window`'s offset within [`Self::commit_out`]/[`Self::commit_in`],
     /// appended past the leading in-study block. The encoder counterpart to
     /// [`Self::commitment_hold_address`]'s decoder.
-    // Rationale: no production caller needs the forward encode direction yet
-    // (`commitment_hold_address` covers the decode direction the manifest
-    // reads); kept alongside its decoder for the round-trip the tests pin.
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn commitment_hold_post_horizon_offset(&self, window: usize) -> usize {
         debug_assert!(

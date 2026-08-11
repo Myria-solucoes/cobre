@@ -1,20 +1,20 @@
 //! Field-for-field conversions from `Simulation*Result` to write-payload types.
 
 use cobre_io::output::simulation_writer::{
-    BusWriteRecord, ContractWriteRecord, CostWriteRecord, ExchangeWriteRecord,
-    GenericViolationWriteRecord, HydroBusWriteRecord, HydroWriteRecord, InflowLagWriteRecord,
-    NonControllableWriteRecord, PumpingWriteRecord, ScenarioWritePayload, StageWritePayload,
-    ThermalWriteRecord, TransitBucketWriteRecord,
+    AnticipatedLaneWriteRecord, BusWriteRecord, ContractWriteRecord, CostWriteRecord,
+    ExchangeWriteRecord, GenericViolationWriteRecord, HydroBusWriteRecord, HydroWriteRecord,
+    InflowLagWriteRecord, NonControllableWriteRecord, PumpingWriteRecord, ScenarioWritePayload,
+    StageWritePayload, ThermalWriteRecord, TransitBucketWriteRecord,
 };
 
 #[cfg(test)]
 use crate::setup::NodeId;
 use crate::simulation::types::{
-    SimulationBusResult, SimulationContractResult, SimulationCostResult, SimulationExchangeResult,
-    SimulationGenericViolationResult, SimulationHydroBusResult, SimulationHydroResult,
-    SimulationInflowLagResult, SimulationNonControllableResult, SimulationPumpingResult,
-    SimulationScenarioResult, SimulationStageResult, SimulationThermalResult,
-    SimulationTransitBucketResult,
+    SimulationAnticipatedLaneResult, SimulationBusResult, SimulationContractResult,
+    SimulationCostResult, SimulationExchangeResult, SimulationGenericViolationResult,
+    SimulationHydroBusResult, SimulationHydroResult, SimulationInflowLagResult,
+    SimulationNonControllableResult, SimulationPumpingResult, SimulationScenarioResult,
+    SimulationStageResult, SimulationThermalResult, SimulationTransitBucketResult,
 };
 
 impl IntoWriteRecord for SimulationCostResult {
@@ -247,6 +247,21 @@ impl IntoWriteRecord for SimulationTransitBucketResult {
     }
 }
 
+impl IntoWriteRecord for SimulationAnticipatedLaneResult {
+    type Record = AnticipatedLaneWriteRecord;
+    fn into_write_record(self, node_id: i32) -> AnticipatedLaneWriteRecord {
+        let s = self;
+        AnticipatedLaneWriteRecord {
+            stage_id: s.stage_id,
+            node_id,
+            thermal_id: s.thermal_id,
+            delivery_date: s.delivery_date,
+            deposited_decision_mw: s.deposited_decision_mw,
+            carried_committed_mw: s.carried_committed_mw,
+        }
+    }
+}
+
 impl IntoWriteRecord for SimulationGenericViolationResult {
     type Record = GenericViolationWriteRecord;
     fn into_write_record(self, node_id: i32) -> GenericViolationWriteRecord {
@@ -299,6 +314,7 @@ impl From<SimulationStageResult> for StageWritePayload {
             inflow_lags: with_node(src.inflow_lags, node_id),
             transit_buckets: with_node(src.transit_buckets, node_id),
             generic_violations: with_node(src.generic_violations, node_id),
+            anticipated_lanes: with_node(src.anticipated_lanes, node_id),
         }
     }
 }
@@ -522,6 +538,7 @@ mod tests {
                 make_transit_bucket(stage_id, 2),
             ],
             generic_violations: vec![make_generic_violation(stage_id, 0)],
+            anticipated_lanes: vec![],
         }
     }
 

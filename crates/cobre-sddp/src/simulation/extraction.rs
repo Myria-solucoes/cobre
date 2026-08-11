@@ -31,11 +31,11 @@ use crate::indexer::{
 use crate::lp_builder::{GenericConstraintRowEntry, StageGeometry};
 use crate::setup::NodeId;
 use crate::simulation::types::{
-    ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
-    SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroBusResult,
-    SimulationHydroResult, SimulationInflowLagResult, SimulationNonControllableResult,
-    SimulationPumpingResult, SimulationStageResult, SimulationThermalResult,
-    SimulationTransitBucketResult,
+    ScenarioCategoryCosts, SimulationAnticipatedLaneResult, SimulationBusResult,
+    SimulationContractResult, SimulationCostResult, SimulationExchangeResult,
+    SimulationGenericViolationResult, SimulationHydroBusResult, SimulationHydroResult,
+    SimulationInflowLagResult, SimulationNonControllableResult, SimulationPumpingResult,
+    SimulationStageResult, SimulationThermalResult, SimulationTransitBucketResult,
 };
 
 /// Reverse lookups from system hydro index to local FPHA/evaporation/filling-slack
@@ -269,6 +269,52 @@ fn compute_anticipated_committed_mw(
         view.primal.len(),
     );
     Some(view.primal[col])
+}
+
+/// Extract one post-horizon commitment-lane row per window whose in-study
+/// decider stage is THIS stage — `geometry.commitment_decision_windows`'s own
+/// sparsity, sparse/empty at every other stage. Reads the deposited decision
+/// directly from the sparse decision column and the ring's freshly-latched
+/// value from the SAME stage's `commit_out` lane (the deposit row pins the two
+/// equal). `delivery_dates` is the setup-resolved, per-window delivery date
+/// (`StudySetup::commitment_window_delivery_dates`), indexed by the same
+/// global survivor window index [`StateSpace::commitment_window_thermal_id`] uses.
+pub(crate) fn extract_commitment_lanes(
+    primal: &[f64],
+    geometry: &StageGeometry,
+    state: &StateSpace,
+    delivery_dates: &[i32],
+    stage_id: u32,
+) -> Vec<SimulationAnticipatedLaneResult> {
+    let windows = &geometry.commitment_decision_windows;
+    debug_assert!(
+        delivery_dates.len() == state.n_commitment,
+        "commitment_window_delivery_dates length {} must match n_commitment {}",
+        delivery_dates.len(),
+        state.n_commitment,
+    );
+    let mut results = Vec::with_capacity(windows.len());
+    for (local_idx, &w) in windows.iter().enumerate() {
+        let decision_col = geometry.commitment_decision.start + local_idx;
+        let carried_col = state.commit_out.start + state.commitment_hold_post_horizon_offset(w);
+        debug_assert!(
+            decision_col < geometry.commitment_decision.end
+                && decision_col < primal.len()
+                && carried_col < primal.len(),
+            "post-horizon lane cols {decision_col}/{carried_col} out of bounds \
+             (commitment_decision {:?}, primal len {})",
+            geometry.commitment_decision,
+            primal.len(),
+        );
+        results.push(SimulationAnticipatedLaneResult {
+            stage_id,
+            thermal_id: state.commitment_window_thermal_id[w].0,
+            delivery_date: delivery_dates[w],
+            deposited_decision_mw: primal[decision_col],
+            carried_committed_mw: primal[carried_col],
+        });
+    }
+    results
 }
 
 /// Extract the travel-time in-transit bucket records for one stage, in the
@@ -1392,6 +1438,11 @@ pub(crate) fn extract_stage_result_with_lookups(
         inflow_lags,
         transit_buckets: extract_transit_buckets(view, spec, stage_id),
         generic_violations,
+        // The window-indexed delivery-date array lives outside `StageExtractionSpec`
+        // (`SimulationOutputSpec::commitment_window_delivery_dates`); the hot path
+        // (`extract_sim_stage_result`) populates this field as a post-step via
+        // `extract_commitment_lanes` instead of through this shared builder.
+        anticipated_lanes: Vec::new(),
     }
 }
 

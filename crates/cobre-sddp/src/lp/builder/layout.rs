@@ -1830,6 +1830,7 @@ impl<'a> StageLayout<'a> {
             thermal: self.equipment.thermal.clone(),
             anticipated_decision: self.anticipated_decision(),
             commitment_decision: self.commitment_decision(),
+            commitment_decision_windows: self.anticipated.commitment_decision_windows.clone(),
             line_fwd: self.equipment.line_fwd.clone(),
             line_rev: self.equipment.line_rev.clone(),
             deficit: self.equipment.deficit.clone(),

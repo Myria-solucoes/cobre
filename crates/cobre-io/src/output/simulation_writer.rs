@@ -18,10 +18,14 @@
 //!   inflow_lags/scenario_id=0000/data.parquet
 //!   in_transit/scenario_id=0000/data.parquet
 //!   violations/generic/scenario_id=0000/data.parquet
+//!   anticipated_lanes/scenario_id=0000/data.parquet
 //! ```
 //!
 //! The `in_transit/` partition is present only when the system declares a
 //! travel-time arc; a non-travel-time study writes no such directory or file.
+//! The `anticipated_lanes/` partition is present only when the system
+//! declares a `future_anticipated_deliveries` window; without one, no such
+//! directory or file is written.
 //!
 //! ## Circular-dependency mitigation
 //!
@@ -43,10 +47,10 @@ use crate::output::atomic::write_parquet_atomic;
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
-    buses_schema, contracts_schema, costs_schema, exchanges_schema, generic_violations_schema,
-    hydro_bus_generation_schema, hydros_schema, in_transit_schema, inflow_lags_schema,
-    non_controllables_schema, paths_schema, pumping_stations_schema, scenario_summary_schema,
-    thermals_schema,
+    anticipated_lanes_schema, buses_schema, contracts_schema, costs_schema, exchanges_schema,
+    generic_violations_schema, hydro_bus_generation_schema, hydros_schema, in_transit_schema,
+    inflow_lags_schema, non_controllables_schema, paths_schema, pumping_stations_schema,
+    scenario_summary_schema, thermals_schema,
 };
 
 // Payload types (mirrors solver simulation result types)
@@ -404,6 +408,25 @@ pub struct GenericViolationWriteRecord {
     pub slack_cost: f64,
 }
 
+/// One post-horizon commitment lane result for one declared window, one
+/// terminal scenario — keyed `(thermal_id, delivery_date)`.
+#[derive(Debug)]
+pub struct AnticipatedLaneWriteRecord {
+    /// Stage index (0-based) — the lane's own in-study decider stage.
+    pub stage_id: u32,
+    /// Declared node id visited at this stage; the degenerate per-stage id on a
+    /// chain, never gated on whether `nodes[]` was declared.
+    pub node_id: i32,
+    /// Thermal unit entity ID owning this lane.
+    pub thermal_id: i32,
+    /// `YYYYMM01` anchor of the lane's resolved post-study delivery stage.
+    pub delivery_date: i32,
+    /// Deposited decision in MW.
+    pub deposited_decision_mw: f64,
+    /// Carried committed value in MW.
+    pub carried_committed_mw: f64,
+}
+
 /// All simulation results for one stage within one scenario.
 #[derive(Debug)]
 pub struct StageWritePayload {
@@ -436,6 +459,8 @@ pub struct StageWritePayload {
     pub transit_buckets: Vec<TransitBucketWriteRecord>,
     /// Generic constraint violation records for this stage.
     pub generic_violations: Vec<GenericViolationWriteRecord>,
+    /// Post-horizon commitment lane records for this stage.
+    pub anticipated_lanes: Vec<AnticipatedLaneWriteRecord>,
 }
 
 /// Complete simulation result for one scenario, ready for Parquet writing.
@@ -599,6 +624,17 @@ impl SimulationParquetWriter {
             std::fs::create_dir_all(sim_dir.join("violations/generic"))
                 .map_err(|e| OutputError::io(sim_dir.join("violations/generic"), e))?;
         }
+        // Gate on a declared post-horizon commitment window, not on thermal count:
+        // a study with no `future_anticipated_deliveries` must emit no
+        // `anticipated_lanes` directory (byte-neutral).
+        let declares_post_horizon_commitment = !system
+            .initial_conditions()
+            .future_anticipated_deliveries
+            .is_empty();
+        if declares_post_horizon_commitment {
+            std::fs::create_dir_all(sim_dir.join("anticipated_lanes"))
+                .map_err(|e| OutputError::io(sim_dir.join("anticipated_lanes"), e))?;
+        }
 
         Ok(Self {
             output_dir: output_dir.to_path_buf(),
@@ -651,7 +687,7 @@ impl SimulationParquetWriter {
     /// - [`OutputError::SerializationError`] if a `RecordBatch` cannot be
     ///   constructed (array length mismatch).
     /// - [`OutputError::IoError`] if any filesystem operation fails.
-    #[allow(clippy::too_many_lines)] // 12 entity types, each its own skip-if-empty block
+    #[allow(clippy::too_many_lines)] // 13 entity types, each its own skip-if-empty block
     #[allow(clippy::needless_pass_by_value)] // consuming by value is intentional: payload drives output
     #[allow(clippy::cast_possible_wrap)] // scenario/stage ids are small non-negative indices
     pub fn write_scenario(&mut self, result: ScenarioWritePayload) -> Result<(), OutputError> {
@@ -827,6 +863,27 @@ impl SimulationParquetWriter {
                 n,
             )?;
             self.write_partition("violations/generic", &partition_suffix, &batch)?;
+        }
+
+        if result
+            .stages
+            .iter()
+            .any(|s| !s.anticipated_lanes.is_empty())
+        {
+            let n: usize = result
+                .stages
+                .iter()
+                .map(|s| s.anticipated_lanes.len())
+                .sum();
+            let batch = build_anticipated_lanes_batch(
+                result
+                    .stages
+                    .iter()
+                    .flat_map(|s| s.anticipated_lanes.iter()),
+                scenario_id,
+                n,
+            )?;
+            self.write_partition("anticipated_lanes", &partition_suffix, &batch)?;
         }
 
         self.scenarios_written += 1;
@@ -1859,6 +1916,47 @@ fn build_generic_violations_batch<'a>(
     .map_err(|e| OutputError::serialization("generic_violations", e.to_string()))
 }
 
+#[allow(clippy::cast_possible_wrap)]
+fn build_anticipated_lanes_batch<'a>(
+    records: impl IntoIterator<Item = &'a AnticipatedLaneWriteRecord>,
+    scenario_id: i32,
+    n: usize,
+) -> Result<RecordBatch, OutputError> {
+    let schema = Arc::new(anticipated_lanes_schema());
+
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
+    let mut stage_id = Int32Builder::with_capacity(n);
+    let mut node_id = Int32Builder::with_capacity(n);
+    let mut thermal_id = Int32Builder::with_capacity(n);
+    let mut delivery_date = Int32Builder::with_capacity(n);
+    let mut deposited_decision_mw = Float64Builder::with_capacity(n);
+    let mut carried_committed_mw = Float64Builder::with_capacity(n);
+
+    for r in records {
+        scenario_id_col.append_value(scenario_id);
+        stage_id.append_value(r.stage_id as i32);
+        node_id.append_value(r.node_id);
+        thermal_id.append_value(r.thermal_id);
+        delivery_date.append_value(r.delivery_date);
+        deposited_decision_mw.append_value(r.deposited_decision_mw);
+        carried_committed_mw.append_value(r.carried_committed_mw);
+    }
+
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(scenario_id_col.finish()),
+            Arc::new(stage_id.finish()),
+            Arc::new(node_id.finish()),
+            Arc::new(thermal_id.finish()),
+            Arc::new(delivery_date.finish()),
+            Arc::new(deposited_decision_mw.finish()),
+            Arc::new(carried_committed_mw.finish()),
+        ],
+    )
+    .map_err(|e| OutputError::serialization("anticipated_lanes", e.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2186,6 +2284,7 @@ mod tests {
                 inflow_lags: vec![],
                 transit_buckets: vec![],
                 generic_violations: vec![],
+                anticipated_lanes: vec![],
             })
             .collect();
         ScenarioWritePayload {
@@ -2833,6 +2932,7 @@ mod tests {
             inflow_lags: vec![],
             transit_buckets: vec![],
             generic_violations: vec![],
+            anticipated_lanes: vec![],
         };
         let payload = ScenarioWritePayload {
             scenario_id: 0,
@@ -3347,6 +3447,7 @@ mod tests {
             inflow_lags: vec![],
             transit_buckets: vec![],
             generic_violations: vec![],
+            anticipated_lanes: vec![],
         };
         writer
             .write_scenario(ScenarioWritePayload {
@@ -3412,6 +3513,7 @@ mod tests {
                 },
             ],
             generic_violations: vec![],
+            anticipated_lanes: vec![],
         };
         writer
             .write_scenario(ScenarioWritePayload {
@@ -3561,6 +3663,7 @@ mod tests {
             inflow_lags: vec![],
             transit_buckets: vec![],
             generic_violations: vec![],
+            anticipated_lanes: vec![],
         };
         writer
             .write_scenario(ScenarioWritePayload {
@@ -3657,6 +3760,7 @@ mod tests {
             inflow_lags: vec![],
             transit_buckets: vec![],
             generic_violations: vec![],
+            anticipated_lanes: vec![],
         };
         let stage1 = StageWritePayload {
             stage_id: 1,
@@ -3681,6 +3785,7 @@ mod tests {
             inflow_lags: vec![],
             transit_buckets: vec![],
             generic_violations: vec![],
+            anticipated_lanes: vec![],
         };
         writer
             .write_scenario(ScenarioWritePayload {
