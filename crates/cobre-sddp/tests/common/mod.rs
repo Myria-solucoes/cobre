@@ -10,7 +10,7 @@ use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::System;
-use cobre_core::scenario::{SamplingScheme, ScenarioSource};
+use cobre_core::scenario::SamplingScheme;
 use cobre_io::Config;
 use cobre_sddp::{
     SimulationScenarioResult, StudySetup,
@@ -164,18 +164,21 @@ pub fn build_setup_for_case(
 
 /// Build a fresh [`StudySetup`] from `case_dir`'s config: parse, apply
 /// `mutate` to the config, load the case, prepare the stochastic context
-/// (seed `42`, [`ScenarioSource::default`]), prepare hydro models, then
-/// build via [`build_setup_for_case`] — the pipeline shared by every
-/// `mpi_wire.rs` determinism gate's `fresh_setup`.
+/// (seed `42`, the training scenario source derived from the mutated
+/// config), prepare hydro models, then build via [`build_setup_for_case`] —
+/// the pipeline shared by every `mpi_wire.rs` determinism gate's
+/// `fresh_setup`.
 pub fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut Config)) -> StudySetup {
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
     mutate(&mut config);
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let training_source = config
+        .training_scenario_source(&config_path)
+        .expect("training_scenario_source must parse");
+    let prepare_result = prepare_stochastic(system, case_dir, &config, 42, &training_source)
+        .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 
