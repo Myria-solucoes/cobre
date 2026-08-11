@@ -132,9 +132,12 @@ impl Communicator for Rank0Of2 {
 /// Build a [`StudySetup`] for a case directory.
 ///
 /// The caller's `prepare_hydro_models` has already folded the productivity
-/// override into `hydro_models`; this helper does no parquet I/O.
+/// override into `hydro_models`; this helper does no parquet I/O, but it does
+/// re-load `case_dir`'s `CaseArtifacts` for `scalar_parameters` —
+/// `StudyParams::into_construction_config` never carries them, so every
+/// caller must patch them in itself (mirrors `cobre-python`'s `run.rs`).
 pub fn build_setup_for_case(
-    _case_dir: &Path,
+    case_dir: &Path,
     config: &Config,
     system: &System,
     stochastic: StochasticContext,
@@ -149,7 +152,11 @@ pub fn build_setup_for_case(
         .expect("simulation_scenario_source must parse");
 
     let params = StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
-    let construction = params.into_construction_config();
+    let mut construction = params.into_construction_config();
+    construction.scalar_parameters = cobre_io::load_case_with_artifacts(case_dir)
+        .expect("load_case_with_artifacts must succeed")
+        .artifacts
+        .scalar_parameters;
 
     StudySetup::from_broadcast_params(
         system,
