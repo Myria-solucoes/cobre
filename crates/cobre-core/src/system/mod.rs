@@ -130,9 +130,9 @@ pub struct System {
     /// Raw external NCS scenario rows, sorted by `(stage_id, scenario_id, ncs_id)` ascending.
     external_ncs_scenarios: Vec<ExternalNcsRow>,
 
-    /// Post-study boundary calendar and per-cell thermal cost/bounds; `None` when
-    /// `post_study_stages.json` is absent (inert). Boundary-only input: never a
-    /// dispatched stage, state region, or cut dimension.
+    /// Post-study boundary calendar and per-`(thermal, post-study stage)`
+    /// cost/bounds; `None` when `post_study_stages.json` is absent (inert).
+    /// Boundary-only input: never a dispatched stage in `system.stages()`.
     post_study_stages: Option<PostStudyStages>,
 }
 

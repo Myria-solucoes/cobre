@@ -7,11 +7,11 @@
 //! an ordered post-horizon calendar segment plus a per-`(thermal, post-study
 //! stage)` cost/bounds table those deliveries resolve into by date.
 //!
-//! The dispatch horizon is untouched: post-study stages are never dispatched,
-//! never a [`Stage`](crate::temporal::Stage) in `system.stages()`, never in the
-//! state layout, never a cut dimension. The setup-side resolved
-//! calendar/discount/lookup artifacts are built downstream; this type is the
-//! parsed, validated input carried on [`System`](crate::System).
+//! The dispatch horizon is untouched: post-study stages are never dispatched and
+//! never a [`Stage`](crate::temporal::Stage) in `system.stages()` — they are a
+//! boundary-only input. The setup-side resolved calendar/discount/lookup artifacts
+//! are built downstream; this type is the parsed, validated input carried on
+//! [`System`](crate::System).
 //!
 //! # Examples
 //!
