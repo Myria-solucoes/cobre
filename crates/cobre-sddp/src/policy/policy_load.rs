@@ -24,6 +24,7 @@ use cobre_solver::{Basis, BasisStatus};
 use crate::SddpError;
 use crate::cut::pool::CutPool;
 use crate::policy::policy_export::ENTITY_TYPE_HYDRO_INFLOW_LAG;
+use crate::policy::reconcile::{RebindOp, build_rebind, rebind_cut};
 use crate::setup::{NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
 
@@ -160,9 +161,9 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// Selects [`validate_policy_load`]'s check matrix (`state_dimension` and
-/// per-slot identity are checked unconditionally for every kind). Sealed so
-/// [`FullFcf`] and [`BoundaryInjection`] are the only implementors, making a
+/// Selects [`validate_policy_load`]'s check matrix (`state_dimension` is
+/// checked unconditionally for every kind). Sealed so [`FullFcf`] and
+/// [`BoundaryInjection`] are the only implementors, making a
 /// [`PolicyLoadProof<K>`] a proof of validation under exactly one real kind —
 /// never a third, uncatalogued one.
 pub trait PolicyLoadKind: sealed::Sealed {
@@ -171,11 +172,17 @@ pub trait PolicyLoadKind: sealed::Sealed {
     /// Whether the pool count and graph-manifest identity are hard-rejected for
     /// this kind. The pool-count analogue of [`Self::CHECK_NUM_STAGES`].
     const CHECK_N_POOLS: bool;
+    /// Whether per-slot identity is checked here as an EXACT positional match
+    /// ([`compare_manifest_slot_identity`]). `false` means the kind reconciles
+    /// slot identity by its own mechanism instead, confined to its own load
+    /// path (currently only [`BoundaryInjection`], via
+    /// [`crate::policy::reconcile::build_rebind`] in [`load_boundary_cuts`]).
+    const CHECK_SLOT_IDENTITY_EXACT: bool;
 }
 
 /// Full future-cost-function load (warm-start, resume, simulation-only):
-/// `num_stages`, the pool count, and the graph manifest must match `current`
-/// exactly.
+/// `num_stages`, the pool count, the graph manifest, and per-slot identity
+/// must match `current` exactly.
 #[derive(Debug, Clone, Copy)]
 pub struct FullFcf;
 
@@ -183,11 +190,15 @@ impl sealed::Sealed for FullFcf {}
 impl PolicyLoadKind for FullFcf {
     const CHECK_NUM_STAGES: bool = true;
     const CHECK_N_POOLS: bool = true;
+    const CHECK_SLOT_IDENTITY_EXACT: bool = true;
 }
 
 /// Single-stage boundary-cut injection into the terminal pool: `num_stages`,
 /// the pool count, and the graph manifest are unchecked (a monthly source may
-/// feed a weekly+monthly current study on a different graph).
+/// feed a weekly+monthly current study on a different graph); per-slot
+/// identity is RECONCILED, not exact-matched — [`load_boundary_cuts`] wires
+/// [`crate::policy::reconcile::build_rebind`]/`rebind_cut` in after this
+/// validation succeeds.
 #[derive(Debug, Clone, Copy)]
 pub struct BoundaryInjection;
 
@@ -195,6 +206,7 @@ impl sealed::Sealed for BoundaryInjection {}
 impl PolicyLoadKind for BoundaryInjection {
     const CHECK_NUM_STAGES: bool = false;
     const CHECK_N_POOLS: bool = false;
+    const CHECK_SLOT_IDENTITY_EXACT: bool = false;
 }
 
 /// Unforgeable, kind-typed evidence that [`validate_policy_load`] accepted a
@@ -211,10 +223,14 @@ pub struct PolicyLoadProof<K: PolicyLoadKind> {
 }
 
 /// Validate that `source`'s state layout is compatible with `current`'s, per
-/// `K`'s check matrix: `state_dimension` equality and per-slot identity
-/// (delegated to [`compare_manifest_slot_identity`]) are hard-rejected for
-/// every kind; `num_stages` equality is hard-rejected only when
-/// `K::CHECK_NUM_STAGES` ([`FullFcf`]). `col_scale`/scaling is never a
+/// `K`'s check matrix: `state_dimension` equality is hard-rejected for every
+/// kind; `num_stages` equality is hard-rejected only when
+/// `K::CHECK_NUM_STAGES` ([`FullFcf`]). Per-slot identity is an EXACT
+/// positional match (delegated to [`compare_manifest_slot_identity`]) only
+/// when `K::CHECK_SLOT_IDENTITY_EXACT` ([`FullFcf`]); [`BoundaryInjection`]
+/// skips it here — its slot identity is RECONCILED separately, by
+/// [`crate::policy::reconcile::build_rebind`] in [`load_boundary_cuts`], never
+/// by this lower-level manifest check. `col_scale`/scaling is never a
 /// compatibility dimension. This is the single entry point for policy-load
 /// validation — its success is the only way to construct a
 /// [`PolicyLoadProof<K>`], so every load path routes through it.
@@ -222,8 +238,8 @@ pub struct PolicyLoadProof<K: PolicyLoadKind> {
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] on a `state_dimension` mismatch, a
-/// `num_stages` mismatch under [`FullFcf`], or a per-slot identity mismatch
-/// (see [`compare_manifest_slot_identity`]).
+/// `num_stages` mismatch under [`FullFcf`], or (under [`FullFcf`] only) a
+/// per-slot identity mismatch (see [`compare_manifest_slot_identity`]).
 pub fn validate_policy_load<K: PolicyLoadKind>(
     source: &PolicyStageManifest<'_>,
     current: &PolicyStageManifest<'_>,
@@ -251,9 +267,11 @@ pub fn validate_policy_load<K: PolicyLoadKind>(
     }
 
     let mut warnings = Vec::new();
-    compare_manifest_slot_identity(source.slots, current.slots, &mut |msg| {
-        warnings.push(msg.to_string());
-    })?;
+    if K::CHECK_SLOT_IDENTITY_EXACT {
+        compare_manifest_slot_identity(source.slots, current.slots, &mut |msg| {
+            warnings.push(msg.to_string());
+        })?;
+    }
 
     if K::CHECK_N_POOLS {
         compare_graph_manifest_identity(source.graph, current.graph)?;
@@ -441,6 +459,29 @@ fn slot_identity(slot: &EntitySlot) -> (u8, i32, u32) {
     (slot.entity_type, slot.entity_id, slot.subindex)
 }
 
+/// Whether `source`/`current` can be identity-verified at all: an empty
+/// manifest on either side (a pre-manifest checkpoint) cannot be verified —
+/// warn once and answer `false`, leaving the caller's `state_dimension` check
+/// as the sole compatibility guard. Shared by [`compare_manifest_slot_identity`]
+/// (the [`FullFcf`] exact-match path) and [`load_boundary_cuts`]'s reconcile
+/// path, so the two report the identical warning on an absent manifest.
+fn manifest_identity_verifiable(
+    source: &[EntitySlot],
+    current: &[EntitySlot],
+    on_warning: &mut dyn FnMut(&str),
+) -> bool {
+    if source.is_empty() || current.is_empty() {
+        on_warning(&format!(
+            "entity manifest absent (source slots: {}, current slots: {}); slot identity \
+             could not be verified, relying on state_dimension alone",
+            source.len(),
+            current.len(),
+        ));
+        return false;
+    }
+    true
+}
+
 /// Compare two entity manifests slot-for-slot by `slot_identity`.
 ///
 /// `source` (a loaded policy's manifest) and `current` (the current study's
@@ -461,13 +502,7 @@ pub fn compare_manifest_slot_identity(
     current: &[EntitySlot],
     on_warning: &mut dyn FnMut(&str),
 ) -> Result<(), SddpError> {
-    if source.is_empty() || current.is_empty() {
-        on_warning(&format!(
-            "entity manifest absent (source slots: {}, current slots: {}); slot identity \
-             could not be verified, relying on state_dimension alone",
-            source.len(),
-            current.len(),
-        ));
+    if !manifest_identity_verifiable(source, current, on_warning) {
         return Ok(());
     }
 
@@ -520,17 +555,20 @@ fn boundary_cut_lag_depth(manifest: &[EntitySlot]) -> u32 {
 
 /// Load boundary cuts from the `source_stage` of a source Cobre policy checkpoint.
 ///
-/// Per-slot matching compares the source stage's manifest to the current
-/// TERMINAL-stage manifest (both length `state_dimension`); `num_stages` may
-/// differ. `current_manifest` is built via
-/// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest)
-/// (single owner of identity resolution, shared with the checkpoint writer). An
-/// empty manifest (pre-manifest checkpoint) leaves the `state_dimension` check
-/// standing and warns; a `was_active == false` boundary slot whose current
-/// counterpart is active warns and loads. Delegates to [`validate_policy_load`]
-/// typed to [`BoundaryInjection`] for the per-slot identity reject, and wraps
-/// the result in a [`ValidatedBoundaryCuts`] — the sole constructor
-/// [`inject_boundary_cuts`] accepts.
+/// Compares the source stage's manifest against the current TERMINAL-stage
+/// manifest (`current_manifest`, built via
+/// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest));
+/// `num_stages` may differ. `state_dimension`/`num_stages` compatibility
+/// routes through [`validate_policy_load`] typed to [`BoundaryInjection`];
+/// per-slot identity is then RECONCILED, never exact-matched, via
+/// [`crate::policy::reconcile::build_rebind`]/`rebind_cut` — storage and
+/// inflow-lag reject a target slot with no source counterpart, naming the
+/// offending hydro or lag depth (the entity is never relaxed). An empty
+/// manifest on either side skips reconciliation and warns, relying on
+/// `state_dimension` alone; a `was_active == false` boundary slot whose
+/// current counterpart is active warns and loads. Wraps the result in a
+/// [`ValidatedBoundaryCuts`] — the sole constructor [`inject_boundary_cuts`]
+/// accepts.
 ///
 /// `declared_inflow_lag_depth` is `config.state_space.inflow_lag_depth`; when
 /// `Some`, a boundary cut referencing inflow-lag state deeper than the declared
@@ -545,8 +583,8 @@ fn boundary_cut_lag_depth(manifest: &[EntitySlot]) -> u32 {
 /// - The boundary cut references inflow-lag state deeper than a declared
 ///   `inflow_lag_depth`
 /// - The source stage's state dimension does not match `current_state_dimension`
-/// - A populated boundary manifest disagrees with `current_manifest` in length or
-///   in any slot's `(entity_type, entity_id, subindex)`
+/// - A target storage or inflow-lag slot has no source counterpart under
+///   identity reconciliation
 pub fn load_boundary_cuts(
     boundary_path: &Path,
     source_stage: u32,
@@ -650,7 +688,44 @@ pub fn load_boundary_cuts(
         loading_cost_scale_factor,
     );
 
+    if manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest, on_warning) {
+        let rebind = build_rebind(&stage_result.entity_manifest, current_manifest)?;
+        warn_on_dormant_source_now_active(
+            &rebind,
+            &stage_result.entity_manifest,
+            current_manifest,
+            on_warning,
+        );
+        for record in &mut records {
+            record.coefficients = rebind_cut(record, &rebind);
+        }
+    }
+
     Ok(ValidatedBoundaryCuts { records })
+}
+
+/// Mirrors [`compare_manifest_slot_identity`]'s dormant-to-active divergence
+/// warning for the reconciled (`BoundaryInjection`) path: for each
+/// identity-matched (`Copy`) target slot, warn when the source slot was
+/// dormant but the current slot is active.
+fn warn_on_dormant_source_now_active(
+    rebind: &[RebindOp],
+    source: &[EntitySlot],
+    current: &[EntitySlot],
+    on_warning: &mut dyn FnMut(&str),
+) {
+    for (j, op) in rebind.iter().enumerate() {
+        if let RebindOp::Copy(pos) = op
+            && !source[*pos].was_active
+            && current[j].was_active
+        {
+            on_warning(&format!(
+                "slot {j} (entity_type={}, entity_id={}, subindex={}) was dormant in the source \
+                 policy but is active in the current study; loading its cut",
+                current[j].entity_type, current[j].entity_id, current[j].subindex
+            ));
+        }
+    }
 }
 
 /// Boundary cut records that passed [`validate_policy_load`]'s
@@ -1438,9 +1513,10 @@ mod tests {
         );
     }
 
-    /// Given a boundary slot 0 with `entity_id` 7 but a current slot 0 with
-    /// `entity_id` 9 (same `state_dimension`), `load_boundary_cuts` rejects with a
-    /// `Validation` error naming slot `0`, `7`, and `9`.
+    /// Given a current terminal storage slot for hydro `9`, absent from a
+    /// boundary source that prices hydros `7` and `2` only,
+    /// `load_boundary_cuts` reconciles by identity and rejects naming the
+    /// unpriced hydro `9`.
     #[test]
     fn load_boundary_cuts_entity_id_mismatch_rejects() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1458,24 +1534,22 @@ mod tests {
             &mut ignore_warnings(),
         );
 
-        assert!(result.is_err(), "entity_id mismatch at slot 0 must reject");
+        assert!(result.is_err(), "an unpriced hydro must reject");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
         assert!(
-            msg.contains("entity_id=7"),
-            "error must name the boundary id 7: {msg}"
-        );
-        assert!(
-            msg.contains("entity_id=9"),
-            "error must name the current id 9: {msg}"
+            msg.contains('9'),
+            "error must name the unpriced current hydro 9: {msg}"
         );
     }
 
-    /// Given a boundary slot 1 typed `HydroInflowLag` (type 1) but a current slot 1
-    /// typed `HydroStorage` (type 0), `load_boundary_cuts` rejects naming slot 1 and
-    /// the differing entity types.
+    /// Given a current terminal storage slot for hydro `2`, but the boundary
+    /// source prices hydro `2` only as an inflow-lag slot (no storage
+    /// counterpart), `load_boundary_cuts` reconciles by identity and rejects
+    /// naming the unpriced storage hydro `2` — the differently-typed slot the
+    /// source happens to carry at the same raw position is irrelevant under
+    /// identity matching.
     #[test]
-    fn load_boundary_cuts_type_mismatch_rejects() {
+    fn load_boundary_cuts_storage_slot_absent_from_differently_typed_source_rejects() {
         let tmp = tempfile::tempdir().unwrap();
         let mut boundary = storage_manifest(1, 2);
         boundary[1].entity_type = 1; // HydroInflowLag
@@ -1493,16 +1567,14 @@ mod tests {
             &mut ignore_warnings(),
         );
 
-        assert!(result.is_err(), "type mismatch at slot 1 must reject");
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("slot 1"), "error must name slot 1: {msg}");
         assert!(
-            msg.contains("entity_type=1"),
-            "error must name the boundary type 1: {msg}"
+            result.is_err(),
+            "a storage slot with no identity counterpart must reject"
         );
+        let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("entity_type=0"),
-            "error must name the current type 0: {msg}"
+            msg.contains('2'),
+            "error must name the unpriced storage hydro 2: {msg}"
         );
     }
 
@@ -1582,20 +1654,20 @@ mod tests {
         );
     }
 
-    /// A policy exported WITHOUT travel-time buckets (slot 1 typed `HydroStorage`)
-    /// loaded by bucket-aware code whose terminal manifest types slot 1 as
-    /// `HydroTransitBucket` (type 3) is rejected: the per-slot identity check names
-    /// slot 1 and the differing types. Asserts the `load_boundary_cuts` rejection
-    /// primitive fires on the bucket-vs-non-bucket case (the end-to-end force-on
-    /// wiring lands separately).
+    /// A policy exported WITHOUT travel-time buckets loaded by bucket-aware
+    /// code whose terminal manifest has a `HydroTransitBucket` (type 3) slot
+    /// at the same `state_dimension` succeeds: a target transit bucket with no
+    /// source match defaults to `0.0` (distinct from storage/lag's
+    /// reject-on-miss; a matching source transit slot is instead copied). The
+    /// storage slot still loads its identity-matched coefficient.
     #[test]
-    fn load_boundary_cuts_missing_transit_bucket_slot_identity_rejects() {
+    fn load_boundary_cuts_missing_transit_bucket_slot_identity_defaults_to_zero() {
         let tmp = tempfile::tempdir().unwrap();
         let boundary = storage_manifest(1, 2);
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
 
         let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
-        let result = load_boundary_cuts(
+        let cuts = load_boundary_cuts(
             tmp.path(),
             0,
             2,
@@ -1603,22 +1675,20 @@ mod tests {
             None,
             1_000_000.0,
             &mut ignore_warnings(),
+        )
+        .expect(
+            "a transit-bucket slot with no source counterpart must default to zero, not reject",
         );
 
-        assert!(
-            result.is_err(),
-            "bucket-vs-non-bucket at slot 1 must reject"
-        );
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("slot 1"), "error must name slot 1: {msg}");
-        assert!(
-            msg.contains("entity_type=3"),
-            "error must name the current bucket type 3: {msg}"
-        );
-        assert!(
-            msg.contains("entity_type=0"),
-            "error must name the boundary storage type 0: {msg}"
-        );
+        assert_eq!(cuts.len(), 2, "both cuts must still load");
+        for cut in cuts.iter() {
+            assert_eq!(
+                cut.coefficients,
+                vec![1.0, 0.0],
+                "the storage slot copies its matched coefficient (the fixture's uniform 1.0); the \
+                 transit slot defaults to 0.0"
+            );
+        }
     }
 
     /// A policy exported WITHOUT travel-time buckets has a smaller `state_dimension`
@@ -1996,10 +2066,14 @@ mod tests {
         );
     }
 
-    /// A per-slot identity mismatch is a hard reject under `BoundaryInjection`
-    /// too — slot identity is checked on both kinds, unlike `num_stages`.
+    /// `validate_policy_load` itself no longer checks per-slot identity under
+    /// `BoundaryInjection` (unlike `FullFcf`): a same-`state_dimension`
+    /// identity mismatch it would have hard-rejected now passes here, because
+    /// slot identity is reconciled separately, by `reconcile::build_rebind`,
+    /// in `load_boundary_cuts` — confined to that load path, not this
+    /// lower-level manifest check.
     #[test]
-    fn validate_policy_load_boundary_injection_slot_mismatch_rejects() {
+    fn validate_policy_load_boundary_injection_does_not_check_slot_identity() {
         let source_slots = storage_manifest(7, 2);
         let current_slots = storage_manifest(9, 2);
         let source = psm(2, 12, &source_slots);
@@ -2007,9 +2081,10 @@ mod tests {
 
         let result = validate_policy_load::<BoundaryInjection>(&source, &current);
 
-        assert!(result.is_err(), "slot identity mismatch must reject");
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
+        assert!(
+            result.is_ok(),
+            "BoundaryInjection defers slot identity to reconcile::build_rebind: {result:?}"
+        );
     }
 
     /// An empty manifest on either side cannot be verified by slot identity:

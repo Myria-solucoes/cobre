@@ -1232,6 +1232,13 @@ fn resolve_commitment_hold_windows(
 /// encoded `year * 10000 + month * 100 + day` (`YYYYMMDD`). The day is pinned to
 /// `01` so the anchor stays month-granular — the same calendar month maps to the
 /// same date whether resolved from a weekly or a monthly stage.
+///
+/// This pin is load-bearing for the boundary reconciliation date join: the join
+/// compares anchors by **equality**, so passing the raw stage-start day instead
+/// of normalizing to `01` would force interval-containment logic in its place.
+/// Pinned by `year_month_day_anchor_same_month_dates_are_equal` and
+/// `year_month_day_anchor_always_normalizes_to_day_01`, and mirrored by the
+/// `delivery_date` field's day-01 promise in `policy.fbs`.
 pub(crate) fn year_month_day_anchor(date: NaiveDate) -> i32 {
     use chrono::Datelike;
     // `month()` is 1..=12, so the conversion never fails.

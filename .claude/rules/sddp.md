@@ -543,19 +543,33 @@ Read: `lp/builder/columns.rs` (`fill_spillage_columns`). Cases: D38, D39, D42
 Every policy load — full-FCF warm-start/resume/simulation-only and terminal
 boundary-cut injection — routes through `validate_policy_load`, the single
 entry point; there is no opt-out or bypass path. Its check matrix keys off
-`PolicyLoadKind`: `state_dimension` equality and per-slot `slot_identity`
-(`entity_type`, `entity_id`, `subindex`) are hard-rejected for both `FullFcf`
+`PolicyLoadKind`: `state_dimension` equality is hard-rejected for both `FullFcf`
 and `BoundaryInjection`; `num_stages` equality is hard-rejected only for
 `FullFcf` — a `BoundaryInjection` load skips it deliberately, since a monthly
-source study may legitimately feed a weekly+monthly current study.
-`col_scale`/LP prescaling is explicitly NOT a compatibility dimension: a state
-variable's identity and physical unit are independent of how the LP happens to
-scale its column, so comparing `col_scale` would falsely reject a policy whose
-entities genuinely match but whose scaling strategy or magnitude differs from
-the current study's — the forbidden alternative this contract rules out.
-Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`). Pinned
-by the `validate_policy_load_full_fcf_*` and
-`validate_policy_load_boundary_injection_*` tests in that module's test suite.
+source study may legitimately feed a weekly+monthly current study. Per-slot
+`slot_identity` (`entity_type`, `entity_id`, `subindex`) is an EXACT positional
+match (`compare_manifest_slot_identity`) only under `FullFcf`; a
+`BoundaryInjection` load does NOT exact-match here — its slot identity is
+RECONCILED instead, by `reconcile::build_rebind`/`rebind_cut` inside
+`load_boundary_cuts`, confined to that one load path. Storage and inflow-lag are
+the state's must-correspond core: a target slot of either family with no source
+counterpart REJECTS, naming the offending hydro or lag depth. The entity
+(`entity_type`/`entity_id`) is NEVER relaxed for any family — only the matching
+MECHANISM changes (identity hashmap vs. exact position), and only a date family's
+calendar `subindex` is ever relaxed (that relaxation is the dated fan-out
+reconciliation, not this core). `col_scale`/LP prescaling is explicitly NOT a
+compatibility dimension: a state variable's identity and physical unit are
+independent of how the LP happens to scale its column, so comparing `col_scale`
+would falsely reject a policy whose entities genuinely match but whose scaling
+strategy or magnitude differs from the current study's — the forbidden
+alternative this contract rules out.
+Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`,
+`PolicyLoadKind::CHECK_SLOT_IDENTITY_EXACT`), `policy/reconcile.rs`
+(`build_rebind`, `rebind_cut`). Pinned by the `validate_policy_load_full_fcf_*`
+(FullFcf exact match, unchanged) and
+`validate_policy_load_boundary_injection_does_not_check_slot_identity`
+(BoundaryInjection defers to reconcile) tests, plus `policy::reconcile`'s unit
+tests and `tests/boundary_reconcile_defaults.rs`.
 
 ## Initial-state seeding resolves IDs through a position map, never `binary_search`
 

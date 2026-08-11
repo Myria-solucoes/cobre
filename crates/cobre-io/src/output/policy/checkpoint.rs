@@ -5,7 +5,10 @@
 //! checks first — a pre-marker artifact is cleanly rejected before any payload
 //! is parsed.
 
+use std::collections::BTreeMap;
 use std::path::Path;
+
+use chrono::NaiveDate;
 
 use super::super::error::OutputError;
 use super::codec::{
@@ -13,10 +16,101 @@ use super::codec::{
     read_sorted_bin_files, serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
 };
 use super::records::{
-    FORMAT_VERSION, OwnedPolicyBasisRecord, PolicyBasisRecord, PolicyCheckpoint,
-    PolicyCheckpointMetadata, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
-    StageStatesReadResult,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, FORMAT_VERSION, OwnedPolicyBasisRecord, PolicyBasisRecord,
+    PolicyCheckpoint, PolicyCheckpointMetadata, StageCutsPayload, StageCutsReadResult,
+    StageStatesPayload, StageStatesReadResult,
 };
+
+/// Raw `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
+/// Its `subindex` is a maturity-lag depth, genuinely delivery-ordered. A
+/// modular delivery-target-residue `subindex` (the other calendar-shaped
+/// family) wraps across the horizon and carries no such order — enforcing
+/// monotonicity on it would reject correctly-produced, non-monotone dates, so
+/// [`check_transit_bucket_monotonicity`] never checks it.
+const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
+
+/// Whether `delivery_date` is [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] or decodes
+/// as a valid `YYYYMMDD` date.
+fn is_well_formed_delivery_date(delivery_date: i32) -> bool {
+    if delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
+        return true;
+    }
+    let year = delivery_date / 10_000;
+    let month = (delivery_date / 100) % 100;
+    let day = delivery_date % 100;
+    let (Ok(month), Ok(day)) = (u32::try_from(month), u32::try_from(day)) else {
+        return false;
+    };
+    NaiveDate::from_ymd_opt(year, month, day).is_some()
+}
+
+/// Verify one pool's `HydroTransitBucket` slots (grouped by `entity_id`) carry
+/// non-sentinel `delivery_date`s that are monotone non-decreasing in `subindex`
+/// (the maturity-lag depth).
+///
+/// # Errors
+///
+/// Returns [`OutputError::SerializationError`] naming the pool, the offending
+/// subindex, and its `delivery_date`.
+fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), OutputError> {
+    let mut by_entity: BTreeMap<i32, Vec<(u32, i32)>> = BTreeMap::new();
+    for slot in &pool.entity_manifest {
+        if slot.entity_type == ENTITY_TYPE_HYDRO_TRANSIT_BUCKET
+            && slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        {
+            by_entity
+                .entry(slot.entity_id)
+                .or_default()
+                .push((slot.subindex, slot.delivery_date));
+        }
+    }
+    for dates in by_entity.values_mut() {
+        dates.sort_by_key(|&(subindex, _)| subindex);
+        for pair in dates.windows(2) {
+            let (prev_subindex, prev_date) = pair[0];
+            let (subindex, date) = pair[1];
+            if date < prev_date {
+                let pool_id = pool.stage_id;
+                return Err(OutputError::serialization(
+                    "policy_checkpoint_dates",
+                    format!(
+                        "pool {pool_id} subindex {subindex} carries delivery_date {date}, \
+                         earlier than subindex {prev_subindex}'s {prev_date}"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that `checkpoint` is internally date-consistent: every
+/// [`EntitySlot`](super::records::EntitySlot)'s non-sentinel `delivery_date` is
+/// a well-formed `YYYYMMDD` date, and every pool's `HydroTransitBucket` slots
+/// are monotone non-decreasing in `subindex`
+/// (see [`check_transit_bucket_monotonicity`]).
+///
+/// # Errors
+///
+/// Returns [`OutputError::SerializationError`] naming the offending pool,
+/// subindex, and `delivery_date`.
+fn validate_checkpoint_dates(checkpoint: &PolicyCheckpoint) -> Result<(), OutputError> {
+    for pool in &checkpoint.stage_cuts {
+        for slot in &pool.entity_manifest {
+            if !is_well_formed_delivery_date(slot.delivery_date) {
+                return Err(OutputError::serialization(
+                    "policy_checkpoint_dates",
+                    format!(
+                        "pool {} subindex {} carries malformed delivery_date {}",
+                        pool.stage_id, slot.subindex, slot.delivery_date
+                    ),
+                ));
+            }
+        }
+        check_transit_bucket_monotonicity(pool)?;
+    }
+    Ok(())
+}
 
 /// One `.bin` payload file name, keyed by the payload's own id (the pool id for
 /// `cuts/`, the stage id for `basis/`/`states/`). Zero-padded for a stable
@@ -176,7 +270,8 @@ pub fn write_policy_checkpoint(
 ///
 /// - [`OutputError::IoError`] — directory or file read failed.
 /// - [`OutputError::SerializationError`] — JSON or `FlatBuffers` parse failure,
-///   or a `format_version` that is absent or not [`FORMAT_VERSION`].
+///   a `format_version` that is absent or not [`FORMAT_VERSION`], or a
+///   date-consistency violation caught by [`validate_checkpoint_dates`].
 ///
 /// # Examples
 ///
@@ -239,10 +334,12 @@ pub fn read_policy_checkpoint(path: &Path) -> Result<PolicyCheckpoint, OutputErr
         Vec::new()
     };
 
-    Ok(PolicyCheckpoint {
+    let checkpoint = PolicyCheckpoint {
         metadata,
         stage_cuts,
         stage_bases,
         stage_states,
-    })
+    };
+    validate_checkpoint_dates(&checkpoint)?;
+    Ok(checkpoint)
 }

@@ -1303,12 +1303,12 @@ mod decomp_integration {
         );
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("slot 0"),
-            "rejection must name the offending slot 0: {msg}"
+            msg.contains("does not price hydro"),
+            "rejection must name the unpriced hydro: {msg}"
         );
         assert!(
-            msg.contains("entity-identity mismatch"),
-            "rejection must describe the identity mismatch: {msg}"
+            msg.contains("different set of plants"),
+            "rejection must describe the identity mismatch (trained on a different set of plants): {msg}"
         );
     }
 }

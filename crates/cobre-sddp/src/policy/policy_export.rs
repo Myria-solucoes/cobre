@@ -22,13 +22,13 @@ use crate::setup::{NodeGraph, NodePos, post_horizon_delivery_date, year_month_da
 use crate::training::TrainingResult;
 
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
+pub(crate) const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
 /// `EntityType::HydroInflowLag` discriminant from `schemas/policy.fbs`.
 pub(crate) const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
 /// `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
+pub(crate) const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 /// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
+pub(crate) const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
 
 /// Build the per-slot entity-identity manifest for one stage's cut pool: one
 /// [`EntitySlot`] per enabled cut-state dimension of `projection`.
@@ -561,7 +561,7 @@ mod tests {
     use super::{
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
         ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, EntitySlot,
-        build_stage_entity_manifest, build_stage_states_payloads,
+        build_stage_entity_manifest, build_stage_states_payloads, year_month_day_anchor,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
@@ -1533,6 +1533,29 @@ mod tests {
                 rec.num_cut_rows, expected,
                 "node {node} num_cut_rows must reflect its own pool {pool}, not fcf.pools[{node}]"
             );
+        }
+    }
+
+    #[test]
+    fn year_month_day_anchor_same_month_dates_are_equal() {
+        let weekly_stage_start = chrono::NaiveDate::from_ymd_opt(2026, 9, 5).unwrap();
+        let monthly_stage_start = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+
+        assert_eq!(year_month_day_anchor(weekly_stage_start), 20260901);
+        assert_eq!(year_month_day_anchor(monthly_stage_start), 20260901);
+    }
+
+    #[test]
+    fn year_month_day_anchor_always_normalizes_to_day_01() {
+        let dates = [
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2027, 2, 28).unwrap(),
+        ];
+
+        for date in dates {
+            assert_eq!(year_month_day_anchor(date) % 100, 1);
         }
     }
 }
