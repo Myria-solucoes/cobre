@@ -38,13 +38,20 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 /// Checks cross-field invariants for anticipated thermal plants.
 ///
 /// 1. **Per-plant lead horizon** — `LeadStages` rejects `K == 0` (defence in
-///    depth; parse-time also rejects it) and `K > n_stages`; `LeadTime` rejects
+///    depth; parse-time also rejects it) and `K > n_stages`: either way the
+///    plant can never deliver within the study horizon. `LeadTime` rejects
 ///    `delta_hours` exceeding the summed study-stage durations (strict `>`, so
-///    a delivery landing exactly on the final stage is accepted). Either way,
-///    the plant can never deliver within the study horizon. A commissioning
-///    window IS supported and composes with the lookahead via the shifted
-///    decision gate; these checks validate the LEAD itself, independent of any
-///    window.
+///    a delivery landing exactly on the final stage is accepted) only for a
+///    thermal with no `future_anticipated_deliveries` window: a thermal that
+///    also carries one legitimately needs a lead reaching past the remaining
+///    horizon, since that commitment is decided in-study but delivered
+///    post-horizon — its decider resolves end-anchored against the delivery
+///    window's own end, not against the study horizon (the solver crate's own
+///    resolution; `cobre-io` is upstream and cannot depend on it, so this is a
+///    targeted exemption, not a re-implementation of that resolution). A
+///    commissioning window IS supported and composes with the lookahead via
+///    the shifted decision gate; these checks validate the LEAD itself,
+///    independent of any window.
 /// 2. **Past-commitments registry bijection** with
 ///    `ic.past_anticipated_commitments`: each anticipated thermal has at least
 ///    one commitment window, each window references an anticipated thermal, and
@@ -66,6 +73,13 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     let n_stages = study_stage_ids.len();
     let study_durations = study_stage_durations(data);
 
+    let thermals_with_future_delivery: HashSet<EntityId> = data
+        .initial_conditions
+        .future_anticipated_deliveries
+        .iter()
+        .map(|delivery| delivery.thermal_id)
+        .collect();
+
     for thermal in &data.thermals {
         let Some(ref cfg) = thermal.anticipated_config else {
             continue;
@@ -74,7 +88,9 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
 
         if let AnticipatedConfig::LeadTime(delta_hours) = *cfg {
             let total_horizon_hours: f64 = study_durations.iter().sum();
-            if delta_hours > total_horizon_hours {
+            if delta_hours > total_horizon_hours
+                && !thermals_with_future_delivery.contains(&thermal.id)
+            {
                 let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_time");
                 ctx.add_error(
                     ErrorKind::BusinessRuleViolation,
@@ -960,14 +976,15 @@ fn delivery_entity(delivery: &FutureAnticipatedDelivery) -> String {
 mod tests {
     use cobre_core::temporal::{Block, PolicyGraphType, Stage};
     use cobre_core::{
-        AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, HorizonGraph, Thermal,
+        AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, FutureAnticipatedDelivery,
+        HorizonGraph, Thermal,
     };
 
     use chrono::{NaiveDate, TimeDelta};
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
-    use super::lead_delivery_stage_count;
+    use super::{check_anticipated_thermals, lead_delivery_stage_count};
     use crate::stages::StagesData;
     use crate::validation::schema::ParsedData;
     use crate::validation::{ErrorKind, ValidationContext};
@@ -1436,6 +1453,109 @@ mod tests {
         assert!(
             !ctx.has_errors(),
             "delta_hours == total_horizon_hours must be accepted, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    // ── Post-horizon delivery exemption from the lead-horizon cap ────────────
+
+    /// Given a `LeadTime(delta_hours)` thermal whose `delta_hours` strictly
+    /// exceeds the summed study-stage durations, when the thermal also carries
+    /// a `future_anticipated_deliveries` window (decided in-study, delivered
+    /// post-horizon), then no `BusinessRuleViolation` naming "lead_time exceeds
+    /// study horizon" is produced — the direct regression for the lead-cap bug.
+    #[test]
+    fn test_lead_time_exceeding_horizon_with_future_delivery_lead_cap_accepted() {
+        let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
+        let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
+        let mut data = make_data_anticipated_with_durations(vec![thermal], &durations, vec![]);
+        let horizon_end = stage_boundaries(&durations)[durations.len()];
+        data.initial_conditions.future_anticipated_deliveries = vec![FutureAnticipatedDelivery {
+            thermal_id: EntityId::from(1),
+            delivery_start: horizon_end,
+            delivery_end: horizon_end + TimeDelta::days(7),
+            min_mw: 0.0,
+            max_mw: 500.0,
+        }];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let lead_cap_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("lead_time exceeds study horizon")
+            })
+            .collect();
+        assert!(
+            lead_cap_errors.is_empty(),
+            "a post-horizon-delivery thermal must be exempt from the lead-horizon cap, got: {errors:?}"
+        );
+    }
+
+    /// Given the same over-horizon `LeadTime` thermal as above but with NO
+    /// `future_anticipated_deliveries` window, the lead-horizon cap still
+    /// rejects it: the exemption is scoped to a thermal that genuinely
+    /// delivers post-horizon, never a blanket relaxation of the cap.
+    #[test]
+    fn test_lead_time_exceeding_horizon_without_future_delivery_still_rejected() {
+        let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
+        let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
+        let data = make_data_anticipated_with_durations(vec![thermal], &durations, vec![]);
+        assert!(
+            data.initial_conditions
+                .future_anticipated_deliveries
+                .is_empty(),
+            "fixture must carry no future delivery window"
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("lead_time exceeds study horizon")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one BusinessRuleViolation with 'lead_time exceeds study horizon', got: {errors:?}"
+        );
+    }
+
+    /// Given a `LeadTime` thermal exceeding the horizon with a matching
+    /// `future_anticipated_deliveries` window AND `past_anticipated_commitments`
+    /// tiling every leading study stage at 0 MW (the pre-study-decided
+    /// placeholder for its whole in-study life, since `lead_delivery_stage_count`
+    /// resolves to `n_stages` whenever `delta_hours` exceeds the horizon),
+    /// `check_anticipated_thermals` validates end-to-end with no errors: the
+    /// lead-cap exemption composes cleanly with the full-tiling coverage
+    /// contract.
+    #[test]
+    fn test_post_horizon_delivery_thermal_tiling_all_study_stages_validates() {
+        let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
+        let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
+        let mut data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &durations,
+            commitments_on(1, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &durations),
+        );
+        let horizon_end = stage_boundaries(&durations)[durations.len()];
+        data.initial_conditions.future_anticipated_deliveries = vec![FutureAnticipatedDelivery {
+            thermal_id: EntityId::from(1),
+            delivery_start: horizon_end,
+            delivery_end: horizon_end + TimeDelta::days(7),
+            min_mw: 0.0,
+            max_mw: 500.0,
+        }];
+        let mut ctx = ValidationContext::new();
+        check_anticipated_thermals(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "a post-horizon-delivery thermal tiling every leading study stage must validate \
+             cleanly through check_anticipated_thermals, got: {:?}",
             ctx.errors()
         );
     }
