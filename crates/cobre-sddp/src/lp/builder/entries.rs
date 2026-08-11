@@ -192,8 +192,8 @@ fn fill_anticipated_slot_definition_entries(
 /// [`DeliveryRing::emit_deposit`]); every other stage, the CARRY row
 /// (`out_col(w) +1`, `in_col(w) −1`, via [`DeliveryRing::emit_carry_rows`]'s
 /// same-slot hold identity at `depth = 1`). No fish arm exists for a
-/// post-horizon lane — it is never consumed in-study; the boundary FCF
-/// prices it (pricing not yet wired).
+/// post-horizon lane — it is never consumed in-study; the boundary FCF prices
+/// the carried state (`fill_commitment_decision_columns` books the fuel).
 fn fill_commitment_post_horizon_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],

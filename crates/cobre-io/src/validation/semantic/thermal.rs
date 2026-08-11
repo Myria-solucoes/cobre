@@ -837,6 +837,24 @@ fn check_delivery_coverage(
         return;
     }
 
+    if covered.len() != 1 {
+        ctx.add_error(
+            ErrorKind::BusinessRuleViolation,
+            "post_study_stages.json",
+            Some(delivery_entity(delivery)),
+            format!(
+                "Thermal {}: future_anticipated_deliveries window [{}, {}) spans {} post-study \
+                 stages; a delivery window must resolve to exactly one post-study stage \
+                 (multi-stage delivery is not supported).",
+                delivery.thermal_id.0,
+                delivery.delivery_start,
+                delivery.delivery_end,
+                covered.len()
+            ),
+        );
+        return;
+    }
+
     for stage_index in covered {
         match bounds.get(&(delivery.thermal_id, stage_index)) {
             None => ctx.add_error(

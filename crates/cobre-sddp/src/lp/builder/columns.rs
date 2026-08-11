@@ -147,8 +147,9 @@ fn fill_transit_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) 
 /// overwrites this fill when active). The trailing post-horizon lanes are
 /// NEVER frozen — `freeze_masked_columns`'s masking is retired for them,
 /// replaced with the same keep-live open bound at every stage including the
-/// terminal, so the boundary FCF can price them (pricing not yet wired;
-/// this only keeps the columns structurally live).
+/// terminal, so the boundary FCF prices the carried state (`β·x`) while
+/// [`fill_commitment_decision_columns`] books the delivery-anchored fuel
+/// (fuel-exclusive β, so the two do not double-count).
 fn fill_anticipated_slot_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     let base = layout.anticipated.col_anticipated_slots_out_start;
     let ring = super::entries::anticipated_ring(layout);
@@ -223,6 +224,10 @@ fn fill_commitment_decision_columns(
              non-empty at read time"
         );
         let Some((cost, min_k, max_k)) = bounds else {
+            // Degrade a violated invariant to the dormant-zero column convention
+            // (as `fill_anticipated_columns` does), never an unbounded free column.
+            bufs.col_lower[col] = 0.0;
+            bufs.col_upper[col] = 0.0;
             continue;
         };
 

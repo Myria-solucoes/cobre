@@ -198,7 +198,6 @@ pub struct StudySetup {
     /// and the generic-constraint echo.
     pub(crate) resolved_parameters: ResolvedParameters,
 
-    /// Setup-side resolved post-study boundary artifacts
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     pub scenario_libraries: ScenarioLibraries,
 

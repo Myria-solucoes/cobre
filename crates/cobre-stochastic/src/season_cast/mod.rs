@@ -647,23 +647,6 @@ impl<'a> StageCalendar<'a> {
             .collect()
     }
 
-    /// Resolve `date`'s containing stage index over this calendar segment:
-    /// the unique stage whose real `[start_date, end_date)` span overlaps the
-    /// one-day window `[date, date + 1 day)`. Built on [`Self::coverage`]'s
-    /// overlap arithmetic rather than a separate date-range walk. `None` when
-    /// `date` falls outside every stage (before the first, at or after the
-    /// last).
-    #[must_use]
-    pub fn resolve_date(&self, date: NaiveDate) -> Option<usize> {
-        let window = DatedWindow {
-            start_date: date,
-            end_date: date + TimeDelta::days(1),
-        };
-        self.coverage(&window)
-            .into_iter()
-            .position(|fraction| fraction > 0.0)
-    }
-
     /// Resolve `window`'s covering stage index: the one stage [`Self::coverage`]
     /// reports at fraction `1.0`, with every other stage at `0.0` — i.e.
     /// `window` aligns exactly to one calendar stage's boundaries. `None` when
@@ -1252,33 +1235,6 @@ mod tests {
         assert_eq!(
             odd_stages[0].end_date,
             NaiveDate::from_ymd_opt(2026, 11, 30).unwrap()
-        );
-    }
-
-    #[test]
-    fn test_resolve_date_maps_to_expected_post_study_index() {
-        let stages = post_study_calendar_stages(&two_post_study_stages());
-        let calendar = StageCalendar::new(&stages);
-
-        assert_eq!(
-            calendar.resolve_date(NaiveDate::from_ymd_opt(2026, 11, 15).unwrap()),
-            Some(0)
-        );
-        assert_eq!(
-            calendar.resolve_date(NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()),
-            Some(1)
-        );
-        assert_eq!(
-            calendar.resolve_date(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()),
-            Some(1)
-        );
-        assert_eq!(
-            calendar.resolve_date(NaiveDate::from_ymd_opt(2026, 10, 31).unwrap()),
-            None
-        );
-        assert_eq!(
-            calendar.resolve_date(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()),
-            None
         );
     }
 

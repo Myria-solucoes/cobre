@@ -183,6 +183,41 @@ fn test_delivery_overreaches_post_study_horizon_rejected() {
     );
 }
 
+// ── AC: delivery window spanning ≥2 whole post-study stages → Err ─────────────
+
+#[test]
+fn test_delivery_spanning_multiple_post_study_stages_rejected() {
+    let dir = TempDir::new().unwrap();
+    make_minimal_case(&dir);
+    // [2024-02-01, 2024-04-01) covers BOTH post-study stages at 1.0 — a single
+    // commitment resolves to exactly one destination stage, so this is rejected.
+    write_file(
+        dir.path(),
+        "initial_conditions.json",
+        &initial_conditions_with_delivery("2024-02-01", "2024-04-01", 0.0, 300.0),
+    );
+    write_file(
+        dir.path(),
+        "post_study_stages.json",
+        r#"{
+          "stages": [
+            { "start_date": "2024-02-01", "duration_hours": 696.0 },
+            { "start_date": "2024-03-01", "duration_hours": 744.0 }
+          ],
+          "thermal_bounds": [
+            { "thermal_id": 86, "post_study_stage_index": 0, "cost_per_mwh": 210.0, "min_mw": 0.0, "max_mw": 350.0 },
+            { "thermal_id": 86, "post_study_stage_index": 1, "cost_per_mwh": 220.0, "min_mw": 0.0, "max_mw": 350.0 }
+          ]
+        }"#,
+    );
+
+    let msg = load_case(dir.path()).unwrap_err().to_string();
+    assert!(
+        msg.contains("spans 2 post-study stages") && msg.contains("exactly one"),
+        "error should name the multi-stage span, got: {msg}"
+    );
+}
+
 // ── AC: covered stage has no PostStudyThermalBound{t, j} → Err naming (t, j) ──
 
 #[test]
