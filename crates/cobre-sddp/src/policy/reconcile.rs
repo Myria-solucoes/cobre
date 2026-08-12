@@ -37,6 +37,7 @@ use chrono::NaiveDate;
 use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::OwnedPolicyCutRecord;
+use serde::Serialize;
 
 use crate::SddpError;
 use crate::policy::policy_export::{
@@ -128,19 +129,24 @@ fn positive_hours(start: NaiveDate, end: NaiveDate) -> f64 {
 
 /// Hours of overlap between two `[start, end)` calendar intervals; `0.0` when
 /// they do not intersect.
-fn overlap_hours(a: (NaiveDate, NaiveDate), b: (NaiveDate, NaiveDate)) -> f64 {
+pub(crate) fn overlap_hours(a: (NaiveDate, NaiveDate), b: (NaiveDate, NaiveDate)) -> f64 {
     positive_hours(a.0.max(b.0), a.1.min(b.1))
 }
 
 /// Decode a day-01 `YYYYMM01` anchor into `[month_start, month_end)` and
 /// `H_M = days_in_month · 24` hours — the exact inverse of
-/// `year_month_day_anchor` (`setup/mod.rs`).
+/// `year_month_day_anchor` (`setup/mod.rs`). Shared with
+/// [`crate::policy::policy_load::resolve_boundary_source_stage`], which
+/// decodes the same per-pool anticipated anchors to auto-resolve
+/// `policy.boundary.source_stage`.
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] if `delivery_date` does not decode to a
 /// real calendar month.
-fn decode_month_anchor(delivery_date: i32) -> Result<(NaiveDate, NaiveDate, f64), SddpError> {
+pub(crate) fn decode_month_anchor(
+    delivery_date: i32,
+) -> Result<(NaiveDate, NaiveDate, f64), SddpError> {
     let year = delivery_date / 10_000;
     let month = u32::try_from(delivery_date / 100 % 100).map_err(|_| {
         SddpError::Validation(format!(
@@ -441,17 +447,25 @@ pub(crate) fn rebind_cut(cut: &OwnedPolicyCutRecord, rebind: &[RebindOp]) -> Vec
         .collect()
 }
 
-/// `source` positions no [`RebindOp::Copy`] in `rebind` ever references.
-// Rationale: reserved for a future reconciliation-report surface (which
-// source slots a load silently dropped); not yet called outside tests.
-#[allow(dead_code)]
+/// `source` positions no [`RebindOp::Copy`] or `Blend`/`Renormalize` term in
+/// `rebind` ever references.
 pub(crate) fn dropped_source_positions(source_len: usize, rebind: &[RebindOp]) -> Vec<usize> {
     let mut referenced = vec![false; source_len];
     for op in rebind {
-        if let RebindOp::Copy(pos) = op
-            && *pos < source_len
-        {
-            referenced[*pos] = true;
+        match op {
+            RebindOp::Copy(pos) => {
+                if *pos < source_len {
+                    referenced[*pos] = true;
+                }
+            }
+            RebindOp::Blend(terms) | RebindOp::Renormalize(terms) => {
+                for &(pos, _) in terms {
+                    if pos < source_len {
+                        referenced[pos] = true;
+                    }
+                }
+            }
+            RebindOp::Zero | RebindOp::Reject { .. } => {}
         }
     }
     referenced
@@ -461,14 +475,250 @@ pub(crate) fn dropped_source_positions(source_len: usize, rebind: &[RebindOp]) -
         .collect()
 }
 
+/// Per-family tally of one [`BoundaryReconciliationReport`]'s per-operation
+/// classification: `copy` ([`RebindOp::Copy`]), `fan_out`
+/// (`Blend` + `Renormalize` target slots), `straddling` (the `Renormalize`
+/// subset of `fan_out` — the boundary-edge sub-case), `default_zero`
+/// (target-only `Zero`, excluding a sentinel-anticipated pad), and
+/// `dropped_source` (this family's own [`dropped_source_positions`]).
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct FamilyTally {
+    /// Target slots resolved by [`RebindOp::Copy`].
+    pub copy: usize,
+    /// Target slots resolved by [`RebindOp::Blend`] or [`RebindOp::Renormalize`].
+    pub fan_out: usize,
+    /// The [`RebindOp::Renormalize`] subset of `fan_out`.
+    pub straddling: usize,
+    /// Target-only [`RebindOp::Zero`] slots (excludes a sentinel-anticipated pad).
+    pub default_zero: usize,
+    /// This family's source positions no op references.
+    pub dropped_source: usize,
+}
+
+/// Anticipated-family fan-out coverage: the source's own priced
+/// delivery-month span and the target's live delivery-interval span.
+/// Paired with the sibling [`BoundaryReconciliationReport::anticipated`]
+/// tally's `fan_out`/`straddling`/`default_zero`, this is everything
+/// [`BoundaryReconciliationReport::diagnostic_lines`] needs to render the
+/// coverage line.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct AnticipatedCoverage {
+    /// Live, dated anticipated source slots contributing a decoded calendar month.
+    pub source_month_count: usize,
+    /// `[earliest month_start, latest month_end)` across those source months.
+    pub source_span: Option<(NaiveDate, NaiveDate)>,
+    /// `[earliest start, latest end)` across live, dated anticipated target intervals.
+    pub target_span: Option<(NaiveDate, NaiveDate)>,
+}
+
+/// The "which boundary policy we have + what got reconciled" diagnostic:
+/// [`build_reconciliation_report`]'s pure tally of one
+/// `load_boundary_cuts` reconciliation, by family. `reconciled` is `false`
+/// only on the empty-manifest / dimension-only skip path, where every tally
+/// stays at its zero [`Default`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BoundaryReconciliationReport {
+    /// `false` on the skipped (dimension-only) load path; `true` when rebind ran.
+    pub reconciled: bool,
+    /// `HydroStorage` tally.
+    pub storage: FamilyTally,
+    /// `HydroInflowLag` tally.
+    pub inflow_lag: FamilyTally,
+    /// `HydroTransitBucket` tally.
+    pub transit_bucket: FamilyTally,
+    /// `AnticipatedThermalState` tally.
+    pub anticipated: FamilyTally,
+    /// The anticipated family's fan-out coverage summary.
+    pub anticipated_coverage: AnticipatedCoverage,
+    /// Every family without its own reconcile arm (the identity-reject default).
+    pub other_identity: FamilyTally,
+}
+
+impl BoundaryReconciliationReport {
+    fn tally_mut(&mut self, family: ReportFamily) -> &mut FamilyTally {
+        match family {
+            ReportFamily::Storage => &mut self.storage,
+            ReportFamily::InflowLag => &mut self.inflow_lag,
+            ReportFamily::TransitBucket => &mut self.transit_bucket,
+            ReportFamily::Anticipated => &mut self.anticipated,
+            ReportFamily::OtherIdentity => &mut self.other_identity,
+        }
+    }
+
+    /// Human-readable diagnostic lines, INFO-level and factual (mirrors the
+    /// bridge importer's `_emit_import_diagnostics` tone): on the skip path,
+    /// a single line naming the dimension-only load; otherwise an
+    /// always-emitted totals summary, one line per family (COPY / FAN-OUT /
+    /// DEFAULT-0.0 / DROP), and the anticipated coverage line.
+    #[must_use]
+    pub fn diagnostic_lines(&self) -> Vec<String> {
+        if !self.reconciled {
+            return vec![
+                "boundary reconciliation: dimension-only load (entity manifest absent); no \
+                 per-family fan-out tally"
+                    .to_string(),
+            ];
+        }
+
+        let families: [(&str, FamilyTally); 5] = [
+            ("storage", self.storage),
+            ("inflow-lag", self.inflow_lag),
+            ("transit-bucket", self.transit_bucket),
+            ("anticipated", self.anticipated),
+            ("other-identity", self.other_identity),
+        ];
+        let total_copy: usize = families.iter().map(|(_, t)| t.copy).sum();
+        let total_fan_out: usize = families.iter().map(|(_, t)| t.fan_out).sum();
+        let total_default_zero: usize = families.iter().map(|(_, t)| t.default_zero).sum();
+        let total_dropped: usize = families.iter().map(|(_, t)| t.dropped_source).sum();
+
+        let mut lines = vec![format!(
+            "boundary reconciliation: {total_copy} copied, {total_fan_out} fanned out, \
+             {total_default_zero} defaulted to 0.0, {total_dropped} source slots dropped"
+        )];
+        for (name, tally) in families {
+            lines.push(format!(
+                "{name}: COPY={}, FAN-OUT=({}, rule = distribute), DEFAULT-0.0={}, DROP={}",
+                tally.copy, tally.fan_out, tally.default_zero, tally.dropped_source
+            ));
+        }
+        lines.push(format!(
+            "anticipated: {} source months fanned to {} target slots ({} straddling, \
+             overlap-blended), {} months defaulted",
+            self.anticipated_coverage.source_month_count,
+            self.anticipated.fan_out,
+            self.anticipated.straddling,
+            self.anticipated.default_zero
+        ));
+        lines
+    }
+}
+
+/// The five report families [`build_reconciliation_report`] tallies,
+/// dispatched by `entity_type` identically to [`resolve_target_slot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportFamily {
+    Storage,
+    InflowLag,
+    TransitBucket,
+    Anticipated,
+    OtherIdentity,
+}
+
+fn report_family(entity_type: u8) -> ReportFamily {
+    match entity_type {
+        ENTITY_TYPE_HYDRO_STORAGE => ReportFamily::Storage,
+        ENTITY_TYPE_HYDRO_INFLOW_LAG => ReportFamily::InflowLag,
+        ENTITY_TYPE_HYDRO_TRANSIT_BUCKET => ReportFamily::TransitBucket,
+        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE => ReportFamily::Anticipated,
+        _ => ReportFamily::OtherIdentity,
+    }
+}
+
+/// Classify one target slot's `(family, op)` into `tally`: `Copy` → COPY;
+/// `Blend`/`Renormalize` → FAN-OUT (`Renormalize` also STRADDLING); `Zero` on
+/// a sentinel-anticipated slot is a structural pad, excluded from every
+/// tally; every other `Zero` → DEFAULT-0.0.
+fn classify_op(op: &RebindOp, family: ReportFamily, slot: &EntitySlot, tally: &mut FamilyTally) {
+    match op {
+        RebindOp::Copy(_) => tally.copy += 1,
+        RebindOp::Blend(_) => tally.fan_out += 1,
+        RebindOp::Renormalize(_) => {
+            tally.fan_out += 1;
+            tally.straddling += 1;
+        }
+        RebindOp::Zero => {
+            let sentinel_anticipated_pad = family == ReportFamily::Anticipated
+                && slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+            if !sentinel_anticipated_pad {
+                tally.default_zero += 1;
+            }
+        }
+        RebindOp::Reject { reason } => unreachable!(
+            "build_rebind must convert Reject into an error before build_reconciliation_report \
+             sees it: {reason}"
+        ),
+    }
+}
+
+/// Widen `span` to also cover `interval`, when present; a no-op for `None`
+/// (a sentinel or otherwise interval-less slot).
+fn fold_span(span: &mut Option<(NaiveDate, NaiveDate)>, interval: Option<(NaiveDate, NaiveDate)>) {
+    let Some((start, end)) = interval else {
+        return;
+    };
+    *span = Some(match *span {
+        Some((cur_start, cur_end)) => (cur_start.min(start), cur_end.max(end)),
+        None => (start, end),
+    });
+}
+
+/// Build a [`BoundaryReconciliationReport`] over one `load_boundary_cuts`
+/// reconciliation: a pure pass over the aligned `target`/`rebind` vectors,
+/// `source` (for [`dropped_source_positions`] and the source month span), and
+/// `target_delivery_intervals` (for the target interval span). No I/O, no
+/// mutation, not on any hot path.
+///
+/// # Panics
+///
+/// Panics if `rebind` contains a [`RebindOp::Reject`] — the same
+/// `build_rebind` postcondition violation [`rebind_cut`] guards against.
+pub(crate) fn build_reconciliation_report(
+    source: &[EntitySlot],
+    target: &[EntitySlot],
+    target_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
+    rebind: &[RebindOp],
+) -> BoundaryReconciliationReport {
+    let mut report = BoundaryReconciliationReport {
+        reconciled: true,
+        ..BoundaryReconciliationReport::default()
+    };
+
+    let mut target_span = None;
+    for (i, (slot, op)) in target.iter().zip(rebind).enumerate() {
+        let family = report_family(slot.entity_type);
+        let interval = target_delivery_intervals.get(i).copied().flatten();
+        fold_span(&mut target_span, interval);
+        classify_op(op, family, slot, report.tally_mut(family));
+    }
+    report.anticipated_coverage.target_span = target_span;
+
+    for pos in dropped_source_positions(source.len(), rebind) {
+        if let Some(slot) = source.get(pos) {
+            report
+                .tally_mut(report_family(slot.entity_type))
+                .dropped_source += 1;
+        }
+    }
+
+    let mut source_span = None;
+    let mut source_month_count = 0;
+    for slot in source {
+        if slot.entity_type != ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            || slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        {
+            continue;
+        }
+        let Ok((start, end, _)) = decode_month_anchor(slot.delivery_date) else {
+            continue;
+        };
+        source_month_count += 1;
+        fold_span(&mut source_span, Some((start, end)));
+    }
+    report.anticipated_coverage.source_month_count = source_month_count;
+    report.anticipated_coverage.source_span = source_span;
+
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
 
     use super::{
-        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
-        ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, RebindOp, build_rebind, decode_month_anchor,
-        dropped_source_positions, rebind_cut,
+        BoundaryReconciliationReport, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+        ENTITY_TYPE_HYDRO_INFLOW_LAG, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, RebindOp, build_rebind,
+        build_reconciliation_report, decode_month_anchor, dropped_source_positions, rebind_cut,
     };
     use crate::SddpError;
     use cobre_io::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyCutRecord};
@@ -749,9 +999,7 @@ mod tests {
     /// Given a source manifest with one monthly anticipated slot and a
     /// target lane slot whose interval lies fully inside that month, when
     /// `build_rebind` runs, then it resolves to `Blend` with a single term
-    /// weighted `overlap/H_M` — the flip of the retired
-    /// `build_rebind_dated_anticipated_target_rejects_gracefully` reject
-    /// path.
+    /// weighted `overlap/H_M`.
     #[test]
     fn build_rebind_dated_anticipated_target_fully_covered_yields_blend() {
         let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
@@ -937,5 +1185,172 @@ mod tests {
         let dropped = dropped_source_positions(source.len(), &rebind);
 
         assert_eq!(dropped, vec![1, 2]);
+    }
+
+    /// A source position referenced only by a `Blend` or `Renormalize` term
+    /// (never a `Copy`) is not reported dropped — `dropped_source_positions`
+    /// counts every referencing op, not `Copy` alone; an unreferenced pad
+    /// still is.
+    #[test]
+    fn dropped_source_positions_blend_and_renormalize_referenced_slots_are_not_dropped() {
+        let rebind = vec![
+            RebindOp::Blend(vec![(0, 0.5), (1, 0.5)]),
+            RebindOp::Renormalize(vec![(2, 1.0)]),
+        ];
+
+        let dropped = dropped_source_positions(4, &rebind);
+
+        assert_eq!(
+            dropped,
+            vec![3],
+            "positions 0/1 (Blend terms) and 2 (Renormalize term) are referenced; only 3 is \
+             dropped"
+        );
+    }
+
+    /// Given a source with one monthly anticipated slot and a target with two
+    /// lane slots exactly tiling that month, when `build_reconciliation_report`
+    /// runs over the resulting `Blend` ops, then the anticipated family's
+    /// `fan_out` equals the target slot count, `straddling`/`default_zero` are
+    /// `0`, and the coverage line renders the expected shape.
+    #[test]
+    fn build_reconciliation_report_full_coverage_fan_out_matches_target_slot_count() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let target = vec![
+            anticipated_dated_slot(9, 100, 20_260_401),
+            anticipated_dated_slot(9, 101, 20_260_401),
+        ];
+        let intervals = vec![
+            Some((ymd(2026, 4, 1), ymd(2026, 4, 16))),
+            Some((ymd(2026, 4, 16), ymd(2026, 5, 1))),
+        ];
+        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+
+        let report = build_reconciliation_report(&source, &target, &intervals, &rebind);
+
+        assert_eq!(
+            report.anticipated.fan_out, 2,
+            "N target slots -> fan_out == N"
+        );
+        assert_eq!(
+            report.anticipated.straddling, 0,
+            "full coverage: no straddle"
+        );
+        assert_eq!(report.anticipated.default_zero, 0);
+        assert_eq!(
+            report.anticipated_coverage.source_month_count, 1,
+            "one source month (K = 1)"
+        );
+
+        let lines = report.diagnostic_lines();
+        assert!(
+            lines.iter().any(|l| l
+                == "anticipated: 1 source months fanned to 2 target slots (0 straddling, \
+                    overlap-blended), 0 months defaulted"),
+            "coverage line must match the expected shape: {lines:?}"
+        );
+    }
+
+    /// Given a target lane slot straddling a priced month and an unpriced one
+    /// (a `Renormalize` op), when `build_reconciliation_report` runs, then the
+    /// anticipated family's `straddling` includes that slot and it is also
+    /// counted in `fan_out`.
+    #[test]
+    fn build_reconciliation_report_renormalize_counts_in_fan_out_and_straddling() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let target = vec![anticipated_dated_slot(9, 100, 20_260_301)];
+        let intervals = vec![Some((ymd(2026, 2, 26), ymd(2026, 3, 5)))];
+        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        assert!(
+            matches!(rebind[0], RebindOp::Renormalize(_)),
+            "fixture must straddle into unpriced time"
+        );
+
+        let report = build_reconciliation_report(&source, &target, &intervals, &rebind);
+
+        assert_eq!(
+            report.anticipated.fan_out, 1,
+            "Renormalize counts toward fan_out"
+        );
+        assert_eq!(report.anticipated.straddling, 1, "and toward straddling");
+    }
+
+    /// Given a target dated anticipated slot with no covered source month
+    /// (`Zero`) and a sentinel anticipated slot (also `Zero`), when
+    /// `build_reconciliation_report` runs, then the dated slot counts as
+    /// `default_zero` while the sentinel slot is excluded — not a default.
+    #[test]
+    fn build_reconciliation_report_dated_zero_defaults_sentinel_zero_excluded() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_301)];
+        let target = vec![
+            anticipated_dated_slot(9, 100, 20_260_301),
+            anticipated_sentinel_slot(9, 101),
+        ];
+        let intervals = vec![Some((ymd(2026, 5, 1), ymd(2026, 5, 8))), None];
+        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+        assert_eq!(rebind, vec![RebindOp::Zero, RebindOp::Zero]);
+
+        let report = build_reconciliation_report(&source, &target, &intervals, &rebind);
+
+        assert_eq!(
+            report.anticipated.default_zero, 1,
+            "only the dated no-covered-month Zero counts as a default"
+        );
+        assert_eq!(report.anticipated.fan_out, 0);
+        assert_eq!(report.anticipated.copy, 0);
+    }
+
+    /// Given a target-shaped source (storage, lag, sentinel anticipated) that
+    /// loads bit-identically, when `build_reconciliation_report` runs, then
+    /// every family reports only `copy` (the sentinel-anticipated slot is
+    /// excluded per its own classification, not counted as `copy` or
+    /// `default_zero`), and `fan_out == 0` everywhere.
+    #[test]
+    fn build_reconciliation_report_target_shaped_superset_reports_copy_only() {
+        let source = vec![
+            storage_slot(1),
+            inflow_lag_slot(1, 1),
+            anticipated_sentinel_slot(9, 0),
+        ];
+        let target = source.clone();
+        let intervals = no_intervals(&target);
+        let rebind = build_rebind(&source, &target, &intervals).unwrap();
+
+        let report = build_reconciliation_report(&source, &target, &intervals, &rebind);
+
+        assert_eq!(report.storage.copy, 1);
+        assert_eq!(report.inflow_lag.copy, 1);
+        assert_eq!(
+            report.anticipated.copy, 0,
+            "sentinel Zero is excluded, not copy"
+        );
+        assert_eq!(
+            report.anticipated.default_zero, 0,
+            "sentinel Zero is excluded, not a default"
+        );
+        assert_eq!(report.anticipated.fan_out, 0);
+        assert_eq!(report.transit_bucket.fan_out, 0);
+        assert_eq!(report.other_identity.fan_out, 0);
+    }
+
+    /// The default report (the shape `load_boundary_cuts` stores on its
+    /// empty-manifest / dimension-only skip path) is `reconciled == false`
+    /// and renders a single dimension-only summary line, with no per-family
+    /// fan-out tally.
+    #[test]
+    fn boundary_reconciliation_report_default_is_unreconciled_with_dimension_only_render() {
+        let report = BoundaryReconciliationReport::default();
+
+        assert!(!report.reconciled);
+        let lines = report.diagnostic_lines();
+        assert_eq!(
+            lines.len(),
+            1,
+            "the skip path renders a single summary line"
+        );
+        assert!(
+            lines[0].contains("dimension-only"),
+            "must state a dimension-only load: {lines:?}"
+        );
     }
 }

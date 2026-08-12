@@ -1529,7 +1529,47 @@ mod tests {
         let cfg = parse_config(f.path()).unwrap();
         let boundary = cfg.policy.boundary.unwrap();
         assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, 2);
+        assert_eq!(boundary.source_stage, Some(2));
+    }
+
+    /// `policy.boundary` with `path` but no `source_stage` deserializes to
+    /// `Some(BoundaryPolicy { source_stage: None, .. })`; an unknown key
+    /// under `boundary` is still rejected by `deny_unknown_fields`.
+    #[test]
+    fn test_boundary_policy_source_stage_absent_is_none() {
+        let f = write_config(
+            r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": {
+                    "path": "../monthly/policy"
+                }
+            }
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        let boundary = cfg.policy.boundary.unwrap();
+        assert_eq!(boundary.path, "../monthly/policy");
+        assert_eq!(boundary.source_stage, None);
+
+        let unknown_key_json = r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": { "path": "../monthly/policy", "unexpected": true }
+            }
+        }"#;
+        assert!(
+            serde_json::from_str::<Config>(unknown_key_json).is_err(),
+            "an unknown key under policy.boundary must still be rejected"
+        );
     }
 
     /// `policy` without a `boundary` key deserializes to `None`.
@@ -1589,14 +1629,14 @@ mod tests {
             checkpointing: CheckpointingConfig::default(),
             boundary: Some(BoundaryPolicy {
                 path: "../monthly/policy".to_string(),
-                source_stage: 5,
+                source_stage: Some(5),
             }),
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: PolicyConfig = serde_json::from_str(&json).unwrap();
         let boundary = restored.boundary.unwrap();
         assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, 5);
+        assert_eq!(boundary.source_stage, Some(5));
     }
 
     /// Stale `exports` keys (`training`, `cuts`, `vertices`, `simulation`,

@@ -13,6 +13,7 @@
 //! [`FutureCostFunction::from_deserialized`]: crate::FutureCostFunction::from_deserialized
 
 use chrono::NaiveDate;
+use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::GraphManifest;
 use cobre_io::OwnedPolicyBasisRecord;
@@ -24,8 +25,13 @@ use cobre_solver::{Basis, BasisStatus};
 
 use crate::SddpError;
 use crate::cut::pool::CutPool;
-use crate::policy::policy_export::ENTITY_TYPE_HYDRO_INFLOW_LAG;
-use crate::policy::reconcile::{RebindOp, build_rebind, rebind_cut};
+use crate::policy::policy_export::{
+    ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
+};
+use crate::policy::reconcile::{
+    BoundaryReconciliationReport, RebindOp, build_rebind, build_reconciliation_report,
+    decode_month_anchor, overlap_hours, rebind_cut,
+};
 use crate::setup::{NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
 
@@ -574,7 +580,9 @@ fn boundary_cut_lag_depth(manifest: &[EntitySlot]) -> u32 {
 /// on `state_dimension` alone; a `was_active == false` boundary slot whose
 /// current counterpart is active warns and loads. Wraps the result in a
 /// [`ValidatedBoundaryCuts`] — the sole constructor [`inject_boundary_cuts`]
-/// accepts.
+/// accepts — carrying a [`crate::policy::reconcile::build_reconciliation_report`]
+/// tally on the reconcile path, or the `reconciled: false` default on the
+/// skipped path; read via [`ValidatedBoundaryCuts::report`].
 ///
 /// `declared_inflow_lag_depth` is `config.state_space.inflow_lag_depth`; when
 /// `Some`, a boundary cut referencing inflow-lag state deeper than the declared
@@ -697,7 +705,11 @@ pub fn load_boundary_cuts(
         loading_cost_scale_factor,
     );
 
-    if manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest, on_warning) {
+    let report = if manifest_identity_verifiable(
+        &stage_result.entity_manifest,
+        current_manifest,
+        on_warning,
+    ) {
         let rebind = build_rebind(
             &stage_result.entity_manifest,
             current_manifest,
@@ -712,9 +724,174 @@ pub fn load_boundary_cuts(
         for record in &mut records {
             record.coefficients = rebind_cut(record, &rebind);
         }
+        build_reconciliation_report(
+            &stage_result.entity_manifest,
+            current_manifest,
+            target_delivery_intervals,
+            &rebind,
+        )
+    } else {
+        BoundaryReconciliationReport::default()
+    };
+
+    Ok(ValidatedBoundaryCuts { records, report })
+}
+
+/// Auto-resolve an absent `policy.boundary.source_stage`: decode each source
+/// pool's live anticipated `delivery_date` months
+/// ([`decode_month_anchor`]) and pick the pool whose months overlap
+/// `current_terminal_delivery_intervals` — the same `target_delivery_intervals`
+/// axis [`load_boundary_cuts`] fans coefficients onto (built by
+/// [`StudySetup::build_terminal_anticipated_delivery_intervals`](crate::StudySetup::build_terminal_anticipated_delivery_intervals)).
+/// The winning candidate is a POOL id (`checkpoint.stage_cuts`'s own
+/// `stage_id` field names a pool, not a graph stage — see
+/// [`cobre_io::StageCutsPayload`]'s doc); [`load_boundary_cuts`]'s
+/// `source_stage` parameter speaks graph-stage-id, so this resolver maps the
+/// winning pool back to its owning node's `stage_id` via
+/// `graph_manifest.nodes` before returning, through [`resolve_stage_id_for_pool`]
+/// (an empty manifest — the chain-degenerate artifact — has `pool_id ==
+/// stage`, so the mapping is the identity there). Returning the pool id
+/// unmapped is the reproduced defect this guards: threaded back into
+/// `load_boundary_cuts` as `source_stage` on a branching graph, it can match
+/// an unrelated node whose OWN `stage_id` happens to equal the winning pool's
+/// numeric value, silently resolving through that node to a different pool.
+///
+/// This only PICKS a candidate; it is not a new trust boundary — a
+/// calendar-matched pool from an incompatible source still rejects once
+/// [`load_boundary_cuts`] reconciles it by storage/lag identity.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if:
+/// - The checkpoint cannot be read.
+/// - More than one source pool's decoded months overlap the current terminal
+///   window (ambiguous; names the count and advises an explicit
+///   `source_stage`).
+/// - No source pool carries any decodable live anticipated `delivery_date`
+///   (a pre-dated-slot checkpoint, or a pure storage/lag boundary; advises
+///   re-exporting or an explicit `source_stage`).
+/// - Every source pool that does carry decodable months has none overlapping
+///   the current terminal window (advises an explicit `source_stage`).
+/// - A live anticipated source slot's `delivery_date` fails to decode to a
+///   real calendar month.
+/// - The winning pool is owned by more than one graph node (sibling fan nodes
+///   sharing a pool — genuinely ambiguous, mirroring `load_boundary_cuts`'s
+///   own single-node-source restriction) or by none (an internal
+///   inconsistency: the pool came from `checkpoint.stage_cuts` itself).
+pub fn resolve_boundary_source_stage(
+    boundary_path: &Path,
+    current_terminal_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
+) -> Result<u32, SddpError> {
+    let checkpoint = read_policy_checkpoint(boundary_path).map_err(|e| {
+        SddpError::Validation(format!(
+            "failed to read boundary policy checkpoint at {}: {e}",
+            boundary_path.display()
+        ))
+    })?;
+
+    let target_intervals: Vec<(NaiveDate, NaiveDate)> = current_terminal_delivery_intervals
+        .iter()
+        .copied()
+        .flatten()
+        .collect();
+
+    let mut any_decodable = false;
+    let mut candidates: Vec<u32> = Vec::new();
+    for stage in &checkpoint.stage_cuts {
+        let months = decode_pool_anticipated_months(&stage.entity_manifest)?;
+        if months.is_empty() {
+            continue;
+        }
+        any_decodable = true;
+        let overlaps = months.iter().any(|&month| {
+            target_intervals
+                .iter()
+                .any(|&iv| overlap_hours(month, iv) > 0.0)
+        });
+        if overlaps {
+            candidates.push(stage.stage_id);
+        }
     }
 
-    Ok(ValidatedBoundaryCuts { records })
+    if candidates.len() > 1 {
+        return Err(SddpError::Validation(format!(
+            "ambiguous: {} source pools match the terminal date; set \
+             policy.boundary.source_stage explicitly",
+            candidates.len()
+        )));
+    }
+    if let Some(&pool) = candidates.first() {
+        return resolve_stage_id_for_pool(&checkpoint.metadata.graph_manifest, pool);
+    }
+    if any_decodable {
+        return Err(SddpError::Validation(
+            "no source pool's anticipated delivery calendar aligns with the current study's \
+             terminal delivery window; set policy.boundary.source_stage explicitly"
+                .to_string(),
+        ));
+    }
+    Err(SddpError::Validation(
+        "this boundary predates dated slots; re-export it, or set policy.boundary.source_stage \
+         explicitly"
+            .to_string(),
+    ))
+}
+
+/// Map a chosen source POOL id back to [`load_boundary_cuts`]'s `source_stage`
+/// vocabulary: the `stage_id` of the graph node that owns it, resolved via
+/// `manifest.nodes` — the exact inverse of `load_boundary_cuts`'s own
+/// `source_stage -> pool` lookup. An empty `manifest` (the chain-degenerate
+/// artifact, no `nodes[]`) has `pool_id == stage` by construction, so `pool`
+/// is returned unchanged.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if more than one node owns `pool`
+/// (sibling fan nodes sharing a pool — genuinely ambiguous, mirroring
+/// `load_boundary_cuts`'s own single-node-source restriction) or if no node
+/// owns it (an internal inconsistency: `pool` was drawn from
+/// `checkpoint.stage_cuts`, so the manifest is missing a pool it wrote).
+fn resolve_stage_id_for_pool(manifest: &GraphManifest, pool: u32) -> Result<u32, SddpError> {
+    if manifest.nodes.is_empty() {
+        return Ok(pool);
+    }
+    let mut owners = manifest.nodes.iter().filter(|n| n.pool_id == pool);
+    let Some(owner) = owners.next() else {
+        return Err(SddpError::Validation(format!(
+            "boundary policy: pool {pool} has no owning node in the graph manifest \
+             (internal inconsistency)"
+        )));
+    };
+    if owners.next().is_some() {
+        return Err(SddpError::Validation(format!(
+            "boundary policy: pool {pool} is shared by more than one graph node; set \
+             policy.boundary.source_stage explicitly"
+        )));
+    }
+    u32::try_from(owner.stage_id).map_err(|_| {
+        SddpError::Validation(format!(
+            "boundary policy: pool {pool}'s owning node has a negative stage id {}",
+            owner.stage_id
+        ))
+    })
+}
+
+/// Decode `manifest`'s live (non-sentinel) `AnticipatedThermalState` slots'
+/// `delivery_date` anchors into `[month_start, month_end)` spans, via
+/// [`decode_month_anchor`] — the per-pool candidate set
+/// [`resolve_boundary_source_stage`] matches against the current study's
+/// terminal delivery window.
+fn decode_pool_anticipated_months(
+    manifest: &[EntitySlot],
+) -> Result<Vec<(NaiveDate, NaiveDate)>, SddpError> {
+    manifest
+        .iter()
+        .filter(|slot| {
+            slot.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+                && slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        })
+        .map(|slot| decode_month_anchor(slot.delivery_date).map(|(start, end, _)| (start, end)))
+        .collect()
 }
 
 /// Mirrors [`compare_manifest_slot_identity`]'s dormant-to-active divergence
@@ -742,13 +919,23 @@ fn warn_on_dormant_source_now_active(
 }
 
 /// Boundary cut records that passed [`validate_policy_load`]'s
-/// [`BoundaryInjection`] check matrix. The private field means the only way to
+/// [`BoundaryInjection`] check matrix. The private fields mean the only way to
 /// obtain one is [`load_boundary_cuts`], so [`inject_boundary_cuts`] cannot
 /// compile against a bare, unvalidated `Vec<OwnedPolicyCutRecord>`. Derefs to
-/// `[OwnedPolicyCutRecord]` for read access.
+/// `[OwnedPolicyCutRecord]` for read access; carries the load's
+/// [`BoundaryReconciliationReport`], read via [`Self::report`].
 #[derive(Debug, Clone)]
 pub struct ValidatedBoundaryCuts {
     records: Vec<OwnedPolicyCutRecord>,
+    report: BoundaryReconciliationReport,
+}
+
+impl ValidatedBoundaryCuts {
+    /// The reconciliation report [`load_boundary_cuts`] built for this load.
+    #[must_use]
+    pub fn report(&self) -> &BoundaryReconciliationReport {
+        &self.report
+    }
 }
 
 impl Deref for ValidatedBoundaryCuts {
@@ -813,8 +1000,8 @@ mod tests {
 
     use super::{
         BoundaryInjection, FullFcf, NodeId, NodePos, PolicyStageManifest, TypedVec,
-        compare_manifest_slot_identity, load_boundary_cuts, resolve_warm_start_counts,
-        validate_policy_load,
+        compare_manifest_slot_identity, load_boundary_cuts, resolve_boundary_source_stage,
+        resolve_warm_start_counts, validate_policy_load,
     };
     use crate::SddpError;
 
@@ -1918,6 +2105,353 @@ mod tests {
         );
         let intercepts: Vec<f64> = cuts.iter().map(|c| c.intercept).collect();
         assert_eq!(intercepts, vec![10.0, 20.0, 30.0]);
+    }
+
+    // ── resolve_boundary_source_stage tests ───────────────────────────────────
+
+    fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
+    }
+
+    /// A single `AnticipatedThermalState` slot (`entity_type 2`), dated at
+    /// `delivery_date` (`YYYYMM01`).
+    fn anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
+        EntitySlot {
+            entity_type: 2,
+            entity_id: thermal_id,
+            subindex: ring_slot,
+            was_active: true,
+            delivery_date,
+        }
+    }
+
+    /// Write a checkpoint with one pool per `manifests` entry (pool id ==
+    /// index, a chain-degenerate graph), each pool holding one cut sized to
+    /// its own manifest — for [`resolve_boundary_source_stage`] tests
+    /// exercising distinct per-pool anticipated calendars.
+    fn write_checkpoint_with_pool_manifests(dir: &std::path::Path, manifests: &[Vec<EntitySlot>]) {
+        let n_pools = manifests.len() as u32;
+        let coefficients_per_pool: Vec<Vec<f64>> =
+            manifests.iter().map(|m| vec![1.0_f64; m.len()]).collect();
+        let cuts_per_pool: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> = coefficients_per_pool
+            .iter()
+            .map(|coeffs| {
+                vec![cobre_io::PolicyCutRecord {
+                    cut_id: 0,
+                    slot_index: 0,
+                    iteration: 0,
+                    forward_pass_index: 0,
+                    intercept: 0.0,
+                    coefficients: coeffs,
+                    is_active: true,
+                }]
+            })
+            .collect();
+        let active_indices = [0_u32];
+        let payloads: Vec<StageCutsPayload<'_>> = manifests
+            .iter()
+            .enumerate()
+            .map(|(pool, manifest)| StageCutsPayload {
+                stage_id: pool as u32,
+                state_dimension: manifest.len() as u32,
+                capacity: 1,
+                warm_start_count: 0,
+                cuts: &cuts_per_pool[pool],
+                active_cut_indices: &active_indices,
+                populated_count: 1,
+                entity_manifest: manifest,
+            })
+            .collect();
+        let metadata = PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
+            cobre_version: "0.14.0".to_string(),
+            created_at: "2026-08-11T00:00:00Z".to_string(),
+            num_stages: n_pools,
+            graph_manifest: chain_manifest(n_pools),
+            producer: producer_block(),
+        };
+        cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
+    }
+
+    /// A checkpoint whose pool 1 alone carries an anticipated slot dated
+    /// inside the current terminal window resolves to pool 1.
+    #[test]
+    fn resolve_boundary_source_stage_unique_match_returns_pool_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifests = vec![
+            vec![storage_slot(1)],
+            vec![anticipated_slot(9, 0, 20_260_301)],
+        ];
+        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
+
+        let target = vec![None, Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
+        let resolved = resolve_boundary_source_stage(tmp.path(), &target)
+            .expect("a unique calendar match must resolve");
+
+        assert_eq!(resolved, 1, "pool 1 carries the matching anticipated month");
+    }
+
+    /// Two pools both carrying an anticipated slot dated inside the current
+    /// terminal window are ambiguous: rejects naming the candidate count and
+    /// advising an explicit `source_stage`.
+    #[test]
+    fn resolve_boundary_source_stage_ambiguous_multiple_pools_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifests = vec![
+            vec![anticipated_slot(9, 0, 20_260_301)],
+            vec![anticipated_slot(9, 0, 20_260_301)],
+        ];
+        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
+
+        let target = vec![Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
+        let err = resolve_boundary_source_stage(tmp.path(), &target).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "must name the ambiguity: {msg}");
+        assert!(msg.contains('2'), "must name the candidate count 2: {msg}");
+        assert!(
+            msg.contains("policy.boundary.source_stage"),
+            "must advise the explicit override: {msg}"
+        );
+    }
+
+    /// A source with no anticipated slot at all, on any pool, has no
+    /// decodable delivery date to match against: rejects with the
+    /// re-export hint.
+    #[test]
+    fn resolve_boundary_source_stage_fully_sentinel_dated_source_rejects_with_reexport_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifests = vec![vec![storage_slot(1)], vec![storage_slot(1)]];
+        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
+
+        let target = vec![Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
+        let err = resolve_boundary_source_stage(tmp.path(), &target).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("re-export"),
+            "must advise re-exporting the boundary: {msg}"
+        );
+        assert!(
+            msg.contains("policy.boundary.source_stage"),
+            "must advise the explicit override: {msg}"
+        );
+    }
+
+    /// A source pool DOES carry a decodable anticipated month, but it falls
+    /// outside the current terminal window: rejects advising an explicit
+    /// `source_stage`, distinct from both the ambiguous and the
+    /// sentinel-dated fallback.
+    #[test]
+    fn resolve_boundary_source_stage_no_overlap_among_decodable_pools_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifests = vec![vec![anticipated_slot(9, 0, 20_260_301)]];
+        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
+
+        let target = vec![Some((ymd(2026, 6, 1), ymd(2026, 7, 1)))];
+        let err = resolve_boundary_source_stage(tmp.path(), &target).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("policy.boundary.source_stage"),
+            "must advise the explicit override: {msg}"
+        );
+        assert!(
+            !msg.contains("ambiguous") && !msg.contains("re-export"),
+            "a decodable-but-non-overlapping source is neither ambiguous nor sentinel-dated: {msg}"
+        );
+    }
+
+    /// A non-existent boundary path surfaces the same IO-failure message
+    /// [`load_boundary_cuts`] reports.
+    #[test]
+    fn resolve_boundary_source_stage_nonexistent_path_returns_error() {
+        let err =
+            resolve_boundary_source_stage(std::path::Path::new("/nonexistent/path/to/policy"), &[])
+                .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to read boundary policy checkpoint"),
+            "error should describe the IO failure: {msg}"
+        );
+    }
+
+    /// The resolver only PICKS a candidate by calendar: a pool that matches
+    /// the terminal date but belongs to a storage-identity-incompatible
+    /// source still rejects once `load_boundary_cuts` reconciles it — the
+    /// resolver is not a new trust boundary.
+    #[test]
+    fn resolve_boundary_source_stage_wrong_system_still_rejected_by_load_boundary_cuts_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifests = vec![vec![storage_slot(7), anticipated_slot(9, 0, 20_260_301)]];
+        write_checkpoint_with_pool_manifests(tmp.path(), &manifests);
+
+        let target_intervals = vec![None, Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
+        let resolved = resolve_boundary_source_stage(tmp.path(), &target_intervals)
+            .expect("a unique calendar match must resolve, even from an incompatible system");
+        assert_eq!(resolved, 0);
+
+        let current = vec![storage_slot(42), anticipated_slot(9, 100, 20_260_301)];
+        let result = load_boundary_cuts(
+            tmp.path(),
+            resolved,
+            current.len() as u32,
+            &current,
+            &target_intervals,
+            None,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
+
+        assert!(
+            result.is_err(),
+            "a calendar-matched but identity-incompatible source must still reject"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("42"),
+            "the storage/lag identity reject must name the unpriced hydro 42: {msg}"
+        );
+    }
+
+    /// Write a checkpoint from explicit `(pool_id, entity_manifest, intercept)`
+    /// pools under an explicit `graph` (never the chain-degenerate default) —
+    /// for tests where a pool id must diverge from its owning node's `stage_id`.
+    fn write_checkpoint_with_explicit_graph(
+        dir: &std::path::Path,
+        pools: &[(u32, Vec<EntitySlot>, f64)],
+        graph: GraphManifest,
+    ) {
+        let coefficients_per_pool: Vec<Vec<f64>> = pools
+            .iter()
+            .map(|(_, manifest, _)| vec![1.0_f64; manifest.len()])
+            .collect();
+        let cuts_per_pool: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> = pools
+            .iter()
+            .zip(&coefficients_per_pool)
+            .map(|((_, _, intercept), coeffs)| {
+                vec![cobre_io::PolicyCutRecord {
+                    cut_id: 0,
+                    slot_index: 0,
+                    iteration: 0,
+                    forward_pass_index: 0,
+                    intercept: *intercept,
+                    coefficients: coeffs,
+                    is_active: true,
+                }]
+            })
+            .collect();
+        let active_indices = [0_u32];
+        let payloads: Vec<StageCutsPayload<'_>> = pools
+            .iter()
+            .zip(&cuts_per_pool)
+            .map(|((pool_id, manifest, _), cuts)| StageCutsPayload {
+                stage_id: *pool_id,
+                state_dimension: manifest.len() as u32,
+                capacity: 1,
+                warm_start_count: 0,
+                cuts,
+                active_cut_indices: &active_indices,
+                populated_count: 1,
+                entity_manifest: manifest,
+            })
+            .collect();
+        let num_stages = graph
+            .nodes
+            .iter()
+            .map(|n| n.stage_id)
+            .max()
+            .and_then(|m| u32::try_from(m + 1).ok())
+            .unwrap_or(0);
+        let metadata = PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
+            cobre_version: "0.14.0".to_string(),
+            created_at: "2026-08-11T00:00:00Z".to_string(),
+            num_stages,
+            graph_manifest: graph,
+            producer: producer_block(),
+        };
+        cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
+    }
+
+    /// The reproduced defect: the resolver's winning POOL id (2) numerically
+    /// coincides with an unrelated DECOY node's `stage_id`, whose OWN pool (5)
+    /// carries different cuts. Returning the raw pool id (the pre-fix
+    /// behavior) makes `load_boundary_cuts` resolve `source_stage` through
+    /// the decoy node instead, silently loading the decoy's cuts (999.0)
+    /// rather than the calendar-winning pool's (777.0). The fix maps the
+    /// winning pool back through the manifest to its OWN owning node's
+    /// `stage_id` (7 — distinct from every pool id and from the decoy's
+    /// stage id), so `load_boundary_cuts` follows the correct node.
+    #[test]
+    fn resolve_boundary_source_stage_maps_winning_pool_to_its_owning_node_stage_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let winning_pool = 2;
+        let decoy_pool = 5;
+
+        let winning_manifest = vec![anticipated_slot(9, 0, 20_260_301)];
+        let decoy_manifest = vec![storage_slot(1)];
+
+        let graph = GraphManifest {
+            n_pools: 6,
+            nodes: vec![
+                // Decoy: `stage_id` equals the winning pool's numeric value,
+                // but owns a DIFFERENT pool.
+                ManifestNode {
+                    id: 100,
+                    stage_id: winning_pool as i32,
+                    pool_id: decoy_pool,
+                },
+                // Correct: owns the winning pool, at an unrelated stage id.
+                ManifestNode {
+                    id: 101,
+                    stage_id: 7,
+                    pool_id: winning_pool,
+                },
+            ],
+            edges: vec![],
+        };
+
+        write_checkpoint_with_explicit_graph(
+            tmp.path(),
+            &[
+                (winning_pool, winning_manifest, 777.0),
+                (decoy_pool, decoy_manifest, 999.0),
+            ],
+            graph,
+        );
+
+        let target = vec![Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
+        let resolved = resolve_boundary_source_stage(tmp.path(), &target)
+            .expect("a unique calendar match must resolve");
+
+        assert_eq!(
+            resolved, 7,
+            "must return the winning pool's OWNING NODE's stage id (7), not the raw pool id (2)"
+        );
+
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            resolved,
+            1,
+            &[],
+            &no_intervals(1),
+            None,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        )
+        .expect("the resolved stage id must thread correctly through load_boundary_cuts");
+
+        assert_eq!(
+            cuts.len(),
+            1,
+            "must load the winning pool's one cut, not the decoy's"
+        );
+        assert_eq!(
+            cuts[0].intercept, 777.0,
+            "must load the CORRECT pool's cut (777.0), never the decoy's (999.0)"
+        );
     }
 
     // ── compare_manifest_slot_identity tests ──────────────────────────────────

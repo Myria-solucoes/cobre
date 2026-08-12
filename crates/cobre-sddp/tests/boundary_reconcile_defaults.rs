@@ -4,10 +4,9 @@
 //! the exact-match path, unaffected by wiring `reconcile` into
 //! `load_boundary_cuts`.
 //!
-//! Extended with transit-bucket (identity match copies, a miss defaults to
+//! Also covers transit-bucket (identity match copies, a miss defaults to
 //! `0.0`), sentinel-dated-anticipated default-`0.0`, and the dated-anticipated
-//! date-driven fan-out (`÷H_M` `Blend`, coverage-`Renormalize`) as those
-//! families gain their own reconcile arms.
+//! date-driven fan-out (`÷H_M` `Blend`, coverage-`Renormalize`).
 
 #![allow(
     clippy::unwrap_used,
@@ -519,5 +518,139 @@ fn boundary_injection_dated_anticipated_interior_weeks_conservation() {
     assert!(
         (summed - source_coeff).abs() < source_coeff.abs() * 1e-9,
         "Σ_w β_w = {summed} must reproduce the source monthly valuation π_M = {source_coeff}"
+    );
+}
+
+/// Given the same one-source-month → 4-target-lane fan-out as
+/// `boundary_injection_dated_anticipated_fan_out_matrix`, when `.report()` is
+/// read, then the anticipated family's `fan_out`/`straddling`/`default_zero`
+/// match the fully-covered fan-out and the coverage line renders the
+/// expected shape.
+#[test]
+fn boundary_injection_report_fan_out_matrix_coverage() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source_manifest = vec![
+        storage_slot(1),
+        dated_anticipated_slot(9, 0, 20_260_401),
+        sentinel_anticipated_slot(9, 1),
+        sentinel_anticipated_slot(9, 2),
+        sentinel_anticipated_slot(9, 3),
+    ];
+    write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0, 0.0, 0.0, 0.0]);
+
+    let weeks = april_2026_weekly_intervals();
+    let current = vec![
+        storage_slot(1),
+        dated_anticipated_slot(9, 100, 20_260_401),
+        dated_anticipated_slot(9, 101, 20_260_401),
+        dated_anticipated_slot(9, 102, 20_260_401),
+        dated_anticipated_slot(9, 103, 20_260_401),
+    ];
+    let intervals: Vec<Option<(NaiveDate, NaiveDate)>> = std::iter::once(None)
+        .chain(weeks.iter().map(|&w| Some(w)))
+        .collect();
+
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        5,
+        &current,
+        &intervals,
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("a fully-covered dated anticipated fan-out must load");
+
+    let report = cuts.report();
+    assert!(report.reconciled);
+    assert_eq!(
+        report.anticipated.fan_out, 4,
+        "4 fully-covered target lanes"
+    );
+    assert_eq!(report.anticipated.straddling, 0);
+    assert_eq!(report.anticipated.default_zero, 0);
+    assert_eq!(
+        report.anticipated_coverage.source_month_count, 1,
+        "one source month (April 2026)"
+    );
+
+    let lines = report.diagnostic_lines();
+    assert!(
+        lines.iter().any(|l| l
+            == "anticipated: 1 source months fanned to 4 target slots (0 straddling, \
+                overlap-blended), 0 months defaulted"),
+        "coverage line must match the expected shape: {lines:?}"
+    );
+}
+
+/// Given a target-shaped source (storage + lag + sentinel anticipated) that
+/// loads bit-identically, when `.report()` is read, then every family
+/// reports only `copy`, `fan_out == 0` everywhere — matching the superset
+/// guarantee.
+#[test]
+fn boundary_injection_report_target_shaped_superset_is_copy_only() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![
+        storage_slot(1),
+        inflow_lag_slot(1, 1),
+        sentinel_anticipated_slot(9, 0),
+    ];
+    let coefficients = vec![10.5, -3.25, 0.0];
+    write_checkpoint(tmp.path(), &manifest, &coefficients);
+
+    let current = manifest.clone();
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        3,
+        &current,
+        &no_intervals(current.len()),
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("a target-shaped source must load");
+
+    let report = cuts.report();
+    assert!(report.reconciled);
+    assert_eq!(report.storage.copy, 1);
+    assert_eq!(report.inflow_lag.copy, 1);
+    assert_eq!(
+        report.anticipated.copy, 0,
+        "sentinel Zero is excluded, not copy"
+    );
+    assert_eq!(report.anticipated.fan_out, 0);
+    assert_eq!(report.transit_bucket.fan_out, 0);
+    assert_eq!(report.other_identity.fan_out, 0);
+}
+
+/// Given a boundary checkpoint with an empty manifest, when `.report()` is
+/// read, then `reconciled == false` and the render states a dimension-only
+/// load.
+#[test]
+fn boundary_injection_report_empty_manifest_is_unreconciled() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write_checkpoint(tmp.path(), &[], &[10.0, 20.0]);
+
+    let current = vec![storage_slot(1), storage_slot(2)];
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        2,
+        &current,
+        &no_intervals(current.len()),
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("an absent manifest must still load cuts");
+
+    let report = cuts.report();
+    assert!(!report.reconciled);
+    let lines = report.diagnostic_lines();
+    assert!(
+        lines.iter().any(|l| l.contains("dimension-only")),
+        "must state a dimension-only load: {lines:?}"
     );
 }

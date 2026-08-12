@@ -91,6 +91,7 @@ use cobre_sddp::orchestration::CheckpointParams;
 use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
+use cobre_sddp::resolve_boundary_source_stage;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
@@ -1197,10 +1198,22 @@ pub(crate) fn apply_training_policy_mode(
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
         let target_delivery_intervals = setup.build_terminal_anticipated_delivery_intervals(system);
+        let source_stage = if let Some(idx) = bp.source_stage {
+            idx
+        } else {
+            let resolved =
+                resolve_boundary_source_stage(&boundary_path, &target_delivery_intervals)
+                    .map_err(|e| format!("boundary cut error: {e}"))?;
+            eprintln!(
+                "cobre-python: boundary source_stage resolved to {resolved} (no explicit \
+                 policy.boundary.source_stage configured)"
+            );
+            resolved
+        };
         let mut on_warning = |msg: &str| eprintln!("cobre-python: boundary cut warning: {msg}");
         let boundary_records = load_boundary_cuts(
             &boundary_path,
-            bp.source_stage,
+            source_stage,
             state_dim,
             &current_manifest,
             &target_delivery_intervals,
@@ -1210,6 +1223,9 @@ pub(crate) fn apply_training_policy_mode(
         )
         .map_err(|e| format!("boundary cut error: {e}"))?;
         inject_boundary_cuts(setup, &boundary_records);
+        for line in boundary_records.report().diagnostic_lines() {
+            eprintln!("cobre-python: {line}");
+        }
     }
 
     Ok(())

@@ -41,8 +41,12 @@ impl std::fmt::Display for PolicyMode {
 pub struct BoundaryPolicy {
     /// Path to the source policy checkpoint directory.
     pub path: String,
-    /// 0-based stage index in the source checkpoint to load rows from.
-    pub source_stage: u32,
+    /// 0-based stage index in the source checkpoint to load rows from. When
+    /// present, overrides auto-resolution; when absent, the loader resolves it
+    /// by matching the source checkpoint's dated stages against the current
+    /// study's terminal calendar.
+    #[serde(default)]
+    pub source_stage: Option<u32>,
 }
 
 /// Policy directory settings (`config.json → policy`).

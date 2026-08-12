@@ -52,15 +52,18 @@
           "type": "string"
         },
         "source_stage": {
-          "description": "0-based stage index in the source checkpoint to load rows from.",
+          "default": null,
+          "description": "0-based stage index in the source checkpoint to load rows from. When\npresent, overrides auto-resolution; when absent, the loader resolves it\nby matching the source checkpoint's dated stages against the current\nstudy's terminal calendar.",
           "format": "uint32",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
-        "path",
-        "source_stage"
+        "path"
       ],
       "type": "object"
     },

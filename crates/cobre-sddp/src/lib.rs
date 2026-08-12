@@ -149,8 +149,10 @@ pub use policy::policy_load::{
     BoundaryInjection, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind, PolicyLoadProof,
     PolicyStageManifest, ValidatedBoundaryCuts, build_basis_cache_from_checkpoint,
     compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
-    rescale_checkpoint_cuts_for_load, validate_policy_load,
+    rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage, validate_policy_load,
 };
+// ── policy_load::reconcile (report) ──────────────────────────────────────────
+pub use policy::reconcile::{AnticipatedCoverage, BoundaryReconciliationReport, FamilyTally};
 // ── provenance ────────────────────────────────────────────────────────────────
 pub use policy::provenance::{
     HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
