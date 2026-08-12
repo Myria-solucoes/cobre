@@ -289,10 +289,39 @@ fn test_empty_commitment_capability_intersection_rejected() {
 fn test_valid_covered_delivery_loads() {
     let dir = TempDir::new().unwrap();
     make_minimal_case(&dir);
+    // Thermal 86 must itself be an anticipated thermal (`anticipated_config`
+    // set) for `future_anticipated_deliveries` to resolve to it; the minimal
+    // case's `thermals.json` is otherwise empty.
+    write_file(
+        dir.path(),
+        "system/thermals.json",
+        r#"{
+          "thermals": [
+            {
+                "id": 86,
+                "name": "T_ANT",
+                "operational_start_date": "2024-01-01",
+                "bus_id": 1,
+                "cost_per_mwh": 10.0,
+                "generation": { "min_mw": 0.0, "max_mw": 300.0 },
+                "anticipated_config": { "lead_time_hours": 744.0 }
+            }
+          ]
+        }"#,
+    );
     write_file(
         dir.path(),
         "initial_conditions.json",
-        &initial_conditions_with_delivery("2024-02-01", "2024-03-01", 0.0, 300.0),
+        r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_anticipated_commitments": [
+            { "thermal_id": 86, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 }
+          ],
+          "future_anticipated_deliveries": [
+            { "thermal_id": 86, "delivery_start": "2024-02-01", "delivery_end": "2024-03-01", "min_mw": 0.0, "max_mw": 300.0 }
+          ]
+        }"#,
     );
     write_file(
         dir.path(),

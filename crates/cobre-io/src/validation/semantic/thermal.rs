@@ -225,6 +225,40 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     }
 }
 
+/// Layer 5a — rejects a `future_anticipated_deliveries` entry whose
+/// `thermal_id` does not resolve to a thermal with `anticipated_config:
+/// Some(_)`; the delivery-side mirror of the `past_anticipated_commitments`
+/// bijection in [`check_anticipated_thermals`]. Without it, a dangling or
+/// non-anticipated `thermal_id` can satisfy every post-study coverage/bound
+/// check in `check_post_study_stages` while resolving to no commitment at
+/// all.
+pub(super) fn check_future_delivery_thermal_is_anticipated(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    let anticipated_ids: HashSet<EntityId> = data
+        .thermals
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .map(|t| t.id)
+        .collect();
+
+    for delivery in &data.initial_conditions.future_anticipated_deliveries {
+        if !anticipated_ids.contains(&delivery.thermal_id) {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "initial_conditions.json",
+                Some(delivery_entity(delivery)),
+                format!(
+                    "Thermal {}: referenced in future_anticipated_deliveries but is not an \
+                     anticipated thermal (anticipated_config is None or thermal does not exist)",
+                    delivery.thermal_id.0
+                ),
+            );
+        }
+    }
+}
+
 /// Advisory (`ModelQuality`): a `lead_stages`-configured thermal whose active
 /// window — decision stage `t` through delivery `t + lead_stages`, `t` ranging
 /// over the plant's commissioning window and the delivery side clamped to the
@@ -984,7 +1018,10 @@ mod tests {
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
-    use super::{check_anticipated_thermals, lead_delivery_stage_count};
+    use super::{
+        check_anticipated_thermals, check_future_delivery_thermal_is_anticipated,
+        lead_delivery_stage_count,
+    };
     use crate::stages::StagesData;
     use crate::validation::schema::ParsedData;
     use crate::validation::{ErrorKind, ValidationContext};
@@ -1279,6 +1316,72 @@ mod tests {
         assert!(
             msg.contains("not an anticipated thermal"),
             "message should contain 'not an anticipated thermal', got: {msg}"
+        );
+    }
+
+    // ── Delivery-side mirror: future_anticipated_deliveries thermal must be
+    //    anticipated (check_future_delivery_thermal_is_anticipated) ──────────
+
+    /// Given a `future_anticipated_deliveries` entry (plus its matching
+    /// `post_study_stages` bound row shape) for a thermal that exists but
+    /// carries `anticipated_config: None`, `check_future_delivery_thermal_is_anticipated`
+    /// rejects it, naming the thermal — the delivery-side mirror of
+    /// [`test_history_entry_for_non_anticipated_thermal_error`].
+    #[test]
+    fn test_future_delivery_for_non_anticipated_thermal_rejected() {
+        let thermal = make_thermal(1, 0.0, 500.0); // NOT anticipated
+        let mut data = make_data_anticipated(vec![thermal], 1, vec![]);
+        data.initial_conditions.future_anticipated_deliveries = vec![FutureAnticipatedDelivery {
+            thermal_id: EntityId::from(1),
+            delivery_start: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            delivery_end: NaiveDate::from_ymd_opt(2024, 6, 8).unwrap(),
+            min_mw: 0.0,
+            max_mw: 300.0,
+        }];
+        let mut ctx = ValidationContext::new();
+        check_future_delivery_thermal_is_anticipated(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| e.kind == ErrorKind::BusinessRuleViolation)
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one BusinessRuleViolation, got: {errors:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("Thermal 1"),
+            "message should contain 'Thermal 1', got: {msg}"
+        );
+        assert!(
+            msg.contains("not an anticipated thermal"),
+            "message should contain 'not an anticipated thermal', got: {msg}"
+        );
+    }
+
+    /// The same delivery, but the referenced thermal carries `anticipated_config:
+    /// Some(_)`: `check_future_delivery_thermal_is_anticipated` produces no error —
+    /// the previously-valid path is unchanged.
+    #[test]
+    fn test_future_delivery_for_anticipated_thermal_accepted() {
+        let thermal = make_anticipated_thermal(1, 1, None, None);
+        let mut data = make_data_anticipated(vec![thermal], 1, vec![]);
+        data.initial_conditions.future_anticipated_deliveries = vec![FutureAnticipatedDelivery {
+            thermal_id: EntityId::from(1),
+            delivery_start: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            delivery_end: NaiveDate::from_ymd_opt(2024, 6, 8).unwrap(),
+            min_mw: 0.0,
+            max_mw: 300.0,
+        }];
+        let mut ctx = ValidationContext::new();
+        check_future_delivery_thermal_is_anticipated(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "an anticipated thermal's future delivery must not be rejected, got: {:?}",
+            ctx.errors()
         );
     }
 
