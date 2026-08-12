@@ -13,14 +13,15 @@
 //! miss is the expected case, not a boundary the current study is
 //! incompatible with. Anticipated slots dispatch on `delivery_date` and the
 //! caller-supplied `target_delivery_intervals`: `SENTINEL` (pre-fan-out
-//! padding) always defaults to `Zero`; a live, dated slot fans out against
-//! the source's own anticipated months by calendar overlap — full coverage by
-//! priced source months yields [`RebindOp::Blend`] (the `÷H_M` distribute), a
-//! boundary-edge slot straddling into unpriced time yields
-//! [`RebindOp::Renormalize`] (anti-deflation over the covered span), no
-//! covered month yields `Zero`, and a slot with no resolved interval — an
-//! invariant violation — is [`RebindOp::Reject`]. Every remaining family falls
-//! back to the identity-reject default, pending its own arm. When every
+//! padding) always defaults to `Zero`; a live, dated POST-HORIZON lane (dated
+//! WITH a resolved interval) fans out against the source's own anticipated
+//! months by calendar overlap — full coverage by priced source months yields
+//! [`RebindOp::Blend`] (the `÷H_M` distribute), a boundary-edge slot straddling
+//! into unpriced time yields [`RebindOp::Renormalize`] (anti-deflation over the
+//! covered span), no covered month yields `Zero`; a live, dated slot with NO
+//! resolved interval is an in-study ring slot (a within-horizon delivery the
+//! terminal boundary does not price) and also yields `Zero`. Every remaining
+//! family falls back to the identity-reject default, pending its own arm. When every
 //! storage/lag/transit/unclassified target slot has a same-identity source
 //! counterpart and every anticipated slot is still sentinel-dated — the shape
 //! an already target-aligned, pre-fan-out boundary policy has — the rebind
@@ -226,9 +227,11 @@ fn build_by_month_index(
 ///
 /// Returns [`SddpError::Validation`] if a storage, inflow-lag, or
 /// unclassified `target` slot has no `source` counterpart under identity
-/// resolution, a live anticipated `source` slot's `delivery_date` fails to
-/// decode to a real calendar month, or a live, dated `AnticipatedThermalState`
-/// `target` slot has no resolved entry in `target_delivery_intervals`.
+/// resolution, or a live anticipated `source` slot's `delivery_date` fails to
+/// decode to a real calendar month. A dated `AnticipatedThermalState` `target`
+/// slot with no resolved `target_delivery_intervals` entry is an in-study ring
+/// slot, resolved to [`RebindOp::Zero`] rather than rejected (see
+/// [`resolve_anticipated`]).
 pub(crate) fn build_rebind(
     source: &[EntitySlot],
     target: &[EntitySlot],
@@ -330,16 +333,32 @@ fn resolve_transit_bucket(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usiz
 /// `AnticipatedThermalState` resolution. `slot.delivery_date == SENTINEL`
 /// (pre-fan-out padding) always resolves to `Zero`, regardless of
 /// `target_interval`. A live, dated slot with no resolved `target_interval`
-/// is an invariant violation ([`RebindOp::Reject`], naming the slot) — a
-/// covered post-horizon lane always resolves one
-/// (`post_horizon_delivery_date`'s own debug-assert guarantees this). A live,
-/// dated slot WITH a resolved interval fans out against `by_month`'s
+/// is an IN-STUDY ring slot — a commitment delivered WITHIN the current
+/// horizon (e.g. a matured commitment fished at the terminal stage, or a
+/// `K = 0` sub-stage-lead delivery self-delivered there) — and resolves to
+/// `Zero`: the terminal boundary FCF prices only post-horizon obligations, so
+/// a within-horizon delivery, already discharged inside the study, contributes
+/// nothing. Post-horizon lanes read their `delivery_date` and their
+/// `target_interval` from the SAME destination-stage index into 1:1-length
+/// vectors ([`build_stage_entity_delivery_intervals`] mirrors
+/// [`build_stage_entity_manifest`]), so a post-horizon lane is always
+/// `dated ⟺ Some(interval)`; a `None` interval on a dated slot therefore marks
+/// the in-study ring uniquely, never a failed post-horizon resolution. Two
+/// wrong-but-compiling alternatives: [`RebindOp::Reject`] here aborts a
+/// legitimate boundary load the moment any anticipated thermal delivers
+/// in-horizon (a sub-stage lead at the terminal stage — the K=0 case); fanning
+/// an in-study slot out (resolving it an in-horizon interval) would wrongly
+/// [`RebindOp::Blend`] a within-horizon delivery against the source's months.
+/// A live, dated slot WITH a resolved interval fans out against `by_month`'s
 /// calendar-overlap-weighted source months: no covered month yields `Zero`;
 /// full coverage yields [`RebindOp::Blend`] (`weight = overlap(w, M) / H_M`,
 /// the `÷H_M` distribute); partial coverage (a boundary-edge slot straddling
 /// into unpriced time) yields [`RebindOp::Renormalize`], scaling the covered
 /// months' density up to the full slot instead of an implicit `0.0`
 /// deflation term.
+///
+/// [`build_stage_entity_delivery_intervals`]: crate::policy_export::build_stage_entity_delivery_intervals
+/// [`build_stage_entity_manifest`]: crate::policy_export::build_stage_entity_manifest
 fn resolve_anticipated(
     slot: &EntitySlot,
     target_interval: Option<(NaiveDate, NaiveDate)>,
@@ -349,14 +368,7 @@ fn resolve_anticipated(
         return RebindOp::Zero;
     }
     let Some((start_w, end_w)) = target_interval else {
-        return RebindOp::Reject {
-            reason: format!(
-                "boundary policy target has a dated anticipated-thermal-state slot with no \
-                 resolved delivery interval (entity_id={}, subindex={}, delivery_date={}): a \
-                 covered post-horizon lane must always resolve one",
-                slot.entity_id, slot.subindex, slot.delivery_date
-            ),
-        };
+        return RebindOp::Zero;
     };
 
     let h_w = positive_hours(start_w, end_w);
@@ -1112,28 +1124,25 @@ mod tests {
     }
 
     /// Given a live, dated anticipated target slot whose
-    /// `target_delivery_intervals` entry is `None` (an invariant violation —
-    /// a covered post-horizon lane always resolves one), when `build_rebind`
-    /// runs, then it rejects cleanly, naming the offending slot — never a
-    /// panic, and never a silent `Zero`.
+    /// `target_delivery_intervals` entry is `None` — the shape of an IN-STUDY
+    /// ring slot (a within-horizon delivery, e.g. a `K = 0` sub-stage-lead
+    /// thermal maturing at the terminal stage), never a post-horizon lane
+    /// (those are always dated ⟺ interval) — when `build_rebind` runs, then it
+    /// resolves to `Zero`: the terminal boundary prices no within-horizon
+    /// delivery. It must never reject (which would abort a legitimate load) and
+    /// never fan out against the source months (which would wrongly `Blend`).
     #[test]
-    fn build_rebind_dated_anticipated_target_with_no_resolved_interval_rejects() {
-        let source = vec![storage_slot(1)];
-        let target = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_301)];
+    fn build_rebind_dated_in_study_ring_slot_with_no_interval_yields_zero() {
+        // A source month for thermal 9 that WOULD overlap the in-study slot's
+        // April date if it were (wrongly) fanned out — proving the `Zero` is
+        // the in-study classification, not an accidental no-covered-month miss.
+        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
+        let target = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
         let intervals = vec![None, None];
 
-        let err = build_rebind(&source, &target, &intervals).unwrap_err();
+        let rebind = build_rebind(&source, &target, &intervals).unwrap();
 
-        assert!(matches!(err, SddpError::Validation(_)));
-        let msg = err.to_string();
-        assert!(
-            msg.contains('9'),
-            "must name the offending entity id: {msg}"
-        );
-        assert!(
-            msg.contains("no resolved delivery interval"),
-            "must name the unresolved-interval invariant violation: {msg}"
-        );
+        assert_eq!(rebind, vec![RebindOp::Copy(0), RebindOp::Zero]);
     }
 
     /// Given a source already shaped identically to the target (storage, lag,

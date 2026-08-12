@@ -599,8 +599,11 @@ fn boundary_cut_lag_depth(manifest: &[EntitySlot]) -> u32 {
 /// - The source stage's state dimension does not match `current_state_dimension`
 /// - A target storage or inflow-lag slot has no source counterpart under
 ///   identity reconciliation
-/// - A live, dated anticipated target slot has no resolved entry in
-///   `target_delivery_intervals` (an invariant violation)
+///
+/// A dated anticipated target slot with no resolved `target_delivery_intervals`
+/// entry is NOT an error: it is an in-study ring slot (a within-horizon
+/// delivery) the boundary does not price, resolved to `Zero` (see
+/// `reconcile::resolve_anticipated`).
 pub fn load_boundary_cuts(
     boundary_path: &Path,
     source_stage: u32,

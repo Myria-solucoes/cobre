@@ -586,8 +586,27 @@ source's (a covered target slot's coeff ratio equals `H_w / H_M`). A target slot
 straddling into unpriced time yields `RebindOp::Renormalize`: the same weights
 additionally scaled by `H_w / Σ_covered overlap`, so the covered months' price
 density replicates across the uncovered span instead of deflating the boundary FCF
-with an implicit `0.0` term. No covered month yields `Zero`; a slot with no
-resolved delivery interval is an `Err`, never a silent pass.
+with an implicit `0.0` term. No covered month yields `Zero`.
+
+Only a POST-HORIZON lane fans out. A dated target slot with NO resolved delivery
+interval is an IN-STUDY ring slot — a commitment delivered WITHIN the current
+horizon (a matured commitment fished at the terminal stage, or a `K = 0`
+sub-stage-lead delivery self-delivered there) — and resolves to `Zero`: the
+terminal boundary FCF prices only post-horizon obligations, so a within-horizon
+delivery, already discharged inside the study, contributes nothing. This is
+sound BECAUSE a post-horizon lane reads its `delivery_date` and its
+`target_interval` from the SAME destination-stage index into 1:1-length vectors
+(`build_stage_entity_manifest` and `build_stage_entity_delivery_intervals` walk
+in lockstep, `post_study_calendar_stages` mapping stages 1:1), so a post-horizon
+lane is always `dated ⟺ Some(interval)`; a `None` interval on a dated slot
+therefore marks the in-study ring uniquely, never a failed post-horizon
+resolution. Two wrong-but-compiling alternatives: `RebindOp::Reject` here (the
+retired behavior) aborts a legitimate boundary load the moment any anticipated
+thermal delivers in-horizon (the K=0-at-terminal case — the manifest DELIBERATELY
+dates a matures-this-stage slot, pinned by
+`anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`); resolving
+the in-study slot an in-horizon interval and fanning it out would wrongly `Blend`
+a within-horizon delivery against the source's months.
 
 `Blend` and `Renormalize` are semantically distinct and MUST NOT be collapsed:
 `rebind_cut` applies both through the identical weighted-sum, so unifying them
@@ -611,9 +630,12 @@ Read: `policy/reconcile.rs` (`resolve_anticipated`, `build_rebind`, `rebind_cut`
 intervals). Pinned by the `hm_distribute_conservation` fixtures in
 `tests/anticipated_core.rs` (coeff ratio equals `H_w / H_M`, invariant to the
 delivery stage's hours), the `Blend`/`Renormalize` `rebind_cut` unit tests (both
-apply identical mechanics, distinction is only the weight), and
+apply identical mechanics, distinction is only the weight),
 `tests/boundary_reconcile_defaults.rs` (the fan-out matrix and the superset
-bit-identity `to_bits` pin).
+bit-identity `to_bits` pin), and
+`build_rebind_dated_in_study_ring_slot_with_no_interval_yields_zero` (a dated
+target slot with no interval resolves to `Zero`, not a reject, even when a source
+month would overlap it).
 
 ## Initial-state seeding resolves IDs through a position map, never `binary_search`
 
