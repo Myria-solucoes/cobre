@@ -96,11 +96,32 @@ int cobre_qhull_convex_hull_3d(
      * it is a build-configuration guard, not a runtime input error. */
     QHULL_LIB_CHECK
 
+    /* Capture qhull's error stream instead of leaking it to the process's
+     * stderr: a near-coplanar cloud's QH6154 precision diagnostic (and any
+     * other qh_fprintf(qh, qh->ferr, ...) text) is written here instead, from
+     * every parallel per-hydro worker. `open_memstream` grows as needed, so a
+     * multi-line diagnostic never overflows a fixed buffer. On `ERRmem`
+     * exhaustion (the only realistic `open_memstream` failure) fall back to
+     * `tmpfile()`, and only if THAT also fails fall back to `stderr` — never
+     * NULL, which `qh_fprintf` treats as a fatal internal abort (see the
+     * header's error-trapping contract). The captured text is discarded
+     * unread once qhull returns, on both outcomes: the soft-recovery path's
+     * fit already succeeded (see below), and the hard-failure path already
+     * returns a typed status the Rust caller maps to a hydro-naming error,
+     * without needing the raw qhull text. */
+    char*  diag_buf = NULL;
+    size_t diag_size = 0;
+    FILE*  diag_stream = open_memstream(&diag_buf, &diag_size);
+    if (diag_stream == NULL) {
+        diag_stream = tmpfile();
+    }
+    FILE* err_stream = (diag_stream != NULL) ? diag_stream : stderr;
+
     /* Reentrant qhull instance lives on the stack — no global state, so
      * concurrent hulls on different threads cannot interfere. */
     qhT qh_qh;
     qhT* qh = &qh_qh;
-    qh_zero(qh, stderr);
+    qh_zero(qh, err_stream);
 
     double* planes = NULL;
     int     status = COBRE_QHULL_OK;
@@ -118,11 +139,10 @@ int cobre_qhull_convex_hull_3d(
          * ownership of it. The cast drops const because qh_new_qhull takes a
          * non-const coordT*; qhull does not mutate the array when joggle is off
          * (no "QJ"), so this is sound. NULL outfile suppresses result printing;
-         * stderr stays the error sink — a NULL errfile would make qhull abort
-         * the process (qh_fprintf treats a NULL file as a fatal internal error)
-         * if it ever needed to print, so it is deliberately NOT silenced that
-         * way; the "Pp" flag suppresses the common precision-warning text
-         * instead. */
+         * `err_stream` (never NULL, see above) is the error sink qhull's
+         * QH6154-class diagnostics land on instead of the process's stderr;
+         * the "Pp" flag additionally suppresses the separate precision-warning
+         * text qhull emits outside the hard errexit path. */
         int qhull_exit = qh_new_qhull(
             qh,
             COBRE_QHULL_DIM,
@@ -131,7 +151,7 @@ int cobre_qhull_convex_hull_3d(
             False,
             (char*)COBRE_QHULL_FLAGS,
             NULL,
-            stderr
+            err_stream
         );
 
         /* qh_new_qhull installs its OWN setjmp over qh->errexit for the duration
@@ -221,6 +241,16 @@ int cobre_qhull_convex_hull_3d(
         *out_planes = NULL;
         *out_n_facets = 0;
     }
+
+    /* Close and discard the captured diagnostic stream on every path. Closing
+     * an `open_memstream` finalizes `diag_buf`/`diag_size`, which we then free
+     * without reading; closing a `tmpfile()` fallback deletes it. `err_stream`
+     * is `stderr` only when both captures failed, in which case `diag_stream`
+     * is NULL and there is nothing to close here. */
+    if (diag_stream != NULL) {
+        fclose(diag_stream);
+    }
+    free(diag_buf);
 
     return status;
 }

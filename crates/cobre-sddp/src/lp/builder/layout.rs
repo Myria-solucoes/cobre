@@ -1143,6 +1143,26 @@ fn enumerate_generic_constraint_rows(
     }
 }
 
+/// One hydro's resolved LP production role at one stage — the single
+/// classifier [`StageLayout::stage_production_role`] resolves, so
+/// `fill_load_balance_entries` and `fill_operational_violation_entries` can
+/// no longer disagree about a plant's role the way two independent
+/// `ProductionModelSet::model()` re-queries once did.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum StageProductionRole {
+    /// Prices through the plant's FPHA generation column(s), at this
+    /// FPHA-local index.
+    Fpha(FphaLocal),
+    /// Prices through the plant's turbine column at this shared productivity.
+    Constant(f64),
+    /// A commissioning-dormant (`PreFilling`/`Filling`) `Fpha`-resolved plant:
+    /// gated out of `fpha_local_index` by `identify_fpha_hydros`, so it has no
+    /// generation column, and its turbine column is frozen `[0, 0]`. It
+    /// contributes nothing to either consumer's row — never priced as
+    /// `ConstantProductivity`, which it has no productivity for.
+    Dormant,
+}
+
 impl<'a> StageLayout<'a> {
     // Rationale: too_many_lines — the role-(b) ranges derive sequentially from the
     // previous range's `.end`; keeping the whole chain in one function is what makes the
@@ -1553,6 +1573,35 @@ impl<'a> StageLayout<'a> {
     #[inline]
     pub(crate) fn fpha_local_first_cell(&self, local_idx: FphaLocal) -> FphaCellLocal {
         FphaCellLocal::new(self.fpha_cell_local_start[local_idx.get()])
+    }
+
+    /// Hydro `h_idx`'s [`StageProductionRole`] at `stage_idx`: `Fpha` when
+    /// `identify_fpha_hydros` admitted it into `fpha_local_index`, else the
+    /// resolved model's `Constant` productivity or, for an `Fpha`-resolved
+    /// model excluded by the phase gate, `Dormant`.
+    #[inline]
+    pub(super) fn stage_production_role(
+        &self,
+        production_models: &ProductionModelSet,
+        h_idx: usize,
+        stage_idx: usize,
+    ) -> StageProductionRole {
+        if let Some(local_idx) = self.fpha_local_index[h_idx] {
+            debug_assert!(
+                matches!(
+                    production_models.model(h_idx, stage_idx),
+                    ResolvedProductionModel::Fpha { .. }
+                ),
+                "FPHA local-index table inconsistent with production model for hydro {h_idx}"
+            );
+            return StageProductionRole::Fpha(local_idx);
+        }
+        match production_models.model(h_idx, stage_idx) {
+            ResolvedProductionModel::ConstantProductivity { productivity } => {
+                StageProductionRole::Constant(*productivity)
+            }
+            ResolvedProductionModel::Fpha { .. } => StageProductionRole::Dormant,
+        }
     }
 
     /// Forward line-flow column for line `l`, block `blk`.

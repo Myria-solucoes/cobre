@@ -2,7 +2,7 @@ use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{BlockMode, CoefficientRef, ContractType, EntityId, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
-use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
+use crate::hydro_models::EvaporationModel;
 use crate::indexer::{
     AnticipatedLocal, BlockIdx, Boundary, EvapLocal, FphaCellLocal, HydroCell, HydroSys, LineSys,
     StateSpace, anticipated_resolution_for,
@@ -11,7 +11,7 @@ use crate::indexer::{
 use super::M3S_TO_HM3;
 use super::delivery_ring::DeliveryRing;
 use super::fpha_cursor::for_each_fpha_plane;
-use super::layout::{StageLayout, TemplateBuildCtx};
+use super::layout::{StageLayout, StageProductionRole, TemplateBuildCtx};
 use crate::generic_constraints::{
     CascadeRefs, ContractRefs, EntityPositionMaps, PumpingRefs, contract_family_slot,
 };
@@ -1039,7 +1039,9 @@ pub(super) fn fill_pumping_water_entries(
 /// and deficit/excess slacks. Each hydro CELL credits its own bus
 /// (`HydroCellIndex::bus_of`) — `Hydro` carries no bus of its own, only its unit
 /// groups do: FPHA cells enter with `g_c` at `+1.0`; constant-productivity cells
-/// with `rho * turbine_col(cell)`, the plant's shared `rho`.
+/// with `rho * turbine_col(cell)`, the plant's shared `rho`; a commissioning-dormant
+/// FPHA plant ([`StageProductionRole::Dormant`]) credits nothing — it has no
+/// generation column and no productivity to price its frozen turbine column at.
 ///
 /// Pumping power is a negative injection: the `pumping_flow` column enters with
 /// `−consumption_mw_per_m3s` (no separate power column). A positive coefficient would
@@ -1056,45 +1058,34 @@ pub(super) fn fill_load_balance_entries(
 
     for h_idx in 0..ctx.hydros.len() {
         let h_sys = HydroSys::new(h_idx);
-        if let Some(local_idx) = layout.fpha_local_index[h_idx] {
-            debug_assert!(
-                matches!(
-                    ctx.production_models.model(h_idx, stage_idx),
-                    ResolvedProductionModel::Fpha { .. }
-                ),
-                "FPHA local-index table inconsistent with production model for hydro {h_idx}"
-            );
-            let cell_base = layout.fpha_cell_local_start[local_idx.get()];
-            for (offset, c) in ctx.hydro_cell_index.cells_of(h_sys).enumerate() {
-                let cell = HydroCell::new(c);
-                if let Some(&b_idx) = ctx.bus_pos.get(&ctx.hydro_cell_index.bus_of(cell)) {
-                    let cell_local = FphaCellLocal::new(cell_base + offset);
-                    for blk in (0..n_blks).map(BlockIdx::new) {
-                        let row = grid.flat(row_load, b_idx, blk);
-                        let col = layout.generation_col(cell_local, blk);
-                        col_entries[col].push((row, 1.0));
+        match layout.stage_production_role(ctx.production_models, h_idx, stage_idx) {
+            StageProductionRole::Fpha(local_idx) => {
+                let cell_base = layout.fpha_cell_local_start[local_idx.get()];
+                for (offset, c) in ctx.hydro_cell_index.cells_of(h_sys).enumerate() {
+                    let cell = HydroCell::new(c);
+                    if let Some(&b_idx) = ctx.bus_pos.get(&ctx.hydro_cell_index.bus_of(cell)) {
+                        let cell_local = FphaCellLocal::new(cell_base + offset);
+                        for blk in (0..n_blks).map(BlockIdx::new) {
+                            let row = grid.flat(row_load, b_idx, blk);
+                            let col = layout.generation_col(cell_local, blk);
+                            col_entries[col].push((row, 1.0));
+                        }
                     }
                 }
             }
-        } else {
-            let rho = match ctx.production_models.model(h_idx, stage_idx) {
-                ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
-                ResolvedProductionModel::Fpha { .. } => {
-                    unreachable!(
-                        "non-FPHA branch reached for FPHA resolved model at hydro {h_idx}"
-                    );
-                }
-            };
-            for c in ctx.hydro_cell_index.cells_of(h_sys) {
-                let cell = HydroCell::new(c);
-                if let Some(&b_idx) = ctx.bus_pos.get(&ctx.hydro_cell_index.bus_of(cell)) {
-                    for blk in (0..n_blks).map(BlockIdx::new) {
-                        let row = grid.flat(row_load, b_idx, blk);
-                        let col = layout.turbine_col(cell, blk);
-                        col_entries[col].push((row, rho));
+            StageProductionRole::Constant(rho) => {
+                for c in ctx.hydro_cell_index.cells_of(h_sys) {
+                    let cell = HydroCell::new(c);
+                    if let Some(&b_idx) = ctx.bus_pos.get(&ctx.hydro_cell_index.bus_of(cell)) {
+                        for blk in (0..n_blks).map(BlockIdx::new) {
+                            let row = grid.flat(row_load, b_idx, blk);
+                            let col = layout.turbine_col(cell, blk);
+                            col_entries[col].push((row, rho));
+                        }
                     }
                 }
             }
+            StageProductionRole::Dormant => {}
         }
     }
 
@@ -1481,8 +1472,9 @@ pub(super) fn fill_z_inflow_entries(
 /// - **Max outflow** (`<=`, per hydro): `q + s + d - sigma_above`
 /// - **Min turbine** (`>=`, per CELL): `q_c + sigma_below_c`
 /// - **Min generation** (`>=`, per CELL): `var_c + sigma_below_c`, where `var_c`
-///   is `rho * q_c` for constant-productivity hydros or the cell's own
-///   generation column `g_c` for FPHA.
+///   is `rho * q_c` for constant-productivity hydros, the cell's own generation
+///   column `g_c` for FPHA, or absent (`sigma_below_c` alone absorbs the floor)
+///   for a commissioning-dormant FPHA plant.
 ///
 /// The two power-side families couple only the CELL's own columns to the
 /// CELL's own slack — never summed across a plant's cells the way the two
@@ -1496,7 +1488,7 @@ pub(super) fn fill_operational_violation_entries(
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
 
-    for (h_idx, fpha_local_entry) in layout.fpha_local_index.iter().enumerate() {
+    for h_idx in 0..layout.n_h {
         for blk in (0..n_blks).map(BlockIdx::new) {
             let row = grid.flat(
                 layout.slack.oper_violation.min_outflow_rows.start,
@@ -1548,50 +1540,63 @@ pub(super) fn fill_operational_violation_entries(
         }
 
         // Per-cell min-generation row: FPHA couples the cell's own generation
-        // column; ConstantProductivity couples the cell's own turbine column at rho.
-        if let Some(&local_fpha_idx) = fpha_local_entry.as_ref() {
-            let fpha_base = layout.fpha_local_first_cell(local_fpha_idx).get();
-            for (offset, c) in ctx
-                .hydro_cell_index
-                .cells_of(HydroSys::new(h_idx))
-                .enumerate()
-            {
-                let cell = HydroCell::new(c);
-                for blk in (0..n_blks).map(BlockIdx::new) {
-                    let row = grid.flat(
-                        layout.slack.oper_violation.min_generation_rows.start,
-                        c,
-                        blk,
-                    );
-                    let col_g = layout.generation_col(FphaCellLocal::new(fpha_base + offset), blk);
-                    col_entries[col_g].push((row, 1.0));
-                    let col_slack = layout.generation_below_col(cell, blk);
-                    col_entries[col_slack].push((row, 1.0));
+        // column; ConstantProductivity couples the cell's own turbine column at
+        // rho. A commissioning-dormant FPHA plant (`StageProductionRole::Dormant`)
+        // couples neither — it has no generation column and no productivity to
+        // price its frozen turbine column at — leaving only the row's own slack
+        // to absorb a nonzero floor, exactly as a dormant ConstantProductivity
+        // plant's frozen (`rho * 0`) turbine term already does.
+        match layout.stage_production_role(ctx.production_models, h_idx, stage_idx) {
+            StageProductionRole::Fpha(local_fpha_idx) => {
+                let fpha_base = layout.fpha_local_first_cell(local_fpha_idx).get();
+                for (offset, c) in ctx
+                    .hydro_cell_index
+                    .cells_of(HydroSys::new(h_idx))
+                    .enumerate()
+                {
+                    let cell = HydroCell::new(c);
+                    for blk in (0..n_blks).map(BlockIdx::new) {
+                        let row = grid.flat(
+                            layout.slack.oper_violation.min_generation_rows.start,
+                            c,
+                            blk,
+                        );
+                        let col_g =
+                            layout.generation_col(FphaCellLocal::new(fpha_base + offset), blk);
+                        col_entries[col_g].push((row, 1.0));
+                        let col_slack = layout.generation_below_col(cell, blk);
+                        col_entries[col_slack].push((row, 1.0));
+                    }
                 }
             }
-        } else {
-            // Read rho from the resolved per-stage production model, not a static field.
-            let rho = match ctx.production_models.model(h_idx, stage_idx) {
-                ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
-                ResolvedProductionModel::Fpha { .. } => {
-                    unreachable!(
-                        "Fpha resolved model in ConstantProductivity LP path for hydro \
-                         {h_idx}; validate production model assignment upstream"
-                    );
+            StageProductionRole::Constant(rho) => {
+                for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
+                    let cell = HydroCell::new(c);
+                    for blk in (0..n_blks).map(BlockIdx::new) {
+                        let row = grid.flat(
+                            layout.slack.oper_violation.min_generation_rows.start,
+                            c,
+                            blk,
+                        );
+                        let col_q = layout.turbine_col(cell, blk);
+                        col_entries[col_q].push((row, rho));
+                        let col_slack = layout.generation_below_col(cell, blk);
+                        col_entries[col_slack].push((row, 1.0));
+                    }
                 }
-            };
-            for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
-                let cell = HydroCell::new(c);
-                for blk in (0..n_blks).map(BlockIdx::new) {
-                    let row = grid.flat(
-                        layout.slack.oper_violation.min_generation_rows.start,
-                        c,
-                        blk,
-                    );
-                    let col_q = layout.turbine_col(cell, blk);
-                    col_entries[col_q].push((row, rho));
-                    let col_slack = layout.generation_below_col(cell, blk);
-                    col_entries[col_slack].push((row, 1.0));
+            }
+            StageProductionRole::Dormant => {
+                for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
+                    let cell = HydroCell::new(c);
+                    for blk in (0..n_blks).map(BlockIdx::new) {
+                        let row = grid.flat(
+                            layout.slack.oper_violation.min_generation_rows.start,
+                            c,
+                            blk,
+                        );
+                        let col_slack = layout.generation_below_col(cell, blk);
+                        col_entries[col_slack].push((row, 1.0));
+                    }
                 }
             }
         }
@@ -3212,7 +3217,8 @@ mod pumping_water_tests {
     };
     use super::{
         LpMatrixBuffers, assemble_csc, build_stage_matrix_entries, fill_fpha_entries,
-        fill_generic_constraint_entries, fill_load_balance_entries, fill_pumping_water_entries,
+        fill_generic_constraint_entries, fill_load_balance_entries,
+        fill_operational_violation_entries, fill_pumping_water_entries,
         fill_transit_bucket_definition_entries, resolve_chrono_arrival_density,
     };
 
@@ -9599,5 +9605,153 @@ mod pumping_water_tests {
         let q_max = (EVAP_INTERCEPT + EVAP_SLOPE * 100.0).abs() * 2.0;
         assert_eq!(col_lower[flow_col], -q_max);
         assert_eq!(col_upper[flow_col], q_max);
+    }
+
+    // ── Commissioning-dormant FPHA plant (A.1 regression) ────────────────────
+
+    /// A commissioning FPHA plant with a future `entry_stage_id`: resolution is
+    /// phase-blind (`ResolvedProductionModel::Fpha` at every stage, including
+    /// stage 0) while `identify_fpha_hydros` gates it `PreFilling` out of
+    /// `fpha_local_index` — the fixture that reproduced the
+    /// commissioning-dormant FPHA panic before `StageProductionRole::Dormant`.
+    /// A nonzero group `min_generation_mw` exercises the min-generation floor
+    /// while the plant is dormant, so the operational-violation test below can
+    /// confirm the row's own slack — not a `var_c` term the plant has no
+    /// column for — is what keeps it satisfiable.
+    fn dormant_fpha_fixture() -> PumpFixtures {
+        let mut dormant = fixture_hydro(1);
+        dormant.entry_stage_id = Some(2);
+        dormant.unit_groups[0].min_generation_mw = 5.0;
+        let production_models = ProductionModelSet::new(
+            vec![vec![
+                ResolvedProductionModel::Fpha {
+                    planes: vec![FphaPlane {
+                        intercept: 1000.0,
+                        gamma_v: 4.0,
+                        gamma_q: 0.6,
+                        gamma_s: 0.3,
+                    }],
+                };
+                N_STAGES
+            ]],
+            1,
+            N_STAGES,
+        );
+        PumpFixtures::new(vec![dormant], Vec::new()).with_production_models(production_models)
+    }
+
+    /// AC1: the LP builds (no `unreachable!` panic) and the dormant plant is
+    /// excluded from the FPHA index, exactly as a resolved-Fpha commissioning
+    /// plant that never reaches a stage template today would be.
+    #[test]
+    fn test_dormant_fpha_plant_is_excluded_from_fpha_index() {
+        let fixture = dormant_fpha_fixture();
+        let ctx = fixture.make_ctx();
+        let stage = three_block_stage(0);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        assert!(
+            layout.fpha_local_index[0].is_none(),
+            "the dormant plant must be gated out of the FPHA index by identify_fpha_hydros"
+        );
+        assert!(
+            layout.fpha_hydro_indices.is_empty(),
+            "a solely-dormant plant reserves no FPHA generation column region at all"
+        );
+    }
+
+    /// AC2: `fill_load_balance_entries` does not panic on a dormant FPHA plant
+    /// and credits its bus with zero generation — never priced as
+    /// `ConstantProductivity` on its frozen turbine column.
+    #[test]
+    fn test_dormant_fpha_plant_load_balance_contributes_nothing() {
+        let fixture = dormant_fpha_fixture();
+        let ctx = fixture.make_ctx();
+        let stage = three_block_stage(0);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_load_balance_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let bus_pos = *ctx.bus_pos.get(&EntityId(1)).unwrap();
+        let grid = layout.block_grid();
+        let row_load = layout.rows.load_balance.start;
+        let cell = HydroCell::new(
+            ctx.hydro_cell_index
+                .cells_of(HydroSys::new(0))
+                .next()
+                .unwrap(),
+        );
+
+        for blk_idx in 0..layout.n_blks {
+            let blk = BlockIdx::new(blk_idx);
+            let row = grid.flat(row_load, bus_pos, blk);
+            let col_turbine = layout.turbine_col(cell, blk);
+            assert_eq!(
+                entry_count_at(&col_entries, col_turbine, row),
+                0,
+                "blk {blk_idx}: a dormant FPHA plant must not be priced as \
+                 ConstantProductivity on its frozen turbine column"
+            );
+        }
+    }
+
+    /// AC3: `fill_operational_violation_entries` does not panic on a dormant
+    /// FPHA plant; the min-generation row's own slack alone absorbs the
+    /// plant's nonzero floor — the row stays satisfiable via the slack, not a
+    /// `var_c` term coupling a column the plant has none of.
+    #[test]
+    fn test_dormant_fpha_plant_operational_violation_contributes_nothing() {
+        let fixture = dormant_fpha_fixture();
+        let ctx = fixture.make_ctx();
+        let stage = three_block_stage(0);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_operational_violation_entries(&ctx, 0, &layout, &mut col_entries);
+        let (row_lower, _row_upper) = fill_stage_rows(&ctx, &stage, 0, &layout);
+
+        let grid = layout.block_grid();
+        let cell_idx = ctx
+            .hydro_cell_index
+            .cells_of(HydroSys::new(0))
+            .next()
+            .unwrap();
+        let cell = HydroCell::new(cell_idx);
+
+        for blk_idx in 0..layout.n_blks {
+            let blk = BlockIdx::new(blk_idx);
+            let row = grid.flat(
+                layout.slack.oper_violation.min_generation_rows.start,
+                cell_idx,
+                blk,
+            );
+            assert_eq!(
+                row_lower[row], 5.0,
+                "blk {blk_idx}: the dormant plant's own group min_generation_mw still \
+                 sets a nonzero floor"
+            );
+            let col_turbine = layout.turbine_col(cell, blk);
+            assert_eq!(
+                entry_count_at(&col_entries, col_turbine, row),
+                0,
+                "blk {blk_idx}: no rho-priced turbine term for a plant with no productivity"
+            );
+            let col_slack = layout.generation_below_col(cell, blk);
+            assert_eq!(
+                raw_coeff_at(&col_entries, col_slack, row),
+                1.0,
+                "blk {blk_idx}: the row's own slack must still absorb the floor, keeping \
+                 it satisfiable rather than structurally infeasible"
+            );
+            assert_eq!(
+                entry_count_at(&col_entries, col_slack, row),
+                1,
+                "blk {blk_idx}: exactly one slack entry, no duplicate or leftover var_c term"
+            );
+        }
     }
 }
