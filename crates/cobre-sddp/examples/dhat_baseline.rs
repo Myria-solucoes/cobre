@@ -19,6 +19,7 @@
     clippy::print_stdout
 )]
 
+#[cfg(feature = "highs")]
 use cobre_io::config::TrainingSelection;
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
