@@ -754,6 +754,9 @@ fn seed_root_accumulators<S: SolverInterface + Send>(
 /// # Errors
 ///
 /// Propagates the `u64` path-product overflow guard.
+// Consumed only by the single-rank solve-count debug-assert above; legitimately
+// unused in a release non-test build (debug-assertions off), so allow it there.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub(crate) fn expected_single_rank_solves(node_graph: &NodeGraph) -> Result<u64, SddpError> {
     Ok(node_graph.forward_solve_counts()?.into_iter().sum())
 }

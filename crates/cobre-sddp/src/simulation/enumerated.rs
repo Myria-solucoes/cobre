@@ -472,6 +472,9 @@ where
         total_scenarios,
     };
 
+    // `lp_solves` is read only by the debug-assert block below; in a release
+    // build (debug-assertions off) it is intentionally unused.
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let lp_solves = run_sweep(
         plan,
         &mut scratch,
