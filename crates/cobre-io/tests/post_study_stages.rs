@@ -30,7 +30,7 @@ fn initial_conditions_with_delivery(
     )
 }
 
-// ── AC: present → System.post_study_stages Some, both collections sorted ──────
+// ── present → System.post_study_stages Some, both collections sorted ──────
 
 #[test]
 fn test_present_carries_sorted_post_study_stages_onto_system() {
@@ -67,7 +67,7 @@ fn test_present_carries_sorted_post_study_stages_onto_system() {
     assert_eq!(ps.thermal_bounds[1].post_study_stage_index, 1);
 }
 
-// ── AC: absent → None, System is otherwise unchanged (additive/inert) ─────────
+// ── absent → None, System is otherwise unchanged (additive/inert) ─────────
 
 #[test]
 fn test_absent_yields_none_and_is_additive() {
@@ -84,7 +84,7 @@ fn test_absent_yields_none_and_is_additive() {
     assert_eq!(system.n_stages(), 1);
 }
 
-// ── AC: first post-study start != study end → Err naming the mismatch ─────────
+// ── first post-study start != study end → Err naming the mismatch ─────────
 
 #[test]
 fn test_first_start_not_study_end_rejected() {
@@ -106,7 +106,7 @@ fn test_first_start_not_study_end_rejected() {
     );
 }
 
-// ── AC: non-contiguous post-study stages → Err ────────────────────────────────
+// ── non-contiguous post-study stages → Err ────────────────────────────────
 
 #[test]
 fn test_non_contiguous_stages_rejected() {
@@ -133,7 +133,7 @@ fn test_non_contiguous_stages_rejected() {
     );
 }
 
-// ── AC: future_anticipated_deliveries but no post_study_stages → Err ──────────
+// ── future_anticipated_deliveries but no post_study_stages → Err ──────────
 
 #[test]
 fn test_delivery_without_post_study_rejected() {
@@ -153,7 +153,7 @@ fn test_delivery_without_post_study_rejected() {
     );
 }
 
-// ── AC: delivery window not covered exactly (over-reach) → Err ────────────────
+// ── delivery window not covered exactly (over-reach) → Err ────────────────
 
 #[test]
 fn test_delivery_overreaches_post_study_horizon_rejected() {
@@ -183,7 +183,7 @@ fn test_delivery_overreaches_post_study_horizon_rejected() {
     );
 }
 
-// ── AC: delivery window spanning ≥2 whole post-study stages → Err ─────────────
+// ── delivery window spanning ≥2 whole post-study stages → Err ─────────────
 
 #[test]
 fn test_delivery_spanning_multiple_post_study_stages_rejected() {
@@ -218,7 +218,7 @@ fn test_delivery_spanning_multiple_post_study_stages_rejected() {
     );
 }
 
-// ── AC: covered stage has no PostStudyThermalBound{t, j} → Err naming (t, j) ──
+// ── covered stage has no PostStudyThermalBound{t, j} → Err naming (t, j) ──
 
 #[test]
 fn test_missing_bound_for_covered_stage_rejected() {
@@ -253,7 +253,7 @@ fn test_missing_bound_for_covered_stage_rejected() {
     );
 }
 
-// ── AC: empty commitment∩capability intersection → Err ───────────────────────
+// ── empty commitment∩capability intersection → Err ───────────────────────
 
 #[test]
 fn test_empty_commitment_capability_intersection_rejected() {
@@ -339,7 +339,7 @@ fn test_valid_covered_delivery_loads() {
     assert!(system.post_study_stages().is_some());
 }
 
-// ── AC: declaration-order invariance through System ───────────────────────────
+// ── declaration-order invariance through System ───────────────────────────
 
 #[test]
 fn test_declaration_order_invariance_through_system() {

@@ -1146,7 +1146,7 @@ struct CommitmentHoldWindows {
 
 /// Resolve every declared post-horizon delivery window
 /// ([`cobre_core::FutureAnticipatedDelivery`]) to its in-study decider stage
-/// ([`resolve_future_delivery_decider`], spec #1 §4.3 step 2) and its resolved
+/// ([`resolve_future_delivery_decider`]) and its resolved
 /// post-study destination stage ([`StageCalendar::resolve_window`] against the
 /// post-study calendar), in canonical `(anticipated thermal system position,
 /// delivery_start)` order — canonical thermal order, not raw `thermal_id`

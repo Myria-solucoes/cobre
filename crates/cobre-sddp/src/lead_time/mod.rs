@@ -544,7 +544,7 @@ fn resolve_decider_physical(
 }
 
 /// Trunk (shared across the terminal fan) vs terminal-fan (per-scenario)
-/// classification of a post-horizon window's in-study decider (spec #1 §7.4).
+/// classification of a post-horizon window's in-study decider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeciderKind {
     /// Decider is strictly before the last operative stage: one decision
@@ -562,7 +562,7 @@ pub(crate) enum DeciderKind {
 /// horizon rather than read off `stage_lengths_hours` — instead of a
 /// decision-anchored stage index. Classifies the decider
 /// [`DeciderKind::TerminalFan`] when it is the last operative stage,
-/// [`DeciderKind::Trunk`] otherwise (spec #1 §7.4). `None` when the target
+/// [`DeciderKind::Trunk`] otherwise. `None` when the target
 /// falls outside the in-study calendar in either direction (before the
 /// horizon start, or past its end) — out of the lead's reach.
 // Voice 4: no production call site wires this in yet — the terminal

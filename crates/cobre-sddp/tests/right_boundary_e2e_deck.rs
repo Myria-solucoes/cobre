@@ -10,8 +10,8 @@
 //!   on this machine; skips loudly and passes when the deck is absent OR when
 //!   the deck's post-horizon lane is not yet live (the bridge's converted
 //!   lead is currently too short for the window to survive setup), and
-//!   asserts the full AC2/AC3 read-back once the lane is live. Never runs in
-//!   CI.
+//!   asserts the full carried-state and fanned-lane read-back once the lane
+//!   is live. Never runs in CI.
 
 #![allow(
     clippy::unwrap_used,
@@ -98,7 +98,7 @@ mod deck_smoke {
         PathBuf::from(home).join("git/cobre-bridge/example/cobre-mar-26-rv2")
     }
 
-    /// AC2 + AC3: a converted case declaring one `future_anticipated_deliveries`
+    /// A converted case declaring one `future_anticipated_deliveries`
     /// window must expose it in the terminal manifest, dated and kept live.
     /// A canary, not a fixed assertion: when the deck's post-horizon lane
     /// isn't live yet (today's reality — the bridge's converted GNL lead is
@@ -131,7 +131,7 @@ mod deck_smoke {
 
         if !live_lane {
             eprintln!(
-                "skipping deck smoke AC2/AC3 read-back: n_commitment={}, thermal {DECK_THERMAL_ID} \
+                "skipping deck smoke boundary read-back: n_commitment={}, thermal {DECK_THERMAL_ID} \
                  manifest slot {}. The deck's converted GNL lead is still the stale 168h, so its \
                  future_anticipated_deliveries window is dropped at setup — pending the bridge \
                  re-conversion with the faithful ~2-month lead.",

@@ -4,7 +4,7 @@
 //! responds to the carried committed MW by `β·x`, and the backward pass
 //! propagates that `β` inward to the deciding stage's cut. The one shared
 //! boundary prices every terminal fan leaf against its OWN lane state
-//! (ticket-004's shared-fan injection topology, extended to the lanes). `β`
+//! (the shared-fan injection topology, extended to the lanes). `β`
 //! values the carried STATE; the delivery-anchored fuel is booked separately on
 //! the decision column — the two are disjoint columns, so they compose without
 //! double-counting.
@@ -79,8 +79,8 @@ const ALPHA: f64 = 5.0;
 /// Boundary cut coefficient `β` on the post-horizon lane slot (zero on the
 /// in-study ring slot), so `θ = α + β·x` isolates the lane.
 const BETA: f64 = 3.0;
-/// Post-study fuel `$/MWh` at the resolved cell — booked on the decision column
-/// (ticket-009), disjoint from the terminal `β·state` valuation this file pins.
+/// Post-study fuel `$/MWh` at the resolved cell — booked on the decision
+/// column, disjoint from the terminal `β·state` valuation this file pins.
 const COST_PER_MWH: f64 = 37.5;
 /// Post-study stage duration \[h\]; the study carries a `0.0` discount rate.
 const POST_STUDY_HOURS: f64 = 720.0;
@@ -92,7 +92,7 @@ fn study_start() -> NaiveDate {
 
 /// Study end date (`stage 1` end) — the first `post_study_stages` stage and the
 /// post-horizon delivery window both anchor here, making the segment
-/// date-contiguous with the horizon (ticket-034a's first-start == study-end
+/// date-contiguous with the horizon (the first-post-study-start == study-end
 /// rule).
 fn study_end() -> NaiveDate {
     study_start() + chrono::TimeDelta::days(61)
@@ -248,7 +248,7 @@ fn penalties() -> cobre_core::resolved::ResolvedPenalties {
 
 /// Two-leaf terminal fan: root (id 0, stage 0) branches into leaves (ids 1 and
 /// 2, stage 1) — both terminal, sharing ONE pool (`build_node_graph`'s
-/// leaf-sharing rule, confirmed by ticket-004).
+/// leaf-sharing rule).
 fn two_leaf_fan_graph() -> HorizonGraph {
     HorizonGraph {
         graph_type: PolicyGraphType::FiniteHorizon,
@@ -556,7 +556,7 @@ fn leaf_positions(graph: &NodeGraph) -> Vec<NodePos> {
         .collect()
 }
 
-// ── AC1: θ prices the carried committed MW by β·x, and β propagates inward ──
+// ── θ prices the carried committed MW by β·x, and β propagates inward ──
 
 /// The terminal value responds to the outstanding committed MW on the lane by
 /// exactly `β·Δx`: with the single injected cut binding (`α > 0`), `θ = α + β·x`
@@ -665,9 +665,9 @@ fn backward_pass_propagates_boundary_coefficient_to_the_deciding_stage() {
     );
 }
 
-// ── Fuel-exclusive composition: β prices the state, 009 books fuel — disjoint ──
+// ── Fuel-exclusive composition: β prices the state, the decision books fuel ──
 
-/// The terminal `β·state` valuation and ticket-009's delivery-anchored fuel
+/// The terminal `β·state` valuation and the delivery-anchored fuel
 /// booking live on DIFFERENT LP columns, so they compose additively with no
 /// double-count: at the deciding stage the decision column carries the fuel in
 /// its objective while the lane's `commit_out` column carries no objective at
@@ -710,9 +710,9 @@ fn terminal_valuation_and_decision_fuel_are_disjoint_columns() {
     );
 }
 
-// ── AC3: one shared boundary prices each fanned leaf by its own lane state ──
+// ── one shared boundary prices each fanned leaf by its own lane state ──
 
-/// Extends ticket-004's shared-boundary fan to the `commit_out`/`commit_in`
+/// Extends the shared-boundary fan to the `commit_out`/`commit_in`
 /// lanes: both terminal fan leaves resolve to ONE shared pool carrying the
 /// single injected boundary, and each leaf's terminal value is priced by ITS
 /// OWN committed MW from that one shared `β` — `θ = α + β·x_leaf`, distinct
@@ -794,7 +794,7 @@ fn shared_boundary_prices_each_fanned_leaf_by_its_own_lane_state() {
     );
 }
 
-// ── AC4: a declared post-horizon window solves the first stage, no walk-off ──
+// ── a declared post-horizon window solves the first stage, no walk-off ──
 
 /// End-to-end sizing pin: a study declaring a post-horizon commitment window
 /// solves its first stage without a `fill_col_state_patches` Vec walk-off. One

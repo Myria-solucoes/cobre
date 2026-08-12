@@ -21,7 +21,7 @@ fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
 }
 
-// ── AC: array present → parsed with correct dates and [min_mw, max_mw] ────────
+// ── array present → parsed with correct dates and [min_mw, max_mw] ────────
 
 #[test]
 fn test_future_anticipated_deliveries_present_parses_correctly() {
@@ -44,7 +44,7 @@ fn test_future_anticipated_deliveries_present_parses_correctly() {
     assert_eq!(entry.max_mw, 350.0);
 }
 
-// ── AC: no future_anticipated_deliveries key → empty vector, no error ─────────
+// ── no future_anticipated_deliveries key → empty vector, no error ─────────
 
 #[test]
 fn test_future_anticipated_deliveries_absent_defaults_to_empty() {
@@ -57,7 +57,7 @@ fn test_future_anticipated_deliveries_absent_defaults_to_empty() {
     );
 }
 
-// ── AC: max_mw < min_mw → Err naming (thermal_id, delivery_start) ─────────────
+// ── max_mw < min_mw → Err naming (thermal_id, delivery_start) ─────────────
 
 #[test]
 fn test_future_anticipated_deliveries_max_less_than_min_rejected() {
@@ -89,7 +89,7 @@ fn test_future_anticipated_deliveries_max_less_than_min_rejected() {
     }
 }
 
-// ── AC: delivery_end <= delivery_start → Err ───────────────────────────────────
+// ── delivery_end <= delivery_start → Err ───────────────────────────────────
 
 #[test]
 fn test_future_anticipated_deliveries_end_before_start_rejected() {
@@ -151,7 +151,7 @@ fn test_future_anticipated_deliveries_end_equals_start_rejected() {
     }
 }
 
-// ── AC: bad date format → Err naming the offending field ──────────────────────
+// ── bad date format → Err naming the offending field ──────────────────────
 
 #[test]
 fn test_future_anticipated_deliveries_invalid_delivery_start_format_rejected() {
@@ -191,7 +191,7 @@ fn test_future_anticipated_deliveries_invalid_delivery_end_format_rejected() {
     }
 }
 
-// ── AC: duplicate (thermal_id, delivery_start) → Err ───────────────────────────
+// ── duplicate (thermal_id, delivery_start) → Err ───────────────────────────
 
 #[test]
 fn test_future_anticipated_deliveries_duplicate_key_rejected() {
@@ -219,7 +219,7 @@ fn test_future_anticipated_deliveries_duplicate_key_rejected() {
     }
 }
 
-// ── AC: two overlapping windows for the same thermal_id → Err naming overlap ──
+// ── two overlapping windows for the same thermal_id → Err naming overlap ──
 
 #[test]
 fn test_future_anticipated_deliveries_overlapping_windows_rejected() {
@@ -280,7 +280,7 @@ fn test_future_anticipated_deliveries_min_equals_max_accepted() {
     assert_eq!(ic.future_anticipated_deliveries[0].max_mw, 150.0);
 }
 
-// ── AC: declaration-order invariance ───────────────────────────────────────────
+// ── declaration-order invariance ───────────────────────────────────────────
 
 #[test]
 fn test_future_anticipated_deliveries_declaration_order_invariance() {

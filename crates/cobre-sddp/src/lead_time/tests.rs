@@ -642,7 +642,7 @@ fn migration_equivalence_point_k0_degeneracy() {
     );
 }
 
-// rv3-like calendar (spec #1 §5): two July weekly stages (168h each) + one
+// rv3-like calendar: two July weekly stages (168h each) + one
 // August monthly stage (744h, 31 days), H = 2 months.
 const RV3_STAGE_LENGTHS_HOURS: [f64; 3] = [168.0, 168.0, 744.0];
 const RV3_LEAD_HOURS: f64 = 1464.0; // 2 months (61 days) at 24h/day.

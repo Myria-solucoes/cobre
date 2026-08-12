@@ -1,10 +1,10 @@
-//! Cost semantics of the post-horizon commitment-hold decision column
-//! (ticket-009): the decision column books the discounted, delivery-anchored
-//! fuel cost (`cost_per_mwh[thermal, dest] * post_study_hours[dest] *
+//! Cost semantics of the post-horizon commitment-hold decision column: the
+//! decision column books the discounted, delivery-anchored fuel cost
+//! (`cost_per_mwh[thermal, dest] * post_study_hours[dest] *
 //! post_study_cumulative_discount[dest]`, unscaled) and is bounded by the
 //! intersection of the commitment interval and the post-study capability.
-//! The terminal boundary FCF (ticket-006) prices the carried state
-//! fuel-exclusively, so this booking does not double-count.
+//! The terminal boundary FCF prices the carried state fuel-exclusively, so
+//! this booking does not double-count.
 //!
 //! The fixture is deliberately minimal: zero hydros, one bus, one anticipated
 //! thermal declared `LeadTime` over two study stages. Its OWN in-study
@@ -409,8 +409,8 @@ mod byte_identity_without_commitment {
     /// zero commitment windows and widens NEITHER `commit_out` nor
     /// `commit_in` by the post-horizon lane's width — the merged
     /// commitment-hold region collapses to exactly the in-study ring's own
-    /// width (`n_anticipated * k_max`), matching the pre-ticket layout with
-    /// no post-horizon lane at all. This is the structural half of the
+    /// width (`n_anticipated * k_max`), matching the no-post-horizon-lane
+    /// layout exactly. This is the structural half of the
     /// inertness claim; `fill_commitment_decision_columns`'s own byte-level
     /// no-op (an empty `commitment_decision_windows` never touches `bufs`) is
     /// pinned directly by the `crates/cobre-sddp/src/lp/builder/columns.rs`

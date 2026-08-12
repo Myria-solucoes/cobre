@@ -67,7 +67,7 @@ fn write_fixture(dir: &std::path::Path, pool_id: u32, manifest: &[EntitySlot]) {
     write_policy_checkpoint(dir, &[payload], &[], &metadata(), &[]).expect("fixture must write");
 }
 
-// ── AC: a malformed delivery_date is rejected, naming the slot ──────────────
+// ── a malformed delivery_date is rejected, naming the slot ──────────────
 
 #[test]
 fn malformed_month_delivery_date_rejected_naming_slot() {
@@ -90,7 +90,7 @@ fn malformed_month_delivery_date_rejected_naming_slot() {
     );
 }
 
-// ── AC: decreasing HydroTransitBucket dates are rejected, naming pool+subindex ──
+// ── decreasing HydroTransitBucket dates are rejected, naming pool+subindex ──
 
 #[test]
 fn hydro_transit_bucket_decreasing_dates_rejected_naming_pool_and_subindex() {
@@ -111,7 +111,7 @@ fn hydro_transit_bucket_decreasing_dates_rejected_naming_pool_and_subindex() {
     );
 }
 
-// ── AC: a well-formed, monotone checkpoint reads Ok with an unchanged manifest ──
+// ── a well-formed, monotone checkpoint reads Ok with an unchanged manifest ──
 
 #[test]
 fn well_formed_monotone_checkpoint_accepted_manifest_unchanged() {
@@ -140,7 +140,7 @@ fn well_formed_monotone_checkpoint_accepted_manifest_unchanged() {
     }
 }
 
-// ── AC: a fully sentinel-dated legacy checkpoint reads Ok ───────────────────
+// ── a fully sentinel-dated legacy checkpoint reads Ok ───────────────────
 
 #[test]
 fn fully_sentinel_legacy_checkpoint_accepted() {
