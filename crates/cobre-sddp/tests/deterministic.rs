@@ -9055,11 +9055,9 @@ mod f36_gap_attainability {
     /// is comfortably above the feasibility-noise floor (~1e-9 × the objective
     /// magnitude ≈ 0.09 R$) yet far below the objective — a genuinely attainable
     /// absolute tolerance. A tolerance below the noise floor would leave the gap
-    /// `> tolerance`, so the run would stop on a NON-`gap` rule instead — for this
-    /// absolute-only `Gap` the mandatory `iteration_limit`, since an absolute R$
-    /// tolerance injects no `bound_stalling` companion (a relative-tolerance `Gap`
-    /// gets one) — and the `reason == gap` assertion below is that unattainability
-    /// failure signal.
+    /// `> tolerance`, so the run would stop on a NON-`gap` rule instead — the
+    /// mandatory `iteration_limit`, the only other rule this fixture declares — and
+    /// the `reason == gap` assertion below is that unattainability failure signal.
     const GAP_TOLERANCE_R: f64 = 10.0;
 
     /// Train the gap-configured fixture at `cost_scale_factor`, returning
@@ -9083,8 +9081,8 @@ mod f36_gap_attainability {
 
     /// Attainability (+ expectation-only): on the enumerated + expectation fixture,
     /// the achieved canonical-R$ gap closes to `<= GAP_TOLERANCE_R` and the run
-    /// stops on the `gap` rule (not `iteration_limit` / the `bound_stalling`
-    /// companion) — the attainability signal.
+    /// stops on the `gap` rule (not the mandatory `iteration_limit`) — the
+    /// attainability signal.
     #[test]
     fn gap_tolerance_attained_under_enumerated_expectation() {
         let (lb, ub, ub_std, reason) = train_gap(None);

@@ -487,13 +487,16 @@ pub enum StoppingRuleConfig {
     },
     /// Stop when the exact upper bound is within tolerance of the lower
     /// bound. At least one of `tolerance` / `relative_tolerance` must be
-    /// present (checked at `from_config`); rejected as not-yet-supported
-    /// until a later release wires evaluation.
+    /// present (checked at `from_config`). Admissible only under enumerated
+    /// forward selection, where the upper bound is the exact bound a gap rule
+    /// requires rather than a statistical estimate.
     Gap {
         /// Absolute gap tolerance, canonical R$.
         #[serde(default)]
         tolerance: Option<f64>,
-        /// Relative gap tolerance (fraction), mirroring reported `gap_percent`.
+        /// Relative gap tolerance in percent (e.g. `0.01` means 0.01%), compared
+        /// against `100·gap / max(1, |lower_bound|)` — the same convention the
+        /// reported `gap_percent` uses.
         #[serde(default)]
         relative_tolerance: Option<f64>,
     },

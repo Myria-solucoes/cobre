@@ -41,6 +41,18 @@ pub const RULE_GAP: &str = "gap";
 /// Rule name for the graceful-shutdown stopping rule.
 pub const RULE_GRACEFUL_SHUTDOWN: &str = "graceful_shutdown";
 
+/// Guarded denominator for the RELATIVE gap: the LOWER bound's magnitude, floored
+/// at `1.0`. Both the reported gap ([`crate::ConvergenceMonitor::gap`]) and the
+/// [`StoppingRule::Gap`] relative arm divide by this, so the two never disagree on
+/// what "relative gap" means — it is normalized by the lower bound, never the
+/// upper. The `1.0` floor bounds the ratio when the lower bound is near zero
+/// (startup, or a zero-cost study); the canonical-R$ lower bound is far larger
+/// than `1.0` once gap-checking matters, so the floor only guards that degenerate
+/// case.
+pub(crate) fn relative_gap_denominator(lower_bound: f64) -> f64 {
+    lower_bound.abs().max(1.0_f64)
+}
+
 // ---------------------------------------------------------------------------
 // MonitorState
 // ---------------------------------------------------------------------------
@@ -133,7 +145,9 @@ pub enum StoppingRule {
         /// Absolute gap tolerance, canonical R$.
         tolerance: Option<f64>,
 
-        /// Relative gap tolerance (fraction): `gap / |LB|`.
+        /// Relative gap tolerance in PERCENT: stops when
+        /// `100·gap / max(1, |LB|) ≤ relative_tolerance`. A value of `0.01` means
+        /// 0.01%, directly comparable to the reported `gap_percent`.
         relative_tolerance: Option<f64>,
     },
 
@@ -238,10 +252,11 @@ impl StoppingRule {
 
     /// Evaluate the [`StoppingRule::Gap`] condition: the clamped canonical-R$ gap
     /// `UB_exact − LB` against the disjunction of the configured tolerance arms
-    /// (`gap ≤ tolerance` OR `gap / |LB| ≤ relative_tolerance`). Both bounds arrive
-    /// canonical-R$, so the difference is compared directly — never the monitor's
-    /// `/max(1, |UB|)` relative-gap expression. A small negative gap (float noise
-    /// at a closed gap) is clamped to `0` before comparing.
+    /// (`gap ≤ tolerance` OR `100·gap / max(1, |LB|) ≤ relative_tolerance`). The
+    /// relative arm normalizes by the LOWER bound
+    /// ([`relative_gap_denominator`]) and is expressed in percent, the same
+    /// convention the reported `gap_percent` uses. A small negative gap (float
+    /// noise at a closed gap) is clamped to `0` before comparing.
     fn evaluate_gap(
         state: &MonitorState,
         tolerance: Option<f64>,
@@ -249,7 +264,8 @@ impl StoppingRule {
     ) -> StoppingRuleResult {
         let gap = (state.upper_bound - state.lower_bound).max(0.0);
         let absolute_hit = tolerance.is_some_and(|t| gap <= t);
-        let relative_hit = relative_tolerance.is_some_and(|r| gap / state.lower_bound.abs() <= r);
+        let relative_hit = relative_tolerance
+            .is_some_and(|r| 100.0 * gap / relative_gap_denominator(state.lower_bound) <= r);
         StoppingRuleResult {
             rule_name: RULE_GAP,
             triggered: absolute_hit || relative_hit,
@@ -485,27 +501,27 @@ mod tests {
     fn gap_relative_arm_stops_within_relative_tolerance() {
         let rule = StoppingRule::Gap {
             tolerance: None,
-            relative_tolerance: Some(0.1),
+            relative_tolerance: Some(10.0),
         };
-        // gap/|LB| = 5/100 = 0.05 <= 0.1 → stop; 20/100 = 0.2 > 0.1 → no stop.
+        // percent gap = 100·5/100 = 5% <= 10% → stop; 100·20/100 = 20% > 10% → no stop.
         assert!(rule.evaluate(&gap_state(100.0, 105.0)).triggered);
         assert!(!rule.evaluate(&gap_state(100.0, 120.0)).triggered);
     }
 
     #[test]
     fn gap_disjunction_stops_when_only_relative_arm_holds() {
-        // abs tol 1.0 NOT met (gap 5 > 1); rel tol 0.1 met (0.05 <= 0.1) → OR stops.
+        // abs tol 1.0 NOT met (gap 5 > 1); rel tol 10% met (5% <= 10%) → OR stops.
         let rule = StoppingRule::Gap {
             tolerance: Some(1.0),
-            relative_tolerance: Some(0.1),
+            relative_tolerance: Some(10.0),
         };
         assert!(rule.evaluate(&gap_state(100.0, 105.0)).triggered);
     }
 
     #[test]
     fn gap_disjunction_stops_when_only_absolute_arm_holds() {
-        // Large |LB| starves the relative arm (50/1e6 = 5e-5 > 1e-9); abs tol 100
-        // met (gap 50 <= 100) → OR stops.
+        // Large |LB| starves the relative arm (percent gap 100·50/1e6 = 5e-3% >
+        // 1e-9%); abs tol 100 met (gap 50 <= 100) → OR stops.
         let rule = StoppingRule::Gap {
             tolerance: Some(100.0),
             relative_tolerance: Some(1e-9),

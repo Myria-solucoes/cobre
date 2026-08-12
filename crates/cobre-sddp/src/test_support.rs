@@ -1398,10 +1398,9 @@ pub fn k_fan_setup_enumerated_reversed(k: usize, max_iterations: u32) -> KFanFix
 /// expectation measure ([`StageRiskConfig::Expectation`] on every stage) with a
 /// `Gap { tolerance }` stopping rule ahead of the mandatory iteration-limit
 /// fallback — the gap-attainability fixture. The `Gap` carries only the absolute
-/// canonical-R$ `tolerance` arm (no `relative_tolerance`), so
-/// `inject_gap_bound_stalling_companion` injects no `BoundStalling` companion;
-/// an unattainable `tolerance` therefore falls through to the mandatory
-/// `IterationLimit`. `cost_scale_factor == None` keeps the default factor;
+/// canonical-R$ `tolerance` arm (no `relative_tolerance`), and no `BoundStalling`
+/// is ever auto-added, so an unattainable `tolerance` falls through to the
+/// mandatory `IterationLimit`. `cost_scale_factor == None` keeps the default factor;
 /// `Some(f)` prescales the LP by `f` — `Some(1.0)` runs it unscaled, the two
 /// settings the canonical-units pinning regression compares. Otherwise identical
 /// to [`k_fan_setup_enumerated`] (fixed seed, iteration limit `max_iterations`).

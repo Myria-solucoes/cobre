@@ -666,8 +666,8 @@ mod convergence_conformance {
     }
 
     const CONVERGENCE_CASES: &[(&str, f64, f64, f64)] = &[
-        ("gap_formula_large_ub", 100.0, 110.0, 10.0 / 110.0),
-        ("gap_formula_small_ub_max_guard", 0.3, 0.5, 0.2),
+        ("gap_formula_large_lb", 100.0, 110.0, 10.0 / 100.0),
+        ("gap_formula_small_lb_max_guard", 0.3, 0.5, 0.2),
         ("lb_history_monotonic", 0.0, 0.0, 0.0), // sentinel; logic below uses lb_values
         ("iteration_limit_exact_trigger", 0.0, 0.0, 0.0), // sentinel; logic below uses loop
     ];
@@ -676,7 +676,7 @@ mod convergence_conformance {
     fn convergence_monitor_parameter_sweep() {
         for (idx, &(desc, lb, ub, expected_gap)) in CONVERGENCE_CASES.iter().enumerate() {
             match idx {
-                // gap = (UB - LB) / max(1, |UB|).
+                // gap = (UB - LB) / max(1, |LB|).
                 0 | 1 => {
                     let mut monitor = make_monitor(100);
                     monitor.update(lb, &make_sync_result(ub));

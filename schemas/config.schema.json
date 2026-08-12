@@ -1115,11 +1115,11 @@
         },
         {
           "additionalProperties": false,
-          "description": "Stop when the exact upper bound is within tolerance of the lower\nbound. At least one of `tolerance` / `relative_tolerance` must be\npresent (checked at `from_config`); rejected as not-yet-supported\nuntil a later release wires evaluation.",
+          "description": "Stop when the exact upper bound is within tolerance of the lower\nbound. At least one of `tolerance` / `relative_tolerance` must be\npresent (checked at `from_config`). Admissible only under enumerated\nforward selection, where the upper bound is the exact bound a gap rule\nrequires rather than a statistical estimate.",
           "properties": {
             "relative_tolerance": {
               "default": null,
-              "description": "Relative gap tolerance (fraction), mirroring reported `gap_percent`.",
+              "description": "Relative gap tolerance in percent (e.g. `0.01` means 0.01%), compared\nagainst `100·gap / max(1, |lower_bound|)` — the same convention the\nreported `gap_percent` uses.",
               "format": "double",
               "type": [
                 "number",

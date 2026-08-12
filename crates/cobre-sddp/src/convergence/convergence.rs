@@ -31,7 +31,7 @@
 //! let (stop, results) = monitor.update(100.0, &sync);
 //! assert!(!stop);
 //! assert_eq!(monitor.iteration_count(), 1);
-//! assert!((monitor.gap() - 10.0 / 110.0).abs() < 1e-10);
+//! assert!((monitor.gap() - 10.0 / 100.0).abs() < 1e-10);
 //! ```
 
 use std::time::Instant;
@@ -40,7 +40,7 @@ use cobre_core::StoppingRuleResult;
 
 use crate::{
     forward::SyncResult,
-    stopping_rule::{MonitorState, StoppingRuleSet},
+    stopping_rule::{MonitorState, StoppingRuleSet, relative_gap_denominator},
 };
 
 /// Tracks bound statistics and evaluates stopping rules across training
@@ -84,16 +84,16 @@ impl ConvergenceMonitor {
     /// Update bound statistics and evaluate stopping rules.
     ///
     /// Returns `(should_stop, results)`: the combined termination decision and
-    /// the per-rule evaluation results. Gap uses a `max(1.0, |UB|)` denominator
-    /// to guard against division by zero.
+    /// the per-rule evaluation results. Gap is normalized by the LOWER bound
+    /// (`max(1.0, |LB|)` denominator, shared with the `Gap` stopping rule) to
+    /// guard against division by zero.
     pub fn update(&mut self, lb: f64, sync_result: &SyncResult) -> (bool, Vec<StoppingRuleResult>) {
         self.lower_bound = lb;
         self.upper_bound = sync_result.global_ub_mean;
         self.upper_bound_std = sync_result.global_ub_std;
         self.ci_95_half_width = sync_result.ci_95_half_width;
 
-        let denominator = self.upper_bound.abs().max(1.0_f64);
-        self.gap = (self.upper_bound - lb) / denominator;
+        self.gap = (self.upper_bound - lb) / relative_gap_denominator(lb);
 
         self.iteration_count += 1;
         self.lower_bound_history.push(lb);
@@ -144,7 +144,7 @@ impl ConvergenceMonitor {
         self.ci_95_half_width
     }
 
-    /// Current convergence gap: `(UB - LB) / max(1.0, |UB|)`.
+    /// Current convergence gap: `(UB - LB) / max(1.0, |LB|)`.
     #[must_use]
     pub fn gap(&self) -> f64 {
         self.gap
@@ -230,31 +230,31 @@ mod tests {
 
     #[test]
     fn gap_formula_uses_max_guard() {
-        // UB = 0.5 → denominator = max(1.0, 0.5) = 1.0
-        // gap = (0.5 - 100.0) / 1.0 = -99.5
+        // LB = 0.5 → denominator = max(1.0, |0.5|) = 1.0 (the lower-bound floor)
+        // gap = (100.5 - 0.5) / 1.0 = 100.0
         let mut monitor =
             ConvergenceMonitor::new(make_rule_set(StoppingRule::IterationLimit { limit: 100 }));
-        let sync = make_sync(0.5);
-        monitor.update(100.0, &sync);
-        let expected = (0.5_f64 - 100.0) / 1.0_f64;
+        let sync = make_sync(100.5);
+        monitor.update(0.5, &sync);
+        let expected = (100.5_f64 - 0.5) / 1.0_f64;
         assert!(
             (monitor.gap() - expected).abs() < 1e-10,
-            "gap with UB=0.5 must use max guard of 1.0, got {}",
+            "gap with LB=0.5 must use max guard of 1.0, got {}",
             monitor.gap()
         );
     }
 
     #[test]
     fn gap_formula_normal_case() {
-        // UB = 110, LB = 100 → gap = (110 - 100) / max(1.0, 110.0) = 10/110
+        // UB = 110, LB = 100 → gap = (110 - 100) / max(1.0, 100.0) = 10/100
         let mut monitor =
             ConvergenceMonitor::new(make_rule_set(StoppingRule::IterationLimit { limit: 100 }));
         let sync = make_sync(110.0);
         monitor.update(100.0, &sync);
-        let expected = 10.0_f64 / 110.0_f64;
+        let expected = 10.0_f64 / 100.0_f64;
         assert!(
             (monitor.gap() - expected).abs() < 1e-10,
-            "gap must be 10/110, got {}",
+            "gap must be 10/100, got {}",
             monitor.gap()
         );
     }
@@ -362,10 +362,10 @@ mod tests {
             stop,
             "BoundStalling should trigger when improvement is < 0.011"
         );
-        // Also verify gap on the last iteration: (110 - 100) / 110 = 10/110
+        // Also verify gap on the last iteration: (110 - 100) / 100 = 10/100
         assert!(
-            (monitor2.gap() - 10.0 / 110.0).abs() < 1e-10,
-            "gap after 4th update must equal 10/110, got {}",
+            (monitor2.gap() - 10.0 / 100.0).abs() < 1e-10,
+            "gap after 4th update must equal 10/100, got {}",
             monitor2.gap()
         );
     }
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(results[0].rule_name, "iteration_limit");
     }
 
-    /// AC: gap formula uses |UB| denominator; with UB=110, LB=100 → gap=10/110.
+    /// AC: gap formula uses |LB| denominator; with UB=110, LB=100 → gap=10/100.
     #[test]
     fn ac_gap_formula_with_ub_110_lb_100() {
         let mut monitor =
@@ -408,7 +408,7 @@ mod tests {
         monitor.update(99.0, &sync);
         monitor.update(99.5, &sync);
         monitor.update(100.0, &sync);
-        let expected = 10.0_f64 / 110.0_f64;
+        let expected = 10.0_f64 / 100.0_f64;
         assert!(
             (monitor.gap() - expected).abs() < 1e-10,
             "gap must equal {expected}, got {}",
