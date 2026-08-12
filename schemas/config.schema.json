@@ -48,7 +48,7 @@
       "description": "Boundary-row configuration for terminal-stage FCF coupling.\n\nWhen present, the solver loads rows from a source Cobre policy\ncheckpoint and injects them as fixed boundary conditions at the\nterminal stage of the current study.",
       "properties": {
         "path": {
-          "description": "Path to the source policy checkpoint directory.",
+          "description": "Path to the source policy checkpoint directory (a different study's\noutput). Resolved relative to the case (input) directory, like every\nother input; an absolute path is used as-is. NOT relative to this run's\noutput directory.",
           "type": "string"
         },
         "source_stage": {

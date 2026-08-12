@@ -94,6 +94,10 @@ pub(super) struct RunContext<C: Communicator> {
     pub(super) n_threads: usize,
     /// Resolved output directory.
     pub(super) output_dir: PathBuf,
+    /// Case (input) directory — the root every input path resolves against,
+    /// including `policy.boundary.path` (an external source checkpoint), never
+    /// the output directory.
+    pub(super) case_dir: PathBuf,
     /// Terminal width for progress bars.
     pub(super) term_width: u16,
     /// Terminal handle for stderr output.

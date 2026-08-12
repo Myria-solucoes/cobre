@@ -89,6 +89,9 @@ pub struct Study {
     warnings: Vec<cobre_io::ReportEntry>,
     /// The output directory fixed at construction time.
     output_dir: PathBuf,
+    /// The case (input) directory fixed at construction time — the root
+    /// `policy.boundary.path` (an external source checkpoint) resolves against.
+    case_dir: PathBuf,
     /// The requested thread count, stored for later `train`/`simulate` calls.
     threads: Option<u32>,
 }
@@ -309,6 +312,7 @@ impl Study {
             hydro_models_summary,
             warnings,
             output_dir: resolved_output,
+            case_dir,
             threads,
         })
     }
@@ -418,6 +422,7 @@ impl Study {
 
         let seed = self.seed;
         let output_dir = self.output_dir.clone();
+        let case_dir = self.case_dir.clone();
         let threads = self.threads;
         let setup = &mut self.setup;
         let system = self.system.as_ref();
@@ -432,7 +437,7 @@ impl Study {
                 run_in_scoped_pool(threads, |n| {
                     // FCF replacement BEFORE training — shared verbatim with
                     // `run_via_study`.
-                    apply_training_policy_mode(setup, system, config, &output_dir)?;
+                    apply_training_policy_mode(setup, system, config, &output_dir, &case_dir)?;
 
                     // `None` keeps the collect-after-return path bit-identical (the
                     // no-callback golden parity anchor); `Some` uses the drain thread.

@@ -232,7 +232,9 @@ pub(super) fn apply_training_policy(
     // Must run after the match: warm-start replaces the whole FCF first, then
     // boundary cuts overwrite only the terminal pool.
     if let Some(bp) = root_config.and_then(|c| c.policy.boundary.as_ref()) {
-        let boundary_path = ctx.output_dir.join(&bp.path);
+        // Resolve against the CASE dir (an external source checkpoint), never the
+        // current run's output dir; an absolute `bp.path` passes through unchanged.
+        let boundary_path = ctx.case_dir.join(&bp.path);
         // Rationale: the cast cannot truncate — `state_dimension` counts FCF
         // state variables (one per reservoir/lag), bounded by the validated study
         // dimensions and far below `u32::MAX`.

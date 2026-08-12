@@ -1087,6 +1087,7 @@ pub(crate) fn apply_training_policy_mode(
     system: &System,
     config: &Config,
     output_dir: &Path,
+    case_dir: &Path,
 ) -> Result<(), String> {
     if config.policy.mode == WarmStart {
         let policy_dir = output_dir.join(&setup.policy_path);
@@ -1193,7 +1194,9 @@ pub(crate) fn apply_training_policy_mode(
     // replaces the entire FCF first, then boundary cuts overwrite only the
     // terminal pool.
     if let Some(ref bp) = config.policy.boundary {
-        let boundary_path = output_dir.join(&bp.path);
+        // Resolve against the CASE dir (an external source checkpoint), never the
+        // current run's output dir; an absolute `bp.path` passes through unchanged.
+        let boundary_path = case_dir.join(&bp.path);
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
@@ -1352,7 +1355,7 @@ pub(crate) fn run_via_study(
     let hydro_models_summary = Some(hydro_models_summary);
 
     if config.training.enabled {
-        apply_training_policy_mode(&mut setup, &system, &config, &output_dir)?;
+        apply_training_policy_mode(&mut setup, &system, &config, &output_dir, case_dir)?;
 
         // Streaming drain thread only when a callback is provided; otherwise the
         // no-callback path stays bit-identical to the golden parity test.
@@ -1837,6 +1840,7 @@ mod tests {
             &loaded.system,
             &loaded.config,
             &output_dir,
+            &case_dir,
         )
         .expect("default-mode policy application must be a no-op");
 

@@ -25,10 +25,11 @@ use std::path::{Path, PathBuf};
 /// ```
 #[derive(Debug, thiserror::Error)]
 pub enum OutputError {
-    /// Filesystem write failure.
-    #[error("I/O error writing {path}: {source}")]
+    /// Filesystem I/O failure (read or write) — the variant is shared by the
+    /// checkpoint reader and the output writers, so the wording is direction-neutral.
+    #[error("I/O error accessing {path}: {source}")]
     IoError {
-        /// Path to the file that could not be written.
+        /// Path to the file that could not be accessed.
         path: PathBuf,
         /// Underlying I/O error.
         source: Error,

@@ -538,6 +538,25 @@ fn boundary_report_section_prints_and_exits_0() {
         .stdout(predicate::str::contains("storage: COPY=1"));
 }
 
+/// A RELATIVE `policy.boundary.path` resolves against the CASE (input) directory,
+/// not the run's output directory: `"output/policy"` points at
+/// `case_dir/output/policy` (the just-produced checkpoint) and validate exits 0.
+/// The retired output-relative resolution looked under `case_dir/output/output/policy`
+/// and could not find it.
+#[test]
+fn boundary_relative_path_resolves_against_case_dir_not_output_dir() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+    append_boundary_policy(dir.path(), Path::new("output/policy"));
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("boundary reconciliation:"));
+}
+
 /// `--json` emits a single, parseable JSON object carrying the per-family
 /// tallies, with no human report text interleaved on stdout.
 #[test]

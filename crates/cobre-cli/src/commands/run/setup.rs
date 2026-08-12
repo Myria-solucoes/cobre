@@ -240,6 +240,7 @@ pub(super) fn setup_communicator(
         quiet,
         n_threads: actual_threads,
         output_dir,
+        case_dir: args.case_dir.clone(),
         term_width,
         stderr,
         render_mode,

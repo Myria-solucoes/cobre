@@ -192,7 +192,9 @@ fn reconcile_boundary(
     stdout: Option<&Term>,
 ) -> Result<BoundaryReconciliationReport, SddpError> {
     let setup = StudySetup::new(system, config, stochastic, hydro_models)?;
-    let boundary_path = case_dir.join("output").join(&bp.path);
+    // Resolve against the CASE dir (an external source checkpoint), never the
+    // current run's output dir; an absolute `bp.path` passes through unchanged.
+    let boundary_path = case_dir.join(&bp.path);
 
     // Rationale: the cast cannot truncate — `state_dimension` counts FCF
     // state variables (one per reservoir/lag), bounded by the validated study

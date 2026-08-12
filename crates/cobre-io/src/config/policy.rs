@@ -39,7 +39,10 @@ impl std::fmt::Display for PolicyMode {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BoundaryPolicy {
-    /// Path to the source policy checkpoint directory.
+    /// Path to the source policy checkpoint directory (a different study's
+    /// output). Resolved relative to the case (input) directory, like every
+    /// other input; an absolute path is used as-is. NOT relative to this run's
+    /// output directory.
     pub path: String,
     /// 0-based stage index in the source checkpoint to load rows from. When
     /// present, overrides auto-resolution; when absent, the loader resolves it
