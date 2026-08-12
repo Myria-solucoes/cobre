@@ -74,6 +74,10 @@ pub(crate) fn outcome_stride(n_state: usize) -> usize {
 /// Propagates `SddpError::Infeasible`/`SddpError::Solver` from the slice's
 /// solves, `SddpError::AnticipatedCommitmentOutOfBounds` from the bound patch,
 /// and `SddpError::Validation` from an `External` child's noise assembly.
+// RATIONALE: the per-slice solve inputs (workspace, stage/training contexts,
+// successor+child specs, trial state, slice bounds, output buffer) are threaded
+// positionally across all three backward variants; bundling them into a struct
+// here alone would desync that shared shape without cutting the real coupling.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn solve_replicated_outcome_slice<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,

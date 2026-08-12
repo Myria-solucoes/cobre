@@ -1004,6 +1004,9 @@ fn k_fan_system(k: usize, reversed: bool) -> System {
 /// degeneracy the enumerated engine's single-path (count-1) 2-rank stub needs.
 /// Every stage gets [`K_FAN_DEFAULT_STATE_CONFIG`] — see [`fan_or_chain_system_ext`]
 /// for a caller that varies it.
+// RATIONALE: one linear fixture that builds a self-consistent multi-stage
+// System; splitting it scatters the study across single-use helpers and hides
+// the whole-study shape a test reads at a glance.
 #[allow(clippy::too_many_lines, clippy::expect_used)]
 fn fan_or_chain_system(n_stages: usize, policy_graph: HorizonGraph) -> System {
     fan_or_chain_system_ext(
@@ -1937,6 +1940,9 @@ const EXTERNAL_FAN_LOAD_STD: f64 = 20.0;
 ///
 /// Never in practice — every literal is a hand-checked, internally-consistent
 /// fixture.
+// RATIONALE: one linear fixture that builds a self-consistent external-distinct
+// fan study; splitting it scatters the study across single-use helpers and hides
+// the whole-study shape a test reads at a glance.
 #[allow(
     clippy::expect_used,
     clippy::too_many_lines,
@@ -2063,6 +2069,9 @@ pub fn external_distinct_fan_setup(k: usize, max_iterations: u32) -> StudySetup 
 ///
 /// Never in practice — every literal is a hand-checked, internally-consistent
 /// fixture.
+// RATIONALE: one linear fixture that builds a self-consistent external-root
+// fan study; splitting it scatters the study across single-use helpers and hides
+// the whole-study shape a test reads at a glance.
 #[allow(
     clippy::expect_used,
     clippy::too_many_lines,
