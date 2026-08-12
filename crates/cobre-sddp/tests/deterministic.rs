@@ -960,52 +960,30 @@ fn d_case_energy_outputs() {
 /// Linear VHA: (0 hm3 → 0.5 km²), (100 hm3 → 1.0 km²), (200 hm3 → 1.5 km²).
 /// Uniform slope da/dv = 0.005 km²/hm3.
 ///
-/// ## Evaporation coefficient derivation
+/// ## Evaporation coefficient derivation (calendar-month rate)
 ///
-/// Midpoint reference_volume = (0 + 200) / 2 = 100 hm3.
-/// a_ref = 1.0 km², da/dv = 0.005 km²/hm3.
-/// stage_hours = 730 h → mm_km2_to_m3s = 1 / (3.6 × 730) = 1/2628.
-/// monthly_evaporation_mm = 100 mm.
-/// volume_slope_m3s_per_hm3 = (1/2628) × 100 × 0.005 = 1/5256.
-/// intercept_m3s            = (1/2628) × 100 × 1.0 − (1/5256) × 100 = 25/1314.
+/// Midpoint reference_volume = (0 + 200) / 2 = 100 hm3; a_ref = 1.0 km²,
+/// da/dv = 0.005 km²/hm3; monthly_evaporation_mm = 100.
 ///
-/// ## Water-balance model (α = κ × volume_slope_m3s_per_hm3 / 2 = 1/4000)
+/// The flow is a monthly-average rate: `mm_km2_to_m3s = 1 / (3.6 × month_hours)`,
+/// dividing by the stage's CALENDAR month, not its nominal 730 h. The two stages
+/// therefore carry DIFFERENT coefficients — stage 0 is January (744 h →
+/// `1/2678.4`) and stage 1 is February 2024 (696 h leap → `1/2505.6`) — and each
+/// deposits only its `stage_hours / month_hours` share of the month's
+/// evaporation, the property this case pins. (A `stage_hours` divisor would
+/// cancel against the water-balance coupling and deposit a whole month on any
+/// stage; see `resolve_evaporation_models`.)
 ///
-/// Substituting evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3/2 × (V_out + V_in) into the LP:
-///   V_out × (1 + α) = V_in × (1 − α) + κ × (q_in − q_turb) − κ × intercept_m3s
+/// ## Expected cost
 ///
-/// ## Expected cost derivation (κ = 657/250 hm3/(m3/s))
-///
-/// The gradient of total cost w.r.t. turb₀ is proportional to
-/// `−1 + (1−α)/(1+α) < 0`, so increasing turb₀ decreases total cost.
-/// The optimal stage-0 policy is therefore turb₀ = 50 m3/s (full capacity).
-///
-/// ### Stage 0 (turb₀ = 50, V_in₀ = 100 hm3)
-///
-/// V_out₀ = [100×(1−α) + κ×(40 − 50) − κ×intercept_m3s] / (1+α)
-///         = 294580/4001 ≈ 73.627 hm3.
-/// gen_h₀ = 50 MW, gen_th₀ = 30 MW.
-/// Stage 0 cost = 30 × 50 × 730 = 1,095,000 $.
-///
-/// ### Stage 1 (terminal, V_in₁ = V_out₀ = 294580/4001 hm3)
-///
-/// turb₁_max = V_in₁ × (1−α) / κ + 10 − intercept_m3s
-///           = 399452585/10514628 ≈ 37.990 m3/s  (<50, so binding).
-/// At turb₁ = turb₁_max: V_out₁ = 0.
-///
-/// gen_th₁ = 80 − turb₁_max = 441717655/10514628 ≈ 42.010 MW.
-/// Stage 1 cost = gen_th₁ × 50 × 730 = 55214706875/36009 ≈ 1,533,358.52 $.
-///
-/// ### Total cost
-///
-/// Total = 1,095,000 + 55214706875/36009
-///       = 39439545000/36009 + 55214706875/36009
-///       = **94644561875/36009 ≈ 2,628,358.52 $**
-///
-/// D08 cost > D02 cost (≈ 2,626,111.11 $): evaporation consumes additional water
-/// in the reservoir, leaving less for stage-1 generation and requiring more
-/// thermal dispatch.
-pub const D08_EXPECTED_COST: f64 = 94_644_561_875.0 / 36_009.0;
+/// The model and optimal policy are D02's (stage-0 `turb₀ = 50 m3/s`, full
+/// capacity), plus evaporation drawing the reservoir down. The study converges
+/// (`LB == UB`, gap < 1e-6) to the value below — above D02's ≈ 2,626,111.11 $
+/// because evaporation consumes water that would otherwise generate, forcing more
+/// thermal dispatch. The converged optimum, not a closed-form rational: the
+/// calendar-month divisors (744, 696) do not reduce cleanly the way the retired
+/// nominal-730 h derivation did.
+pub const D08_EXPECTED_COST: f64 = 2_628_380.531_119_177;
 
 #[cfg_attr(
     not(feature = "slow-tests"),
@@ -7354,14 +7332,16 @@ mod custom_weekly_evaporation_regression {
     const A_REF: f64 = 2.0;
     const DA_DV: f64 = 0.005;
     const REFERENCE_VOLUME_HM3: f64 = 300.0;
-    const STAGE_HOURS: f64 = 730.0;
+    /// Evaporation divides by the CALENDAR month, not the stage's nominal 730 h:
+    /// both fixture stages sit in 30-day months (June, November) = 720 h.
+    const MONTH_HOURS: f64 = 720.0;
 
     /// Independent replication (not a call into production code) of the Taylor
     /// linearization `resolve_evaporation_core` computes for a given
     /// `monthly_evaporation_mm`, at this fixture's known geometry constants — the
     /// Tier-4 analytical-derivation pattern.
     fn expected_coefficients(monthly_evaporation_mm: f64) -> (f64, f64) {
-        let mm_km2_to_m3s = 1.0 / (3.6 * STAGE_HOURS);
+        let mm_km2_to_m3s = 1.0 / (3.6 * MONTH_HOURS);
         let slope = mm_km2_to_m3s * monthly_evaporation_mm * DA_DV;
         let intercept =
             mm_km2_to_m3s * monthly_evaporation_mm * A_REF - slope * REFERENCE_VOLUME_HM3;
