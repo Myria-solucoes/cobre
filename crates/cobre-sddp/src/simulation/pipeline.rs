@@ -7,9 +7,10 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{Sender, SyncSender};
 
+use chrono::NaiveDate;
 use cobre_comm::Communicator;
 use cobre_core::commissioning::commissioning_active;
-use cobre_core::{EntityId, TrainingEvent};
+use cobre_core::{EntityId, HydroPastDefluence, TrainingEvent};
 use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, StageTemplate};
 use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
@@ -40,7 +41,8 @@ use crate::{
         extraction::EntityCounts,
         extraction::{
             HydroReverseLookup, SolutionView, StageExtractionSpec, ThermalReverseLookup,
-            accumulate_category_costs, extract_commitment_lanes, extract_stage_result_with_lookups,
+            TransitSeedArc, accumulate_category_costs, build_transit_seed,
+            extract_commitment_lanes, extract_stage_result_with_lookups,
         },
         types::{ScenarioCategoryCosts, SimulationScenarioResult, SimulationStageResult},
     },
@@ -171,6 +173,20 @@ pub struct SimulationOutputSpec<'a> {
     /// [`StateSpace::commitment_window_thermal_id`] order. Length equals
     /// `state.n_commitment`; empty without a declared post-horizon commitment.
     pub commitment_window_delivery_dates: &'a [i32],
+
+    /// Declared travel-time arcs for the rolling-seed emitter
+    /// ([`crate::setup::StudySetup::transit_seed_arcs`]). Empty when the study
+    /// declares no travel-time arc.
+    pub transit_seed_arcs: &'a [TransitSeedArc],
+
+    /// This run's own `past_defluences`, for the rolling-seed emitter's
+    /// pre-study input-tail stitch.
+    pub past_defluences: &'a [HydroPastDefluence],
+
+    /// `(start_date, end_date)` per in-study stage, parallel to
+    /// [`SimulationStageResult::stage_id`]'s positional index. Feeds the
+    /// rolling-seed emitter's per-stage windows.
+    pub study_stage_dates: &'a [(NaiveDate, NaiveDate)],
 }
 
 /// Per-scenario context bundled for `process_scenario_stages`.
@@ -974,6 +990,13 @@ pub(crate) fn dispatch_scenario_result(
         }
     }
     let compact_category = category_costs.clone();
+    let transit_seed = build_transit_seed(
+        &stage_results,
+        output.study_stage_dates,
+        output.transit_seed_arcs,
+        output.past_defluences,
+        output.block_hours_per_stage,
+    );
     output
         .result_tx
         .send(SimulationScenarioResult {
@@ -981,6 +1004,7 @@ pub(crate) fn dispatch_scenario_result(
             total_cost,
             per_category_costs: category_costs,
             stages: stage_results,
+            transit_seed,
         })
         .map_err(|_| SimulationError::ChannelClosed)?;
     Ok((scenario_id, total_cost, compact_category))

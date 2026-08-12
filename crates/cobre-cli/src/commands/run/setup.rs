@@ -613,6 +613,7 @@ fn build_study_setup(
         backward_scheduler: bcast_config.backward_scheduler.into(),
         cost_scale_factor: bcast_config.cost_scale_factor,
         inflow_lag_depth: bcast_config.inflow_lag_depth,
+        boundary_present: bcast_config.boundary_present,
     };
     StudySetup::from_broadcast_params(
         system,

@@ -116,6 +116,12 @@ pub struct StudyParams {
     /// when the study leaves it undeclared. Widens `L_state` in
     /// `resolve_state_layout` via `widen_lag_state_depth`.
     pub inflow_lag_depth: Option<u32>,
+    /// `policy.boundary.is_some()`: whether the study declares a terminal
+    /// boundary FCF. Threaded into `build_transit_bucket_topology` so the
+    /// water-bucket terminal mask un-caps only for a study that will load one
+    /// (the "Terminal credit deferred" contract); the ACTUAL boundary cuts
+    /// load later, after `StudySetup` construction.
+    pub boundary_present: bool,
 }
 
 impl StudyParams {
@@ -267,6 +273,8 @@ impl StudyParams {
             ));
         }
 
+        let boundary_present = config.policy.boundary.is_some();
+
         Ok(Self {
             seed,
             forward_passes,
@@ -286,6 +294,7 @@ impl StudyParams {
             backward_scheduler,
             cost_scale_factor,
             inflow_lag_depth,
+            boundary_present,
         })
     }
 
@@ -316,6 +325,7 @@ impl StudyParams {
             backward_scheduler: self.backward_scheduler,
             cost_scale_factor: self.cost_scale_factor,
             inflow_lag_depth: self.inflow_lag_depth,
+            boundary_present: self.boundary_present,
         }
     }
 }
@@ -445,6 +455,10 @@ pub struct ConstructionConfig {
     /// when the study leaves it undeclared. Widens `L_state` in
     /// `resolve_state_layout` via `widen_lag_state_depth`.
     pub inflow_lag_depth: Option<u32>,
+    /// `policy.boundary.is_some()`; threaded into
+    /// `bucket_topology::build_transit_bucket_topology` so every rank builds
+    /// the identical (un-capped-or-not) water-bucket terminal mask.
+    pub boundary_present: bool,
 }
 
 #[cfg(test)]
@@ -454,7 +468,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        BoundaryPolicy, Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, ParallelismConfig,
         PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
         SimulationSelection, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
@@ -638,6 +652,17 @@ mod tests {
         config
     }
 
+    /// `policy.boundary` present or absent; the checkpoint `path` is never
+    /// read by `from_config` (only `.is_some()` matters here).
+    fn config_with_boundary(present: bool) -> Config {
+        let mut config = base_test_config();
+        config.policy.boundary = present.then(|| BoundaryPolicy {
+            path: "unused".to_string(),
+            source_stage: None,
+        });
+        config
+    }
+
     /// An absent `modeling.cost_scale_factor` resolves to
     /// [`DEFAULT_COST_SCALE_FACTOR`] — the byte-neutral-at-default contract.
     #[test]
@@ -780,6 +805,25 @@ mod tests {
             err.to_string().contains("state_space.inflow_lag_depth"),
             "error message must name 'state_space.inflow_lag_depth'; got: {err}"
         );
+    }
+
+    /// An absent `policy.boundary` resolves `boundary_present` to `false`.
+    #[test]
+    fn boundary_present_absent_resolves_to_false() {
+        let params = StudyParams::from_config(&config_with_boundary(false))
+            .expect("absent policy.boundary is valid");
+        assert!(!params.boundary_present);
+    }
+
+    /// A present `policy.boundary` resolves `boundary_present` to `true` and
+    /// carries through to the derived `ConstructionConfig`.
+    #[test]
+    fn boundary_present_true_resolves_and_carries_to_construction_config() {
+        let params = StudyParams::from_config(&config_with_boundary(true))
+            .expect("present policy.boundary is valid");
+        assert!(params.boundary_present);
+        let construction = params.into_construction_config();
+        assert!(construction.boundary_present);
     }
 
     /// `from_config` rejects a `Gap` rule with neither `tolerance` nor

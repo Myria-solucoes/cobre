@@ -4,7 +4,7 @@ use cobre_io::output::simulation_writer::{
     AnticipatedLaneWriteRecord, BusWriteRecord, ContractWriteRecord, CostWriteRecord,
     ExchangeWriteRecord, GenericViolationWriteRecord, HydroBusWriteRecord, HydroWriteRecord,
     InflowLagWriteRecord, NonControllableWriteRecord, PumpingWriteRecord, ScenarioWritePayload,
-    StageWritePayload, ThermalWriteRecord, TransitBucketWriteRecord,
+    StageWritePayload, ThermalWriteRecord, TransitBucketWriteRecord, TransitSeedWriteRecord,
 };
 
 #[cfg(test)]
@@ -15,6 +15,7 @@ use crate::simulation::types::{
     SimulationHydroBusResult, SimulationHydroResult, SimulationInflowLagResult,
     SimulationNonControllableResult, SimulationPumpingResult, SimulationScenarioResult,
     SimulationStageResult, SimulationThermalResult, SimulationTransitBucketResult,
+    SimulationTransitSeedResult,
 };
 
 impl IntoWriteRecord for SimulationCostResult {
@@ -277,6 +278,17 @@ impl IntoWriteRecord for SimulationGenericViolationResult {
     }
 }
 
+impl From<SimulationTransitSeedResult> for TransitSeedWriteRecord {
+    fn from(src: SimulationTransitSeedResult) -> Self {
+        Self {
+            hydro_id: src.hydro_id,
+            start_date: src.start_date,
+            end_date: src.end_date,
+            value_m3s: src.value_m3s,
+        }
+    }
+}
+
 /// Convert a `Simulation*Result` into its cobre-io write record, stamping the
 /// stage's `node_id` (the source carries no node axis).
 ///
@@ -324,12 +336,15 @@ impl From<SimulationScenarioResult> for ScenarioWritePayload {
         Self {
             scenario_id: src.scenario_id,
             stages: src.stages.into_iter().map(Into::into).collect(),
+            transit_seed: src.transit_seed.into_iter().map(Into::into).collect(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveDate;
+
     use super::*;
     use crate::simulation::ScenarioCategoryCosts;
     use cobre_io::output::simulation_writer::ScenarioWritePayload;
@@ -559,12 +574,21 @@ mod tests {
             total_cost: 167.0,
             per_category_costs: make_category_costs(),
             stages: vec![make_stage(0), make_stage(1)],
+            transit_seed: vec![SimulationTransitSeedResult {
+                hydro_id: 2,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date"),
+                value_m3s: 12.5,
+            }],
         };
 
         let payload = ScenarioWritePayload::from(scenario);
 
         assert_eq!(payload.scenario_id, 7);
         assert_eq!(payload.stages.len(), 2);
+        assert_eq!(payload.transit_seed.len(), 1);
+        assert_eq!(payload.transit_seed[0].hydro_id, 2);
+        assert_eq!(payload.transit_seed[0].value_m3s, 12.5);
 
         let stage0 = &payload.stages[0];
         assert_eq!(stage0.stage_id, 0);

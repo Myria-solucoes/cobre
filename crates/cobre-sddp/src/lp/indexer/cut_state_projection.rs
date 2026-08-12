@@ -263,7 +263,7 @@ impl CutStateProjection {
 #[cfg(test)]
 mod tests {
     use super::{CutSlot, CutStateProjection, InCol, OutCol, StageStateConfig, StateDim};
-    use crate::indexer::StateSpace;
+    use crate::indexer::{StateRegion, StateSpace};
 
     fn finalized(
         hydro_count: usize,
@@ -643,6 +643,81 @@ mod tests {
             rendered, global_render,
             "B==0 render must reproduce the global nonzero_state_indices render"
         );
+    }
+
+    /// A bucket region deeper than a terminal stage's horizon cap still projects
+    /// EVERY bucket dim — the deep-lag slots `horizon_cap_active` freezes `[0, 0]`
+    /// at the terminal included. `CutStateProjection::new` keys bucket inclusion on
+    /// `StateRegion::Buckets` being cut-enabled and walks the whole
+    /// `state_dim_range`, with no entity-type or per-stage gate, so the terminal
+    /// bucket-state pricing path (`β·bucket_state`) is already wired at the
+    /// projection level: un-masking a deep-lag slot adds no projection code.
+    #[test]
+    fn every_bucket_dim_projects_including_deep_terminal_lags() {
+        // One downstream plant, depth 4: lags 1..=3 sit beyond the terminal cap
+        // `n_stages − 1 − t` (which reaches 0 at the terminal, keeping only lag 0),
+        // so they are frozen `[0, 0]` in the LP today; the state layout retains
+        // them (sized from the global max over every anchor).
+        let global = finalized_with_transit_buckets(
+            1,
+            1,
+            4,
+            vec![(0, 0), (0, 1), (0, 2), (0, 3)],
+            0,
+            0,
+            vec![],
+        );
+        let cut = CutStateProjection::new(&global, ALL_ENABLED);
+
+        assert!(
+            StateRegion::Buckets.cut_enabled(ALL_ENABLED),
+            "buckets are the always-included region the projection walk keys on"
+        );
+
+        let buckets = global.state_dim_range(StateRegion::Buckets);
+        assert_eq!(buckets.len(), global.n_buckets);
+
+        for g in buckets.clone() {
+            let dim = StateDim::new(g);
+            let offset = g - buckets.start;
+
+            let projecting_slots: Vec<CutSlot> = (0..cut.n_slots())
+                .map(CutSlot::new)
+                .filter(|&s| cut.global_state_index(s) == dim)
+                .collect();
+            assert_eq!(
+                projecting_slots.len(),
+                1,
+                "bucket dim {g} must project to exactly one cut slot"
+            );
+            let slot = projecting_slots[0];
+
+            assert_eq!(
+                cut.incoming_column(slot),
+                InCol::new(global.transit_buckets_in.start + offset),
+                "bucket dim {g}: incoming column is the pinned bucket column (subgradient read site)"
+            );
+            assert_eq!(
+                cut.outgoing_column(slot),
+                OutCol::new(global.transit_buckets_out.start + offset),
+                "bucket dim {g}: outgoing column is the identity bucket column (cut-render site)"
+            );
+
+            let rendered: Vec<OutCol> = cut
+                .render_pairs()
+                .filter(|&(s, _)| s == slot)
+                .map(|(_, col)| col)
+                .collect();
+            assert_eq!(
+                rendered.len(),
+                1,
+                "bucket dim {g} must appear in exactly one render pair"
+            );
+            assert_eq!(
+                rendered[0],
+                OutCol::new(global.transit_buckets_out.start + offset)
+            );
+        }
     }
 
     // ── Terminal commitment-hold (post-horizon lanes) tests ────────────────

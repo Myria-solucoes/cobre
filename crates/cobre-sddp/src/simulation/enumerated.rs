@@ -586,6 +586,9 @@ mod tests {
             hydro_min_storage_hm3: &setup.hydro_min_storage_hm3,
             event_sender: None,
             commitment_window_delivery_dates: &setup.commitment_window_delivery_dates,
+            transit_seed_arcs: &setup.transit_seed_arcs,
+            past_defluences: &setup.past_defluences,
+            study_stage_dates: &setup.study_stage_dates,
         };
 
         let sampler =

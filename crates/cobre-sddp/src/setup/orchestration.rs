@@ -276,6 +276,9 @@ impl StudySetup {
             hydro_min_storage_hm3: &self.hydro_min_storage_hm3,
             event_sender,
             commitment_window_delivery_dates: &self.commitment_window_delivery_dates,
+            transit_seed_arcs: &self.transit_seed_arcs,
+            past_defluences: &self.past_defluences,
+            study_stage_dates: &self.study_stage_dates,
         };
 
         simulate(

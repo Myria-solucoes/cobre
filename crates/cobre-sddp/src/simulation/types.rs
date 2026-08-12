@@ -20,6 +20,8 @@
 //! `losses_mw`, `outflow_m3s`. See simulation-architecture.md SS3.4 for the
 //! complete list.
 
+use chrono::NaiveDate;
+
 use crate::setup::NodeId;
 
 /// Cost breakdown for one (stage, block) pair.
@@ -391,6 +393,29 @@ pub struct SimulationTransitBucketResult {
     pub delayed_arrival_hm3: f64,
 }
 
+/// One rolling-seed release window for a declared travel-time arc's upstream
+/// hydro, in the same shape [`cobre_core::HydroPastDefluence`] carries.
+///
+/// Corresponds to one row in the `transit_seed` output partition. Reconstructed
+/// from the scenario's realized releases (never the LP's terminal bucket
+/// state), covering the trailing `[study_end − travel_time_hours, study_end)`
+/// span: one window per in-study stage overlapping that span, plus the
+/// stitched pre-study windows sliced from the run's own `past_defluences` when
+/// the arc's travel time exceeds the study horizon. Scenario-level (no
+/// stage/node axis — a window's own date range anchors it). Empty for a study
+/// with no declared travel-time arc.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SimulationTransitSeedResult {
+    /// Upstream hydro plant entity ID whose release feeds the arc.
+    pub hydro_id: i32,
+    /// Start of the release window (inclusive).
+    pub start_date: NaiveDate,
+    /// End of the release window (exclusive).
+    pub end_date: NaiveDate,
+    /// Realized mean release rate over the window, in m³/s.
+    pub value_m3s: f64,
+}
+
 /// Generic constraint violation for one (stage, block, constraint) tuple.
 ///
 /// Corresponds to one row in the violations/generic output schema
@@ -536,6 +561,11 @@ pub struct SimulationScenarioResult {
     /// Summary — in that case only `scenario_id`, `total_cost`, and
     /// `per_category_costs` are populated.
     pub stages: Vec<SimulationStageResult>,
+
+    /// Rolling-seed release windows for the next run's `past_defluences`
+    /// input, one entry per declared arc's upstream hydro per emitted window.
+    /// Empty when the study declares no travel-time arc.
+    pub transit_seed: Vec<SimulationTransitSeedResult>,
 }
 
 /// Aggregate simulation statistics computed after all scenarios complete.
@@ -1038,6 +1068,7 @@ mod tests {
                 imputed_cost: 50_000.0,
             },
             stages,
+            transit_seed: vec![],
         };
 
         assert_eq!(result.scenario_id, 42);

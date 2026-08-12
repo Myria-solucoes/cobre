@@ -758,7 +758,7 @@ pub fn build_stage_templates_resolving_layout(
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
 ) -> Result<StageTemplates, SddpError> {
-    let topology = build_transit_bucket_topology(system);
+    let topology = build_transit_bucket_topology(system, false);
     let (state_layout, _, _) = resolve_state_layout(system, par_lp, &topology, None)?;
     let hydro_cell_index = HydroCellIndex::build(system.hydros());
     build_stage_templates(

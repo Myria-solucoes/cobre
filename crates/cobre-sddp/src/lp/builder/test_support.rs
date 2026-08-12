@@ -38,7 +38,7 @@ pub(super) fn ctx_anticipated_and_mask_inputs(
     usize,
 ) {
     let (resolution, lead_stages) = resolve_anticipated_commitments_core(system);
-    let topology = build_transit_bucket_topology(system);
+    let topology = build_transit_bucket_topology(system, false);
     let max_par_order = system
         .inflow_models()
         .iter()

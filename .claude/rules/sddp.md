@@ -808,6 +808,74 @@ windows for one arc contribute independently), and the seed's own
 declaration-order-invariance regression (distinct from, and in addition to,
 the topology-level ordering pin above).
 
+### Delivery-family right-boundary pricing
+
+Both delivery-family carriers — the anticipated-thermal hold ring
+(`## Anticipated thermal commitments`) and the water travel-time bucket ring —
+keep terminal in-flight state LIVE and price it through the SAME already-generic
+cut-state projection (`β·state`), never a per-family pricing arm.
+`StateRegion::cut_enabled` returns `true` for both `Buckets` and `CommitmentHold`
+at every pool, the terminal pool included, and `CutStateProjection::new` walks
+every cut-enabled region's `state_dim_range` with no entity-type and no per-stage
+arm — so a kept-live terminal slot of either family is already a priced FCF
+dimension a loaded boundary cut's `β` lands on directly. The projection carries
+every such slot today; only whether the slot holds live value or a masked
+`[0, 0]` structural zero depends on the per-family fill. A per-family
+terminal-pricing arm is the forbidden alternative: the projection already owns
+the coefficient, so a second path double-counts or misaligns it.
+
+The two carriers reach that live terminal state through a LOAD-BEARING asymmetry
+that must not be flattened into one shared keep-live helper:
+
+- **Thermal is additive and inert by default.** Its post-horizon lanes are an
+  appended block `fill_anticipated_slot_columns` holds open `(-inf, inf)` at
+  every stage, terminal included. No post-horizon commitment is ever created
+  without an injected boundary, so the open block perturbs nothing for a study
+  that loads none — it is inert until a boundary fills it.
+- **Water is the ring's own capped slots and is NOT inert.** Its terminal state
+  is the bucket ring's own horizon-capped deep-lag slots, which
+  `horizon_cap_active` masks `[0, 0]` at the terminal (Terminal credit deferred
+  below). Un-masking them re-enables their definition rows, deposit share, and
+  outgoing columns — a live LP change, not an inert appendage — so it MUST be
+  gated on `config.policy.boundary` presence: a zero-terminal-value study (no
+  boundary) keeps the masked layout byte-for-byte, and only a boundary-loaded
+  study opens the terminal slots.
+
+Un-masking the water terminal slots UNCONDITIONALLY — dropping the
+`config.policy.boundary` gate — is the wrong-but-compiling alternative. It
+re-enables the terminal deposit and outgoing columns for every study, so a
+zero-terminal-value water-travel-time study, whose terminal value is still zero,
+now routes the end-of-horizon release into a bucket slot it used to drop; the LP
+the solver sees changes, silently perturbing every existing water-travel-time
+golden even though the optimal cost is unchanged. Byte-neutrality for the
+no-boundary case is the property the gate protects.
+
+The water terminal state is also EMITTED for rolling seeding (the `transit_seed`
+output, reconstructed from realized turbined+spilled releases in the
+`past_defluences` schema so a follow-on run reuses `build_initial_transit_bucket_state`
+verbatim). That rolling round-trip is faithful ONLY for `t_v <= horizon`: the seed
+reader derives its `StageCalendar` from the receiving study's own un-padded stage
+list, so it cannot represent an in-transit lag deeper than that study's stage
+count. For `t_v > horizon` the deep pre-study mass beyond the horizon is not
+carried across the seam — the SAME Terminal credit deferred imprecision (below),
+surfacing at the rolling boundary rather than being introduced by the emit format
+(a direct bucket-state emit would hit the identical reader truncation). This is a
+ratified scope boundary, not a bug; lifting it requires the seed reader to
+represent lags past the horizon. Pinned by the `#[ignore]`d
+`round_trip_continuity_needs_the_leftover_seed_stitch_when_travel_time_exceeds_horizon`
+reproduction, alongside the passing `t_v <= horizon` round-trip, in
+`tests/hydro_sim.rs`.
+Read: `lp/indexer/state_space.rs` (`StateRegion::cut_enabled`),
+`lp/indexer/cut_state_projection.rs` (`CutStateProjection::new`),
+`setup/bucket_topology.rs` (`horizon_cap_active`), `lp/builder/columns.rs`
+(`fill_anticipated_slot_columns`, `fill_transit_bucket_columns`),
+`crates/cobre-io/src/config/policy.rs` (`PolicyConfig::boundary`). Pinned by
+`every_bucket_dim_projects_including_deep_terminal_lags` (every bucket dim, the
+deep-lag terminal slots included, appears exactly once in the cut-state
+projection with no entity-type or per-stage gate) and
+`commitment_hold_post_horizon_joins_the_projection` (the thermal post-horizon
+lanes join the same projection), both in `lp/indexer/cut_state_projection.rs`.
+
 ### Terminal credit deferred
 
 `horizon_cap_active` caps each stage's active lag at `n_stages − 1 − t`, the
@@ -823,6 +891,13 @@ why dropping the row is safe: the finite horizon's zero terminal value
 (`HorizonMode::Finite`, the only implemented mode) makes a masked slot's cut
 coefficient structurally zero, so no solution loses value by never routing
 water into it — the residual mass has no receiving stage either way. This
+safe-drop is scoped to a zero-terminal-value study — one with no
+`config.policy.boundary`: with a boundary loaded the terminal value is not zero,
+the masked slot's coefficient is no longer structurally zero, and dropping the
+slot would lose real value — the case the Delivery-family right-boundary pricing
+convention above handles, keeping the terminal bucket state live and pricing it
+through the shared cut-state projection, gated on `config.policy.boundary`
+presence so this drop stays byte-for-byte for a zero-terminal-value study. This
 under-values end-of-horizon upstream release; it is a documented target-stage
 imprecision, not a bug to patch by capping
 `TransitBucketTopology::per_plant_depth`/`column_order` too — those size from the

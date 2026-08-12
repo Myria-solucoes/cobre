@@ -37,8 +37,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BooleanBuilder, Float64Builder, Int8Builder, Int32Builder, RecordBatch};
+use arrow::array::{
+    BooleanBuilder, Date32Builder, Float64Builder, Int8Builder, Int32Builder, RecordBatch,
+};
 
+use chrono::{Datelike, NaiveDate};
 use cobre_core::System;
 
 use crate::MetadataSimulationSolveStats;
@@ -50,7 +53,7 @@ use crate::output::schemas::{
     anticipated_lanes_schema, buses_schema, contracts_schema, costs_schema, exchanges_schema,
     generic_violations_schema, hydro_bus_generation_schema, hydros_schema, in_transit_schema,
     inflow_lags_schema, non_controllables_schema, paths_schema, pumping_stations_schema,
-    scenario_summary_schema, thermals_schema,
+    scenario_summary_schema, thermals_schema, transit_seed_schema,
 };
 
 // Payload types (mirrors solver simulation result types)
@@ -369,6 +372,21 @@ pub struct TransitBucketWriteRecord {
     pub delayed_arrival_hm3: f64,
 }
 
+/// One windowed release record for an upstream entity — a rolling-seed
+/// artifact, not a per-stage diagnostic: the record carries no stage or node
+/// axis, only a `[start_date, end_date)` release window and rate.
+#[derive(Debug)]
+pub struct TransitSeedWriteRecord {
+    /// Upstream entity identifier whose release the window covers.
+    pub hydro_id: i32,
+    /// Start of the release window (inclusive).
+    pub start_date: NaiveDate,
+    /// End of the release window (exclusive).
+    pub end_date: NaiveDate,
+    /// Mean release rate over the window, in m³/s.
+    pub value_m3s: f64,
+}
+
 /// Per-cell hydro dispatch result for one (stage, block, hydro, bus) tuple —
 /// one LP cell.
 #[derive(Debug)]
@@ -476,6 +494,10 @@ pub struct ScenarioWritePayload {
 
     /// Per-stage detailed results.
     pub stages: Vec<StageWritePayload>,
+
+    /// Rolling-seed release windows, scenario-level (no stage/node axis).
+    /// Empty when the system declares no upstream travel-time arc.
+    pub transit_seed: Vec<TransitSeedWriteRecord>,
 }
 
 /// One row of `simulation/paths.parquet`: the node visited at one
@@ -619,6 +641,8 @@ impl SimulationParquetWriter {
         if declares_travel_time {
             std::fs::create_dir_all(sim_dir.join("in_transit"))
                 .map_err(|e| OutputError::io(sim_dir.join("in_transit"), e))?;
+            std::fs::create_dir_all(sim_dir.join("transit_seed"))
+                .map_err(|e| OutputError::io(sim_dir.join("transit_seed"), e))?;
         }
         if !system.generic_constraints().is_empty() {
             std::fs::create_dir_all(sim_dir.join("violations/generic"))
@@ -842,6 +866,15 @@ impl SimulationParquetWriter {
                 n,
             )?;
             self.write_partition("in_transit", &partition_suffix, &batch)?;
+        }
+
+        if !result.transit_seed.is_empty() {
+            let batch = build_transit_seed_batch(
+                result.transit_seed.iter(),
+                scenario_id,
+                result.transit_seed.len(),
+            )?;
+            self.write_partition("transit_seed", &partition_suffix, &batch)?;
         }
 
         if result
@@ -1875,6 +1908,48 @@ fn build_in_transit_batch<'a>(
     .map_err(|e| OutputError::serialization("in_transit", e.to_string()))
 }
 
+/// Arrow `Date32`'s native representation (days since the Unix epoch,
+/// 1970-01-01) for one calendar date.
+fn date32_days(date: NaiveDate) -> i32 {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).map_or(0, |e| e.num_days_from_ce());
+    date.num_days_from_ce() - epoch
+}
+
+#[allow(clippy::cast_possible_wrap)]
+fn build_transit_seed_batch<'a>(
+    records: impl IntoIterator<Item = &'a TransitSeedWriteRecord>,
+    scenario_id: i32,
+    n: usize,
+) -> Result<RecordBatch, OutputError> {
+    let schema = Arc::new(transit_seed_schema());
+
+    let mut scenario_id_col = Int32Builder::with_capacity(n);
+    let mut hydro_id = Int32Builder::with_capacity(n);
+    let mut start_date = Date32Builder::with_capacity(n);
+    let mut end_date = Date32Builder::with_capacity(n);
+    let mut value_m3s = Float64Builder::with_capacity(n);
+
+    for r in records {
+        scenario_id_col.append_value(scenario_id);
+        hydro_id.append_value(r.hydro_id);
+        start_date.append_value(date32_days(r.start_date));
+        end_date.append_value(date32_days(r.end_date));
+        value_m3s.append_value(r.value_m3s);
+    }
+
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(scenario_id_col.finish()),
+            Arc::new(hydro_id.finish()),
+            Arc::new(start_date.finish()),
+            Arc::new(end_date.finish()),
+            Arc::new(value_m3s.finish()),
+        ],
+    )
+    .map_err(|e| OutputError::serialization("transit_seed", e.to_string()))
+}
+
 #[allow(clippy::cast_possible_wrap)]
 fn build_generic_violations_batch<'a>(
     records: impl IntoIterator<Item = &'a GenericViolationWriteRecord>,
@@ -2290,6 +2365,7 @@ mod tests {
         ScenarioWritePayload {
             scenario_id,
             stages,
+            transit_seed: vec![],
         }
     }
 
@@ -2937,6 +3013,7 @@ mod tests {
         let payload = ScenarioWritePayload {
             scenario_id: 0,
             stages: vec![stage0],
+            transit_seed: vec![],
         };
         writer
             .write_scenario(payload)
@@ -3453,6 +3530,7 @@ mod tests {
             .write_scenario(ScenarioWritePayload {
                 scenario_id: 0,
                 stages: vec![stage0],
+                transit_seed: vec![],
             })
             .expect("write_scenario must succeed");
 
@@ -3519,6 +3597,7 @@ mod tests {
             .write_scenario(ScenarioWritePayload {
                 scenario_id: 0,
                 stages: vec![stage0],
+                transit_seed: vec![],
             })
             .expect("write_scenario must succeed");
 
@@ -3669,6 +3748,7 @@ mod tests {
             .write_scenario(ScenarioWritePayload {
                 scenario_id: 0,
                 stages: vec![stage0],
+                transit_seed: vec![],
             })
             .expect("write_scenario must succeed");
 
@@ -3791,6 +3871,7 @@ mod tests {
             .write_scenario(ScenarioWritePayload {
                 scenario_id: 0,
                 stages: vec![stage0, stage1],
+                transit_seed: vec![],
             })
             .expect("write_scenario must succeed");
 

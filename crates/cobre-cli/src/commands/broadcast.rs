@@ -79,7 +79,13 @@ impl From<BroadcastBackwardScheduler> for BackwardScheduler {
 }
 
 /// Configuration snapshot broadcast from rank 0 to all ranks.
+// Rationale (struct_excessive_bools): each bool is an independent config
+// flag `StudyParams::from_config` resolves from a DIFFERENT `Config` section
+// (training selection, training enable, exports, policy.boundary); grouping
+// them into an enum or a state machine would invent a joint state no config
+// section actually declares.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct BroadcastConfig {
     pub(crate) seed: u64,
     pub(crate) forward_passes: u32,
@@ -132,6 +138,10 @@ pub(crate) struct BroadcastConfig {
     /// when the study leaves it undeclared. Rebuilt into `ConstructionConfig`
     /// on every rank, widening `L_state` in `resolve_state_layout`.
     pub(crate) inflow_lag_depth: Option<u32>,
+    /// `policy.boundary.is_some()`, resolved identically on every rank by
+    /// `StudyParams::from_config`. Gates the water-bucket terminal mask
+    /// (`build_transit_bucket_topology`) before `inject_boundary_cuts` runs.
+    pub(crate) boundary_present: bool,
 }
 
 impl BroadcastConfig {
@@ -216,6 +226,7 @@ impl BroadcastConfig {
             backward_scheduler: params.backward_scheduler.into(),
             cost_scale_factor: params.cost_scale_factor,
             inflow_lag_depth: params.inflow_lag_depth,
+            boundary_present: params.boundary_present,
         })
     }
 }
@@ -749,6 +760,29 @@ mod tests {
         let decoded: BroadcastConfig =
             postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
         assert_eq!(decoded.inflow_lag_depth, Some(12));
+    }
+
+    /// A present `policy.boundary` reaches `BroadcastConfig` as `boundary_present
+    /// = true` and survives the postcard wire hop.
+    #[test]
+    fn broadcast_config_carries_boundary_present() {
+        use super::BroadcastConfig;
+
+        let json = r#"{
+            "training": {
+                "selection": { "method": "sampled", "forward_passes": 4 },
+                "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }]
+            },
+            "policy": { "boundary": { "path": "unused" } }
+        }"#;
+        let config: cobre_io::Config = serde_json::from_str(json).unwrap();
+        let original = BroadcastConfig::from_config(&config).unwrap();
+        assert!(original.boundary_present);
+
+        let bytes = postcard::to_allocvec(&original).expect("postcard serialization must succeed");
+        let decoded: BroadcastConfig =
+            postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
+        assert!(decoded.boundary_present);
     }
 
     /// Postcard serialization round-trip for `BroadcastConfig`.

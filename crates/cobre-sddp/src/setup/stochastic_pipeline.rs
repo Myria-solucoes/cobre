@@ -1292,7 +1292,7 @@ mod tests {
         let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
         let par_lp = PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, None)
             .expect("PrecomputedPar must build");
-        let topology = crate::setup::bucket_topology::build_transit_bucket_topology(&system);
+        let topology = crate::setup::bucket_topology::build_transit_bucket_topology(&system, false);
         let (state_layout, _, _) =
             crate::setup::resolve_state_layout(&system, &par_lp, &topology, declared_depth)
                 .expect("resolve_state_layout must succeed with a declared depth");

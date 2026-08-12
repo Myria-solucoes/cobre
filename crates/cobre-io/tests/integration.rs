@@ -1013,6 +1013,7 @@ fn write_and_read_hydro_batches(
         .write_scenario(ScenarioWritePayload {
             scenario_id: 0,
             stages,
+            transit_seed: vec![],
         })
         .unwrap_or_else(|e| panic!("write_scenario must succeed: {e}"));
 
@@ -1201,6 +1202,7 @@ fn test_paths_join_to_entity_file_on_scenario_and_stage() {
             .write_scenario(ScenarioWritePayload {
                 scenario_id: scenario_id as u32,
                 stages,
+                transit_seed: vec![],
             })
             .unwrap_or_else(|e| panic!("write_scenario must succeed: {e}"));
     }

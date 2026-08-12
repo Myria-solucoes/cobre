@@ -81,8 +81,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cobre_core::{
-    AnticipatedConfig, EntityId, HorizonGraph, Hydro, PostStudyStages, PostStudyThermalBound,
-    Stage, StageId, System, Thermal,
+    AnticipatedConfig, EntityId, HorizonGraph, Hydro, HydroPastDefluence, PostStudyStages,
+    PostStudyThermalBound, Stage, StageId, System, Thermal,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::StageIdResolver;
@@ -109,6 +109,7 @@ use crate::{
     lp_builder::{M3S_TO_HM3, build_stage_templates},
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
+    simulation::extraction::TransitSeedArc,
     stopping_rule::{StoppingRule, StoppingRuleSet},
     workspace::CapturedBasis,
 };
@@ -193,6 +194,24 @@ pub struct StudySetup {
     /// so per-lane output extraction never re-derives the calendar walk. Empty
     /// when the study declares no post-horizon commitment window.
     pub(crate) commitment_window_delivery_dates: Vec<i32>,
+
+    /// Declared travel-time arcs (upstream hydro id + travel time), resolved
+    /// once from [`System::hydros`] ([`build_transit_seed_arcs`]). Threaded
+    /// into [`SimulationOutputSpec`](crate::simulation::SimulationOutputSpec)
+    /// so the rolling-seed emitter never re-derives it from `System`. Empty
+    /// when the study declares no travel-time arc.
+    pub(crate) transit_seed_arcs: Vec<TransitSeedArc>,
+
+    /// This run's own `system.initial_conditions().past_defluences`, retained
+    /// for the rolling-seed emitter's pre-study input-tail stitch (nonempty
+    /// only when a declared arc's travel time exceeds the study horizon).
+    pub(crate) past_defluences: Vec<HydroPastDefluence>,
+
+    /// `study_stage_dates[t] = (stage.start_date, stage.end_date)` per study
+    /// stage index, parallel to [`Self::study_stage_ids`]. Threaded into
+    /// [`SimulationOutputSpec`](crate::simulation::SimulationOutputSpec) so the
+    /// rolling-seed emitter's per-stage windows never re-derive the calendar.
+    pub(crate) study_stage_dates: Vec<(NaiveDate, NaiveDate)>,
 
     /// Resolved `(parameter_id, stage)` coefficients; consumed by the LP builder
     /// and the generic-constraint echo.
@@ -391,6 +410,7 @@ impl StudySetup {
             backward_scheduler,
             cost_scale_factor,
             inflow_lag_depth,
+            boundary_present,
         } = config;
 
         // Fail fast on a backend-unsupported field before any template exists;
@@ -418,7 +438,11 @@ impl StudySetup {
         // Computed here (not inside `build_energy_and_templates`) so the one
         // `TransitBucketTopology` this constructor derives from `system` also seeds the
         // `StudySetup.transit_bucket_topology` field below, with no second call.
-        let transit_bucket_topology = bucket_topology::build_transit_bucket_topology(system);
+        // `boundary_present` gates the terminal deep-lag mask (the Delivery-family
+        // right-boundary pricing contract) — every rank resolves it identically from
+        // the broadcast config, before `inject_boundary_cuts` runs.
+        let transit_bucket_topology =
+            bucket_topology::build_transit_bucket_topology(system, boundary_present);
 
         // Resolved before the LP templates: none of the state dimensions depend on
         // the built LP, and `build_stage_templates` needs the finished `StateSpace`
@@ -515,6 +539,8 @@ impl StudySetup {
             .cloned()
             .collect();
         let study_stage_ids: Vec<i32> = stages.iter().map(|s| s.id).collect();
+        let study_stage_dates: Vec<(NaiveDate, NaiveDate)> =
+            stages.iter().map(|s| (s.start_date, s.end_date)).collect();
 
         let LagData {
             stage_lag_transitions,
@@ -662,6 +688,8 @@ impl StudySetup {
         let anticipated_windows = build_anticipated_windows(system);
         let commitment_window_delivery_dates =
             build_commitment_window_delivery_dates(system, &state_layout);
+        let transit_seed_arcs = build_transit_seed_arcs(system);
+        let past_defluences = system.initial_conditions().past_defluences.clone();
 
         admission_gate(&risk_measures, &stopping_rule_set, training_enumerated)?;
 
@@ -697,6 +725,9 @@ impl StudySetup {
             anticipated_windows,
             study_stage_ids,
             commitment_window_delivery_dates,
+            transit_seed_arcs,
+            past_defluences,
+            study_stage_dates,
             resolved_parameters,
             scenario_libraries,
             node_graph,
@@ -1314,6 +1345,25 @@ fn build_commitment_window_delivery_dates(system: &System, state: &StateSpace) -
         .map(|w| {
             let thermal_id = state.commitment_window_thermal_id[w];
             post_horizon_delivery_date(system, state, w, thermal_id)
+        })
+        .collect()
+}
+
+/// Declared travel-time arcs (upstream hydro id + travel time), one entry per
+/// hydro declaring `travel_time_hours > 0.0` and a `downstream_id` — the same
+/// predicate [`bucket_topology::declared_arcs`] uses, applied per upstream
+/// hydro rather than grouped by downstream plant.
+fn build_transit_seed_arcs(system: &System) -> Vec<TransitSeedArc> {
+    system
+        .hydros()
+        .iter()
+        .filter_map(|h| {
+            let t_v = h.travel_time_hours.filter(|&t| t > 0.0)?;
+            h.downstream_id?;
+            Some(TransitSeedArc {
+                upstream_hydro_id: h.id.0,
+                travel_time_hours: t_v,
+            })
         })
         .collect()
 }
@@ -2803,5 +2853,310 @@ mod post_study_resolution_tests {
             Some((220.0, 0.0, 300.0))
         );
         assert_eq!(resolved.thermal_bounds.lookup(EntityId(2), 0), None);
+    }
+}
+
+/// Round-trip fidelity: the rolling-seed emitter's output, re-anchored at the
+/// next run's `start_0`, must reproduce the identical
+/// [`build_initial_transit_bucket_state`] seed a direct re-anchoring of the
+/// SAME underlying history (pre-study `past_defluences` plus the elapsed
+/// in-study releases) would produce — the property that lets a rolling run
+/// hand off water state across runs with no separate input path.
+#[cfg(test)]
+mod transit_seed_round_trip_tests {
+    use chrono::{Duration, NaiveDate};
+    use cobre_core::entities::bus::{Bus, DeficitSegment};
+    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{EntityId, HydroPastDefluence, InitialConditions, System, SystemBuilder};
+
+    use super::{TransitSeedArc, bucket_topology, build_initial_transit_bucket_state};
+    use crate::simulation::extraction::build_transit_seed;
+    use crate::simulation::types::{SimulationHydroResult, SimulationStageResult};
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap_or_else(|| unreachable!("hardcoded date is valid"))
+    }
+
+    fn zero_penalties() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    fn hydro(id: i32, downstream_id: Option<i32>, travel_time_hours: Option<f64>) -> Hydro {
+        let mut h = Hydro {
+            unit_groups: Vec::new(),
+            id: EntityId(id),
+            name: format!("H{id}"),
+            operational_start_date: date(2024, 1, 1),
+            downstream_id: downstream_id.map(EntityId),
+            travel_time_hours,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: zero_penalties(),
+        };
+        h.declare_mirror_unit_group(EntityId(1));
+        h
+    }
+
+    /// One study stage, `id`-indexed from 0, a single `hours`-long block, each
+    /// anchored one real calendar day apart (`NaiveDate` has no sub-day
+    /// resolution; `StageCalendar::hour_window_shares` reads only
+    /// `duration_hours`, never the calendar span).
+    fn stages_from(start: NaiveDate, n: i32, hours: f64) -> Vec<Stage> {
+        (0..n)
+            .map(|id| {
+                let start_date = start + Duration::days(i64::from(id));
+                Stage {
+                    index: usize::try_from(id).unwrap_or(0),
+                    id,
+                    start_date,
+                    end_date: start_date + Duration::days(1),
+                    season_id: None,
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "FLAT".to_string(),
+                        duration_hours: hours,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn build_system(
+        hydros: Vec<Hydro>,
+        stages: Vec<Stage>,
+        past: Vec<HydroPastDefluence>,
+    ) -> System {
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            operational_start_date: date(2024, 1, 1),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(hydros)
+            .stages(stages)
+            .initial_conditions(InitialConditions {
+                past_defluences: past,
+                ..InitialConditions::default()
+            })
+            .build()
+            .expect("valid system")
+    }
+
+    const UPSTREAM_ID: i32 = 2;
+    const DOWNSTREAM_ID: i32 = 1;
+
+    fn hydros() -> Vec<Hydro> {
+        vec![
+            hydro(DOWNSTREAM_ID, None, None),
+            hydro(UPSTREAM_ID, Some(DOWNSTREAM_ID), Some(100.0)),
+        ]
+    }
+
+    fn stage_release(stage_id: u32, hydro_id: i32, rate_m3s: f64) -> SimulationStageResult {
+        SimulationStageResult {
+            stage_id,
+            node_id: crate::setup::NodeId(i32::try_from(stage_id).unwrap_or(0)),
+            costs: vec![],
+            hydros: vec![SimulationHydroResult {
+                stage_id,
+                block_id: Some(0),
+                hydro_id,
+                turbined_m3s: rate_m3s,
+                spillage_m3s: 0.0,
+                evaporation_m3s: None,
+                diverted_inflow_m3s: None,
+                diverted_outflow_m3s: None,
+                incremental_inflow_m3s: 0.0,
+                inflow_m3s: 0.0,
+                storage_initial_hm3: 0.0,
+                storage_final_hm3: 0.0,
+                generation_mw: 0.0,
+                equivalent_productivity_mw_per_m3s: 0.0,
+                accumulated_productivity_mw_per_m3s: 0.0,
+                incremental_inflow_energy_mw: 0.0,
+                stored_energy_initial_mwh: 0.0,
+                stored_energy_final_mwh: 0.0,
+                spillage_cost: 0.0,
+                water_value_per_hm3: 0.0,
+                storage_binding_code: 0,
+                operative_state_code: 0,
+                turbined_slack_m3s: 0.0,
+                outflow_slack_below_m3s: 0.0,
+                outflow_slack_above_m3s: 0.0,
+                generation_slack_mw: 0.0,
+                storage_violation_below_hm3: 0.0,
+                filling_target_violation_hm3: 0.0,
+                evaporation_violation_pos_m3s: 0.0,
+                evaporation_violation_neg_m3s: 0.0,
+                inflow_nonnegativity_slack_m3s: 0.0,
+                water_withdrawal_violation_pos_m3s: 0.0,
+                water_withdrawal_violation_neg_m3s: 0.0,
+            }],
+            hydro_bus_generation: vec![],
+            thermals: vec![],
+            exchanges: vec![],
+            buses: vec![],
+            pumping_stations: vec![],
+            contracts: vec![],
+            non_controllables: vec![],
+            inflow_lags: vec![],
+            transit_buckets: vec![],
+            generic_violations: vec![],
+            anticipated_lanes: vec![],
+        }
+    }
+
+    /// `t_v = 100h` exceeds the 48h in-study horizon, exercising the stitch:
+    /// the emitted windows must cover both the elapsed in-study releases and
+    /// the run's own pre-study `past_defluences` tail. Re-anchoring the SAME
+    /// underlying history (the pre-study window plus the two in-study
+    /// releases) at `study_end` directly must give the identical seed the
+    /// emitted windows reproduce when fed to a continuing run starting there.
+    #[test]
+    fn emitted_windows_reproduce_the_directly_reanchored_seed() {
+        let study_start_a = date(2024, 1, 1);
+        let study_end_a = study_start_a + Duration::days(2); // 2 stages, 24h each
+        let pre_study_window = HydroPastDefluence {
+            hydro_id: EntityId(UPSTREAM_ID),
+            start_date: study_start_a - Duration::days(2),
+            end_date: study_start_a,
+            value_m3s: 50.0,
+        };
+
+        let stages_a = stages_from(study_start_a, 2, 24.0);
+        let study_stage_dates: Vec<(NaiveDate, NaiveDate)> = stages_a
+            .iter()
+            .map(|s| (s.start_date, s.end_date))
+            .collect();
+        let stage_results = vec![
+            stage_release(0, UPSTREAM_ID, 100.0),
+            stage_release(1, UPSTREAM_ID, 200.0),
+        ];
+        let arcs = [TransitSeedArc {
+            upstream_hydro_id: UPSTREAM_ID,
+            travel_time_hours: 100.0,
+        }];
+        let block_hours = vec![vec![24.0]; 2];
+
+        let emitted = build_transit_seed(
+            &stage_results,
+            &study_stage_dates,
+            &arcs,
+            std::slice::from_ref(&pre_study_window),
+            &block_hours,
+        );
+        assert_eq!(
+            emitted.len(),
+            3,
+            "t_v=100h must pull in both in-study stages and the pre-study tail"
+        );
+
+        let system_b = build_system(
+            hydros(),
+            stages_from(study_end_a, 1, 24.0),
+            emitted
+                .into_iter()
+                .map(|w| HydroPastDefluence {
+                    hydro_id: EntityId(w.hydro_id),
+                    start_date: w.start_date,
+                    end_date: w.end_date,
+                    value_m3s: w.value_m3s,
+                })
+                .collect(),
+        );
+        let topology_b = bucket_topology::build_transit_bucket_topology(&system_b, false);
+        let seed_from_emission = build_initial_transit_bucket_state(&system_b, &topology_b);
+
+        let system_reference = build_system(
+            hydros(),
+            stages_from(study_end_a, 1, 24.0),
+            vec![
+                pre_study_window,
+                HydroPastDefluence {
+                    hydro_id: EntityId(UPSTREAM_ID),
+                    start_date: stages_a[0].start_date,
+                    end_date: stages_a[0].end_date,
+                    value_m3s: 100.0,
+                },
+                HydroPastDefluence {
+                    hydro_id: EntityId(UPSTREAM_ID),
+                    start_date: stages_a[1].start_date,
+                    end_date: stages_a[1].end_date,
+                    value_m3s: 200.0,
+                },
+            ],
+        );
+        let topology_reference =
+            bucket_topology::build_transit_bucket_topology(&system_reference, false);
+        let seed_reference =
+            build_initial_transit_bucket_state(&system_reference, &topology_reference);
+
+        assert_eq!(seed_from_emission.len(), seed_reference.len());
+        for (a, b) in seed_from_emission.iter().zip(&seed_reference) {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "round-trip seed must match the directly re-anchored reference to 1e-9: \
+                 {seed_from_emission:?} vs {seed_reference:?}"
+            );
+        }
+        assert!(
+            seed_reference.iter().any(|&v| v.abs() > f64::EPSILON),
+            "the reference seed must be non-degenerate (not all-zero) for this to be a \
+             meaningful fidelity check"
+        );
     }
 }

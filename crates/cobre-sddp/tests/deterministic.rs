@@ -8517,6 +8517,7 @@ mod enumerated_external {
             backward_scheduler,
             cost_scale_factor: DEFAULT_COST_SCALE_FACTOR,
             inflow_lag_depth: None,
+            boundary_present: false,
         }
     }
 
@@ -9375,5 +9376,511 @@ mod enumerated_checkpoint {
                 }
             }
         }
+    }
+}
+
+/// Terminal in-transit water-bucket keep-live + FCF valuation when a boundary
+/// FCF is present: `build_transit_bucket_topology`'s terminal-lag mask
+/// un-caps only when `config.policy.boundary` is declared, so a
+/// zero-terminal-value study (no boundary) keeps the masked layout
+/// byte-for-byte (Terminal credit deferred), while a boundary-loaded study
+/// carries the deep-lag terminal slots live and prices them through the
+/// already-generic cut-state projection (the Delivery-family right-boundary
+/// pricing contract). Reuses d45's already-vetted
+/// mixed-calendar arc (depth 3 into a 4-stage horizon, so the terminal's own
+/// uncapped reach is nonzero) rather than a fresh fixture.
+#[cfg(feature = "test-support")]
+// Rationale (cast_sign_loss): `StageTemplate`'s CSC arrays (`col_starts`,
+// `row_indices`) are solver-side `i32` indices that are always non-negative
+// by construction (row/column counts, never a sentinel or delta).
+#[allow(clippy::cast_sign_loss)]
+mod water_terminal_fcf_valuation {
+    use std::path::Path;
+
+    use cobre_core::EntityId;
+    use cobre_core::temporal::StageStateConfig;
+    use cobre_io::{
+        BoundaryPolicy, FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata,
+        PolicyCutRecord, ProducerBlock, StageCutsPayload, write_policy_checkpoint,
+    };
+    use cobre_sddp::indexer::CutStateProjection;
+    use cobre_sddp::setup::{NodeId, StageIdx};
+    use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
+    use cobre_sddp::workspace::SolverWorkspace;
+    use cobre_sddp::{
+        CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts, load_boundary_cuts,
+    };
+    use cobre_solver::{
+        ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
+        freeze_rows_into_template,
+    };
+
+    use crate::common::{StubComm, fresh_setup_with};
+
+    const CASE_DIR: &str = "../../examples/deterministic/d45-travel-time-mixed-calendar";
+    const TRAVEL_TIME_HOURS: f64 = 360.0;
+    const STAGE_HOURS: [f64; 4] = [720.0, 168.0, 168.0, 168.0];
+    const DOWNSTREAM_ID: EntityId = EntityId(1);
+    /// Boundary cut intercept `alpha`, positive so the injected cut binds `theta`
+    /// above its zero floor for every in-transit volume `x >= 0`.
+    const ALPHA: f64 = 5.0;
+    /// Boundary cut coefficient `beta` on the terminal bucket slot.
+    const BETA: f64 = 3.0;
+    const TOL: f64 = 1e-6;
+
+    fn case_dir() -> &'static Path {
+        Path::new(CASE_DIR)
+    }
+
+    fn boundary_policy() -> BoundaryPolicy {
+        BoundaryPolicy {
+            path: "unused".to_string(),
+            source_stage: None,
+        }
+    }
+
+    /// This gate's power precondition: the terminal stage's own uncapped
+    /// reach (`resolve_spread` at the last stage, padded past the horizon)
+    /// must be nonzero, or un-capping the mask would be a no-op.
+    fn terminal_uncapped_reach() -> usize {
+        let padded = super::pad_calendar_for_resolution(&STAGE_HOURS, TRAVEL_TIME_HOURS);
+        let terminal = STAGE_HOURS.len() - 1;
+        super::resolve_spread(TRAVEL_TIME_HOURS, terminal, &padded, None).stage_reach
+    }
+
+    /// J's (the downstream plant's) global bucket state index for `lag`
+    /// (`state.transit_buckets_out.start` plus `column_order`'s position),
+    /// resolved by canonical hydro index — the single derivation site every
+    /// helper below reads through.
+    fn bucket_state_index(setup: &StudySetup, lag: usize) -> usize {
+        let system = cobre_io::load_case(case_dir()).expect("load_case must succeed");
+        let j_idx = system
+            .hydros()
+            .iter()
+            .position(|h| h.id == DOWNSTREAM_ID)
+            .expect("downstream plant must exist in the canonical hydro order");
+        let state = setup.stage_state();
+        let pos = state
+            .transit_bucket_column_order
+            .iter()
+            .position(|&(p, l)| p == j_idx && l == lag)
+            .unwrap_or_else(|| panic!("lag {lag} must be a declared bucket slot"));
+        state.transit_buckets_out.start + pos
+    }
+
+    /// Count of nonzero entries in `template` landing on `row` — the
+    /// structural half of the keep-live pin (no solve).
+    fn row_nnz(template: &StageTemplate, row: usize) -> usize {
+        (0..template.num_cols)
+            .flat_map(|col| {
+                let start = template.col_starts[col] as usize;
+                let end = template.col_starts[col + 1] as usize;
+                template.row_indices[start..end].iter().map(|&r| r as usize)
+            })
+            .filter(|&r| r == row)
+            .count()
+    }
+
+    /// `col`'s own CSC entries in `template` — a live bucket outgoing column
+    /// carries exactly one (its own `emit_shift_rows` `+1.0` definition row);
+    /// a masked/frozen one carries none.
+    fn col_entries(template: &StageTemplate, col: usize) -> &[i32] {
+        let start = template.col_starts[col] as usize;
+        let end = template.col_starts[col + 1] as usize;
+        &template.row_indices[start..end]
+    }
+
+    /// Write a synthetic single-cut boundary checkpoint carrying `intercept`
+    /// and the explicit per-slot `coefficients`, unscaled (`cost_scale_factor:
+    /// Some(1.0)`). No entity manifest: the loader's identity check
+    /// short-circuits with a warning (`right_boundary_pricing.rs`'s pattern).
+    fn write_synthetic_boundary(
+        dir: &Path,
+        state_dimension: u32,
+        intercept: f64,
+        coefficients: &[f64],
+    ) {
+        let cuts = vec![PolicyCutRecord {
+            cut_id: 0,
+            slot_index: 0,
+            iteration: 0,
+            forward_pass_index: 0,
+            intercept,
+            coefficients,
+            is_active: true,
+        }];
+        let payload = StageCutsPayload {
+            stage_id: 0,
+            state_dimension,
+            capacity: 1,
+            warm_start_count: 0,
+            cuts: &cuts,
+            active_cut_indices: &[0],
+            populated_count: 1,
+            entity_manifest: &[],
+        };
+        let metadata = PolicyCheckpointMetadata {
+            format_version: FORMAT_VERSION,
+            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: "2026-08-12T00:00:00Z".to_string(),
+            num_stages: 1,
+            graph_manifest: GraphManifest {
+                n_pools: 1,
+                nodes: vec![ManifestNode {
+                    id: 100,
+                    stage_id: 0,
+                    pool_id: 0,
+                }],
+                edges: vec![],
+            },
+            producer: ProducerBlock {
+                completed_iterations: 0,
+                final_lower_bound: 0.0,
+                best_upper_bound: None,
+                max_iterations: 0,
+                forward_passes: 0,
+                warm_start_cuts: 0,
+                warm_start_counts: vec![],
+                rng_seed: 0,
+                total_visited_states: 0,
+                training_block_mode: "parallel".to_string(),
+                training_block_mode_per_stage: vec![],
+                cost_scale_factor: Some(1.0),
+            },
+        };
+        write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
+    }
+
+    /// Load a bucket-only boundary (`BETA` on `bucket_col`, zero elsewhere,
+    /// intercept `ALPHA`) and inject it into `setup`'s terminal pool.
+    fn inject_bucket_boundary(setup: &mut StudySetup, dir: &Path, bucket_col: usize) {
+        let state_dimension = setup.fcf.state_dimension as u32;
+        let mut coefficients = vec![0.0_f64; state_dimension as usize];
+        coefficients[bucket_col] = BETA;
+        write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
+
+        let boundary_cuts =
+            load_boundary_cuts(dir, 0, state_dimension, &[], &[], None, 1.0, &mut |_msg| {})
+                .expect("boundary cut must load");
+        inject_boundary_cuts(setup, &boundary_cuts);
+    }
+
+    /// Build the terminal pool's FROZEN LP template: the base structural
+    /// template plus one literal row per active cut, exactly as production
+    /// freezes a pool once per iteration.
+    fn freeze_terminal_template(setup: &StudySetup, pool_id: usize) -> StageTemplate {
+        let state = setup.stage_state();
+        let terminal_stage = setup.num_stages() - 1;
+        let ctx = setup.stage_ctx();
+        let base = &ctx.templates[terminal_stage];
+
+        let cut_state = CutStateProjection::new(
+            state,
+            StageStateConfig {
+                storage: true,
+                inflow_lags: true,
+            },
+        );
+
+        let mut batch = RowBatch {
+            num_rows: 0,
+            row_starts: Vec::new(),
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
+        build_cut_row_batch_into(
+            &mut batch,
+            &setup.fcf,
+            pool_id,
+            state,
+            &cut_state,
+            &base.col_scale,
+        );
+
+        let mut frozen = StageTemplate::empty();
+        let mut scratch = FreezeScratch::new();
+        freeze_rows_into_template(base, &batch, &mut frozen, &mut scratch);
+        frozen
+    }
+
+    /// Solve the terminal stage's frozen `template` against `pool` with the
+    /// state vector pinned to `pinned_state`, returning `(theta, priced_col)`'s
+    /// primal values — `priced_col` is read back from the SOLVED outgoing
+    /// column (never assumed equal to a pin), since the ring's shift-row
+    /// definition (`b_d^out = b_{d+1}^in + k_d * D`) makes the outgoing value
+    /// an affine, not identity, function of whichever incoming slot is
+    /// pinned. `raw_noise` is sized from `ctx`'s own hydro/load-bus/
+    /// stochastic-NCS counts (never hand-picked), so an all-zero draw is
+    /// always the correct shape regardless of which fixture calls this.
+    fn terminal_theta(
+        setup: &StudySetup,
+        template: &StageTemplate,
+        pool: &CutPool,
+        node_id: NodeId,
+        pinned_state: &[f64],
+        priced_col: usize,
+    ) -> (f64, f64) {
+        let comm = StubComm;
+        let mut workspace_pool = setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("create_workspace_pool");
+        let ws: &mut SolverWorkspace<ActiveSolver> = &mut workspace_pool.workspaces[0];
+        let ctx = setup.stage_ctx();
+        let training_ctx = setup.training_ctx();
+        let theta_col = setup.stage_state().theta;
+        let terminal_stage = setup.num_stages() - 1;
+
+        let raw_noise =
+            vec![0.0_f64; ctx.n_hydros + ctx.n_load_buses + ctx.ncs_stochastic_dense_col.len()];
+
+        ws.solver.reset_solver_state();
+        ws.solver.load_model(template);
+        patch_backward_opening_for_probe(
+            ws,
+            &ctx,
+            &training_ctx,
+            StageIdx(terminal_stage),
+            pinned_state,
+            &raw_noise,
+        )
+        .expect("StageSolvePrep::run must not error on the d45 fixture");
+
+        let view =
+            solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)
+                .expect("terminal stage solve must not error");
+        (view.primal[theta_col], view.primal[priced_col])
+    }
+
+    /// Pin the state vector with `x` on `bucket_col` and `0.0` elsewhere.
+    fn bucket_pin(setup: &StudySetup, bucket_col: usize, x: f64) -> Vec<f64> {
+        let mut pin = vec![0.0_f64; setup.stage_state().n_state];
+        pin[bucket_col] = x;
+        pin
+    }
+
+    /// The gated-off build reproduces today's capped mask (structural
+    /// byte-neutrality anchor), the boundary-present build un-caps the
+    /// terminal stage's own reach, sizing (`n_state`, bucket region ranges)
+    /// stays identical across the gate, and the newly-live terminal row
+    /// carries real nonzero coupling (not an empty shell).
+    #[test]
+    fn terminal_deep_lag_rows_and_columns_are_live_only_with_boundary_present() {
+        let uncapped_terminal_reach = terminal_uncapped_reach();
+        assert!(
+            uncapped_terminal_reach >= 1,
+            "gate has no power unless the terminal's own reach is nonzero (got \
+             {uncapped_terminal_reach})"
+        );
+
+        let setup_off = fresh_setup_with(case_dir(), |_cfg| {});
+        let setup_on = fresh_setup_with(case_dir(), |cfg| {
+            cfg.policy.boundary = Some(boundary_policy());
+        });
+
+        let state_off = setup_off.stage_state();
+        let state_on = setup_on.stage_state();
+        assert_eq!(
+            state_off.n_state, state_on.n_state,
+            "n_state must be gate-invariant"
+        );
+        assert_eq!(state_off.n_buckets, state_on.n_buckets);
+        assert_eq!(
+            state_off.transit_bucket_column_order,
+            state_on.transit_bucket_column_order
+        );
+        assert_eq!(state_off.transit_buckets_out, state_on.transit_buckets_out);
+        assert_eq!(state_off.transit_buckets_in, state_on.transit_buckets_in);
+
+        let terminal_stage = setup_off.num_stages() - 1;
+        let template_off = &setup_off.stage_ctx().templates[terminal_stage];
+        let template_on = &setup_on.stage_ctx().templates[terminal_stage];
+
+        assert_eq!(
+            template_on.num_rows,
+            template_off.num_rows + uncapped_terminal_reach,
+            "boundary-present must emit exactly the un-masked bucket-definition rows"
+        );
+
+        // The lag-1 slot's outgoing column follows row_pos automatically
+        // (frozen [0,0] off, live [0, inf) on) with no separate column edit.
+        let lag1_col = bucket_state_index(&setup_off, 1);
+        assert_eq!(template_off.col_lower[lag1_col], 0.0);
+        assert_eq!(template_off.col_upper[lag1_col], 0.0);
+        assert_eq!(template_on.col_lower[lag1_col], 0.0);
+        assert_eq!(template_on.col_upper[lag1_col], f64::INFINITY);
+
+        // Off, the masked column defines no row at all; on, it defines
+        // exactly one — a genuine equality carrying real coupling (the
+        // shift-row identity, plus the release column whenever the arc
+        // deposits at this lag/stage) — never an empty shell.
+        assert!(
+            col_entries(template_off, lag1_col).is_empty(),
+            "a masked bucket outgoing column must define no row"
+        );
+        let on_entries = col_entries(template_on, lag1_col);
+        assert_eq!(
+            on_entries.len(),
+            1,
+            "a live bucket outgoing column must define exactly its own row"
+        );
+        let new_row = on_entries[0] as usize;
+        assert_eq!(template_on.row_lower[new_row], 0.0);
+        assert_eq!(template_on.row_upper[new_row], 0.0);
+        assert!(
+            row_nnz(template_on, new_row) >= 2,
+            "a live bucket-definition row must carry at least its own shift-row identity"
+        );
+    }
+
+    /// With no `policy.boundary`, `final_lb` reproduces its pre-boundary-gate
+    /// value bit-for-bit — the gate's sole divergence is `config.policy.
+    /// boundary` presence. The `to_bits` literal is HiGHS-only (`#[cfg]`-gated):
+    /// bit-exactness is backend-specific, and CLP legitimately reaches a
+    /// different-but-valid vertex; the cross-backend byte-neutrality guarantee
+    /// is covered by the parity-hash reproduction in `parity.rs`.
+    #[cfg(feature = "highs")]
+    #[test]
+    fn gated_off_final_lb_is_byte_stable() {
+        let mut setup = fresh_setup_with(case_dir(), |_cfg| {});
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must return Ok");
+        assert!(outcome.error.is_none(), "expected no training error");
+        assert_eq!(
+            outcome.result.final_lb.to_bits(),
+            GATED_OFF_FINAL_LB_BITS,
+            "gated-off final_lb must stay bit-identical to the pre-boundary-gate tree; a \
+             mismatch means the boundary_present gate perturbed the no-boundary path"
+        );
+    }
+
+    /// The gated-off `final_lb` on this exact case (seed 42, 1 thread,
+    /// `StubComm`, `ActiveSolver`) — the HiGHS regression sentinel for
+    /// `gated_off_final_lb_is_byte_stable`.
+    #[cfg(feature = "highs")]
+    const GATED_OFF_FINAL_LB_BITS: u64 = 0x40c4_0000_0000_0000;
+
+    /// A terminal boundary cut carrying a known coefficient `BETA` on the
+    /// terminal lag-1 bucket slot prices theta by exactly `BETA * x`
+    /// (closed-form), mirroring `right_boundary_pricing.rs`'s thermal
+    /// `beta * x` pin on the bucket family.
+    ///
+    /// The probe pins lag **2**'s incoming column, not lag 1's: the ring's
+    /// shift-row definition is `b_d^out = b_{d+1}^in + k_d * D` (never an
+    /// identity), so lag 1's outgoing value — what the cut and theta actually
+    /// price — is controlled by lag 2's incoming, one hop deeper. The arc's
+    /// own release `D` adds a constant, cost-optimal offset independent of
+    /// this pin, so it cancels in the delta between the two solves below.
+    #[test]
+    fn boundary_cut_prices_the_terminal_bucket_state_by_beta_times_x() {
+        let mut setup = fresh_setup_with(case_dir(), |cfg| {
+            cfg.policy.boundary = Some(boundary_policy());
+            cfg.modeling.cost_scale_factor = Some(1.0);
+        });
+        let bucket_col = bucket_state_index(&setup, 1);
+        let pin_col = bucket_state_index(&setup, 2);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        inject_bucket_boundary(&mut setup, &tmp.path().join("boundary"), bucket_col);
+
+        let terminal_pool_id = setup.fcf.pools.len() - 1;
+        let template = freeze_terminal_template(&setup, terminal_pool_id);
+        let pool = &setup.fcf.pools[terminal_pool_id];
+        let terminal_node = NodeId(i32::try_from(setup.num_stages() - 1).expect("fits i32"));
+
+        let x0 = 0.0;
+        let x1 = 2.0;
+        let (theta0, outgoing0) = terminal_theta(
+            &setup,
+            &template,
+            pool,
+            terminal_node,
+            &bucket_pin(&setup, pin_col, x0),
+            bucket_col,
+        );
+        let (theta1, outgoing1) = terminal_theta(
+            &setup,
+            &template,
+            pool,
+            terminal_node,
+            &bucket_pin(&setup, pin_col, x1),
+            bucket_col,
+        );
+
+        assert!(
+            theta0 > 0.0 && theta1 > 0.0,
+            "both solves must land on the injected cut's binding regime \
+             (theta0={theta0}, theta1={theta1})"
+        );
+        assert!(
+            (outgoing1 - outgoing0 - (x1 - x0)).abs() < TOL,
+            "the deeper pin must move the priced outgoing lag 1:1 through the \
+             shift-row identity (b_1^out = b_2^in + k_1*D, D cost-optimal and \
+             pin-independent): outgoing0={outgoing0}, outgoing1={outgoing1}"
+        );
+
+        // Closed form: theta = alpha + beta * outgoing, using the SOLVED
+        // outgoing value (never the pin) — exact regardless of the arc's own
+        // cost-optimal release D, which the pin does not determine.
+        assert!(
+            (theta0 - (ALPHA + BETA * outgoing0)).abs() < TOL
+                && (theta1 - (ALPHA + BETA * outgoing1)).abs() < TOL,
+            "theta must equal alpha + beta*outgoing: theta0={theta0} \
+             (expected {}), theta1={theta1} (expected {})",
+            ALPHA + BETA * outgoing0,
+            ALPHA + BETA * outgoing1
+        );
+
+        let expected_delta = BETA * (outgoing1 - outgoing0);
+        let actual_delta = theta1 - theta0;
+        assert!(
+            (actual_delta - expected_delta).abs() < TOL,
+            "theta must respond to the in-transit volume by beta*x: expected \
+             delta {expected_delta}, got {actual_delta}"
+        );
+    }
+
+    /// The backward pass propagates the boundary coefficient inward —
+    /// after one training iteration, pool 0's (the earliest stage's)
+    /// generated cut carries a nonzero coefficient on the terminal bucket
+    /// state, reached through the shift-row chain connecting every stage's
+    /// outgoing column to the next stage's incoming column at the same
+    /// global index.
+    #[test]
+    fn backward_pass_propagates_boundary_coefficient_to_pool_zero() {
+        let mut setup = fresh_setup_with(case_dir(), |cfg| {
+            cfg.policy.boundary = Some(boundary_policy());
+        });
+        let bucket_col = bucket_state_index(&setup, 1);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        inject_bucket_boundary(&mut setup, &tmp.path().join("boundary"), bucket_col);
+
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error must be None; got {:?}",
+            outcome.error
+        );
+
+        let (_slot, _intercept, coefficients) = setup
+            .fcf
+            .active_cuts(0)
+            .next()
+            .expect("pool 0 must carry a generated cut after training");
+        assert!(
+            coefficients[bucket_col].abs() > TOL,
+            "pool 0's cut must carry a nonzero coefficient on the terminal bucket \
+             state; got {}",
+            coefficients[bucket_col]
+        );
     }
 }

@@ -5887,6 +5887,7 @@ mod anticipated_convergence_slow {
             backward_scheduler: cobre_io::config::BackwardScheduler::default(),
             cost_scale_factor: cobre_sddp::DEFAULT_COST_SCALE_FACTOR,
             inflow_lag_depth: None,
+            boundary_present: false,
         };
 
         let source = ScenarioSource {

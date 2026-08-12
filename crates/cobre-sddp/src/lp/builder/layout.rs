@@ -469,21 +469,21 @@ pub(crate) struct ConstraintRows {
     /// − deposit_d = 0`, one row per (plant, lag) bucket REACHABLE at this
     /// stage (`state.transit_bucket_column_order[slot]`'s lag within this stage's
     /// `per_stage_mask` cap for that plant — see [`Self::transit_bucket_row_pos`]);
-    /// unlike `commit_in`'s active-plant sparseness, a lag beyond the
-    /// cap targets a stage outside `[0, n_stages)` and gets no row at ANY
-    /// stage from here to the horizon (the cap only shrinks). Placed
-    /// immediately after [`Self::water_balance`], so `load_balance` and every
-    /// row cursor after it shift by this stage's reachable count (`<=
-    /// state.n_buckets`, `== state.n_buckets` only while every lag is still
-    /// within-horizon). Empty `start..start` when `state.n_buckets == 0` (the
-    /// B==0 byte-identity anchor: `load_balance` collapses back onto
-    /// `water_balance.end`).
+    /// unlike `commit_in`'s active-plant sparseness, a lag beyond the cap gets
+    /// no row at this stage — absent a boundary FCF the cap only shrinks toward
+    /// the horizon end (Terminal credit deferred); with one present the
+    /// terminal cap un-caps instead (Delivery-family right-boundary pricing;
+    /// both in `.claude/rules/sddp.md`). Placed immediately after
+    /// [`Self::water_balance`], so `load_balance` and every row cursor after it
+    /// shift by this stage's reachable count (`<= state.n_buckets`). Empty
+    /// `start..start` when `state.n_buckets == 0` (the B==0 byte-identity
+    /// anchor: `load_balance` collapses back onto `water_balance.end`).
     pub(crate) transit_bucket_definition: Range<usize>,
     /// For each GLOBAL bucket index (`state.transit_bucket_column_order`'s index),
     /// this stage's compact row position within [`Self::transit_bucket_definition`], or
     /// `None` when its lag is beyond this stage's reachable cap (no row; the
-    /// matching deposit in [`super::entries`]'s arc-release fill is dropped,
-    /// not misdirected to another row). Length `state.n_buckets`.
+    /// matching deposit in [`super::entries`]'s arc-release fill is dropped
+    /// there, not misdirected to another row). Length `state.n_buckets`.
     pub(crate) transit_bucket_row_pos: Vec<Option<usize>>,
     /// Row range for load balance constraints (one per bus per block).
     pub(crate) load_balance: Range<usize>,
@@ -1256,7 +1256,8 @@ impl<'a> StageLayout<'a> {
         // Sized from this stage's reachable count, not the stage-invariant
         // `state.n_buckets`: `build_transit_bucket_row_pos` masks a lag beyond
         // `ctx.per_stage_mask[stage_idx]`'s per-plant cap out of the row range
-        // entirely (`horizon_cap_active`'s "dropped by construction").
+        // entirely — the cap itself is `build_transit_bucket_topology`'s, gated
+        // on `boundary_present`.
         let (transit_bucket_row_pos, n_transit_bucket_rows) = build_transit_bucket_row_pos(
             &state.transit_bucket_column_order,
             &ctx.per_stage_mask,

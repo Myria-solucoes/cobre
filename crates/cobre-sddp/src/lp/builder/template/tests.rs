@@ -1974,7 +1974,7 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
     let par_lp = PrecomputedPar::default();
     let normal_lp = PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
-    let topology = build_transit_bucket_topology(&system);
+    let topology = build_transit_bucket_topology(&system, false);
     let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology, None)
         .expect("resolve_state_layout: valid test fixture");
     let hydro_cell_index = HydroCellIndex::build(system.hydros());
@@ -4693,7 +4693,7 @@ fn build_stage_templates_never_emits_k0_advisory_itself() {
     let par_lp = PrecomputedPar::default();
     let normal_lp = PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
-    let topology = build_transit_bucket_topology(&system);
+    let topology = build_transit_bucket_topology(&system, false);
     let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology, None)
         .expect("resolve_state_layout: valid test fixture");
     let per_stage_mask = topology.per_stage_mask;

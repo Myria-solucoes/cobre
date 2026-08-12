@@ -1488,6 +1488,9 @@ mod determinism {
                         hydro_min_storage_hm3: &[0.0; 3],
                         event_sender: None,
                         commitment_window_delivery_dates: &[],
+                        transit_seed_arcs: &[],
+                        past_defluences: &[],
+                        study_stage_dates: &[],
                     },
                     None,
                     &[],
@@ -2459,6 +2462,118 @@ mod water_travel_time_no_arc_byte_identity {
         super::common::parity_hash::run_golden_case("parity_baselines_clp", "D06", ClpSolver::new);
     }
 }
+
+mod water_travel_time_gate_byte_neutrality {
+    //! Byte-neutrality of the water-travel-time terminal keep-live gate when
+    //! `config.policy.boundary` is absent, on a DECLARED-ARC case (D44,
+    //! distinct from [`super::water_travel_time_no_arc_byte_identity`]'s
+    //! no-arc D06): a gated-off study must reproduce `final_lb` bit-for-bit
+    //! across two independent, freshly-constructed runs, and the gated-off
+    //! state layout must keep every terminal deep-lag bucket slot masked
+    //! exactly as the pre-keep-live layout — the "Terminal credit deferred"
+    //! contract the gate must preserve when no boundary is loaded. The
+    //! existing water goldens' own `.sha256` reproduction
+    //! (`d06_parity_hash_matches_existing_baseline_{highs,clp}` above) is the
+    //! companion evidence that no baseline moved; this module adds the
+    //! run-to-run reproducibility and mask-invariance checks a golden hash
+    //! alone does not pin.
+
+    use std::path::Path;
+
+    use cobre_io::config::BoundaryPolicy;
+    use cobre_solver::ActiveSolver;
+
+    use super::common::{StubComm, fresh_setup_with};
+
+    fn case_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/deterministic/d44-travel-time-substage")
+    }
+
+    fn train_gated_off() -> f64 {
+        let mut setup = fresh_setup_with(&case_dir(), |_cfg| {});
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must return Ok");
+        assert!(outcome.error.is_none(), "expected no training error");
+        outcome.result.final_lb
+    }
+
+    /// A water-travel-time study with no `config.policy.boundary` reproduces
+    /// `final_lb` bit-for-bit across two independent, freshly constructed
+    /// runs.
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn gated_off_declared_arc_study_reproduces_final_lb_across_independent_runs() {
+        let lb_a = train_gated_off();
+        let lb_b = train_gated_off();
+        assert_eq!(
+            lb_a.to_bits(),
+            lb_b.to_bits(),
+            "two independent runs of a gated-off declared-arc water-travel-time study \
+             must reproduce final_lb bit-for-bit (run A: {lb_a}, run B: {lb_b})"
+        );
+    }
+
+    /// With no `config.policy.boundary`, `n_state` and the declared bucket
+    /// column order stay gate-invariant, and every terminal bucket slot that
+    /// is masked `[0, 0]` with the gate off stays live once
+    /// `boundary_present` is true — proving the gated-off path stays
+    /// byte-neutral.
+    #[test]
+    fn gated_off_declared_arc_study_keeps_the_terminal_mask_and_state_dimension() {
+        let setup_off = fresh_setup_with(&case_dir(), |_cfg| {});
+        let setup_on = fresh_setup_with(&case_dir(), |cfg| {
+            cfg.policy.boundary = Some(BoundaryPolicy {
+                path: "unused".to_string(),
+                source_stage: None,
+            });
+        });
+
+        let state_off = setup_off.stage_state();
+        let state_on = setup_on.stage_state();
+        assert!(
+            state_off.n_buckets > 0,
+            "fixture has no power unless it declares at least one travel-time bucket"
+        );
+        assert_eq!(
+            state_off.n_state, state_on.n_state,
+            "n_state must stay gate-invariant"
+        );
+        assert_eq!(
+            state_off.transit_bucket_column_order, state_on.transit_bucket_column_order,
+            "bucket column order/depth must stay gate-invariant"
+        );
+
+        let terminal_stage = setup_off.num_stages() - 1;
+        let template_off = &setup_off.stage_ctx().templates[terminal_stage];
+        let template_on = &setup_on.stage_ctx().templates[terminal_stage];
+
+        let mut any_masked_off = false;
+        for pos in 0..state_off.n_buckets {
+            let col = state_off.transit_buckets_out.start + pos;
+            if template_off.col_lower[col] == 0.0 && template_off.col_upper[col] == 0.0 {
+                any_masked_off = true;
+                assert!(
+                    template_on.col_upper[col] > 0.0,
+                    "bucket column {col} (pos {pos}) masked [0,0] with the gate off must be \
+                     live once boundary_present is true"
+                );
+            }
+        }
+        assert!(
+            any_masked_off,
+            "fixture has no power unless at least one terminal bucket slot is masked \
+             [0,0] with no boundary present"
+        );
+    }
+}
+
 mod sacred_chain_parity_roster {
     //! The ten chain-parity obligations and their break-one-obligation
     //! verification table. No executable code — a module doc only, the

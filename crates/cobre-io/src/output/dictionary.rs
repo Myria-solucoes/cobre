@@ -23,7 +23,7 @@ use crate::output::schemas::{
     hydros_schema, in_transit_schema, inflow_lags_schema, iteration_timing_schema,
     non_controllables_schema, paths_schema, pumping_stations_schema, rank_timing_schema,
     retry_histogram_schema, row_selection_schema, scenario_summary_schema,
-    solver_iterations_schema, thermals_schema,
+    solver_iterations_schema, thermals_schema, transit_seed_schema,
 };
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
@@ -232,6 +232,7 @@ fn variables_csv_schemas() -> Vec<(&'static str, Schema)> {
         ("non_controllables", non_controllables_schema()),
         ("inflow_lags", inflow_lags_schema()),
         ("in_transit", in_transit_schema()),
+        ("transit_seed", transit_seed_schema()),
         ("generic_violations", generic_violations_schema()),
         ("paths", paths_schema()),
         ("scenario_summary", scenario_summary_schema()),
@@ -293,6 +294,7 @@ fn arrow_type_str(dt: &DataType) -> &'static str {
         DataType::Float64 => "f64",
         DataType::Boolean => "bool",
         DataType::Utf8 => "string",
+        DataType::Date32 => "date32",
         _ => "unknown",
     }
 }
@@ -356,7 +358,8 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         | "inflow_nonnegativity_slack_m3s"
         | "water_withdrawal_violation_pos_m3s"
         | "water_withdrawal_violation_neg_m3s"
-        | "pumped_volume_hm3" => return "m3/s",
+        | "pumped_volume_hm3"
+        | "value_m3s" => return "m3/s",
         "storage_initial_hm3"
         | "storage_final_hm3"
         | "storage_violation_below_hm3"
@@ -602,6 +605,12 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("in_transit", "delayed_arrival_hm3") => {
             "Water delivered this stage (non-zero only at lag 1)"
         }
+        ("transit_seed", "hydro_id") => {
+            "Upstream entity identifier whose release the window covers"
+        }
+        ("transit_seed", "start_date") => "Start of the release window (inclusive)",
+        ("transit_seed", "end_date") => "End of the release window (exclusive)",
+        ("transit_seed", "value_m3s") => "Mean release rate over the window",
         ("generic_violations", "stage_id") => "Stage index",
         ("generic_violations", "block_id") => "Block index within stage (nullable)",
         ("generic_violations", "constraint_id") => "Generic constraint identifier",
@@ -2300,8 +2309,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 253,
-            "variables.csv must have exactly 253 data rows (one per column across all schemas)"
+            row_count, 258,
+            "variables.csv must have exactly 258 data rows (one per column across all schemas)"
         );
     }
 

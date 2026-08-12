@@ -268,6 +268,23 @@ pub(crate) fn in_transit_schema() -> Schema {
     Schema::new(fields)
 }
 
+/// Schema for `simulation/transit_seed/` — rolling release-window seed for a
+/// continuing run's own upstream-release input.
+///
+/// Scenario-level: unlike every other simulation partition, a window's own
+/// `[start_date, end_date)` span anchors the row, not a stage/node index, so
+/// this schema carries `scenario_id` alone (no `stage_id`/`node_id`). Written
+/// only when the system declares a travel-time arc.
+pub(crate) fn transit_seed_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("scenario_id", DataType::Int32, false),
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("start_date", DataType::Date32, false),
+        Field::new("end_date", DataType::Date32, false),
+        Field::new("value_m3s", DataType::Float64, false),
+    ])
+}
+
 /// Schema for `simulation/anticipated_lanes/` — post-horizon commitment lane
 /// results, keyed `(thermal_id, delivery_date)`.
 ///
@@ -902,6 +919,38 @@ mod tests {
                 field.name()
             );
         }
+    }
+
+    #[test]
+    fn transit_seed_schema_field_count() {
+        let schema = transit_seed_schema();
+        assert_eq!(
+            schema.fields().len(),
+            5,
+            "transit_seed schema must have 5 fields"
+        );
+    }
+
+    #[test]
+    fn transit_seed_schema_all_non_nullable() {
+        let schema = transit_seed_schema();
+        for field in schema.fields() {
+            assert!(
+                !field.is_nullable(),
+                "transit_seed field '{}' must not be nullable",
+                field.name()
+            );
+        }
+    }
+
+    #[test]
+    fn transit_seed_schema_carries_no_stage_or_node_axis() {
+        let schema = transit_seed_schema();
+        assert!(
+            schema.field_with_name("stage_id").is_err()
+                && schema.field_with_name("node_id").is_err(),
+            "transit_seed is scenario-level; it must not carry the stage/node row prefix"
+        );
     }
 
     #[test]
