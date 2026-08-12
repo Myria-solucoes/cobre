@@ -4,6 +4,10 @@
 //! convergence monitoring, and policy simulation. Parallelized via rayon (intra-rank)
 //! and ferrompi (inter-rank).
 
+// Internal (unpublished) workspace crate: public items intra-doc-link their
+// pub(crate) collaborators as a maintainer aid (docs read with
+// --document-private-items); the public-only doc gate flags these intentional links.
+#![allow(rustdoc::private_intra_doc_links)]
 #![cfg_attr(
     test,
     allow(

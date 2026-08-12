@@ -24,6 +24,10 @@
 //!
 //! See the [repository](https://github.com/cobre-rs/cobre) for the current status.
 
+// Internal (unpublished) workspace crate: public items intra-doc-link their
+// pub(crate) collaborators as a maintainer aid (docs read with
+// --document-private-items); the public-only doc gate flags these intentional links.
+#![allow(rustdoc::private_intra_doc_links)]
 #![cfg_attr(
     test,
     allow(

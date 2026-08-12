@@ -1686,7 +1686,7 @@ fn oracle_raw_noise(setup: &StudySetup, node_pos: NodePos) -> Vec<f64> {
 /// — the base template for the node's stage with the incoming-state pin and the
 /// realized noise applied exactly as the training solve does (via the shared
 /// [`StageSolvePrep::run`] pipeline). The incoming-state columns land pinned to
-/// [`Self::initial_state`]; the extensive-form composer frees and couples them for
+/// [`StudySetup::initial_state`]; the extensive-form composer frees and couples them for
 /// non-root nodes.
 ///
 /// # Panics
