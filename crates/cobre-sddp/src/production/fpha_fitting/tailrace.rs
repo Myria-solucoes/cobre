@@ -33,16 +33,24 @@ use super::error::FphaFittingError;
 /// [`TailraceSegments::from_rows`].
 const CONTIG_EPS: f64 = 1e-6;
 
-/// Absolute tolerance for the inter-segment C0-continuity check (m).
+/// Absolute floor (m) for the inter-segment C0-continuity check, for a
+/// near-zero tailrace level where a purely relative term would collapse to
+/// near-zero.
+const C0_EPS_ABS: f64 = 1e-3;
+
+/// Relative tolerance for the inter-segment C0-continuity check.
 ///
 /// Contract (Voice 1): adjacent quartics are continuous when their boundary
-/// elevations agree within `C0_EPS`, never bit-for-bit (`==`) — the two are fit
-/// independently and meet only to calibration precision (~1e-4 m), so `==` would
-/// reject every real family. The `1e-3` m (1 mm) bound accepts that residual
-/// while a genuine data error breaks by metres; a tighter `1e-6` m rejects
-/// faithfully-converted real curves, and a sub-mm break in a ~100 m level range
-/// is hydraulically meaningless. Owning check: [`TailraceSegments::from_rows`].
-const C0_EPS: f64 = 1e-3;
+/// elevations agree within `max(C0_EPS_ABS, C0_EPS_REL * max(|h_left|,
+/// |h_right|))`, never bit-for-bit (`==`) — the two quartics are fit
+/// independently and meet only to calibration precision, which scales with the
+/// tailrace level rather than staying fixed in absolute terms (a fixed-`1e-3`-m
+/// bound faithfully accepts a near-zero curve's residual but under-scales a
+/// hundreds-of-metres curve's). `C0_EPS_REL` (100 ppm) is the owner-chosen
+/// bound: loose enough to admit that calibration residual at any level, tight
+/// enough that a genuine metre-scale discontinuity still exceeds it by roughly
+/// an order of magnitude. Owning check: [`TailraceSegments::from_rows`].
+const C0_EPS_REL: f64 = 1e-4;
 
 /// One degree-4 piece of a family's tailrace curve.
 ///
@@ -138,7 +146,8 @@ impl TailraceSegments {
             let boundary = prev.outflow_max;
             let h_left = prev.eval(boundary);
             let h_right = curr.eval(boundary);
-            if (h_left - h_right).abs() > C0_EPS {
+            let c0_tolerance = (C0_EPS_REL * h_left.abs().max(h_right.abs())).max(C0_EPS_ABS);
+            if (h_left - h_right).abs() > c0_tolerance {
                 return Err(FphaFittingError::TailraceDiscontinuity {
                     hydro_name: hydro_name.to_owned(),
                     boundary,
@@ -532,6 +541,45 @@ mod tests {
                 assert_eq!(boundary, b);
                 assert!((h_left - 1.0).abs() < 1e-12);
                 assert!((h_right - 1.5).abs() < 1e-12);
+            }
+            other => panic!("expected TailraceDiscontinuity, got {other:?}"),
+        }
+    }
+
+    /// A ~3.6e-6-relative knot gap at a ~775 m tailrace level (the reported
+    /// false rejection: two independently-fit quartics meeting only to
+    /// calibration precision) is accepted.
+    #[test]
+    fn c0_relative_gap_within_tolerance_at_high_magnitude_is_accepted() {
+        let b = 416.0;
+        let rows = vec![
+            row(1, 0.0, b, [774.924_141_892_876_4, 0.0, 0.0, 0.0, 0.0]),
+            row(2, b, 1000.0, [774.921_368_920_938, 0.0, 0.0, 0.0, 0.0]),
+        ];
+        let seg = TailraceSegments::from_rows(&rows, "Plant");
+        assert!(
+            seg.is_ok(),
+            "a knot gap within the relative tolerance must be accepted, got: {seg:?}"
+        );
+    }
+
+    /// A genuine metre-scale discontinuity at the same ~775 m level (well
+    /// beyond the relative tolerance) is still rejected — the tolerance must
+    /// have power, not just admit the reported calibration residual.
+    #[test]
+    fn c0_metre_scale_gap_beyond_tolerance_is_still_rejected() {
+        let b = 416.0;
+        let rows = vec![
+            row(1, 0.0, b, [775.0, 0.0, 0.0, 0.0, 0.0]),
+            row(2, b, 1000.0, [773.5, 0.0, 0.0, 0.0, 0.0]),
+        ];
+        let err = TailraceSegments::from_rows(&rows, "Plant").unwrap_err();
+        match err {
+            FphaFittingError::TailraceDiscontinuity {
+                h_left, h_right, ..
+            } => {
+                assert!((h_left - 775.0).abs() < 1e-12);
+                assert!((h_right - 773.5).abs() < 1e-12);
             }
             other => panic!("expected TailraceDiscontinuity, got {other:?}"),
         }

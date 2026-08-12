@@ -24,8 +24,8 @@
 //! | 7a| Filling guards (hard): `filling ⟹ entry_stage_id` (a bare window without filling is valid), `start_stage_id < entry_stage_id`, seed in `[0, min_storage_hm3)`, no `exit_stage_id` on a filling hydro, seed `== 0` when `start_stage_id > 0` | `system/hydros.json` | `InvalidValue` |
 //! | 7b| `entry_stage_id >= horizon` on a filling hydro (fills throughout, never operates within this study) | `system/hydros.json` | `ModelQuality` (warning) |
 //! | 8 | Geometry `volume_hm3` strictly increasing         | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
-//! | 9 | Geometry `height_m` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
-//! |10 | Geometry `area_km2` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
+//! | 9 | Geometry `height_m` non-decreasing (within a relative tolerance) | `system/hydro_geometry.parquet` | `BusinessRuleViolation`|
+//! |10 | Geometry `area_km2` non-decreasing (within a relative tolerance) | `system/hydro_geometry.parquet` | `BusinessRuleViolation`|
 //! |11 | FPHA: at least 1 plane per (hydro, stage)         | `system/fpha_hyperplanes.parquet`     | `BusinessRuleViolation`|
 //! |12 | FPHA: `gamma_v >= 0`, `gamma_s <= 0`              | `system/fpha_hyperplanes.parquet`     | `BusinessRuleViolation`|
 //! |13 | `min_generation_mw <= max_generation_mw` (thermal)| `system/thermals.json`                | `InvalidValue`         |
@@ -109,7 +109,7 @@
 //! |30  | Season defined in `season_definitions` but not referenced by any stage   | `stages.json`                                  | `ModelQuality` (warning) |
 //! |31  | Observation resolution must not be finer than season resolution          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
 //! |32  | *(retired — number never reused)* | — | — |
-//! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
+//! |33  | Filling schedule reaches the dead volume, within a relative tolerance: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json` | `BusinessRuleViolation`  |
 //! |34  | PAR order > 0 but every study stage has `inflow_lags == false` (inflow-lag state omitted) | `stages.json`        | `ModelQuality` (warning) |
 //! |35  | User-supplied `inflow_ar_coefficients.parquet` must pass the periodic-ACF closure stationarity gate (external-input path only; annual-aware; season resolved via `resolve_stage_seasons`'s `season_map`-or-fallback) | `scenarios/inflow_ar_coefficients.parquet` | `InvalidValue` (or `BusinessRuleViolation` when a stage's season is genuinely unresolvable) |
 //! |36  | Node `scenario_id` required at a stage carrying a slot-occupying external class, rejected as meaningless where none (declared `nodes[]`, enumerated forward selection only) | `stages.json` | `InvalidValue` |
@@ -223,3 +223,9 @@ const CORR_TOLERANCE: f64 = 1e-9;
 /// decimal but not in binary (0.1 + 0.2 > 0.3); a plant declaring no groups is
 /// already exact and is admitted by the strict `>` in `check_hydro_unit_groups`.
 const ENVELOPE_TOLERANCE: f64 = 1e-9;
+
+/// `ENVELOPE_TOLERANCE` scaled to `value`'s own magnitude, floored at `1.0` so a
+/// near-zero declared/required value doesn't collapse the tolerance to zero.
+fn envelope_tolerance(value: f64) -> f64 {
+    ENVELOPE_TOLERANCE * value.abs().max(1.0)
+}

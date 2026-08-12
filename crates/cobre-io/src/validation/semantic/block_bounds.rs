@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use cobre_core::{EntityId, Hydro, HydroUnitGroup};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
-use super::ENVELOPE_TOLERANCE;
+use super::envelope_tolerance;
 
 /// Per-family constants the rejection messages need: the capitalized family
 /// name, the row's id-field name, the row-kind label, and the source Parquet
@@ -576,7 +576,7 @@ pub(super) fn check_bound_raises_declared_capacity(data: &ParsedData, ctx: &mut 
 
         for (column, value, declared_value) in columns {
             let Some(value) = value else { continue };
-            let tolerance = ENVELOPE_TOLERANCE * declared_value.abs().max(1.0);
+            let tolerance = envelope_tolerance(declared_value);
             if value > declared_value + tolerance {
                 emit_raises_declared_capacity_error(
                     row.hydro_id.0,
@@ -661,7 +661,7 @@ pub(super) fn check_group_bound_raises_declared_capacity(
 
         for (column, value, declared_value) in columns {
             let Some(value) = value else { continue };
-            let tolerance = ENVELOPE_TOLERANCE * declared_value.abs().max(1.0);
+            let tolerance = envelope_tolerance(declared_value);
             if value > declared_value + tolerance {
                 emit_group_raises_declared_capacity_error(
                     row.hydro_id.0,

@@ -13,7 +13,7 @@ use cobre_stochastic::season_cast::{RealizedWindow, SeasonPeriodWindow, cast};
 use crate::{LoadError, StageIdResolver};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
-use super::ENVELOPE_TOLERANCE;
+use super::{ENVELOPE_TOLERANCE, envelope_tolerance};
 
 // ── Rules 6-10: Penalty ordering ──────────────────────────────────────────────
 
@@ -1144,9 +1144,13 @@ const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
 /// per-stage `filling_min_rate_m3s` override from `hydro_bounds` when present,
 /// else the entity-level rate.
 ///
-/// One-sided: only under-provisioning is rejected (strict `capacity < required`,
-/// never float equality) — surplus capacity merely relaxes the earliest floors to
-/// slack, so a two-sided / exact-equality test would reject valid schedules.
+/// One-sided: only genuine under-provisioning is rejected
+/// (`capacity < required - tolerance`, never float equality) — a
+/// relative-with-floor tolerance (`envelope_tolerance`, the same idiom
+/// `check_hydro_unit_groups` uses) absorbs the round-off `Σ ζ_s·rate_s`
+/// accumulates against `min_storage_hm3 - seed`; surplus capacity merely
+/// relaxes the earliest floors to slack, so a two-sided / exact-equality test
+/// would reject valid schedules.
 ///
 /// Stage ids index `data.stages.stages` by `Stage::id`, not array position: the
 /// override key (`HydroBoundsRow.stage_id`) and `start_stage_id`/`entry_stage_id`
@@ -1197,8 +1201,9 @@ pub(super) fn check_filling_sufficiency(data: &ParsedData, ctx: &mut ValidationC
 
         let seed = seed_by_hydro.get(&hydro.id.0).copied().unwrap_or(0.0);
         let required = hydro.min_storage_hm3 - seed;
+        let tolerance = envelope_tolerance(required);
 
-        if capacity < required {
+        if capacity < required - tolerance {
             let entity_str = format!("Hydro {}", hydro.id.0);
             ctx.add_error(
                 ErrorKind::BusinessRuleViolation,
@@ -1229,6 +1234,7 @@ pub(super) fn check_filling_sufficiency(data: &ParsedData, ctx: &mut ValidationC
 mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
+    use super::M3S_TO_HM3;
     use crate::{
         scenarios::{
             BlockFactor, InflowAnnualComponentRow, InflowArCoefficientRow, InflowHistoryRow,
@@ -2452,6 +2458,76 @@ mod tests {
         assert!(
             !ctx.has_errors(),
             "an over-provisioned filling schedule should produce no errors at all, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A `capacity` a hair below `required` — by less than the
+    /// relative-with-floor tolerance — must not be rejected: the round-off
+    /// false-reject this check exists to fix (reported Δ ≈ 5e-14 hm3 on a
+    /// ~232 hm3 requirement, ~2e-16 relative).
+    #[test]
+    fn test_filling_sufficiency_within_relative_tolerance_no_error() {
+        let zeta = 720.0 * M3S_TO_HM3;
+        let rate = 30.0;
+        let capacity = zeta * rate + zeta * rate;
+        // A relative gap an order of magnitude below the tolerance.
+        let min_storage_hm3 = capacity + capacity.abs().max(1.0) * 1e-10;
+        let hydro = make_filling_hydro(7, min_storage_hm3, 2, 4, rate);
+        let data = make_data_5b(
+            vec![hydro],
+            make_stages_with_block_duration(&[2, 3], 720.0),
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+
+        let relevant: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.message.contains("filling schedule is insufficient"))
+            .collect();
+        assert!(
+            relevant.is_empty(),
+            "a capacity within relative tolerance of required must not be rejected, \
+             got: {relevant:?}"
+        );
+    }
+
+    /// A `capacity` short of `required` by an order of magnitude MORE than the
+    /// tolerance is still rejected — the tolerance must have power, not just
+    /// admit the reported round-off.
+    #[test]
+    fn test_filling_sufficiency_beyond_tolerance_still_errors() {
+        let zeta = 720.0 * M3S_TO_HM3;
+        let rate = 30.0;
+        let capacity = zeta * rate + zeta * rate;
+        // A relative gap an order of magnitude above the tolerance.
+        let min_storage_hm3 = capacity + capacity.abs().max(1.0) * 1e-8;
+        let hydro = make_filling_hydro(7, min_storage_hm3, 2, 4, rate);
+        let data = make_data_5b(
+            vec![hydro],
+            make_stages_with_block_duration(&[2, 3], 720.0),
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+
+        let relevant: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.message.contains("filling schedule is insufficient"))
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "a shortfall beyond the tolerance must still be rejected, got: {:?}",
             ctx.errors()
         );
     }
