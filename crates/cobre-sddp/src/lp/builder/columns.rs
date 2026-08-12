@@ -367,10 +367,10 @@ fn cell_max_turbined(
 
 /// Cell `c`'s min-turbine soft-floor RHS: the PLAIN SUM of the cell's own
 /// member groups' resolved `min_turbined_m3s`, never a fold and never clamped
-/// against the plant's declared minimum — see the min-floor contract in
-/// `.claude/rules/sddp.md`. A floor on a sum of variables (the cell's member
-/// groups all feed the same aggregate turbine column) adds; it does not fold
-/// or clamp the way the closing `MAX` bound does.
+/// against the plant's declared minimum — see the min-floor contract. A floor
+/// on a sum of variables (the cell's member groups all feed the same
+/// aggregate turbine column) adds; it does not fold or clamp the way the
+/// closing `MAX` bound does.
 pub(super) fn cell_min_turbined(
     groups: &[HydroUnitGroup],
     positions: &[usize],
@@ -821,7 +821,7 @@ fn cell_max_generation(
 /// Cell `c`'s min-generation soft-floor RHS: the PLAIN SUM of the cell's own
 /// member groups' resolved `min_generation_mw` — never folded through a
 /// productivity, never clamped against the plant's declared minimum. See
-/// [`cell_min_turbined`] and the min-floor contract in `.claude/rules/sddp.md`.
+/// [`cell_min_turbined`] and the min-floor contract.
 pub(super) fn cell_min_generation(
     groups: &[HydroUnitGroup],
     positions: &[usize],
@@ -1003,8 +1003,7 @@ enum BlockSlackFamily {
 
 /// The two cell-keyed operational-violation slack families, addressing a
 /// disjoint `n_cells * n_blks` column range — the min-floor mirror of
-/// [`BlockSlackFamily`]'s hydro-keyed families. See the min-floor contract in
-/// `.claude/rules/sddp.md`.
+/// [`BlockSlackFamily`]'s hydro-keyed families. See the min-floor contract.
 #[derive(Clone, Copy)]
 enum CellSlackFamily {
     /// Active iff the cell's resolved `cell_min_turbined` sum is `> 0.0`.
@@ -1081,7 +1080,7 @@ fn fill_block_family(
 /// columns; `col_lower` stays at the `0.0` vec default. The cost is the
 /// PLANT's own penalty (`HydroPenalties` is plant-level) at FULL magnitude —
 /// never divided by the plant's cell count — replicated onto every one of the
-/// plant's cells; see the min-floor contract in `.claude/rules/sddp.md`.
+/// plant's cells; see the min-floor contract.
 fn fill_cell_block_family(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,

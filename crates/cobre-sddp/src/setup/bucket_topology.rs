@@ -130,8 +130,8 @@ fn horizon_cap_active(active: usize, stage: usize, n_stages: usize) -> usize {
 /// `boundary_present` (the caller's `config.policy.boundary.is_some()`) gates
 /// [`horizon_cap_active`]: `false` reproduces today's capped mask byte-for-byte
 /// (Terminal credit deferred); `true` un-caps the terminal deep-lag slots so
-/// they stay live and reach the boundary-priced cut-state projection (see
-/// `.claude/rules/sddp.md`'s "Delivery-family right-boundary pricing").
+/// they stay live and reach the boundary-priced cut-state projection (the
+/// "Delivery-family right-boundary pricing" contract).
 pub(crate) fn build_transit_bucket_topology(
     system: &System,
     boundary_present: bool,

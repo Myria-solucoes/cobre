@@ -373,8 +373,8 @@ pub(crate) struct NcsNoiseOffsets {
 ///
 /// Availability `α = clamp(mean + std · η, 0, 1)` is a **dimensionless factor**;
 /// the realized cap is `max_gen · α · block_factor`. The parquet `(mean, std)`
-/// are stored as factors, not MW. (Authoritative home of this contract; see
-/// `.claude/rules/sddp.md`.)
+/// are stored as factors, not MW (the authoritative statement of the NCS
+/// stochastic availability-factor contract).
 ///
 /// With `allow_curtailment == false` the lower bound equals the upper bound, so
 /// the source must run at exactly the realized availability (aggregate

@@ -1486,8 +1486,7 @@ pub(super) fn fill_z_inflow_entries(
 ///
 /// The two power-side families couple only the CELL's own columns to the
 /// CELL's own slack — never summed across a plant's cells the way the two
-/// flow families above are — see the min-floor contract in
-/// `.claude/rules/sddp.md`.
+/// flow families above are — see the min-floor contract.
 pub(super) fn fill_operational_violation_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -5256,8 +5255,8 @@ mod pumping_water_tests {
     /// groups have distinct minima (discriminates a max-fold mutation), and the
     /// plant's OWN declared `min_turbined_m3s`/`min_generation_mw` are set below
     /// EVERY cell's own group-sum (discriminates a `.min(plant)` clamp). Pins the
-    /// min-floor contract in `.claude/rules/sddp.md`: RHS = plain sum of the
-    /// cell's own groups, never a fold, never a plant clamp, never apportioned.
+    /// min-floor contract: RHS = plain sum of the cell's own groups, never a
+    /// fold, never a plant clamp, never apportioned.
     fn min_floor_fixture() -> Hydro {
         let mut hydro = fixture_hydro_ds(20, None);
         hydro.min_turbined_m3s = 1.0;

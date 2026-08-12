@@ -434,7 +434,7 @@ fn fill_z_inflow_rows(
 /// CELL per-block: each cell's RHS is the PLAIN SUM of its own member groups'
 /// resolved minimum (`cell_min_turbined`/`cell_min_generation`), never the
 /// plant's declared `min_turbined_m3s`/`min_generation_mw` — see the
-/// min-floor contract in `.claude/rules/sddp.md`.
+/// min-floor contract.
 ///
 /// - **Min outflow** (`>=`): `row_lower = min_outflow_m3s`, `row_upper = +INF`.
 /// - **Max outflow** (`<=`): `row_lower = -INF`, `row_upper = max_outflow_m3s`

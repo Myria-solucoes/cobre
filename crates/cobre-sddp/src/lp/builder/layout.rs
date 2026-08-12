@@ -381,7 +381,7 @@ pub(crate) struct EquipmentColumns {
 /// `n_cells * n_blks` (non-empty only when `n_cells > 0`) — a cell's own
 /// min-turbine/min-generation floor is the sum of ITS OWN member groups, never
 /// the plant's aggregate, so each cell gets its own row and its own slack
-/// column. See the min-floor contract in `.claude/rules/sddp.md`. Slack
+/// column. See the min-floor contract. Slack
 /// columns follow the withdrawal slacks; constraint rows follow the
 /// evaporation rows. Kept as one nested struct (not destructured) because the
 /// column and row halves are allocated as two back-to-back `RangeCursor` runs
@@ -472,8 +472,8 @@ pub(crate) struct ConstraintRows {
     /// unlike `commit_in`'s active-plant sparseness, a lag beyond the cap gets
     /// no row at this stage — absent a boundary FCF the cap only shrinks toward
     /// the horizon end (Terminal credit deferred); with one present the
-    /// terminal cap un-caps instead (Delivery-family right-boundary pricing;
-    /// both in `.claude/rules/sddp.md`). Placed immediately after
+    /// terminal cap un-caps instead (Delivery-family right-boundary pricing).
+    /// Placed immediately after
     /// [`Self::water_balance`], so `load_balance` and every row cursor after it
     /// shift by this stage's reachable count (`<= state.n_buckets`). Empty
     /// `start..start` when `state.n_buckets == 0` (the B==0 byte-identity

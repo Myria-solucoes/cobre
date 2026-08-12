@@ -8,8 +8,8 @@
 //! nodes' stage costs — the exact bound `Σ_ℓ P(ℓ)·C(ℓ)` the caller reduces with
 //! the compensated `Σ w·c` primitive.
 //!
-//! Determinism mirrors the by-node backward scheduler
-//! (`.claude/rules/sddp.md` "By-node scheduler is warm-start-only"): a stage's
+//! Determinism mirrors the by-node backward scheduler's own
+//! "By-node scheduler is warm-start-only" contract: a stage's
 //! visits are claimed from a shared atomic counter in any order, written into a
 //! per-node arena keyed by canonical node position, and aggregated in canonical
 //! order — so the exact bound, the lower bound, and the generated cut set are

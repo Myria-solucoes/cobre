@@ -196,6 +196,10 @@ pub struct RecentObservation {
 /// others (including late-entry hydros) in
 /// [`storage`](InitialConditions::storage).
 ///
+/// The `#[serde(default)]` fields below (`past_anticipated_commitments` onward)
+/// are part of the postcard wire format MPI broadcast round-trips: a new field
+/// must be appended at the end, never inserted earlier in the struct.
+///
 /// [`filling_storage`]: InitialConditions::filling_storage
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -213,9 +217,6 @@ pub struct InitialConditions {
     /// Past externally-decided anticipated commitments per anticipated thermal
     /// plant; empty without any. See [`AnticipatedCommitmentHistory`] for the
     /// per-entry contract and sunk-cost semantics.
-    ///
-    /// Field declaration order is part of the postcard wire format used by MPI
-    /// broadcast: append new fields at the end, never above this one.
     #[cfg_attr(feature = "serde", serde(default))]
     pub past_anticipated_commitments: Vec<AnticipatedCommitmentHistory>,
     /// Observed inflow data for partial periods before the study start, to seed
@@ -229,17 +230,11 @@ pub struct InitialConditions {
     ///
     /// Always emitted on output even when empty — omitting it would break the
     /// postcard round-trip used by MPI broadcast.
-    ///
-    /// Field declaration order is part of the postcard wire format used by MPI
-    /// broadcast: append new fields at the end, never above this one.
     #[cfg_attr(feature = "serde", serde(default))]
     pub past_defluences: Vec<HydroPastDefluence>,
     /// Future in-study decided anticipated deliveries per anticipated thermal
     /// plant, delivered after the study horizon; empty without any. See
     /// [`FutureAnticipatedDelivery`] for the per-entry contract.
-    ///
-    /// Field declaration order is part of the postcard wire format used by MPI
-    /// broadcast: append new fields at the end, never above this one.
     #[cfg_attr(feature = "serde", serde(default))]
     pub future_anticipated_deliveries: Vec<FutureAnticipatedDelivery>,
 }

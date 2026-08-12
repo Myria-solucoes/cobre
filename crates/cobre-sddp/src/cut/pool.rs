@@ -957,8 +957,8 @@ impl CutPool {
     /// Grow this pool's capacity in place. `Vec::resize` only appends new
     /// (zeroed/inactive) slots when growing — it never relocates an existing
     /// element — so every populated slot keeps its index, the invariant a
-    /// stored basis's slot-identity match depends on (`.claude/rules/sddp.md`,
-    /// "Cut pool is append-only; basis matches by slot identity"). Reserved
+    /// stored basis's slot-identity match depends on (the "Cut pool is
+    /// append-only; basis matches by slot identity" contract). Reserved
     /// seam: the training session's between-iteration growth hook calls this
     /// when a pool's realized visit rate would exceed its construction-time
     /// floor.
