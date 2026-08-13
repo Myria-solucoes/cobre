@@ -60,6 +60,9 @@ pub(crate) struct ForwardPassInputs<'a, S: SolverInterface + Send> {
     pub frozen: &'a [StageTemplate],
     /// Future-cost function — read-only for the forward pass.
     pub fcf: &'a FutureCostFunction,
+    /// Whether the terminal stage's static template carries boundary cuts,
+    /// captured once when it was baked at priming.
+    pub terminal_has_boundary_cuts: bool,
     /// Study-level training context (horizon, indexer, stochastic model).
     pub training_ctx: &'a TrainingContext<'a>,
     /// Trajectory output records; pre-allocated by the caller.
@@ -106,6 +109,7 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
             ctx,
             frozen: &scratch.frozen_templates,
             fcf,
+            terminal_has_boundary_cuts: scratch.terminal_has_boundary_cuts,
             training_ctx,
             records: &mut scratch.records[..fwd_record_len],
             local_forward_passes: ranks.my_actual_fwd,
@@ -440,8 +444,11 @@ impl ForwardPassState {
 
         let noise_dim = stochastic.dim();
 
-        let (root_node, terminal_has_boundary_cuts) =
-            Self::resolve_root_and_terminal_cuts(training_ctx, num_stages, inputs.fcf)?;
+        let (root_node, terminal_has_boundary_cuts) = Self::resolve_root_and_terminal_cuts(
+            training_ctx,
+            num_stages,
+            inputs.terminal_has_boundary_cuts,
+        )?;
 
         // Re-size the per-worker per-stage accumulators: the worker count may
         // differ from `new()` if the pool shrank. Fast path resets in place when
@@ -574,8 +581,11 @@ impl ForwardPassState {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
-        let terminal_has_boundary_cuts =
-            Self::resolve_terminal_has_boundary_cuts(training_ctx, num_stages, inputs.fcf)?;
+        let terminal_has_boundary_cuts = Self::resolve_terminal_has_boundary_cuts(
+            training_ctx,
+            num_stages,
+            inputs.terminal_has_boundary_cuts,
+        )?;
 
         let dcs_params = training_ctx.dcs.filter(|p| p.is_active(inputs.iteration));
 
@@ -624,8 +634,10 @@ impl ForwardPassState {
         })
     }
 
-    /// Whether the terminal stage's pool carries warm-start (boundary) cuts;
-    /// `false` for a zero-stage horizon.
+    /// Whether the terminal stage's static template carries boundary cuts —
+    /// `terminal_has_boundary_cuts` as captured once at its priming bake, not
+    /// a live pool lookup (the terminal template is never refrozen after
+    /// priming). `false` for a zero-stage horizon.
     ///
     /// # Errors
     ///
@@ -633,12 +645,12 @@ impl ForwardPassState {
     fn resolve_terminal_has_boundary_cuts(
         training_ctx: &TrainingContext<'_>,
         num_stages: usize,
-        fcf: &FutureCostFunction,
+        terminal_has_boundary_cuts: bool,
     ) -> Result<bool, SddpError> {
         if num_stages == 0 {
             return Ok(false);
         }
-        let terminal_node = training_ctx
+        training_ctx
             .node_graph
             .any_stage_node(StageIdx(num_stages - 1))
             .ok_or_else(|| {
@@ -646,11 +658,11 @@ impl ForwardPassState {
                     "forward pass: terminal stage carries no alive node".to_string(),
                 )
             })?;
-        Ok(fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count > 0)
+        Ok(terminal_has_boundary_cuts)
     }
 
     /// Resolve the sampled traversal's root node and whether its terminal
-    /// pool carries warm-start boundary cuts.
+    /// stage's static template carries boundary cuts.
     ///
     /// # Errors
     ///
@@ -659,7 +671,7 @@ impl ForwardPassState {
     fn resolve_root_and_terminal_cuts(
         training_ctx: &TrainingContext<'_>,
         num_stages: usize,
-        fcf: &FutureCostFunction,
+        terminal_has_boundary_cuts: bool,
     ) -> Result<(NodePos, bool), SddpError> {
         let root_node = training_ctx
             .node_graph
@@ -667,8 +679,11 @@ impl ForwardPassState {
             .ok_or_else(|| {
                 SddpError::Validation("forward pass: stage 0 carries no alive node".to_string())
             })?;
-        let terminal_has_boundary_cuts =
-            Self::resolve_terminal_has_boundary_cuts(training_ctx, num_stages, fcf)?;
+        let terminal_has_boundary_cuts = Self::resolve_terminal_has_boundary_cuts(
+            training_ctx,
+            num_stages,
+            terminal_has_boundary_cuts,
+        )?;
         Ok((root_node, terminal_has_boundary_cuts))
     }
 
@@ -1034,6 +1049,7 @@ mod tests {
         StageStateConfig,
     };
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder, WorkerPhaseTimings};
+    use cobre_io::OwnedPolicyCutRecord;
     use cobre_solver::{
         Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
         SolverStatistics, StageTemplate,
@@ -1044,9 +1060,9 @@ mod tests {
     use super::*;
     use crate::{
         context::{StageContext, TrainingContext},
-        cut::FutureCostFunction,
+        cut::{CutPool, FutureCostFunction},
         horizon_mode::HorizonMode,
-        indexer::StateSpace,
+        indexer::{StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         test_support::{state_layout, study_dims},
@@ -1497,6 +1513,7 @@ mod tests {
             ctx: &ctx,
             frozen: &fx.templates,
             fcf: &fx.fcf,
+            terminal_has_boundary_cuts: false,
             training_ctx: &training_ctx,
             records: &mut fx.records,
             local_forward_passes: fx.n_scenarios,
@@ -1591,6 +1608,7 @@ mod tests {
             ctx: &ctx,
             frozen: &fx.templates,
             fcf: &fx.fcf,
+            terminal_has_boundary_cuts: false,
             training_ctx: &training_ctx,
             records: &mut fx.records,
             local_forward_passes: fx.n_scenarios,
@@ -1808,6 +1826,7 @@ mod tests {
                 ctx: &ctx,
                 frozen: &fx.templates,
                 fcf: &fx.fcf,
+                terminal_has_boundary_cuts: false,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
                 local_forward_passes: fx.n_scenarios,
@@ -1834,6 +1853,7 @@ mod tests {
                 ctx: &ctx,
                 frozen: &fx.templates,
                 fcf: &fx.fcf,
+                terminal_has_boundary_cuts: false,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
                 local_forward_passes: fx.n_scenarios,
@@ -1943,6 +1963,7 @@ mod tests {
                 ctx: &ctx,
                 frozen: &fx.templates,
                 fcf: &fx.fcf,
+                terminal_has_boundary_cuts: false,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
                 local_forward_passes: fx.n_scenarios,
@@ -1968,6 +1989,7 @@ mod tests {
                 ctx: &ctx,
                 frozen: &fx.templates,
                 fcf: &fx.fcf,
+                terminal_has_boundary_cuts: false,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
                 local_forward_passes: fx.n_scenarios,
@@ -2686,5 +2708,169 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── `resolve_terminal_has_boundary_cuts` sources the static-template flag ──
+
+    /// Build a minimal 2-stage chain `TrainingContext` (pool id == stage) for
+    /// the `resolve_terminal_has_boundary_cuts` fixtures below; only the
+    /// `node_graph`/`horizon` fields the resolver reads matter.
+    fn terminal_boundary_test_ctx<'a>(
+        stochastic: &'a StochasticContext,
+        node_graph: &'a crate::setup::node_graph::NodeGraph,
+        state: &'a StateSpace,
+        stages: &'a [Stage],
+        study_dims: &'a StudyDimensions,
+        initial_state: &'a [f64],
+    ) -> TrainingContext<'a> {
+        TrainingContext {
+            node_graph,
+            horizon: &HorizonMode::Finite { num_stages: 2 },
+            state,
+            cut_state_layouts: &[],
+            study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic,
+            initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages,
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        }
+    }
+
+    /// A warm-started terminal pool's active-cut count (the static template's
+    /// captured property) resolves `true` and matches the legacy
+    /// `warm_start_count > 0` result it replaces.
+    #[test]
+    fn resolve_terminal_has_boundary_cuts_true_matches_legacy_warm_start_count() {
+        let stochastic = make_stochastic_context_2_stages();
+        let node_graph = crate::test_support::chain_node_graph(&stochastic);
+        let state = state_layout(1, 0);
+        let stages = make_stages_2();
+        let study_dims = study_dims();
+        let initial_state = vec![0.0; state.n_state];
+        let training_ctx = terminal_boundary_test_ctx(
+            &stochastic,
+            &node_graph,
+            &state,
+            &stages,
+            &study_dims,
+            &initial_state,
+        );
+
+        let terminal_pool = CutPool::new_with_warm_start(
+            state.n_state,
+            1,
+            10,
+            &[OwnedPolicyCutRecord {
+                cut_id: 0,
+                slot_index: 0,
+                coefficients: vec![1.0; state.n_state],
+                intercept: 5.0,
+                iteration: 0,
+                forward_pass_index: 0,
+                is_active: true,
+            }],
+        );
+        let root_pool = CutPool::new(10, state.n_state, 1, 0);
+        let fcf = FutureCostFunction {
+            pools: vec![root_pool, terminal_pool],
+            state_dimension: state.n_state,
+            forward_passes: 1,
+        };
+
+        let legacy_warm_start = fcf.pools[1].warm_start_count > 0;
+        let captured_from_active_cuts = fcf.pools[1].active_count() > 0;
+        assert!(
+            legacy_warm_start,
+            "fixture must warm-start the terminal pool"
+        );
+        assert_eq!(
+            captured_from_active_cuts, legacy_warm_start,
+            "the static template's captured active-cut count must match the legacy \
+             warm_start_count > 0 result at bake time"
+        );
+
+        let resolved = ForwardPassState::resolve_terminal_has_boundary_cuts(
+            &training_ctx,
+            2,
+            captured_from_active_cuts,
+        )
+        .expect("terminal stage carries an alive node");
+        assert!(resolved, "a captured boundary-cut flag must resolve true");
+    }
+
+    /// A pool with no warm-started cuts resolves `false`, matching the legacy
+    /// `warm_start_count > 0` result it replaces.
+    #[test]
+    fn resolve_terminal_has_boundary_cuts_false_matches_legacy_warm_start_count() {
+        let stochastic = make_stochastic_context_2_stages();
+        let node_graph = crate::test_support::chain_node_graph(&stochastic);
+        let state = state_layout(1, 0);
+        let stages = make_stages_2();
+        let study_dims = study_dims();
+        let initial_state = vec![0.0; state.n_state];
+        let training_ctx = terminal_boundary_test_ctx(
+            &stochastic,
+            &node_graph,
+            &state,
+            &stages,
+            &study_dims,
+            &initial_state,
+        );
+
+        let fcf = FutureCostFunction::new(2, state.n_state, 1, 10, &[0, 0]);
+
+        let legacy_warm_start = fcf.pools[1].warm_start_count > 0;
+        let captured_from_active_cuts = fcf.pools[1].active_count() > 0;
+        assert!(!legacy_warm_start, "fixture must not warm-start any pool");
+        assert_eq!(
+            captured_from_active_cuts, legacy_warm_start,
+            "the static template's captured active-cut count must match the legacy \
+             warm_start_count > 0 result at bake time"
+        );
+
+        let resolved = ForwardPassState::resolve_terminal_has_boundary_cuts(
+            &training_ctx,
+            2,
+            captured_from_active_cuts,
+        )
+        .expect("terminal stage carries an alive node");
+        assert!(!resolved, "no boundary cuts must resolve false");
+    }
+
+    /// `num_stages == 0` short-circuits to `false` regardless of the captured
+    /// flag — a zero-stage horizon carries no terminal stage to source it.
+    #[test]
+    fn resolve_terminal_has_boundary_cuts_zero_stages_guard_ignores_captured_flag() {
+        let stochastic = make_stochastic_context_2_stages();
+        let node_graph = crate::test_support::chain_node_graph(&stochastic);
+        let state = state_layout(1, 0);
+        let stages = make_stages_2();
+        let study_dims = study_dims();
+        let initial_state = vec![0.0; state.n_state];
+        let training_ctx = terminal_boundary_test_ctx(
+            &stochastic,
+            &node_graph,
+            &state,
+            &stages,
+            &study_dims,
+            &initial_state,
+        );
+
+        let resolved = ForwardPassState::resolve_terminal_has_boundary_cuts(&training_ctx, 0, true)
+            .expect("a zero-stage horizon never reaches the alive-node check");
+        assert!(
+            !resolved,
+            "the num_stages == 0 guard must return false even when the captured flag is true"
+        );
     }
 }

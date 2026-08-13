@@ -28,7 +28,7 @@ use crate::{
     noise::{AccumSnapshot, DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
     setup::node_graph::{EnumeratedPlan, NodeGraph, NodeId, NodePos, StageIdx, TypedVec},
     solver_stats::SolverStatsDelta,
-    stage_solve::{StageInputs, fill_unscaled, run_stage_solve},
+    stage_solve::{StageInputs, fill_unscaled, run_stage_solve, run_stage_solve_terminal_static},
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
@@ -169,8 +169,10 @@ pub(crate) struct EnumeratedForwardResult {
 
 /// Solve one node's LP at the incoming state already installed on
 /// `ws.current_state`, warm-started from `stored_basis` (matched by node id in
-/// `run_stage_solve`); leaves `ws.current_state` holding the outgoing state and
-/// returns the raw stage cost plus the captured basis (frozen path only).
+/// `run_stage_solve`, or — at the terminal stage — the 1:1 apply in
+/// `run_stage_solve_terminal_static`); leaves `ws.current_state` holding the
+/// outgoing state and returns the raw stage cost plus the captured basis
+/// (frozen path only).
 ///
 /// Mirrors `forward_pass_state::run_forward_stage`'s solve/record/advance
 /// sequence but keys the basis by node — `stored_basis` is read immutably
@@ -288,7 +290,11 @@ fn solve_forward_node<S: SolverInterface + Send>(
             iteration: Some(params.iteration),
             node_id,
         };
-        let view = run_stage_solve(ws, &inputs)?;
+        let view = if horizon.is_terminal(t.next().0) {
+            run_stage_solve_terminal_static(ws, &inputs)?
+        } else {
+            run_stage_solve(ws, &inputs)?
+        };
         let objective = view.objective;
         fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         objective
@@ -423,7 +429,6 @@ where
         }
     }
 
-    // Grow per-worker scratch to the current worker count / stage span.
     if scratch.worker_captures.len() != n_workers {
         scratch.worker_captures = (0..n_workers).map(|_| Vec::new()).collect();
         scratch.worker_stage_stats = (0..n_workers)
@@ -525,7 +530,6 @@ where
         }
     }
 
-    // Aggregate per-stage stats across workers.
     let mut stage_stats: Vec<SolverStatsDelta> = (0..num_stages)
         .map(|_| SolverStatsDelta::default())
         .collect();

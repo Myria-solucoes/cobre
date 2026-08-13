@@ -67,6 +67,7 @@
 mod common;
 
 use cobre_io::config::BackwardScheduler;
+use cobre_sddp::CutPool;
 use cobre_sddp::StudySetup;
 use cobre_sddp::hydro_models::ResolvedProductionModel;
 use cobre_sddp::setup::{NodePos, OpeningSource, StageIdx};
@@ -643,5 +644,167 @@ fn external_distinct_fan_by_node_matches_by_scenario() {
         ub_by_scenario.to_bits(),
         "by_node and by_scenario must produce a bit-identical final_ub on the external-distinct \
          fan ({ub_by_node} vs {ub_by_scenario})"
+    );
+}
+
+// ── Terminal-pool memory-shape regression guard (ignored) ────────────────────
+//
+// Change 3 (`docs/design/terminal-leaf-optimization.md`) removed the terminal
+// pool's growable training capacity (fixed-capacity `CutPool::new_with_warm_start`
+// construction and `grow_pools_for_next_iteration`'s terminal skip) and stopped
+// re-baking its frozen LP template every iteration (the priming-only freeze). Both
+// changes are structural and deterministic, so they are pinned below as an
+// `#[ignore]`-gated capstone guard over a full training run on a wide terminal
+// fan, rather than left to the empirical RSS spot-check documented here.
+//
+// Structural invariant: on a study whose leaves share one terminal `CutPool` —
+// the trailing shared leaf pool the node graph assigns to every
+// all-successor-less stage — training must leave the terminal pool's
+// `capacity`, `warm_start_count`, `active_count()`, and `populated()` unchanged
+// from their pre-training values: a leaf never receives a new cut
+// (`enumerated_pool_cut_stride` sizes a leaf pool's per-iteration stride at
+// zero), so there is no growable training slack to consume and no new cut to
+// bake into a refrozen template. The two tests below capture that snapshot
+// before training, train to completion via `train_bounds`, and assert the
+// snapshot is bit-for-bit unchanged afterward — the non-growable and
+// single-materialization invariants together.
+//
+// Per-worker RSS spot-measurement (manual; commits no number): the design
+// doc's "Memory analysis" section asks for a per-worker RSS measurement on a
+// DECOMP-like terminal fan as an implementation-time regression check,
+// explicitly not a committed figure. The reproducible procedure:
+//
+// 1. Build a DECOMP-like terminal fan at production-representative scale —
+//    `terminal_generated_fan_setup`/`external_distinct_fan_setup` (or an
+//    equivalent DECOMP-format deck with a boundary policy loaded via
+//    `inject_boundary_cuts`) sized to the target `k`, `max_iterations`, and
+//    worker thread count (the `n_threads` argument to `StudySetup::train`).
+// 2. On Linux, read this process's own `VmRSS:` line from `/proc/self/status`
+//    (a text pseudo-file; the line reports resident memory in kB) immediately
+//    before calling `train`, and again immediately after `train` returns.
+// 3. Run the same procedure twice with every parameter held fixed: once
+//    against a checkout at (or before) the commit predating Change 3, and
+//    once against the tree under test.
+// 4. Compare the two post-minus-pre `VmRSS` deltas. The tree under test
+//    should show a smaller delta at higher thread counts, reflecting one
+//    fewer full copy of the terminal pool's coefficients held per worker (the
+//    growable pool plus its per-iteration refrozen template, versus the fixed
+//    pool plus its bake-once template).
+//
+// This is a manual spot check, not an automated assertion: `VmRSS` is
+// influenced by allocator behavior, resident page-cache state, and OS
+// scheduling in ways that make it unsuitable as a deterministic CI gate, and
+// no number from step 4 is recorded here or anywhere else in this file. The
+// structural guard below is the automated regression protection; this
+// procedure is its empirical companion, run by hand during implementation or
+// optimization work.
+
+/// Training-iteration budget for both terminal-pool fixtures below: enough
+/// iterations that a per-iteration growth or re-materialization regression has
+/// room to manifest, small enough to keep an `#[ignore]`-gated guard cheap to
+/// run on demand.
+const MAX_ITERATIONS: u32 = 30;
+
+/// Fan-out width for [`terminal_generated_fan_setup`] below — `k >= 8` per the
+/// wide-fan requirement this guard exists to cover.
+const WIDE_FAN_K: usize = 8;
+
+/// Fan-out width for [`external_distinct_fan_setup`] below, capped at its
+/// fixture's own distinct-inflow-column limit.
+const DISTINCT_FAN_K: usize = 3;
+
+/// Snapshot of a terminal [`CutPool`]'s memory-shape fields. Comparing two
+/// snapshots — one taken before training, one after — is the pre/post check
+/// the non-growable and single-materialization invariants reduce to on a leaf
+/// pool that never receives a new cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalPoolShape {
+    capacity: usize,
+    warm_start_count: u32,
+    active_count: usize,
+    populated: usize,
+}
+
+impl TerminalPoolShape {
+    fn capture(pool: &CutPool) -> Self {
+        Self {
+            capacity: pool.capacity,
+            warm_start_count: pool.warm_start_count,
+            active_count: pool.active_count(),
+            populated: pool.populated(),
+        }
+    }
+}
+
+/// Asserts the fixed-capacity, no-boundary-cut shape both fixtures below start
+/// from: no warm-started cuts, so `capacity == warm_start_count == 0`
+/// (`CutPool::new_with_warm_start`'s `max_iterations = 0` construction leaves
+/// no growable training slack), and no populated or active slot.
+fn assert_fixed_no_boundary_shape(shape: TerminalPoolShape) {
+    assert_eq!(
+        shape.warm_start_count, 0,
+        "fixture carries no boundary-injected cuts"
+    );
+    assert_eq!(
+        shape.capacity, shape.warm_start_count as usize,
+        "a leaf pool's capacity must equal its warm_start_count (0 here) -- no \
+         growable training slack"
+    );
+    assert_eq!(
+        shape.active_count, 0,
+        "a leaf pool never receives a training cut"
+    );
+    assert_eq!(
+        shape.populated, 0,
+        "a leaf pool's populated high-water mark never advances"
+    );
+}
+
+/// A wide (`k = 8`) terminal-Generated fan: the primary AC-mandated fixture.
+/// Training must leave the shared terminal pool's capacity, warm-start count,
+/// active-cut count, and populated high-water mark bit-for-bit unchanged.
+#[test]
+#[ignore = "trains a wide terminal fan; run with `-- --ignored`"]
+fn terminal_generated_fan_pool_stays_fixed_and_single_materialized() {
+    let mut setup = terminal_generated_fan_setup(WIDE_FAN_K, MAX_ITERATIONS);
+    let terminal_idx = setup.fcf.pools.len() - 1;
+
+    let before = TerminalPoolShape::capture(&setup.fcf.pools[terminal_idx]);
+    assert_fixed_no_boundary_shape(before);
+
+    let _ = train_bounds(&mut setup);
+
+    let after = TerminalPoolShape::capture(&setup.fcf.pools[terminal_idx]);
+    assert_fixed_no_boundary_shape(after);
+    assert_eq!(
+        after, before,
+        "the terminal pool's capacity/warm_start_count/active_count/populated must \
+         be unchanged across the full training run -- no growth, no \
+         re-materialization"
+    );
+}
+
+/// A second, materially different terminal fan (distinct, non-interchangeable
+/// per-leaf inflow columns rather than the Generated fan's interchangeable
+/// leaves) exercising the same shared-terminal-pool invariant under a different
+/// topology.
+#[test]
+#[ignore = "trains a wide terminal fan; run with `-- --ignored`"]
+fn external_distinct_fan_terminal_pool_stays_fixed_and_single_materialized() {
+    let mut setup = external_distinct_fan_setup(DISTINCT_FAN_K, MAX_ITERATIONS);
+    let terminal_idx = setup.fcf.pools.len() - 1;
+
+    let before = TerminalPoolShape::capture(&setup.fcf.pools[terminal_idx]);
+    assert_fixed_no_boundary_shape(before);
+
+    let _ = train_bounds(&mut setup);
+
+    let after = TerminalPoolShape::capture(&setup.fcf.pools[terminal_idx]);
+    assert_fixed_no_boundary_shape(after);
+    assert_eq!(
+        after, before,
+        "the terminal pool's capacity/warm_start_count/active_count/populated must \
+         be unchanged across the full training run on a distinct-successor \
+         terminal fan too"
     );
 }

@@ -1578,6 +1578,41 @@ mod tests {
     }
 
     #[test]
+    fn new_with_warm_start_zero_max_iterations_yields_fixed_capacity() {
+        use cobre_io::OwnedPolicyCutRecord;
+
+        let records = vec![
+            OwnedPolicyCutRecord {
+                cut_id: 0,
+                slot_index: 0,
+                coefficients: vec![1.0, 2.0],
+                intercept: 5.0,
+                is_active: true,
+                iteration: 3,
+                forward_pass_index: 0,
+            },
+            OwnedPolicyCutRecord {
+                cut_id: 1,
+                slot_index: 1,
+                coefficients: vec![3.0, 4.0],
+                intercept: 6.0,
+                is_active: true,
+                iteration: 4,
+                forward_pass_index: 1,
+            },
+        ];
+
+        let pool = CutPool::new_with_warm_start(2, 4, 0, &records);
+        assert_eq!(
+            pool.capacity,
+            records.len(),
+            "max_iterations = 0 must leave no growable training slack"
+        );
+        assert_eq!(pool.warm_start_count as usize, records.len());
+        assert_eq!(pool.populated(), records.len());
+    }
+
+    #[test]
     fn terminal_has_boundary_cuts_when_warm_start_count_positive() {
         // A pool with warm_start_count > 0 signals boundary cuts at the
         // terminal stage.

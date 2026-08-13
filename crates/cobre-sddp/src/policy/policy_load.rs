@@ -921,9 +921,10 @@ impl Deref for ValidatedBoundaryCuts {
 
 /// Inject boundary cuts into the terminal stage of the study's FCF.
 ///
-/// Replaces the terminal stage's [`CutPool`] with one pre-populated from
-/// `boundary_cuts`, retaining capacity for new training cuts. The resulting
-/// nonzero `warm_start_count` is what makes the forward pass treat the terminal
+/// Replaces the terminal stage's [`CutPool`] with one fixed to exactly
+/// `boundary_cuts.len()` slots — a leaf never receives a new cut, so no
+/// growable training capacity is reserved. The resulting nonzero
+/// `warm_start_count` is what makes the forward pass treat the terminal
 /// stage as boundary-loaded (`terminal_has_boundary_cuts`) and skip theta zeroing.
 ///
 /// `boundary_cuts` must come from [`load_boundary_cuts`] — its private field
@@ -945,21 +946,10 @@ pub fn inject_boundary_cuts(setup: &mut StudySetup, boundary_cuts: &ValidatedBou
     let terminal_idx = fcf.pools.len() - 1;
     let state_dimension = fcf.state_dimension;
     let forward_passes = fcf.forward_passes;
-    let existing_capacity = fcf.pools[terminal_idx].capacity;
-    let existing_warm_start = fcf.pools[terminal_idx].warm_start_count as usize;
-    let training_capacity = existing_capacity.saturating_sub(existing_warm_start);
-    #[allow(clippy::cast_possible_truncation)]
-    let max_iterations = if forward_passes > 0 {
-        (training_capacity / forward_passes as usize) as u64
-    } else {
-        0
-    };
-    fcf.pools[terminal_idx] = CutPool::new_with_warm_start(
-        state_dimension,
-        forward_passes,
-        max_iterations,
-        boundary_cuts,
-    );
+    // The terminal pool never receives a new cut (a leaf generates none), so
+    // `max_iterations = 0` reserves no growable training capacity.
+    fcf.pools[terminal_idx] =
+        CutPool::new_with_warm_start(state_dimension, forward_passes, 0, boundary_cuts);
 }
 
 #[cfg(test)]
@@ -972,11 +962,13 @@ mod tests {
     };
 
     use super::{
-        BoundaryInjection, FullFcf, NodeId, NodePos, PolicyStageManifest, TypedVec,
-        compare_manifest_slot_identity, load_boundary_cuts, resolve_boundary_source_stage,
+        BoundaryInjection, BoundaryReconciliationReport, CutPool, FullFcf, NodeId, NodePos,
+        PolicyStageManifest, TypedVec, ValidatedBoundaryCuts, compare_manifest_slot_identity,
+        inject_boundary_cuts, load_boundary_cuts, resolve_boundary_source_stage,
         resolve_warm_start_counts, validate_policy_load,
     };
     use crate::SddpError;
+    use crate::test_support;
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -3051,5 +3043,76 @@ mod tests {
         assert_eq!(cache[0].as_ref().unwrap().cut_row_slots, vec![0_u32]);
         assert_eq!(cache[1].as_ref().unwrap().cut_row_slots, vec![3_u32]);
         assert_eq!(cache[2].as_ref().unwrap().cut_row_slots, vec![9_u32]);
+    }
+
+    // ── inject_boundary_cuts tests ──────────────────────────────────────────────
+
+    #[test]
+    fn inject_boundary_cuts_produces_fixed_capacity_terminal_pool() {
+        let mut setup = test_support::oracle_chain_setup(10);
+        let terminal_idx = setup.fcf.pools.len() - 1;
+        let state_dimension = setup.fcf.state_dimension;
+        let records = vec![
+            owned_cut(5.0, vec![1.0; state_dimension]),
+            owned_cut(6.0, vec![2.0; state_dimension]),
+        ];
+        let boundary_cuts = ValidatedBoundaryCuts {
+            records: records.clone(),
+            report: BoundaryReconciliationReport::default(),
+        };
+
+        inject_boundary_cuts(&mut setup, &boundary_cuts);
+
+        let pool = &setup.fcf.pools[terminal_idx];
+        assert_eq!(pool.warm_start_count as usize, records.len());
+        assert_eq!(
+            pool.capacity,
+            records.len(),
+            "terminal pool must carry no growable training slack after injection"
+        );
+    }
+
+    /// `active_cuts()` on the fixed terminal pool must be identical to what a
+    /// growable construction (nonzero `max_iterations`) would yield for the
+    /// same records — the fixed capacity changes only the unused tail, never
+    /// the loaded region's slot/intercept/coefficient sequence.
+    #[test]
+    fn inject_boundary_cuts_active_cuts_matches_growable_construction() {
+        let mut setup = test_support::oracle_chain_setup(10);
+        let terminal_idx = setup.fcf.pools.len() - 1;
+        let state_dimension = setup.fcf.state_dimension;
+        let forward_passes = setup.fcf.forward_passes;
+        let records = vec![
+            owned_cut(5.0, vec![1.0; state_dimension]),
+            owned_cut(6.0, vec![2.0; state_dimension]),
+            owned_cut(7.0, vec![3.0; state_dimension]),
+        ];
+        let boundary_cuts = ValidatedBoundaryCuts {
+            records: records.clone(),
+            report: BoundaryReconciliationReport::default(),
+        };
+
+        inject_boundary_cuts(&mut setup, &boundary_cuts);
+
+        let fixed_active: Vec<(usize, f64, Vec<f64>)> = setup.fcf.pools[terminal_idx]
+            .active_cuts()
+            .map(|(slot, intercept, coeffs)| (slot, intercept, coeffs.to_vec()))
+            .collect();
+
+        let growable = CutPool::new_with_warm_start(state_dimension, forward_passes, 5, &records);
+        let growable_active: Vec<(usize, f64, Vec<f64>)> = growable
+            .active_cuts()
+            .map(|(slot, intercept, coeffs)| (slot, intercept, coeffs.to_vec()))
+            .collect();
+
+        assert_eq!(
+            fixed_active, growable_active,
+            "active_cuts() must be identical whether or not growable training slack is reserved"
+        );
+        for (i, (slot, intercept, coeffs)) in fixed_active.iter().enumerate() {
+            assert_eq!(*slot, i);
+            assert_eq!(*intercept, records[i].intercept);
+            assert_eq!(coeffs, &records[i].coefficients);
+        }
     }
 }

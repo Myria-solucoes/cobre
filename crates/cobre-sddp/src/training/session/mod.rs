@@ -477,7 +477,14 @@ where
 
         self.run_cut_management(iteration)?;
 
-        grow_pools_for_next_iteration(self.fcf, u64::from(self.config.loop_config.forward_passes));
+        let node_graph = self.training_ctx.node_graph;
+        let num_stages = self.ranks.num_stages;
+        grow_pools_for_next_iteration(
+            self.fcf,
+            u64::from(self.config.loop_config.forward_passes),
+            node_graph,
+            num_stages,
+        );
         // Growth-only: a pool `grow_pools_for_next_iteration` just grew may now
         // exceed what the DCS scratch covers; re-reserve before the next
         // sweep touches it (never inside the sweep itself).
@@ -1203,7 +1210,7 @@ where
         }
 
         let freeze_start = Instant::now();
-        let total_rows_frozen = self.freeze_active_cuts_into_templates();
+        let total_rows_frozen = self.freeze_active_cuts_into_templates(true);
         #[allow(clippy::cast_possible_truncation)]
         let freeze_time_ms = freeze_start.elapsed().as_millis() as u64;
         emit(
@@ -1231,16 +1238,36 @@ where
     /// start) every batch is empty and the freeze is a structural copy of the
     /// base template — identical to the pre-freeze done in `IterationScratch::new`.
     ///
+    /// `skip_static_terminal` skips any pool whose base stage is the terminal
+    /// stage (`pool_stage[p] == StageIdx(num_stages - 1)`): a terminal leaf never
+    /// adds or removes a cut, so its template is baked once by
+    /// [`prime_frozen_templates`] (`false`) and left untouched by every
+    /// per-iteration refreeze (`true`). Skipping is deliberately confined to this
+    /// flag, never a `pool_stage`-derived early return baked into the loop bounds,
+    /// so the priming call still bakes the terminal pool and captures
+    /// `scratch.terminal_has_boundary_cuts` from its active-cut count — the
+    /// static template property the forward pass reads instead of a live
+    /// pool lookup.
+    ///
     /// Deliberately left unoptimized: the refreeze is quadratic in the active-cut
     /// count only in the no-cut-selection default, which production never runs at
     /// scale. An append-only fast path would fire only there, so the full refreeze
     /// is kept.
-    fn freeze_active_cuts_into_templates(&mut self) -> u64 {
+    fn freeze_active_cuts_into_templates(&mut self, skip_static_terminal: bool) -> u64 {
         let mut total_rows_frozen: u64 = 0;
         let state = self.training_ctx.state;
         let node_graph = self.training_ctx.node_graph;
+        let num_stages = self.ranks.num_stages;
+        let terminal_stage = (num_stages > 0).then(|| StageIdx(num_stages - 1));
         for p in 0..node_graph.n_pools {
             let t = node_graph.pool_stage[p];
+            let is_terminal = terminal_stage == Some(t);
+            if skip_static_terminal && is_terminal {
+                continue;
+            }
+            if is_terminal {
+                self.scratch.terminal_has_boundary_cuts = self.fcf.pools[p].active_count() > 0;
+            }
             build_cut_row_batch_into(
                 &mut self.scratch.freeze_row_batches[p],
                 self.fcf,
@@ -1296,7 +1323,7 @@ where
     /// cut-less, myopic policy. No-op for a fresh start (no active cuts).
     pub(crate) fn prime_frozen_templates(&mut self) {
         if self.fcf.total_active_cuts() > 0 {
-            let _ = self.freeze_active_cuts_into_templates();
+            let _ = self.freeze_active_cuts_into_templates(false);
         }
     }
 
@@ -1377,8 +1404,23 @@ fn selection_record_index_by_pool(
 /// same value here never triggers growth; a declared graph's realized
 /// per-pool visit source is supplied once a general-graph traversal is
 /// wired.
-fn grow_pools_for_next_iteration(fcf: &mut FutureCostFunction, realized_visits: u64) {
-    for pool in &mut fcf.pools {
+///
+/// Skips the terminal-stage pool (`node_graph.pool_stage[p] ==
+/// StageIdx(num_stages - 1)`): a leaf's populated count never advances, so an
+/// unconditional grow would re-introduce the growable slack a fixed
+/// boundary-injected pool (`CutPool::new_with_warm_start` at
+/// `max_iterations = 0`) was built without.
+fn grow_pools_for_next_iteration(
+    fcf: &mut FutureCostFunction,
+    realized_visits: u64,
+    node_graph: &NodeGraph,
+    num_stages: usize,
+) {
+    let terminal_stage = (num_stages > 0).then(|| StageIdx(num_stages - 1));
+    for (p, pool) in fcf.pools.iter_mut().enumerate() {
+        if terminal_stage == Some(node_graph.pool_stage[p]) {
+            continue;
+        }
         let populated = pool.populated();
         // Cast cannot truncate: SDDP runs only on 64-bit targets.
         #[allow(clippy::cast_possible_truncation)]
@@ -1433,6 +1475,7 @@ mod tests {
             StageStateConfig,
         },
     };
+    use cobre_io::OwnedPolicyCutRecord;
     use cobre_solver::{
         Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
@@ -1445,7 +1488,7 @@ mod tests {
         selection_record_index_by_pool,
     };
     use crate::{
-        SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+        CutPool, SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
         context::{StageContext, TrainingContext},
         cut::fcf::FutureCostFunction,
@@ -1957,6 +2000,100 @@ mod tests {
         );
     }
 
+    // ── Test: per-iteration freeze skips the terminal pool ────────────────
+
+    /// The terminal pool's frozen template is baked once by
+    /// `prime_frozen_templates` and left byte-identical by a subsequent
+    /// per-iteration `freeze_active_cuts_into_templates(true)` call, while a
+    /// non-terminal pool is re-baked with a newly added cut.
+    #[test]
+    fn per_iteration_freeze_skips_terminal_pool_but_rebakes_others() {
+        let n_stages = 2;
+        let state = test_support::state_layout(1, 0);
+        let templates = vec![minimal_template(state.n_state); n_stages];
+        let base_rows = vec![2usize; n_stages];
+        let initial_state = vec![0.0_f64; state.n_state];
+        let stochastic = make_stochastic_context(n_stages, 1);
+        let stages = make_stages(n_stages);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let mut fcf = make_fcf(n_stages, state.n_state, 1, 10);
+        fcf.pools[0].add_cut(NodeId(0), 0, 0, 1.0, &[1.0]);
+        fcf.pools[1].add_cut(NodeId(0), 0, 0, 2.0, &[2.0]);
+
+        let config = make_config(1, 10, 1, n_stages);
+        let mut solver = MockSolver::with_fixed(100.0);
+        let comm = StubComm;
+        let block_counts = vec![1usize; n_stages];
+        let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let node_graph_fixture = test_support::chain_node_graph(&stochastic);
+        let training_ctx = make_training_ctx(
+            &horizon,
+            &study_dims,
+            &state,
+            &cut_state_layouts,
+            &stochastic,
+            &initial_state,
+            &stages,
+            &node_graph_fixture,
+        );
+
+        let mut session = TrainingSession::new(
+            &mut solver,
+            config,
+            &mut fcf,
+            &stage_ctx,
+            &training_ctx,
+            &comm,
+            || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
+        )
+        .unwrap();
+
+        session.prime_frozen_templates();
+
+        let terminal_pool = n_stages - 1;
+        let terminal_after_priming = session.scratch.frozen_templates[terminal_pool].clone();
+        let non_terminal_after_priming = session.scratch.frozen_templates[0].clone();
+
+        // Add a second cut to the non-terminal pool only; the terminal pool's
+        // active-cut set is untouched.
+        session.fcf.pools[0].add_cut(NodeId(0), 2, 0, 3.0, &[3.0]);
+
+        let _ = session.freeze_active_cuts_into_templates(true);
+
+        let terminal_after_iteration = &session.scratch.frozen_templates[terminal_pool];
+        assert_eq!(
+            terminal_after_iteration.num_rows, terminal_after_priming.num_rows,
+            "terminal pool's row count must be unchanged by the per-iteration refreeze"
+        );
+        assert_eq!(
+            terminal_after_iteration.row_indices, terminal_after_priming.row_indices,
+            "terminal template rows must stay byte-identical across the per-iteration freeze"
+        );
+        assert_eq!(
+            terminal_after_iteration.values, terminal_after_priming.values,
+            "terminal template coefficients must stay byte-identical across the per-iteration freeze"
+        );
+        assert_eq!(
+            terminal_after_iteration.row_lower, terminal_after_priming.row_lower,
+            "terminal template row bounds must stay byte-identical across the per-iteration freeze"
+        );
+        assert_eq!(
+            terminal_after_iteration.row_upper, terminal_after_priming.row_upper,
+            "terminal template row bounds must stay byte-identical across the per-iteration freeze"
+        );
+
+        let non_terminal_after_iteration = &session.scratch.frozen_templates[0];
+        assert_ne!(
+            non_terminal_after_iteration.num_rows, non_terminal_after_priming.num_rows,
+            "non-terminal pool must be re-baked to include the newly added cut"
+        );
+    }
+
     // ── Test: training_session_finalize_emits_training_finished ───────────
 
     /// Verify that `finalize()` emits exactly one `TrainingFinished` event.
@@ -2377,8 +2514,10 @@ mod tests {
         assert_eq!(fcf.pools[0].capacity, 2);
         fcf.pools[0].add_cut(NodeId(0), 0, 0, 7.0, &[3.0]);
         let prior_capacity = fcf.pools[0].capacity;
+        let stochastic = make_stochastic_context(2, 1);
+        let node_graph = test_support::chain_node_graph(&stochastic);
 
-        grow_pools_for_next_iteration(&mut fcf, 3);
+        grow_pools_for_next_iteration(&mut fcf, 3, &node_graph, 2);
 
         assert!(
             fcf.pools[0].capacity > prior_capacity,
@@ -2397,8 +2536,10 @@ mod tests {
         let mut fcf = FutureCostFunction::new_per_pool(&[1], 1, 1, 10, &[0], &[1]);
         fcf.pools[0].add_cut(NodeId(0), 0, 0, 1.0, &[1.0]);
         let prior_capacity = fcf.pools[0].capacity;
+        let stochastic = make_stochastic_context(2, 1);
+        let node_graph = test_support::chain_node_graph(&stochastic);
 
-        grow_pools_for_next_iteration(&mut fcf, 1);
+        grow_pools_for_next_iteration(&mut fcf, 1, &node_graph, 2);
 
         assert_eq!(
             fcf.pools[0].capacity, prior_capacity,
@@ -2421,11 +2562,52 @@ mod tests {
             }
         }
         let capacities_before: Vec<usize> = fcf.pools.iter().map(|p| p.capacity).collect();
+        let stochastic = make_stochastic_context(2, 1);
+        let node_graph = test_support::chain_node_graph(&stochastic);
 
-        grow_pools_for_next_iteration(&mut fcf, u64::from(forward_passes));
+        grow_pools_for_next_iteration(&mut fcf, u64::from(forward_passes), &node_graph, 2);
 
         let capacities_after: Vec<usize> = fcf.pools.iter().map(|p| p.capacity).collect();
         assert_eq!(capacities_before, capacities_after);
+    }
+
+    /// The fixed terminal pool [`inject_boundary_cuts`](crate::inject_boundary_cuts)
+    /// builds (`CutPool::new_with_warm_start` at `max_iterations = 0`, so
+    /// `capacity == warm_start_count == populated`, `remaining == 0`) must never
+    /// grow: the unguarded loop would double it the moment any realized visit
+    /// count is positive, silently re-introducing the growable slack removed at
+    /// injection.
+    #[test]
+    fn grow_pools_for_next_iteration_skips_a_fixed_capacity_terminal_pool() {
+        let n_stages = 2;
+        let forward_passes = 4u32;
+        let mut fcf = make_fcf(n_stages, 1, forward_passes, 10);
+        let terminal_idx = n_stages - 1;
+        let records = vec![OwnedPolicyCutRecord {
+            cut_id: 0,
+            slot_index: 0,
+            coefficients: vec![1.0],
+            intercept: 5.0,
+            is_active: true,
+            iteration: 0,
+            forward_pass_index: 0,
+        }];
+        fcf.pools[terminal_idx] = CutPool::new_with_warm_start(1, forward_passes, 0, &records);
+        let capacity_before = fcf.pools[terminal_idx].capacity;
+        assert_eq!(
+            capacity_before,
+            records.len(),
+            "fixed terminal pool starts with no growable slack"
+        );
+
+        let stochastic = make_stochastic_context(n_stages, 1);
+        let node_graph = test_support::chain_node_graph(&stochastic);
+        grow_pools_for_next_iteration(&mut fcf, u64::from(forward_passes), &node_graph, n_stages);
+
+        assert_eq!(
+            fcf.pools[terminal_idx].capacity, capacity_before,
+            "the terminal pool must never grow, even though its remaining capacity is 0"
+        );
     }
 
     fn gen_openings() -> NodeOpenings {
