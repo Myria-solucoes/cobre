@@ -2082,7 +2082,6 @@ mod tests {
     /// per-`(rank, pool)` counts (pool 0 visited only by rank 0, pool 1 only by
     /// rank 1) is exchanged at each peer's OWN per-pool stride: rank 1's pool-1
     /// cuts land in pool 1, and rank 0's pool-0 local cuts are never re-inserted.
-    /// This is the divergence the removed uniform-count rejection used to refuse.
     #[test]
     fn sync_level_records_per_rank_pool_divergence_inserts_remote() {
         let n_state = 2usize;

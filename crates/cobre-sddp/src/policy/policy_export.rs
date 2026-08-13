@@ -4,6 +4,11 @@
 //! trained [`FutureCostFunction`] and [`TrainingResult`] into the `cobre-io`
 //! policy types needed by [`cobre_io::write_policy_checkpoint`].
 
+// Rationale: the counts and indices harvested from a trained FutureCostFunction
+// (cut counts, warm-start counts, state/slot indices) are small non-negative
+// usize/u32 values written into fixed-width FlatBuffers fields; the narrowing
+// casts are pervasive across this file's converters and each is bounded far
+// below its target width.
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use crate::visited_states::VisitedStatesArchive;

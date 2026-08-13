@@ -285,12 +285,9 @@ fn resolve_evaporation_core(
                 )));
             }
 
-            // mm·km²/month → m³/s. Divide by the CALENDAR month's hours, not the
-            // stage's: the water-balance coupling later multiplies this flow by the
-            // stage-duration factor `zeta` (∝ stage_seconds), so a `stage_hours`
-            // divisor would cancel and deposit a whole month of evaporation on any
-            // stage. Dividing by `month_hours` makes it a monthly-average rate, so
-            // a stage deposits only its `stage_hours / month_hours` share.
+            // Divide by the CALENDAR month's hours, not the stage's: the
+            // water-balance `zeta` (∝ stage_seconds) cancels a stage-hours divisor
+            // and would deposit a whole month of evaporation per stage.
             let month_hours = hours_in_calendar_month(stage.start_date);
             let mm_km2_to_m3s = 1.0 / (3.6 * month_hours);
 
@@ -753,7 +750,7 @@ mod tests {
     ///   reference_volume = (100 + 500) / 2 = 300
     ///   A(300) = 2.0
     ///   dA/dv|_300 = (2.0 - 1.5) / (300 - 200) = 0.005
-    ///   stage: season_id=0 (January), duration=744h
+    ///   January (season_id=0): calendar month = 31·24 = 744 h
     ///   mm_km2_to_m3s = 1 / (3.6 * 744) = 1 / 2678.4
     ///   monthly_evaporation_mm = 5.0
     ///   volume_slope_m3s_per_hm3 = mm_km2_to_m3s * 5.0 * 0.005
@@ -806,8 +803,8 @@ mod tests {
                 let a_ref = 2.0_f64;
                 let da_dv = 0.005_f64;
                 let monthly_evaporation_mm = 5.0_f64;
-                let stage_hours = 744.0_f64;
-                let mm_km2_to_m3s = 1.0 / (3.6 * stage_hours);
+                let month_hours = 744.0_f64;
+                let mm_km2_to_m3s = 1.0 / (3.6 * month_hours);
 
                 let expected_slope = mm_km2_to_m3s * monthly_evaporation_mm * da_dv;
                 let expected_intercept = mm_km2_to_m3s * monthly_evaporation_mm * a_ref

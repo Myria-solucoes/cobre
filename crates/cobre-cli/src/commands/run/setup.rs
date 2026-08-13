@@ -1146,8 +1146,8 @@ mod tests {
         (system, training_source)
     }
 
-    /// Given a declared lag depth (24, the ticket's worked AC example)
-    /// greater than the fixture's fitted AR order (0),
+    /// Given a declared lag depth (24) greater than the fixture's fitted AR
+    /// order (0),
     /// `rebuild_historical_library_non_root` must widen the returned
     /// library's `max_order()` to 24 — matching
     /// `cobre_sddp::setup::stochastic_pipeline::build_opening_tree_library`'s
@@ -1155,7 +1155,7 @@ mod tests {
     /// every non-root rank is the entire point of this function) — rather
     /// than leaving it at the un-widened `par.max_order()` (0). A regression
     /// that fails if this source is left un-widened while another is fixed,
-    /// exactly the divergent-sources bug this ticket exists to kill.
+    /// exactly the divergent-sources bug this guards against.
     ///
     /// `rebuild_historical_library_non_root` (cobre-cli) is unreachable from
     /// cobre-sddp's test scope, so this crate-boundary source is pinned to

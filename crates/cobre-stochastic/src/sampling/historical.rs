@@ -1948,7 +1948,7 @@ mod tests {
     }
 
     /// With no conditioning, the derived lag seed carries exactly the same
-    /// values a pre-epic literal seed would have held, so threading it
+    /// values an explicit literal seed would hold, so threading it
     /// through the per-(stage, hydro) `solve_par_noise` calls reproduces the
     /// eta a hard-coded seed of those values would have produced. Covers 2
     /// hydros and a 2-lag stride so a transposed `(hydro, lag)` index in the

@@ -3040,7 +3040,7 @@ mod tests {
         );
     }
 
-    /// Minus sign before `@name` negates the scale (AC-5 in ticket).
+    /// A minus sign before `@name` negates the referenced scale.
     #[test]
     fn param_ref_after_minus_negates_scale() {
         let tbl = one_param_table();

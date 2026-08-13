@@ -884,7 +884,7 @@ mod tests {
     /// A single Parallel source stage feeds one chronological arrival stage:
     /// the stored arrival density is the arrival-frame delivery split
     /// (`[0.8, 0.2]`), not the duration-weighted uniform fallback
-    /// (`[0.4, 0.6]`) a parallel sender used to collapse to.
+    /// (`[0.4, 0.6]`).
     #[test]
     fn test_build_arc_arrival_density_parallel_sender_is_not_duration_uniform() {
         let downstream = hydro(1, None, None);

@@ -4213,7 +4213,7 @@ mod commitment_decision_cost_tests {
     /// Byte-identity: with zero declared post-horizon windows,
     /// `fill_commitment_decision_columns` never runs its loop body, so every
     /// buffer entry stays exactly at its `fill_stage_columns` pre-fill default
-    /// — never `(-inf, inf)` (the pre-ticket open-bound fill) and never any
+    /// — never `(-inf, inf)` (the open-bound fill a declared window applies) and never any
     /// nonzero objective.
     #[test]
     fn no_declared_window_leaves_every_buffer_entry_at_its_pre_fill_default() {
@@ -8487,8 +8487,8 @@ mod cell_column_bound_tests {
 
     /// With no `hydro_unit_group_bounds` rows, the overlay stays
     /// [`ResolvedHydroUnitGroupBounds::empty`] and every `GroupBoundLookup` read
-    /// is `None.unwrap_or(declared)` — the same `f64` the pre-ticket helpers
-    /// read directly off `HydroUnitGroup`. `mw_bind` binds on its MW cap
+    /// is `None.unwrap_or(declared)` — the same `f64` the non-overlay path
+    /// reads directly off `HydroUnitGroup`. `mw_bind` binds on its MW cap
     /// (q̄=100, p̄=50, ρ=1 → fold 50.0), `flow_bind` binds on its flow cap
     /// (q̄=10, p̄=100, ρ=1 → fold 10.0); the padding/split pair reruns
     /// `test_cell_columns_take_their_own_group_box`'s FPHA numbers to cover
