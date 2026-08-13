@@ -1226,9 +1226,7 @@ pub(crate) fn apply_training_policy_mode(
         )
         .map_err(|e| format!("boundary cut error: {e}"))?;
         inject_boundary_cuts(setup, &boundary_records);
-        for line in boundary_records.report().diagnostic_lines() {
-            eprintln!("cobre-python: {line}");
-        }
+        eprintln!("cobre-python: {}", boundary_records.report().summary_line());
     }
 
     Ok(())

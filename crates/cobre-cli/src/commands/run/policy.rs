@@ -284,8 +284,13 @@ pub(super) fn apply_training_policy(
                 source_stage,
                 boundary_path.display()
             ));
-            for line in boundary_records.report().diagnostic_lines() {
-                let _ = ctx.stderr.write_line(&line);
+            let _ = ctx
+                .stderr
+                .write_line(&boundary_records.report().summary_line());
+        }
+        if ctx.is_root {
+            for line in boundary_records.report().detail_lines() {
+                tracing::debug!("{line}");
             }
         }
     }

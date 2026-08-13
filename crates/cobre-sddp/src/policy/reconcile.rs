@@ -511,7 +511,7 @@ pub struct FamilyTally {
 /// delivery-month span and the target's live delivery-interval span.
 /// Paired with the sibling [`BoundaryReconciliationReport::anticipated`]
 /// tally's `fan_out`/`straddling`/`default_zero`, this is everything
-/// [`BoundaryReconciliationReport::diagnostic_lines`] needs to render the
+/// [`BoundaryReconciliationReport::detail_lines`] needs to render the
 /// coverage line.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct AnticipatedCoverage {
@@ -557,37 +557,47 @@ impl BoundaryReconciliationReport {
         }
     }
 
-    /// Human-readable diagnostic lines, INFO-level and factual (mirrors the
-    /// bridge importer's `_emit_import_diagnostics` tone): on the skip path,
-    /// a single line naming the dimension-only load; otherwise an
-    /// always-emitted totals summary, one line per family (COPY / FAN-OUT /
-    /// DEFAULT-0.0 / DROP), and the anticipated coverage line.
-    #[must_use]
-    pub fn diagnostic_lines(&self) -> Vec<String> {
-        if !self.reconciled {
-            return vec![
-                "boundary reconciliation: dimension-only load (entity manifest absent); no \
-                 per-family fan-out tally"
-                    .to_string(),
-            ];
-        }
-
-        let families: [(&str, FamilyTally); 5] = [
+    fn families(&self) -> [(&'static str, FamilyTally); 5] {
+        [
             ("storage", self.storage),
             ("inflow-lag", self.inflow_lag),
             ("transit-bucket", self.transit_bucket),
             ("anticipated", self.anticipated),
             ("other-identity", self.other_identity),
-        ];
+        ]
+    }
+
+    /// One-line reconciliation summary: the dimension-only notice on the skip
+    /// path, otherwise the totals across every family. The per-family breakdown
+    /// lives in [`Self::detail_lines`].
+    #[must_use]
+    pub fn summary_line(&self) -> String {
+        if !self.reconciled {
+            return "boundary reconciliation: dimension-only load (entity manifest absent); no \
+                    per-family fan-out tally"
+                .to_string();
+        }
+        let families = self.families();
         let total_copy: usize = families.iter().map(|(_, t)| t.copy).sum();
         let total_fan_out: usize = families.iter().map(|(_, t)| t.fan_out).sum();
         let total_default_zero: usize = families.iter().map(|(_, t)| t.default_zero).sum();
         let total_dropped: usize = families.iter().map(|(_, t)| t.dropped_source).sum();
-
-        let mut lines = vec![format!(
+        format!(
             "boundary reconciliation: {total_copy} copied, {total_fan_out} fanned out, \
              {total_default_zero} defaulted to 0.0, {total_dropped} source slots dropped"
-        )];
+        )
+    }
+
+    /// Per-family reconciliation breakdown (one COPY / FAN-OUT / DEFAULT-0.0 /
+    /// DROP line per family, then the anticipated coverage line) — the verbose
+    /// detail behind [`Self::summary_line`]. Empty on the dimension-only skip path.
+    #[must_use]
+    pub fn detail_lines(&self) -> Vec<String> {
+        if !self.reconciled {
+            return Vec::new();
+        }
+        let families = self.families();
+        let mut lines = Vec::with_capacity(families.len() + 1);
         for (name, tally) in families {
             lines.push(format!(
                 "{name}: COPY={}, FAN-OUT=({}, rule = distribute), DEFAULT-0.0={}, DROP={}",
@@ -1251,7 +1261,7 @@ mod tests {
             "one source month (K = 1)"
         );
 
-        let lines = report.diagnostic_lines();
+        let lines = report.detail_lines();
         assert!(
             lines.iter().any(|l| l
                 == "anticipated: 1 source months fanned to 2 target slots (0 straddling, \
@@ -1343,23 +1353,21 @@ mod tests {
     }
 
     /// The default report (the shape `load_boundary_cuts` stores on its
-    /// empty-manifest / dimension-only skip path) is `reconciled == false`
-    /// and renders a single dimension-only summary line, with no per-family
-    /// fan-out tally.
+    /// empty-manifest / dimension-only skip path) is `reconciled == false`,
+    /// renders a dimension-only summary line, and carries no per-family detail.
     #[test]
     fn boundary_reconciliation_report_default_is_unreconciled_with_dimension_only_render() {
         let report = BoundaryReconciliationReport::default();
 
         assert!(!report.reconciled);
-        let lines = report.diagnostic_lines();
-        assert_eq!(
-            lines.len(),
-            1,
-            "the skip path renders a single summary line"
+        assert!(
+            report.summary_line().contains("dimension-only"),
+            "must state a dimension-only load: {}",
+            report.summary_line()
         );
         assert!(
-            lines[0].contains("dimension-only"),
-            "must state a dimension-only load: {lines:?}"
+            report.detail_lines().is_empty(),
+            "the skip path carries no per-family detail"
         );
     }
 }

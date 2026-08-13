@@ -441,8 +441,9 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     if args.json {
         emit_validate_json(&ValidateBoundaryOutput::success(boundary_report))?;
     } else if let Some(report) = &boundary_report {
-        for line in report.diagnostic_lines() {
-            let _ = stdout.write_line(&line);
+        let _ = stdout.write_line(&report.summary_line());
+        for line in report.detail_lines() {
+            tracing::debug!("{line}");
         }
     }
 

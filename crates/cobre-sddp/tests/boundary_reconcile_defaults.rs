@@ -575,7 +575,7 @@ fn boundary_injection_report_fan_out_matrix_coverage() {
         "one source month (April 2026)"
     );
 
-    let lines = report.diagnostic_lines();
+    let lines = report.detail_lines();
     assert!(
         lines.iter().any(|l| l
             == "anticipated: 1 source months fanned to 4 target slots (0 straddling, \
@@ -648,9 +648,10 @@ fn boundary_injection_report_empty_manifest_is_unreconciled() {
 
     let report = cuts.report();
     assert!(!report.reconciled);
-    let lines = report.diagnostic_lines();
     assert!(
-        lines.iter().any(|l| l.contains("dimension-only")),
-        "must state a dimension-only load: {lines:?}"
+        report.summary_line().contains("dimension-only"),
+        "must state a dimension-only load: {}",
+        report.summary_line()
     );
+    assert!(report.detail_lines().is_empty());
 }

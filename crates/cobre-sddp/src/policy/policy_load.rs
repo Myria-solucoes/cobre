@@ -29,8 +29,8 @@ use crate::policy::policy_export::{
     ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
 };
 use crate::policy::reconcile::{
-    BoundaryReconciliationReport, RebindOp, build_rebind, build_reconciliation_report,
-    decode_month_anchor, overlap_hours, rebind_cut,
+    BoundaryReconciliationReport, build_rebind, build_reconciliation_report, decode_month_anchor,
+    overlap_hours, rebind_cut,
 };
 use crate::setup::{NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
@@ -718,12 +718,6 @@ pub fn load_boundary_cuts(
             current_manifest,
             target_delivery_intervals,
         )?;
-        warn_on_dormant_source_now_active(
-            &rebind,
-            &stage_result.entity_manifest,
-            current_manifest,
-            on_warning,
-        );
         for record in &mut records {
             record.coefficients = rebind_cut(record, &rebind);
         }
@@ -895,30 +889,6 @@ fn decode_pool_anticipated_months(
         })
         .map(|slot| decode_month_anchor(slot.delivery_date).map(|(start, end, _)| (start, end)))
         .collect()
-}
-
-/// Mirrors [`compare_manifest_slot_identity`]'s dormant-to-active divergence
-/// warning for the reconciled (`BoundaryInjection`) path: for each
-/// identity-matched (`Copy`) target slot, warn when the source slot was
-/// dormant but the current slot is active.
-fn warn_on_dormant_source_now_active(
-    rebind: &[RebindOp],
-    source: &[EntitySlot],
-    current: &[EntitySlot],
-    on_warning: &mut dyn FnMut(&str),
-) {
-    for (j, op) in rebind.iter().enumerate() {
-        if let RebindOp::Copy(pos) = op
-            && !source[*pos].was_active
-            && current[j].was_active
-        {
-            on_warning(&format!(
-                "slot {j} (entity_type={}, entity_id={}, subindex={}) was dormant in the source \
-                 policy but is active in the current study; loading its cut",
-                current[j].entity_type, current[j].entity_id, current[j].subindex
-            ));
-        }
-    }
 }
 
 /// Boundary cut records that passed [`validate_policy_load`]'s
