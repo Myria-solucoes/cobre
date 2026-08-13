@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-13
+
 ### Added
 
 - **`cobre.write_policy_checkpoint(...)`** writes a policy checkpoint to disk
@@ -129,6 +131,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authored as per-`(stage, block)` bound columns alongside the existing entity
   bounds.
 
+- **A terminal boundary future cost function loaded from an external policy
+  checkpoint (a DECOMP-style right boundary).** `config.json`'s `policy.boundary`
+  points at a previously trained checkpoint (`path`, with an optional
+  `source_stage`); its cuts are injected as fixed boundary conditions at the
+  study's terminal stage, so the horizon is priced against an externally supplied
+  continuation value instead of a zero terminal value. When `source_stage` is
+  omitted it is auto-resolved by calendar overlap against the terminal window.
+  A source anticipated-thermal or water travel-time delivery state is reconciled
+  onto the current study's calendar by dated, hour-weighted fan-out (a monthly
+  source delivering onto a weekly/monthly study), and a per-family reconciliation
+  summary is reported at load. The source is addressed by a single leaf pool; a
+  multi-node source is rejected.
+
 ### Changed
 
 - **BREAKING — the policy checkpoint format gains a required version marker;
@@ -235,6 +250,22 @@ slack}`). The shape comes from which endpoints
   and `simulation.selection.num_scenarios` (under a sampled method) are the
   only accepted homes for the count; a config declaring it at the old flat
   location is rejected as an unknown field.
+
+### Fixed
+
+- **Reservoir evaporation is scaled by the stage's calendar month, not its stage
+  duration.** The mm·km²/month evaporation rate is converted to m³/s by the
+  calendar month's hours, so a stage deposits only its own share of the month's
+  evaporation rather than a full month's worth on every stage.
+
+- **A commissioning-dormant FPHA hydro no longer aborts the LP build.** A plant
+  whose FPHA production model is not yet commissioned at a stage is gated out of
+  the FPHA index and priced as dormant, instead of reaching an unreachable path.
+
+- **The Windows (`x86_64-pc-windows-msvc`) wheel builds.** The qhull convex-hull
+  shim's diagnostic capture used the POSIX-only `open_memstream`, which left an
+  unresolved symbol at link time on MSVC; it now falls back to a temporary file
+  on Windows.
 
 ### Migration
 
@@ -3158,7 +3189,9 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/cobre-rs/cobre/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/cobre-rs/cobre/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/cobre-rs/cobre/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/cobre-rs/cobre/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/cobre-rs/cobre/compare/v0.10.0...v0.11.0
