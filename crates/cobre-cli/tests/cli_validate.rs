@@ -522,9 +522,10 @@ fn append_boundary_policy(dir: &Path, boundary_policy_dir: &Path) {
 }
 
 /// A compatible boundary (the case's own just-produced checkpoint) prints the
-/// per-family reconciliation section and exits 0, without a solve.
+/// one-line reconciliation summary and exits 0, without a solve. The per-family
+/// breakdown moved behind `RUST_LOG=debug`, so it is absent from default stdout.
 #[test]
-fn boundary_report_section_prints_and_exits_0() {
+fn boundary_report_summary_prints_and_exits_0() {
     let dir = TempDir::new().unwrap();
     write_boundary_case(dir.path(), 0);
     run_case(dir.path());
@@ -535,7 +536,7 @@ fn boundary_report_section_prints_and_exits_0() {
         .assert()
         .success()
         .stdout(predicate::str::contains("boundary reconciliation:"))
-        .stdout(predicate::str::contains("storage: COPY=1"));
+        .stdout(predicate::str::contains("storage: COPY=").not());
 }
 
 /// A RELATIVE `policy.boundary.path` resolves against the CASE (input) directory,
