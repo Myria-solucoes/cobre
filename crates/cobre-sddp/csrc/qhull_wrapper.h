@@ -54,7 +54,8 @@
  * A narrow/degenerate cloud's hard errexit diagnostic (e.g. QH6154, "Initial
  * simplex is flat") is written to a captured in-memory stream
  * (`open_memstream`, falling back to `tmpfile()` and finally to `stderr` —
- * never NULL) instead of the process's stderr, so a near-coplanar cloud does
+ * never NULL; Windows lacks `open_memstream` and starts the chain at
+ * `tmpfile()`) instead of the process's stderr, so a near-coplanar cloud does
  * not dump multi-line text from every parallel worker. The captured text is
  * discarded unread on every path: the soft-recovery below already succeeds
  * without it, and the hard-failure status already maps to a hydro-naming

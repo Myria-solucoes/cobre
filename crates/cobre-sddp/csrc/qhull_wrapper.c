@@ -111,10 +111,19 @@ int cobre_qhull_convex_hull_3d(
      * without needing the raw qhull text. */
     char*  diag_buf = NULL;
     size_t diag_size = 0;
-    FILE*  diag_stream = open_memstream(&diag_buf, &diag_size);
+    FILE*  diag_stream = NULL;
+#if defined(_WIN32)
+    /* open_memstream is POSIX-2008 and absent on MSVC — calling it is an
+     * unresolved external symbol at link time, not a runtime NULL the check
+     * below could catch — so Windows starts the fallback chain at tmpfile();
+     * diag_buf/diag_size stay NULL/0 and free(diag_buf) below is a no-op. */
+    diag_stream = tmpfile();
+#else
+    diag_stream = open_memstream(&diag_buf, &diag_size);
     if (diag_stream == NULL) {
         diag_stream = tmpfile();
     }
+#endif
     FILE* err_stream = (diag_stream != NULL) ? diag_stream : stderr;
 
     /* Reentrant qhull instance lives on the stack — no global state, so
