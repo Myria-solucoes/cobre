@@ -317,13 +317,27 @@ chore(ferrompi): update to v0.3.0
 
 ### Improving Documentation
 
-Documentation improvements are always welcome. The Rust API docs live inline
-in source code (rustdoc); crate-internal reference docs live in this repo's
-per-crate READMEs (`crates/*/README.md`). User-facing guides, tutorials, and
-reference pages live on the software docs site,
-[docs.cobre-rs.dev](https://docs.cobre-rs.dev/). The methodology specification
-corpus lives in the separate
-[cobre-docs](https://github.com/cobre-rs/cobre-docs) repository.
+Documentation improvements are always welcome. Cobre's documentation is split
+by audience — each kind of doc has one authoritative home, and the others point
+to it rather than restating it:
+
+| Documentation            | Home                                                                     | Authoritative for                                        |
+| ------------------------ | ------------------------------------------------------------------------ | -------------------------------------------------------- |
+| Rust API reference       | rustdoc (inline in source)                                               | Public types, traits, functions                          |
+| Per-crate reference      | `crates/*/README.md`                                                     | A crate's responsibility and internals                   |
+| Workspace map            | `ARCHITECTURE.md`                                                        | Crate boundaries and the dependency graph                |
+| Contributor guide        | `CONTRIBUTING.md` (this file)                                            | Build, test, and PR workflow                             |
+| User guides & tutorials  | [docs.cobre-rs.dev](https://docs.cobre-rs.dev/)                          | Installation, CLI and Python usage                       |
+| Methodology & theory     | [cobre-docs](https://github.com/cobre-rs/cobre-docs)                     | SDDP formulation, cut derivation, math specs             |
+| Design specs & decisions | `docs/design/` (`docs/design/README.md` is the status index)             | Shipped-behavior specs, decision records, proposals      |
+| Coding conventions       | `CLAUDE.md`, `.claude/rules/*`                                           | Enforced comment/import/testing/SDDP contracts           |
+| Release history          | `CHANGELOG.md`                                                           | Per-version changes                                      |
+| License & notices        | `LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES.md`, `THIRD_PARTY_NOTICES.md` | Legal obligations (see each file's header for its scope) |
+
+The methodology specification corpus lives in the separate
+[cobre-docs](https://github.com/cobre-rs/cobre-docs) repository; user-facing
+guides and reference pages are published from it at
+[docs.cobre-rs.dev](https://docs.cobre-rs.dev/).
 
 #### JSON schemas and the cobre-docs vendored copy
 
@@ -400,7 +414,6 @@ See `.claude/architecture-rules.md` for the full Python parity checklist.
 #### cobre-solver
 
 - The `SolverInterface` trait must remain backend-agnostic. HiGHS-specific code stays behind the `highs` feature flag.
-- Criterion benchmarks for solver interface changes are planned but not yet configured; they will be added in a future phase.
 - Basis warm-starting affects correctness, not only performance — validate it in tests.
 
 #### cobre-comm

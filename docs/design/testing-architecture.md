@@ -1,13 +1,15 @@
 # Uniform Testing Architecture
 
-**Status:** Proposed (analysis + target standard; not yet implemented)
+> **Status:** Proposal — target standard, not yet implemented. Snapshot figures are calibration-time context; re-measure before acting.
+
 **Scope:** the whole workspace's test strategy — layering, per-crate structure,
 shared fixtures, comparators, runner, CI tiering, and correctness hardening.
 **Relationship to other docs:**
 
-- `test-binary-consolidation.md` is **Layer 1 (binary structure)** of this
-  standard — this document subsumes and generalizes it, and does not restate its
-  file-by-file mapping.
+- **Layer 1 (binary structure)** of this standard — the concrete
+  `#[path]`-submodule grouping mechanics and the domain-binary grouping approach
+  for consolidating the per-file integration binaries — is specified in §5.1
+  below. This document subsumes and generalizes it.
 - `.claude/rules/testing.md` is the authoritative tier taxonomy; this document
   **formalizes and extends** it (adds property / compile-fail / hardening tiers,
   a decision rule, and a comparator standard) without weakening any existing
@@ -16,8 +18,9 @@ shared fixtures, comparators, runner, CI tiering, and correctness hardening.
   `reserved-seams-and-deferred-debt.md` (oracle-harness duplication, Python-Rust
   tests invisible to CI, mega-file/inline-test asymmetry).
 
-The measured numbers below are a point-in-time snapshot for calibration; the
-standard is stated as invariants, not counts.
+The figures below are a point-in-time calibration snapshot, each paired with a
+command to re-measure it; the standard itself is stated as invariants, not
+counts.
 
 ---
 
@@ -26,10 +29,10 @@ standard is stated as invariants, not counts.
 The suite is **strong on correctness and weak on uniformity/sustainability.**
 The advanced machinery — the four test tiers, golden baselines, the determinism
 gate binary, the shared fixture harness — lives almost entirely in `cobre-sddp`;
-every other crate tests ad hoc. The workspace links **84 separate integration
-binaries** (59 of them statically linking the C++ solver), homes unit tests
-inconsistently (giant inline modules next to extracted `tests.rs` siblings _in
-the same directory_), runs the entire slow suite on every PR, and has no uniform
+every other crate tests ad hoc. The workspace links **one integration binary per
+`tests/*.rs` file** — most of them statically linking the C++ solver — homes unit
+tests inconsistently (giant inline modules next to extracted `tests.rs` siblings
+_in the same directory_), runs the entire slow suite on every PR, and has no uniform
 cross-crate fixture-sharing convention, no nextest configuration, and no
 correctness-hardening tier (miri / sanitizers / fuzz). None of this is broken; all of it scales badly and
 resists being taught to a new crate or contributor. The objective is a **single,
@@ -38,34 +41,41 @@ making the suite cheap to build, consistent to navigate, and safe to extend.
 
 ---
 
-## 2. Current state (measured)
+## 2. Current state
 
 ### 2.1 Shape
 
-| Metric                                   | Value                                                                   |
-| ---------------------------------------- | ----------------------------------------------------------------------- |
-| Integration-test binaries (`tests/*.rs`) | **84** (sddp 35, cli 16, io 13, solver 8, stochastic 8, comm 2, core 2) |
-| …that statically link the solver         | **59** (all sddp + cli + solver binaries)                               |
-| Unit tests (`#[test]` in `src/`)         | ~5340                                                                   |
-| Integration tests                        | ~984                                                                    |
-| Doctests                                 | ~345                                                                    |
-| pytest (cobre-python)                    | 31 files / ~189 tests                                                   |
-| Golden bit-exact cases                   | 5 (D06/D15/D30/D34/D41) × 2 backends                                    |
-| `to_bits`/ULP determinism assertions     | ~917 across ~70 files                                                   |
-| `proptest!` sites                        | 5                                                                       |
-| Slow-gated (`slow-tests`) attributes     | ~94, entirely in `cobre-sddp`                                           |
+The counts below rot silently, so they are stated as the mechanism that measures
+each rather than a frozen census. Re-measure before acting on any of them.
 
-The unit:integration ratio (~5.4:1) is a healthy pyramid; the cost is not test
-_count_ but binary _count_ × static-solver-link.
+| Metric                               | How to re-measure                                                                                          |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| Integration-test binaries, per crate | `for d in crates/*/tests; do printf '%s %s\n' "$d" "$(find "$d" -maxdepth 1 -name '*.rs' \| wc -l)"; done` |
+| …that statically link the solver     | the subset of the above whose crate depends on `cobre-solver` (`cobre-sddp`, `cobre-cli`, `cobre-solver`)  |
+| Unit + integration test count        | `cargo nextest list --features test-support`                                                               |
+| Doctests                             | `cargo test --doc`                                                                                         |
+| pytest (`cobre-python`)              | `pytest crates/cobre-python --collect-only -q`                                                             |
+| Golden bit-exact cases               | a small deliberate set × 2 backends (HiGHS/CLP); enumerate the `tests/fixtures/parity_baselines*` decks    |
+| `to_bits`/ULP determinism assertions | `git grep -c 'to_bits' -- 'crates/**/*.rs'`                                                                |
+| `proptest!` sites                    | `git grep -l 'proptest!' -- 'crates/**/*.rs'`                                                              |
+| Slow-gated (`slow-tests`) attributes | `git grep -c 'slow-tests' -- 'crates/**/*.rs'` — concentrated entirely in `cobre-sddp`                     |
+
+The invariants those numbers evidence — which do **not** rot — are: unit tests
+outnumber integration tests by roughly an order of magnitude (a healthy
+pyramid), so the cost is not test _count_ but integration-binary _count_ ×
+static-solver-link; and the solver-linking crates (`cobre-sddp`, `cobre-cli`,
+`cobre-solver`) own most of the integration binaries and therefore most of the
+link cost.
 
 ### 2.2 Where the sophistication lives
 
-`cobre-sddp` is the sole home of: all four test tiers, the only `tests/common/`
-harness (1591 LOC — `StubComm`/`Rank0Of2`, `build_setup_*`, `make_*` builders,
-`parity_hash`, `permute`), the only `tests/fixtures/` (dual golden baselines +
-deterministic case decks), the `mpi_wire.rs` determinism-gate binary (70 tests,
-power self-checks), and the only `benches/`. Every other crate is unit +
-behavioral only, constructing fixtures per-file.
+`cobre-sddp` is the sole home of: all four test tiers, the only large
+`tests/common/` harness (`StubComm`/`Rank0Of2`, `build_setup_*`, `make_*`
+builders, `parity_hash`, `permute`), the only `tests/fixtures/` (dual golden
+baselines + deterministic case decks), the `mpi_wire.rs` determinism-gate binary
+(with its power self-checks), and the only `benches/`. Every other crate is unit
+
+- behavioral only, constructing fixtures per-file.
 
 ### 2.3 Tooling & CI topology
 
@@ -83,12 +93,13 @@ behavioral only, constructing fixtures per-file.
   dispatch.
 - **Coverage** via `cargo-llvm-cov` → codecov (HiGHS backend). Good.
 - **Real multi-rank MPI** via a SLURM Docker cluster on `examples/4ree`
-  (`mpi-slurm.yml`). Good. In-process MPI via `StubComm`/`Rank0Of2` in 25 files.
+  (`mpi-slurm.yml`). Good. In-process MPI via `StubComm`/`Rank0Of2` across the
+  in-process rank-shape tests.
 - **Absent**: miri, sanitizers/valgrind, fuzzing, snapshot tooling
   (`insta`/`expect-test`), a uniform cross-crate fixture convention (the
   `test-support` feature exists but is applied inconsistently), and any
-  `cargo test`/doctest run for the workspace-excluded `cobre-python` (its ~21
-  Rust unit tests and doctests never compile in CI).
+  `cargo test`/doctest run for the workspace-excluded `cobre-python` (its Rust
+  unit tests and doctests never compile in CI).
 
 ---
 
@@ -104,7 +115,7 @@ behavioral only, constructing fixtures per-file.
    the field and must be preserved and named.
 2. **Contract-pinning.** Every invariant in `.claude/rules/sddp.md` is tied to a
    named regression test. This is the single best property of the suite.
-3. **Determinism discipline at HPC grade.** ~917 bit-exact assertions, the
+3. **Determinism discipline at HPC grade.** Pervasive bit-exact assertions, the
    `mpi_wire` gates with _power self-checks_ (a gate proves it exercises the
    condition it guards), dual HiGHS/CLP golden baselines, an order-invariance
    shuffle matrix, and real multi-rank MPI. This matches the strict end of the
@@ -118,9 +129,9 @@ behavioral only, constructing fixtures per-file.
 1. **Binary sharding — the dominant structural cost.** Rust links one binary per
    `tests/*.rs`; with `n` binaries and `m` libraries the linker does `m·n` work,
    and Cargo runs integration binaries _sequentially_. Cobre amplifies this by
-   statically linking a C++ LP solver into all 59 solver-linked binaries. (When
+   statically linking a C++ LP solver into every solver-linked binary. (When
    Cargo itself moved to a single integration binary, compile time dropped **3×**
-   and artifacts **5×** — matklad.) This is Layer 1 / the consolidation doc.
+   and artifacts **5×** — matklad.) This is Layer 1; its mechanics are in §5.1.
 2. **Per-crate non-uniformity.** There is no crate testing _standard_: tiers,
    the shared harness, fixtures, and golden management exist only in `cobre-sddp`.
    A contributor to `cobre-io` or `cobre-stochastic` has no template to follow.
@@ -133,8 +144,8 @@ behavioral only, constructing fixtures per-file.
    and its Rust tests never run in CI. Three different sharing mechanisms, none
    uniform.
 4. **Inline-giant vs extracted-sibling asymmetry — intra-directory.**
-   `lp/builder/entries.rs` (8081 inline test LOC) and `columns.rs` (7612) keep
-   tests inline while their siblings `template.rs`/`layout.rs` use extracted
+   `lp/builder/entries.rs` and `columns.rs` keep multi-thousand-line test
+   modules inline while their siblings `template.rs`/`layout.rs` use extracted
    `tests.rs`. The homing rule is a coin-flip.
 5. **No CI cadence tiering.** Everything (including the entire slow suite) runs
    on every PR, while the order-invariance shuffle — a hard-rule guarantee —
@@ -236,12 +247,151 @@ crates/<crate>/
 ```
 
 - **One integration binary per crate** (`tests/it.rs` or `tests/it/main.rs`),
-  submodules by domain via `#[path]`-free `mod`. Generalizes the consolidation
-  doc from sddp/cli to **every** crate. Kills the `m·n` re-link.
+  submodules by domain via plain (`#[path]`-free) `mod` in the greenfield case.
+  This generalizes to **every** crate the binary consolidation that Layer 1
+  (below) applies first to the solver-linking crates. Kills the `m·n` re-link.
 - **One deterministic unit-test homing rule**: inline when the test module is
   below a fixed threshold (proposal: ~500 test-LOC or ~40 test fns), extracted to
   a sibling `tests.rs` above it. No more intra-directory coin-flip. (Pick the
   threshold once here; it is a lint, not a judgment call.)
+
+#### Layer 1 — consolidating the existing per-file integration binaries
+
+The greenfield layout above is the end state; Layer 1 is the mechanism that gets
+the current solver-linking crates there without rewriting test bodies — the
+concrete grouping mechanics and target groupings follow.
+
+**Why it is the dominant cost.** Every crate depending on `cobre-solver`
+statically links the vendored HiGHS / CLP / CoinUtils / qhull C++ into _each_
+`tests/*.rs` binary, because Cargo compiles one executable per integration-test
+file. Each such binary embeds the solver object code + debug info + the crate
+rlib — on the order of hundreds of MB in a debug build — and pays a full C++
+static link (several seconds) at build time. This is the dominant steady-state
+contributor to `target/` size and CI link wall-time _after_ a clean build.
+(Cause separation: the multi-hundred-GB `target/` that first motivated the work
+was mostly stale accumulated artifacts, addressed separately by build hygiene —
+`CONTRIBUTING.md` → "Reclaiming disk space". Layer 1 addresses only the
+steady-state cost that survives `cargo clean`: binary count × solver-link
+size/time.) Consolidation also brings the suite back into compliance with
+`.claude/rules/testing.md`, which mandates grouping related tests with `mod`
+submodules and treats a new test _binary_ as needing justification proportional
+to its link cost.
+
+**Grouping mechanics (`#[path]`-submodule).** Each current `tests/<file>.rs`
+becomes a submodule of a domain binary, included by path so the file contents
+move with minimal edits:
+
+```
+tests/
+  <domain>.rs                # the new binary root
+  <domain>/
+    <file_a>.rs              # was tests/<file_a>.rs
+    <file_b>.rs
+  common/                    # unchanged, shared harness
+```
+
+`tests/<domain>.rs`:
+
+```rust
+mod common;                              // declared ONCE per binary, at the root
+#[path = "<domain>/file_a.rs"] mod file_a;
+#[path = "<domain>/file_b.rs"] mod file_b;
+```
+
+Per-file edits when moving `tests/file_a.rs` → `tests/<domain>/file_a.rs`:
+
+1. **`mod common;` → remove.** The domain root owns the single `mod common;`.
+   Rewrite submodule references from `use common::…` / bare `common::…` to
+   `use crate::common::…` (Rust resolves `common` at the crate root, not in the
+   submodule's own namespace).
+2. **Crate-inner attributes stay, as module-inner attributes.** A file's leading
+   `#![allow(clippy::…)]` / `#![allow(unused)]` remains valid unchanged inside
+   `mod file_a { #![allow(…)] … }`: with a `#[path]` include the file _is_ the
+   module body, so its `#![…]` inner attributes are still legal at the top of
+   that body — no rewrite needed.
+3. **Symbol collisions.** Because each file is its own `mod`, free items with the
+   same leaf name (`fn setup`, `const CASE`, a local `struct Fixture`) do **not**
+   collide — they are namespaced under their submodule. Only items a file
+   declares at crate scope (rare in these files) collide; audit and qualify per
+   merge.
+4. **Feature/slow gates ride along** on the individual `#[test]` / `mod`; no
+   change. Files that are entirely `#[cfg(feature = "mpi")]` are grouped with
+   each other so the whole domain binary is coherently gated.
+
+Prefer the `#[path]` include over physically concatenating files into one `.rs`:
+concatenation would collide the per-file `#![allow]` inner attributes and
+free-item names, and destroy `git mv` blame. The `#[path]`-submodule layout is
+the low-diff way to apply the `testing.md` "group related tests with `mod`"
+prescription to existing large files without rewriting them.
+
+**Domain-binary grouping approach.** Priority order is the solver-linking crates;
+group by subject so a contributor still finds tests by domain. Exact membership
+is a starting proposal, refined during migration:
+
+- **`cobre-sddp`** → a handful of domain binaries: `deterministic` (stays
+  standalone — already one large domain file), `parity` (**stays standalone** —
+  it owns the slow-gated `parity_regen` ignored tests and the golden baselines,
+  which §6 / the parity fixtures leave untouched), `anticipated`, `boundary`,
+  `simulation`, `cut_backward`, `lp_structural`, `pipeline_io`, and `mpi` (all
+  `mpi`-gated files grouped so the binary is coherently gated).
+- **`cobre-cli`** → domain binaries by subject: `cli_run`, `cli_validate`,
+  `cli_reporting`, `cli_metadata`, `cli_basics`.
+- **`cobre-solver`** → ~2–3 binaries grouped by concern (backend FFI,
+  warm-start / basis, determinism) — a lower absolute win, but each of its
+  binaries links the solver.
+- **Non-solver crates** (`cobre-io`, `cobre-stochastic`, `cobre-comm`,
+  `cobre-core`) are **out of scope**: their binaries do not link the solver, so
+  the per-binary cost is small. Consolidate opportunistically only, never on this
+  effort's critical path.
+
+Expected outcome: the solver-linking integration binaries drop by roughly 3–4×,
+and clean-build test-binary disk and cumulative link time drop roughly
+proportionally.
+
+**Migration invariants (a refactor, not a coverage change).**
+
+- **No test is deleted, skipped, renamed, or weakened**; test-function count is
+  identical before and after, verified mechanically by the §6 count-parity gate.
+- **No test logic changes** — bodies, assertions, fixtures, and the tier a test
+  belongs to are untouched.
+- **No change to feature or slow gating** — `#[cfg(feature = "mpi")]`,
+  `#[cfg_attr(not(feature = "slow-tests"), ignore = …)]`, and every other gate
+  are preserved verbatim.
+- **The shared `tests/common/` harness stays the single source** of fixture
+  builders; it is not duplicated or forked per domain binary. (This is the
+  interim state; §5.2 later collapses `tests/common/` into `cobre-sddp`'s
+  `test-support` surface.)
+- **Determinism gates keep their power** (e.g. `mpi_wire.rs`'s self-checked
+  thresholds). Integration submodules share no mutable global state today and
+  must not start: grouping leaves each binary a single process running its tests
+  on separate threads, introduces no shared `static mut`, and must not reorder or
+  share state a gate depends on.
+
+**Migration procedure (incremental, one domain at a time — do _not_ move all
+files at once).** Per domain binary:
+
+1. Create `tests/<domain>.rs` and `tests/<domain>/`, `git mv` each member file
+   in (preserving blame), apply the per-file edits above.
+2. `cargo build --tests -p <crate>` under both `highs` and, where relevant,
+   `clp` — fix `use crate::common::…` paths and any crate-scope collisions.
+3. Run the new binary; confirm every moved test still runs and passes.
+4. Verify test-count parity for the crate (§6) before moving on. A drop means a
+   `#[test]` was lost in the move — stop and fix.
+5. Commit per domain (`refactor(test): consolidate <domain> integration tests`)
+   so a regression bisects to one domain.
+
+Order within `cobre-sddp`: start with a small, self-contained family (`boundary`
+— already grouped by subject) to validate the mechanics end-to-end, then the
+larger families. The `mpi` domain binary must compile and run under
+`--features mpi` in the SLURM job and compile (its tests gated out) without it.
+The headline payoff — a measurable drop in the crate's test-build link wall-time
+— is worth capturing once, before vs after each crate is fully migrated.
+
+**Complementary lever (not part of Layer 1).** Dynamically linking the solver for
+dev/test builds (static only for `dist`) would shrink every test binary
+regardless of count, but it changes the vendored-static-reproducible build
+contract and adds an `LD_LIBRARY_PATH` runtime dependency. Tracked separately; it
+does not block consolidation and the two compose.
 
 ### 5.2 A uniform `test-support` feature convention (not a dedicated test crate)
 
@@ -413,8 +563,10 @@ Each phase is behavior-neutral and gated on `cargo nextest list` count parity
 (no test added, removed, or renamed except the module-path prefix). Order by
 leverage:
 
-1. **Layer 1 — binary consolidation** (`test-binary-consolidation.md`): sddp
-   35→~9, cli 16→~5, solver 8→~2. Biggest single win; already specced.
+1. **Layer 1 — binary consolidation** (§5.1): group each solver-linking crate's
+   per-file integration binaries into a handful of domain binaries via the
+   `#[path]`-submodule mechanics and target groupings specified there. Biggest
+   single win.
 2. **`.config/nextest.toml` + nextest as the sole runner** (+ `--doc` step). Cheap,
    immediate CI-time and observability win; unlocks archive/partitioning.
 3. **Standardize the `test-support` feature** (§5.2): collapse `tests/common/`

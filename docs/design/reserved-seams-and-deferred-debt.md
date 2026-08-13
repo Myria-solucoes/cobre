@@ -1,5 +1,7 @@
 # Reserved Seams and Deferred Debt
 
+> **Status:** Living register — tracks shipped state (what is reserved vs deferred today). Every entry is self-guarding; re-derive against the live tree before acting.
+
 This document tracks two related but distinct things about the workspace's
 non-obvious inert surfaces:
 
