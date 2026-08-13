@@ -1814,10 +1814,11 @@ mod tests {
 
     /// Given a boundary slot whose identity matches the current study but whose
     /// `was_active` is `false` while the current study treats it as active,
-    /// `load_boundary_cuts` returns `Ok` (cut loaded) and surfaces a `was_active`
-    /// divergence warning.
+    /// `load_boundary_cuts` returns `Ok` (cut loaded) and surfaces no warning —
+    /// a dormant-to-active transition is expected for a boundary load, not an
+    /// advisory.
     #[test]
-    fn load_boundary_cuts_was_active_divergence_warns_and_loads() {
+    fn load_boundary_cuts_was_active_divergence_loads_without_warning() {
         let tmp = tempfile::tempdir().unwrap();
         let mut boundary = storage_manifest(1, 2);
         boundary[1].was_active = false; // dormant at the boundary stage
@@ -1840,11 +1841,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(cuts.len(), 2, "was_active divergence must still load cuts");
-        assert_eq!(warnings.len(), 1, "divergence must surface one warning");
         assert!(
-            warnings[0].contains("dormant") && warnings[0].contains("slot 1"),
-            "warning must flag slot 1's dormancy divergence: {}",
-            warnings[0]
+            warnings.is_empty(),
+            "a dormant-to-active transition is expected, not warned: {warnings:?}"
         );
     }
 
