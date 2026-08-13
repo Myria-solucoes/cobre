@@ -36,6 +36,16 @@ authors = ["Rogerio J. M. Alves <rogerio.alves@cobre-rs.dev>"]
 unsafe_code = "forbid"
 missing_docs = "warn"
 
+# Dev/test builds (the `test` profile inherits these). `line-tables-only` keeps
+# backtraces and panic line numbers while dropping the heavy variable/type DWARF
+# that dominates a binary statically linking the HiGHS/CLP/qhull C++ solver, and
+# `unpacked` split-debuginfo keeps that debug data out of the linked test
+# executables — together they shrink each solver-linked test binary several-fold.
+# Full debug info is still available via `--profile profiling`.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 [profile.release]
 strip = "symbols"
 

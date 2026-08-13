@@ -34,6 +34,25 @@ cargo test -p cobre-sddp
 cargo doc --workspace --no-deps --open
 ```
 
+### Reclaiming disk space
+
+Every integration-test binary statically links the HiGHS/CLP/qhull C++ solver,
+so `target/debug` grows large, and Cargo does not garbage-collect the
+hash-suffixed binaries left behind by earlier rebuilds — stale artifacts
+accumulate until pruned. When `target/` outgrows your disk, prune with
+`cargo-sweep` rather than a full wipe, so the current build stays warm:
+
+```bash
+cargo install cargo-sweep      # one-time
+cargo sweep --time 7           # remove artifacts not touched in the last 7 days
+cargo sweep --installed        # also drop artifacts from removed toolchains
+```
+
+`cargo clean` is the from-scratch reset (it forces a full rebuild, including the
+vendored C++ solver). The maturin-built `cobre-python` crate is excluded from the
+workspace and builds into a separate `target/` directory of its own under
+`crates/cobre-python/` — sweep or clean that one separately.
+
 ### Solver Backend Selection
 
 `cobre-solver` ships two LP backends behind **mutually exclusive** Cargo features:
