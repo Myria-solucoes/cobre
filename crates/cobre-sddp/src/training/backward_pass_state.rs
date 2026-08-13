@@ -3668,8 +3668,8 @@ mod tests {
     }
 
     /// A predicate-eligible External terminal leaf with NO captured fused
-    /// slice (`EnumeratedForwardScratch::default()` — ticket-007's forward
-    /// capture never ran) falls back to solving the child directly instead of
+    /// slice (`EnumeratedForwardScratch::default()` — the forward capture
+    /// never ran) falls back to solving the child directly instead of
     /// unwrapping. The Generated sibling is unaffected: it always solves. The
     /// run must complete with `Ok`, never panic.
     #[test]

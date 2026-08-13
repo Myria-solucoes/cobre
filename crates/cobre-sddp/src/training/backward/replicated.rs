@@ -170,7 +170,7 @@ pub(crate) fn solve_replicated_outcome_slice<S: SolverInterface + Send>(
 /// ranks, and for this rank's intersecting children either reads a child's
 /// captured terminal-leaf slice from `enumerated_state` (an External terminal
 /// leaf, `NodeGraph::is_external_terminal_leaf`, whose forward-solved LP is
-/// byte-identical to the one the backward would solve — ticket-006/007) or
+/// byte-identical to the one the backward would solve) or
 /// solves its local slice ([`solve_replicated_outcome_slice`]), then
 /// allgathers every rank's `(objective, subgradient)` slice into the full
 /// joint outcome set in canonical order, and runs the identical
@@ -188,7 +188,7 @@ pub(crate) fn solve_replicated_outcome_slice<S: SolverInterface + Send>(
 /// exhaustively") — every non-eligible child still loads and solves its own
 /// LP, exactly as before fusion. A predicate-eligible child whose captured
 /// slice is unexpectedly absent falls back to solving it directly instead of
-/// unwrapping — correctness-preserving, logged as an error since ticket-007's
+/// unwrapping — correctness-preserving, logged as an error since the forward
 /// capture should have populated it.
 ///
 /// # Errors

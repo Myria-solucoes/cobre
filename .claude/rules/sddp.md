@@ -556,6 +556,35 @@ separately by design. Pinned by `terminal_boundary_fcf_training_gap_is_consisten
 and `terminal_boundary_fcf_simulation_cost_includes_post_horizon`
 (`tests/branching_value_oracle.rs`).
 
+## Fused terminal slice projects with the parent pool, not the leaf pool
+
+Terminal-leaf fusion reuses an External terminal leaf's forward-solved
+`(objective, duals)` as the penultimate-stage Benders cut instead of re-solving
+the leaf in the backward. The forward MUST project that slice with the leaf's
+CUT-GENERATING PARENT pool (`cut_state_layouts[parent.pool_id]`, where `parent =
+build_parent_map()[leaf]`) — the identical projection the backward's
+`SuccessorSpec::cut_state` uses for the currently-solving parent node — NOT the
+leaf's own (terminal, no-successor) pool. The two pools' `n_slots()` differ
+whenever the terminal pool and the parent's successor-sized pool project
+different state dimensions (`build_cut_state_layouts` seeds every pool at full
+state and only shrinks non-leaf pools to their successor's `state_config`).
+Projecting with the leaf's own pool is the wrong-but-compiling alternative: it
+emits a wrong-length/wrong-projection dual slice the consumer still accepts,
+corrupting the fused cut (surfaces as an `allgather_outcomes` length-invariant
+violation, or a silently mis-projected cut driving a NEGATIVE gap).
+
+Fusion is confined to `is_external_terminal_leaf` (External, single-opening,
+terminal) and DISABLED under DCS (`params.dcs.is_none()`): DCS solves a lazily
+cut-reduced forward LP that need not match the full frozen template the backward
+loads, so a fused DCS slice could under-price the cut. A parentless leaf (a
+malformed graph) captures nothing and falls back to a direct backward solve.
+
+Read: `training/forward/enumerated.rs` (`solve_forward_node`, `fusion_cut_state`),
+`training/backward_pass_state.rs` (`SuccessorSpec::cut_state`). Pinned by
+`enumerated_forward_fused_slice_projects_with_parent_pool_not_leaf_pool` and
+`external_distinct_fan_heterogeneous_cut_state_matches_extensive_form`
+(`tests/branching_value_oracle.rs`).
+
 ## Spillage is frozen `[0, 0]` during PreFilling
 
 A `PreFilling` hydro's spillage column is pinned `[0, 0]` — no dam exists yet to

@@ -648,7 +648,7 @@ fn external_distinct_fan_by_node_matches_by_scenario() {
     );
 }
 
-// ── Terminal-fusion cut-state projection (ticket-007 forward capture) ────────
+// ── Terminal-fusion cut-state projection (forward capture) ──────────────────
 //
 // The fused forward capture must project a terminal leaf's dual with its
 // CUT-GENERATING PARENT's cut-state layout (the backward's own
@@ -972,4 +972,314 @@ fn terminal_boundary_fcf_simulation_cost_includes_post_horizon() {
         "the post-horizon FCF (a positive value-to-go) must strictly raise the reported \
          simulation cost: boundary mean {mean_boundary} must exceed plain mean {mean_plain}"
     );
+}
+
+// ── Terminal-leaf fusion: analytical + behavioral verification capstone ─────
+//
+// Fusion reuses an eligible External terminal leaf's forward-captured
+// `(objective, duals)` for its cut-generating parent's Benders cut instead of
+// re-solving that leaf in the backward pass (`NodeGraph::is_external_terminal_leaf`,
+// `training/backward/replicated.rs`'s `run_backward_node_replicated`). This module
+// is the capstone: an analytical oracle proving the fused cut is a valid
+// supporting hyperplane, the bound/thread-shape pins fusion must not perturb, a
+// compute-win pin that the redundant External-leaf solve is gone, and the
+// Generated-leaf mirror proving fusion did not leak past its `is_external_terminal_leaf`
+// gate.
+mod terminal_fusion {
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+
+    use cobre_core::TrainingEvent;
+    use cobre_solver::SolverInterface;
+
+    use super::{
+        ActiveSolver, NodePos, StageIdx, StubComm, StudySetup,
+        assert_distinct_external_leaf_columns, close, extensive_form_optimum,
+        external_distinct_fan_setup, terminal_generated_fan_setup, train_bounds_threads,
+    };
+    use cobre_sddp::indexer::StateDim;
+    use cobre_sddp::test_support::{
+        capture_patched_node_template, water_binding_external_fan_setup,
+    };
+
+    /// Training budget for every External-fan behavioral/compute-win fixture
+    /// in this module.
+    const FUSION_MAX_ITERATIONS: u32 = 30;
+
+    /// Fan-out width for every fixture in this module.
+    const FUSION_FAN_K: usize = 3;
+
+    /// Training budget for the AC-1 analytical oracle: exactly one iteration,
+    /// so the trial state driving the produced cut is deterministic. With no
+    /// cuts yet on the root's pool, θ is unconstrained, so the root's own
+    /// solve is a well-defined LP an independent probe solve can reproduce.
+    const ANALYTICAL_ORACLE_ITERATIONS: u32 = 1;
+
+    /// Trains `setup` single-rank/single-thread with an attached event
+    /// channel, returning `(final_lb, final_ub, backward_lp_solves)`.
+    /// `solver_stats_log`'s own `"backward"` phase stays empty for enumerated
+    /// training — `BackwardResult::stage_stats` is unconditionally
+    /// `Vec::new()` off the sampled/by-node path
+    /// (`BackwardPassState::run_enumerated_backward`) — so the real backward
+    /// solve count is recovered by subtracting this iteration's logged
+    /// `"forward"` + `"lower_bound"` total from
+    /// `TrainingEvent::IterationSummary::lp_solves`, which sums all three
+    /// phases for that iteration. Filtering `solver_stats_log` by
+    /// `phase == "backward"` here would silently read zero regardless of
+    /// fusion — the wrong-but-compiling shortcut this helper exists to avoid.
+    fn train_enumerated_backward_lp_solves(setup: &mut StudySetup) -> (f64, f64, u64) {
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let (tx, rx) = mpsc::channel::<TrainingEvent>();
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, Some(tx), None)
+            .expect("training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "training must not error: {:?}",
+            outcome.error
+        );
+
+        let mut fwd_lb_by_iter: HashMap<u64, u64> = HashMap::new();
+        for entry in &outcome.result.solver_stats_log {
+            if entry.phase == "forward" || entry.phase == "lower_bound" {
+                *fwd_lb_by_iter.entry(entry.iteration).or_default() += entry.delta.lp_solves;
+            }
+        }
+
+        let mut backward_lp_solves = 0_u64;
+        let mut iterations_seen = 0_u64;
+        for event in rx.try_iter() {
+            if let TrainingEvent::IterationSummary {
+                iteration,
+                lp_solves,
+                ..
+            } = event
+            {
+                let fwd_lb = fwd_lb_by_iter.get(&iteration).copied().unwrap_or(0);
+                backward_lp_solves += lp_solves.saturating_sub(fwd_lb);
+                iterations_seen += 1;
+            }
+        }
+        assert!(
+            iterations_seen > 0,
+            "power: training must emit at least one IterationSummary event"
+        );
+        (
+            outcome.result.final_lb,
+            outcome.result.final_ub,
+            backward_lp_solves,
+        )
+    }
+
+    /// AC-1 (analytical oracle): [`water_binding_external_fan_setup`]'s hydro
+    /// genuinely generates against a scarce reservoir (ρ = 0.95), so each
+    /// leaf's storage dual is a real, leaf-varying, nonzero number — unlike a
+    /// zero-productivity fixture, where every leaf's dual collapses to zero
+    /// regardless of a sign/scale/weighting bug. Trained for exactly
+    /// [`ANALYTICAL_ORACLE_ITERATIONS`] iteration, the produced cut is
+    /// independently re-derived via a code path that never touches the
+    /// fused-capture machinery in `training/forward/enumerated.rs`:
+    ///
+    /// 1. solve the root's own fresh (zero-cut) template directly
+    ///    (`capture_patched_node_template` + a bare solver call) to read
+    ///    `x_bar` — the root's own outgoing-storage decision;
+    /// 2. solve each leaf's own template with its incoming-storage column
+    ///    FIXED to `x_bar` (`col_lower == col_upper == x_bar`, mirroring
+    ///    production's own column-bound state pinning — sddp.md "State
+    ///    pinning uses column bounds"), reading `(objective,
+    ///    reduced_costs[in_col] / col_scale[in_col])` per leaf — the same
+    ///    `rc_scaled / col_scale` formula `extract_state_duals_only` uses,
+    ///    computed here from an independent solve;
+    /// 3. combine the leaves' `(objective, dual)` by the fixture's own
+    ///    probability weights (`i / total`, `i = 1..=k`) into
+    ///    `hand_intercept = Σ wᵢ·(objᵢ − dualᵢ·x_bar)`,
+    ///    `hand_coefficient = Σ wᵢ·dualᵢ`.
+    ///
+    /// A dropped, sign-flipped, mis-scaled, or misweighted dual in the
+    /// production fused-capture path changes the TRAINED cut but not this
+    /// independent re-derivation, so the two diverge — this oracle has power.
+    #[test]
+    fn water_binding_external_fan_fused_cut_matches_independently_derived_cut() {
+        let k = FUSION_FAN_K;
+        let mut setup = water_binding_external_fan_setup(k, ANALYTICAL_ORACLE_ITERATIONS);
+        assert_distinct_external_leaf_columns(&setup);
+
+        let state = setup.stage_state();
+        let out_col = state.lp_column_for_state(StateDim::new(0)).get();
+        let in_col = state.state_to_lp_incoming_column(StateDim::new(0)).get();
+
+        let g = &setup.node_graph;
+        let root_pos = (0..g.nodes.len())
+            .map(NodePos)
+            .find(|&pos| g.nodes[pos].stage == StageIdx(0))
+            .expect("fixture must have a stage-0 root");
+        let root_pool = g.nodes[root_pos].pool_id;
+        let leaf_positions: Vec<NodePos> = (0..g.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| g.successors[pos].is_empty())
+            .collect();
+        assert_eq!(
+            leaf_positions.len(),
+            k,
+            "fixture must fan the root into exactly k leaves"
+        );
+
+        let root_template = capture_patched_node_template(&setup, root_pos);
+        let mut root_solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        root_solver.load_model(&root_template);
+        let root_view = root_solver
+            .solve(None)
+            .expect("root's fresh (zero-cut) LP must solve");
+        let x_bar = root_view.primal[out_col];
+
+        let mut leaf_objectives = Vec::with_capacity(k);
+        let mut leaf_duals = Vec::with_capacity(k);
+        for &leaf_pos in &leaf_positions {
+            let mut leaf_template = capture_patched_node_template(&setup, leaf_pos);
+            leaf_template.col_lower[in_col] = x_bar;
+            leaf_template.col_upper[in_col] = x_bar;
+            let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+            solver.load_model(&leaf_template);
+            let view = solver
+                .solve(None)
+                .expect("leaf's own LP, pinned at x_bar, must solve");
+            leaf_objectives.push(view.objective);
+            leaf_duals.push(view.reduced_costs[in_col] / leaf_template.col_scale[in_col]);
+        }
+
+        let max_obj = leaf_objectives.iter().copied().fold(f64::MIN, f64::max);
+        let min_obj = leaf_objectives.iter().copied().fold(f64::MAX, f64::min);
+        assert!(
+            max_obj - min_obj > 1.0,
+            "power: leaf objectives must differ substantially so per-child weighting is \
+             exercised, got {leaf_objectives:?}"
+        );
+        assert!(
+            leaf_duals.iter().any(|d| d.abs() > 1e-3),
+            "power: at least one leaf's storage dual must be substantially nonzero so sign/\
+             scale extraction is exercised, got {leaf_duals:?}"
+        );
+
+        let total: f64 = (1..=k).map(|i| i as f64).sum();
+        let weights: Vec<f64> = (1..=k).map(|i| i as f64 / total).collect();
+        let hand_coefficient: f64 = weights.iter().zip(&leaf_duals).map(|(w, d)| w * d).sum();
+        let hand_intercept: f64 = weights
+            .iter()
+            .zip(&leaf_objectives)
+            .zip(&leaf_duals)
+            .map(|((w, obj), dual)| w * (obj - dual * x_bar))
+            .sum();
+
+        let _ = train_bounds_threads(&mut setup, 1);
+
+        let pool = &setup.fcf.pools[root_pool];
+        let mut checked = 0_usize;
+        for (slot, intercept, coeffs) in pool.active_cuts() {
+            assert!(
+                close(intercept, hand_intercept),
+                "trained fused cut intercept at slot {slot} is {intercept}, independently \
+                 derived is {hand_intercept} (gap {})",
+                intercept - hand_intercept
+            );
+            assert_eq!(
+                coeffs.len(),
+                1,
+                "fixture state dimension must be storage-only (1 dimension)"
+            );
+            assert!(
+                close(coeffs[0], hand_coefficient),
+                "trained fused cut coefficient at slot {slot} is {}, independently derived \
+                 is {hand_coefficient} (gap {})",
+                coeffs[0],
+                coeffs[0] - hand_coefficient
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 1,
+            "training for exactly one iteration must generate exactly one cut"
+        );
+    }
+
+    /// AC-2 (behavioral bound): fusion must not perturb the External fan's
+    /// bound closure or its thread-shape invariance.
+    #[test]
+    fn external_distinct_fan_final_bounds_match_extensive_form_and_thread_shape_invariant() {
+        let mut setup = external_distinct_fan_setup(FUSION_FAN_K, FUSION_MAX_ITERATIONS);
+        assert_distinct_external_leaf_columns(&setup);
+        let optimum = extensive_form_optimum(&setup);
+
+        let (lb1, ub1) = train_bounds_threads(&mut setup, 1);
+        assert!(
+            close(lb1, optimum),
+            "fused External fan final_lb {lb1} must equal extensive-form optimum {optimum} \
+             (gap {})",
+            lb1 - optimum
+        );
+        assert!(
+            close(lb1, ub1),
+            "fused External fan final_lb {lb1} must equal final_ub {ub1} (gap {})",
+            lb1 - ub1
+        );
+
+        let mut setup4 = external_distinct_fan_setup(FUSION_FAN_K, FUSION_MAX_ITERATIONS);
+        let (lb4, _) = train_bounds_threads(&mut setup4, 4);
+        assert_eq!(
+            lb1.to_bits(),
+            lb4.to_bits(),
+            "fused External fan final_lb must be bit-identical across threads=1 ({lb1}) and \
+             threads=4 ({lb4})"
+        );
+    }
+
+    /// AC-3 (compute-win pin): fusion eliminates every terminal-leaf backward
+    /// solve on the all-External fan.
+    #[test]
+    fn external_distinct_fan_backward_performs_zero_terminal_leaf_solves() {
+        let mut setup = external_distinct_fan_setup(FUSION_FAN_K, FUSION_MAX_ITERATIONS);
+        assert_distinct_external_leaf_columns(&setup);
+
+        let (_, _, backward_lp_solves) = train_enumerated_backward_lp_solves(&mut setup);
+        assert_eq!(
+            backward_lp_solves, 0,
+            "fusion must eliminate every terminal-leaf backward solve on the all-External \
+             fan, got {backward_lp_solves} backward LP solves"
+        );
+    }
+
+    /// AC-4 (Generated-leaf guard, paired with AC-3's mirror): a Generated
+    /// terminal fan still integrates every opening exhaustively — its bounds
+    /// still match the extensive-form optimum — and the backward still
+    /// genuinely solves every Generated leaf every iteration (one solve per
+    /// leaf per iteration, none skipped), proving fusion did not leak past its
+    /// External-only gate.
+    #[test]
+    fn terminal_generated_fan_integrates_exhaustively_and_backward_solves_every_leaf() {
+        let mut setup = terminal_generated_fan_setup(FUSION_FAN_K, FUSION_MAX_ITERATIONS);
+        let optimum = extensive_form_optimum(&setup);
+
+        let (lb, ub, backward_lp_solves) = train_enumerated_backward_lp_solves(&mut setup);
+
+        assert!(
+            close(lb, optimum),
+            "Generated terminal fan final_lb {lb} must equal extensive-form optimum {optimum} \
+             (gap {})",
+            lb - optimum
+        );
+        assert!(
+            close(lb, ub),
+            "Generated terminal fan final_lb {lb} must equal final_ub {ub} (gap {})",
+            lb - ub
+        );
+
+        let expected_backward_lp_solves =
+            u64::from(u32::try_from(FUSION_FAN_K).unwrap()) * u64::from(FUSION_MAX_ITERATIONS);
+        assert_eq!(
+            backward_lp_solves, expected_backward_lp_solves,
+            "the mirror of AC-3: a Generated terminal leaf is never fused, so the backward \
+             must solve every one of the {FUSION_FAN_K} leaves on every one of the \
+             {FUSION_MAX_ITERATIONS} iterations, got {backward_lp_solves} backward LP solves"
+        );
+    }
 }

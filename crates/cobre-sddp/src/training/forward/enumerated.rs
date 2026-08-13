@@ -257,6 +257,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     params: &EnumeratedParams<'_>,
     node: NodePos,
+    parent: Option<NodePos>,
     t: StageIdx,
     scenario_index: usize,
     raw_noise: &[f64],
@@ -272,21 +273,17 @@ fn solve_forward_node<S: SolverInterface + Send>(
     let state = training_ctx.state;
     let horizon = training_ctx.horizon;
     let pool = &params.fcf.pools[pool_id];
-    // The backward extracts a leaf's duals with its CUT-GENERATING PARENT's
-    // cut-state projection, not the leaf's own pool
-    // (`backward_pass_state.rs`'s `SuccessorSpec::cut_state`,
-    // `solve_replicated_outcome_slice`) — the two pools' `n_slots()` differ
-    // whenever the leaf's terminal (no-successor) pool and its parent's
-    // successor-sized pool project different state dimensions
-    // (`build_cut_state_layouts`). Projecting with the leaf's own pool here
-    // would silently emit a wrong-length/wrong-projection slice the consumer
-    // still accepts. No single parent (a malformed leaf) captures nothing,
-    // falling back to a direct backward solve instead of guessing a pool.
-    let fusion_cut_state = node_graph
-        .is_external_terminal_leaf(node, params.num_stages)
-        .then(|| node_graph.node_parent(node))
-        .flatten()
-        .map(|parent| &training_ctx.cut_state_layouts[node_graph.nodes[parent].pool_id]);
+    // Fuse the leaf's forward slice only with its CUT-GENERATING PARENT's
+    // cut-state projection, never the leaf's own pool — the parent-pool
+    // fusion-projection contract (sddp.md). Disabled under DCS: the forward's
+    // lazily cut-reduced LP need not match the full frozen template the backward
+    // loads (mirrors the `params.dcs.is_none()` basis-capture gate below). A
+    // parentless leaf captures nothing → direct backward solve.
+    let fusion_cut_state = (params.dcs.is_none()
+        && node_graph.is_external_terminal_leaf(node, params.num_stages))
+    .then_some(parent)
+    .flatten()
+    .map(|p| &training_ctx.cut_state_layouts[node_graph.nodes[p].pool_id]);
 
     // Reset + reload per solve so the landed vertex cannot depend on which nodes
     // a worker solved before it (determinism across worker counts); on the DCS
@@ -792,6 +789,7 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
             ws,
             params,
             node,
+            parent[node],
             t,
             local_m,
             raw_noise,
@@ -872,8 +870,8 @@ mod tests {
 
     /// An eligible node's captured `(objective, duals)` equals a direct
     /// [`extract_state_duals_only`] call on the same `view`/`cut_state`/`col_scale` —
-    /// the ticket's "reuse verbatim" contract, proved by construction rather
-    /// than by re-deriving the `rc`/`col_scale` math a second time.
+    /// [`capture_fused_terminal_slice`]'s "reuse verbatim" contract, proved by
+    /// construction rather than by re-deriving the `rc`/`col_scale` math a second time.
     #[test]
     fn capture_fused_terminal_slice_matches_extract_state_duals_only() {
         let state = StateSpace::new(2, 1, 0, Vec::new(), 0, 0, vec![], &[1, 1]);

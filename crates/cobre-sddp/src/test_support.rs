@@ -1962,7 +1962,7 @@ pub fn external_distinct_fan_setup(k: usize, max_iterations: u32) -> StudySetup 
 /// `build_cut_state_layouts` (`setup/mod.rs`) starts every pool at
 /// `FULL_STATE_CONFIG` and only overwrites a NON-leaf pool with its
 /// successor's declared `state_config`; every stage here keeps the module
-/// default storage-only `state_config` ([`K_FAN_DEFAULT_STATE_CONFIG]`), so the
+/// default storage-only `state_config` ([`K_FAN_DEFAULT_STATE_CONFIG`]), so the
 /// root's pool (sized from the leaf's declared config) projects storage only
 /// while the leaves' own terminal pool (no successor to resize it) keeps the
 /// unconditional full storage+lag projection — divergent dimensions with no

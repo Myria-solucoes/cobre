@@ -1141,14 +1141,11 @@ pub(crate) fn advance_sampled_node(
 }
 
 impl NodeGraph {
-    /// `node`'s single canonical predecessor, or `None` at a root. A node reached
-    /// by more than one edge is a recombination join — `debug_assert`-checked
-    /// (construction invariant), never silently resolved to an arbitrary
-    /// predecessor. Resolves an eligible terminal leaf's cut-generating parent
-    /// pool for the fused forward capture
-    /// (`forward::enumerated::solve_forward_node`); the forward walk itself
-    /// needs no parent lookup (every trajectory carries its own
-    /// previous-stage record directly).
+    /// Single-node test accessor for a node's canonical predecessor (`None` at a
+    /// root), mirroring [`NodeGraph::build_parent_map`] — production reads that
+    /// O(1) map, not this O(n) scan. A node reached by more than one edge is a
+    /// recombination join — `debug_assert`-checked, never silently resolved.
+    #[cfg(test)]
     pub(crate) fn node_parent(&self, node: NodePos) -> Option<NodePos> {
         let mut candidates = self
             .successors
