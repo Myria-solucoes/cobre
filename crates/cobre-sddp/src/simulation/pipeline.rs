@@ -524,6 +524,17 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
     ws.scratch.unscaled_primal = unscaled_primal;
     ws.scratch.unscaled_dual = unscaled_dual;
 
+    // Study-level terminal-boundary flag, mirroring the forward pass's
+    // `terminal_has_boundary_cuts`; the pool read runs only at the terminal stage.
+    let num_stages = training_ctx.horizon.num_stages();
+    let include_terminal_theta = training_ctx.horizon.is_terminal(t.next().0)
+        && training_ctx
+            .node_graph
+            .any_stage_node(StageIdx(num_stages - 1))
+            .is_some_and(|n| {
+                fcf.pools[training_ctx.node_graph.nodes[n].pool_id].warm_start_count > 0
+            });
+
     let (immediate_cost, result) = extract_sim_stage_result(
         &mut ws.scratch.inflow_m3s_buf,
         &mut ws.scratch.row_lower_buf,
@@ -533,6 +544,7 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
         &ws.scratch.unscaled_primal,
         &ws.scratch.unscaled_dual,
         view_objective,
+        include_terminal_theta,
         ctx,
         output,
         state,
@@ -606,6 +618,7 @@ pub(crate) fn extract_sim_stage_result(
     unscaled_primal: &[f64],
     unscaled_dual: &[f64],
     view_objective: f64,
+    include_terminal_theta: bool,
     ctx: &StageContext<'_>,
     output: &SimulationOutputSpec<'_>,
     state: &StateSpace,
@@ -616,13 +629,21 @@ pub(crate) fn extract_sim_stage_result(
     lookups: &SimLookups,
 ) -> (f64, SimulationStageResult) {
     let t = ids.t;
-    let theta_obj_coeff = ctx
-        .templates
-        .get(t.0)
-        .and_then(|tmpl| tmpl.objective.get(state.theta).copied())
-        .unwrap_or(1.0);
-    let theta_contribution = unscaled_primal[state.theta] * theta_obj_coeff;
-    let immediate_cost = (view_objective - theta_contribution) * ctx.cost_scale_factor;
+    // Terminal boundary θ prices the post-horizon value-to-go: KEEP it in the
+    // reported per-scenario cost (matching the training UB/LB); the interior
+    // subtraction drops it. sddp.md "Terminal boundary FCF in the reported total
+    // cost". Byte-neutral when terminal θ is [0,0].
+    let immediate_cost = if include_terminal_theta {
+        view_objective * ctx.cost_scale_factor
+    } else {
+        let theta_obj_coeff = ctx
+            .templates
+            .get(t.0)
+            .and_then(|tmpl| tmpl.objective.get(state.theta).copied())
+            .unwrap_or(1.0);
+        let theta_contribution = unscaled_primal[state.theta] * theta_obj_coeff;
+        (view_objective - theta_contribution) * ctx.cost_scale_factor
+    };
     // Realized inflow Z_t from the z_h primal: total natural inflow (PAR lag
     // included), gross of withdrawal.
     inflow_m3s_buf.clear();

@@ -24,6 +24,7 @@ use crate::{
     SddpError,
     context::{StageContext, TrainingContext},
     cut_sync::OutcomeExchangeScratch,
+    forward::EnumeratedForwardScratch,
     risk_measure::{BackwardOutcome, RiskMeasure},
     setup::node_graph::OpeningSource,
     solve::partition,
@@ -166,17 +167,29 @@ pub(crate) fn solve_replicated_outcome_slice<S: SolverInterface + Send>(
 
 /// Solve one cut-generating node's backward cut via the replicated per-node
 /// solve: partitions the node's whole flattened successor outcome set across
-/// ranks, solves every intersecting child's local slice
-/// ([`solve_replicated_outcome_slice`]), allgathers every rank's
-/// `(objective, subgradient)` slice into the full joint outcome set in
-/// canonical order, and runs the identical [`RiskMeasure::aggregate_cut_into`]
-/// on every rank — every rank computes the bit-identical
-/// `(intercept, coefficients)`, returning the intercept; the aggregated
-/// coefficients are left in `ws.backward_accum.agg_coefficients`. The caller
-/// appends the cut (`fcf.add_cut`, `forward_pass_index ≡ 0`, sddp.md "Cut pool
-/// is append-only") — `fcf` is not threaded through here because its
-/// `pools` are already borrowed via `outcomes`, so an internal `add_cut` call
-/// would need a second, conflicting mutable borrow of the same value.
+/// ranks, and for this rank's intersecting children either reads a child's
+/// captured terminal-leaf slice from `enumerated_state` (an External terminal
+/// leaf, `NodeGraph::is_external_terminal_leaf`, whose forward-solved LP is
+/// byte-identical to the one the backward would solve — ticket-006/007) or
+/// solves its local slice ([`solve_replicated_outcome_slice`]), then
+/// allgathers every rank's `(objective, subgradient)` slice into the full
+/// joint outcome set in canonical order, and runs the identical
+/// [`RiskMeasure::aggregate_cut_into`] on every rank — every rank computes the
+/// bit-identical `(intercept, coefficients)`, returning the intercept; the
+/// aggregated coefficients are left in `ws.backward_accum.agg_coefficients`.
+/// The caller appends the cut (`fcf.add_cut`, `forward_pass_index ≡ 0`,
+/// sddp.md "Cut pool is append-only") — `fcf` is not threaded through here
+/// because its `pools` are already borrowed via `outcomes`, so an internal
+/// `add_cut` call would need a second, conflicting mutable borrow of the same
+/// value.
+///
+/// A Generated terminal leaf or an interior successor is never eligible
+/// (sddp.md "The branching backward integrates every successor
+/// exhaustively") — every non-eligible child still loads and solves its own
+/// LP, exactly as before fusion. A predicate-eligible child whose captured
+/// slice is unexpectedly absent falls back to solving it directly instead of
+/// unwrapping — correctness-preserving, logged as an error since ticket-007's
+/// capture should have populated it.
 ///
 /// # Errors
 ///
@@ -201,6 +214,7 @@ pub(crate) fn run_backward_node_replicated<S: SolverInterface + Send, C: Communi
     x_hat: &[f64],
     pool_id: usize,
     iteration: u64,
+    enumerated_state: &EnumeratedForwardScratch,
 ) -> Result<f64, SddpError> {
     let n_state = succ.cut_state.n_slots();
     let n_openings = outcomes.total_outcomes();
@@ -211,6 +225,7 @@ pub(crate) fn run_backward_node_replicated<S: SolverInterface + Send, C: Communi
     );
     let n_ranks = comm.size();
     let my_rank = comm.rank();
+    let num_stages = training_ctx.horizon.num_stages();
 
     let (o_start, o_end) = partition(n_openings, n_ranks, my_rank);
 
@@ -221,6 +236,38 @@ pub(crate) fn run_backward_node_replicated<S: SolverInterface + Send, C: Communi
         let hi = o_end.min(child.outcome_range.end);
         if lo >= hi {
             continue;
+        }
+        let is_eligible_terminal_leaf = training_ctx
+            .node_graph
+            .is_external_terminal_leaf(child.successor_node, num_stages);
+        let fused = is_eligible_terminal_leaf
+            .then(|| enumerated_state.fused_terminal_slice(child.successor_node))
+            .flatten();
+        if let Some((objective, duals)) = fused {
+            debug_assert_eq!(
+                (
+                    lo - child.outcome_range.start,
+                    hi - child.outcome_range.start
+                ),
+                (0, 1),
+                "an External terminal leaf has exactly one opening"
+            );
+            debug_assert_eq!(
+                duals.len(),
+                n_state,
+                "the fused slice's dual length must equal the cut-state dimension"
+            );
+            scratch.local_slice.push(objective);
+            scratch.local_slice.extend_from_slice(duals);
+            continue;
+        }
+        if is_eligible_terminal_leaf {
+            tracing::error!(
+                node = ?child.successor_node,
+                "fused terminal slice missing for a predicate-eligible External terminal \
+                 leaf; falling back to solving this child's LP directly \
+                 (correctness-preserving — the forward capture should have populated it)"
+            );
         }
         solve_replicated_outcome_slice(
             ws,

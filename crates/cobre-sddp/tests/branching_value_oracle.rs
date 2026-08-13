@@ -72,14 +72,15 @@ use cobre_sddp::StudySetup;
 use cobre_sddp::hydro_models::ResolvedProductionModel;
 use cobre_sddp::setup::{NodePos, OpeningSource, StageIdx};
 use cobre_sddp::test_support::{
-    dcs_k_fan_setup, extensive_form_optimum, external_distinct_fan_setup, external_root_fan_setup,
-    k_fan_setup, node_prefix_counts, node_scenario_count, node_visit_probabilities,
-    oracle_chain_setup, terminal_generated_fan_setup, water_binding_external_fan_setup,
-    water_binding_external_fan_setup_reversed,
+    dcs_k_fan_setup, extensive_form_optimum, external_distinct_fan_setup,
+    external_distinct_fan_setup_heterogeneous_cut_state, external_root_fan_setup, k_fan_setup,
+    node_prefix_counts, node_scenario_count, node_visit_probabilities, oracle_chain_setup,
+    pool_cut_state_dimensions, terminal_generated_fan_setup, try_k_fan_simulation_enumerated,
+    water_binding_external_fan_setup, water_binding_external_fan_setup_reversed,
 };
 use cobre_solver::ActiveSolver;
 
-use common::StubComm;
+use common::{StubComm, run_simulation};
 
 /// Relative + absolute LP tolerance for oracle-vs-engine value comparison. The
 /// backend primal/dual feasibility tolerance is `≈ 1e-9`; scaled by the objective
@@ -647,6 +648,67 @@ fn external_distinct_fan_by_node_matches_by_scenario() {
     );
 }
 
+// ── Terminal-fusion cut-state projection (ticket-007 forward capture) ────────
+//
+// The fused forward capture must project a terminal leaf's dual with its
+// CUT-GENERATING PARENT's cut-state layout (the backward's own
+// `SuccessorSpec::cut_state`), never the leaf's own terminal pool
+// (`training::forward::enumerated::solve_forward_node`). Every other
+// enumerated fixture in this file declares no inflow-lag slot, so the leaf's
+// always-full terminal pool coincides with its parent's successor-sized pool
+// and a wrong-pool projection is dimensionally invisible; this fixture's
+// active lag slot makes the two diverge, reproducing the invalid-lower-bound /
+// `allgather_outcomes` failure a wrong-projection capture produces. There is
+// no config path to force a non-fused cold solve of one specific leaf, so
+// this does not compare against a cold-solved control cut directly — the
+// extensive-form oracle below is the value-correctness check instead.
+
+#[test]
+fn external_distinct_fan_heterogeneous_cut_state_matches_extensive_form() {
+    let mut setup = external_distinct_fan_setup_heterogeneous_cut_state(2, 30);
+    assert_distinct_external_leaf_columns(&setup);
+
+    // Power self-check: this fixture's whole point is that a leaf's own
+    // terminal pool and its cut-generating parent's pool project DIFFERENT
+    // cut-state dimensions — the coverage gap the other fixtures above lack.
+    let g = &setup.node_graph;
+    let root_pool = (0..g.nodes.len())
+        .map(NodePos)
+        .find(|&pos| g.nodes[pos].stage == StageIdx(0))
+        .map(|pos| g.nodes[pos].pool_id)
+        .expect("fixture must have a stage-0 root");
+    let leaf_pools: Vec<usize> = (0..g.nodes.len())
+        .map(NodePos)
+        .filter(|&pos| g.successors[pos].is_empty())
+        .map(|pos| g.nodes[pos].pool_id)
+        .collect();
+    let dims = pool_cut_state_dimensions(&setup);
+    for &leaf_pool in &leaf_pools {
+        assert_ne!(
+            dims[leaf_pool], dims[root_pool],
+            "fixture power check: leaf pool {leaf_pool} and root (cut-generating parent) pool \
+             {root_pool} must project different cut-state dimensions ({dims:?}), or this test \
+             cannot distinguish the fix from the wrong-projection bug"
+        );
+    }
+
+    let optimum = extensive_form_optimum(&setup);
+    let (lb, ub) = train_bounds(&mut setup);
+
+    assert!(
+        close(lb, optimum),
+        "heterogeneous-cut-state fan final_lb {lb} must equal extensive-form optimum {optimum} \
+         (gap {})",
+        lb - optimum
+    );
+    assert!(
+        close(lb, ub),
+        "heterogeneous-cut-state fan final_lb {lb} must equal final_ub {ub} — no negative gap \
+         (gap {})",
+        lb - ub
+    );
+}
+
 // ── Terminal-pool memory-shape regression guard (ignored) ────────────────────
 //
 // Change 3 (`docs/design/terminal-leaf-optimization.md`) removed the terminal
@@ -806,5 +868,108 @@ fn external_distinct_fan_terminal_pool_stays_fixed_and_single_materialized() {
         "the terminal pool's capacity/warm_start_count/active_count/populated must \
          be unchanged across the full training run on a distinct-successor \
          terminal fan too"
+    );
+}
+
+// ── Terminal boundary FCF bound-accounting (sddp.md "Terminal boundary FCF in the
+//    reported total cost") ──────────────────────────────────────────────────────
+
+/// Intercept (scaled cost units) of the constant boundary cut injected at the
+/// terminal pool: a nonzero post-horizon value-to-go with no state gradient, so it
+/// shifts every path's cost by a fixed discounted amount without perturbing the
+/// in-horizon optimal policy.
+const TERMINAL_BOUNDARY_INTERCEPT: f64 = 100.0;
+
+/// Replace `setup`'s terminal FCF pool with a single constant boundary cut
+/// (`θ_terminal ≥ intercept`, zero state coefficients), so the terminal θ prices a
+/// nonzero post-horizon value-to-go — the terminal-boundary-policy shape no
+/// existing fixture exercised. Mirrors `inject_boundary_cuts`, building the fixed
+/// warm-start pool directly from a hand-constructed record (the validated
+/// file-load path is unnecessary for a synthetic fixture).
+fn inject_constant_terminal_boundary_fcf(setup: &mut StudySetup, intercept: f64) {
+    let state_dim = setup.fcf.state_dimension;
+    let forward_passes = setup.fcf.forward_passes;
+    let terminal = setup.fcf.pools.len() - 1;
+    let record = cobre_io::OwnedPolicyCutRecord {
+        cut_id: 0,
+        slot_index: 0,
+        coefficients: vec![0.0; state_dim],
+        intercept,
+        iteration: 0,
+        forward_pass_index: 0,
+        is_active: true,
+    };
+    setup.fcf.pools[terminal] =
+        CutPool::new_with_warm_start(state_dim, forward_passes, 0, &[record]);
+}
+
+/// A terminal boundary FCF (nonzero post-horizon value-to-go) must be booked
+/// identically in the lower and upper bound, so a converged deterministic chain
+/// still closes `final_lb == final_ub`. Before the terminal-θ-in-cost fix the UB
+/// subtracted the terminal θ that the LB keeps, so `final_lb ≫ final_ub` — a
+/// negative gap the stopping rule's `.max(0.0)` clamp falsely reads as converged.
+/// The `!close(lb_b, lb_p)` power check proves the injected FCF actually reaches
+/// the bound (a vacuous θ=0 fixture would pass `close(lb_b, ub_b)` trivially).
+#[test]
+fn terminal_boundary_fcf_training_gap_is_consistent() {
+    let mut plain = oracle_chain_setup(30);
+    let (lb_p, ub_p) = train_bounds(&mut plain);
+    assert!(
+        close(lb_p, ub_p),
+        "control: plain chain must converge to final_lb == final_ub (lb {lb_p}, ub {ub_p})"
+    );
+
+    let mut boundary = oracle_chain_setup(30);
+    inject_constant_terminal_boundary_fcf(&mut boundary, TERMINAL_BOUNDARY_INTERCEPT);
+    let (lb_b, ub_b) = train_bounds(&mut boundary);
+
+    assert!(
+        !close(lb_b, lb_p),
+        "power: the terminal boundary FCF must materially raise the LB above the plain \
+         chain (lb_b {lb_b}, lb_p {lb_p}); a vacuous θ=0 fixture could not test the fix"
+    );
+    assert!(
+        close(lb_b, ub_b),
+        "terminal boundary FCF must be booked in BOTH bounds: final_lb {lb_b} must equal \
+         final_ub {ub_b} (gap {}). A negative gap here is the terminal-θ subtraction bug",
+        lb_b - ub_b
+    );
+}
+
+/// Mean per-scenario `total_cost` over a simulation's returned scenarios.
+fn mean_scenario_total_cost(sims: &[cobre_sddp::SimulationScenarioResult]) -> f64 {
+    assert!(
+        !sims.is_empty(),
+        "simulation must produce at least one scenario result"
+    );
+    sims.iter().map(|s| s.total_cost).sum::<f64>() / sims.len() as f64
+}
+
+/// The simulation's reported per-scenario cost books the terminal boundary FCF
+/// (post-horizon value-to-go) the same way the forward pass does. A constant
+/// terminal FCF shifts every path's reported total by the same discounted amount,
+/// so the boundary run's mean cost exceeds the plain run's by that amount. Before
+/// the fix the census simulation subtracted the terminal θ, so the FCF never
+/// reached the reported total and the two means coincided. Exercises the census
+/// (`enumerated`) simulation engine, which shares `extract_sim_stage_result` — the
+/// single fixed site — with the sampled engine.
+#[test]
+fn terminal_boundary_fcf_simulation_cost_includes_post_horizon() {
+    let mut plain = try_k_fan_simulation_enumerated(2).expect("simulate-enabled fixture builds");
+    let mean_plain = mean_scenario_total_cost(&run_simulation(&mut plain, 1));
+
+    let mut boundary = try_k_fan_simulation_enumerated(2).expect("simulate-enabled fixture builds");
+    inject_constant_terminal_boundary_fcf(&mut boundary, TERMINAL_BOUNDARY_INTERCEPT);
+    let mean_boundary = mean_scenario_total_cost(&run_simulation(&mut boundary, 1));
+
+    assert!(
+        !close(mean_boundary, mean_plain),
+        "simulation total_cost must carry the post-horizon FCF: boundary mean {mean_boundary} \
+         must differ from plain mean {mean_plain}. Equal means are the terminal-θ subtraction bug"
+    );
+    assert!(
+        mean_boundary > mean_plain,
+        "the post-horizon FCF (a positive value-to-go) must strictly raise the reported \
+         simulation cost: boundary mean {mean_boundary} must exceed plain mean {mean_plain}"
     );
 }

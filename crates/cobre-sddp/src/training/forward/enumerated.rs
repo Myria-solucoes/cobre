@@ -15,7 +15,7 @@
 //! order — so the exact bound, the lower bound, and the generated cut set are
 //! bit-identical across worker, thread, and rank counts.
 
-use cobre_solver::{SolverInterface, StageTemplate};
+use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
 use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
@@ -25,18 +25,33 @@ use crate::{
     cut::FutureCostFunction,
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
+    indexer::CutStateProjection,
     noise::{AccumSnapshot, DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
     setup::node_graph::{EnumeratedPlan, NodeGraph, NodeId, NodePos, StageIdx, TypedVec},
     solver_stats::SolverStatsDelta,
     stage_solve::{StageInputs, fill_unscaled, run_stage_solve, run_stage_solve_terminal_static},
-    training::stage_solve_prep::{
-        InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
+    training::{
+        backward::extract_state_duals_only,
+        stage_solve_prep::{
+            InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
+        },
     },
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, CapturedBasis, SolverWorkspace},
 };
 
 use super::write_capture_metadata;
+
+/// A node's terminal-leaf subgradient, captured on the forward for the
+/// backward to consume instead of re-solving (`NodeGraph::is_external_terminal_leaf`).
+/// `captured` is `false` for every non-eligible node; `objective`/`state_duals`
+/// are meaningful only when it is `true`.
+#[derive(Clone, Default)]
+struct FusedTerminalSlice {
+    captured: bool,
+    objective: f64,
+    state_duals: Vec<f64>,
+}
 
 /// One node's forward visit outcome, keyed by canonical node position in the
 /// per-node arena and produced worker-locally in the claim loop.
@@ -54,6 +69,8 @@ struct NodeVisit {
     accum: AccumSnapshot,
     /// Post-solve captured basis (frozen path only; `None` on the DCS path).
     basis: Option<CapturedBasis>,
+    /// Populated only for an eligible External terminal leaf; see [`FusedTerminalSlice`].
+    fused: FusedTerminalSlice,
 }
 
 /// Reused per-iteration mutable scratch for the enumerated forward engine —
@@ -110,6 +127,11 @@ impl EnumeratedForwardScratch {
                 out_state: vec![0.0; n_state],
                 accum: AccumSnapshot::default(),
                 basis: None,
+                fused: FusedTerminalSlice {
+                    captured: false,
+                    objective: 0.0,
+                    state_duals: Vec::with_capacity(n_state),
+                },
             })
             .collect();
         self.solved = vec![false; n_nodes].into();
@@ -125,6 +147,17 @@ impl EnumeratedForwardScratch {
     /// `records`/`exchange.state_at`.
     pub(crate) fn out_state(&self, node: NodePos) -> &[f64] {
         &self.arena[node].out_state
+    }
+
+    /// Node `node`'s captured terminal-leaf subgradient from the most recent
+    /// [`run_enumerated_forward`] call — `Some((objective, state_duals))` for
+    /// an eligible External terminal leaf, `None` otherwise. Mirrors
+    /// [`Self::out_state`]'s node-indexed read.
+    pub(crate) fn fused_terminal_slice(&self, node: NodePos) -> Option<(f64, &[f64])> {
+        let fused = &self.arena[node].fused;
+        fused
+            .captured
+            .then_some((fused.objective, fused.state_duals.as_slice()))
     }
 
     /// Test-only: directly seed node `node`'s `out_state`, growing the arena to
@@ -167,12 +200,33 @@ pub(crate) struct EnumeratedForwardResult {
     pub stage_stats: Vec<SolverStatsDelta>,
 }
 
+/// For an eligible node (`cut_state.is_some()`), extract this node's own
+/// incoming-state subgradient via [`extract_state_duals_only`] — reused
+/// verbatim, never re-derived (`rc / col_scale`, divided; sddp.md "Benders cut
+/// sign & subgradient extraction") — before `view` is dropped; otherwise mark
+/// `fused_out` uncaptured.
+fn capture_fused_terminal_slice(
+    view: &SolutionView<'_>,
+    col_scale: &[f64],
+    cut_state: Option<&CutStateProjection>,
+    fused_out: &mut FusedTerminalSlice,
+) {
+    match cut_state {
+        Some(cut_state) => {
+            fused_out.objective =
+                extract_state_duals_only(view, cut_state, col_scale, &mut fused_out.state_duals);
+            fused_out.captured = true;
+        }
+        None => fused_out.captured = false,
+    }
+}
+
 /// Solve one node's LP at the incoming state already installed on
 /// `ws.current_state`, warm-started from `stored_basis` (matched by node id in
 /// `run_stage_solve`, or — at the terminal stage — the 1:1 apply in
 /// `run_stage_solve_terminal_static`); leaves `ws.current_state` holding the
 /// outgoing state and returns the raw stage cost plus the captured basis
-/// (frozen path only).
+/// (frozen path only) and fused terminal-leaf subgradient.
 ///
 /// Mirrors `forward_pass_state::run_forward_stage`'s solve/record/advance
 /// sequence but keys the basis by node — `stored_basis` is read immutably
@@ -181,7 +235,9 @@ pub(crate) struct EnumeratedForwardResult {
 /// per-solve allocation), for the caller's sequential post-region scatter. So a
 /// dynamically-claimed node never races the session basis store. The DCS path
 /// captures no basis (leaving `basis_out` untouched), mirroring
-/// `run_forward_stage`.
+/// `run_forward_stage`. `fused_out` is populated independently of the basis
+/// capture, gated on `NodeGraph::is_external_terminal_leaf` — see
+/// [`capture_fused_terminal_slice`].
 ///
 /// `scenario_index` (the caller's `EnumeratedForwardScratch::m_rep[node]`) is
 /// this call's solve/stats-bookkeeping role only — `DcsSolveContext`'s and
@@ -206,6 +262,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
     raw_noise: &[f64],
     stored_basis: Option<&CapturedBasis>,
     basis_out: &mut Option<CapturedBasis>,
+    fused_out: &mut FusedTerminalSlice,
 ) -> Result<f64, SddpError> {
     let training_ctx = params.training_ctx;
     let ctx = params.ctx;
@@ -215,6 +272,21 @@ fn solve_forward_node<S: SolverInterface + Send>(
     let state = training_ctx.state;
     let horizon = training_ctx.horizon;
     let pool = &params.fcf.pools[pool_id];
+    // The backward extracts a leaf's duals with its CUT-GENERATING PARENT's
+    // cut-state projection, not the leaf's own pool
+    // (`backward_pass_state.rs`'s `SuccessorSpec::cut_state`,
+    // `solve_replicated_outcome_slice`) — the two pools' `n_slots()` differ
+    // whenever the leaf's terminal (no-successor) pool and its parent's
+    // successor-sized pool project different state dimensions
+    // (`build_cut_state_layouts`). Projecting with the leaf's own pool here
+    // would silently emit a wrong-length/wrong-projection slice the consumer
+    // still accepts. No single parent (a malformed leaf) captures nothing,
+    // falling back to a direct backward solve instead of guessing a pool.
+    let fusion_cut_state = node_graph
+        .is_external_terminal_leaf(node, params.num_stages)
+        .then(|| node_graph.node_parent(node))
+        .flatten()
+        .map(|parent| &training_ctx.cut_state_layouts[node_graph.nodes[parent].pool_id]);
 
     // Reset + reload per solve so the landed vertex cannot depend on which nodes
     // a worker solved before it (determinism across worker counts); on the DCS
@@ -279,6 +351,7 @@ fn solve_forward_node<S: SolverInterface + Send>(
         let view = ws.backward_accum.dcs_solve.result_view();
         let objective = view.objective;
         fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        capture_fused_terminal_slice(&view, col_scale, fusion_cut_state, fused_out);
         objective
     } else {
         let inputs = StageInputs {
@@ -297,11 +370,19 @@ fn solve_forward_node<S: SolverInterface + Send>(
         };
         let objective = view.objective;
         fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        capture_fused_terminal_slice(&view, col_scale, fusion_cut_state, fused_out);
         objective
     };
 
     let d_t = ctx.discount_factor(t);
-    let stage_cost = (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor;
+    // Terminal boundary θ prices the post-horizon value-to-go: KEEP it in the cost
+    // (subtracting it, the interior form, drops it from the UB only — understating
+    // it below the LB). sddp.md "Terminal boundary FCF in the reported total cost".
+    let stage_cost = if horizon.is_terminal(t.next().0) && params.terminal_has_boundary_cuts {
+        view_objective * ctx.cost_scale_factor
+    } else {
+        (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor
+    };
 
     let lag_start = state.inflow_lags.start;
     let lag_len = state.hydro_count * state.max_par_order;
@@ -519,6 +600,12 @@ where
                 dst.out_state.clear();
                 dst.out_state.extend_from_slice(&src.out_state);
                 src.accum.copy_into(&mut dst.accum);
+                dst.fused.captured = src.fused.captured;
+                dst.fused.objective = src.fused.objective;
+                dst.fused.state_duals.clear();
+                dst.fused
+                    .state_duals
+                    .extend_from_slice(&src.fused.state_duals);
             }
             scratch.solved[node] = true;
             if capture_basis {
@@ -700,6 +787,7 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
         // read-only basis store, never `ws`, so both coexist with the `&mut ws`
         // solve — no per-solve copy needed (mirrors the sampled driver).
         let raw_noise = noise.as_slice();
+        let visit = &mut captures[count];
         let stage_cost = solve_forward_node(
             ws,
             params,
@@ -708,12 +796,12 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
             local_m,
             raw_noise,
             stored,
-            &mut captures[count].basis,
+            &mut visit.basis,
+            &mut visit.fused,
         )?;
         let delta = SolverStatsDelta::from_snapshots(&stats_before, &ws.solver.statistics());
         SolverStatsDelta::accumulate_into(&mut stage_stats[t.0], &delta);
 
-        let visit = &mut captures[count];
         visit.node = node;
         visit.stage_cost = stage_cost;
         visit.node_id = node_graph.node_ids[node];
@@ -763,4 +851,367 @@ fn seed_root_accumulators<S: SolverInterface + Send>(
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub(crate) fn expected_single_rank_solves(node_graph: &NodeGraph) -> Result<u64, SddpError> {
     Ok(node_graph.forward_solve_counts()?.into_iter().sum())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
+
+    use super::*;
+    use cobre_comm::LocalBackend;
+    use cobre_core::temporal::StageStateConfig;
+    use cobre_solver::ActiveSolver;
+
+    use crate::{
+        indexer::StateSpace,
+        setup::{StudySetup, node_graph::Traversal},
+        test_support,
+        training::forward::build_sampler_from_ctx,
+        workspace::WorkspacePool,
+    };
+
+    /// An eligible node's captured `(objective, duals)` equals a direct
+    /// [`extract_state_duals_only`] call on the same `view`/`cut_state`/`col_scale` —
+    /// the ticket's "reuse verbatim" contract, proved by construction rather
+    /// than by re-deriving the `rc`/`col_scale` math a second time.
+    #[test]
+    fn capture_fused_terminal_slice_matches_extract_state_duals_only() {
+        let state = StateSpace::new(2, 1, 0, Vec::new(), 0, 0, vec![], &[1, 1]);
+        let cut_state = CutStateProjection::new(
+            &state,
+            StageStateConfig {
+                storage: true,
+                inflow_lags: true,
+            },
+        );
+        // A lag slot's incoming column (`inflow_lags` block) lands past
+        // `state.n_state`, so this must exceed the largest incoming column
+        // `cut_state` resolves, not just `[0, n_state)`.
+        let n_cols = 64;
+        let reduced_costs: Vec<f64> = (0..n_cols).map(|c| c as f64 + 1.0).collect();
+        let col_scale: Vec<f64> = vec![2.0; n_cols];
+        let view = SolutionView {
+            objective: 42.0,
+            primal: &[],
+            dual: &[],
+            reduced_costs: &reduced_costs,
+            iterations: 0,
+            solve_time_seconds: 0.0,
+        };
+
+        let mut expected_duals = Vec::new();
+        let expected_objective =
+            extract_state_duals_only(&view, &cut_state, &col_scale, &mut expected_duals);
+
+        let mut fused_out = FusedTerminalSlice::default();
+        capture_fused_terminal_slice(&view, &col_scale, Some(&cut_state), &mut fused_out);
+
+        assert!(fused_out.captured);
+        assert_eq!(fused_out.objective, expected_objective);
+        assert_eq!(fused_out.state_duals, expected_duals);
+    }
+
+    /// A `None` `cut_state` (the non-eligible-node signal) resets an
+    /// already-populated `fused_out` to uncaptured, not merely leaves it as
+    /// constructed — catching a "only ever sets true" regression.
+    #[test]
+    fn capture_fused_terminal_slice_none_when_ineligible() {
+        let view = SolutionView {
+            objective: 7.0,
+            primal: &[],
+            dual: &[],
+            reduced_costs: &[],
+            iterations: 0,
+            solve_time_seconds: 0.0,
+        };
+        let mut fused_out = FusedTerminalSlice {
+            captured: true,
+            objective: 99.0,
+            state_duals: vec![1.0, 2.0],
+        };
+
+        capture_fused_terminal_slice(&view, &[], None, &mut fused_out);
+
+        assert!(!fused_out.captured);
+    }
+
+    /// Fresh, unpopulated scaffolding for one [`run_enumerated_forward`] call
+    /// over `setup`'s whole graph: a single-worker pool, an empty
+    /// [`BasisStore`], and zeroed [`TrajectoryRecord`]s.
+    fn fresh_rig(
+        setup: &StudySetup,
+    ) -> (
+        WorkspacePool<ActiveSolver>,
+        BasisStore,
+        Vec<TrajectoryRecord>,
+    ) {
+        let node_graph = &setup.node_graph;
+        let total_forward_passes =
+            usize::try_from(test_support::node_scenario_count(node_graph).expect("scenario count"))
+                .expect("fits usize");
+        let comm = LocalBackend;
+        let pool = setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("workspace pool");
+        let basis_store = BasisStore::new(total_forward_passes, node_graph.nodes.len());
+        let records: Vec<TrajectoryRecord> = (0..total_forward_passes * setup.num_stages())
+            .map(|_| TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                node_id: NodeId(0),
+                state: Vec::new(),
+            })
+            .collect();
+        (pool, basis_store, records)
+    }
+
+    /// Run one `enumerated` forward iteration over `setup`'s whole graph on a
+    /// single worker, mirroring `ForwardPassState::run_enumerated`'s param
+    /// assembly. `scratch`/`workspaces`/`basis_store`/`records` persist across
+    /// repeated calls, so a second call at `iteration + 1` exercises
+    /// cross-iteration basis warm-start.
+    fn run_iteration(
+        setup: &StudySetup,
+        scratch: &mut EnumeratedForwardScratch,
+        workspaces: &mut [SolverWorkspace<ActiveSolver>],
+        basis_store: &mut BasisStore,
+        records: &mut [TrajectoryRecord],
+        iteration: u64,
+    ) -> EnumeratedForwardResult {
+        let node_graph = &setup.node_graph;
+        let stage_ctx = setup.stage_ctx();
+        let training_ctx = setup.training_ctx();
+        let sampler = build_sampler_from_ctx(&training_ctx).expect("forward sampler");
+        let frozen: Vec<StageTemplate> = (0..node_graph.n_pools)
+            .map(|p| stage_ctx.templates[node_graph.pool_stage[p].0].clone())
+            .collect();
+        let traversal = Traversal::resolve(node_graph, true, 0);
+        let Traversal::Enumerated(plan) = &traversal else {
+            unreachable!("resolve(is_enumerated=true, ..) always yields Enumerated");
+        };
+        let total_forward_passes =
+            usize::try_from(test_support::node_scenario_count(node_graph).expect("scenario count"))
+                .expect("fits usize");
+        let dcs = training_ctx.dcs.filter(|p| p.is_active(iteration));
+
+        let params = EnumeratedParams {
+            num_stages: setup.num_stages(),
+            iteration,
+            fwd_offset: 0,
+            local_forward_passes: total_forward_passes,
+            total_forward_passes,
+            terminal_has_boundary_cuts: false,
+            noise_dim: training_ctx.stochastic.dim(),
+            initial_state: training_ctx.initial_state,
+            lag_accum_seed: training_ctx.lag_accum_seed,
+            lag_weight_seed: training_ctx.lag_weight_seed,
+            ctx: &stage_ctx,
+            frozen: &frozen,
+            fcf: &setup.fcf,
+            training_ctx: &training_ctx,
+            sampler: &sampler,
+            dcs,
+        };
+
+        run_enumerated_forward(plan, scratch, workspaces, basis_store, records, &params)
+            .expect("run_enumerated_forward must succeed on a well-formed fixture")
+    }
+
+    /// An External, single-opening terminal leaf is captured; the interior
+    /// External root is not; the eligible leaves' basis is still captured into
+    /// [`BasisStore`] and a second iteration (warm-started from it) succeeds.
+    #[test]
+    fn enumerated_forward_captures_fused_slice_only_for_eligible_external_terminal_leaves() {
+        let setup = test_support::external_distinct_fan_setup(2, 1);
+        let node_graph = &setup.node_graph;
+        let num_stages = setup.num_stages();
+
+        let eligible: Vec<NodePos> = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&p| node_graph.is_external_terminal_leaf(p, num_stages))
+            .collect();
+        let ineligible: Vec<NodePos> = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&p| !node_graph.is_external_terminal_leaf(p, num_stages))
+            .collect();
+        assert_eq!(
+            eligible.len(),
+            2,
+            "both leaves of a 2-leaf external-distinct fan are eligible"
+        );
+        assert_eq!(
+            ineligible.len(),
+            1,
+            "only the interior External root is ineligible"
+        );
+
+        let (mut pool, mut basis_store, mut records) = fresh_rig(&setup);
+        let mut scratch = EnumeratedForwardScratch::default();
+
+        run_iteration(
+            &setup,
+            &mut scratch,
+            &mut pool.workspaces,
+            &mut basis_store,
+            &mut records,
+            1,
+        );
+
+        for &node in &ineligible {
+            assert!(
+                scratch.fused_terminal_slice(node).is_none(),
+                "non-eligible node {node:?} must not be captured"
+            );
+        }
+        for &node in &eligible {
+            let (objective, duals) = scratch
+                .fused_terminal_slice(node)
+                .unwrap_or_else(|| panic!("eligible leaf {node:?} must be captured"));
+            assert!(objective.is_finite());
+            let pool_id = node_graph.nodes[node].pool_id;
+            assert_eq!(
+                duals.len(),
+                setup.stage_data.cut_state_layouts[pool_id].n_slots(),
+                "captured duals must span the leaf's own cut-state projection"
+            );
+            let local_m = scratch.m_rep[node];
+            assert!(
+                basis_store.get(local_m, node).is_some(),
+                "eligible leaf {node:?}'s basis must still be captured into BasisStore"
+            );
+        }
+
+        run_iteration(
+            &setup,
+            &mut scratch,
+            &mut pool.workspaces,
+            &mut basis_store,
+            &mut records,
+            2,
+        );
+
+        for &node in &eligible {
+            assert!(
+                scratch.fused_terminal_slice(node).is_some(),
+                "eligible leaf {node:?} must stay captured across a warm-started iteration"
+            );
+            let local_m = scratch.m_rep[node];
+            assert!(
+                basis_store.get(local_m, node).is_some(),
+                "eligible leaf {node:?}'s basis must still be present after iteration 2"
+            );
+        }
+    }
+
+    /// An eligible leaf's captured dual length must span its CUT-GENERATING
+    /// PARENT's cut-state projection — never the leaf's own terminal (no-successor,
+    /// always-full) pool. [`test_support::external_distinct_fan_setup_heterogeneous_cut_state`]
+    /// declares an active inflow-lag slot so the two genuinely diverge
+    /// (`build_cut_state_layouts`'s no-successor rule keeps every leaf's own pool
+    /// full-dimension regardless of its declared `state_config`); on the ORIGINAL
+    /// `external_distinct_fan_setup` fixture (no lag slot) the two pools coincide,
+    /// which is exactly the coverage gap that let the wrong-projection capture ship.
+    #[test]
+    fn enumerated_forward_fused_slice_projects_with_parent_pool_not_leaf_pool() {
+        let setup = test_support::external_distinct_fan_setup_heterogeneous_cut_state(2, 1);
+        let node_graph = &setup.node_graph;
+        let num_stages = setup.num_stages();
+
+        let eligible: Vec<NodePos> = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&p| node_graph.is_external_terminal_leaf(p, num_stages))
+            .collect();
+        assert_eq!(
+            eligible.len(),
+            2,
+            "both leaves of a 2-leaf external-distinct fan are eligible"
+        );
+
+        for &node in &eligible {
+            let leaf_pool = node_graph.nodes[node].pool_id;
+            let parent = node_graph
+                .node_parent(node)
+                .unwrap_or_else(|| panic!("eligible leaf {node:?} must have a parent"));
+            let parent_pool = node_graph.nodes[parent].pool_id;
+            assert_ne!(
+                setup.stage_data.cut_state_layouts[leaf_pool].n_slots(),
+                setup.stage_data.cut_state_layouts[parent_pool].n_slots(),
+                "fixture power check: leaf pool {leaf_pool} and parent pool {parent_pool} must \
+                 project DIFFERENT dimensions, or this test cannot distinguish the fix from the bug"
+            );
+        }
+
+        let (mut pool, mut basis_store, mut records) = fresh_rig(&setup);
+        let mut scratch = EnumeratedForwardScratch::default();
+        run_iteration(
+            &setup,
+            &mut scratch,
+            &mut pool.workspaces,
+            &mut basis_store,
+            &mut records,
+            1,
+        );
+
+        for &node in &eligible {
+            let (_, duals) = scratch
+                .fused_terminal_slice(node)
+                .unwrap_or_else(|| panic!("eligible leaf {node:?} must be captured"));
+            let leaf_pool = node_graph.nodes[node].pool_id;
+            let parent = node_graph.node_parent(node).expect("checked above");
+            let parent_pool = node_graph.nodes[parent].pool_id;
+            assert_eq!(
+                duals.len(),
+                setup.stage_data.cut_state_layouts[parent_pool].n_slots(),
+                "captured duals must span the CUT-GENERATING PARENT's cut-state projection \
+                 (the backward's own `SuccessorSpec::cut_state`), not the leaf's own pool"
+            );
+            assert_ne!(
+                duals.len(),
+                setup.stage_data.cut_state_layouts[leaf_pool].n_slots(),
+                "power check: the leaf's own pool dimension must differ from the parent's, or \
+                 this assertion cannot distinguish the fix from the wrong-projection bug"
+            );
+        }
+    }
+
+    /// A Generated terminal leaf is never captured, even though its basis is —
+    /// fusion eligibility and basis capture are independent mechanisms.
+    #[test]
+    fn enumerated_forward_generated_terminal_leaf_stays_uncaptured() {
+        let setup = test_support::terminal_generated_fan_setup(2, 1);
+        let node_graph = &setup.node_graph;
+        let num_stages = setup.num_stages();
+
+        assert!(
+            (0..node_graph.nodes.len())
+                .map(NodePos)
+                .all(|p| !node_graph.is_external_terminal_leaf(p, num_stages)),
+            "a terminal-Generated fan has no eligible node"
+        );
+
+        let (mut pool, mut basis_store, mut records) = fresh_rig(&setup);
+        let mut scratch = EnumeratedForwardScratch::default();
+
+        run_iteration(
+            &setup,
+            &mut scratch,
+            &mut pool.workspaces,
+            &mut basis_store,
+            &mut records,
+            1,
+        );
+
+        for pos in (0..node_graph.nodes.len()).map(NodePos) {
+            assert!(
+                scratch.fused_terminal_slice(pos).is_none(),
+                "node {pos:?} in a terminal-Generated fan must not be captured"
+            );
+            let local_m = scratch.m_rep[pos];
+            assert!(
+                basis_store.get(local_m, pos).is_some(),
+                "node {pos:?}'s basis must still be captured regardless of fusion eligibility"
+            );
+        }
+    }
 }

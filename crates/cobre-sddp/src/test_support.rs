@@ -1952,6 +1952,49 @@ const EXTERNAL_FAN_LOAD_STD: f64 = 20.0;
 )]
 #[must_use]
 pub fn external_distinct_fan_setup(k: usize, max_iterations: u32) -> StudySetup {
+    build_external_distinct_fan_setup(k, max_iterations, None)
+}
+
+/// [`external_distinct_fan_setup`] with an active inflow-lag slot
+/// (`state_space.inflow_lag_depth = Some(1)`) — the terminal-fusion regression
+/// fixture whose leaf pool and cut-generating parent pool project DIFFERENT
+/// dimensions, unlike every other fan/chain fixture in this module.
+/// `build_cut_state_layouts` (`setup/mod.rs`) starts every pool at
+/// `FULL_STATE_CONFIG` and only overwrites a NON-leaf pool with its
+/// successor's declared `state_config`; every stage here keeps the module
+/// default storage-only `state_config` ([`K_FAN_DEFAULT_STATE_CONFIG]`), so the
+/// root's pool (sized from the leaf's declared config) projects storage only
+/// while the leaves' own terminal pool (no successor to resize it) keeps the
+/// unconditional full storage+lag projection — divergent dimensions with no
+/// declared per-stage `state_config` override at all
+/// ([`K_FAN_DEFAULT_STATE_CONFIG`]). Every other fan/chain fixture leaves
+/// `inflow_lag_depth` at its `None` default, so the lag block is empty and
+/// the full-vs-storage-only distinction is dimensionally moot — this is the
+/// one fixture that gives it a nonzero width.
+///
+/// # Panics
+///
+/// Never in practice — as [`external_distinct_fan_setup`].
+#[must_use]
+pub fn external_distinct_fan_setup_heterogeneous_cut_state(
+    k: usize,
+    max_iterations: u32,
+) -> StudySetup {
+    build_external_distinct_fan_setup(k, max_iterations, Some(1))
+}
+
+#[allow(
+    clippy::expect_used,
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation
+)]
+fn build_external_distinct_fan_setup(
+    k: usize,
+    max_iterations: u32,
+    inflow_lag_depth: Option<u32>,
+) -> StudySetup {
     assert!(
         k >= 2 && k <= EXTERNAL_FAN_INFLOWS.len(),
         "external fan k in 2..=3"
@@ -2036,7 +2079,8 @@ pub fn external_distinct_fan_setup(k: usize, max_iterations: u32) -> StudySetup 
         &[],
     );
 
-    let config = external_fan_config_enumerated(max_iterations);
+    let mut config = external_fan_config_enumerated(max_iterations);
+    config.state_space.inflow_lag_depth = inflow_lag_depth;
     let stochastic = build_stochastic_context(
         &system,
         K_FAN_SEED,
@@ -2050,10 +2094,10 @@ pub fn external_distinct_fan_setup(k: usize, max_iterations: u32) -> StudySetup 
             ncs: Some(SamplingScheme::InSample),
         },
     )
-    .expect("external_distinct_fan_setup: build_stochastic_context must succeed");
+    .expect("build_external_distinct_fan_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     StudySetup::new(&system, &config, stochastic, hydro_models)
-        .expect("external_distinct_fan_setup: StudySetup::new must succeed")
+        .expect("build_external_distinct_fan_setup: StudySetup::new must succeed")
 }
 
 /// A 2-stage all-external fan whose SINGLE stage-0 root is itself an external node

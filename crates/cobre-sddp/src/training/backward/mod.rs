@@ -78,6 +78,7 @@ pub(crate) use by_node::{
     identity_block_order, merge_block_pivots, process_stage_backward_by_node, resolve_block_size,
 };
 pub(crate) use by_scenario::{StageOpeningSolver, process_by_scenario_backward};
+pub(crate) use duals_extraction::extract_state_duals_only;
 pub(crate) use lp_setup::fill_external_opening_noise;
 pub(crate) use replicated::{ReplicatedScratch, run_backward_node_replicated};
 

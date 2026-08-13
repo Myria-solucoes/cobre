@@ -170,7 +170,14 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     };
 
     let d_t = ctx.discount_factors.get(t.0).copied().unwrap_or(1.0);
-    let stage_cost = (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor;
+    // Terminal boundary θ (post-horizon value-to-go) stays in the reported cost;
+    // the interior subtraction would drop it from the UB alone. sddp.md
+    // "Terminal boundary FCF in the reported total cost".
+    let stage_cost = if horizon.is_terminal(t.next().0) && terminal_has_boundary_cuts {
+        view_objective * ctx.cost_scale_factor
+    } else {
+        (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor
+    };
     let rec = &mut worker_records[local_m * num_stages + t.0];
     // rec.primal/dual stay empty: only state and node_id feed downstream
     // consumers (the backward pass reads state; node_id tags the visit for

@@ -853,6 +853,7 @@ impl BackwardPassState {
                     x_hat,
                     pool_id,
                     inputs.iteration,
+                    inputs.enumerated_state,
                 )?;
                 inputs.fcf.add_cut(
                     node_id,
@@ -3390,6 +3391,60 @@ mod tests {
         (node_graph, stochastic)
     }
 
+    /// A hand-built trunk+fan graph mirroring [`trunk_fan_graph`], except the
+    /// trunk's two terminal children are ONE External leaf (id 2, scenario
+    /// column 0 — `is_external_terminal_leaf` eligible) and ONE Generated leaf
+    /// (id 3 — never eligible), so a single node's backward exercises both the
+    /// fusion-eligible and the exhaustive-solve branch side by side.
+    fn mixed_terminal_fan_graph() -> (NodeGraph, cobre_stochastic::StochasticContext) {
+        use crate::setup::node_graph::build_node_graph;
+        use cobre_core::HorizonGraph;
+        use cobre_core::temporal::{Node, PolicyGraphType, Transition};
+        use cobre_io::StageIdResolver;
+
+        fn node(id: i32, stage_id: i32, scenario_id: Option<i32>) -> Node {
+            Node {
+                id,
+                stage_id,
+                scenario_id,
+                label: None,
+            }
+        }
+        fn transition(source_id: i32, target_id: i32, probability: f64) -> Transition {
+            Transition {
+                source_id,
+                target_id,
+                probability,
+                annual_discount_rate_override: None,
+            }
+        }
+
+        let n_stages = 3_usize;
+        let stochastic = make_stochastic_context(n_stages, 3);
+        let study_stage_ids = [0_i32, 1, 2];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let graph = HorizonGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            nodes: vec![
+                node(0, 0, None),
+                node(1, 1, None),
+                node(2, 2, Some(0)),
+                node(3, 2, None),
+            ],
+            transitions: vec![
+                transition(0, 1, 1.0),
+                transition(1, 2, 0.5),
+                transition(1, 3, 0.5),
+            ],
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            season_map: None,
+        };
+        let node_graph = build_node_graph(&graph, n_stages, &resolver, &stochastic)
+            .expect("declared mixed terminal fan graph must build");
+        (node_graph, stochastic)
+    }
+
     /// Run the enumerated backward over `node_graph` with the given resolved
     /// `traversal`/`enumerated_state`, returning the raw result (so both the
     /// happy-path and the validation-error tests can share this setup) and
@@ -3610,6 +3665,60 @@ mod tests {
             "trunk pool: one cut on 2 ranks, exactly as on 1"
         );
         assert_eq!(per_pool_2[trunk_pool], 1, "and that count is exactly one");
+    }
+
+    /// A predicate-eligible External terminal leaf with NO captured fused
+    /// slice (`EnumeratedForwardScratch::default()` — ticket-007's forward
+    /// capture never ran) falls back to solving the child directly instead of
+    /// unwrapping. The Generated sibling is unaffected: it always solves. The
+    /// run must complete with `Ok`, never panic.
+    #[test]
+    fn enumerated_backward_falls_back_to_solving_when_fused_slice_is_absent() {
+        let (node_graph, stochastic) = mixed_terminal_fan_graph();
+        let root = NodePos(0);
+        let trunk = NodePos(1);
+        let external_leaf = NodePos(2);
+        let generated_leaf = NodePos(3);
+        let num_stages = 3;
+
+        assert!(
+            node_graph.is_external_terminal_leaf(external_leaf, num_stages),
+            "node 2 must be a fusion-eligible External terminal leaf"
+        );
+        assert!(
+            !node_graph.is_external_terminal_leaf(generated_leaf, num_stages),
+            "node 3 (Generated) must never be fusion-eligible"
+        );
+
+        let traversal = Traversal::resolve(&node_graph, true, 1);
+        let mut enumerated_state = EnumeratedForwardScratch::default();
+        enumerated_state.set_out_state_for_test(root, node_graph.nodes.len(), &[10.0]);
+        enumerated_state.set_out_state_for_test(trunk, node_graph.nodes.len(), &[20.0]);
+        assert!(
+            enumerated_state
+                .fused_terminal_slice(external_leaf)
+                .is_none(),
+            "power: the eligible leaf's fused slice must genuinely be absent"
+        );
+
+        let (result, per_pool) = run_enumerated_backward_over_graph(
+            &node_graph,
+            &stochastic,
+            &traversal,
+            &enumerated_state,
+            &StubComm,
+        );
+        let result = result.expect("a missing fused slice must fall back to solving, never error");
+
+        let trunk_pool = node_graph.nodes[trunk].pool_id;
+        assert_eq!(
+            per_pool[trunk_pool], 1,
+            "the trunk's cut is still generated despite the fallback solve"
+        );
+        assert!(
+            result.cuts_generated >= 2,
+            "both cut-generating nodes (root, trunk) still append a cut"
+        );
     }
 
     /// A successor whose `EnumeratedPlan::parent` does not record the
@@ -4634,5 +4743,228 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── fusion: real-solver AC1/AC2 solve-count checks ─────────────────────
+
+    /// Run one real (`ActiveSolver`) enumerated forward+backward round on
+    /// `setup`'s whole graph, returning the raw [`BackwardResult`] — in
+    /// particular its real `lp_solves` count (`ws.solver.statistics()
+    /// .solve_count` deltas before/after the backward sweep), the metric
+    /// fusion must reduce to zero on an all-External terminal fan and leave
+    /// unchanged on a Generated one.
+    ///
+    /// `stage_ctx`/`training_ctx` are built as direct field literals (mirroring
+    /// `StudySetup::train_inner`), not via the `setup.stage_ctx()`/
+    /// `setup.training_ctx()` accessors: those take `&self` opaquely, so the
+    /// compiler would treat their returned borrows as covering the whole
+    /// struct and reject the later `&mut setup.fcf` this harness also needs.
+    #[allow(clippy::too_many_lines)]
+    fn run_real_enumerated_round(setup: &mut crate::StudySetup) -> BackwardResult {
+        use cobre_solver::ActiveSolver;
+
+        let comm = StubComm;
+        let num_stages = setup.stage_data.stages.len();
+        let node_graph = &setup.node_graph;
+        let total_forward_passes = usize::try_from(
+            crate::test_support::node_scenario_count(node_graph)
+                .expect("scenario count must not overflow"),
+        )
+        .expect("fits usize");
+
+        let mut pool = setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("workspace pool must build");
+        let mut basis_store = BasisStore::new(total_forward_passes, node_graph.nodes.len());
+        let mut records: Vec<TrajectoryRecord> = (0..total_forward_passes * num_stages)
+            .map(|_| TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                node_id: NodeId(0),
+                state: Vec::new(),
+            })
+            .collect();
+
+        let stage_ctx = StageContext {
+            templates: &setup.stage_data.stage_templates.templates,
+            base_rows: &setup.stage_data.stage_templates.base_rows,
+            geometry_per_stage: &setup.stage_data.stage_templates.geometry_per_stage,
+            noise_scale: &setup.stage_data.stage_templates.noise_scale,
+            n_hydros: setup.stage_data.stage_templates.n_hydros,
+            cost_scale_factor: setup.stage_data.stage_templates.cost_scale_factor,
+            n_load_buses: setup.stage_data.stage_templates.n_load_buses,
+            load_balance_row_starts: &setup.stage_data.stage_templates.load_balance_row_starts,
+            load_bus_indices: &setup.stage_data.stage_templates.load_bus_indices,
+            block_counts_per_stage: &setup.stage_data.block_counts_per_stage,
+            ncs_col_starts: &setup.stage_data.stage_templates.ncs_col_starts,
+            n_ncs: setup.stage_data.stage_templates.n_ncs,
+            ncs_stochastic_dense_col: &setup.ncs_stochastic_dense_col,
+            ncs_stochastic_windows: &setup.ncs_stochastic_windows,
+            anticipated_windows: &setup.anticipated_windows,
+            study_stage_ids: &setup.study_stage_ids,
+            ncs_max_gen: &setup.ncs_max_gen,
+            ncs_allow_curtailment: &setup.ncs_allow_curtailment,
+            discount_factors: setup.stage_data.stage_templates.discount_factors(),
+            cumulative_discount_factors: setup
+                .stage_data
+                .stage_templates
+                .cumulative_discount_factors(),
+            stage_lag_transitions: &setup.stage_data.stage_lag_transitions,
+            noise_group_ids: &setup.stage_data.noise_group_ids,
+            downstream_par_order: setup.downstream_par_order,
+        };
+        let tr = &setup.scenario_libraries.training;
+        let training_ctx = TrainingContext {
+            horizon: &setup.methodology.horizon,
+            state: &setup.stage_data.state,
+            cut_state_layouts: &setup.stage_data.cut_state_layouts,
+            study_dims: &setup.stage_data.study_dims,
+            inflow_method: &setup.methodology.inflow_method,
+            stochastic: &setup.stochastic,
+            initial_state: &setup.initial_state,
+            inflow_scheme: tr.inflow_scheme,
+            load_scheme: tr.load_scheme,
+            ncs_scheme: tr.ncs_scheme,
+            stages: &setup.stage_data.stages,
+            historical_library: tr.historical.as_ref(),
+            external_inflow_library: tr.external_inflow.as_ref(),
+            external_load_library: tr.external_load.as_ref(),
+            external_ncs_library: tr.external_ncs.as_ref(),
+            lag_accum_seed: &setup.derived_inflow_seeds.accum,
+            lag_weight_seed: &setup.derived_inflow_seeds.weight,
+            dcs: None,
+            node_graph: &setup.node_graph,
+        };
+
+        let sampler =
+            crate::forward::build_sampler_from_ctx(&training_ctx).expect("forward sampler");
+        let frozen: Vec<StageTemplate> = (0..node_graph.n_pools)
+            .map(|p| stage_ctx.templates[node_graph.pool_stage[p].0].clone())
+            .collect();
+        let traversal = Traversal::resolve(node_graph, true, 0);
+        let Traversal::Enumerated(plan) = &traversal else {
+            unreachable!("resolve(is_enumerated=true, ..) always yields Enumerated");
+        };
+
+        let fwd_params = crate::forward::EnumeratedParams {
+            num_stages,
+            iteration: 1,
+            fwd_offset: 0,
+            local_forward_passes: total_forward_passes,
+            total_forward_passes,
+            terminal_has_boundary_cuts: false,
+            noise_dim: training_ctx.stochastic.dim(),
+            initial_state: training_ctx.initial_state,
+            lag_accum_seed: training_ctx.lag_accum_seed,
+            lag_weight_seed: training_ctx.lag_weight_seed,
+            ctx: &stage_ctx,
+            frozen: &frozen,
+            fcf: &setup.fcf,
+            training_ctx: &training_ctx,
+            sampler: &sampler,
+            dcs: None,
+        };
+
+        let mut scratch = EnumeratedForwardScratch::default();
+        crate::forward::run_enumerated_forward(
+            plan,
+            &mut scratch,
+            &mut pool.workspaces,
+            &mut basis_store,
+            &mut records,
+            &fwd_params,
+        )
+        .expect("real forward round must not error");
+
+        let n_state = training_ctx.state.n_state;
+        let mut cut_batches = empty_cut_batches(node_graph.n_pools);
+        let mut exchange = ExchangeBuffers::new(n_state, total_forward_passes.max(1), 1);
+        let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, 1);
+        let risk_measures = vec![RiskMeasure::Expectation; num_stages];
+        let bwd_max_openings = node_graph
+            .successors
+            .iter()
+            .map(|succs| {
+                succs
+                    .iter()
+                    .map(|s| node_graph.nodes[s.child].openings.len)
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let mut state_machine = BackwardPassState::new(
+            1,
+            1,
+            bwd_max_openings,
+            n_state,
+            total_forward_passes,
+            n_state,
+            num_stages,
+        );
+
+        let mut inputs = BackwardPassInputs {
+            workspaces: &mut pool.workspaces,
+            basis_store: &mut basis_store,
+            ctx: &stage_ctx,
+            frozen: &frozen,
+            fcf: &mut setup.fcf,
+            cut_batches: &mut cut_batches,
+            training_ctx: &training_ctx,
+            comm: &comm,
+            exchange: &mut exchange,
+            records: &records,
+            cut_sync_bufs: &mut csb,
+            visited_archive: None,
+            event_sender: None,
+            risk_measures: &risk_measures,
+            cut_activity_tolerance: 0.0,
+            iteration: 1,
+            local_work: 0,
+            fwd_offset: 0,
+            traversal: &traversal,
+            enumerated_state: &scratch,
+        };
+
+        state_machine
+            .run(&mut inputs)
+            .expect("real backward round must not error")
+    }
+
+    /// AC1: on an all-External terminal fan (every child of the sole
+    /// cut-generating node is a fusion-eligible External terminal leaf), the
+    /// real backward performs ZERO LP solves — every child's outcome is
+    /// filled from the forward-captured fused slice instead of being solved.
+    #[test]
+    fn enumerated_backward_fuses_all_external_terminal_fan_to_zero_solves() {
+        let mut setup = crate::test_support::external_distinct_fan_setup(2, 1);
+        let result = run_real_enumerated_round(&mut setup);
+        assert_eq!(
+            result.lp_solves, 0,
+            "an all-External terminal fan must be fully fused: zero backward LP solves"
+        );
+        assert_eq!(
+            result.cuts_generated, 1,
+            "the sole cut-generating node (root) still appends exactly one cut"
+        );
+    }
+
+    /// AC2: on a terminal-Generated fan (no child is fusion-eligible), the
+    /// real backward still solves every opening of every child — exhaustive
+    /// integration is unaffected by fusion.
+    #[test]
+    fn enumerated_backward_still_solves_every_opening_for_generated_terminal_fan() {
+        let mut setup = crate::test_support::terminal_generated_fan_setup(2, 1);
+        let result = run_real_enumerated_round(&mut setup);
+        assert!(
+            result.lp_solves > 0,
+            "power: a terminal-Generated fan has no fusion-eligible child, so the backward \
+             must genuinely solve"
+        );
+        assert_eq!(
+            result.cuts_generated, 1,
+            "the sole cut-generating node (root) still appends exactly one cut"
+        );
     }
 }

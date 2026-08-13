@@ -1144,10 +1144,11 @@ impl NodeGraph {
     /// `node`'s single canonical predecessor, or `None` at a root. A node reached
     /// by more than one edge is a recombination join — `debug_assert`-checked
     /// (construction invariant), never silently resolved to an arbitrary
-    /// predecessor. A structural inspection utility, not a hot-path call — the
-    /// forward walk needs no parent lookup (every trajectory carries its own
-    /// previous-stage record directly); its only callers today are tests.
-    #[cfg(test)]
+    /// predecessor. Resolves an eligible terminal leaf's cut-generating parent
+    /// pool for the fused forward capture
+    /// (`forward::enumerated::solve_forward_node`); the forward walk itself
+    /// needs no parent lookup (every trajectory carries its own
+    /// previous-stage record directly).
     pub(crate) fn node_parent(&self, node: NodePos) -> Option<NodePos> {
         let mut candidates = self
             .successors
@@ -1188,6 +1189,24 @@ impl NodeGraph {
             OpeningSource::External => Some(openings.offset),
             OpeningSource::Generated => None,
         }
+    }
+
+    /// `true` iff `node` is a terminal, External, single-opening leaf — the
+    /// only case where the forward capture and the backward's own solve read
+    /// the byte-identical LP, licensing reuse of a captured forward leaf
+    /// slice on the backward. Single source of fusion eligibility for the
+    /// forward capture and the backward consume, so the two cannot drift. A
+    /// Generated terminal leaf (forward samples one opening, backward
+    /// integrates all of them) or an interior node returns `false` — reusing
+    /// a single forward opening there understates the cut and drives
+    /// `final_lb` above `final_ub`.
+    pub(crate) fn is_external_terminal_leaf(&self, node: NodePos, num_stages: usize) -> bool {
+        let Some(terminal_stage) = num_stages.checked_sub(1) else {
+            return false;
+        };
+        self.nodes[node].stage.0 >= terminal_stage
+            && self.node_pinned_scenario(node).is_some()
+            && self.node_opening_range(node).1 == 1
     }
 
     /// Single canonical predecessor of every node (`None` at a root), indexed by
@@ -2002,6 +2021,53 @@ mod tests {
         );
         // Generated node yields `None` → the sampler hash-selects unchanged.
         assert_eq!(ng.node_pinned_scenario(NodePos(1)), None);
+    }
+
+    // ── Fusion eligibility: terminal + External + single-opening ───────────
+
+    #[test]
+    fn is_external_terminal_leaf_true_for_terminal_external_single_opening() {
+        let stochastic = stochastic_context(2, 1, 6);
+        let graph = HorizonGraph {
+            nodes: vec![node(0, 0, None), node(1, 1, Some(4))],
+            transitions: vec![transition(0, 1, 1.0)],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
+
+        assert!(ng.is_external_terminal_leaf(NodePos(1), 2));
+    }
+
+    #[test]
+    fn is_external_terminal_leaf_false_for_generated_terminal_leaf() {
+        let stochastic = stochastic_context(2, 1, 6);
+        let graph = HorizonGraph {
+            nodes: vec![node(0, 0, None), node(1, 1, None)],
+            transitions: vec![transition(0, 1, 1.0)],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
+
+        assert!(!ng.is_external_terminal_leaf(NodePos(1), 2));
+    }
+
+    #[test]
+    fn is_external_terminal_leaf_false_for_interior_external_node() {
+        let stochastic = stochastic_context(2, 1, 6);
+        let graph = HorizonGraph {
+            nodes: vec![node(0, 0, Some(4)), node(1, 1, None)],
+            transitions: vec![transition(0, 1, 1.0)],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
+
+        assert!(!ng.is_external_terminal_leaf(NodePos(0), 2));
     }
 
     // ── Discount: per-stage, never per-node ─────────────────────────────────
