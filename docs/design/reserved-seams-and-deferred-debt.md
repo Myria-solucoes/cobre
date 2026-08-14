@@ -17,9 +17,9 @@ non-obvious inert surfaces:
   debt (not limited to unwired seams) tracked alongside this one.
 
 For known **structural/algorithmic** limitations of the node-graph engine
-(as opposed to unwired config or code) — single-initial-node, single-boundary
--policy terminal cost (a per-leaf terminal future-cost function needs multi-policy
-input), enumerated-selection restrictions — see
+(as opposed to unwired config or code) — single-initial-node,
+single-boundary-policy terminal cost (a per-leaf terminal future-cost function
+needs multi-policy input), enumerated-selection restrictions — see
 [`policy-graph-limitations.md`](policy-graph-limitations.md); this document
 does not restate those.
 
