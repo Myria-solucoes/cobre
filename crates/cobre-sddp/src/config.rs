@@ -53,6 +53,9 @@ pub struct LoopParams {
     pub seed: u64,
     /// Number of forward-pass trajectories per training iteration.
     pub forward_passes: u32,
+    /// `true` when the forward selection is `enumerated`; selects the exact
+    /// probability-weighted upper bound instead of the sampled statistical one.
+    pub training_enumerated: bool,
     /// Maximum iteration budget (also used for FCF cut-pool pre-sizing).
     pub max_iterations: u64,
     /// Starting iteration offset for resumed training runs.
@@ -79,6 +82,11 @@ pub struct LoopConfig {
     /// Total forward scenarios per iteration across all ranks. Must be `>= 1`.
     pub forward_passes: u32,
 
+    /// `true` when the forward selection is `enumerated`; [`crate::train`] then
+    /// assembles the exact probability-weighted upper bound rather than the
+    /// sampled Welford mean + CI.
+    pub training_enumerated: bool,
+
     /// Maximum training iterations before forced termination. Must be `>= 1`.
     /// Also drives cut-pool capacity pre-sizing.
     pub max_iterations: u64,
@@ -101,6 +109,7 @@ impl Default for LoopConfig {
     fn default() -> Self {
         Self {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 1,
             start_iteration: 0,
             n_fwd_threads: 1,

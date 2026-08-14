@@ -29,7 +29,7 @@ use cobre_solver::{
     Basis, BasisStatus, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics,
     StageTemplate,
 };
-use cobre_stochastic::StochasticContext;
+use cobre_stochastic::{StochasticContext, select_transition_child};
 
 use cobre_sddp::{
     CapturedBasis, EnergyConversionSet, Phase, SimulationError,
@@ -39,6 +39,10 @@ use cobre_sddp::{
     indexer::{StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
+    setup::node_graph::{
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        StageIdx, Traversal,
+    },
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
     test_support::all_enabled_cut_state_layouts,
     workspace::{SolverWorkspace, WorkspaceSizing},
@@ -138,13 +142,13 @@ struct MockSolver {
 }
 
 impl MockSolver {
-    fn always_ok(solution: LpSolution) -> Self {
+    fn new(solution: LpSolution, infeasible_at: Option<usize>) -> Self {
         let buf_primal = solution.primal.clone();
         let buf_dual = solution.dual.clone();
         let buf_reduced_costs = solution.reduced_costs.clone();
         Self {
             solution,
-            infeasible_at: None,
+            infeasible_at,
             call_count: 0,
             buf_primal,
             buf_dual,
@@ -157,23 +161,12 @@ impl MockSolver {
         }
     }
 
+    fn always_ok(solution: LpSolution) -> Self {
+        Self::new(solution, None)
+    }
+
     fn infeasible_on(solution: LpSolution, n: usize) -> Self {
-        let buf_primal = solution.primal.clone();
-        let buf_dual = solution.dual.clone();
-        let buf_reduced_costs = solution.reduced_costs.clone();
-        Self {
-            solution,
-            infeasible_at: Some(n),
-            call_count: 0,
-            buf_primal,
-            buf_dual,
-            buf_reduced_costs,
-            load_count: 0,
-            add_rows_count: 0,
-            solve_count: 0,
-            solve_with_basis_count: 0,
-            recorded_basis: None,
-        }
+        Self::new(solution, Some(n))
     }
 
     fn do_solve(&mut self) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
@@ -499,7 +492,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         0,
         0,
         solver,
-        PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+        PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
         1,
         WorkspaceSizing {
             hydro_count: 1,
@@ -570,6 +563,7 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -611,10 +605,15 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     );
 
     assert!(result.is_ok(), "simulate returned error: {result:?}");
@@ -701,6 +700,7 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -742,10 +742,15 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     );
 
     match result {
@@ -823,6 +828,7 @@ fn simulate_infeasible_at_scenario2_stage3() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -864,10 +870,15 @@ fn simulate_infeasible_at_scenario2_stage3() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     );
 
     match result {
@@ -944,6 +955,7 @@ fn simulate_channel_closed_returns_error() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -985,10 +997,15 @@ fn simulate_channel_closed_returns_error() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     );
 
     assert!(
@@ -1024,7 +1041,6 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
     let objective = 100.0_f64;
     let theta_val = 30.0_f64;
     let expected_stage_cost = (objective - theta_val) * 1_000_000.0;
-    #[allow(clippy::cast_precision_loss)]
     let expected_total_cost = expected_stage_cost * n_stages as f64;
 
     let solution = fixed_solution(objective, theta_val);
@@ -1066,6 +1082,7 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -1107,10 +1124,15 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1185,6 +1207,7 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -1226,10 +1249,15 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1305,6 +1333,7 @@ fn simulate_channel_receives_results_in_scenario_order() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -1346,10 +1375,15 @@ fn simulate_channel_receives_results_in_scenario_order() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1421,6 +1455,7 @@ fn test_simulation_parallel_cost_determinism() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -1462,10 +1497,15 @@ fn test_simulation_parallel_cost_determinism() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1476,7 +1516,7 @@ fn test_simulation_parallel_cost_determinism() {
                 0,
                 idx,
                 MockSolver::always_ok(solution.clone()),
-                PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+                PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
                 1,
                 WorkspaceSizing {
                     hydro_count: 1,
@@ -1514,6 +1554,7 @@ fn test_simulation_parallel_cost_determinism() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -1555,10 +1596,15 @@ fn test_simulation_parallel_cost_determinism() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1659,6 +1705,7 @@ fn simulate_emits_progress_events() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -1700,10 +1747,15 @@ fn simulate_emits_progress_events() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: Some(event_tx),
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     );
     assert!(result.is_ok(), "simulate returned error: {result:?}");
 
@@ -1800,6 +1852,7 @@ fn simulate_no_events_when_sender_is_none() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -1841,10 +1894,15 @@ fn simulate_no_events_when_sender_is_none() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     );
 
     assert!(result.is_ok(), "simulate returned error: {result:?}");
@@ -1926,6 +1984,7 @@ fn simulate_progress_events_received_before_return() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -1967,10 +2026,15 @@ fn simulate_progress_events_received_before_return() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: Some(event_tx),
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -2063,6 +2127,7 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -2104,10 +2169,15 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: Some(event_tx),
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -2198,6 +2268,7 @@ fn simulate_emits_simulation_finished_as_last_event() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -2239,10 +2310,15 @@ fn simulate_emits_simulation_finished_as_last_event() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: Some(event_tx),
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -2344,6 +2420,7 @@ fn simulate_progress_scenario_cost_is_finite() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -2385,10 +2462,15 @@ fn simulate_progress_scenario_cost_is_finite() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: Some(event_tx),
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -2474,6 +2556,7 @@ fn simulate_frozen_path_issues_zero_add_rows() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -2515,10 +2598,15 @@ fn simulate_frozen_path_issues_zero_add_rows() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         Some(frozen.as_slice()),
         &[],
         &comm,
+        &Traversal::default(),
     );
 
     assert!(result.is_ok(), "frozen path must succeed: {result:?}");
@@ -2597,6 +2685,7 @@ fn simulate_fallback_path_issues_expected_add_rows() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -2638,10 +2727,15 @@ fn simulate_fallback_path_issues_expected_add_rows() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     );
 
     assert!(result.is_ok(), "fallback path must succeed: {result:?}");
@@ -2722,6 +2816,7 @@ fn simulate_frozen_length_mismatch_returns_error() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -2763,10 +2858,15 @@ fn simulate_frozen_length_mismatch_returns_error() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         Some(wrong_frozen.as_slice()),
         &[],
         &comm,
+        &Traversal::default(),
     );
 
     match &result {
@@ -2807,9 +2907,9 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     //   add_cut(iter=1, fwd=0) → slot 11
     //   add_cut(iter=2, fwd=0) → slot 12
     let mut fcf = FutureCostFunction::new(n_stages, 1, 1, 5, &[10]);
-    fcf.pools[0].add_cut(0, 0, 50.0, &[1.0]);
-    fcf.pools[0].add_cut(1, 0, 60.0, &[1.0]);
-    fcf.pools[0].add_cut(2, 0, 70.0, &[1.0]);
+    fcf.pools[0].add_cut(NodeId(0), 0, 0, 50.0, &[1.0]);
+    fcf.pools[0].add_cut(NodeId(0), 1, 0, 60.0, &[1.0]);
+    fcf.pools[0].add_cut(NodeId(0), 2, 0, 70.0, &[1.0]);
     assert_eq!(
         fcf.pools[0].active_count(),
         3,
@@ -2821,7 +2921,10 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         "populated_count must be 13 (slot 12 + 1)"
     );
 
-    let mut cb = CapturedBasis::new(4, 5, 2, 3, 1);
+    // node_id must match the chain's node_ids[0] == 0 (n_stages = 1 below) or the
+    // new node-tag check drops this basis to cold, breaking the warm-start
+    // assertions this test exists to pin.
+    let mut cb = CapturedBasis::new(4, 5, 2, 3, 1, NodeId(0));
     cb.basis.row_status = vec![
         BASE_STATUS,
         BASE_STATUS,
@@ -2884,6 +2987,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -2925,11 +3029,16 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         // fallback path (no frozen templates); reconstruction uses pool.active_cuts()
         None,
         &stage_bases,
         &comm,
+        &Traversal::default(),
     );
 
     assert!(
@@ -3048,6 +3157,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -3089,10 +3199,15 @@ fn simulate_with_empty_stage_bases_cold_starts() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     );
 
     assert!(
@@ -3113,6 +3228,240 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         solver.solve_count, expected_solves,
         "cold-start solve must be called exactly n_scenarios({n_scenarios}) × \
          n_stages({n_stages}) = {expected_solves} times; got {}",
+        solver.solve_count
+    );
+}
+
+// ── R7: node-keyed simulation warm-basis cache (branching K-fan) ───────────
+
+/// A 2-stage K-fan: a stage-0 root (node 0) branching 50/50 into two stage-1
+/// leaves (node 1, node 2) — the minimal shape where node position and stage
+/// diverge (node 2 sits at position 2 while its stage is 1), the exact
+/// condition a stage-keyed warm-basis lookup gets wrong. Leaves share pool 1
+/// (this module's leaf-sharing rule); the warm-basis cache is keyed by node
+/// position regardless.
+fn two_leaf_fan_node_graph() -> NodeGraph {
+    let root_openings = NodeOpenings {
+        source: OpeningSource::Generated,
+        offset: 0,
+        len: 1,
+        q: 1.0,
+    };
+    NodeGraph {
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2)].into(),
+        nodes: vec![
+            NodeRuntime {
+                stage: StageIdx(0),
+                pool_id: 0,
+                openings: root_openings,
+            },
+            NodeRuntime {
+                stage: StageIdx(1),
+                pool_id: 1,
+                openings: root_openings,
+            },
+            NodeRuntime {
+                stage: StageIdx(1),
+                pool_id: 1,
+                openings: root_openings,
+            },
+        ]
+        .into(),
+        successors: vec![
+            vec![
+                NodeSuccessor {
+                    child: NodePos(1),
+                    probability: 0.5,
+                },
+                NodeSuccessor {
+                    child: NodePos(2),
+                    probability: 0.5,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+        ]
+        .into(),
+        n_pools: 2,
+        pool_stage: vec![StageIdx(0), StageIdx(1)],
+    }
+}
+
+/// A `CapturedBasis` warm-startable against `minimal_template_1_0`
+/// (`num_cols=4`, `num_rows=2`, 0 cut rows): 2 BASIC columns + 0 BASIC rows
+/// satisfies `enforce_basic_count_invariant`'s `total_basic == num_row`
+/// requirement, mirroring `run_stage_solve_warm_start_frozen_path_succeeds`'s
+/// fixture.
+fn warm_basis_for_node(node_id: NodeId) -> CapturedBasis {
+    let mut cb = CapturedBasis::new(4, 2, 2, 0, 1, node_id);
+    cb.basis.col_status[0] = BasisStatus::Basic;
+    cb.basis.col_status[1] = BasisStatus::Basic;
+    cb.state_at_capture.push(0.0);
+    cb
+}
+
+/// R7 acceptance: a branching simulation warm-starts from the VISITED node's
+/// own basis, not whichever node's basis happens to land at that stage index.
+/// The pre-fix, stage-keyed lookup (`stage_bases.get(t)`) would resolve node
+/// 2's stage-1 solve to `node_bases[1]` — leaf A's basis, whose `node_id`
+/// mismatches — and `run_stage_solve`'s node-tag guard would silently reject
+/// it as cold. A node-keyed lookup warm-starts every stage-1 solve regardless
+/// of which leaf it visits.
+#[test]
+fn simulate_branching_k_fan_warm_starts_from_visited_node_basis() {
+    let node_graph = two_leaf_fan_node_graph();
+    let n_stages = 2;
+    let n_scenarios = 8u32;
+
+    // Self-checked precondition (testing.md): the pinned scenario range must
+    // resolve visits to BOTH leaves, or this test cannot distinguish a
+    // per-node lookup from the stage-keyed bug it exists to catch.
+    let weights = [0.5_f64, 0.5];
+    let leaf_for_scenario: Vec<usize> = (0..n_scenarios)
+        .map(|s| select_transition_child(0, s, 0, weights.iter().copied()))
+        .collect();
+    assert!(
+        leaf_for_scenario.contains(&0),
+        "pinned scenario range must resolve at least one visit to leaf A (node 1)"
+    );
+    assert!(
+        leaf_for_scenario.contains(&1),
+        "pinned scenario range must resolve at least one visit to leaf B (node 2) — \
+         otherwise this test cannot exercise the node-vs-stage divergence"
+    );
+
+    let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
+    let base_rows: Vec<usize> = vec![0; n_stages];
+    let state = state_layout_for(1, 0);
+    let fcf = FutureCostFunction::new(node_graph.n_pools, 1, 1, 10, &vec![0; node_graph.n_pools]);
+    let stochastic = make_stochastic_context(n_stages);
+    let config = SimulationConfig {
+        n_scenarios,
+        io_channel_capacity: 32,
+        profile: Phase::Simulation.profile(),
+    };
+    let horizon = HorizonMode::Finite {
+        num_stages: n_stages,
+    };
+    let initial_state = vec![50.0_f64];
+
+    let solution = fixed_solution(100.0, 30.0);
+    let solver = MockSolver::always_ok(solution);
+    let comm = StubComm { rank: 0, size: 1 };
+    let entity_counts = entity_counts_1_hydro();
+    let (tx, _rx) = mpsc::sync_channel(32);
+    let hprod = hydro_productivities_1hydro(n_stages);
+    let ec = zero_energy_conversion(1, n_stages);
+
+    // node_bases[0] (root) carries no basis; nodes 1 and 2 each carry their
+    // OWN basis, tagged with their OWN declared node_id.
+    let node_bases: Vec<Option<CapturedBasis>> = vec![
+        None,
+        Some(warm_basis_for_node(NodeId(1))),
+        Some(warm_basis_for_node(NodeId(2))),
+    ];
+
+    let mut workspaces = single_workspace(solver);
+    let result = cobre_sddp::simulate(
+        &mut workspaces,
+        &StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        },
+        &fcf,
+        &TrainingContext {
+            node_graph: &node_graph,
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, node_graph.n_pools),
+            study_dims: &study_dims(),
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        },
+        &config,
+        SimulationOutputSpec {
+            result_tx: &tx,
+            zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
+            block_hours_per_stage: &[],
+            entity_counts: &entity_counts,
+            generic_constraint_row_entries: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            pumping_col_starts: &[],
+            n_pumping: 0,
+            geometry_per_stage: &[],
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices_per_stage: &[],
+            contract_is_import: &[],
+            ncs_entity_ids_per_stage: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities_per_stage: &hprod,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0],
+            event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
+        },
+        None,
+        &node_bases,
+        &comm,
+        &Traversal::default(),
+    );
+
+    assert!(
+        result.is_ok(),
+        "branching K-fan simulate must succeed: {result:?}"
+    );
+
+    let solver = workspaces[0].solver.inner();
+    let n_scenarios = n_scenarios as usize;
+    assert_eq!(
+        solver.solve_with_basis_count, n_scenarios,
+        "every stage-1 solve must warm-start from its OWN visited node's basis, \
+         regardless of which leaf it visits; got solve_with_basis_count={} \
+         (expected {n_scenarios} — one per scenario)",
+        solver.solve_with_basis_count
+    );
+    assert_eq!(
+        solver.solve_count, n_scenarios,
+        "every stage-0 (root) solve must be cold (no basis provided); got \
+         solve_count={}",
         solver.solve_count
     );
 }

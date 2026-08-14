@@ -1,6 +1,6 @@
 //! Stochastic preprocessing pipeline: PAR estimation, opening tree loading, and stochastic context construction.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use cobre_core::temporal::SeasonCycleType::Monthly;
@@ -10,14 +10,15 @@ use cobre_core::{
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::Config;
+use cobre_io::LoadError;
 use cobre_io::LoadFactorEntry;
-use cobre_io::ValidationContext;
+use cobre_io::StageIdResolver;
+use cobre_io::config::Openings;
 use cobre_io::scenarios::assemble_opening_tree;
 use cobre_io::scenarios::estimation::estimate_from_history;
 use cobre_io::scenarios::load_noise_openings;
 use cobre_io::scenarios::parse_load_factors;
 use cobre_io::scenarios::validate_noise_openings;
-use cobre_io::validate_structure;
 use cobre_stochastic::BlockFactorPair;
 use cobre_stochastic::ClassSchemes;
 use cobre_stochastic::DerivedInflowSeeds;
@@ -34,6 +35,7 @@ use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
 use cobre_stochastic::standardize_historical_windows;
 use cobre_stochastic::{OpeningTreeInputs, StochasticContext, context::OpeningTree};
 
+use super::widen_lag_state_depth;
 use crate::{EstimationPath, EstimationReport, SddpError};
 
 /// Result of the stochastic preprocessing pipeline.
@@ -50,44 +52,63 @@ pub struct PrepareStochasticResult {
     pub estimation_path: EstimationPath,
 }
 
-/// Load and validate a user-supplied opening tree from `scenarios/noise_openings.parquet`.
+/// Load and validate a user-supplied opening tree when
+/// `training.scenario_source.openings` declares `{source: file}`, reading the
+/// convention-located `scenarios/noise_openings.parquet` — consumed by
+/// declaration, not by file existence.
 ///
-/// Returns `Ok(None)` if the file is absent.
+/// Returns `Ok(None)` when the declaration is absent or `generated` (the tree is
+/// generated downstream). A present-but-undeclared file is therefore ignored.
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Io`] if the file exists but cannot be read or fails validation.
+/// Returns [`SddpError::Io`] when `{source: file}` is declared but the
+/// conventional file is absent, unreadable, or fails validation against each
+/// stage's declared `num_openings` (its `branching_factor`).
 fn load_user_opening_tree_inner(
     case_dir: &Path,
     system: &System,
+    config: &Config,
+    training_source: &ScenarioSource,
 ) -> Result<Option<OpeningTree>, SddpError> {
-    let mut ctx = ValidationContext::new();
-    let manifest = validate_structure(case_dir, &mut ctx);
+    match config.training_openings() {
+        None | Some(Openings::Generated {}) => Ok(None),
+        Some(Openings::File {}) => {
+            let path = case_dir.join("scenarios").join("noise_openings.parquet");
+            if !path.exists() {
+                return Err(SddpError::Io(LoadError::io(
+                    &path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "openings source is 'file' but the conventional \
+                         scenarios/noise_openings.parquet is absent",
+                    ),
+                )));
+            }
 
-    if !manifest.scenarios_noise_openings_parquet {
-        return Ok(None);
+            let rows = load_noise_openings(Some(&path))?;
+
+            let schemes = ClassSchemes {
+                inflow: Some(training_source.inflow_scheme),
+                load: Some(training_source.load_scheme),
+                ncs: Some(training_source.ncs_scheme),
+            };
+            let expected_dim = noise_entity_order(system, &schemes).dim();
+
+            let (study_stage_ids, expected_openings_per_stage): (Vec<i32>, Vec<usize>) = system
+                .stages()
+                .iter()
+                .filter(|s| s.id >= 0)
+                .map(|s| (s.id, s.scenario_config.branching_factor))
+                .unzip();
+            let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+
+            validate_noise_openings(&rows, expected_dim, &expected_openings_per_stage, &resolver)?;
+
+            let tree = assemble_opening_tree(rows, expected_dim, &resolver);
+            Ok(Some(tree))
+        }
     }
-
-    let path = case_dir.join("scenarios").join("noise_openings.parquet");
-
-    let rows = load_noise_openings(Some(&path))?;
-
-    let expected_dim = noise_entity_order(system).dim();
-
-    let expected_stages = system.stages().iter().filter(|s| s.id >= 0).count();
-    let mut openings_by_stage: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
-    for row in &rows {
-        openings_by_stage
-            .entry(row.stage_id)
-            .or_default()
-            .insert(row.opening_index);
-    }
-    let openings_per_stage: Vec<usize> = openings_by_stage.values().map(BTreeSet::len).collect();
-
-    validate_noise_openings(&rows, expected_dim, expected_stages, &openings_per_stage)?;
-
-    let tree = assemble_opening_tree(rows, expected_dim);
-    Ok(Some(tree))
 }
 
 /// Noise-group ids for the study stages, delegating to [`precompute_noise_groups`].
@@ -173,6 +194,7 @@ pub fn load_load_factors_for_stochastic(
 fn build_opening_tree_library(
     system: &System,
     training_source: &ScenarioSource,
+    declared_lag_depth: Option<u32>,
 ) -> Result<Option<HistoricalScenarioLibrary>, SddpError> {
     use cobre_core::temporal::NoiseMethod;
     let needs_historical_tree = system
@@ -195,7 +217,7 @@ fn build_opening_tree_library(
         .as_ref()
         .map(|sm| sm.seasons.len());
     let par = PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
-    let max_order = par.max_order();
+    let max_order = widen_lag_state_depth(par.max_order(), declared_lag_depth);
     let user_pool = training_source.historical_years.as_ref();
     let window_years = discover_historical_windows(
         system.inflow_history(),
@@ -255,98 +277,89 @@ fn build_opening_tree_library(
     Ok(Some(lib))
 }
 
+/// Per-class per-stage raw scenario count for opening-tree clamping, keyed by the
+/// resolved study index. `None` when the class is not External. A row whose
+/// `stage_id` does not resolve is impossible here — cobre-io's A2 rejects it at
+/// load — and the resolve consumes the study stage-id resolver's map, never a
+/// `stage_id as usize` index a gapped or 1-based domain would mis-key.
+fn class_scenario_counts(
+    scheme: SamplingScheme,
+    stage_ids: impl Iterator<Item = i32>,
+    n_entities: usize,
+    n_stages: usize,
+    resolver: &StageIdResolver,
+) -> Option<Vec<usize>> {
+    if scheme != SamplingScheme::External {
+        return None;
+    }
+    let mut rows_per_stage = vec![0usize; n_stages];
+    for stage_id in stage_ids {
+        if let Some(idx) = resolver.resolve(stage_id) {
+            rows_per_stage[idx] += 1;
+        }
+    }
+    Some(if n_entities > 0 {
+        rows_per_stage.iter().map(|&r| r / n_entities).collect()
+    } else {
+        vec![0usize; n_stages]
+    })
+}
+
 /// Compute per-stage external scenario counts for opening tree clamping.
 ///
 /// When any entity class uses External sampling, the external library is padded
 /// to a uniform scenario count after loading. The opening tree generator must
-/// clamp per-stage openings to the pre-padding raw count. The element-wise
-/// minimum across entity classes is returned.
+/// clamp per-stage openings to the pre-padding raw count. P-B1 (cobre-io Layer
+/// 5b) rejects any deck whose slot-occupying external classes disagree on the
+/// per-stage raw count, so the present classes are guaranteed to agree here and
+/// the first present class's vector is authoritative — never an element-wise
+/// minimum, which would silently truncate a class's scenario set to a wrong
+/// answer.
 fn compute_external_scenario_counts(
     system: &System,
     training_source: &ScenarioSource,
 ) -> Option<Vec<usize>> {
-    let n_stages = system.stages().iter().filter(|s| s.id >= 0).count();
-    let noise_order = noise_entity_order(system);
-
-    let inflow_counts: Option<Vec<usize>> =
-        if training_source.inflow_scheme == SamplingScheme::External && n_stages > 0 {
-            let external_rows = system.external_scenarios();
-            let n_hydros = noise_order.hydro_ids.len();
-            let mut rows_per_stage = vec![0usize; n_stages];
-            #[allow(clippy::cast_sign_loss)]
-            for row in external_rows {
-                let s = row.stage_id as usize;
-                if s < n_stages {
-                    rows_per_stage[s] += 1;
-                }
-            }
-            Some(if n_hydros > 0 {
-                rows_per_stage.iter().map(|&r| r / n_hydros).collect()
-            } else {
-                vec![0usize; n_stages]
-            })
-        } else {
-            None
-        };
-
-    let load_counts: Option<Vec<usize>> =
-        if training_source.load_scheme == SamplingScheme::External && n_stages > 0 {
-            let external_rows = system.external_load_scenarios();
-            let n_buses = noise_order.load_bus_ids.len();
-            let mut rows_per_stage = vec![0usize; n_stages];
-            #[allow(clippy::cast_sign_loss)]
-            for row in external_rows {
-                let s = row.stage_id as usize;
-                if s < n_stages {
-                    rows_per_stage[s] += 1;
-                }
-            }
-            Some(if n_buses > 0 {
-                rows_per_stage.iter().map(|&r| r / n_buses).collect()
-            } else {
-                vec![0usize; n_stages]
-            })
-        } else {
-            None
-        };
-
-    let ncs_counts: Option<Vec<usize>> =
-        if training_source.ncs_scheme == SamplingScheme::External && n_stages > 0 {
-            let external_rows = system.external_ncs_scenarios();
-            let n_ncs = noise_order.ncs_entity_ids.len();
-            let mut rows_per_stage = vec![0usize; n_stages];
-            #[allow(clippy::cast_sign_loss)]
-            for row in external_rows {
-                let s = row.stage_id as usize;
-                if s < n_stages {
-                    rows_per_stage[s] += 1;
-                }
-            }
-            Some(if n_ncs > 0 {
-                rows_per_stage.iter().map(|&r| r / n_ncs).collect()
-            } else {
-                vec![0usize; n_stages]
-            })
-        } else {
-            None
-        };
-
-    match (inflow_counts, load_counts, ncs_counts) {
-        (None, None, None) => None,
-        (Some(a), None, None) => Some(a),
-        (None, Some(b), None) => Some(b),
-        (None, None, Some(c)) => Some(c),
-        (Some(a), Some(b), None) => Some(a.iter().zip(b.iter()).map(|(&x, &y)| x.min(y)).collect()),
-        (Some(a), None, Some(c)) => Some(a.iter().zip(c.iter()).map(|(&x, &y)| x.min(y)).collect()),
-        (None, Some(b), Some(c)) => Some(b.iter().zip(c.iter()).map(|(&x, &y)| x.min(y)).collect()),
-        (Some(a), Some(b), Some(c)) => Some(
-            a.iter()
-                .zip(b.iter())
-                .zip(c.iter())
-                .map(|((&x, &y), &z)| x.min(y).min(z))
-                .collect(),
-        ),
+    let study_stage_ids: Vec<i32> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let n_stages = study_stage_ids.len();
+    if n_stages == 0 {
+        return None;
     }
+    let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+    let schemes = ClassSchemes {
+        inflow: Some(training_source.inflow_scheme),
+        load: Some(training_source.load_scheme),
+        ncs: Some(training_source.ncs_scheme),
+    };
+    let noise_order = noise_entity_order(system, &schemes);
+
+    let inflow_counts = class_scenario_counts(
+        training_source.inflow_scheme,
+        system.external_scenarios().iter().map(|r| r.stage_id),
+        noise_order.hydro_ids.len(),
+        n_stages,
+        &resolver,
+    );
+    let load_counts = class_scenario_counts(
+        training_source.load_scheme,
+        system.external_load_scenarios().iter().map(|r| r.stage_id),
+        noise_order.load_bus_ids.len(),
+        n_stages,
+        &resolver,
+    );
+    let ncs_counts = class_scenario_counts(
+        training_source.ncs_scheme,
+        system.external_ncs_scenarios().iter().map(|r| r.stage_id),
+        noise_order.ncs_entity_ids.len(),
+        n_stages,
+        &resolver,
+    );
+
+    inflow_counts.or(load_counts).or(ncs_counts)
 }
 
 /// Run the stochastic preprocessing pipeline: PAR estimation, block factor
@@ -366,7 +379,8 @@ pub fn prepare_stochastic(
     let (system, estimation_report, estimation_path) =
         estimate_from_history(system, case_dir, config)?;
 
-    let user_opening_tree = load_user_opening_tree_inner(case_dir, &system)?;
+    let user_opening_tree =
+        load_user_opening_tree_inner(case_dir, &system, config, training_source)?;
 
     let load_factor_entries = load_load_factors_for_stochastic(case_dir)?;
     let block_pairs: Vec<Vec<BlockFactorPair>> = load_factor_entries
@@ -390,7 +404,11 @@ pub fn prepare_stochastic(
         .map(|(ncs_id, stage_id, pairs)| (*ncs_id, *stage_id, pairs.as_slice()))
         .collect();
 
-    let opening_tree_library = build_opening_tree_library(&system, training_source)?;
+    let opening_tree_library = build_opening_tree_library(
+        &system,
+        training_source,
+        config.state_space.inflow_lag_depth,
+    )?;
     let external_scenario_counts = compute_external_scenario_counts(&system, training_source);
 
     let opening_tree_noise_group_ids = study_stage_noise_group_ids(&system);
@@ -428,20 +446,22 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, HydroBlockBounds,
-        HydroStageBounds, HydroStagePenalties, InitialConditions, LineBlockBounds,
-        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
-        ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, HorizonGraph,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
         entities::{
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
         },
-        scenario::{InflowHistoryRow, InflowModel, LoadModel},
+        scenario::{
+            ExternalLoadRow, ExternalScenarioRow, InflowHistoryRow, InflowModel, LoadModel,
+        },
         temporal::{
-            Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
-            SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageLagTransition,
-            StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, SeasonCycleType,
+            SeasonDefinition, SeasonMap, Stage, StageLagTransition, StageRiskConfig,
+            StageStateConfig,
         },
     };
     use cobre_stochastic::par::lag_transition::{
@@ -474,6 +494,25 @@ mod tests {
                 def(12, 4, Some(6)),
                 def(13, 7, Some(9)),
             ],
+        }
+    }
+
+    /// A standard 12-month `SeasonMap` (id `i` = calendar month `i+1`), the
+    /// shape `derive_inflow_seeds`'s season-based backward walk needs.
+    fn monthly_season_map() -> SeasonMap {
+        let seasons: Vec<SeasonDefinition> = (0..12_u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("Month{}", i + 1),
+                month_start: i + 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
         }
     }
 
@@ -692,13 +731,9 @@ mod tests {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
                     max_turbined_m3s: 100.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
@@ -755,10 +790,12 @@ mod tests {
             },
         );
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: Some(ring_season_map()),
         };
 
@@ -778,6 +815,7 @@ mod tests {
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
+                future_anticipated_deliveries: vec![],
             })
             .build()
             .expect("ring fixture: valid system");
@@ -865,7 +903,7 @@ mod tests {
             historical_years: None,
         };
 
-        let lib = build_opening_tree_library(&fx.system, &training_source)
+        let lib = build_opening_tree_library(&fx.system, &training_source, None)
             .expect("build_opening_tree_library must succeed")
             .expect("HistoricalResiduals noise method must build a library");
         assert_eq!(
@@ -921,5 +959,820 @@ mod tests {
              (the literal downstream_par_order=0 regression value), got eta={eta_stage4} \
              vs naive={expected_naive_eta}"
         );
+    }
+
+    /// 12 monthly study stages (season 0=Jan .. 11=Dec, year 2026), one hydro,
+    /// AR(0) — the declared depth alone drives widening, with no fitted lag
+    /// dependence to entangle it, and a real monthly `SeasonMap` (needed for
+    /// `derive_inflow_seeds`'s own season-based backward walk, which — unlike
+    /// `discover_historical_windows`'s `month0()` fallback — requires a
+    /// populated `SeasonMap.seasons` to resolve at all). History covers all 12
+    /// study months plus `n_lag_months` pre-study lag months immediately
+    /// preceding January 2026 (spanning back as many prior years as needed),
+    /// each carrying a distinct `value_m3s = 1000.0 + k` (`k` = 1 for December
+    /// 2025, the most recent, up to `n_lag_months` for the oldest) so a caller
+    /// can identify exactly which calendar month landed in which lag slot.
+    // Rationale: one flat literal `System` fixture (bus, hydro, 12 stages,
+    // inflow models, bounds, penalties) mirroring `build_ring_fixture` above;
+    // splitting it fragments a single-purpose, single-call fixture across
+    // artificial sub-functions.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap
+    )]
+    fn build_ar0_fixture_with_declared_lag_history(n_lag_months: u32) -> (System, ScenarioSource) {
+        let hydro_id = EntityId(1);
+        let bus_id = EntityId(2);
+
+        let make_stage = |index: usize, month: u32| {
+            let start = NaiveDate::from_ymd_opt(2026, month, 1).unwrap();
+            let end = if month == 12 {
+                NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(2026, month + 1, 1).unwrap()
+            };
+            Stage {
+                index,
+                id: index as i32,
+                start_date: start,
+                end_date: end,
+                season_id: Some(index),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 720.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: true,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::HistoricalResiduals,
+                },
+            }
+        };
+        let stages: Vec<Stage> = (1..=12_u32)
+            .map(|m| make_stage((m - 1) as usize, m))
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..12_i32)
+            .map(|stage_id| InflowModel {
+                hydro_id,
+                stage_id,
+                mean_m3s: 100.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let mut inflow_history: Vec<InflowHistoryRow> = stages
+            .iter()
+            .map(|s| InflowHistoryRow {
+                hydro_id,
+                start_date: s.start_date,
+                end_date: s.end_date,
+                value_m3s: 100.0,
+            })
+            .collect();
+        // Pre-study lag months immediately preceding January 2026 (month
+        // index 0), walking back `n_lag_months` — possibly several prior
+        // years — via Euclidean division so `k=12` lands on January 2025 and
+        // `k=13` on December 2024, matching `nth_previous_occurrence`'s
+        // monthly step-back semantics (`seeds.rs`).
+        for k in 1..=n_lag_months {
+            let month_index = -i32::try_from(k).unwrap();
+            let year = 2026 + month_index.div_euclid(12);
+            let month = u32::try_from(month_index.rem_euclid(12)).unwrap() + 1;
+            let start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+            let end = if month == 12 {
+                NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+            };
+            inflow_history.push(InflowHistoryRow {
+                hydro_id,
+                start_date: start,
+                end_date: end,
+                value_m3s: 1000.0 + f64::from(k),
+            });
+        }
+
+        let load_models: Vec<LoadModel> = (0..12_i32)
+            .map(|stage_id| LoadModel {
+                bus_id,
+                stage_id,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let bus = Bus {
+            id: bus_id,
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
+            id: hydro_id,
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+        hydro.declare_mirror_unit_group(bus_id);
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 12,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    max_turbined_m3s: 100.0,
+                    max_generation_mw: 250.0,
+                    ..Default::default()
+                },
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: 12,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let policy_graph = HorizonGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions: vec![],
+            nodes: Vec::new(),
+            season_map: Some(monthly_season_map()),
+        };
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .inflow_history(inflow_history)
+            .bounds(bounds)
+            .penalties(penalties)
+            .policy_graph(policy_graph)
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_anticipated_commitments: vec![],
+                recent_observations: vec![],
+                past_defluences: vec![],
+                future_anticipated_deliveries: vec![],
+            })
+            .build()
+            .expect("AR(0) declared-lag-history fixture: valid system");
+
+        let training_source = ScenarioSource {
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            seed: None,
+            historical_years: None,
+        };
+        (system, training_source)
+    }
+
+    /// Given a declared lag depth (3) greater than the fixture's fitted AR
+    /// order (0), `build_opening_tree_library` must widen the returned
+    /// library's `max_order()` to 3 — matching `resolve_state_layout`'s
+    /// `max_par_order` for the same declared depth — rather than leaving it at
+    /// the un-widened `par.max_order()` (0). A regression that fails if this
+    /// source is left un-widened while another (e.g. `resolve_state_layout`)
+    /// is fixed, exactly the divergent-sources bug these regressions guard against.
+    #[test]
+    fn build_opening_tree_library_widens_max_order_to_declared_depth() {
+        let (system, training_source) = build_ar0_fixture_with_declared_lag_history(3);
+
+        let lib = build_opening_tree_library(&system, &training_source, Some(3))
+            .expect("build_opening_tree_library must succeed with a declared depth")
+            .expect("HistoricalResiduals noise method must build a library");
+
+        assert_eq!(
+            lib.max_order(),
+            3,
+            "library max_order must widen to the declared depth (fixture AR order is 0)"
+        );
+    }
+
+    /// Cross-source regression at the SAME declared depth (24, the worked
+    /// acceptance example): `resolve_state_layout` (the dense-stride + mask
+    /// source) and `build_opening_tree_library` (the opening-tree historical
+    /// library source) must agree on `L_state`, both widening past the
+    /// fixture's AR(0) order to exactly 24. `rebuild_historical_library_non_root`
+    /// (cobre-cli) is unreachable from this crate and is realigned to the same
+    /// depth-24 fixture in its own test module
+    /// (`rebuild_historical_library_non_root_widens_max_order_to_declared_depth`)
+    /// — no single Rust test spans the crate boundary, but all three sources
+    /// are pinned to the identical value.
+    #[test]
+    fn build_opening_tree_library_and_resolve_state_layout_agree_at_declared_depth() {
+        let (system, training_source) = build_ar0_fixture_with_declared_lag_history(24);
+        let declared_depth = Some(24);
+
+        let study_stages: Vec<Stage> = system
+            .stages()
+            .iter()
+            .filter(|s| s.id >= 0)
+            .cloned()
+            .collect();
+        let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
+        let par_lp = PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, None)
+            .expect("PrecomputedPar must build");
+        let topology = crate::setup::bucket_topology::build_transit_bucket_topology(&system, false);
+        let (state_layout, _, _) =
+            crate::setup::resolve_state_layout(&system, &par_lp, &topology, declared_depth)
+                .expect("resolve_state_layout must succeed with a declared depth");
+
+        let lib = build_opening_tree_library(&system, &training_source, declared_depth)
+            .expect("build_opening_tree_library must succeed with a declared depth")
+            .expect("HistoricalResiduals noise method must build a library");
+
+        assert_eq!(
+            state_layout.max_par_order, 24,
+            "resolve_state_layout must widen to the declared depth"
+        );
+        assert_eq!(
+            lib.max_order(),
+            24,
+            "build_opening_tree_library must widen to the declared depth"
+        );
+        assert_eq!(
+            state_layout.max_par_order,
+            lib.max_order(),
+            "resolve_state_layout and build_opening_tree_library must agree on L_state \
+             at the same declared depth"
+        );
+    }
+
+    /// Given a declared lag depth (24) exceeding the fitted AR(0) order,
+    /// `derive_inflow_seeds` — the function `build_opening_tree_library` calls
+    /// to build the `derived_lag_values`/`l_state` pair `run_eta_inversion`'s
+    /// `max_order.min(l_state)` copy loop reads — must actually seed the
+    /// DEEPEST declared lag slot from real history, not merely report a wider
+    /// `max_order()`. Complements
+    /// `build_opening_tree_library_and_resolve_state_layout_agree_at_declared_depth`'s
+    /// dimension-only check with the concrete seeded value.
+    #[test]
+    fn derive_inflow_seeds_populates_the_deepest_declared_lag_slot_from_real_history() {
+        let (system, _training_source) = build_ar0_fixture_with_declared_lag_history(24);
+        let declared_depth = widen_lag_state_depth(0, Some(24));
+        assert_eq!(declared_depth, 24);
+
+        let first_stage = system
+            .stages()
+            .iter()
+            .find(|s| s.id >= 0)
+            .expect("fixture has a study stage");
+        let season_map = system
+            .policy_graph()
+            .season_map
+            .as_ref()
+            .expect("fixture carries a monthly season map");
+
+        let seeds = derive_inflow_seeds(
+            system.inflow_history(),
+            &system.initial_conditions().recent_observations,
+            system.hydros(),
+            first_stage,
+            season_map,
+            declared_depth,
+        );
+
+        assert_eq!(
+            seeds.lag_values.len(),
+            system.hydros().len() * 24,
+            "the seed buffer itself must be widened to the declared depth"
+        );
+
+        // Deepest slot: k=24 (index 23) is January 2024, this fixture's
+        // uniquely-valued oldest pre-study month (1000.0 + 24 = 1024.0).
+        let deepest = seeds.lag_values[23];
+        assert!(
+            (deepest - 1024.0).abs() < 1e-9,
+            "the deepest declared lag slot (24 months back) must carry the real \
+             January 2024 observation, not a truncated/default 0.0; got {deepest}"
+        );
+
+        // Negative control: an un-widened source (l_state left at the AR(0)
+        // order, 0) cannot represent the deepest slot at all — the concrete
+        // shape of "any source left un-widened".
+        let unwidened_seeds = derive_inflow_seeds(
+            system.inflow_history(),
+            &system.initial_conditions().recent_observations,
+            system.hydros(),
+            first_stage,
+            season_map,
+            0,
+        );
+        assert!(
+            unwidened_seeds.lag_values.is_empty(),
+            "sanity: the un-widened AR(0) order provides no lag slots at all"
+        );
+    }
+
+    // ── compute_external_scenario_counts: min + silent-drop deletion ──────────
+
+    /// A `System` with one hydro and one std-bearing load bus over `stage_ids`,
+    /// carrying `inflow_per_stage`/`load_per_stage` external realizations per stage
+    /// (one row per entity per realization). Deliberately supports disagreeing
+    /// per-class counts so a unit test can drive `compute_external_scenario_counts`
+    /// directly — a disagreement P-B1 (cobre-io) would reject at load, unreachable
+    /// through the public API but the exact input that separates take-first from an
+    /// element-wise minimum.
+    #[allow(clippy::too_many_lines)]
+    fn external_count_system(
+        stage_ids: &[i32],
+        inflow_per_stage: usize,
+        load_per_stage: usize,
+    ) -> System {
+        let hydro_id = EntityId(1);
+        let bus_id = EntityId(2);
+        let n_stages = stage_ids.len();
+
+        let stages: Vec<Stage> = stage_ids
+            .iter()
+            .enumerate()
+            .map(|(index, &id)| Stage {
+                index,
+                id,
+                start_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = stage_ids
+            .iter()
+            .map(|&stage_id| InflowModel {
+                hydro_id,
+                stage_id,
+                mean_m3s: 100.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+        let load_models: Vec<LoadModel> = stage_ids
+            .iter()
+            .map(|&stage_id| LoadModel {
+                bus_id,
+                stage_id,
+                mean_mw: 100.0,
+                std_mw: 10.0,
+            })
+            .collect();
+
+        let mut external_scenarios = Vec::new();
+        let mut external_load_scenarios = Vec::new();
+        for &stage_id in stage_ids {
+            for s in 0..inflow_per_stage {
+                external_scenarios.push(ExternalScenarioRow {
+                    stage_id,
+                    scenario_id: i32::try_from(s).unwrap(),
+                    hydro_id,
+                    value_m3s: 1.0,
+                });
+            }
+            for s in 0..load_per_stage {
+                external_load_scenarios.push(ExternalLoadRow {
+                    stage_id,
+                    scenario_id: i32::try_from(s).unwrap(),
+                    bus_id,
+                    value_mw: 1.0,
+                });
+            }
+        }
+
+        let bus = Bus {
+            id: bus_id,
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
+            id: hydro_id,
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+        hydro.declare_mirror_unit_group(bus_id);
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    max_turbined_m3s: 100.0,
+                    max_generation_mw: 250.0,
+                    ..Default::default()
+                },
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let policy_graph = HorizonGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions: vec![],
+            nodes: Vec::new(),
+            season_map: None,
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .policy_graph(policy_graph)
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_anticipated_commitments: vec![],
+                recent_observations: vec![],
+                past_defluences: vec![],
+                future_anticipated_deliveries: vec![],
+            })
+            .external_scenarios(external_scenarios)
+            .external_load_scenarios(external_load_scenarios)
+            .build()
+            .expect("external-count fixture: valid system")
+    }
+
+    fn external_source(inflow: SamplingScheme, load: SamplingScheme) -> ScenarioSource {
+        ScenarioSource {
+            inflow_scheme: inflow,
+            load_scheme: load,
+            ncs_scheme: SamplingScheme::InSample,
+            seed: None,
+            historical_years: None,
+        }
+    }
+
+    /// The element-wise minimum is gone: with inflow (3) and load (2) external
+    /// classes disagreeing on the per-stage raw count, the returned vector is the
+    /// first present class's (inflow, 3) — never `min(3, 2) = 2`. This deck is
+    /// P-B1-rejected at load; the direct call is the only way to observe the
+    /// reconciliation was deleted rather than relocated.
+    #[test]
+    fn compute_external_scenario_counts_takes_first_never_min() {
+        let system = external_count_system(&[0], 3, 2);
+        let source = external_source(SamplingScheme::External, SamplingScheme::External);
+        let counts = compute_external_scenario_counts(&system, &source);
+        assert_eq!(
+            counts,
+            Some(vec![3]),
+            "the first present class's raw count is authoritative, not the element-wise minimum"
+        );
+    }
+
+    /// The `if stage_id as usize < n_stages` silent-drop is gone: a study numbered
+    /// `[10, 11]` (never 0-based) counts every external row through the resolver.
+    /// The pre-deletion code keyed on `stage_id as usize` and dropped all
+    /// rows (`10 < 2` is false), returning `[0, 0]`; the resolver returns `[1, 1]`.
+    #[test]
+    fn compute_external_scenario_counts_resolves_non_zero_based_stage_ids() {
+        let system = external_count_system(&[10, 11], 1, 0);
+        let source = external_source(SamplingScheme::External, SamplingScheme::InSample);
+        let counts = compute_external_scenario_counts(&system, &source);
+        assert_eq!(
+            counts,
+            Some(vec![1, 1]),
+            "rows must be counted through the resolver, not dropped by a stage_id-as-index guard"
+        );
+    }
+
+    // ── load_user_opening_tree_inner: by declaration, not existence ───────────
+
+    /// Parse a `Config` from an inline JSON string.
+    fn config_from_json(json: &str) -> Config {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(tmp.path(), json).expect("write config");
+        cobre_io::parse_config(tmp.path()).expect("parse config")
+    }
+
+    const SAMPLED_TRAINING: &str = r#""selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]"#;
+
+    /// Write a 5-stage, 1-opening-per-stage, dim-1 tree at
+    /// `case_dir/scenarios/noise_openings.parquet` — the shape the ring fixture's
+    /// `branching_factor = 1` study stages declare.
+    fn write_ring_noise_openings(case_dir: &Path) {
+        let path = case_dir.join("scenarios").join("noise_openings.parquet");
+        let tree = OpeningTree::from_parts(vec![0.1, 0.2, 0.3, 0.4, 0.5], vec![1; 5], 1);
+        cobre_io::output::stochastic::write_noise_openings(&path, &tree)
+            .expect("write noise_openings");
+    }
+
+    /// A `noise_openings.parquet` physically present but with no `openings`
+    /// declaration is ignored — consumption is by declaration, not existence.
+    #[test]
+    fn load_user_opening_tree_undeclared_file_is_ignored() {
+        let fx = build_ring_fixture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        write_ring_noise_openings(dir.path());
+
+        let config = config_from_json(&format!(r#"{{"training": {{{SAMPLED_TRAINING}}}}}"#));
+        let loaded = load_user_opening_tree_inner(
+            dir.path(),
+            &fx.system,
+            &config,
+            &ScenarioSource::default(),
+        )
+        .expect("an undeclared file must resolve to Ok(None)");
+        assert!(
+            loaded.is_none(),
+            "a present-but-undeclared noise_openings.parquet must be ignored"
+        );
+    }
+
+    /// A `{source: file}` declaration with a present, count-consistent file
+    /// installs the user opening tree.
+    #[test]
+    fn load_user_opening_tree_declared_file_installs_tree() {
+        let fx = build_ring_fixture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        write_ring_noise_openings(dir.path());
+
+        let config = config_from_json(&format!(
+            r#"{{"training": {{{SAMPLED_TRAINING}, "scenario_source": {{"openings": {{"source": "file"}}}}}}}}"#
+        ));
+        let loaded = load_user_opening_tree_inner(
+            dir.path(),
+            &fx.system,
+            &config,
+            &ScenarioSource::default(),
+        )
+        .expect("a declared, present file must load")
+        .expect("a declared file must install a tree");
+        assert_eq!(loaded.n_stages(), 5);
+        assert_eq!(loaded.dim(), 1);
+        for s in 0..5 {
+            assert_eq!(loaded.n_openings(s), 1, "stage {s} declares one opening");
+        }
+    }
+
+    /// A `{source: file}` declaration with the file absent is a named error.
+    #[test]
+    fn load_user_opening_tree_declared_absent_file_errors() {
+        let fx = build_ring_fixture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+
+        let config = config_from_json(&format!(
+            r#"{{"training": {{{SAMPLED_TRAINING}, "scenario_source": {{"openings": {{"source": "file"}}}}}}}}"#
+        ));
+        let err = load_user_opening_tree_inner(
+            dir.path(),
+            &fx.system,
+            &config,
+            &ScenarioSource::default(),
+        )
+        .expect_err("a declared but absent file must error");
+        match err {
+            SddpError::Io(e) => assert!(
+                e.to_string().contains("noise_openings.parquet"),
+                "the error must name the missing file, got: {e}"
+            ),
+            other => panic!("expected SddpError::Io, got: {other:?}"),
+        }
     }
 }

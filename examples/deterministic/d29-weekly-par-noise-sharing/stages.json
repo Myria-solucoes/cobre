@@ -43,7 +43,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": true },
-      "num_scenarios": 5
+      "num_openings": 5
     },
     {
       "id": 1,
@@ -58,7 +58,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": true },
-      "num_scenarios": 5
+      "num_openings": 5
     },
     {
       "id": 2,
@@ -73,7 +73,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": true },
-      "num_scenarios": 5
+      "num_openings": 5
     },
     {
       "id": 3,
@@ -88,7 +88,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": true },
-      "num_scenarios": 5
+      "num_openings": 5
     }
   ]
 }

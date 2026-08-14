@@ -19,9 +19,10 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use chrono::NaiveDate;
 use cobre_core::BlockMode;
-use cobre_core::ConstraintSense;
 use cobre_core::EntityId;
+use cobre_core::HydroPastDefluence;
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::indexer::{
@@ -30,12 +31,14 @@ use crate::indexer::{
     anticipated_resolution_for, is_anticipated_decision_active_for_delivery,
 };
 use crate::lp_builder::{GenericConstraintRowEntry, StageGeometry};
+use crate::setup::NodeId;
 use crate::simulation::types::{
-    ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
-    SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroBusResult,
-    SimulationHydroResult, SimulationInflowLagResult, SimulationNonControllableResult,
-    SimulationPumpingResult, SimulationStageResult, SimulationThermalResult,
-    SimulationTransitBucketResult,
+    ScenarioCategoryCosts, SimulationAnticipatedLaneResult, SimulationBusResult,
+    SimulationContractResult, SimulationCostResult, SimulationExchangeResult,
+    SimulationGenericViolationResult, SimulationHydroBusResult, SimulationHydroResult,
+    SimulationInflowLagResult, SimulationNonControllableResult, SimulationPumpingResult,
+    SimulationStageResult, SimulationThermalResult, SimulationTransitBucketResult,
+    SimulationTransitSeedResult,
 };
 
 /// Reverse lookups from system hydro index to local FPHA/evaporation/filling-slack
@@ -242,11 +245,13 @@ fn compute_anticipated_decision_mw(
 
 /// Committed MW for an anticipated thermal, or `None` when not anticipated.
 ///
-/// The committed scalar is slot 0 of the `anticipated_state` ring buffer
-/// (`anticipated_state.start + local_idx`), NOT a per-block thermal generation
-/// column — those differ when block hours or generations are non-uniform, and the
-/// fishing constraint pins slot 0 to the block-hours-weighted average. The read
-/// applies unconditionally for any anticipated plant.
+/// The committed scalar is the commitment-hold ring's maturing in-study slot
+/// for this stage — delivery target `m = spec.stage_index`'s modular slot
+/// (`m mod k_max`, [`StateSpace::commitment_hold_in_study_offset`]), NOT a
+/// per-block thermal generation column: those differ when block hours or
+/// generations are non-uniform, and the fishing constraint pins that slot to
+/// the block-hours-weighted average. The read applies unconditionally for any
+/// anticipated plant.
 #[inline]
 fn compute_anticipated_committed_mw(
     view: &SolutionView<'_>,
@@ -257,13 +262,62 @@ fn compute_anticipated_committed_mw(
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     // Ring buffer lives in the stage-invariant state region, so the base is the
     // role-(a) `StateSpace`, not the geometry indexer.
-    let col = spec.state.anticipated_state.start + local_idx.get();
+    let slot_offset = spec
+        .state
+        .commitment_hold_in_study_offset(local_idx.get(), spec.stage_index);
+    let col = spec.state.commit_in.start + slot_offset;
     debug_assert!(
         col < view.primal.len(),
-        "anticipated_state slot-0 col {col} out of primal bounds {}",
+        "commitment-hold maturing-slot col {col} out of primal bounds {}",
         view.primal.len(),
     );
     Some(view.primal[col])
+}
+
+/// Extract one post-horizon commitment-lane row per window whose in-study
+/// decider stage is THIS stage — `geometry.commitment_decision_windows`'s own
+/// sparsity, sparse/empty at every other stage. Reads the deposited decision
+/// directly from the sparse decision column and the ring's freshly-latched
+/// value from the SAME stage's `commit_out` lane (the deposit row pins the two
+/// equal). `delivery_dates` is the setup-resolved, per-window delivery date
+/// (`StudySetup::commitment_window_delivery_dates`), indexed by the same
+/// global survivor window index [`StateSpace::commitment_window_thermal_id`] uses.
+pub(crate) fn extract_commitment_lanes(
+    primal: &[f64],
+    geometry: &StageGeometry,
+    state: &StateSpace,
+    delivery_dates: &[i32],
+    stage_id: u32,
+) -> Vec<SimulationAnticipatedLaneResult> {
+    let windows = &geometry.commitment_decision_windows;
+    debug_assert!(
+        delivery_dates.len() == state.n_commitment,
+        "commitment_window_delivery_dates length {} must match n_commitment {}",
+        delivery_dates.len(),
+        state.n_commitment,
+    );
+    let mut results = Vec::with_capacity(windows.len());
+    for (local_idx, &w) in windows.iter().enumerate() {
+        let decision_col = geometry.commitment_decision.start + local_idx;
+        let carried_col = state.commit_out.start + state.commitment_hold_post_horizon_offset(w);
+        debug_assert!(
+            decision_col < geometry.commitment_decision.end
+                && decision_col < primal.len()
+                && carried_col < primal.len(),
+            "post-horizon lane cols {decision_col}/{carried_col} out of bounds \
+             (commitment_decision {:?}, primal len {})",
+            geometry.commitment_decision,
+            primal.len(),
+        );
+        results.push(SimulationAnticipatedLaneResult {
+            stage_id,
+            thermal_id: state.commitment_window_thermal_id[w].0,
+            delivery_date: delivery_dates[w],
+            deposited_decision_mw: primal[decision_col],
+            carried_committed_mw: primal[carried_col],
+        });
+    }
+    results
 }
 
 /// Extract the travel-time in-transit bucket records for one stage, in the
@@ -316,6 +370,131 @@ fn extract_transit_buckets(
         });
     }
     results
+}
+
+/// One declared travel-time arc's upstream hydro identity, resolved once at
+/// setup time from [`cobre_core::System::hydros`] and threaded into the
+/// simulation pipeline — the rolling-seed emitter never re-derives it from
+/// `System`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransitSeedArc {
+    /// Upstream hydro plant entity ID whose release feeds the arc.
+    pub upstream_hydro_id: i32,
+    /// Travel time on the arc, in hours (`> 0.0`).
+    pub travel_time_hours: f64,
+}
+
+/// Hours between `study_end` and `end_date` (`study_end − end_date`), mirroring
+/// `setup::hours_between`'s convention — positive when `end_date` precedes
+/// `study_end`.
+#[allow(clippy::cast_precision_loss)]
+fn hours_before(study_end: NaiveDate, end_date: NaiveDate) -> f64 {
+    (study_end - end_date).num_hours() as f64
+}
+
+/// Duration-weighted mean of (turbined + spillage) across this stage's blocks
+/// for one hydro, in m³/s — the same quantity `fill_arc_release_block_entries`
+/// (`lp/builder/entries.rs`) deposits into the arc's `k_d`-weighted rows
+/// (`push_plant_release`'s `Σ_c q_c + s`), so re-seeding from it reproduces the
+/// ring's in-transit distribution by construction. Diverted outflow is
+/// deliberately excluded: it leaves via the plant's own `diversion_col` to a
+/// different downstream target and never feeds this arc's deposit — including
+/// it would overstate the seed whenever the same hydro also declares a
+/// diversion channel. `0.0` if the hydro has no block rows at this stage or the
+/// stage's total block hours are `0.0`.
+fn stage_release_rate_m3s(
+    stage_result: &SimulationStageResult,
+    hydro_id: i32,
+    block_hours: &[f64],
+) -> f64 {
+    let mut weighted_sum = 0.0;
+    let mut total_hours = 0.0;
+    for hydro in stage_result
+        .hydros
+        .iter()
+        .filter(|h| h.hydro_id == hydro_id)
+    {
+        let Some(b) = hydro.block_id else { continue };
+        let hours = block_hours.get(b as usize).copied().unwrap_or(0.0);
+        weighted_sum += hours * (hydro.turbined_m3s + hydro.spillage_m3s);
+        total_hours += hours;
+    }
+    if total_hours > 0.0 {
+        weighted_sum / total_hours
+    } else {
+        0.0
+    }
+}
+
+/// Build one scenario's rolling-seed windows, reconstructed from realized
+/// releases rather than the LP's masked terminal bucket state, so this
+/// emitter stays independent of the terminal-state FCF valuation.
+///
+/// For each declared arc, emits one window per in-study stage whose own
+/// `[start_date, end_date)` overlaps the trailing `[study_end −
+/// travel_time_hours, study_end)` span — `value_m3s` the stage's
+/// [`stage_release_rate_m3s`] — followed by the stitched pre-study windows
+/// sliced from `past_defluences` that overlap the same trailing span
+/// (nonempty only when `travel_time_hours` exceeds the study horizon).
+/// `stage_results` and `study_stage_dates` are parallel, one entry per
+/// in-study stage. Empty when `declared_arcs` is empty (no declared
+/// travel-time arc), keeping the `transit_seed` partition absent.
+pub(crate) fn build_transit_seed(
+    stage_results: &[SimulationStageResult],
+    study_stage_dates: &[(NaiveDate, NaiveDate)],
+    declared_arcs: &[TransitSeedArc],
+    past_defluences: &[HydroPastDefluence],
+    block_hours_per_stage: &[Vec<f64>],
+) -> Vec<SimulationTransitSeedResult> {
+    if declared_arcs.is_empty() {
+        return Vec::new();
+    }
+    debug_assert_eq!(
+        stage_results.len(),
+        study_stage_dates.len(),
+        "stage_results and study_stage_dates must be parallel, one entry per in-study stage"
+    );
+    let Some(&(_, study_end)) = study_stage_dates.last() else {
+        return Vec::new();
+    };
+
+    let mut windows = Vec::new();
+    for arc in declared_arcs {
+        for (stage_result, &(start_date, end_date)) in stage_results.iter().zip(study_stage_dates) {
+            if hours_before(study_end, end_date) >= arc.travel_time_hours {
+                continue;
+            }
+            let value_m3s = stage_release_rate_m3s(
+                stage_result,
+                arc.upstream_hydro_id,
+                block_hours_per_stage
+                    .get(stage_result.stage_id as usize)
+                    .map_or(&[][..], Vec::as_slice),
+            );
+            windows.push(SimulationTransitSeedResult {
+                hydro_id: arc.upstream_hydro_id,
+                start_date,
+                end_date,
+                value_m3s,
+            });
+        }
+
+        for window in past_defluences
+            .iter()
+            .filter(|w| w.hydro_id.0 == arc.upstream_hydro_id)
+        {
+            if hours_before(study_end, window.end_date) >= arc.travel_time_hours {
+                continue;
+            }
+            windows.push(SimulationTransitSeedResult {
+                hydro_id: arc.upstream_hydro_id,
+                start_date: window.start_date,
+                end_date: window.end_date,
+                value_m3s: window.value_m3s,
+            });
+        }
+    }
+    windows
 }
 
 /// System entity counts needed to populate per-entity result [`Vec`]s. Every ID
@@ -429,7 +608,7 @@ pub const ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S: f64 = 1.0e6 / 3600.0;
 /// stage. For uniform-block studies the per-stage and stage-0 reads coincide.
 pub struct StageExtractionSpec<'a> {
     /// Role-(a) state layout: source of the state-region column reads (`storage`,
-    /// `storage_in`, `inflow_lags`, `anticipated_state`, `max_par_order`).
+    /// `storage_in`, `inflow_lags`, `commit_in`, `max_par_order`).
     pub state: &'a StateSpace,
     /// Single owner of the study-invariant, non-state LP shape (entity counts and
     /// optional-column presence flags).
@@ -1264,7 +1443,12 @@ fn extract_buses(
 ///
 /// Builds the reverse-lookup tables on every call. On the hot path use
 /// `extract_stage_result_with_lookups` with pre-built lookups instead.
+///
+/// The visited node id defaults to `stage_id` — the chain-degenerate node id
+/// (`node_graph.node_ids[t] == t` on a chain). A branching walk supplies its own
+/// node id through [`extract_stage_result_with_lookups`] (the hot path).
 #[must_use]
+#[allow(clippy::cast_possible_wrap)]
 pub fn extract_stage_result(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1274,7 +1458,14 @@ pub fn extract_stage_result(
     let n_thermals = spec.entity_counts.thermal_ids.len();
     let hydro_lookup = HydroReverseLookup::build(spec.geometry, spec.hydro_cell_index, n_hydros);
     let thermal_lookup = ThermalReverseLookup::build(spec.study_dims, n_thermals);
-    extract_stage_result_with_lookups(view, spec, stage_id, &hydro_lookup, &thermal_lookup)
+    extract_stage_result_with_lookups(
+        view,
+        spec,
+        stage_id,
+        NodeId(stage_id as i32),
+        &hydro_lookup,
+        &thermal_lookup,
+    )
 }
 
 /// Extract a [`SimulationStageResult`] using pre-built reverse-lookup tables.
@@ -1297,6 +1488,7 @@ pub(crate) fn extract_stage_result_with_lookups(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
     stage_id: u32,
+    node_id: NodeId,
     hydro_lookup: &HydroReverseLookup,
     thermal_lookup: &ThermalReverseLookup,
 ) -> SimulationStageResult {
@@ -1361,6 +1553,7 @@ pub(crate) fn extract_stage_result_with_lookups(
 
     SimulationStageResult {
         stage_id,
+        node_id,
         costs,
         hydros: extract_hydros(view, spec, stage_id, hydro_lookup),
         hydro_bus_generation: extract_hydro_bus_generation(view, spec, stage_id, hydro_lookup),
@@ -1373,6 +1566,11 @@ pub(crate) fn extract_stage_result_with_lookups(
         inflow_lags,
         transit_buckets: extract_transit_buckets(view, spec, stage_id),
         generic_violations,
+        // The window-indexed delivery-date array lives outside `StageExtractionSpec`
+        // (`SimulationOutputSpec::commitment_window_delivery_dates`); the hot path
+        // (`extract_sim_stage_result`) populates this field as a post-step via
+        // `extract_commitment_lanes` instead of through this shared builder.
+        anticipated_lanes: Vec::new(),
     }
 }
 
@@ -1566,8 +1764,9 @@ fn compute_cost_result(
 
 /// Extract generic constraint violation results from a solved LP.
 ///
-/// For an `==` constraint (two slack columns) the reported `slack_value` is the
-/// net violation `s_plus - s_minus`, while its cost charges both (`s_plus + s_minus`).
+/// For a two-sided row (`slack_minus_col` present) the reported `slack_value` is
+/// the net violation `s_plus - s_minus`, while its cost charges both
+/// (`s_plus + s_minus`) — one violation record per row either way.
 fn extract_generic_violations(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1593,19 +1792,16 @@ fn extract_generic_violations(
                 .unwrap_or(0.0)
         };
         let (slack_value, slack_cost) = if entry.slack_enabled {
-            match entry.sense {
-                ConstraintSense::Equal => {
-                    let s_plus = entry.slack_plus_col.map_or(0.0, |col| view.primal[col]);
-                    let s_minus = entry.slack_minus_col.map_or(0.0, |col| view.primal[col]);
-                    let net = s_plus - s_minus;
-                    let cost = (s_plus + s_minus) * entry.slack_penalty * block_hours;
-                    (net, cost)
-                }
-                ConstraintSense::LessEqual | ConstraintSense::GreaterEqual => {
-                    let s = entry.slack_plus_col.map_or(0.0, |col| view.primal[col]);
-                    let cost = s * entry.slack_penalty * block_hours;
-                    (s, cost)
-                }
+            if let Some(minus_col) = entry.slack_minus_col {
+                let s_plus = entry.slack_plus_col.map_or(0.0, |col| view.primal[col]);
+                let s_minus = view.primal[minus_col];
+                let net = s_plus - s_minus;
+                let cost = (s_plus + s_minus) * entry.slack_penalty * block_hours;
+                (net, cost)
+            } else {
+                let s = entry.slack_plus_col.map_or(0.0, |col| view.primal[col]);
+                let cost = s * entry.slack_penalty * block_hours;
+                (s, cost)
             }
         } else {
             (0.0, 0.0)
@@ -1939,6 +2135,262 @@ pub fn accumulate_category_costs(cost: &SimulationCostResult, accum: &mut Scenar
     accum.regularization_cost +=
         cost.spillage_cost + cost.turbined_cost + cost.curtailment_cost + cost.exchange_cost;
     accum.imputed_cost += cost.pumping_cost;
+}
+
+#[cfg(test)]
+mod transit_seed_tests {
+    use chrono::NaiveDate;
+    use cobre_core::{EntityId, HydroPastDefluence};
+
+    use super::{
+        SimulationHydroResult, SimulationStageResult, SimulationTransitSeedResult, TransitSeedArc,
+        build_transit_seed,
+    };
+    use crate::setup::NodeId;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap_or_else(|| unreachable!("hardcoded date is valid"))
+    }
+
+    /// Three 30-day stages: `[2024-01-01, 2024-01-31)`, `[2024-01-31,
+    /// 2024-03-01)`, `[2024-03-01, 2024-03-31)` — 2160h horizon.
+    fn three_stage_dates() -> Vec<(NaiveDate, NaiveDate)> {
+        vec![
+            (date(2024, 1, 1), date(2024, 1, 31)),
+            (date(2024, 1, 31), date(2024, 3, 1)),
+            (date(2024, 3, 1), date(2024, 3, 31)),
+        ]
+    }
+
+    fn hydro_row(
+        stage_id: u32,
+        block_id: u32,
+        hydro_id: i32,
+        turbined: f64,
+        spillage: f64,
+    ) -> SimulationHydroResult {
+        SimulationHydroResult {
+            stage_id,
+            block_id: Some(block_id),
+            hydro_id,
+            turbined_m3s: turbined,
+            spillage_m3s: spillage,
+            evaporation_m3s: None,
+            diverted_inflow_m3s: None,
+            diverted_outflow_m3s: None,
+            incremental_inflow_m3s: 0.0,
+            inflow_m3s: 0.0,
+            storage_initial_hm3: 0.0,
+            storage_final_hm3: 0.0,
+            generation_mw: 0.0,
+            equivalent_productivity_mw_per_m3s: 0.0,
+            accumulated_productivity_mw_per_m3s: 0.0,
+            incremental_inflow_energy_mw: 0.0,
+            stored_energy_initial_mwh: 0.0,
+            stored_energy_final_mwh: 0.0,
+            spillage_cost: 0.0,
+            water_value_per_hm3: 0.0,
+            storage_binding_code: 0,
+            operative_state_code: 0,
+            turbined_slack_m3s: 0.0,
+            outflow_slack_below_m3s: 0.0,
+            outflow_slack_above_m3s: 0.0,
+            generation_slack_mw: 0.0,
+            storage_violation_below_hm3: 0.0,
+            filling_target_violation_hm3: 0.0,
+            evaporation_violation_pos_m3s: 0.0,
+            evaporation_violation_neg_m3s: 0.0,
+            inflow_nonnegativity_slack_m3s: 0.0,
+            water_withdrawal_violation_pos_m3s: 0.0,
+            water_withdrawal_violation_neg_m3s: 0.0,
+        }
+    }
+
+    /// One stage result carrying a single-block hydro row (`turbined +
+    /// spillage` given directly as the whole-stage rate; block hours supplied
+    /// separately via `block_hours_per_stage`).
+    fn stage_with_hydro(stage_id: u32, hydro_id: i32, rate_m3s: f64) -> SimulationStageResult {
+        SimulationStageResult {
+            stage_id,
+            node_id: NodeId(i32::try_from(stage_id).unwrap_or(0)),
+            costs: vec![],
+            hydros: vec![hydro_row(stage_id, 0, hydro_id, rate_m3s, 0.0)],
+            hydro_bus_generation: vec![],
+            thermals: vec![],
+            exchanges: vec![],
+            buses: vec![],
+            pumping_stations: vec![],
+            contracts: vec![],
+            non_controllables: vec![],
+            inflow_lags: vec![],
+            transit_buckets: vec![],
+            generic_violations: vec![],
+            anticipated_lanes: vec![],
+        }
+    }
+
+    const HYDRO_ID: i32 = 5;
+
+    /// `t_v <= horizon`: the trailing window excludes a stage whose release
+    /// matured EXACTLY at `t_v` (delivered in full, zero remaining in-transit
+    /// mass) — only stages 1 and 2 overlap `[study_end - 1440h, study_end)`.
+    #[test]
+    fn in_study_only_excludes_the_stage_that_fully_matured_at_t_v() {
+        let dates = three_stage_dates();
+        let stages = vec![
+            stage_with_hydro(0, HYDRO_ID, 10.0),
+            stage_with_hydro(1, HYDRO_ID, 20.0),
+            stage_with_hydro(2, HYDRO_ID, 30.0),
+        ];
+        let arcs = [TransitSeedArc {
+            upstream_hydro_id: HYDRO_ID,
+            travel_time_hours: 1440.0,
+        }];
+        let block_hours = vec![vec![720.0]; 3];
+
+        let windows = build_transit_seed(&stages, &dates, &arcs, &[], &block_hours);
+
+        assert_eq!(
+            windows,
+            vec![
+                SimulationTransitSeedResult {
+                    hydro_id: HYDRO_ID,
+                    start_date: dates[1].0,
+                    end_date: dates[1].1,
+                    value_m3s: 20.0,
+                },
+                SimulationTransitSeedResult {
+                    hydro_id: HYDRO_ID,
+                    start_date: dates[2].0,
+                    end_date: dates[2].1,
+                    value_m3s: 30.0,
+                },
+            ],
+            "stage 0 matured exactly at t_v and must be excluded; stages 1-2 must carry their \
+             own release rate verbatim"
+        );
+    }
+
+    /// `t_v > horizon` pulls in every in-study stage AND stitches the
+    /// pre-study `past_defluences` tail — two additive window sources, never
+    /// a `.find()` that would silently keep only the first past-defluence
+    /// window.
+    #[test]
+    fn wide_t_v_stitches_every_in_study_stage_and_the_past_defluence_tail() {
+        let dates = three_stage_dates();
+        let stages = vec![
+            stage_with_hydro(0, HYDRO_ID, 10.0),
+            stage_with_hydro(1, HYDRO_ID, 20.0),
+            stage_with_hydro(2, HYDRO_ID, 30.0),
+        ];
+        let arcs = [TransitSeedArc {
+            upstream_hydro_id: HYDRO_ID,
+            travel_time_hours: 3000.0,
+        }];
+        let block_hours = vec![vec![720.0]; 3];
+        let past_defluences = vec![
+            HydroPastDefluence {
+                hydro_id: EntityId(HYDRO_ID),
+                start_date: date(2023, 12, 2),
+                end_date: date(2024, 1, 1),
+                value_m3s: 99.0,
+            },
+            HydroPastDefluence {
+                hydro_id: EntityId(HYDRO_ID),
+                start_date: date(2023, 11, 1),
+                end_date: date(2023, 12, 2),
+                value_m3s: 88.0,
+            },
+            // A window ending well before the trailing span must be dropped.
+            HydroPastDefluence {
+                hydro_id: EntityId(HYDRO_ID),
+                start_date: date(2020, 1, 1),
+                end_date: date(2020, 2, 1),
+                value_m3s: 1.0,
+            },
+        ];
+
+        let windows = build_transit_seed(&stages, &dates, &arcs, &past_defluences, &block_hours);
+
+        assert_eq!(
+            windows,
+            vec![
+                SimulationTransitSeedResult {
+                    hydro_id: HYDRO_ID,
+                    start_date: dates[0].0,
+                    end_date: dates[0].1,
+                    value_m3s: 10.0,
+                },
+                SimulationTransitSeedResult {
+                    hydro_id: HYDRO_ID,
+                    start_date: dates[1].0,
+                    end_date: dates[1].1,
+                    value_m3s: 20.0,
+                },
+                SimulationTransitSeedResult {
+                    hydro_id: HYDRO_ID,
+                    start_date: dates[2].0,
+                    end_date: dates[2].1,
+                    value_m3s: 30.0,
+                },
+                SimulationTransitSeedResult {
+                    hydro_id: HYDRO_ID,
+                    start_date: date(2023, 12, 2),
+                    end_date: date(2024, 1, 1),
+                    value_m3s: 99.0,
+                },
+                SimulationTransitSeedResult {
+                    hydro_id: HYDRO_ID,
+                    start_date: date(2023, 11, 1),
+                    end_date: date(2023, 12, 2),
+                    value_m3s: 88.0,
+                },
+            ],
+            "a wider t_v pulls in stage 0 too, and both non-contiguous past_defluence windows \
+             must contribute independently; the stale pre-2020 window must be dropped"
+        );
+    }
+
+    #[test]
+    fn no_declared_arc_emits_no_windows() {
+        let dates = three_stage_dates();
+        let stages = vec![stage_with_hydro(0, HYDRO_ID, 10.0)];
+        let past_defluences = vec![HydroPastDefluence {
+            hydro_id: EntityId(HYDRO_ID),
+            start_date: date(2023, 11, 1),
+            end_date: date(2024, 1, 1),
+            value_m3s: 99.0,
+        }];
+
+        let windows =
+            build_transit_seed(&stages, &dates[..1], &[], &past_defluences, &[vec![720.0]]);
+
+        assert!(
+            windows.is_empty(),
+            "no declared arc must emit no windows even with populated past_defluences"
+        );
+    }
+
+    /// [`super::stage_release_rate_m3s`] duration-weights turbined + spillage
+    /// across blocks, excluding diverted outflow — diverted water leaves via
+    /// a different downstream target and never feeds this arc's deposit.
+    #[test]
+    fn stage_release_rate_is_duration_weighted_mean_excluding_diversion() {
+        let mut stage = stage_with_hydro(0, HYDRO_ID, 0.0);
+        stage.hydros = vec![
+            hydro_row(0, 0, HYDRO_ID, 10.0, 5.0),
+            hydro_row(0, 1, HYDRO_ID, 20.0, 0.0),
+        ];
+        stage.hydros[0].diverted_outflow_m3s = Some(1_000.0);
+        let block_hours = [100.0, 300.0];
+
+        let rate = super::stage_release_rate_m3s(&stage, HYDRO_ID, &block_hours);
+
+        assert!(
+            (rate - 18.75).abs() < 1e-9,
+            "expected duration-weighted mean (100*15 + 300*20)/400 = 18.75, got {rate}"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -49,9 +49,12 @@ PARALLEL_CASE = _FIXTURES / "parallel_storage"
 
 # The exact field set of the `hydros` output schema, owned by `hydros_schema()`
 # in cobre-io's simulation writer. Per-block storage/evaporation resolution reuses
-# the existing columns with block-resolved values; it adds none, so a mismatch
-# here (added/removed/renamed column) is a regression, not an expected outcome.
+# the existing columns with block-resolved values; the node axis adds the
+# `node_id` and `scenario_id` axis columns on every entity row. A mismatch here
+# (added/removed/renamed column beyond these) is a regression, not expected.
 HYDROS_SCHEMA_FIELDS = {
+    "scenario_id",
+    "node_id",
     "stage_id",
     "block_id",
     "hydro_id",
@@ -102,7 +105,10 @@ def _read_hydro_rows(output_dir: pathlib.Path) -> list[dict[str, object]]:
     """Read every hydros partition into a flat list of row dicts."""
     rows: list[dict[str, object]] = []
     for parquet in _hydros_parquets(output_dir):
-        rows.extend(pq.read_table(parquet).to_pylist())
+        # ParquetFile().read() reads the file's own columns only; pq.read_table()
+        # would add a dictionary<int32> `scenario_id` partition column from the
+        # `scenario_id=NNNN/` Hive path that collides with the in-file int32 column.
+        rows.extend(pq.ParquetFile(parquet).read().to_pylist())
     return rows
 
 

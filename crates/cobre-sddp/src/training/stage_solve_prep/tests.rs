@@ -20,9 +20,7 @@ use cobre_solver::{
 use cobre_stochastic::StochasticContext;
 use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-use super::{
-    InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
-};
+use super::{InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource};
 use crate::{
     context::{StageContext, TrainingContext},
     horizon_mode::HorizonMode,
@@ -33,6 +31,7 @@ use crate::{
         NcsNoiseOffsets, build_dense_ncs_col_indices, gather_dense_ncs_bounds,
         transform_inflow_noise, transform_ncs_noise,
     },
+    setup::node_graph::StageIdx,
     test_support::{all_enabled_cut_state_layouts, state_layout, study_dims},
     workspace::{ScratchBuffers, WorkspaceSizing},
 };
@@ -217,6 +216,7 @@ fn minimal_sizing() -> WorkspaceSizing {
         noise_dim: 1,
         n_anticipated: 0,
         k_max: 0,
+        n_commitment: 0,
     }
 }
 
@@ -307,6 +307,7 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     let horizon = HorizonMode::Finite { num_stages: 1 };
     let study_dims = study_dims();
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),
@@ -335,11 +336,11 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     // (no load buses, no anticipated thermals, no NCS in scope) ----
     let mut reference_scratch = ScratchBuffers::new(sizing);
     let mut reference_solver = RecordingSolver::default();
-    let mut reference_patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
+    let mut reference_patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0);
 
     transform_inflow_noise(
         &raw_noise,
-        0,
+        StageIdx(0),
         &current_state,
         &ctx,
         &training_ctx,
@@ -374,10 +375,9 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     // ---- owner: StageSolvePrep::run configured the way forward would ----
     let mut owner_scratch = ScratchBuffers::new(sizing);
     let mut owner_solver = RecordingSolver::default();
-    let mut owner_patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
+    let mut owner_patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0);
     let params = StageSolvePrepParams {
         state_source: StateSource(&current_state),
-        opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Present,
         inflow_noise: InflowNoise::Transform,
         raw_noise: &raw_noise,
@@ -388,7 +388,7 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         &mut owner_scratch,
         &ctx,
         &training_ctx,
-        0,
+        StageIdx(0),
         &params,
     )
     .expect("fixture commitments are in bounds; reconciliation must not reject");
@@ -411,7 +411,6 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         1,
         "the minimal fixture patches exactly one noise row"
     );
-    assert_eq!(params.opening_mode, OpeningMode::SingleRealized);
 }
 
 /// One bus, one NCS entity, availability factor `mean=0.5, std=0.1` — the D15
@@ -583,6 +582,7 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     };
     let stages = vec![ncs_stage];
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stoch),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),
@@ -619,10 +619,10 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
         noise_dim: 1,
         n_anticipated: 0,
         k_max: 0,
+        n_commitment: 0,
     };
     let params = StageSolvePrepParams {
         state_source: StateSource(&[]),
-        opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Absent,
         inflow_noise: InflowNoise::PreBuilt,
         raw_noise: &raw_noise,
@@ -640,7 +640,7 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
             n_load_buses: 0,
         },
         &stoch,
-        0,
+        StageIdx(0),
         1,
         &ncs_max_gen,
         &ncs_allow_curtailment,
@@ -671,14 +671,14 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     // ---- owner: StageSolvePrep::run's internal NCS-patch wiring ----
     let mut owner_scratch = ScratchBuffers::new(sizing);
     let mut owner_solver = RecordingSolver::default();
-    let mut owner_patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0, 0);
+    let mut owner_patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0, 0, 0);
     StageSolvePrep::run(
         &mut owner_solver,
         &mut owner_patch_buf,
         &mut owner_scratch,
         &ctx,
         &training_ctx,
-        0,
+        StageIdx(0),
         &params,
     )
     .expect("fixture commitments are in bounds; reconciliation must not reject");
@@ -739,6 +739,7 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
     let horizon = HorizonMode::Finite { num_stages: 1 };
     let study_dims = study_dims();
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),
@@ -770,10 +771,9 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
     scratch.load_rhs_buf = vec![777.0];
 
     let mut solver = RecordingSolver::default();
-    let mut patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
+    let mut patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0);
     let params = StageSolvePrepParams {
         state_source: StateSource(&current_state),
-        opening_mode: OpeningMode::PerOpening,
         load_noise: LoadNoise::Absent,
         inflow_noise: InflowNoise::PreBuilt,
         raw_noise: &raw_noise,
@@ -784,7 +784,7 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
         &mut scratch,
         &ctx,
         &training_ctx,
-        0,
+        StageIdx(0),
         &params,
     )
     .expect("fixture commitments are in bounds; reconciliation must not reject");

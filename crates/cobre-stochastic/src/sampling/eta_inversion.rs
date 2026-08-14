@@ -58,6 +58,9 @@ pub(super) fn run_eta_inversion<F, W>(
     for h in 0..n_hydros {
         // Fill up to `max_order` slots so PAR(p)-A annual contributions
         // (widened across the `psi` slice) see real lag values, not zeros.
+        // `max_order.min(l_state)` truncates silently when `max_order`
+        // under-covers `l_state` — the caller must pass a `max_order` already
+        // widened to the intended lag depth, never rely on this `min` to raise it.
         for lag in 0..max_order.min(l_state) {
             past_lag_buf[h * safe_max_order + lag] = derived_lag_values[h * l_state + lag];
         }

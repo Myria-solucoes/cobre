@@ -24,7 +24,7 @@
 //! to length 0 when `n_anticipated == 0`, leaving the rest of the layout
 //! byte-identical to the pre-anticipated form. The control region runs
 //! `anticipated_decision` then `line_fwd` directly — the anticipated ring's
-//! outgoing slots (`StateSpace::anticipated_slots_out`) do NOT live here:
+//! outgoing slots (`StateSpace::commit_out`) do NOT live here:
 //! they sit in the stage-invariant state region owned by [`StateSpace`], so
 //! their address never depends on `n_blks`. An `anticipated_state_out_def`
 //! equality row pins the plant's own newest ring slot to its
@@ -120,6 +120,6 @@ pub use index::{BlockIdx, Boundary, Col, CutSlot, InCol, OutCol, Row, StateDim};
 pub use layout::{EvaporationIndices, FphaRowRange};
 pub(crate) use range_cursor::RangeCursor;
 pub use state_space::StateSpace;
-pub(crate) use state_space::{REGION_ORDER, StateRegion};
+pub(crate) use state_space::{CommitmentHoldAddress, REGION_ORDER, StateRegion};
 pub use storage_boundary_grid::StorageBoundaryGrid;
 pub use study_dimensions::StudyDimensions;

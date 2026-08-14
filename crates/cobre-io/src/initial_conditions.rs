@@ -15,14 +15,21 @@
 //!   per date range per hydro), shadowing the record day-wise wherever both
 //!   cover the same date (the two never blend). Optional; defaults to an
 //!   empty array when absent.
-//! - `past_anticipated_commitments` — committed MW values for each anticipated
-//!   thermal plant, ordered by delivery stage ascending. Optional; defaults to
-//!   an empty array when no anticipated thermals are present.
+//! - `past_anticipated_commitments` — committed MW windows per anticipated
+//!   thermal plant, each a self-describing `[start_date, end_date)` window
+//!   carrying a `value_mw` rate held constant over the window. Optional;
+//!   defaults to an empty array when no anticipated thermals are present.
 //! - `past_defluences` — past release windows per arc (m³/s per date range),
 //!   keyed by the upstream hydro whose release feeds the arc. Each entry is a
 //!   self-describing `[start_date, end_date)` window on the pre-study calendar,
 //!   mirroring `recent_observations`. Optional; defaults to an empty array when
 //!   absent.
+//! - `future_anticipated_deliveries` — in-study decided delivery windows per
+//!   anticipated thermal plant, delivered after the study horizon: the
+//!   right-boundary counterpart to `past_anticipated_commitments`. Each entry
+//!   is a self-describing `[delivery_start, delivery_end)` window carrying a
+//!   `[min_mw, max_mw]` bound (`min_mw == max_mw` pins a fixed commitment).
+//!   Optional; defaults to an empty array when absent.
 //!
 //! ```json
 //! {
@@ -37,7 +44,10 @@
 //!     { "hydro_id": 0, "start_date": "2026-04-04", "end_date": "2026-04-11", "value_m3s": 480.0 }
 //!   ],
 //!   "past_anticipated_commitments": [
-//!     { "thermal_id": 1, "values_mw": [0.0, 0.0] }
+//!     { "thermal_id": 1, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 0.0 }
+//!   ],
+//!   "future_anticipated_deliveries": [
+//!     { "thermal_id": 86, "delivery_start": "2026-09-05", "delivery_end": "2026-09-12", "min_mw": 0.0, "max_mw": 350.0 }
 //!   ]
 //! }
 //! ```
@@ -59,23 +69,34 @@
 //!    count.
 //! 6. For observations with the same `hydro_id`, date ranges do not overlap
 //!    (adjacent ranges where `start == prev_end` are accepted).
-//! 7. No `thermal_id` appears more than once in `past_anticipated_commitments`.
-//! 8. Every `past_anticipated_commitments[i].values_mw` is non-empty.
-//! 9. Every value in `past_anticipated_commitments[i].values_mw` is finite and
-//!    non-negative (`>= 0.0`) (parse-time check).
-//! 10. `past_anticipated_commitments[i].values_mw.len()` equals the
-//!     calendar-derived count of pre-study-committed delivery stages for that
-//!     thermal's lead mode — not `lead_stages` on a non-uniform calendar — and
-//!     every value lies within the plant's `[min_generation_mw, max_generation_mw]`
-//!     bounds and, if the plant has a commissioning window, matures inside it.
-//!     All three are enforced by the semantic validator (Layer 5a); the committed
-//!     values are sunk cost and do not enter the study objective. See
-//!     [`AnticipatedCommitmentHistory`] in `cobre-core` for the full contract.
-//! 11. Every `start_date` and `end_date` in `past_defluences` parses as ISO 8601
+//! 7. No `(thermal_id, start_date)` pair appears more than once in
+//!    `past_anticipated_commitments`.
+//! 8. Every `start_date` and `end_date` in `past_anticipated_commitments`
+//!    parses as ISO 8601 (`YYYY-MM-DD`), `end_date > start_date`, every
+//!    `value_mw` is finite, and windows for the same `thermal_id` do not overlap
+//!    (adjacent ranges where `start == prev_end` are accepted). All four route
+//!    through the shared windowed-record validator.
+//! 9. Each thermal's windows tile its calendar-derived leading delivery stages
+//!    at coverage `1.0` — no gap, no overlap, none beyond the horizon — and
+//!    every `value_mw` lies within the plant's
+//!    `[min_generation_mw, max_generation_mw]` bounds and, if the plant has a
+//!    commissioning window, matures inside it. All are enforced by the semantic
+//!    validator (Layer 5a); the committed values are sunk cost and do not enter
+//!    the study objective. See [`AnticipatedCommitmentHistory`] in `cobre-core`
+//!    for the full contract.
+//! 10. Every `start_date` and `end_date` in `past_defluences` parses as ISO 8601
 //!     (`YYYY-MM-DD`), and `end_date > start_date`.
-//! 12. Every `value_m3s` in `past_defluences` is finite and non-negative.
-//! 13. For defluence windows with the same `hydro_id`, date ranges do not overlap
+//! 11. Every `value_m3s` in `past_defluences` is finite and non-negative.
+//! 12. For defluence windows with the same `hydro_id`, date ranges do not overlap
 //!     (adjacent ranges where `start == prev_end` are accepted).
+//! 13. No `(thermal_id, delivery_start)` pair appears more than once in
+//!     `future_anticipated_deliveries`.
+//! 14. Every `delivery_start` and `delivery_end` in `future_anticipated_deliveries`
+//!     parses as ISO 8601 (`YYYY-MM-DD`), `delivery_end > delivery_start`, `min_mw`
+//!     is finite, and windows for the same `thermal_id` do not overlap (adjacent
+//!     ranges where `start == prev_end` are accepted).
+//! 15. Every `max_mw` in `future_anticipated_deliveries` is finite and
+//!     `min_mw <= max_mw` (equality pins a fixed commitment).
 //!
 //! Cross-reference validation (checking that hydro IDs exist in the hydro
 //! registry) is deferred to Layer 3 (deferred). Storage bounds validation
@@ -84,14 +105,15 @@
 
 use chrono::NaiveDate;
 use cobre_core::{
-    AnticipatedCommitmentHistory, EntityId, HydroPastDefluence, HydroStorage, InitialConditions,
-    RecentObservation,
+    AnticipatedCommitmentHistory, EntityId, FutureAnticipatedDelivery, HydroPastDefluence,
+    HydroStorage, InitialConditions, RecentObservation,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
 use crate::LoadError;
+use crate::windowed_history::{WindowedRecord, parse_iso_date, validate_windowed_records};
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
 
@@ -120,9 +142,11 @@ pub(crate) struct RawInitialConditions {
     #[serde(default)]
     recent_observations: Vec<RawRecentObservation>,
 
-    /// Past committed MW values for each anticipated thermal plant, ordered by
-    /// delivery stage ascending. Present only when the study includes at least
-    /// one anticipated thermal. Optional; defaults to empty.
+    /// Past committed MW windows per anticipated thermal plant, each a
+    /// self-describing `[start_date, end_date)` window carrying a `value_mw`
+    /// rate. Present only when the study includes at least one anticipated
+    /// thermal. Windows for the same thermal must not overlap; adjacent ranges
+    /// (start == previous end) are accepted. Optional; defaults to empty.
     #[serde(default)]
     past_anticipated_commitments: Vec<RawAnticipatedCommitmentHistory>,
 
@@ -133,6 +157,15 @@ pub(crate) struct RawInitialConditions {
     /// (start == previous end) are accepted. Optional; defaults to empty.
     #[serde(default)]
     past_defluences: Vec<RawHydroPastDefluence>,
+
+    /// In-study decided delivery windows per anticipated thermal plant,
+    /// delivered after the study horizon, each a self-describing
+    /// `[delivery_start, delivery_end)` window carrying a `[min_mw, max_mw]`
+    /// bound (`min_mw == max_mw` pins a fixed commitment). Windows for the
+    /// same thermal must not overlap; adjacent ranges (start == previous end)
+    /// are accepted. Optional; defaults to empty.
+    #[serde(default)]
+    future_anticipated_deliveries: Vec<RawFutureAnticipatedDelivery>,
 }
 
 /// Initial reservoir volume for one hydro plant, in hm³.
@@ -194,24 +227,57 @@ struct RawRecentObservation {
     value_m3s: f64,
 }
 
-/// Past committed MW values for one anticipated thermal plant.
+/// One past committed MW window for an anticipated thermal plant.
 ///
-/// `values_mw[j]` is the MW dispatched at the `j`-th pre-study-committed
-/// delivery stage (delivery-anchored; required length is calendar-derived, not
-/// `lead_stages` on a non-uniform calendar — validated semantically). The
-/// values are sunk cost: they do not enter the study objective. Each value
-/// must lie within the plant's `[min_generation_mw, max_generation_mw]` bounds
-/// and, if the plant has a commissioning window, mature inside it (both
-/// validated semantically).
+/// A self-describing `[start_date, end_date)` window (ISO 8601, `end_date`
+/// exclusive and after `start_date`) carrying `value_mw`, the MW rate held
+/// constant over the window. A plant's windows must tile its calendar-derived
+/// leading delivery stages exactly (validated semantically). The values are
+/// sunk cost: they do not enter the study objective. Each `value_mw` must lie
+/// within the plant's `[min_generation_mw, max_generation_mw]` bounds and, if
+/// the plant has a commissioning window, mature inside it (both validated
+/// semantically).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawAnticipatedCommitmentHistory {
     /// Thermal plant identifier. Must reference an anticipated thermal.
     thermal_id: i32,
-    /// Past committed MW values, ordered by delivery stage ascending. Required
-    /// length is calendar-derived (validated semantically), not `lead_stages`.
-    values_mw: Vec<f64>,
+    /// Start of the commitment window (inclusive), as an ISO 8601 date
+    /// (YYYY-MM-DD).
+    start_date: String,
+    /// End of the commitment window (exclusive), as an ISO 8601 date
+    /// (YYYY-MM-DD). Must be after `start_date`.
+    end_date: String,
+    /// Committed MW rate over the window, held constant.
+    value_mw: f64,
+}
+
+/// One in-study decided delivery window for an anticipated thermal plant,
+/// delivered after the study horizon — the right-boundary counterpart to
+/// [`RawAnticipatedCommitmentHistory`].
+///
+/// A self-describing `[delivery_start, delivery_end)` window (ISO 8601,
+/// `delivery_end` exclusive and after `delivery_start`) carrying a
+/// `[min_mw, max_mw]` bound on the delivered MW rate. `min_mw == max_mw` pins
+/// a fixed commitment.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawFutureAnticipatedDelivery {
+    /// Thermal plant identifier. Must reference an anticipated thermal.
+    thermal_id: i32,
+    /// Start of the delivery window (inclusive), as an ISO 8601 date
+    /// (YYYY-MM-DD).
+    delivery_start: String,
+    /// End of the delivery window (exclusive), as an ISO 8601 date
+    /// (YYYY-MM-DD). Must be after `delivery_start`.
+    delivery_end: String,
+    /// Lower bound of the delivered MW rate over the window. Must be finite.
+    min_mw: f64,
+    /// Upper bound of the delivered MW rate over the window. Must be finite
+    /// and `>= min_mw`.
+    max_mw: f64,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -262,14 +328,173 @@ fn validate_raw(raw: &RawInitialConditions, path: &Path) -> Result<(), LoadError
     validate_no_duplicates(&raw.storage, "storage", path)?;
     validate_no_duplicates(&raw.filling_storage, "filling_storage", path)?;
     validate_mutual_exclusion(raw, path)?;
-    validate_recent_observations_dates(&raw.recent_observations, path)?;
-    validate_recent_observations_values(&raw.recent_observations, path)?;
-    validate_recent_observations_no_overlap(&raw.recent_observations, path)?;
-    validate_anticipated_commitment_histories(&raw.past_anticipated_commitments, path)?;
-    validate_past_defluences_dates(&raw.past_defluences, path)?;
-    validate_past_defluences_values(&raw.past_defluences, path)?;
-    validate_past_defluences_no_overlap(&raw.past_defluences, path)?;
+
+    let recent_observation_windows =
+        parse_recent_observation_windows(&raw.recent_observations, path)?;
+    validate_windowed_records(
+        &recent_observation_windows,
+        "recent_observations",
+        "hydro_id",
+        "value_m3s",
+        path,
+    )?;
+
+    let anticipated_commitment_windows =
+        parse_anticipated_commitment_windows(&raw.past_anticipated_commitments, path)?;
+    validate_no_duplicate_commitment_windows(&anticipated_commitment_windows, path)?;
+    validate_windowed_records(
+        &anticipated_commitment_windows,
+        "past_anticipated_commitments",
+        "thermal_id",
+        "value_mw",
+        path,
+    )?;
+
+    let past_defluence_windows = parse_past_defluence_windows(&raw.past_defluences, path)?;
+    validate_windowed_records(
+        &past_defluence_windows,
+        "past_defluences",
+        "hydro_id",
+        "value_m3s",
+        path,
+    )?;
+    validate_past_defluences_non_negative(&raw.past_defluences, path)?;
+
+    let future_delivery_windows =
+        parse_future_anticipated_delivery_windows(&raw.future_anticipated_deliveries, path)?;
+    validate_no_duplicate_future_delivery_windows(&future_delivery_windows, path)?;
+    validate_windowed_records(
+        &future_delivery_windows,
+        "future_anticipated_deliveries",
+        "thermal_id",
+        "min_mw",
+        path,
+    )?;
+    validate_future_delivery_bounds(&raw.future_anticipated_deliveries, path)?;
+
     Ok(())
+}
+
+/// Parse `recent_observations` dates and build the shared windowed view for
+/// [`validate_windowed_records`].
+fn parse_recent_observation_windows(
+    entries: &[RawRecentObservation],
+    path: &Path,
+) -> Result<Vec<WindowedRecord>, LoadError> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let start_date = parse_iso_date(
+                &format!("recent_observations[{i}].start_date"),
+                &entry.start_date,
+                path,
+            )?;
+            let end_date = parse_iso_date(
+                &format!("recent_observations[{i}].end_date"),
+                &entry.end_date,
+                path,
+            )?;
+            Ok(WindowedRecord {
+                entity_id: entry.hydro_id,
+                start_date,
+                end_date,
+                value: entry.value_m3s,
+            })
+        })
+        .collect()
+}
+
+/// Parse `past_anticipated_commitments` dates and build the shared windowed
+/// view for [`validate_windowed_records`].
+fn parse_anticipated_commitment_windows(
+    entries: &[RawAnticipatedCommitmentHistory],
+    path: &Path,
+) -> Result<Vec<WindowedRecord>, LoadError> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let start_date = parse_iso_date(
+                &format!("past_anticipated_commitments[{i}].start_date"),
+                &entry.start_date,
+                path,
+            )?;
+            let end_date = parse_iso_date(
+                &format!("past_anticipated_commitments[{i}].end_date"),
+                &entry.end_date,
+                path,
+            )?;
+            Ok(WindowedRecord {
+                entity_id: entry.thermal_id,
+                start_date,
+                end_date,
+                value: entry.value_mw,
+            })
+        })
+        .collect()
+}
+
+/// Parse `past_defluences` dates and build the shared windowed view for
+/// [`validate_windowed_records`].
+fn parse_past_defluence_windows(
+    entries: &[RawHydroPastDefluence],
+    path: &Path,
+) -> Result<Vec<WindowedRecord>, LoadError> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let start_date = parse_iso_date(
+                &format!("past_defluences[{i}].start_date"),
+                &entry.start_date,
+                path,
+            )?;
+            let end_date = parse_iso_date(
+                &format!("past_defluences[{i}].end_date"),
+                &entry.end_date,
+                path,
+            )?;
+            Ok(WindowedRecord {
+                entity_id: entry.hydro_id,
+                start_date,
+                end_date,
+                value: entry.value_m3s,
+            })
+        })
+        .collect()
+}
+
+/// Parse `future_anticipated_deliveries` dates and build the shared windowed
+/// view for [`validate_windowed_records`]. `min_mw` stands in for the shared
+/// view's single value slot; `max_mw` finiteness and the `min_mw <= max_mw`
+/// bound are checked separately by [`validate_future_delivery_bounds`].
+fn parse_future_anticipated_delivery_windows(
+    entries: &[RawFutureAnticipatedDelivery],
+    path: &Path,
+) -> Result<Vec<WindowedRecord>, LoadError> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let start_date = parse_iso_date(
+                &format!("future_anticipated_deliveries[{i}].delivery_start"),
+                &entry.delivery_start,
+                path,
+            )?;
+            let end_date = parse_iso_date(
+                &format!("future_anticipated_deliveries[{i}].delivery_end"),
+                &entry.delivery_end,
+                path,
+            )?;
+            Ok(WindowedRecord {
+                entity_id: entry.thermal_id,
+                start_date,
+                end_date,
+                value: entry.min_mw,
+            })
+        })
+        .collect()
 }
 
 fn validate_non_negative(
@@ -326,41 +551,82 @@ fn validate_mutual_exclusion(raw: &RawInitialConditions, path: &Path) -> Result<
     Ok(())
 }
 
-fn validate_recent_observations_dates(
-    entries: &[RawRecentObservation],
+/// Reject two commitment windows sharing a `(thermal_id, start_date)` — the
+/// windowed successor to the "duplicate `thermal_id`" rule. A thermal legitimately
+/// carries multiple windows at distinct start dates; only a repeated start on
+/// the same thermal is a duplicate. Date/overlap/finiteness are enforced by
+/// [`validate_windowed_records`].
+fn validate_no_duplicate_commitment_windows(
+    windows: &[WindowedRecord],
+    path: &Path,
+) -> Result<(), LoadError> {
+    let mut seen: HashSet<(i32, NaiveDate)> = HashSet::new();
+    for (i, window) in windows.iter().enumerate() {
+        if !seen.insert((window.entity_id, window.start_date)) {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("past_anticipated_commitments[{i}].start_date"),
+                message: format!(
+                    "duplicate (thermal_id {}, start_date {}) in past_anticipated_commitments",
+                    window.entity_id, window.start_date
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Reject two delivery windows sharing a `(thermal_id, delivery_start)` —
+/// mirrors [`validate_no_duplicate_commitment_windows`] for the right-boundary
+/// surface. Date/overlap/`min_mw` finiteness are enforced by
+/// [`validate_windowed_records`].
+fn validate_no_duplicate_future_delivery_windows(
+    windows: &[WindowedRecord],
+    path: &Path,
+) -> Result<(), LoadError> {
+    let mut seen: HashSet<(i32, NaiveDate)> = HashSet::new();
+    for (i, window) in windows.iter().enumerate() {
+        if !seen.insert((window.entity_id, window.start_date)) {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("future_anticipated_deliveries[{i}].delivery_start"),
+                message: format!(
+                    "duplicate (thermal_id {}, delivery_start {}) in future_anticipated_deliveries",
+                    window.entity_id, window.start_date
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Reject a non-finite `max_mw` or an inverted `[min_mw, max_mw]` interval.
+/// `min_mw` finiteness is enforced upstream by [`validate_windowed_records`]
+/// (called before this function in [`validate_raw`]), so a non-finite
+/// `min_mw` never reaches the `min_mw > max_mw` comparison here.
+fn validate_future_delivery_bounds(
+    entries: &[RawFutureAnticipatedDelivery],
     path: &Path,
 ) -> Result<(), LoadError> {
     for (i, entry) in entries.iter().enumerate() {
-        let start = NaiveDate::parse_from_str(&entry.start_date, "%Y-%m-%d").map_err(|_| {
-            LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("recent_observations[{i}].start_date"),
-                message: format!(
-                    "recent_observations[{i}].start_date '{}' is not a valid ISO 8601 date \
-                     (expected YYYY-MM-DD)",
-                    entry.start_date
-                ),
-            }
-        })?;
-        let end = NaiveDate::parse_from_str(&entry.end_date, "%Y-%m-%d").map_err(|_| {
-            LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("recent_observations[{i}].end_date"),
-                message: format!(
-                    "recent_observations[{i}].end_date '{}' is not a valid ISO 8601 date \
-                     (expected YYYY-MM-DD)",
-                    entry.end_date
-                ),
-            }
-        })?;
-        if end <= start {
+        if !entry.max_mw.is_finite() {
             return Err(LoadError::SchemaError {
                 path: path.to_path_buf(),
-                field: format!("recent_observations[{i}].end_date"),
+                field: format!("future_anticipated_deliveries[{i}].max_mw"),
                 message: format!(
-                    "recent_observations[{i}]: end_date must be after start_date \
-                     (start_date={}, end_date={})",
-                    entry.start_date, entry.end_date
+                    "future_anticipated_deliveries[{i}].max_mw must be a finite number, got {}",
+                    entry.max_mw
+                ),
+            });
+        }
+        if entry.min_mw > entry.max_mw {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("future_anticipated_deliveries[{i}].max_mw"),
+                message: format!(
+                    "future_anticipated_deliveries[{i}]: max_mw ({}) must be >= min_mw ({}) \
+                     for thermal_id {}, delivery_start {}",
+                    entry.max_mw, entry.min_mw, entry.thermal_id, entry.delivery_start
                 ),
             });
         }
@@ -368,230 +634,23 @@ fn validate_recent_observations_dates(
     Ok(())
 }
 
-fn validate_recent_observations_values(
-    entries: &[RawRecentObservation],
-    path: &Path,
-) -> Result<(), LoadError> {
-    // Observations carry the same incremental quantity as `inflow_history`, so a
-    // negative value is legitimate for the same reason `parse_inflow_history`
-    // documents; restoring a `< 0.0` reject here rejects production records.
-    for (i, entry) in entries.iter().enumerate() {
-        if !entry.value_m3s.is_finite() {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("recent_observations[{i}].value_m3s"),
-                message: format!(
-                    "recent_observations[{i}].value_m3s must be a finite number, got {}",
-                    entry.value_m3s
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Check that for observations with the same `hydro_id`, date ranges do not
-/// overlap. Adjacent ranges where `start_date == previous end_date` are
-/// accepted (exclusive-end convention).
-///
-/// Precondition: [`validate_recent_observations_dates`] has returned `Ok(())`
-/// for these entries (dates are valid and `end > start`).
-fn validate_recent_observations_no_overlap(
-    entries: &[RawRecentObservation],
-    path: &Path,
-) -> Result<(), LoadError> {
-    use std::collections::HashMap;
-
-    let mut by_hydro: HashMap<i32, Vec<usize>> = HashMap::new();
-    for (i, entry) in entries.iter().enumerate() {
-        by_hydro.entry(entry.hydro_id).or_default().push(i);
-    }
-
-    for (hydro_id, mut indices) in by_hydro {
-        indices.sort_by_key(|&i| {
-            NaiveDate::parse_from_str(&entries[i].start_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("start_date already validated"))
-        });
-
-        for window in indices.windows(2) {
-            let (i_prev, i_curr) = (window[0], window[1]);
-            let prev_end = NaiveDate::parse_from_str(&entries[i_prev].end_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("end_date already validated"));
-            let curr_start = NaiveDate::parse_from_str(&entries[i_curr].start_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("start_date already validated"));
-
-            if curr_start < prev_end {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("recent_observations[{i_curr}].start_date"),
-                    message: format!(
-                        "recent_observations: overlapping date ranges for hydro_id {hydro_id}: \
-                         entry [{i_prev}] ends on {prev_end} but entry [{i_curr}] starts on \
-                         {curr_start}"
-                    ),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Validate IO-layer invariants on `past_anticipated_commitments`.
-fn validate_anticipated_commitment_histories(
-    histories: &[RawAnticipatedCommitmentHistory],
-    path: &Path,
-) -> Result<(), LoadError> {
-    let mut seen: HashSet<i32> = HashSet::new();
-    for (i, entry) in histories.iter().enumerate() {
-        if !seen.insert(entry.thermal_id) {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("past_anticipated_commitments[{i}].thermal_id"),
-                message: format!(
-                    "duplicate thermal_id {} in past_anticipated_commitments",
-                    entry.thermal_id
-                ),
-            });
-        }
-        if entry.values_mw.is_empty() {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("past_anticipated_commitments[{i}].values_mw"),
-                message: format!(
-                    "past_anticipated_commitments[{i}].values_mw must not be empty; \
-                     anticipated plants always require at least one committed value"
-                ),
-            });
-        }
-        for (j, &v) in entry.values_mw.iter().enumerate() {
-            if !v.is_finite() {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("past_anticipated_commitments[{i}].values_mw[{j}]"),
-                    message: format!(
-                        "past_anticipated_commitments[{i}].values_mw[{j}] is not finite \
-                         (got {v}); all committed MW values must be finite numbers"
-                    ),
-                });
-            }
-            if v < 0.0 {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("past_anticipated_commitments[{i}].values_mw[{j}]"),
-                    message: format!(
-                        "past_anticipated_commitments[{i}].values_mw[{j}] must be >= 0 \
-                         (got {v}); anticipated commitments are physical generation amounts"
-                    ),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_past_defluences_dates(
+/// Reject negative `value_m3s` — the sign policy that distinguishes
+/// `past_defluences` from `recent_observations`/`inflow_history` (finiteness
+/// is enforced by [`validate_windowed_records`]).
+fn validate_past_defluences_non_negative(
     entries: &[RawHydroPastDefluence],
     path: &Path,
 ) -> Result<(), LoadError> {
     for (i, entry) in entries.iter().enumerate() {
-        let start = NaiveDate::parse_from_str(&entry.start_date, "%Y-%m-%d").map_err(|_| {
-            LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("past_defluences[{i}].start_date"),
-                message: format!(
-                    "past_defluences[{i}].start_date '{}' is not a valid ISO 8601 date \
-                     (expected YYYY-MM-DD)",
-                    entry.start_date
-                ),
-            }
-        })?;
-        let end = NaiveDate::parse_from_str(&entry.end_date, "%Y-%m-%d").map_err(|_| {
-            LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("past_defluences[{i}].end_date"),
-                message: format!(
-                    "past_defluences[{i}].end_date '{}' is not a valid ISO 8601 date \
-                     (expected YYYY-MM-DD)",
-                    entry.end_date
-                ),
-            }
-        })?;
-        if end <= start {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("past_defluences[{i}].end_date"),
-                message: format!(
-                    "past_defluences[{i}]: end_date must be after start_date \
-                     (start_date={}, end_date={})",
-                    entry.start_date, entry.end_date
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_past_defluences_values(
-    entries: &[RawHydroPastDefluence],
-    path: &Path,
-) -> Result<(), LoadError> {
-    for (i, entry) in entries.iter().enumerate() {
-        if !entry.value_m3s.is_finite() || entry.value_m3s < 0.0 {
+        if entry.value_m3s < 0.0 {
             return Err(LoadError::SchemaError {
                 path: path.to_path_buf(),
                 field: format!("past_defluences[{i}].value_m3s"),
                 message: format!(
-                    "past_defluences[{i}].value_m3s must be a finite non-negative number, \
-                     got {}",
+                    "past_defluences[{i}].value_m3s must be >= 0.0, got {}",
                     entry.value_m3s
                 ),
             });
-        }
-    }
-    Ok(())
-}
-
-/// Check that for defluence windows with the same `hydro_id`, date ranges do
-/// not overlap. Adjacent ranges where `start_date == previous end_date` are
-/// accepted (exclusive-end convention).
-///
-/// Precondition: [`validate_past_defluences_dates`] has returned `Ok(())` for
-/// these entries (dates are valid and `end > start`).
-fn validate_past_defluences_no_overlap(
-    entries: &[RawHydroPastDefluence],
-    path: &Path,
-) -> Result<(), LoadError> {
-    use std::collections::HashMap;
-
-    let mut by_hydro: HashMap<i32, Vec<usize>> = HashMap::new();
-    for (i, entry) in entries.iter().enumerate() {
-        by_hydro.entry(entry.hydro_id).or_default().push(i);
-    }
-
-    for (hydro_id, mut indices) in by_hydro {
-        indices.sort_by_key(|&i| {
-            NaiveDate::parse_from_str(&entries[i].start_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("start_date already validated"))
-        });
-
-        for window in indices.windows(2) {
-            let (i_prev, i_curr) = (window[0], window[1]);
-            let prev_end = NaiveDate::parse_from_str(&entries[i_prev].end_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("end_date already validated"));
-            let curr_start = NaiveDate::parse_from_str(&entries[i_curr].start_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("start_date already validated"));
-
-            if curr_start < prev_end {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("past_defluences[{i_curr}].start_date"),
-                    message: format!(
-                        "past_defluences: overlapping date ranges for hydro_id {hydro_id}: \
-                         entry [{i_prev}] ends on {prev_end} but entry [{i_curr}] starts on \
-                         {curr_start}"
-                    ),
-                });
-            }
         }
     }
     Ok(())
@@ -644,10 +703,14 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .into_iter()
         .map(|e| AnticipatedCommitmentHistory {
             thermal_id: EntityId(e.thermal_id),
-            values_mw: e.values_mw,
+            start_date: NaiveDate::parse_from_str(&e.start_date, "%Y-%m-%d")
+                .unwrap_or_else(|_| unreachable!("start_date already validated")),
+            end_date: NaiveDate::parse_from_str(&e.end_date, "%Y-%m-%d")
+                .unwrap_or_else(|_| unreachable!("end_date already validated")),
+            value_mw: e.value_mw,
         })
         .collect();
-    past_anticipated_commitments.sort_by_key(|e| e.thermal_id.0);
+    past_anticipated_commitments.sort_by_key(|e| (e.thermal_id.0, e.start_date));
 
     let mut past_defluences: Vec<HydroPastDefluence> = raw
         .past_defluences
@@ -663,12 +726,28 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .collect();
     past_defluences.sort_by_key(|e| (e.hydro_id.0, e.start_date));
 
+    let mut future_anticipated_deliveries: Vec<FutureAnticipatedDelivery> = raw
+        .future_anticipated_deliveries
+        .into_iter()
+        .map(|e| FutureAnticipatedDelivery {
+            thermal_id: EntityId(e.thermal_id),
+            delivery_start: NaiveDate::parse_from_str(&e.delivery_start, "%Y-%m-%d")
+                .unwrap_or_else(|_| unreachable!("delivery_start already validated")),
+            delivery_end: NaiveDate::parse_from_str(&e.delivery_end, "%Y-%m-%d")
+                .unwrap_or_else(|_| unreachable!("delivery_end already validated")),
+            min_mw: e.min_mw,
+            max_mw: e.max_mw,
+        })
+        .collect();
+    future_anticipated_deliveries.sort_by_key(|e| (e.thermal_id.0, e.delivery_start));
+
     InitialConditions {
         storage,
         filling_storage,
         past_anticipated_commitments,
         recent_observations,
         past_defluences,
+        future_anticipated_deliveries,
     }
 }
 
@@ -1138,6 +1217,10 @@ mod tests {
                     message.contains("end_date must be after start_date"),
                     "message should contain 'end_date must be after start_date', got: {message}"
                 );
+                assert!(
+                    message.contains("hydro_id 0"),
+                    "message should name the entity, got: {message}"
+                );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
@@ -1162,6 +1245,10 @@ mod tests {
                 assert!(
                     message.contains("end_date must be after start_date"),
                     "message should contain 'end_date must be after start_date', got: {message}"
+                );
+                assert!(
+                    message.contains("hydro_id 0"),
+                    "message should name the entity, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -1312,18 +1399,21 @@ mod tests {
           "storage": [],
           "filling_storage": [],
           "past_anticipated_commitments": [
-            { "thermal_id": 1, "values_mw": [120.0, 180.0] }
+            { "thermal_id": 1, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 120.0 },
+            { "thermal_id": 1, "start_date": "2026-02-01", "end_date": "2026-03-01", "value_mw": 180.0 }
           ]
         }"#;
         let f = write_json(json);
         let ic = parse_initial_conditions(f.path()).unwrap();
 
-        assert_eq!(ic.past_anticipated_commitments.len(), 1);
+        assert_eq!(ic.past_anticipated_commitments.len(), 2);
         assert_eq!(ic.past_anticipated_commitments[0].thermal_id, EntityId(1));
         assert_eq!(
-            ic.past_anticipated_commitments[0].values_mw,
-            vec![120.0, 180.0]
+            ic.past_anticipated_commitments[0].start_date,
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
         );
+        assert!((ic.past_anticipated_commitments[0].value_mw - 120.0).abs() < f64::EPSILON);
+        assert!((ic.past_anticipated_commitments[1].value_mw - 180.0).abs() < f64::EPSILON);
     }
 
     /// Given an `initial_conditions.json` with no `past_anticipated_commitments`
@@ -1347,16 +1437,18 @@ mod tests {
           "storage": [],
           "filling_storage": [],
           "past_anticipated_commitments": [
-            { "thermal_id": 1, "values_mw": [120.0, 180.0] },
-            { "thermal_id": 2, "values_mw": [50.0] }
+            { "thermal_id": 1, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 120.0 },
+            { "thermal_id": 1, "start_date": "2026-02-01", "end_date": "2026-03-01", "value_mw": 180.0 },
+            { "thermal_id": 2, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 50.0 }
           ]
         }"#;
         let json_reversed = r#"{
           "storage": [],
           "filling_storage": [],
           "past_anticipated_commitments": [
-            { "thermal_id": 2, "values_mw": [50.0] },
-            { "thermal_id": 1, "values_mw": [120.0, 180.0] }
+            { "thermal_id": 2, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 50.0 },
+            { "thermal_id": 1, "start_date": "2026-02-01", "end_date": "2026-03-01", "value_mw": 180.0 },
+            { "thermal_id": 1, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 120.0 }
           ]
         }"#;
         let f1 = write_json(json_forward);
@@ -1369,10 +1461,19 @@ mod tests {
             "results must be identical regardless of input ordering"
         );
         assert_eq!(ic1.past_anticipated_commitments[0].thermal_id, EntityId(1));
-        assert_eq!(ic1.past_anticipated_commitments[1].thermal_id, EntityId(2));
+        assert_eq!(
+            ic1.past_anticipated_commitments[0].start_date,
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
+        );
+        assert_eq!(ic1.past_anticipated_commitments[1].thermal_id, EntityId(1));
+        assert_eq!(
+            ic1.past_anticipated_commitments[1].start_date,
+            chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()
+        );
+        assert_eq!(ic1.past_anticipated_commitments[2].thermal_id, EntityId(2));
     }
 
-    /// Given two entries with the same `thermal_id: 5` in
+    /// Given two windows sharing `(thermal_id: 5, start_date)` in
     /// `past_anticipated_commitments`, `parse_initial_conditions` returns
     /// `Err(LoadError::SchemaError)` with field containing
     /// `"past_anticipated_commitments["` and message containing `"duplicate"`.
@@ -1382,8 +1483,8 @@ mod tests {
           "storage": [],
           "filling_storage": [],
           "past_anticipated_commitments": [
-            { "thermal_id": 5, "values_mw": [100.0] },
-            { "thermal_id": 5, "values_mw": [200.0] }
+            { "thermal_id": 5, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 100.0 },
+            { "thermal_id": 5, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 200.0 }
           ]
         }"#;
         let f = write_json(json);
@@ -1403,16 +1504,33 @@ mod tests {
         }
     }
 
-    /// Given a `past_anticipated_commitments` entry with `values_mw: []`,
-    /// `parse_initial_conditions` returns `Err(LoadError::SchemaError)` with
-    /// `message` containing `"values_mw must not be empty"`.
+    /// A thermal legitimately carries several windows at distinct start dates;
+    /// `parse_initial_conditions` accepts them (contrast with the shared
+    /// `(thermal_id, start_date)` duplicate rule).
     #[test]
-    fn test_empty_values_mw_rejected() {
+    fn test_multiple_windows_same_thermal_distinct_starts_accepted() {
         let json = r#"{
           "storage": [],
           "filling_storage": [],
           "past_anticipated_commitments": [
-            { "thermal_id": 3, "values_mw": [] }
+            { "thermal_id": 3, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 100.0 },
+            { "thermal_id": 3, "start_date": "2026-02-01", "end_date": "2026-03-01", "value_mw": 200.0 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let ic = parse_initial_conditions(f.path()).unwrap();
+        assert_eq!(ic.past_anticipated_commitments.len(), 2);
+    }
+
+    /// A commitment window whose `end_date <= start_date` is rejected by the
+    /// shared windowed-record validator.
+    #[test]
+    fn test_commitment_window_end_before_start_rejected() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_anticipated_commitments": [
+            { "thermal_id": 7, "start_date": "2026-02-01", "end_date": "2026-01-01", "value_mw": 120.0 }
           ]
         }"#;
         let f = write_json(json);
@@ -1420,43 +1538,58 @@ mod tests {
         match &err {
             LoadError::SchemaError { message, .. } => {
                 assert!(
-                    message.contains("values_mw must not be empty"),
-                    "message should contain 'values_mw must not be empty', got: {message}"
+                    message.contains("end_date must be after start_date"),
+                    "message should contain 'end_date must be after start_date', got: {message}"
+                );
+                assert!(
+                    message.contains("thermal_id 7"),
+                    "message should name the entity, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
     }
 
-    /// Given a `past_anticipated_commitments` entry with a negative MW value
-    /// (e.g. `values_mw: [120.0, -50.0]`), `parse_initial_conditions` returns
-    /// `Err(LoadError::SchemaError)` with `message` containing `"must be >= 0"`
-    /// and `field` containing `"values_mw[1]"`.
+    /// Two overlapping commitment windows for the same thermal are rejected by
+    /// the shared windowed-record validator.
     #[test]
-    fn test_negative_values_mw_rejected() {
+    fn test_commitment_windows_overlapping_rejected() {
         let json = r#"{
           "storage": [],
           "filling_storage": [],
           "past_anticipated_commitments": [
-            { "thermal_id": 7, "values_mw": [120.0, -50.0] }
+            { "thermal_id": 7, "start_date": "2026-01-01", "end_date": "2026-02-15", "value_mw": 120.0 },
+            { "thermal_id": 7, "start_date": "2026-02-01", "end_date": "2026-03-01", "value_mw": 130.0 }
           ]
         }"#;
         let f = write_json(json);
         let err = parse_initial_conditions(f.path()).unwrap_err();
         match &err {
-            LoadError::SchemaError { field, message, .. } => {
+            LoadError::SchemaError { message, .. } => {
                 assert!(
-                    message.contains("must be >= 0"),
-                    "message should contain 'must be >= 0', got: {message}"
+                    message.contains("overlapping"),
+                    "message should contain 'overlapping', got: {message}"
                 );
                 assert!(
-                    field.contains("values_mw[1]"),
-                    "field should contain 'values_mw[1]', got: {field}"
+                    message.contains("thermal_id 7"),
+                    "message should name thermal_id (the commitment surface's own entity \
+                     label), got: {message}"
+                );
+                assert!(
+                    !message.contains("hydro_id"),
+                    "message must not borrow the hydro surfaces' entity label, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
     }
+
+    // Non-finite `value_mw` has no JSON-reachable regression here: serde_json
+    // errors on an out-of-range float literal before deserialization ever
+    // produces an f64. The commitment surface's finiteness-error labels are
+    // covered directly against `validate_windowed_records` in
+    // `windowed_history`'s test module, which builds a `WindowedRecord` with
+    // `f64::NAN` instead of going through JSON text.
 
     // ── AC: past_defluences absent → empty; present → parsed and sorted ───────
 
@@ -1550,6 +1683,10 @@ mod tests {
                 assert!(
                     message.contains("end_date must be after start_date"),
                     "message should contain 'end_date must be after start_date', got: {message}"
+                );
+                assert!(
+                    message.contains("hydro_id 0"),
+                    "message should name the entity, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),

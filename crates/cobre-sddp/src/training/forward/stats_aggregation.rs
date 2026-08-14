@@ -1,10 +1,12 @@
 //! Forward-pass upper-bound statistics aggregation.
 //!
-//! Owns `sync_forward`: the cross-rank `allgatherv` plus the canonical-order
-//! `WelfordAccumulator` summation that yields bit-identical upper-bound
-//! statistics regardless of MPI rank count. The Welford summation is a
-//! determinism contract — iterating the gathered costs in one fixed global
-//! order is what makes the result rank-count-invariant.
+//! Owns `sync_forward`: the cross-rank `allgatherv` plus the per-source
+//! assembly of the upper bound. Under a sampled forward it is the canonical-order
+//! `WelfordAccumulator` summation (sample mean + 95% CI); under an enumerated
+//! forward it is the exact `Σ wᵢ·cᵢ` compensated reduction
+//! ([`weighted_cost_reduction`]). Both iterate the gathered costs in one fixed
+//! global order — the determinism contract that makes the result
+//! rank-count-invariant.
 
 use std::time::Instant;
 
@@ -18,10 +20,58 @@ use crate::error::SddpError;
 #[allow(unused_imports)]
 use super::run_forward_pass;
 
+/// Which upper-bound estimator [`sync_forward`] assembles from the gathered
+/// forward-pass costs.
+#[derive(Clone, Copy, Debug)]
+pub enum ForwardBound<'a> {
+    /// Sampled forward: Welford sample mean, standard deviation, and 95% CI
+    /// half-width.
+    Statistical,
+    /// Enumerated forward: exact `Σ wᵢ·cᵢ` over `path_weights` (canonical order);
+    /// standard deviation and CI half-width are `0` — a deduplicated enumeration
+    /// carries no sampling distribution.
+    Exact {
+        /// Per-path probability weights, one per gathered cost, in canonical order.
+        path_weights: &'a [f64],
+    },
+}
+
+/// Compensated (Neumaier) `Σ wᵢ·cᵢ` over paired cost/weight slices in slice-index
+/// order.
+///
+/// The index order is fixed and decoupled from solve/gather order, so the
+/// reduction is bit-identical across rank and thread counts; Neumaier
+/// compensation (not a naive running sum) holds accuracy when the weighted terms
+/// span wide magnitudes.
+pub(crate) fn weighted_cost_reduction(costs: &[f64], weights: &[f64]) -> f64 {
+    debug_assert_eq!(
+        costs.len(),
+        weights.len(),
+        "weighted_cost_reduction: costs ({}) and weights ({}) must align 1:1",
+        costs.len(),
+        weights.len(),
+    );
+    let mut sum = 0.0_f64;
+    let mut compensation = 0.0_f64;
+    for (&cost, &weight) in costs.iter().zip(weights.iter()) {
+        let term = weight * cost;
+        let t = sum + term;
+        if sum.abs() >= term.abs() {
+            compensation += (sum - t) + term;
+        } else {
+            compensation += (term - t) + sum;
+        }
+        sum = t;
+    }
+    sum + compensation
+}
+
 /// Aggregate one rank's forward-pass statistics across all MPI ranks.
 ///
 /// `allgatherv`s `local.scenario_costs` into a canonical-order global buffer,
-/// then computes mean/std/CI by sequential summation in that fixed order so the
+/// then assembles the upper bound per `bound`: [`ForwardBound::Statistical`]
+/// computes the Welford sample mean/std/CI, [`ForwardBound::Exact`] the
+/// probability-weighted `Σ wᵢ·cᵢ`. Both reduce in the fixed global order, so the
 /// result is bit-identical regardless of rank count. In single-rank mode
 /// `LocalBackend.allgatherv` is an identity copy, needing no special case.
 ///
@@ -36,6 +86,7 @@ pub fn sync_forward<C: Communicator>(
     local: &ForwardResult,
     comm: &C,
     total_forward_passes: usize,
+    bound: ForwardBound<'_>,
 ) -> Result<SyncResult, SddpError> {
     let start = Instant::now();
 
@@ -71,20 +122,35 @@ pub fn sync_forward<C: Communicator>(
 
     comm.allgatherv(&local.scenario_costs, &mut global_costs, &counts, &displs)?;
 
-    // Single canonical-order pass: every rank iterates global_costs in the same
-    // order, so the statistics are bit-identical regardless of rank count.
-    // Welford's online algorithm, not the two-pass naive formula, avoids
-    // catastrophic cancellation when sum_sq ≈ n * mean^2; the full gathered array
-    // is in hand, so no MPI Welford merge is needed.
-    let mut welford = WelfordAccumulator::new();
-    for &c in &global_costs {
-        welford.update(c);
-    }
-    let mean = welford.mean();
-    let (std_dev, ci_95) = if global_n > 1 {
-        (welford.sample_std_dev(), welford.sample_ci_95_half_width())
-    } else {
-        (0.0_f64, 0.0_f64)
+    let (mean, std_dev, ci_95) = match bound {
+        ForwardBound::Statistical => {
+            // Single canonical-order pass: every rank iterates global_costs in the
+            // same order, so the statistics are bit-identical regardless of rank
+            // count. Welford's online algorithm, not the two-pass naive formula,
+            // avoids catastrophic cancellation when sum_sq ≈ n * mean^2; the full
+            // gathered array is in hand, so no MPI Welford merge is needed.
+            let mut welford = WelfordAccumulator::new();
+            for &c in &global_costs {
+                welford.update(c);
+            }
+            let mean = welford.mean();
+            if global_n > 1 {
+                (
+                    mean,
+                    welford.sample_std_dev(),
+                    welford.sample_ci_95_half_width(),
+                )
+            } else {
+                (mean, 0.0_f64, 0.0_f64)
+            }
+        }
+        ForwardBound::Exact { path_weights } => {
+            // Exact probability-weighted bound; std/CI are 0 because a deduplicated
+            // enumeration has no sampling distribution — routing it through the
+            // Welford accumulator as S samples would be a category error.
+            let ub_exact = weighted_cost_reduction(&global_costs, path_weights);
+            (ub_exact, 0.0_f64, 0.0_f64)
+        }
     };
 
     #[allow(clippy::cast_possible_truncation)]

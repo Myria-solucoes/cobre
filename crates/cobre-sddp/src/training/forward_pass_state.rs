@@ -11,6 +11,8 @@ use cobre_core::{TrainingEvent, WorkerTimingPhase};
 use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, SolverStatistics, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
+#[cfg(test)]
+use cobre_stochastic::select_transition_child;
 use cobre_stochastic::{
     ClassDimensions, ClassSampleRequest, ForwardSampler, ForwardSamplerConfig, SampleRequest,
     build_forward_sampler,
@@ -19,6 +21,8 @@ use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
+#[cfg(test)]
+use crate::setup::node_graph::NodeId;
 use crate::training_session::iteration_scratch::IterationScratch;
 use crate::training_session::rank_distribution::RankDistribution;
 use crate::training_session::runtime::RuntimeHandles;
@@ -27,8 +31,12 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     error::SddpError,
-    forward::{ForwardResult, StageKey, run_forward_stage},
+    forward::{
+        EnumeratedForwardResult, EnumeratedForwardScratch, EnumeratedParams, ForwardResult,
+        StageKey, run_enumerated_forward, run_forward_stage,
+    },
     indexer::StateSpace,
+    setup::node_graph::{EnumeratedPlan, NodePos, StageIdx, Traversal, advance_sampled_node},
     solve::partition,
     solver_phase::Phase,
     solver_stats::SolverStatsDelta,
@@ -52,6 +60,9 @@ pub(crate) struct ForwardPassInputs<'a, S: SolverInterface + Send> {
     pub frozen: &'a [StageTemplate],
     /// Future-cost function — read-only for the forward pass.
     pub fcf: &'a FutureCostFunction,
+    /// Whether the terminal stage's static template carries boundary cuts,
+    /// captured once when it was baked at priming.
+    pub terminal_has_boundary_cuts: bool,
     /// Study-level training context (horizon, indexer, stochastic model).
     pub training_ctx: &'a TrainingContext<'a>,
     /// Trajectory output records; pre-allocated by the caller.
@@ -98,6 +109,7 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
             ctx,
             frozen: &scratch.frozen_templates,
             fcf,
+            terminal_has_boundary_cuts: scratch.terminal_has_boundary_cuts,
             training_ctx,
             records: &mut scratch.records[..fwd_record_len],
             local_forward_passes: ranks.my_actual_fwd,
@@ -128,6 +140,9 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub fwd_offset: usize,
     /// True when the last stage has warm-start (boundary) cuts.
     pub terminal_has_boundary_cuts: bool,
+    /// The stage-0 root's canonical `NodeGraph` position — every trajectory's
+    /// walk starts here. A chain-degenerate graph's root is `nodes[0]`.
+    pub root_node: NodePos,
     /// Noise dimension for worker-local sampling buffers (`OutOfSample` path).
     pub noise_dim: usize,
     /// Initial reservoir state shared across all workers.
@@ -220,6 +235,20 @@ pub(crate) struct ForwardPassState {
     /// Defaults to `Phase::Forward.profile()`; override with
     /// [`Self::set_profile`] before the first `run()` call.
     profile: ActiveProfile,
+
+    /// The resolved forward-traversal axis: [`Self::run`] dispatches on this
+    /// directly (no separate flag), so "selected enumerated but carries no
+    /// plan" is unrepresentable. Set once via [`Self::set_traversal`];
+    /// defaults to `Traversal::Sampled { forward_passes: 0 }` — the
+    /// `run_forward_pass` test shim never calls `set_traversal`, matching its
+    /// existing sampled-only behavior.
+    traversal: Traversal,
+
+    /// Reused per-run mutable scratch for the enumerated engine (arena,
+    /// per-worker capture buffers). Meaningful only while `traversal` is
+    /// `Enumerated`; always present (never `Option`) and grows to size on the
+    /// first enumerated `run()`, so no allocation occurs after warm-up.
+    enumerated_scratch: EnumeratedForwardScratch,
 }
 
 impl ForwardPassState {
@@ -252,6 +281,8 @@ impl ForwardPassState {
             stage_stats,
             reconcile_scratch: [0_i32; 1],
             profile: Phase::Forward.profile(),
+            traversal: Traversal::default(),
+            enumerated_scratch: EnumeratedForwardScratch::default(),
         }
     }
 
@@ -259,6 +290,30 @@ impl ForwardPassState {
     /// entry (default: `Phase::Forward.profile()`). Call before `run()`.
     pub(crate) fn set_profile(&mut self, profile: ActiveProfile) {
         self.profile = profile;
+    }
+
+    /// Routes [`Self::run`] to the enumerated all-paths engine
+    /// (`Traversal::Enumerated`) or the sampled by-scenario driver
+    /// (`Traversal::Sampled`, the default). Set once from the resolved
+    /// selection; there is no separate forward-scheduler knob.
+    pub(crate) fn set_traversal(&mut self, traversal: Traversal) {
+        self.traversal = traversal;
+    }
+
+    /// The resolved forward-traversal axis, for a caller (the training
+    /// session) that needs to read it after `run()` returns — e.g.
+    /// `Traversal::path_weights()` for the exact upper-bound reduction.
+    pub(crate) fn traversal(&self) -> &Traversal {
+        &self.traversal
+    }
+
+    /// The persisted per-node outgoing-state arena from the most recent
+    /// enumerated forward pass, handed to `BackwardPassInputs` so the
+    /// enumerated backward fork reads a cut-generating node's own trial state
+    /// directly instead of `records`/`exchange.state_at`. Empty (never
+    /// indexed) under `Traversal::Sampled`.
+    pub(crate) fn enumerated_state(&self) -> &EnumeratedForwardScratch {
+        &self.enumerated_scratch
     }
 
     /// Execute the forward pass for one training iteration on this rank.
@@ -280,7 +335,7 @@ impl ForwardPassState {
     ///
     /// - `inputs.records.len() != inputs.local_forward_passes * num_stages`
     /// - `inputs.training_ctx.initial_state.len() != state.n_state`
-    /// - `inputs.frozen.len() != num_stages`
+    /// - `inputs.frozen.len() != n_pools`
     pub(crate) fn run<S>(
         &mut self,
         inputs: &mut ForwardPassInputs<'_, S>,
@@ -294,8 +349,6 @@ impl ForwardPassState {
             state,
             stochastic,
             initial_state,
-            lag_accum_seed,
-            lag_weight_seed,
             ..
         } = training_ctx;
 
@@ -304,10 +357,11 @@ impl ForwardPassState {
 
         debug_assert_eq!(inputs.records.len(), forward_passes * num_stages);
         debug_assert_eq!(initial_state.len(), state.n_state);
+        let n_pools = training_ctx.node_graph.n_pools;
         debug_assert_eq!(
             inputs.frozen.len(),
-            num_stages,
-            "frozen templates length mismatch: expected {num_stages}, got {}",
+            n_pools,
+            "frozen templates length mismatch: expected {n_pools} pools, got {}",
             inputs.frozen.len()
         );
 
@@ -330,6 +384,51 @@ impl ForwardPassState {
             external_ncs_library: training_ctx.external_ncs_library,
         })?;
 
+        // Taken out for the match's duration so `self` stays freely `&mut`-usable
+        // inside both arms (the `Enumerated` arm's `plan` borrows this local, not
+        // `self`); restored before returning. Zero-allocation: `Traversal::default()`
+        // is a stack-only `Sampled` variant.
+        let traversal = std::mem::take(&mut self.traversal);
+        let result = match &traversal {
+            Traversal::Enumerated(plan) => self.run_enumerated(inputs, &sampler, plan),
+            Traversal::Sampled { .. } => self.run_sampled(inputs, &sampler),
+        };
+        self.traversal = traversal;
+        result
+    }
+
+    /// Monte-Carlo forward for one iteration: dispatched from [`Self::run`]
+    /// under `Traversal::Sampled`. Partitions `inputs.local_forward_passes`
+    /// trajectories across rayon workers, each walking the sampled node
+    /// graph one stage at a time via [`run_forward_worker`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates `SddpError::Infeasible`/`SddpError::Solver` from any stage
+    /// solve, and `SddpError::Validation` from
+    /// [`Self::resolve_root_and_terminal_cuts`] if stage 0 or the terminal
+    /// stage carries no alive node.
+    fn run_sampled<S>(
+        &mut self,
+        inputs: &mut ForwardPassInputs<'_, S>,
+        sampler: &ForwardSampler<'_>,
+    ) -> Result<ForwardResult, SddpError>
+    where
+        S: SolverInterface<Profile = ActiveProfile> + Send,
+    {
+        let training_ctx = inputs.training_ctx;
+        let TrainingContext {
+            horizon,
+            state,
+            stochastic,
+            initial_state,
+            lag_accum_seed,
+            lag_weight_seed,
+            ..
+        } = training_ctx;
+        let num_stages = horizon.num_stages();
+        let forward_passes = inputs.local_forward_passes;
+
         let n_workers = inputs.workspaces.len().max(1);
         let start = Instant::now();
 
@@ -345,8 +444,11 @@ impl ForwardPassState {
 
         let noise_dim = stochastic.dim();
 
-        let terminal_has_boundary_cuts =
-            num_stages > 0 && inputs.fcf.pools[num_stages - 1].warm_start_count > 0;
+        let (root_node, terminal_has_boundary_cuts) = Self::resolve_root_and_terminal_cuts(
+            training_ctx,
+            num_stages,
+            inputs.terminal_has_boundary_cuts,
+        )?;
 
         // Re-size the per-worker per-stage accumulators: the worker count may
         // differ from `new()` if the pool shrank. Fast path resets in place when
@@ -404,6 +506,7 @@ impl ForwardPassState {
             iteration: inputs.iteration,
             fwd_offset: inputs.fwd_offset,
             terminal_has_boundary_cuts,
+            root_node,
             noise_dim,
             initial_state,
             lag_accum_seed,
@@ -413,7 +516,7 @@ impl ForwardPassState {
             frozen: inputs.frozen,
             fcf: inputs.fcf,
             training_ctx,
-            sampler: &sampler,
+            sampler,
         };
         let worker_results: Vec<Result<ForwardWorkerResult, SddpError>> = inputs
             .workspaces
@@ -448,11 +551,144 @@ impl ForwardPassState {
         self.post_process_worker_results(inputs, worker_results, &ppc)
     }
 
-    /// Sequential post-processing after the rayon parallel region.
+    /// Enumerated all-paths forward for one iteration: dispatched from
+    /// [`Self::run`] under `Traversal::Enumerated`. Applies the forward
+    /// profile and drives the by-node engine against the already-resolved
+    /// `plan` (built once, at `Traversal` resolution — never re-derived
+    /// here), whose per-path costs feed the exact `Σ P(ℓ)·C(ℓ)` bound.
     ///
-    /// Collects per-worker solver-statistic snapshots, decomposes timing
-    /// overhead, emits [`TrainingEvent::WorkerTiming`] events, and merges
-    /// per-worker cost vectors and stage stats into the final [`ForwardResult`].
+    /// # Errors
+    ///
+    /// Propagates `SddpError::Infeasible`/`SddpError::Solver` from any node solve.
+    fn run_enumerated<S>(
+        &mut self,
+        inputs: &mut ForwardPassInputs<'_, S>,
+        sampler: &ForwardSampler<'_>,
+        plan: &EnumeratedPlan,
+    ) -> Result<ForwardResult, SddpError>
+    where
+        S: SolverInterface<Profile = ActiveProfile> + Send,
+    {
+        let start = Instant::now();
+        let training_ctx = inputs.training_ctx;
+        let num_stages = training_ctx.horizon.num_stages();
+
+        let forward_profile = self.profile;
+        for ws in inputs.workspaces.iter_mut() {
+            ws.solver.set_profile(&forward_profile);
+        }
+        for ws in inputs.workspaces.iter_mut() {
+            ws.worker_timing_buf = WorkerPhaseTimings::default();
+        }
+
+        let terminal_has_boundary_cuts = Self::resolve_terminal_has_boundary_cuts(
+            training_ctx,
+            num_stages,
+            inputs.terminal_has_boundary_cuts,
+        )?;
+
+        let dcs_params = training_ctx.dcs.filter(|p| p.is_active(inputs.iteration));
+
+        let params = EnumeratedParams {
+            num_stages,
+            iteration: inputs.iteration,
+            fwd_offset: inputs.fwd_offset,
+            local_forward_passes: inputs.local_forward_passes,
+            total_forward_passes: inputs.total_forward_passes,
+            terminal_has_boundary_cuts,
+            noise_dim: training_ctx.stochastic.dim(),
+            initial_state: training_ctx.initial_state,
+            lag_accum_seed: training_ctx.lag_accum_seed,
+            lag_weight_seed: training_ctx.lag_weight_seed,
+            ctx: inputs.ctx,
+            frozen: inputs.frozen,
+            fcf: inputs.fcf,
+            training_ctx,
+            sampler,
+            dcs: dcs_params,
+            event_sender: inputs.event_sender,
+        };
+
+        let EnumeratedForwardResult {
+            scenario_costs,
+            lp_solves,
+            stage_stats,
+        } = run_enumerated_forward(
+            plan,
+            &mut self.enumerated_scratch,
+            inputs.workspaces,
+            inputs.basis_store,
+            inputs.records,
+            &params,
+        )?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        Ok(ForwardResult {
+            scenario_costs,
+            elapsed_ms,
+            lp_solves,
+            setup_time_ms: 0,
+            load_imbalance_ms: 0,
+            scheduling_overhead_ms: 0,
+            stage_stats,
+        })
+    }
+
+    /// Whether the terminal stage's static template carries boundary cuts —
+    /// `terminal_has_boundary_cuts` as captured once at its priming bake, not
+    /// a live pool lookup (the terminal template is never refrozen after
+    /// priming). `false` for a zero-stage horizon.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SddpError::Validation`] if the terminal stage carries no alive node.
+    fn resolve_terminal_has_boundary_cuts(
+        training_ctx: &TrainingContext<'_>,
+        num_stages: usize,
+        terminal_has_boundary_cuts: bool,
+    ) -> Result<bool, SddpError> {
+        if num_stages == 0 {
+            return Ok(false);
+        }
+        training_ctx
+            .node_graph
+            .any_stage_node(StageIdx(num_stages - 1))
+            .ok_or_else(|| {
+                SddpError::Validation(
+                    "forward pass: terminal stage carries no alive node".to_string(),
+                )
+            })?;
+        Ok(terminal_has_boundary_cuts)
+    }
+
+    /// Resolve the sampled traversal's root node and whether its terminal
+    /// stage's static template carries boundary cuts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SddpError::Validation`] if stage 0 or the terminal stage
+    /// carries no alive node.
+    fn resolve_root_and_terminal_cuts(
+        training_ctx: &TrainingContext<'_>,
+        num_stages: usize,
+        terminal_has_boundary_cuts: bool,
+    ) -> Result<(NodePos, bool), SddpError> {
+        let root_node = training_ctx
+            .node_graph
+            .frontier_node(StageIdx(0))
+            .ok_or_else(|| {
+                SddpError::Validation("forward pass: stage 0 carries no alive node".to_string())
+            })?;
+        let terminal_has_boundary_cuts = Self::resolve_terminal_has_boundary_cuts(
+            training_ctx,
+            num_stages,
+            terminal_has_boundary_cuts,
+        )?;
+        Ok((root_node, terminal_has_boundary_cuts))
+    }
+
+    /// Sequential post-processing after the rayon parallel region.
     ///
     /// # Errors
     ///
@@ -588,6 +824,11 @@ impl ForwardPassState {
 ///
 /// Propagates `Err(SddpError::Stochastic(_))` from `sampler.sample(...)` and
 /// `Err(SddpError::Infeasible/Solver(_))` from [`run_forward_stage`].
+// RATIONALE: one sequential per-(stage, trajectory) pipeline — node/state
+// resolution, LP solve, and the transition-draw advance are load-bearing
+// ordering, not independent steps a split would clarify; the numerical work
+// itself is already delegated to `run_forward_stage`/`advance_sampled_node`.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     w: usize,
     ws: &mut SolverWorkspace<S>,
@@ -613,7 +854,16 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(params.noise_dim, 0.0_f64);
     let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
-    perm_scratch.resize((params.total_forward_passes).max(1), 0_usize);
+    perm_scratch.resize(params.total_forward_passes.max(1), 0_usize);
+
+    // Per-trajectory sampled-walk node carrier, root-initialized: each
+    // trajectory advances its own entry by the transition draw at the end of
+    // every stage below. On a chain the root is the only node at every stage
+    // (single out-edge, short-circuited — see the transition-draw call site),
+    // so this reduces to reading `nodes[t]` byte-for-byte.
+    let mut current_node_buf = std::mem::take(&mut ws.scratch.current_node_buf);
+    current_node_buf.clear();
+    current_node_buf.resize(n_local, params.root_node);
 
     let local_solve_count_before = ws.solver.statistics().solve_count;
     #[allow(clippy::cast_possible_truncation)]
@@ -626,14 +876,27 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
         .dcs
         .filter(|p| p.is_active(params.iteration));
 
-    for t in 0..params.num_stages {
+    // Rationale: `t` indexes several parallel per-stage collections
+    // (params.frozen, params.ctx.cumulative_discount_factors) beyond
+    // `per_stage_stats`, so an iterator over `per_stage_stats` alone would not
+    // eliminate the range index.
+    #[allow(clippy::needless_range_loop)]
+    for t in (0..params.num_stages).map(StageIdx) {
         let cum_d = params
             .ctx
             .cumulative_discount_factors
-            .get(t)
+            .get(t.0)
             .copied()
             .unwrap_or(1.0);
+
         for (local_m, m) in (start_m..end_m).enumerate() {
+            // Each trajectory resolves its OWN visited node — the sampled walk;
+            // below a recombination join, or on a declared fan, distinct
+            // trajectories may sit at distinct nodes at the same stage `t`.
+            let node = current_node_buf[local_m];
+            let node_graph = params.training_ctx.node_graph;
+            let pool_id = node_graph.nodes[node].pool_id;
+
             // Reset the solver's simplex state at the per-scenario boundary so
             // this scenario's landed vertex cannot depend on which scenarios the
             // worker solved before it (determinism across thread/rank counts).
@@ -649,18 +912,21 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             // the cut-free base template (loading frozen would double-append the
             // embedded cut rows), so the frozen load is skipped.
             if dcs_params.is_none() {
-                ws.solver.load_model(&params.frozen[t]);
+                ws.solver.load_model(&params.frozen[pool_id]);
             }
             ws.current_state.clear();
-            let src: &[f64] = if t == 0 {
+            // Each trajectory's incoming state is its OWN previous-stage record —
+            // a per-trajectory walk needs no parent-node lookup: every edge is
+            // t -> t+1, so the state that fed this visit is always this same
+            // trajectory's own `t - 1` solve, on a chain or a declared graph alike.
+            let src: &[f64] = if t.0 == 0 {
                 params.initial_state
             } else {
-                &worker_records[local_m * params.num_stages + (t - 1)].state
+                &worker_records[local_m * params.num_stages + (t.0 - 1)].state
             };
             ws.current_state.extend_from_slice(src);
 
-            // Seed (or zero) the lag accumulator at trajectory start.
-            if t == 0 {
+            if t.0 == 0 {
                 if params.lag_accum_seed.is_empty() {
                     ws.scratch.lag_accumulator.fill(0.0);
                     ws.scratch.lag_weight_accum.fill(0.0);
@@ -678,9 +944,11 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
 
             let global_scenario = params.fwd_offset + m;
             #[allow(clippy::cast_possible_truncation)]
-            let (i32, s32, t32) = (params.iteration as u32, global_scenario as u32, t as u32);
+            let (i32, s32, t32) = (params.iteration as u32, global_scenario as u32, t.0 as u32);
 
-            if t == 0 {
+            let (node_opening_offset, node_opening_len) = node_graph.node_opening_range(node);
+
+            if t.0 == 0 {
                 let class_req = ClassSampleRequest {
                     iteration: i32,
                     scenario: s32,
@@ -688,6 +956,9 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                     stage_idx: 0,
                     total_scenarios: total_scenarios_u32,
                     noise_group_id: 0,
+                    node_opening_offset,
+                    node_opening_len,
+                    pinned_scenario: None,
                 };
                 params.sampler.apply_initial_state(
                     &class_req,
@@ -699,11 +970,14 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 iteration: i32,
                 scenario: s32,
                 stage: t32,
-                stage_idx: t,
+                stage_idx: t.0,
                 noise_buf: &mut raw_noise_buf,
                 perm_scratch: &mut perm_scratch,
                 total_scenarios: total_scenarios_u32,
                 noise_group_id: params.ctx.noise_group_id_at(t),
+                node_opening_offset,
+                node_opening_len,
+                pinned_scenario: None,
             })?;
             let raw_noise = noise.as_slice();
 
@@ -714,10 +988,11 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 num_stages: params.num_stages,
                 iteration: params.iteration,
                 raw_noise,
-                basis_row_capacity: params.frozen[t].num_rows,
+                basis_row_capacity: params.frozen[pool_id].num_rows,
                 terminal_has_boundary_cuts: params.terminal_has_boundary_cuts,
-                pool: &params.fcf.pools[t],
+                pool: &params.fcf.pools[pool_id],
                 dcs: dcs_params,
+                node,
             };
             let stats_before_stage = ws.solver.statistics();
             let stage_cost = run_forward_stage(
@@ -730,14 +1005,20 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             )?;
             let stage_delta =
                 SolverStatsDelta::from_snapshots(&stats_before_stage, &ws.solver.statistics());
-            SolverStatsDelta::accumulate_into(&mut per_stage_stats[t], &stage_delta);
+            SolverStatsDelta::accumulate_into(&mut per_stage_stats[t.0], &stage_delta);
             ws.scratch.trajectory_costs_buf[local_m] += cum_d * stage_cost;
+
+            // Advance this trajectory to the node it will visit at t + 1
+            // (chain-parity contract stated once at `advance_sampled_node`).
+            if t.next().0 < params.num_stages {
+                current_node_buf[local_m] = advance_sampled_node(node_graph, node, i32, s32, t32);
+            }
         }
     }
 
-    // Restore taken scratch buffers so they survive into the next iteration.
     ws.scratch.raw_noise_buf = raw_noise_buf;
     ws.scratch.perm_scratch = perm_scratch;
+    ws.scratch.current_node_buf = current_node_buf;
 
     let local_solves = ws.solver.statistics().solve_count - local_solve_count_before;
     ws.worker_timing_buf.forward_wall_ms += worker_wall_start.elapsed().as_secs_f64() * 1_000.0;
@@ -769,6 +1050,7 @@ mod tests {
         StageStateConfig,
     };
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder, WorkerPhaseTimings};
+    use cobre_io::OwnedPolicyCutRecord;
     use cobre_solver::{
         Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
         SolverStatistics, StageTemplate,
@@ -779,9 +1061,9 @@ mod tests {
     use super::*;
     use crate::{
         context::{StageContext, TrainingContext},
-        cut::FutureCostFunction,
+        cut::{CutPool, FutureCostFunction},
         horizon_mode::HorizonMode,
-        indexer::StateSpace,
+        indexer::{StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         test_support::{state_layout, study_dims},
@@ -899,7 +1181,7 @@ mod tests {
             rank: 0,
             worker_id: 0,
             solver: ProfiledSolver::new(solver),
-            patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(state.n_state),
             scratch: ScratchBuffers {
                 noise_buf: Vec::with_capacity(state.hydro_count),
@@ -931,6 +1213,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -1131,6 +1414,7 @@ mod tests {
                     primal: Vec::new(),
                     dual: Vec::new(),
                     stage_cost: 0.0,
+                    node_id: NodeId(0),
                     state: Vec::new(),
                 })
                 .collect();
@@ -1202,6 +1486,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1229,6 +1514,7 @@ mod tests {
             ctx: &ctx,
             frozen: &fx.templates,
             fcf: &fx.fcf,
+            terminal_has_boundary_cuts: false,
             training_ctx: &training_ctx,
             records: &mut fx.records,
             local_forward_passes: fx.n_scenarios,
@@ -1279,6 +1565,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1322,6 +1609,7 @@ mod tests {
             ctx: &ctx,
             frozen: &fx.templates,
             fcf: &fx.fcf,
+            terminal_has_boundary_cuts: false,
             training_ctx: &training_ctx,
             records: &mut fx.records,
             local_forward_passes: fx.n_scenarios,
@@ -1373,6 +1661,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1421,6 +1710,7 @@ mod tests {
             iteration: 1,
             fwd_offset: 0,
             terminal_has_boundary_cuts: false,
+            root_node: NodePos(0),
             noise_dim: fx.stochastic.dim(),
             initial_state: &fx.initial_state,
             lag_accum_seed: &[],
@@ -1443,6 +1733,7 @@ mod tests {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
+                node_id: NodeId(0),
                 state: Vec::new(),
             })
             .collect();
@@ -1505,6 +1796,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1535,6 +1827,7 @@ mod tests {
                 ctx: &ctx,
                 frozen: &fx.templates,
                 fcf: &fx.fcf,
+                terminal_has_boundary_cuts: false,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
                 local_forward_passes: fx.n_scenarios,
@@ -1561,6 +1854,7 @@ mod tests {
                 ctx: &ctx,
                 frozen: &fx.templates,
                 fcf: &fx.fcf,
+                terminal_has_boundary_cuts: false,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
                 local_forward_passes: fx.n_scenarios,
@@ -1640,6 +1934,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1669,6 +1964,7 @@ mod tests {
                 ctx: &ctx,
                 frozen: &fx.templates,
                 fcf: &fx.fcf,
+                terminal_has_boundary_cuts: false,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
                 local_forward_passes: fx.n_scenarios,
@@ -1694,6 +1990,7 @@ mod tests {
                 ctx: &ctx,
                 frozen: &fx.templates,
                 fcf: &fx.fcf,
+                terminal_has_boundary_cuts: false,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
                 local_forward_passes: fx.n_scenarios,
@@ -1939,6 +2236,7 @@ mod tests {
         let lag_accum_seed = [0.0_f64, 0.0_f64];
         let lag_weight_seed = [1.0_f64, 0.5_f64];
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &[],
@@ -1987,6 +2285,7 @@ mod tests {
             iteration: 1,
             fwd_offset: 0,
             terminal_has_boundary_cuts: false,
+            root_node: NodePos(0),
             noise_dim: stochastic.dim(),
             initial_state: &initial_state,
             lag_accum_seed: &lag_accum_seed,
@@ -2015,6 +2314,7 @@ mod tests {
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: NodeId(0),
             state: Vec::new(),
         }];
         let mut per_stage_stats = vec![SolverStatsDelta::default()];
@@ -2039,6 +2339,539 @@ mod tests {
             ws.scratch.lag_weight_accum[1], 0.5,
             "hydro B (half coverage) weight should be 0.5, got {}",
             ws.scratch.lag_weight_accum[1]
+        );
+    }
+
+    // ── Declared-graph frontier resolution (branching coverage) ─────────────
+
+    /// A root fanning into 4 leaves at stage 1. Each leaf's frontier visit
+    /// must read its OWN pool id (the shared leaf pool) and node id — never a
+    /// positional `nodes[t]` read, which on this declared graph would land on
+    /// whichever leaf happens to occupy canonical position 1 — and its
+    /// incoming state must resolve to the root's own outgoing state.
+    #[test]
+    fn declared_k_fan_frontier_resolves_each_leaf_own_pool_and_node_id_with_root_incoming_state() {
+        use cobre_core::HorizonGraph;
+        use cobre_core::temporal::{Node, PolicyGraphType, Transition};
+        use cobre_io::StageIdResolver;
+
+        use crate::setup::node_graph::build_node_graph;
+
+        fn node(id: i32, stage_id: i32) -> Node {
+            Node {
+                id,
+                stage_id,
+                scenario_id: None,
+                label: None,
+            }
+        }
+        fn transition(source_id: i32, target_id: i32, probability: f64) -> Transition {
+            Transition {
+                source_id,
+                target_id,
+                probability,
+                annual_discount_rate_override: None,
+            }
+        }
+
+        let stochastic = make_stochastic_context_2_stages();
+        let study_stage_ids = [0_i32, 1_i32];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let graph = HorizonGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            nodes: vec![node(0, 0), node(1, 1), node(2, 1), node(3, 1), node(4, 1)],
+            transitions: vec![
+                transition(0, 1, 0.25),
+                transition(0, 2, 0.25),
+                transition(0, 3, 0.25),
+                transition(0, 4, 0.25),
+            ],
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            season_map: None,
+        };
+        let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)
+            .expect("declared K-fan graph must build");
+
+        let root = NodePos(0);
+        let leaves: Vec<NodePos> = node_graph.stage_frontier(StageIdx(1)).collect();
+        assert_eq!(leaves.len(), 4, "all 4 leaves must be alive at stage 1");
+
+        let expected_leaf_pool = node_graph.nodes[leaves[0]].pool_id;
+        assert_ne!(
+            expected_leaf_pool, node_graph.nodes[root].pool_id,
+            "the shared leaf pool must differ from the root's own pool"
+        );
+        let leaf_node_ids: Vec<NodeId> = leaves.iter().map(|&l| node_graph.node_ids[l]).collect();
+        assert_eq!(
+            leaf_node_ids,
+            vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+            "each leaf must resolve its OWN declared node id"
+        );
+
+        let root_state = vec![7.0_f64, 8.0_f64];
+        let num_stages = 2_usize;
+        let mut worker_records: Vec<TrajectoryRecord> = (0..num_stages)
+            .map(|_| TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                node_id: NodeId(0),
+                state: Vec::new(),
+            })
+            .collect();
+        worker_records[0].state = root_state.clone();
+        worker_records[0].node_id = node_graph.node_ids[root];
+
+        for &leaf in &leaves {
+            assert_eq!(
+                node_graph.nodes[leaf].pool_id, expected_leaf_pool,
+                "leaf {leaf} must read its own pool_id (the shared leaf pool)"
+            );
+
+            let parent = node_graph.node_parent(leaf);
+            assert_eq!(
+                parent,
+                Some(root),
+                "leaf {leaf}'s parent must resolve to the root"
+            );
+            let parent_stage = node_graph.nodes[parent.unwrap()].stage;
+            assert_eq!(
+                worker_records[parent_stage.0].state, root_state,
+                "leaf {leaf}'s incoming state must equal the root's own outgoing state"
+            );
+        }
+    }
+
+    /// A full `run_forward_worker` pass over a declared K-fan: each
+    /// trajectory's recorded leaf must equal `select_transition_child`'s own
+    /// pinned-seed choice for that trajectory's `(iteration, global_scenario)`
+    /// — never a stage-uniform node — and the pinned range must resolve more
+    /// than one leaf, proving the walk is not collapsed to one node per
+    /// stage (the exact restriction the singleton-frontier resolver used to
+    /// impose).
+    // Rationale: a real `run_forward_worker` call needs the full fixture
+    // (graph, LP template, sampler, workspace) the sibling declared-K-fan
+    // test above builds by hand; splitting the assembly out would scatter a
+    // single-use fixture across helpers with no other caller.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn run_forward_worker_k_fan_pinned_trajectories_match_selected_transitions() {
+        use cobre_core::HorizonGraph;
+        use cobre_core::temporal::{Node, PolicyGraphType, Transition};
+        use cobre_io::StageIdResolver;
+
+        use crate::setup::node_graph::build_node_graph;
+
+        fn node(id: i32, stage_id: i32) -> Node {
+            Node {
+                id,
+                stage_id,
+                scenario_id: None,
+                label: None,
+            }
+        }
+        fn transition(source_id: i32, target_id: i32, probability: f64) -> Transition {
+            Transition {
+                source_id,
+                target_id,
+                probability,
+                annual_discount_rate_override: None,
+            }
+        }
+
+        let stochastic = make_stochastic_context_2_stages();
+        let study_stage_ids = [0_i32, 1_i32];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let graph = HorizonGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            nodes: vec![node(0, 0), node(1, 1), node(2, 1), node(3, 1), node(4, 1)],
+            transitions: vec![
+                transition(0, 1, 0.25),
+                transition(0, 2, 0.25),
+                transition(0, 3, 0.25),
+                transition(0, 4, 0.25),
+            ],
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            season_map: None,
+        };
+        let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)
+            .expect("declared K-fan graph must build");
+        let root = NodePos(0);
+
+        let state = state_layout(1, 0);
+        let templates = vec![minimal_template_1_0(); 2];
+        let base_rows = vec![0_usize; 2];
+        let initial_state = vec![0.0_f64; state.n_state];
+        let fcf = FutureCostFunction::new(
+            node_graph.n_pools,
+            state.n_state,
+            2,
+            10,
+            &vec![0; node_graph.n_pools],
+        );
+        let horizon = HorizonMode::Finite { num_stages: 2 };
+        let noise_scale = vec![0.0_f64; 2 * state.hydro_count];
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &noise_scale,
+            n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = study_dims();
+        let stages = make_stages_2();
+        let training_ctx = TrainingContext {
+            node_graph: &node_graph,
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &[],
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &stages,
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        };
+        let sampler = build_forward_sampler(ForwardSamplerConfig {
+            class_schemes: ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+            ctx: &stochastic,
+            stages: &stages,
+            dims: ClassDimensions {
+                n_hydros: stochastic.n_hydros(),
+                n_load_buses: stochastic.n_load_buses(),
+                n_ncs: stochastic.n_stochastic_ncs(),
+            },
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+        })
+        .expect("sampler build must not error");
+
+        let forward_passes = 6_usize;
+        let pinned_iteration = 3_u64;
+        let params = ForwardWorkerParams {
+            forward_passes,
+            total_forward_passes: forward_passes,
+            num_stages: 2,
+            n_workers: 1,
+            iteration: pinned_iteration,
+            fwd_offset: 0,
+            terminal_has_boundary_cuts: false,
+            root_node: root,
+            noise_dim: stochastic.dim(),
+            initial_state: &initial_state,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            state: &state,
+            ctx: &ctx,
+            frozen: &templates,
+            fcf: &fcf,
+            training_ctx: &training_ctx,
+            sampler: &sampler,
+        };
+
+        let mut ws = single_workspace(MockSolver::always_ok(fixed_solution_1_0()), &state);
+        // Basis store axis is NODE: the K-fan visits leaf nodes at positions
+        // beyond `num_stages`, so the store must span every node, not the stages.
+        let mut basis_store = BasisStore::new(forward_passes, node_graph.nodes.len());
+        let mut basis_slices = basis_store.split_workers_mut(1);
+        let mut basis_slice = basis_slices.remove(0);
+        let mut records: Vec<TrajectoryRecord> = (0..forward_passes * 2)
+            .map(|_| TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                node_id: NodeId(0),
+                state: Vec::new(),
+            })
+            .collect();
+        let mut per_stage_stats = vec![SolverStatsDelta::default(); 2];
+
+        run_forward_worker(
+            0,
+            &mut ws,
+            &mut records,
+            &mut basis_slice,
+            &mut per_stage_stats,
+            &params,
+        )
+        .expect("run_forward_worker must not error");
+
+        let successors = &node_graph.successors[root];
+        let weights: Vec<f64> = successors.iter().map(|s| s.probability).collect();
+        let mut resolved_leaves: std::collections::BTreeSet<NodeId> =
+            std::collections::BTreeSet::new();
+        #[allow(clippy::cast_possible_truncation)]
+        let pinned_iteration_u32 = pinned_iteration as u32;
+        for m in 0..forward_passes {
+            #[allow(clippy::cast_possible_truncation)]
+            let global_scenario = m as u32;
+            let expected_idx = select_transition_child(
+                pinned_iteration_u32,
+                global_scenario,
+                0,
+                weights.iter().copied(),
+            );
+            let expected_leaf_node_id = node_graph.node_ids[successors[expected_idx].child];
+
+            assert_eq!(
+                records[m * 2].node_id,
+                node_graph.node_ids[root],
+                "trajectory {m}'s stage-0 record must carry the root's own node id"
+            );
+            assert_eq!(
+                records[m * 2 + 1].node_id,
+                expected_leaf_node_id,
+                "trajectory {m}'s recorded leaf must match select_transition_child's own \
+                 pinned-seed choice"
+            );
+            resolved_leaves.insert(expected_leaf_node_id);
+        }
+        assert!(
+            resolved_leaves.len() > 1,
+            "the pinned iteration/scenario range must resolve more than one leaf, or this \
+             test cannot distinguish a per-trajectory walk from a collapsed stage-uniform one"
+        );
+    }
+
+    // ── No graph-shape dispatch in the forward path ──────────────────────────
+
+    /// The forward path carries no graph-shape dispatch — chain parity is
+    /// degeneracy (the node-native path running on the one-node-per-stage
+    /// graph), never a fork to preserved legacy code. Banned tokens are
+    /// assembled from char arrays so this check is not itself a false-positive
+    /// hit for the same predicate it looks for.
+    #[test]
+    fn forward_path_has_no_shape_selected_layout_branch() {
+        let banned: Vec<String> = vec![
+            ['i', 's', '_', 'c', 'h', 'a', 'i', 'n'].iter().collect(),
+            [
+                'n', 'o', 'd', 'e', 's', '.', 'i', 's', '_', 'e', 'm', 'p', 't', 'y', '(', ')',
+            ]
+            .iter()
+            .collect(),
+            [
+                'g', 'r', 'a', 'p', 'h', '.', 'i', 's', '_', 'n', 'o', 'n', 'e', '(', ')',
+            ]
+            .iter()
+            .collect(),
+        ];
+        let sources: [(&str, &str); 3] = [
+            (
+                "forward_pass_state.rs",
+                include_str!("forward_pass_state.rs"),
+            ),
+            ("forward/mod.rs", include_str!("forward/mod.rs")),
+            (
+                "forward/stage_solve.rs",
+                include_str!("forward/stage_solve.rs"),
+            ),
+        ];
+        for (name, src) in sources {
+            for token in &banned {
+                assert!(
+                    !src.contains(token.as_str()),
+                    "{name}: forward path must not branch on a graph-shape predicate ({token})"
+                );
+            }
+        }
+    }
+
+    // ── `resolve_terminal_has_boundary_cuts` sources the static-template flag ──
+
+    /// Build a minimal 2-stage chain `TrainingContext` (pool id == stage) for
+    /// the `resolve_terminal_has_boundary_cuts` fixtures below; only the
+    /// `node_graph`/`horizon` fields the resolver reads matter.
+    fn terminal_boundary_test_ctx<'a>(
+        stochastic: &'a StochasticContext,
+        node_graph: &'a crate::setup::node_graph::NodeGraph,
+        state: &'a StateSpace,
+        stages: &'a [Stage],
+        study_dims: &'a StudyDimensions,
+        initial_state: &'a [f64],
+    ) -> TrainingContext<'a> {
+        TrainingContext {
+            node_graph,
+            horizon: &HorizonMode::Finite { num_stages: 2 },
+            state,
+            cut_state_layouts: &[],
+            study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic,
+            initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages,
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        }
+    }
+
+    /// A warm-started terminal pool's active-cut count (the static template's
+    /// captured property) resolves `true` and matches the legacy
+    /// `warm_start_count > 0` result it replaces.
+    #[test]
+    fn resolve_terminal_has_boundary_cuts_true_matches_legacy_warm_start_count() {
+        let stochastic = make_stochastic_context_2_stages();
+        let node_graph = crate::test_support::chain_node_graph(&stochastic);
+        let state = state_layout(1, 0);
+        let stages = make_stages_2();
+        let study_dims = study_dims();
+        let initial_state = vec![0.0; state.n_state];
+        let training_ctx = terminal_boundary_test_ctx(
+            &stochastic,
+            &node_graph,
+            &state,
+            &stages,
+            &study_dims,
+            &initial_state,
+        );
+
+        let terminal_pool = CutPool::new_with_warm_start(
+            state.n_state,
+            1,
+            10,
+            &[OwnedPolicyCutRecord {
+                cut_id: 0,
+                slot_index: 0,
+                coefficients: vec![1.0; state.n_state],
+                intercept: 5.0,
+                iteration: 0,
+                forward_pass_index: 0,
+                is_active: true,
+            }],
+        );
+        let root_pool = CutPool::new(10, state.n_state, 1, 0);
+        let fcf = FutureCostFunction {
+            pools: vec![root_pool, terminal_pool],
+            state_dimension: state.n_state,
+            forward_passes: 1,
+        };
+
+        let legacy_warm_start = fcf.pools[1].warm_start_count > 0;
+        let captured_from_active_cuts = fcf.pools[1].active_count() > 0;
+        assert!(
+            legacy_warm_start,
+            "fixture must warm-start the terminal pool"
+        );
+        assert_eq!(
+            captured_from_active_cuts, legacy_warm_start,
+            "the static template's captured active-cut count must match the legacy \
+             warm_start_count > 0 result at bake time"
+        );
+
+        let resolved = ForwardPassState::resolve_terminal_has_boundary_cuts(
+            &training_ctx,
+            2,
+            captured_from_active_cuts,
+        )
+        .expect("terminal stage carries an alive node");
+        assert!(resolved, "a captured boundary-cut flag must resolve true");
+    }
+
+    /// A pool with no warm-started cuts resolves `false`, matching the legacy
+    /// `warm_start_count > 0` result it replaces.
+    #[test]
+    fn resolve_terminal_has_boundary_cuts_false_matches_legacy_warm_start_count() {
+        let stochastic = make_stochastic_context_2_stages();
+        let node_graph = crate::test_support::chain_node_graph(&stochastic);
+        let state = state_layout(1, 0);
+        let stages = make_stages_2();
+        let study_dims = study_dims();
+        let initial_state = vec![0.0; state.n_state];
+        let training_ctx = terminal_boundary_test_ctx(
+            &stochastic,
+            &node_graph,
+            &state,
+            &stages,
+            &study_dims,
+            &initial_state,
+        );
+
+        let fcf = FutureCostFunction::new(2, state.n_state, 1, 10, &[0, 0]);
+
+        let legacy_warm_start = fcf.pools[1].warm_start_count > 0;
+        let captured_from_active_cuts = fcf.pools[1].active_count() > 0;
+        assert!(!legacy_warm_start, "fixture must not warm-start any pool");
+        assert_eq!(
+            captured_from_active_cuts, legacy_warm_start,
+            "the static template's captured active-cut count must match the legacy \
+             warm_start_count > 0 result at bake time"
+        );
+
+        let resolved = ForwardPassState::resolve_terminal_has_boundary_cuts(
+            &training_ctx,
+            2,
+            captured_from_active_cuts,
+        )
+        .expect("terminal stage carries an alive node");
+        assert!(!resolved, "no boundary cuts must resolve false");
+    }
+
+    /// `num_stages == 0` short-circuits to `false` regardless of the captured
+    /// flag — a zero-stage horizon carries no terminal stage to source it.
+    #[test]
+    fn resolve_terminal_has_boundary_cuts_zero_stages_guard_ignores_captured_flag() {
+        let stochastic = make_stochastic_context_2_stages();
+        let node_graph = crate::test_support::chain_node_graph(&stochastic);
+        let state = state_layout(1, 0);
+        let stages = make_stages_2();
+        let study_dims = study_dims();
+        let initial_state = vec![0.0; state.n_state];
+        let training_ctx = terminal_boundary_test_ctx(
+            &stochastic,
+            &node_graph,
+            &state,
+            &stages,
+            &study_dims,
+            &initial_state,
+        );
+
+        let resolved = ForwardPassState::resolve_terminal_has_boundary_cuts(&training_ctx, 0, true)
+            .expect("a zero-stage horizon never reaches the alive-node check");
+        assert!(
+            !resolved,
+            "the num_stages == 0 guard must return false even when the captured flag is true"
         );
     }
 }

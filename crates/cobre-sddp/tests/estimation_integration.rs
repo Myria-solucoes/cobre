@@ -141,7 +141,7 @@ fn config_json(order_selection: &str, max_order: u32) -> String {
     format!(
         r#"{{
             "training": {{ "tree_seed": 42 }},
-            "simulation": {{ "enabled": false, "num_scenarios": 0, "io_channel_capacity": 16 }},
+            "simulation": {{ "enabled": false, "io_channel_capacity": 16 }},
             "modeling": {{}},
             "policy": {{}},
             "exports": {{}},
@@ -1002,7 +1002,7 @@ fn monthly_season_map() -> cobre_core::SeasonMap {
 /// `run_user_ar_estimation`'s pre-study synthesis needs to resolve out-of-window
 /// lag seasons.
 fn build_season_mapped_system(first_season: usize, n: usize) -> cobre_core::System {
-    use cobre_core::{PolicyGraph, PolicyGraphType};
+    use cobre_core::{HorizonGraph, PolicyGraphType};
 
     let bus = make_bus(
         EntityId::from(BUS_ID),
@@ -1102,10 +1102,12 @@ fn build_season_mapped_system(first_season: usize, n: usize) -> cobre_core::Syst
         })
         .collect();
 
-    let policy_graph = PolicyGraph {
+    let policy_graph = HorizonGraph {
+        stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.0,
         transitions: Vec::new(),
+        nodes: Vec::new(),
         season_map: Some(monthly_season_map()),
     };
 

@@ -94,6 +94,10 @@ pub(super) struct RunContext<C: Communicator> {
     pub(super) n_threads: usize,
     /// Resolved output directory.
     pub(super) output_dir: PathBuf,
+    /// Case (input) directory — the root every input path resolves against,
+    /// including `policy.boundary.path` (an external source checkpoint), never
+    /// the output directory.
+    pub(super) case_dir: PathBuf,
     /// Terminal width for progress bars.
     pub(super) term_width: u16,
     /// Terminal handle for stderr output.
@@ -280,7 +284,6 @@ pub(super) fn build_distribution_info(
     n_threads: usize,
     ranks_participated: u32,
 ) -> DistributionInfo {
-    use cobre_comm::BackendKind;
     DistributionInfo {
         backend: match topology.backend {
             BackendKind::Mpi => "mpi",
@@ -290,7 +293,7 @@ pub(super) fn build_distribution_info(
         .to_string(),
         world_size: u32::try_from(topology.world_size).unwrap_or(u32::MAX),
         ranks_participated,
-        num_nodes: u32::try_from(topology.num_hosts()).unwrap_or(u32::MAX),
+        num_hosts: u32::try_from(topology.num_hosts()).unwrap_or(u32::MAX),
         threads_per_rank: u32::try_from(n_threads).unwrap_or(u32::MAX),
         mpi_library: topology.mpi.as_ref().map(|m| m.library_version.clone()),
         mpi_standard: topology.mpi.as_ref().map(|m| m.standard_version.clone()),
@@ -394,35 +397,54 @@ mod tests {
     #[test]
     fn test_delta_to_stats_row_backward_carries_opening_rank_worker() {
         let delta = make_delta(10);
-        let row = delta_to_stats_row(1, "backward", 2, Some(0), Some(1), Some(3), &delta);
-        assert_eq!(row.opening, Some(0));
+        let row = delta_to_stats_row(
+            Some(1),
+            None,
+            "backward",
+            Some(2),
+            Some(0),
+            Some(1),
+            Some(3),
+            &delta,
+        );
+        assert_eq!(row.opening_index, Some(0));
         assert_eq!(row.rank, Some(1));
         assert_eq!(row.worker_id, Some(3));
-        assert_eq!(row.stage, 2);
+        assert_eq!(row.stage_id, Some(2));
         assert_eq!(row.phase, "backward");
         assert_eq!(row.lp_solves, 10);
     }
 
     #[test]
     fn test_delta_to_stats_row_forward_opening_and_worker_id_are_none() {
-        // Forward rows use the real stage index, not the -1 sentinel.
+        // Forward rows carry the real (domain) stage_id, not the -1 sentinel.
         let delta = make_delta(4);
-        let row = delta_to_stats_row(1, "forward", 0, None, Some(0), None, &delta);
-        assert_eq!(row.opening, None);
+        let row = delta_to_stats_row(
+            Some(1),
+            None,
+            "forward",
+            Some(0),
+            None,
+            Some(0),
+            None,
+            &delta,
+        );
+        assert_eq!(row.opening_index, None);
         assert_eq!(row.rank, Some(0));
         assert_eq!(row.worker_id, None);
-        assert_eq!(row.stage, 0);
+        assert_eq!(row.stage_id, Some(0));
         assert_eq!(row.lp_solves, 4);
     }
 
     #[test]
     fn test_delta_to_stats_row_simulation_rank_and_worker_id_are_none() {
         let delta = make_delta(7);
-        let row = delta_to_stats_row(42, "simulation", -1, None, None, None, &delta);
-        assert_eq!(row.opening, None);
+        let row = delta_to_stats_row(None, Some(42), "simulation", None, None, None, None, &delta);
+        assert_eq!(row.opening_index, None);
         assert_eq!(row.rank, None);
         assert_eq!(row.worker_id, None);
-        assert_eq!(row.iteration, 42);
+        assert_eq!(row.scenario_id, Some(42));
+        assert_eq!(row.iteration, None);
     }
 
     // ── overflow guard tests ──────────────────────────────────────────────────

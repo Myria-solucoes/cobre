@@ -26,7 +26,7 @@ fn write_file(root: &Path, relative: &str, content: &str) {
 
 const CONFIG_JSON: &str = r#"{
     "training": {
-        "forward_passes": 10,
+        "selection": { "method": "sampled", "forward_passes": 10 },
         "stopping_rules": [
             { "type": "iteration_limit", "limit": 100 }
         ],
@@ -71,7 +71,7 @@ const STAGES_JSON: &str = r#"{
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 50
+            "num_openings": 50
         }
     ]
 }"#;
@@ -153,6 +153,54 @@ fn missing_buses_json_stdout_mentions_file() {
         .failure()
         .code(1)
         .stdout(predicate::str::contains("buses.json"));
+}
+
+/// A case that fails BEFORE boundary reconciliation (here, the six-layer IO
+/// pipeline over a missing required file) must still emit a single
+/// parseable JSON object under `--json` — never interleaved human report
+/// text — carrying the failing phase and message, with stderr empty and a
+/// non-zero exit.
+#[test]
+fn missing_buses_json_json_mode_emits_parseable_error_object() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+    fs::remove_file(dir.path().join("system/buses.json")).unwrap();
+
+    let output = cobre()
+        .args(["validate", dir.path().to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected the validation exit code"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
+    assert!(
+        parsed.is_ok(),
+        "stdout must be a single parseable JSON object, got parse error {:?} for: {stdout:?}",
+        parsed.as_ref().err()
+    );
+    let value = parsed.unwrap();
+    assert!(
+        value["configured"].is_null(),
+        "configured must stay absent on an early abort: {value}"
+    );
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("buses.json")),
+        "the error object must name the offending file: {value}"
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.trim().is_empty(),
+        "stderr must stay empty (already_rendered): got {stderr:?}"
+    );
 }
 
 /// stderr must NOT carry the "run `cobre validate`" hint — that would point the
@@ -245,7 +293,7 @@ fn removed_cut_selection_field_fails_validate() {
 
     let removed_field_config = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": { "method": "sampled", "forward_passes": 10 },
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ],
@@ -324,6 +372,252 @@ fn fpha_hydro_without_production_models_json_fails_validate() {
         .assert()
         .failure()
         .code(1);
+}
+
+// ── boundary reconciliation (`policy.boundary`, `--json`) ──────────────────────
+//
+// A minimal 2-stage, single-hydro case with a `constant_productivity`
+// production model — the smallest fixture with a nonzero terminal storage
+// slot, so `load_boundary_cuts`'s reconciliation has a slot to tally.
+
+fn write_boundary_case(dir: &Path, hydro_id: i64) {
+    write_file(
+        dir,
+        "config.json",
+        r#"{
+            "training": {
+                "selection": { "method": "sampled", "forward_passes": 1 },
+                "stopping_rules": [{ "type": "iteration_limit", "limit": 1 }]
+            },
+            "simulation": { "enabled": false },
+            "modeling": { "inflow_non_negativity": { "method": "none" } }
+        }"#,
+    );
+    write_file(
+        dir,
+        "stages.json",
+        r#"{
+            "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0 },
+            "stages": [
+                {
+                    "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+                    "blocks": [{ "id": 0, "name": "SINGLE", "hours": 730 }], "num_openings": 1
+                },
+                {
+                    "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
+                    "blocks": [{ "id": 0, "name": "SINGLE", "hours": 730 }], "num_openings": 1
+                }
+            ]
+        }"#,
+    );
+    write_file(
+        dir,
+        "system/hydros.json",
+        &format!(
+            r#"{{
+                "hydros": [
+                    {{
+                        "id": {hydro_id}, "name": "H", "operational_start_date": "2020-01-01",
+                        "downstream_id": null,
+                        "reservoir": {{ "min_storage_hm3": 0.0, "max_storage_hm3": 200.0 }},
+                        "outflow": {{ "min_outflow_m3s": 0.0, "max_outflow_m3s": 50.0 }},
+                        "generation": {{
+                            "model": "constant_productivity",
+                            "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0,
+                            "min_generation_mw": 0.0, "max_generation_mw": 50.0
+                        }},
+                        "unit_groups": [
+                            {{
+                                "id": 0, "name": "H", "bus_id": 0,
+                                "min_generation_mw": 0.0, "max_generation_mw": 50.0,
+                                "min_turbined_m3s": 0.0, "max_turbined_m3s": 50.0
+                            }}
+                        ]
+                    }}
+                ]
+            }}"#
+        ),
+    );
+    write_file(
+        dir,
+        "system/hydro_production_models.json",
+        &format!(
+            r#"{{
+                "production_models": [
+                    {{
+                        "hydro_id": {hydro_id}, "selection_mode": "stage_ranges",
+                        "stage_ranges": [
+                            {{
+                                "start_stage_id": 0, "end_stage_id": null,
+                                "model": "constant_productivity", "productivity_mw_per_m3s": 1.0
+                            }}
+                        ]
+                    }}
+                ]
+            }}"#
+        ),
+    );
+    write_file(
+        dir,
+        "system/buses.json",
+        r#"{ "buses": [
+            { "id": 0, "name": "B0", "operational_start_date": "2020-01-01",
+              "deficit_segments": [{ "depth_mw": null, "cost": 1000.0 }] }
+        ] }"#,
+    );
+    write_file(dir, "system/lines.json", LINES_JSON);
+    write_file(dir, "system/thermals.json", THERMALS_JSON);
+    write_file(
+        dir,
+        "initial_conditions.json",
+        &format!(
+            r#"{{ "storage": [{{ "hydro_id": {hydro_id}, "value_hm3": 100.0 }}], "filling_storage": [] }}"#
+        ),
+    );
+    write_file(
+        dir,
+        "penalties.json",
+        r#"{
+            "bus": {
+                "deficit_segments": [{ "depth_mw": null, "cost": 1000.0 }],
+                "excess_cost": 0.01
+            },
+            "line": { "exchange_cost": 0.01 },
+            "hydro": {
+                "spillage_cost": 0.01, "turbined_cost": 0.01, "diversion_cost": 0.01,
+                "storage_violation_below_cost": 500.0, "filling_target_violation_cost": 500.0,
+                "turbined_violation_below_cost": 500.0, "outflow_violation_below_cost": 500.0,
+                "outflow_violation_above_cost": 500.0, "generation_violation_below_cost": 500.0,
+                "evaporation_violation_cost": 500.0, "water_withdrawal_violation_cost": 500.0
+            },
+            "non_controllable_source": { "curtailment_cost": 0.005 }
+        }"#,
+    );
+}
+
+/// Run `cobre run` on `dir` and assert it succeeds, materializing a real
+/// policy checkpoint at `dir/output/policy` — the checkpoint boundary tests
+/// point `policy.boundary.path` at.
+fn run_case(dir: &Path) {
+    cobre()
+        .args(["run", dir.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+fn append_boundary_policy(dir: &Path, boundary_policy_dir: &Path) {
+    let boundary_path = boundary_policy_dir.to_str().unwrap();
+    let config = format!(
+        r#"{{
+            "training": {{
+                "selection": {{ "method": "sampled", "forward_passes": 1 }},
+                "stopping_rules": [{{ "type": "iteration_limit", "limit": 1 }}]
+            }},
+            "simulation": {{ "enabled": false }},
+            "modeling": {{ "inflow_non_negativity": {{ "method": "none" }} }},
+            "policy": {{ "boundary": {{ "path": "{boundary_path}", "source_stage": 1 }} }}
+        }}"#
+    );
+    write_file(dir, "config.json", &config);
+}
+
+/// A compatible boundary (the case's own just-produced checkpoint) prints the
+/// one-line reconciliation summary and exits 0, without a solve. The per-family
+/// breakdown moved behind `RUST_LOG=debug`, so it is absent from default stdout.
+#[test]
+fn boundary_report_summary_prints_and_exits_0() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+    append_boundary_policy(dir.path(), &dir.path().join("output/policy"));
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("boundary reconciliation:"))
+        .stdout(predicate::str::contains("storage: COPY=").not());
+}
+
+/// A RELATIVE `policy.boundary.path` resolves against the CASE (input) directory,
+/// not the run's output directory: `"output/policy"` points at
+/// `case_dir/output/policy` (the just-produced checkpoint) and validate exits 0.
+/// The retired output-relative resolution looked under `case_dir/output/output/policy`
+/// and could not find it.
+#[test]
+fn boundary_relative_path_resolves_against_case_dir_not_output_dir() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+    append_boundary_policy(dir.path(), Path::new("output/policy"));
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("boundary reconciliation:"));
+}
+
+/// `--json` emits a single, parseable JSON object carrying the per-family
+/// tallies, with no human report text interleaved on stdout.
+#[test]
+fn boundary_json_mode_emits_parseable_object_with_tallies() {
+    let dir = TempDir::new().unwrap();
+    write_boundary_case(dir.path(), 0);
+    run_case(dir.path());
+    append_boundary_policy(dir.path(), &dir.path().join("output/policy"));
+
+    let output = cobre()
+        .args(["validate", dir.path().to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // Parsing must succeed with no interleaved human text on stdout.
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["configured"], serde_json::json!(true));
+    assert_eq!(value["report"]["storage"]["copy"], serde_json::json!(1));
+}
+
+/// `--json` with no `policy.boundary` configured emits the explicit
+/// absent-marker object, never a crash.
+#[test]
+fn boundary_absent_json_marks_absent_marker() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+
+    let output = cobre()
+        .args(["validate", dir.path().to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["configured"], serde_json::json!(false));
+    assert!(value["report"].is_null());
+}
+
+/// A boundary trained on a different hydro set is a validate failure:
+/// non-zero exit, naming the offending hydro.
+#[test]
+fn boundary_mismatched_hydro_set_exits_nonzero_and_names_hydro() {
+    let target_dir = TempDir::new().unwrap();
+    write_boundary_case(target_dir.path(), 0);
+    run_case(target_dir.path());
+
+    let source_dir = TempDir::new().unwrap();
+    write_boundary_case(source_dir.path(), 1);
+    run_case(source_dir.path());
+
+    append_boundary_policy(target_dir.path(), &source_dir.path().join("output/policy"));
+
+    cobre()
+        .args(["validate", target_dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("hydro 0"))
+        .stdout(predicate::str::contains("different set of plants"));
 }
 
 #[test]

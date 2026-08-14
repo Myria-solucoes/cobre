@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use chrono::{Datelike, NaiveDate};
 use cobre_core::temporal::Stage;
 use cobre_core::{EntityId, Hydro, System, month_of};
 use cobre_io::CaseArtifacts;
@@ -34,14 +35,19 @@ use crate::SddpError;
 /// where:
 ///
 /// ```text
-/// mm_km2_to_m3s            = 1.0 / (3.6 * stage_hours)   -- mm·km² → m³/s
+/// mm_km2_to_m3s            = 1.0 / (3.6 * month_hours)   -- mm·km² → m³/s
 /// volume_slope_m3s_per_hm3 = mm_km2_to_m3s * monthly_evaporation_mm[month] * dA/dv|_{reference_volume}
 /// intercept_m3s            = mm_km2_to_m3s * monthly_evaporation_mm[month] * A(reference_volume)
 ///                            - volume_slope_m3s_per_hm3 * reference_volume
 /// ```
 ///
 /// `reference_volume = (v_min + v_max) / 2` is the linearization reference volume.
-/// `stage_hours` is the sum of all block durations in the stage.
+/// `month_hours` is the CALENDAR month's hours (leap-aware). It is the divisor —
+/// not the stage's own hours — because the water-balance coupling multiplies this
+/// flow by the stage-duration factor `zeta` (∝ `stage_seconds`); dividing by the
+/// stage would cancel and deposit a whole month of evaporation on any stage,
+/// whereas dividing by the month makes it a monthly-average rate, so a stage
+/// deposits only its `stage_hours / month_hours` share.
 /// `month` is the 0-based calendar month [`month_of`](cobre_core::month_of)
 /// derives from `stage.start_date` — not `stage.season_id`, whose meaning is
 /// cycle-dependent (`Monthly`, `Weekly`, `Custom`) and only equals the calendar
@@ -138,6 +144,25 @@ pub fn resolve_evaporation_models_from_artifacts(
     let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
     resolve_evaporation_core(system.hydros(), &geometry_map, &study_stages)
+}
+
+/// Hours in `date`'s calendar month, leap-aware. The evaporation-rate divisor
+/// (see [`resolve_evaporation_models`]): a stage deposits its
+/// `stage_hours / month_hours` share of the month's evaporation.
+fn hours_in_calendar_month(date: NaiveDate) -> f64 {
+    let days = match date.month() {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31.0,
+        2 if is_leap_year(date.year()) => 29.0,
+        2 => 28.0,
+        // April, June, September, November have 30 days; the wildcard also
+        // absorbs the unreachable out-of-range month (`month()` is 1..=12).
+        _ => 30.0,
+    };
+    days * 24.0
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 /// Core evaporation linearization over pre-loaded data, split from
@@ -249,8 +274,22 @@ fn resolve_evaporation_core(
 
             let stage_hours: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
 
-            // mm·km²/month → m³/s.
-            let mm_km2_to_m3s = 1.0 / (3.6 * stage_hours);
+            // A zero-duration stage no longer surfaces as a non-finite coefficient
+            // below (the divisor is now the calendar month, never zero), so reject
+            // it explicitly here.
+            if stage_hours <= 0.0 {
+                return Err(SddpError::Validation(format!(
+                    "hydro {} (id={}) stage {}: total block duration is {stage_hours} h; \
+                     evaporation needs a positive stage duration.",
+                    hydro.name, hydro.id.0, stage.id
+                )));
+            }
+
+            // Divide by the CALENDAR month's hours, not the stage's: the
+            // water-balance `zeta` (∝ stage_seconds) cancels a stage-hours divisor
+            // and would deposit a whole month of evaporation per stage.
+            let month_hours = hours_in_calendar_month(stage.start_date);
+            let mm_km2_to_m3s = 1.0 / (3.6 * month_hours);
 
             let volume_slope_m3s_per_hm3 = mm_km2_to_m3s * monthly_evaporation_mm * da_dv;
             let intercept_m3s = mm_km2_to_m3s * monthly_evaporation_mm * a_ref
@@ -711,7 +750,7 @@ mod tests {
     ///   reference_volume = (100 + 500) / 2 = 300
     ///   A(300) = 2.0
     ///   dA/dv|_300 = (2.0 - 1.5) / (300 - 200) = 0.005
-    ///   stage: season_id=0 (January), duration=744h
+    ///   January (season_id=0): calendar month = 31·24 = 744 h
     ///   mm_km2_to_m3s = 1 / (3.6 * 744) = 1 / 2678.4
     ///   monthly_evaporation_mm = 5.0
     ///   volume_slope_m3s_per_hm3 = mm_km2_to_m3s * 5.0 * 0.005
@@ -764,8 +803,8 @@ mod tests {
                 let a_ref = 2.0_f64;
                 let da_dv = 0.005_f64;
                 let monthly_evaporation_mm = 5.0_f64;
-                let stage_hours = 744.0_f64;
-                let mm_km2_to_m3s = 1.0 / (3.6 * stage_hours);
+                let month_hours = 744.0_f64;
+                let mm_km2_to_m3s = 1.0 / (3.6 * month_hours);
 
                 let expected_slope = mm_km2_to_m3s * monthly_evaporation_mm * da_dv;
                 let expected_intercept = mm_km2_to_m3s * monthly_evaporation_mm * a_ref
@@ -954,22 +993,18 @@ mod tests {
         assert_eq!(n_not_modeled, 2, "expected 2 NotModeled");
     }
 
-    /// resolve_evaporation_models core logic: NaN/Inf detection from degenerate geometry
-    /// (two identical volume points) returns a validation error.
+    /// resolve_evaporation_core: a zero-duration stage is rejected by the
+    /// explicit `stage_hours > 0` guard (the divisor is the calendar month now,
+    /// so a zero-duration stage no longer surfaces as a non-finite coefficient).
     #[test]
-    fn resolve_evaporation_degenerate_geometry_nan_detected() {
+    fn resolve_evaporation_zero_duration_stage_is_rejected() {
         let evap_mm = [5.0f64; 12];
         let hydro = make_hydro_with_evaporation(0, 100.0, 500.0, Some(evap_mm));
 
-        // Two rows with same volume but different areas: this is degenerate.
-        // With dv=0, area_derivative returns 0.0, so no NaN there.
-        // To force NaN we need the scenario where stage_hours=0
-        // (mm_km2_to_m3s → Inf). Test that scenario instead.
         let mut stage_zero_duration = make_stage_with_month(0, 0);
         stage_zero_duration.blocks = vec![Block {
             index: 0,
             name: "ZERO".to_string(),
-            // zero duration → mm_km2_to_m3s = Inf → volume_slope_m3s_per_hm3 = Inf
             duration_hours: 0.0,
         }];
 
@@ -981,7 +1016,7 @@ mod tests {
         let stage_refs = vec![&stage_zero_duration];
 
         let err = super::resolve_evaporation_core(&[hydro], &geometry_map, &stage_refs)
-            .expect_err("degenerate geometry (zero duration) must return an error");
+            .expect_err("a zero-duration stage must return an error");
 
         assert!(
             matches!(err, SddpError::Validation(_)),
@@ -1021,7 +1056,8 @@ mod tests {
         let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
-        // Two stages: January (744h) and February (672h).
+        // Two stages: January (stage 744h) and February 2024 (stage 672h).
+        // Evaporation divides by the CALENDAR month: Jan 744h, leap-Feb 696h.
         let stage_jan = make_stage_with_month(0, 0);
         let mut stage_feb = make_stage_with_month(1, 1);
         stage_feb.blocks = vec![Block {
@@ -1090,7 +1126,9 @@ mod tests {
                 );
 
                 // Verify stage 1 coefficients using reference_volume=400.
-                let mm_km2_to_m3s_feb = 1.0 / (3.6 * 672.0);
+                // Divisor is the calendar month, not the stage's 672 h:
+                // February 2024 is a leap month, 29 · 24 = 696 h.
+                let mm_km2_to_m3s_feb = 1.0 / (3.6 * 696.0);
                 let a_feb = 2.5_f64;
                 let reference_volume_feb = 400.0_f64;
                 let expected_slope_feb = mm_km2_to_m3s_feb * monthly_evaporation_mm * da_dv;
@@ -1247,7 +1285,8 @@ mod tests {
         let reference_volume = 300.0_f64;
         let a_ref = 2.0_f64;
         let da_dv = 0.005_f64;
-        let mm_km2_to_m3s = 1.0 / (3.6 * 744.0_f64);
+        // Divisor is June's calendar month: 30 · 24 = 720 h.
+        let mm_km2_to_m3s = 1.0 / (3.6 * 720.0_f64);
         let expected_slope = mm_km2_to_m3s * 7.0 * da_dv;
         let expected_intercept = mm_km2_to_m3s * 7.0 * a_ref - expected_slope * reference_volume;
 

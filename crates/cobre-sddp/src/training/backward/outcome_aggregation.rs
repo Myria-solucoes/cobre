@@ -12,13 +12,13 @@ use crate::{
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
 };
 
-use super::SuccessorSpec;
+use super::SuccessorChild;
 
 /// Accumulate one opening's solve result (stats delta, outcome, and binding-cut
 /// slot increments) into the workspace accumulators. Call after `view` is dropped.
 pub(crate) fn accumulate_opening_outcome<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
-    succ: &SuccessorSpec<'_>,
+    succ: &SuccessorChild<'_>,
     omega: usize,
     objective: f64,
     x_hat: &[f64],
@@ -27,6 +27,8 @@ pub(crate) fn accumulate_opening_outcome<S: SolverInterface + Send>(
 ) {
     write_opening_outcome(ws, omega, objective, x_hat, stats_before, stats_after);
 
+    // Bump the child's OWN pool region (`metadata_offset + slot`), so a fan's
+    // sibling pools never collide on a shared slot index.
     for (cut_idx, &slot) in succ.successor_active_slots.iter().enumerate() {
         if ws
             .backward_accum
@@ -34,7 +36,7 @@ pub(crate) fn accumulate_opening_outcome<S: SolverInterface + Send>(
             .get(cut_idx)
             .is_some_and(|&d| d > succ.cut_activity_tolerance)
         {
-            ws.backward_accum.slot_increments[slot] += 1;
+            ws.backward_accum.slot_increments[succ.metadata_offset + slot] += 1;
         }
     }
 }
@@ -115,7 +117,8 @@ pub(crate) fn write_opening_outcome<S: SolverInterface + Send>(
             .sum::<f64>();
 }
 
-/// Capture the post-solve basis at the first-solved opening into `basis_slice[m, s]`.
+/// Capture the post-solve basis at the first-solved opening into
+/// `basis_slice[m, successor_node]`.
 ///
 /// Only the first-solved opening (`solve_order[0]`, = canonical ω=0 under the
 /// identity order) may capture: a later capture would store a basis whose retained
@@ -123,41 +126,33 @@ pub(crate) fn write_opening_outcome<S: SolverInterface + Send>(
 /// stale and potentially infeasible when reloaded.
 pub(crate) fn save_basis_at_omega_zero<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
-    succ: &SuccessorSpec<'_>,
+    succ: &SuccessorChild<'_>,
     basis_slice: &mut BasisStoreSliceMut<'_>,
     m: usize,
     x_hat: &[f64],
 ) {
-    let s = succ.successor;
-    let num_cols = succ.frozen_template.num_cols;
+    let successor_node = succ.successor_node;
     let base_row_count = succ.template_num_rows;
     let cut_row_count = succ.num_cuts_at_successor;
-    let basis_row_capacity = base_row_count + cut_row_count;
-    if let Some(captured) = basis_slice.get_mut(m, s).as_mut() {
-        ws.solver.get_basis(&mut captured.basis);
-        write_capture_metadata(
-            captured,
-            succ.successor_pool,
-            base_row_count,
-            cut_row_count,
-            x_hat,
-        );
-    } else {
-        let mut captured = CapturedBasis::new(
-            num_cols,
-            basis_row_capacity,
-            base_row_count,
-            cut_row_count,
-            x_hat.len(),
-        );
-        ws.solver.get_basis(&mut captured.basis);
-        write_capture_metadata(
-            &mut captured,
-            succ.successor_pool,
-            base_row_count,
-            cut_row_count,
-            x_hat,
-        );
-        *basis_slice.get_mut(m, s) = Some(captured);
-    }
+    let captured = basis_slice
+        .get_mut(m, successor_node)
+        .get_or_insert_with(|| {
+            CapturedBasis::new(
+                succ.frozen_template.num_cols,
+                base_row_count + cut_row_count,
+                base_row_count,
+                cut_row_count,
+                x_hat.len(),
+                succ.successor_node_id,
+            )
+        });
+    ws.solver.get_basis(&mut captured.basis);
+    write_capture_metadata(
+        captured,
+        succ.successor_pool,
+        base_row_count,
+        cut_row_count,
+        x_hat,
+        succ.successor_node_id,
+    );
 }

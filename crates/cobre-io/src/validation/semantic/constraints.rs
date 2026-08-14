@@ -211,8 +211,7 @@ fn boundary_is_interior(k: usize, num_blocks: usize) -> bool {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use cobre_core::{
-        ConstraintExpression, ConstraintSense, EntityId, GenericConstraint, LinearTerm,
-        SlackConfig, VariableRef,
+        ConstraintExpression, EntityId, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         temporal::{Block, BlockMode},
     };
 
@@ -254,17 +253,19 @@ mod tests {
             expression: ConstraintExpression {
                 terms: vec![LinearTerm::literal(1.0, variable)],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         }];
         data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
             constraint_id: 1,
             stage_id: 0,
             block_id: None,
-            bound: 0.0,
+            bound_lower: Some(0.0),
+            bound_upper: None,
         }];
         data
     }

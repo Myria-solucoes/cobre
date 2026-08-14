@@ -35,15 +35,15 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     cut::row::build_cut_row_batch_into,
-    indexer::{CutStateProjection, StateSpace},
+    setup::node_graph::{NodePos, StageIdx, Traversal},
     simulation::{
         config::SimulationConfig,
+        enumerated::run_enumerated_simulation,
         error::SimulationError,
         extraction::assign_scenarios,
         pipeline::{
-            SIMULATION_SEED_OFFSET, ScenarioIds, SimLookups, SimulationOutputSpec,
-            SimulationRunResult, WorkerCosts, WorkerStats, dispatch_scenario_result,
-            emit_sim_progress, process_scenario_stages,
+            ScenarioIds, SimLookups, SimulationOutputSpec, SimulationRunResult, WorkerCosts,
+            WorkerStats, dispatch_scenario_result, emit_sim_progress, process_scenario_stages,
         },
     },
     solve::partition,
@@ -70,14 +70,25 @@ pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
     pub output: SimulationOutputSpec<'a>,
     /// Pre-frozen LP templates from training. `None` triggers local re-freeze.
     pub frozen_templates: Option<&'a [StageTemplate]>,
-    /// Per-stage warm-start basis captured from the training checkpoint.
-    pub stage_bases: &'a [Option<CapturedBasis>],
+    /// Warm-start basis captured from the training checkpoint, one entry per
+    /// canonical `NodeGraph` position — never per stage, so a branching
+    /// simulation warm-starts from the visited node's own basis instead of
+    /// whichever node's basis happens to land at that stage index.
+    pub node_bases: &'a [Option<CapturedBasis>],
     /// MPI communicator.
     pub comm: &'a C,
+    /// The resolved simulation-traversal axis: [`SimulationState::run`] forks
+    /// on this directly — `Sampled` keeps the existing per-scenario loop,
+    /// `Enumerated` dispatches to the node-native census driver.
+    pub traversal: &'a Traversal,
 }
 
 impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
     /// Construct a `SimulationInputs` bundle from positional arguments.
+    // RATIONALE: a field-for-field bundle constructor; splitting would only
+    // relocate the parameter list, not reduce it — the struct already bundles
+    // what can be bundled.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         workspaces: &'a mut [SolverWorkspace<S>],
         ctx: &'a StageContext<'a>,
@@ -86,8 +97,9 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
         config: &'a SimulationConfig,
         output: SimulationOutputSpec<'a>,
         frozen_templates: Option<&'a [StageTemplate]>,
-        stage_bases: &'a [Option<CapturedBasis>],
+        node_bases: &'a [Option<CapturedBasis>],
         comm: &'a C,
+        traversal: &'a Traversal,
     ) -> Self {
         Self {
             workspaces,
@@ -97,8 +109,9 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
             config,
             output,
             frozen_templates,
-            stage_bases,
+            node_bases,
             comm,
+            traversal,
         }
     }
 }
@@ -120,8 +133,9 @@ pub(crate) struct SimWorkerParams<'w> {
     output: &'w SimulationOutputSpec<'w>,
     /// Simulation configuration (scenario count, I/O channel capacity).
     config: &'w SimulationConfig,
-    /// Per-stage warm-start basis captured from the training checkpoint.
-    stage_bases: &'w [Option<CapturedBasis>],
+    /// Warm-start basis cache, one entry per canonical `NodeGraph` position
+    /// (see [`SimulationInputs::node_bases`]).
+    node_bases: &'w [Option<CapturedBasis>],
     /// Resolved frozen LP templates (caller-supplied or locally re-frozen).
     frozen_templates: &'w [StageTemplate],
     /// Shared completion counter scaled to a global progress estimate.
@@ -140,6 +154,9 @@ pub(crate) struct SimWorkerParams<'w> {
     num_stages: usize,
     /// Number of MPI ranks, scaling rank-local progress to a global estimate.
     world_size: u32,
+    /// The stage-0 root's canonical `NodeGraph` position — every scenario's
+    /// sampled walk starts here.
+    root_node: NodePos,
 }
 
 /// Owned scratch state for one simulation run.
@@ -222,26 +239,24 @@ impl SimulationState {
             ..
         } = training_ctx;
         let num_stages = horizon.num_stages();
-        let rank = inputs.comm.rank();
 
         debug_assert_inputs(inputs.ctx, num_stages, initial_state.len(), state.n_state);
 
+        let n_pools = training_ctx.node_graph.n_pools;
         if let Some(frozen) = inputs.frozen_templates
-            && frozen.len() != num_stages
+            && frozen.len() != n_pools
         {
             return Err(SimulationError::InvalidConfiguration(format!(
-                "frozen_templates length {} != num_stages {}",
+                "frozen_templates length {} != n_pools {}",
                 frozen.len(),
-                num_stages
+                n_pools
             )));
         }
 
         refreeze_templates_if_needed(
             inputs.fcf,
             inputs.ctx,
-            state,
-            training_ctx.cut_state_layouts,
-            num_stages,
+            training_ctx,
             inputs.frozen_templates,
             &mut self.freeze_batch,
             &mut self.owned_frozen,
@@ -254,14 +269,9 @@ impl SimulationState {
                 (None, None) => unreachable!("owned_frozen is Some when frozen_templates is None"),
             };
 
-        let scenario_range = assign_scenarios(inputs.config.n_scenarios, rank, inputs.comm.size());
-        #[allow(clippy::cast_possible_truncation)]
-        let local_count = (scenario_range.end - scenario_range.start) as usize;
-        let scenario_start = scenario_range.start as usize;
         let n_workers = inputs.workspaces.len().max(1);
         let world_size = u32::try_from(inputs.comm.size()).unwrap_or(1).max(1);
         let sim_start = Instant::now();
-        let scenarios_complete = AtomicU32::new(0);
 
         // Before the parallel region so rank 0's progress thread can render a
         // banner before any scenario completes (no-op on non-root ranks: sender None).
@@ -286,48 +296,23 @@ impl SimulationState {
             ws.solver.set_profile(&self.profile);
         }
 
-        let params = SimWorkerParams {
-            ctx: inputs.ctx,
-            fcf: inputs.fcf,
-            training_ctx,
-            output: &inputs.output,
-            config: inputs.config,
-            stage_bases: inputs.stage_bases,
-            frozen_templates,
-            scenarios_complete: &scenarios_complete,
-            sim_start,
-            local_count,
-            n_workers,
-            scenario_start,
-            sampler: &sampler,
-            num_stages,
-            world_size,
+        let (all_costs, all_stats): (WorkerCosts, WorkerStats) = match inputs.traversal {
+            Traversal::Sampled { .. } => {
+                run_sampled_simulation(inputs, frozen_templates, &sampler, sim_start)?
+            }
+            Traversal::Enumerated(plan) => {
+                let k = plan.paths.leaf.len();
+                #[allow(clippy::cast_possible_truncation)]
+                if k != inputs.config.n_scenarios as usize {
+                    return Err(SimulationError::InvalidConfiguration(format!(
+                        "enumerated plan carries {k} leaf paths but the simulation config \
+                         resolved n_scenarios = {}",
+                        inputs.config.n_scenarios
+                    )));
+                }
+                run_enumerated_simulation(plan, inputs, frozen_templates, &sampler)?
+            }
         };
-
-        let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> = inputs
-            .workspaces
-            .par_iter_mut()
-            .enumerate()
-            .map(|(w, ws)| run_worker_scenarios(w, ws, &params))
-            .collect();
-
-        let mut all_costs = Vec::with_capacity(local_count);
-        let mut all_stats = Vec::with_capacity(local_count);
-        for result in worker_results {
-            let (costs, stats) = result?;
-            all_costs.extend(costs);
-            all_stats.extend(stats);
-        }
-        // Each worker emits a contiguous ascending scenario_id range, so the
-        // sequential `extend` leaves `all_costs`/`all_stats` sorted — no sort needed.
-        debug_assert!(
-            all_costs.windows(2).all(|w| w[0].0 <= w[1].0),
-            "all_costs not pre-sorted: workers must emit ascending scenario_id"
-        );
-        debug_assert!(
-            all_stats.windows(2).all(|w| w[0].0 <= w[1].0),
-            "all_stats not pre-sorted: workers must emit ascending scenario_id"
-        );
 
         if let Some(sender) = inputs.output.event_sender.take() {
             #[allow(clippy::cast_possible_truncation)]
@@ -340,6 +325,7 @@ impl SimulationState {
         Ok(SimulationRunResult {
             costs: all_costs,
             solver_stats: all_stats,
+            census_weights: inputs.traversal.path_weights().map(<[f64]>::to_vec),
         })
     }
 }
@@ -368,6 +354,94 @@ fn debug_assert_inputs(
         n_initial, n_state,
         "initial_state.len()={n_initial} != n_state={n_state}"
     );
+}
+
+/// Monte-Carlo simulation for one call: dispatched from [`SimulationState::run`]
+/// under `Traversal::Sampled`. Partitions `inputs.config.n_scenarios` across
+/// rayon workers, each running its own scenario range via
+/// [`run_worker_scenarios`].
+///
+/// # Errors
+///
+/// Returns `Err(SimulationError::InvalidConfiguration { .. })` if stage 0
+/// carries no alive node. Returns `Err(SimulationError::LpInfeasible { .. })`
+/// when a stage LP has no feasible solution, `Err(SimulationError::SolverError
+/// { .. })` for other terminal LP solver failures, and
+/// `Err(SimulationError::ChannelClosed)` when the channel receiver has been
+/// dropped.
+fn run_sampled_simulation<S: SolverInterface + Send, C: Communicator>(
+    inputs: &mut SimulationInputs<'_, S, C>,
+    frozen_templates: &[StageTemplate],
+    sampler: &ForwardSampler<'_>,
+    sim_start: Instant,
+) -> Result<(WorkerCosts, WorkerStats), SimulationError> {
+    let training_ctx = inputs.training_ctx;
+    let num_stages = training_ctx.horizon.num_stages();
+    let rank = inputs.comm.rank();
+    let n_workers = inputs.workspaces.len().max(1);
+    let world_size = u32::try_from(inputs.comm.size()).unwrap_or(1).max(1);
+    let scenarios_complete = AtomicU32::new(0);
+
+    let scenario_range = assign_scenarios(inputs.config.n_scenarios, rank, inputs.comm.size());
+    #[allow(clippy::cast_possible_truncation)]
+    let local_count = (scenario_range.end - scenario_range.start) as usize;
+    let scenario_start = scenario_range.start as usize;
+
+    // Every scenario's sampled walk starts at the same stage-0 root —
+    // resolved once, mirroring the training forward pass's own root_node.
+    let root_node = training_ctx
+        .node_graph
+        .frontier_node(StageIdx(0))
+        .ok_or_else(|| {
+            SimulationError::InvalidConfiguration(
+                "node graph: stage 0 carries no alive node".to_string(),
+            )
+        })?;
+
+    let params = SimWorkerParams {
+        ctx: inputs.ctx,
+        fcf: inputs.fcf,
+        training_ctx,
+        output: &inputs.output,
+        config: inputs.config,
+        node_bases: inputs.node_bases,
+        frozen_templates,
+        scenarios_complete: &scenarios_complete,
+        sim_start,
+        local_count,
+        n_workers,
+        scenario_start,
+        sampler,
+        num_stages,
+        world_size,
+        root_node,
+    };
+
+    let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> = inputs
+        .workspaces
+        .par_iter_mut()
+        .enumerate()
+        .map(|(w, ws)| run_worker_scenarios(w, ws, &params))
+        .collect();
+
+    let mut all_costs = Vec::with_capacity(local_count);
+    let mut all_stats = Vec::with_capacity(local_count);
+    for result in worker_results {
+        let (costs, stats) = result?;
+        all_costs.extend(costs);
+        all_stats.extend(stats);
+    }
+    // Each worker emits a contiguous ascending scenario_id range, so the
+    // sequential `extend` leaves `all_costs`/`all_stats` sorted — no sort needed.
+    debug_assert!(
+        all_costs.windows(2).all(|w| w[0].0 <= w[1].0),
+        "all_costs not pre-sorted: workers must emit ascending scenario_id"
+    );
+    debug_assert!(
+        all_stats.windows(2).all(|w| w[0].0 <= w[1].0),
+        "all_stats not pre-sorted: workers must emit ascending scenario_id"
+    );
+    Ok((all_costs, all_stats))
 }
 
 /// Execute one worker's share of scenarios in the rayon parallel region.
@@ -405,12 +479,12 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     for local_idx in start_local..end_local {
         #[allow(clippy::cast_possible_truncation)]
         let scenario_id = (params.scenario_start + local_idx) as u32;
-        let global_scenario = SIMULATION_SEED_OFFSET.saturating_add(scenario_id);
+        let global_scenario = scenario_id;
 
         let stats_before = ws.solver.statistics();
         let load_spec = SimScenarioLoadSpec {
             frozen_templates: params.frozen_templates,
-            stage_bases: params.stage_bases,
+            node_bases: params.node_bases,
         };
         // mem::take (capacity retained) so the immutable ScenarioIds borrows of
         // these slices do not conflict with the `&mut ws` passed below.
@@ -431,6 +505,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
                 raw_noise_buf: &mut raw_noise_buf,
                 perm_scratch: &mut perm_scratch,
                 sampler: params.sampler,
+                root_node: params.root_node,
             },
             &lookups,
         );
@@ -471,7 +546,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
 }
 
 /// Build the [`ForwardSampler`] for a simulation run from the training context.
-fn build_sim_sampler<'a>(
+pub(crate) fn build_sim_sampler<'a>(
     training_ctx: &'a TrainingContext<'a>,
 ) -> Result<ForwardSampler<'a>, SimulationError> {
     Ok(build_forward_sampler(ForwardSamplerConfig {
@@ -496,15 +571,14 @@ fn build_sim_sampler<'a>(
 
 /// Populate `owned_frozen` when the caller did not provide pre-frozen templates.
 ///
-/// No-op if `caller_frozen` is `Some`. Otherwise rebuilds `owned_frozen` from the
-/// FCF, context templates, and state layout, using `freeze_batch` as scratch (its
-/// post-call contents are unspecified). Cost `O(num_stages * num_active_cuts)`.
+/// No-op if `caller_frozen` is `Some`. Otherwise rebuilds `owned_frozen` — one
+/// frozen template per POOL — from the FCF, context templates, and state layout,
+/// using `freeze_batch` as scratch (its post-call contents are unspecified). Cost
+/// `O(n_pools * num_active_cuts)`.
 fn refreeze_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
-    state: &StateSpace,
-    cut_state_layouts: &[CutStateProjection],
-    num_stages: usize,
+    training_ctx: &TrainingContext<'_>,
     caller_frozen: Option<&[StageTemplate]>,
     freeze_batch: &mut RowBatch,
     owned_frozen: &mut Option<Vec<StageTemplate>>,
@@ -515,22 +589,30 @@ fn refreeze_templates_if_needed(
         return;
     }
 
-    let mut owned = Vec::with_capacity(num_stages);
-    // Rationale: `t` is the stage index passed to `build_cut_row_batch_into` AND used
-    // to index three parallel slices (fcf pools, cut_state_layouts, templates); an
-    // iterator zip would not carry the stage index the builder needs.
+    let state = training_ctx.state;
+    let cut_state_layouts = training_ctx.cut_state_layouts;
+    let node_graph = training_ctx.node_graph;
+
+    // Per-POOL frozen overlay, mirroring the training freeze: pool `p`'s cuts on
+    // pool `p`'s base stage template `templates[pool_stage[p]]`. A per-stage build
+    // would bake one node's cuts into a sibling's LP on a branching graph.
+    let mut owned = Vec::with_capacity(node_graph.n_pools);
+    // Rationale: `p` is the pool passed by value to `build_cut_row_batch_into` and
+    // mapped through `pool_stage[p]` to the base stage template; an `enumerate`
+    // over one pool-keyed slice would not carry those other uses.
     #[allow(clippy::needless_range_loop)]
-    for t in 0..num_stages {
+    for p in 0..node_graph.n_pools {
+        let t = node_graph.pool_stage[p];
         build_cut_row_batch_into(
             freeze_batch,
             fcf,
-            t,
+            p,
             state,
-            &cut_state_layouts[t],
-            &ctx.templates[t].col_scale,
+            &cut_state_layouts[p],
+            &ctx.template(t).col_scale,
         );
         let mut frozen = StageTemplate::empty();
-        freeze_rows_into_template(&ctx.templates[t], freeze_batch, &mut frozen, freeze_scratch);
+        freeze_rows_into_template(ctx.template(t), freeze_batch, &mut frozen, freeze_scratch);
         owned.push(frozen);
     }
     *owned_frozen = Some(owned);

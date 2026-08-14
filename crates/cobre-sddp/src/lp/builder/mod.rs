@@ -40,8 +40,6 @@
 //! exclusion — recomputes the phase by calling it; no caller may cache a per-stage
 //! [`cobre_core::commissioning::Phase`] mask.
 
-use cobre_core::ConstraintSense;
-
 mod columns;
 pub(crate) mod commitment_reconcile;
 pub(crate) mod delivery_ring;
@@ -58,6 +56,8 @@ mod test_support;
 
 // --- Public re-exports (stable API) ---
 pub use commitment_reconcile::BoundRelaxations;
+#[cfg(any(test, feature = "test-support"))]
+pub use delivery_ring::DeliveryRing;
 pub use patch::PatchBuffer;
 #[cfg(any(test, feature = "test-support"))]
 pub use template::build_stage_templates_resolving_layout;
@@ -67,7 +67,7 @@ pub use template::{StageGeometry, StageTemplates, build_stage_templates};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
 pub(crate) use scaling::{
-    apply_anticipated_col_scale_unscale, apply_col_scale, apply_row_scale, compute_col_scale,
+    apply_col_scale, apply_commitment_hold_col_scale_unscale, apply_row_scale, compute_col_scale,
     compute_row_scale,
 };
 
@@ -139,10 +139,10 @@ pub struct GenericConstraintRowEntry {
     /// Whether this row is a collapsed stage-level row; when `true` the slack column
     /// is priced by the stage's total hours, not `block_idx`'s block hours.
     pub is_stage_level: bool,
-    /// The right-hand-side bound value for this row.
-    pub bound: f64,
-    /// Comparison sense of the constraint (`>=`, `<=`, or `==`).
-    pub sense: ConstraintSense,
+    /// Lower right-hand-side endpoint; `None` when the row is upper-only.
+    pub bound_lower: Option<f64>,
+    /// Upper right-hand-side endpoint; `None` when the row is lower-only.
+    pub bound_upper: Option<f64>,
     /// Whether slack is enabled for this constraint.
     pub slack_enabled: bool,
     /// Penalty cost per unit of slack violation (`0.0` when slack is disabled).
@@ -150,6 +150,7 @@ pub struct GenericConstraintRowEntry {
     /// Positive-violation slack (`slack_plus`) column; `None` when slack is disabled.
     pub slack_plus_col: Option<usize>,
     /// Negative-violation slack (`slack_minus`) column, present only when slack is
-    /// enabled and `sense == Equal`; `None` otherwise.
+    /// enabled and the row is two-sided (both `bound_lower` and `bound_upper`
+    /// present); `None` otherwise.
     pub slack_minus_col: Option<usize>,
 }

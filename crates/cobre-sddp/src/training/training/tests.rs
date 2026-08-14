@@ -43,6 +43,7 @@ use crate::{
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
+    setup::NodeId,
     solver_stats::{SolverStatsDelta, SolverStatsLogEntry},
     test_support,
 };
@@ -221,7 +222,6 @@ impl Communicator for StubComm {
 /// [`SystemBuilder`] + `build_stochastic_context` pattern as the forward-pass
 /// integration tests.  The `n_openings` parameter controls the branching
 /// factor of the opening tree.
-#[allow(clippy::cast_possible_wrap)]
 fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticContext {
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
@@ -435,6 +435,7 @@ fn ac_train_completes_with_iteration_limit() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -490,6 +491,7 @@ fn ac_train_completes_with_iteration_limit() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -538,6 +540,7 @@ fn ac_train_returns_partial_on_infeasible() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -593,6 +596,7 @@ fn ac_train_returns_partial_on_infeasible() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -654,6 +658,7 @@ fn ac_train_emits_correct_event_sequence() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -709,6 +714,7 @@ fn ac_train_emits_correct_event_sequence() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -856,6 +862,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 4,
@@ -911,6 +918,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -943,7 +951,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         .iter()
         .filter(|e| matches!(e, TrainingEvent::WorkerTiming { .. }))
         .collect();
-    // C2: exactly 8 WorkerTiming events (4 workers × 2 phases × 1 iteration).
+    // Exactly 8 WorkerTiming events (4 workers × 2 phases × 1 iteration).
     assert_eq!(
         worker_events.len(),
         8,
@@ -994,7 +1002,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
     assert_eq!(fwd_workers.len(), 4, "expected 4 distinct forward workers");
     assert_eq!(bwd_workers.len(), 4, "expected 4 distinct backward workers");
 
-    // C3: setup-sum invariant — sum of per-worker BWD_SETUP equals
+    // Setup-sum invariant: sum of per-worker BWD_SETUP equals
     // BackwardPassComplete.setup_time_ms within ±1 ms tolerance.
     // (BackwardPassComplete.setup_time_ms is u64; per-worker timings are f64.)
     let bwd_setup_total_ms_u64 = events
@@ -1004,7 +1012,6 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
             _ => None,
         })
         .expect("BackwardPassComplete event must exist");
-    #[allow(clippy::cast_precision_loss)]
     let bwd_setup_total_ms = bwd_setup_total_ms_u64 as f64;
     assert!(
         (bwd_setup_sum_ms - bwd_setup_total_ms).abs() < 1.0,
@@ -1030,6 +1037,7 @@ fn ac_train_result_fields_populated() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1085,6 +1093,7 @@ fn ac_train_result_fields_populated() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1133,6 +1142,7 @@ fn ac_train_with_no_event_sender() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 2,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1188,6 +1198,7 @@ fn ac_train_with_no_event_sender() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1233,6 +1244,7 @@ fn ac_total_time_ms_is_non_negative() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 1,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1288,6 +1300,7 @@ fn ac_total_time_ms_is_non_negative() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1341,6 +1354,7 @@ fn cut_selection_none_skips_step() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1396,6 +1410,7 @@ fn cut_selection_none_skips_step() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1455,6 +1470,7 @@ fn cut_selection_level1_runs_at_frequency() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1513,6 +1529,7 @@ fn cut_selection_level1_runs_at_frequency() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1551,7 +1568,6 @@ fn cut_selection_level1_runs_at_frequency() {
         "expected exactly 1 PolicySelectionComplete event for check_frequency=3 over 5 iterations"
     );
 
-    // Verify the event was emitted at iteration 3.
     let TrainingEvent::PolicySelectionComplete { iteration, .. } = sel_events[0] else {
         panic!("wrong variant");
     };
@@ -1582,6 +1598,7 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1640,6 +1657,7 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1693,7 +1711,6 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
         *rows_deactivated, 0,
         "stage 0 is exempt from cut selection, so no cuts should be deactivated"
     );
-    // Verify per-stage records are populated and stage 0 is exempt.
     assert!(
         !per_stage.is_empty(),
         "per_stage must contain at least the stage 0 record"
@@ -1722,6 +1739,7 @@ fn existing_train_tests_pass_with_none() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 3,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1777,6 +1795,7 @@ fn existing_train_tests_pass_with_none() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1827,6 +1846,7 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1886,6 +1906,7 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1912,7 +1933,6 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
     )
     .unwrap();
 
-    // Verify partial result semantics.
     assert!(outcome.error.is_some(), "expected error in TrainingOutcome");
     assert_eq!(
         outcome.result.iterations, 0,
@@ -1924,7 +1944,6 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
         "total_time_ms must be > 0"
     );
 
-    // Verify TrainingFinished event was emitted with reason "error".
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
     let finished = events
         .iter()
@@ -1955,6 +1974,7 @@ fn start_iteration_resumes_from_offset() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 3,
             n_fwd_threads: 1,
@@ -2010,6 +2030,7 @@ fn start_iteration_resumes_from_offset() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2060,6 +2081,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 5,
             n_fwd_threads: 1,
@@ -2115,6 +2137,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2156,6 +2179,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
 #[test]
 fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     const VARIANTS: [BasisStatus; 7] = [
@@ -2174,7 +2198,7 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
 
     // Populate scenario 0 with a per-stage-distinct status sequence.
     for t in 0..num_stages {
-        *store.get_mut(0, t) = Some(CapturedBasis {
+        *store.get_mut(0, NodePos(t)) = Some(CapturedBasis {
             basis: Basis {
                 col_status: vec![VARIANTS[t], VARIANTS[t + 1]],
                 row_status: vec![VARIANTS[t + 2]],
@@ -2182,12 +2206,13 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
             base_row_count: 0,
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
+            node_id: NodeId(0),
         });
     }
 
     // Populate scenario 3 (last) with completely different values.
     for t in 0..num_stages {
-        *store.get_mut(3, t) = Some(CapturedBasis {
+        *store.get_mut(3, NodePos(t)) = Some(CapturedBasis {
             basis: Basis {
                 col_status: vec![BasisStatus::Superbasic, BasisStatus::Fixed],
                 row_status: vec![BasisStatus::Nonbasic],
@@ -2195,11 +2220,12 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
             base_row_count: 0,
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
+            node_id: NodeId(0),
         });
     }
 
     let comm = StubComm; // single-rank, no broadcast
-    let cache = broadcast_basis_cache(&store, num_stages, &comm).unwrap();
+    let cache = broadcast_basis_cache(&store, &comm).unwrap();
 
     assert_eq!(cache.len(), num_stages);
     for (t, entry) in cache.iter().enumerate() {
@@ -2229,7 +2255,7 @@ fn ac_broadcast_basis_cache_none_slots_preserved() {
     let store = BasisStore::new(1, num_stages);
 
     let comm = StubComm;
-    let cache = broadcast_basis_cache(&store, num_stages, &comm).unwrap();
+    let cache = broadcast_basis_cache(&store, &comm).unwrap();
 
     assert_eq!(cache.len(), num_stages);
     for t in 0..num_stages {
@@ -2243,13 +2269,14 @@ fn ac_broadcast_basis_cache_none_slots_preserved() {
 #[test]
 fn broadcast_basis_cache_single_rank_preserves_metadata() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let num_stages = 2;
     let mut store = BasisStore::new(1, num_stages);
 
     // Populate stage 0 with non-empty metadata.
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Lower, BasisStatus::Basic],
             row_status: vec![BasisStatus::Upper, BasisStatus::Zero, BasisStatus::Nonbasic],
@@ -2257,11 +2284,12 @@ fn broadcast_basis_cache_single_rank_preserves_metadata() {
         base_row_count: 2,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
         state_at_capture: vec![1.5_f64, 2.5_f64],
+        node_id: NodeId(4),
     });
     // Stage 1 left None.
 
     let comm = StubComm; // size == 1
-    let cache = broadcast_basis_cache(&store, num_stages, &comm).unwrap();
+    let cache = broadcast_basis_cache(&store, &comm).unwrap();
 
     assert_eq!(cache.len(), num_stages);
     let cb = cache[0].as_ref().expect("stage 0 must have captured basis");
@@ -2275,6 +2303,12 @@ fn broadcast_basis_cache_single_rank_preserves_metadata() {
         cb.state_at_capture,
         vec![1.5_f64, 2.5_f64],
         "state_at_capture must be preserved"
+    );
+    assert_eq!(
+        cb.node_id,
+        NodeId(4),
+        "single-rank path preserves node_id from capture (the multi-rank path \
+         now recovers it from the wire, never an out-of-band fill)"
     );
     assert!(cache[1].is_none(), "stage 1 must remain None");
 }
@@ -2466,10 +2500,11 @@ impl MultiRankMockComm {
 #[test]
 fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let mut store = BasisStore::new(1, 2);
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Lower, BasisStatus::Basic, BasisStatus::Upper],
             row_status: vec![BasisStatus::Zero, BasisStatus::Nonbasic],
@@ -2477,16 +2512,18 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
         base_row_count: 4,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
         state_at_capture: vec![1.5_f64, 2.5_f64],
+        // node_id rides the wire, so rank 1 must recover THIS captured value.
+        node_id: NodeId(3),
     });
     // Stage 1 left None.
 
     let root_comm = MultiRankMockComm::new_root();
-    let _cache_rank0 = broadcast_basis_cache(&store, 2, &root_comm).unwrap();
+    let _cache_rank0 = broadcast_basis_cache(&store, &root_comm).unwrap();
 
     let peer_comm = MultiRankMockComm::new_peer(&root_comm);
     // Rank 1's basis_store is empty — all data must come from the broadcast.
     let empty_store = BasisStore::new(1, 2);
-    let cache = broadcast_basis_cache(&empty_store, 2, &peer_comm).unwrap();
+    let cache = broadcast_basis_cache(&empty_store, &peer_comm).unwrap();
 
     assert_eq!(cache.len(), 2);
     let cb0 = cache[0]
@@ -2516,16 +2553,74 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
         cb0.base_row_count, 4,
         "base_row_count must round-trip on non-root rank"
     );
+    assert_eq!(
+        cb0.node_id,
+        NodeId(3),
+        "node_id now rides the wire; rank 1 must recover rank 0's captured \
+         value, no longer an out-of-band fill from a per-stage node array"
+    );
     assert!(cache[1].is_none(), "stage 1 had no basis → None");
+}
+
+/// A branching (K-fan) run has `num_nodes (7) > num_stages`: leaves share one
+/// pool but each is its own node. `broadcast_basis_cache` sizes and keys the
+/// cache by `basis_store.num_nodes()`, so every node — leaves included — is
+/// broadcast and round-trips with its own `node_id`, never truncated at
+/// `num_stages`.
+#[test]
+fn broadcast_basis_cache_branching_round_trips_every_node() {
+    use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
+    use crate::workspace::{BasisStore, CapturedBasis};
+
+    let num_nodes = 7;
+    let mut store = BasisStore::new(1, num_nodes);
+    for node in 0..num_nodes {
+        *store.get_mut(0, NodePos(node)) = Some(CapturedBasis {
+            basis: Basis {
+                col_status: vec![BasisStatus::Basic],
+                row_status: vec![BasisStatus::Lower],
+            },
+            base_row_count: 1,
+            cut_row_slots: Vec::new(),
+            state_at_capture: vec![node as f64],
+            node_id: NodeId(100 + node as i32),
+        });
+    }
+
+    let root_comm = MultiRankMockComm::new_root();
+    let _ = broadcast_basis_cache(&store, &root_comm).unwrap();
+
+    let peer_comm = MultiRankMockComm::new_peer(&root_comm);
+    let empty_store = BasisStore::new(1, num_nodes);
+    let cache = broadcast_basis_cache(&empty_store, &peer_comm).unwrap();
+
+    assert_eq!(
+        cache.len(),
+        num_nodes,
+        "cache is sized by n_nodes, not num_stages"
+    );
+    for (node, slot) in cache.iter().enumerate() {
+        let cb = slot
+            .as_ref()
+            .unwrap_or_else(|| panic!("node {node} must round-trip (no truncation)"));
+        assert_eq!(
+            cb.node_id,
+            NodeId(100 + node as i32),
+            "node {node} must recover its own node_id across the branching broadcast"
+        );
+        assert_eq!(cb.state_at_capture, vec![node as f64]);
+    }
 }
 
 #[test]
 fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let mut store = BasisStore::new(1, 1);
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Nonbasic, BasisStatus::Superbasic],
             row_status: vec![BasisStatus::Fixed],
@@ -2533,14 +2628,15 @@ fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
         base_row_count: 1,
         cut_row_slots: vec![], // deliberately empty
         state_at_capture: vec![3.75_f64],
+        node_id: NodeId(0),
     });
 
     let root_comm = MultiRankMockComm::new_root();
-    let _ = broadcast_basis_cache(&store, 1, &root_comm).unwrap();
+    let _ = broadcast_basis_cache(&store, &root_comm).unwrap();
 
     let peer_comm = MultiRankMockComm::new_peer(&root_comm);
     let empty_store = BasisStore::new(1, 1);
-    let cache = broadcast_basis_cache(&empty_store, 1, &peer_comm).unwrap();
+    let cache = broadcast_basis_cache(&empty_store, &peer_comm).unwrap();
 
     assert_eq!(cache.len(), 1);
     let cb = cache[0]
@@ -2571,11 +2667,12 @@ fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
 #[test]
 fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     // Build a store with cut_row_slots = [10, 11, 12].
     let mut store = BasisStore::new(1, 1);
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Lower],
             row_status: vec![BasisStatus::Basic],
@@ -2583,11 +2680,12 @@ fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
         base_row_count: 1,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
         state_at_capture: vec![0.0_f64],
+        node_id: NodeId(0),
     });
 
     // Record rank-0 payloads.
     let root_comm = MultiRankMockComm::new_root();
-    let _ = broadcast_basis_cache(&store, 1, &root_comm).unwrap();
+    let _ = broadcast_basis_cache(&store, &root_comm).unwrap();
     let mut snapshot = root_comm.snapshot();
 
     // snapshot[1] is the Ints(payload) entry. Remove the last i32 value
@@ -2611,7 +2709,7 @@ fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
 
     let peer_comm = MultiRankMockComm::new_peer_from_queue(snapshot);
     let empty_store = BasisStore::new(1, 1);
-    let result = broadcast_basis_cache(&empty_store, 1, &peer_comm);
+    let result = broadcast_basis_cache(&empty_store, &peer_comm);
 
     match result {
         Err(SddpError::Validation(msg)) => {
@@ -2634,10 +2732,11 @@ fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
 #[test]
 fn broadcast_basis_cache_truncated_state_returns_validation() {
     use super::broadcast_basis_cache;
+    use crate::setup::NodePos;
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let mut store = BasisStore::new(1, 1);
-    *store.get_mut(0, 0) = Some(CapturedBasis {
+    *store.get_mut(0, NodePos(0)) = Some(CapturedBasis {
         basis: Basis {
             col_status: vec![BasisStatus::Lower],
             row_status: vec![BasisStatus::Basic],
@@ -2645,10 +2744,11 @@ fn broadcast_basis_cache_truncated_state_returns_validation() {
         base_row_count: 1,
         cut_row_slots: vec![],
         state_at_capture: vec![1.0_f64, 2.0_f64, 3.0_f64],
+        node_id: NodeId(0),
     });
 
     let root_comm = MultiRankMockComm::new_root();
-    let _ = broadcast_basis_cache(&store, 1, &root_comm).unwrap();
+    let _ = broadcast_basis_cache(&store, &root_comm).unwrap();
     let mut snapshot = root_comm.snapshot();
 
     // snapshot[3] is the Floats(f64-payload) entry with 3 values.
@@ -2676,7 +2776,7 @@ fn broadcast_basis_cache_truncated_state_returns_validation() {
 
     let peer_comm = MultiRankMockComm::new_peer_from_queue(snapshot);
     let empty_store = BasisStore::new(1, 1);
-    let result = broadcast_basis_cache(&empty_store, 1, &peer_comm);
+    let result = broadcast_basis_cache(&empty_store, &peer_comm);
 
     match result {
         Err(SddpError::Validation(msg)) => {
@@ -2742,6 +2842,7 @@ fn template_freeze_event_emitted() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -2798,6 +2899,7 @@ fn template_freeze_event_emitted() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2887,11 +2989,12 @@ fn ac_training_result_new_assigns_all_fields() {
         base_row_count: 3,
         cut_row_slots: vec![4_u32],
         state_at_capture: vec![5.0_f64],
+        node_id: NodeId(6),
     })];
     let solver_stats_log = vec![SolverStatsLogEntry::from_raw(
         7,
         "forward",
-        -1,
+        Some(0),
         -1,
         0,
         -1,

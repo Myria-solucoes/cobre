@@ -4,7 +4,7 @@
 //! [`cobre_core::scenario::ScenarioSource`] is performed by the helpers in
 //! `config/mod.rs`.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Intermediate serde type for per-class scenario source configuration in `config.json`.
 ///
@@ -33,6 +33,28 @@ pub struct RawScenarioSourceConfig {
     /// NCS class scenario config. Absent defaults to `in_sample`.
     #[serde(default)]
     pub ncs: Option<RawClassConfigEntry>,
+
+    /// Where a stage's openings come from. Absent defaults to `generated`,
+    /// preserving generation-sourced openings.
+    #[serde(default)]
+    pub openings: Option<Openings>,
+}
+
+/// Where a stage's openings originate (`config.json` scenario-source `source`).
+///
+/// The tag key is `source` and the field is `openings`, deliberately distinct
+/// from the per-class `scheme` key: `openings.source` selects where a stage's
+/// openings come from, while `scheme` selects how a class's noise is modelled.
+/// A single word would otherwise carry both axes. An absent `openings`
+/// declaration is equivalent to `generated`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum Openings {
+    /// Openings come from noise generation (the default when `openings` is absent).
+    Generated {},
+    /// Openings come from the conventional `scenarios/noise_openings.parquet` file.
+    File {},
 }
 
 /// Intermediate serde type for a single per-class scenario scheme in `config.json`.
@@ -40,8 +62,39 @@ pub struct RawScenarioSourceConfig {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawClassConfigEntry {
-    /// Scheme string: `"in_sample"`, `"out_of_sample"`, `"external"`, or `"historical"`.
-    pub scheme: String,
+    /// Forward-pass scenario scheme for this class.
+    pub scheme: RawSamplingScheme,
+}
+
+/// Per-class forward-pass scenario scheme (`config.json` scenario-source `scheme`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum RawSamplingScheme {
+    /// Reuse the backward-pass opening tree for the forward pass.
+    InSample,
+    /// Draw fresh noise from the same distribution with an independent seed.
+    OutOfSample,
+    /// Draw from an externally supplied scenario file.
+    External,
+    /// Replay historical realisations.
+    Historical,
+}
+
+impl<'de> Deserialize<'de> for RawSamplingScheme {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "in_sample" => Ok(Self::InSample),
+            "out_of_sample" => Ok(Self::OutOfSample),
+            "external" => Ok(Self::External),
+            "historical" => Ok(Self::Historical),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["in_sample", "out_of_sample", "external", "historical"],
+            )),
+        }
+    }
 }
 
 /// Intermediate serde type for `historical_years` in `config.json`.

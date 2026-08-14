@@ -47,7 +47,9 @@ ZERO_PUMPING_CASE = _REPO_ROOT / "examples" / "1dtoy"
 # by `pumping_stations_schema()` in cobre-io's simulation_writer; this set mirrors
 # its shape so a schema drift (added/removed/renamed column) fails this test.
 PUMPING_SCHEMA_FIELDS = {
+    "scenario_id",
     "stage_id",
+    "node_id",
     "block_id",
     "pumping_station_id",
     "pumped_flow_m3s",

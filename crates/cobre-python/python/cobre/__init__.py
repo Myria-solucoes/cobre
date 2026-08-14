@@ -61,6 +61,7 @@ sys.modules["cobre.results"] = results
 from ._native import Policy as Policy
 from ._native import Study as Study
 from ._native import version_info as version_info
+from ._native import write_policy_checkpoint as write_policy_checkpoint
 
 # --- Extension point ---------------------------------------------------------
 # Pure-Python ergonomic wrappers are layered on top of the compiled surface
@@ -74,6 +75,7 @@ __all__ = [
     "Study",
     "Policy",
     "version_info",
+    "write_policy_checkpoint",
     "errors",
     "io",
     "model",

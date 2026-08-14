@@ -42,7 +42,6 @@
 //!
 //! After deserializing, the following constraints are checked before conversion:
 //!
-//! - `method` must not be empty.
 //! - `profiles` must not be empty.
 //! - For each group in each profile:
 //!   - `matrix` must be square (`rows == cols`).
@@ -67,7 +66,7 @@ use cobre_core::scenario::{
     CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
     CorrelationScheduleEntry,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::LoadError;
 
@@ -92,11 +91,8 @@ pub(crate) struct RawCorrelationFile {
     #[serde(rename = "$schema")]
     _schema: Option<String>,
 
-    /// Decomposition method for the correlation matrix. Must not be empty.
-    /// Defaults to `"spectral"`. `"cholesky"` is also accepted for backward
-    /// compatibility with existing case files. Unrecognized values produce a
-    /// warning but are not rejected.
-    method: String,
+    /// Decomposition method for the correlation matrix. Accepts `spectral`.
+    method: CorrelationMethod,
 
     /// Named correlation profiles. Must not be empty. Keys are profile names
     /// (e.g. `"default"`, `"wet_season"`).
@@ -107,6 +103,26 @@ pub(crate) struct RawCorrelationFile {
     /// match a key in `profiles`.
     #[serde(default)]
     schedule: Option<Vec<RawScheduleEntry>>,
+}
+
+/// Correlation-matrix decomposition method (`scenarios/correlation.json`
+/// `method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum CorrelationMethod {
+    /// Spectral (eigenvalue) decomposition.
+    Spectral,
+}
+
+impl<'de> Deserialize<'de> for CorrelationMethod {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "spectral" => Ok(Self::Spectral),
+            other => Err(serde::de::Error::unknown_variant(other, &["spectral"])),
+        }
+    }
 }
 
 /// A named correlation profile containing one or more correlation groups.
@@ -191,8 +207,7 @@ struct RawScheduleEntry {
 /// | Condition                                                | Error variant              |
 /// | -------------------------------------------------------- | -------------------------- |
 /// | File not found / read failure                            | [`LoadError::IoError`]     |
-/// | Malformed JSON / missing required field                  | [`LoadError::ParseError`]  |
-/// | `method` is empty                                        | [`LoadError::SchemaError`] |
+/// | Malformed JSON / missing or unknown `method`             | [`LoadError::ParseError`]  |
 /// | `profiles` is empty                                      | [`LoadError::SchemaError`] |
 /// | Correlation matrix not square                            | [`LoadError::SchemaError`] |
 /// | Matrix row count != entity count                         | [`LoadError::SchemaError`] |
@@ -230,23 +245,6 @@ pub fn parse_correlation(path: &Path) -> Result<CorrelationModel, LoadError> {
 /// Called before conversion so that error messages can reference JSON field
 /// paths rather than Rust field names.
 fn validate_raw(raw: &RawCorrelationFile, path: &Path) -> Result<(), LoadError> {
-    if raw.method.is_empty() {
-        return Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: "method".to_string(),
-            message: "method must not be empty".to_string(),
-        });
-    }
-
-    // Unrecognized methods warn but are not rejected (forward compatibility).
-    if raw.method != "spectral" && raw.method != "cholesky" {
-        tracing::warn!(
-            method = %raw.method,
-            path = %path.display(),
-            "unrecognized correlation method; expected 'spectral' or 'cholesky'"
-        );
-    }
-
     if raw.profiles.is_empty() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
@@ -398,7 +396,9 @@ fn convert(raw: RawCorrelationFile) -> CorrelationModel {
         .collect();
 
     CorrelationModel {
-        method: raw.method,
+        method: match raw.method {
+            CorrelationMethod::Spectral => "spectral".to_string(),
+        },
         profiles,
         schedule,
     }
@@ -488,7 +488,6 @@ mod tests {
         assert_eq!(group.name, "all_hydros");
         assert_eq!(group.entities.len(), 3);
         assert!((group.matrix[1][1] - 1.0).abs() < f64::EPSILON);
-        assert_eq!(group.entities.len(), 3);
         assert_eq!(group.entities[0].id, EntityId(10));
         assert_eq!(group.entities[0].entity_type, "inflow");
         assert_eq!(group.entities[1].id, EntityId(20));
@@ -855,6 +854,8 @@ mod tests {
         }
     }
 
+    /// An empty `method` is not one of the accepted variants, so it is rejected
+    /// at parse (`ParseError`) rather than warned-and-accepted.
     #[test]
     fn test_empty_method_rejected() {
         let json = r#"{
@@ -874,14 +875,41 @@ mod tests {
         let tmp = write_json(json);
         let err = parse_correlation(tmp.path()).unwrap_err();
 
+        assert!(
+            matches!(err, LoadError::ParseError { .. }),
+            "expected ParseError for an empty method, got: {err:?}"
+        );
+    }
+
+    /// An unrecognized `method` is rejected at parse (the tightening: no
+    /// warn-and-continue), and the serde error names the accepted set.
+    #[test]
+    fn unknown_method_is_rejected_naming_accepted_set() {
+        let json = r#"{
+  "method": "bogus",
+  "profiles": {
+    "default": {
+      "correlation_groups": [
+        {
+          "name": "g",
+          "entities": [{ "type": "inflow", "id": 0 }],
+          "matrix": [[1.0]]
+        }
+      ]
+    }
+  }
+}"#;
+        let tmp = write_json(json);
+        let err = parse_correlation(tmp.path()).unwrap_err();
+
         match &err {
-            LoadError::SchemaError { field, .. } => {
+            LoadError::ParseError { message, .. } => {
                 assert!(
-                    field.contains("method"),
-                    "field should contain 'method', got: {field}"
+                    message.contains("spectral"),
+                    "message should name the accepted set, got: {message}"
                 );
             }
-            other => panic!("expected SchemaError, got: {other:?}"),
+            other => panic!("expected ParseError, got: {other:?}"),
         }
     }
 
@@ -917,10 +945,11 @@ mod tests {
         assert!((model.profiles["default"].groups[0].matrix[0][0] - 1.0).abs() < f64::EPSILON);
     }
 
-    /// `"cholesky"` must still load without error — backward compatibility with
-    /// existing case files (the default is `"spectral"`).
+    /// `method: cholesky` is now an unknown-variant load error naming the
+    /// accepted set — the intended compat-break; it never drove a distinct
+    /// decomposition.
     #[test]
-    fn parse_accepts_cholesky_method() {
+    fn cholesky_method_is_rejected() {
         let json = r#"{
   "method": "cholesky",
   "profiles": {
@@ -942,13 +971,16 @@ mod tests {
   }
 }"#;
         let tmp = write_json(json);
-        let model = parse_correlation(tmp.path()).unwrap();
+        let err = parse_correlation(tmp.path()).unwrap_err();
 
-        assert_eq!(
-            model.method, "cholesky",
-            "cholesky must be accepted for backward compat"
-        );
-        assert_eq!(model.profiles.len(), 1);
-        assert!(model.schedule.is_empty());
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("spectral"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
     }
 }

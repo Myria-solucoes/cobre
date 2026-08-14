@@ -46,7 +46,9 @@ NO_ARC_CASE = _REPO_ROOT / "examples" / "1dtoy"
 # `in_transit_schema()` in cobre-io's schemas.rs. A schema drift (added/removed/
 # renamed column) fails this test.
 IN_TRANSIT_SCHEMA_FIELDS = {
+    "scenario_id",
     "stage_id",
+    "node_id",
     "hydro_id",
     "lag",
     "in_transit_volume_hm3",
@@ -76,7 +78,10 @@ def _assert_in_transit_table_shape(parquet_path: pathlib.Path) -> None:
         f"got {sorted(schema_names)}"
     )
 
-    table = pq.read_table(parquet_path, columns=sorted(IN_TRANSIT_SCHEMA_FIELDS))
+    # Read the single file directly: scenario_id is now both the Hive partition
+    # key and an in-file column, so pq.read_table's dataset path would try to
+    # merge the two same-named fields and error. ParquetFile reads only the file.
+    table = pq.ParquetFile(parquet_path).read(columns=sorted(IN_TRANSIT_SCHEMA_FIELDS))
     cols = table.to_pydict()
     assert table.num_rows > 0, "the travel-time partition must carry at least one row"
 

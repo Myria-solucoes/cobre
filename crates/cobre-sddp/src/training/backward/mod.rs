@@ -28,9 +28,10 @@
 //!
 //! Anticipated-ring slots resolve by identity (`state_to_lp_column`, the
 //! `transit_buckets_out` convention): the in-LP ring's definition rows — a
-//! plain shift for slot `i < K_p-1`, the delivery-decision deposit for plant
-//! `p`'s own newest slot `K_p-1` — resolve the ring transition, so cuts apply
-//! directly against the outgoing `anticipated_slots_out` column. The fishing
+//! same-slot carry (`out − in = 0`) for a not-yet-due slot, the
+//! delivery-decision deposit into the slot of a decision's own delivery target
+//! (`delivery_stage mod k_max`) — resolve the ring transition, so cuts apply
+//! directly against the outgoing `commit_out` column. The fishing
 //! constraint is emitted at every stage unconditionally, so every slot
 //! participates in the dual chain. See the `StateSpace::state_to_lp_column`
 //! rustdoc.
@@ -48,30 +49,38 @@
 //! stage `t+1`); the inner trial-point loop is parallelised across
 //! [`SolverWorkspace`](crate::workspace::SolverWorkspace) instances with static
 //! scenario partitioning. Each worker generates cuts into a thread-local
-//! `StagedCut` buffer, sorted by `trial_point_idx` after the parallel region for
+//! `StagedCut` buffer, sorted by `trial_state_idx` after the parallel region for
 //! deterministic FCF insertion regardless of thread completion order.
 
 use cobre_solver::{RowBatch, StageTemplate};
 
-use crate::{cut::pool::CutPool, indexer::CutStateProjection, solver_stats::SolverStatsDelta};
+use crate::{
+    cut::pool::CutPool,
+    indexer::CutStateProjection,
+    setup::node_graph::{NodeId, NodeOpenings, NodePos, StageIdx},
+    solver_stats::SolverStatsDelta,
+};
 
 use std::ops::Range;
 
+mod by_node;
+mod by_scenario;
 mod duals_extraction;
 mod lp_setup;
-mod opening_block;
 mod outcome_aggregation;
-mod trial_point;
+mod replicated;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use opening_block::{
-    OpeningOutcome, hardest_first_block_order, identity_block_order, merge_block_pivots,
-    opening_block_count, opening_block_finish, process_stage_backward_opening_block,
-    resolve_block_size,
+pub(crate) use by_node::{
+    OpeningOutcome, by_node_block_count, by_node_finish, hardest_first_block_order,
+    identity_block_order, merge_block_pivots, process_stage_backward_by_node, resolve_block_size,
 };
-pub(crate) use trial_point::{StageOpeningSolver, process_trial_point_backward};
+pub(crate) use by_scenario::{StageOpeningSolver, process_by_scenario_backward};
+pub(crate) use duals_extraction::extract_state_duals_only;
+pub(crate) use lp_setup::fill_external_opening_noise;
+pub(crate) use replicated::{ReplicatedScratch, run_backward_node_replicated};
 
 #[cfg(test)]
 pub(crate) use lp_setup::{load_backward_lp, patch_opening_bounds, resolve_backward_basis};
@@ -105,13 +114,15 @@ pub struct BackwardResult {
 
     /// Per-stage, per-`(rank, worker_id, opening)` solver statistics deltas.
     ///
-    /// Each outer entry is `(successor_stage_index, per_worker_opening_deltas)`.
-    /// The inner `Vec` element is `(rank, worker_id, omega, delta)`: one entry per
-    /// `(MPI rank, rayon worker, opening index)` triple gathered via `allgatherv`.
-    /// Only includes entries where `omega < n_openings(successor)` AND
-    /// `delta.lp_solves > 0 || omega == 0` (preserves the omega=0 "stage visited"
-    /// sentinel while skipping padded buffer slots).
-    /// Entries are in reverse stage order (matching the backward iteration direction).
+    /// Each outer entry is `(successor_stage_index, per_worker_opening_deltas)`;
+    /// the inner `Vec` element is `(rank, worker_id, omega, delta)`. The sampled
+    /// path gathers one entry per `(MPI rank, rayon worker, opening)` triple via
+    /// `allgatherv`, filtered to `omega < n_openings(successor)` and
+    /// `delta.lp_solves > 0 || omega == 0` (the omega=0 "stage visited"
+    /// sentinel), in reverse stage order. The enumerated path has no
+    /// per-worker/per-opening breakdown: one `(rank, worker_id, 0, delta)` entry
+    /// per visited successor stage (`delta.lp_solves > 0`), in ascending stage
+    /// order.
     pub stage_stats: Vec<(usize, Vec<StageWorkerOpeningDelta>)>,
 
     /// Wall-clock time for state exchange (`allgatherv`) accumulated across
@@ -155,12 +166,12 @@ pub struct BackwardResult {
 ///
 /// Each worker thread populates one `StagedCut` per trial point instead of
 /// writing directly into the `FutureCostFunction`. After the parallel region,
-/// staged cuts are sorted by `trial_point_idx` and merged into the FCF in
+/// staged cuts are sorted by `trial_state_idx` and merged into the FCF in
 /// deterministic order regardless of thread completion order.
 pub(crate) struct StagedCut {
     /// Local trial-point index within `0..local_work`. Used for deterministic
     /// merge ordering after the parallel region.
-    pub(crate) trial_point_idx: usize,
+    pub(crate) trial_state_idx: usize,
 
     /// Aggregated cut intercept (result of `RiskMeasure::aggregate_cut`).
     pub(crate) intercept: f64,
@@ -177,42 +188,171 @@ pub(crate) struct StagedCut {
     pub(crate) forward_pass_index: u32,
 }
 
-/// Per-successor data bundled for `process_stage_backward` and the trial-point helper.
-///
-/// Groups the successor-specific arguments — including the stage index `t`,
-/// opening probabilities, pre-built cut batch, and cut activity metadata —
-/// to keep per-function argument counts at or below seven.
+/// Node-level backward-pass arguments at one cut-generating node, shared across
+/// every successor child. The per-child successor data lives in
+/// [`SuccessorOutcomes`]; a child is priced against ITS OWN LP, never child 0's.
 pub(crate) struct SuccessorSpec<'a> {
     /// Stage index being cut (the stage whose cost-to-go we are computing).
-    pub(crate) t: usize,
-    /// Successor stage index (`t + 1`), where the LP is actually solved.
-    pub(crate) successor: usize,
+    pub(crate) t: StageIdx,
+    /// Successor stage index (`t + 1`), where the LPs are solved. Every child of
+    /// the node sits at this one stage (`t -> t+1`, no stage-skipping — validation
+    /// rule 39), so it is node-level, not per-child.
+    pub(crate) successor: StageIdx,
     /// This rank's MPI rank index (used to address exchange buffer state).
     pub(crate) my_rank: usize,
-    /// Uniform opening probabilities for the successor stage.
+    /// Product weights `P(n→m) · q_{m,ψ}` over the current node's successor
+    /// outcome set `O(n) = {(m, ψ): m ∈ n⁺, ψ ∈ Ω_m}`, flattened in canonical
+    /// order (ascending child node id, then within-child ω) — the same order the
+    /// [`SuccessorOutcomes`] entries and their `outcome_range`s follow.
     pub(crate) probabilities: &'a [f64],
-    /// Pre-built cut rows to append to each successor LP.
-    /// Delta batch when freeze is active, full active-cut batch otherwise.
-    pub(crate) cut_batch: &'a RowBatch,
-    /// Total number of active cuts at the successor stage for dual extraction.
-    /// Includes both frozen and delta cuts contiguous after `template_num_rows`.
-    pub(crate) num_cuts_at_successor: usize,
-    /// Base row count of the successor template (excludes cuts).
-    pub(crate) template_num_rows: usize,
-    /// Frozen LP template for the successor stage. Always populated — freeze
-    /// is complete before the backward pass begins.
-    pub(crate) frozen_template: &'a StageTemplate,
-    /// Ordered slot indices of the active cuts at the successor stage.
-    pub(crate) successor_active_slots: &'a [usize],
-    /// Minimum dual multiplier for a cut to count as binding.
-    pub(crate) cut_activity_tolerance: f64,
-    /// Populated count of the successor's cut pool.
-    pub(crate) successor_populated_count: usize,
-    /// Cut pool at the successor stage for binding-activity tracking.
-    pub(crate) successor_pool: &'a CutPool,
-    /// Cut-state projection for the pool this stage's cut is inserted into (pool
-    /// `t`, sized from `stages[t+1].state_config`): the LP incoming-state columns
-    /// dual extraction reads and the dimension every per-stage backward buffer is
-    /// sized to. `n_slots()` equals `successor_pool.state_dimension`.
+    /// Cut-state projection for the pool this stage's cut is inserted into
+    /// (the pool id resolved from the node graph for the node at stage `t`,
+    /// sized from its successor's `state_config`): the LP incoming-state
+    /// columns dual extraction reads. `n_slots()` equals every successor pool's
+    /// `state_dimension` (all children share one stage and `state_config`).
     pub(crate) cut_state: &'a CutStateProjection,
+}
+
+/// Owned per-child metadata for one successor outcome. Borrow-free so it lives in a
+/// reused per-node buffer (no hot-path allocation); the pool-indexed LP data
+/// (frozen template, delta cut batch, active slots, cut pool) is resolved on demand
+/// by [`SuccessorOutcomes::child`].
+pub(crate) struct SuccessorEntry {
+    /// Child's canonical node position (`NodeGraph::nodes` index) — the warm-start
+    /// `BasisStore` node-axis key. On the chain degeneracy equal to the successor stage.
+    pub(crate) successor_node: NodePos,
+    /// Child's declared node id (`NodeGraph::node_ids[successor_node]`).
+    pub(crate) successor_node_id: NodeId,
+    /// Child's pool id (`FutureCostFunction::pools` index).
+    pub(crate) pool_id: usize,
+    /// Total active cuts at the child for dual extraction — the child's OWN frozen
+    /// pool rows plus the child's OWN delta (mixing pools corrupts warm-start slots).
+    pub(crate) num_cuts_at_successor: usize,
+    /// Populated count of the child's cut pool.
+    pub(crate) populated_count: usize,
+    /// This child's slice of the shared active-slots buffer.
+    pub(crate) active_slots: Range<usize>,
+    /// Base offset of this child's cut pool's region in the concatenated
+    /// binding-metadata buffers (`slot_increments`/`metadata_sync_contribution`) —
+    /// so each child's binding metadata lands in ITS OWN pool's slots, never child
+    /// 0's. Two children never share a non-empty pool (a non-leaf owns its own pool;
+    /// leaves share an empty terminal pool), so per-child offsets separate distinct
+    /// pools while shared empty-pool children stay collision-free (`populated == 0`).
+    pub(crate) metadata_offset: usize,
+    /// Child's Ω view (source + offset + len).
+    pub(crate) openings: NodeOpenings,
+    /// This child's contiguous slice of the flattened outcome/weight vector.
+    pub(crate) outcome_range: Range<usize>,
+}
+
+/// A fully-resolved successor child: [`SuccessorEntry`] metadata plus the
+/// pool-indexed LP data resolved from the node's arrays. The leaf backward helpers
+/// read per-child data from this, so pricing a child against another child's LP —
+/// the child-0 collapse — is unrepresentable.
+pub(crate) struct SuccessorChild<'a> {
+    /// Child's canonical node position — the warm-start `BasisStore` node-axis key.
+    pub(crate) successor_node: NodePos,
+    /// Child's declared node id — tags the captured basis and the solve target.
+    pub(crate) successor_node_id: NodeId,
+    /// Child's pool id.
+    pub(crate) pool_id: usize,
+    /// Child's frozen LP template (`frozen[pool_id]`).
+    pub(crate) frozen_template: &'a StageTemplate,
+    /// Child's delta cut rows to append to its LP (`cut_batches[pool_id]`).
+    pub(crate) cut_batch: &'a RowBatch,
+    /// Total active cuts at the child (frozen pool rows + delta).
+    pub(crate) num_cuts_at_successor: usize,
+    /// Base row count of the successor stage template (node-level; excludes cuts).
+    pub(crate) template_num_rows: usize,
+    /// Minimum dual multiplier for a cut to count as binding (node-level).
+    pub(crate) cut_activity_tolerance: f64,
+    /// Ordered slot indices of the child's active cuts.
+    pub(crate) successor_active_slots: &'a [usize],
+    /// Populated count of the child's cut pool.
+    pub(crate) populated_count: usize,
+    /// Base offset of the child's pool region in the binding-metadata buffers.
+    pub(crate) metadata_offset: usize,
+    /// Child's cut pool (binding-activity tracking, basis-capture metadata).
+    pub(crate) successor_pool: &'a CutPool,
+    /// Child's Ω view (source + offset + len).
+    pub(crate) openings: NodeOpenings,
+    /// This child's contiguous slice of the flattened outcome/weight vector.
+    pub(crate) outcome_range: Range<usize>,
+}
+
+/// The current node's reified successor outcome set: one [`SuccessorEntry`] per
+/// child, canonical order (ascending child node id, then within-child ω — the order
+/// `assemble_outcome_weights` produces, so the weight slices align with the outcome
+/// arena by construction), over the node's pool-indexed LP arrays. A chain is the
+/// one-element case — chain byte-parity is preserved by that degeneracy, never by a
+/// graph-shape predicate.
+pub(crate) struct SuccessorOutcomes<'a> {
+    entries: &'a [SuccessorEntry],
+    active_slots_buf: &'a [usize],
+    frozen: &'a [StageTemplate],
+    cut_batches: &'a [RowBatch],
+    pools: &'a [CutPool],
+    template_num_rows: usize,
+    cut_activity_tolerance: f64,
+}
+
+impl<'a> SuccessorOutcomes<'a> {
+    /// Build the view over the reused metadata buffer and the node's pool-indexed
+    /// arrays.
+    pub(crate) fn new(
+        entries: &'a [SuccessorEntry],
+        active_slots_buf: &'a [usize],
+        frozen: &'a [StageTemplate],
+        cut_batches: &'a [RowBatch],
+        pools: &'a [CutPool],
+        template_num_rows: usize,
+        cut_activity_tolerance: f64,
+    ) -> Self {
+        Self {
+            entries,
+            active_slots_buf,
+            frozen,
+            cut_batches,
+            pools,
+            template_num_rows,
+            cut_activity_tolerance,
+        }
+    }
+
+    pub(crate) fn n_children(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Total flattened outcomes `Σ_(m∈successors)|Ω_m|`; must equal `probabilities.len()`.
+    pub(crate) fn total_outcomes(&self) -> usize {
+        self.entries.iter().map(|e| e.outcome_range.len()).sum()
+    }
+
+    /// Total length of the per-worker binding-metadata buffers: the sum of every
+    /// child's cut-pool populated count, so each child's pool occupies its own
+    /// non-overlapping slot region (`metadata_offset..metadata_offset + populated`).
+    pub(crate) fn total_metadata_len(&self) -> usize {
+        self.entries.iter().map(|e| e.populated_count).sum()
+    }
+
+    /// Resolve child `i`'s full LP bundle from the pool-indexed arrays.
+    pub(crate) fn child(&self, i: usize) -> SuccessorChild<'a> {
+        let e = &self.entries[i];
+        SuccessorChild {
+            successor_node: e.successor_node,
+            successor_node_id: e.successor_node_id,
+            pool_id: e.pool_id,
+            frozen_template: &self.frozen[e.pool_id],
+            cut_batch: &self.cut_batches[e.pool_id],
+            num_cuts_at_successor: e.num_cuts_at_successor,
+            template_num_rows: self.template_num_rows,
+            cut_activity_tolerance: self.cut_activity_tolerance,
+            successor_active_slots: &self.active_slots_buf[e.active_slots.clone()],
+            populated_count: e.populated_count,
+            metadata_offset: e.metadata_offset,
+            successor_pool: &self.pools[e.pool_id],
+            openings: e.openings,
+            outcome_range: e.outcome_range.clone(),
+        }
+    }
 }

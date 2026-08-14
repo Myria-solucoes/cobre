@@ -23,13 +23,64 @@
 
 mod common;
 
+use chrono::{NaiveDate, TimeDelta};
+use cobre_core::{AnticipatedCommitmentHistory, EntityId};
+
+/// One windowed commitment per value, tiling stage `i`'s
+/// `[anchor + i*days_per_stage, anchor + (i+1)*days_per_stage)` span for `i`
+/// in `0..values.len()`.
+///
+/// `StageCalendar::coverage` (`cobre-stochastic`) resolves fractional overlap
+/// against each stage's own real `[start_date, end_date)` calendar span, so a
+/// window's `days_per_stage` must equal the matching `daily_stage_dates` call
+/// that built the fixture's `Stage`s — the two must derive from the same
+/// `anchor`/`days_per_stage`, or the window and the stage it should fully
+/// cover disagree and `build_initial_state`'s commitment-hold seed silently never
+/// writes the value (`fraction != 1.0`).
+fn windowed_commitments_daily(
+    thermal_id: EntityId,
+    anchor: NaiveDate,
+    days_per_stage: i64,
+    values: &[f64],
+) -> Vec<AnticipatedCommitmentHistory> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, &value_mw)| AnticipatedCommitmentHistory {
+            thermal_id,
+            start_date: anchor + TimeDelta::days(days_per_stage * i as i64),
+            end_date: anchor + TimeDelta::days(days_per_stage * (i as i64 + 1)),
+            value_mw,
+        })
+        .collect()
+}
+
+/// Sequential stage boundary dates for `n_stages` stages of
+/// `days_per_stage` days each, starting at `anchor` — pass the SAME
+/// `anchor`/`days_per_stage` to [`windowed_commitments_daily`] so a
+/// commitment window's span matches a `Stage`'s own span exactly.
+fn daily_stage_dates(
+    anchor: NaiveDate,
+    n_stages: usize,
+    days_per_stage: i64,
+) -> Vec<(NaiveDate, NaiveDate)> {
+    (0..n_stages)
+        .map(|i| {
+            (
+                anchor + TimeDelta::days(days_per_stage * i as i64),
+                anchor + TimeDelta::days(days_per_stage * (i as i64 + 1)),
+            )
+        })
+        .collect()
+}
+
 mod anticipated_5stage_k2_smoke {
     //! Smoke test for K=2 anticipated thermal dispatch, 5 stages: structural
     //! assertions only. No `EXPECTED_LB` is pinned — this fixture has no closed form,
     //! so a pinned value would certify stability, not correctness. Value-correctness
     //! is the `anticipated_closed_form_lb_k1_single_thermal` canary in
     //! `anticipated_core.rs`; this defends multi-stage state propagation, the K=2
-    //! ring-buffer shift, and basis-cache capture.
+    //! commitment-hold carry, and basis-cache capture.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -42,12 +93,13 @@ mod anticipated_5stage_k2_smoke {
         StageStateConfig,
     };
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -171,13 +223,15 @@ mod anticipated_5stage_k2_smoke {
         );
 
         let n_stages = 5_usize;
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, n_stages, 31);
         let stages: Vec<Stage> = (0..n_stages)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -235,13 +289,9 @@ mod anticipated_5stage_k2_smoke {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -324,12 +374,15 @@ mod anticipated_5stage_k2_smoke {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: vec![100.0, 50.0],
-            }],
+            past_anticipated_commitments: super::windowed_commitments_daily(
+                anticipated_id,
+                calendar_anchor,
+                31,
+                &[100.0, 50.0],
+            ),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -353,6 +406,7 @@ mod anticipated_5stage_k2_smoke {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -363,13 +417,13 @@ mod anticipated_5stage_k2_smoke {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 8 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -403,7 +457,7 @@ mod anticipated_5stage_k2_smoke {
 
         let result = &outcome.result;
         let state = setup.stage_state();
-        let anticipated_slots_out_start = state.anticipated_slots_out.start;
+        let commit_out_start = state.commit_out.start;
         let n_anticipated = state.n_anticipated;
 
         assert_training_converged_structurally(result, &[], 8);
@@ -412,13 +466,13 @@ mod anticipated_5stage_k2_smoke {
         // at t+K in {2,3,4}.
         assert_anticipated_delivery_slots_populated(
             result,
-            anticipated_slots_out_start,
+            commit_out_start,
             n_anticipated,
             &[2, 3, 4],
         );
     }
 
-    /// Warm-start regression: the anticipated ring's `anticipated_slots_out` block
+    /// Warm-start regression: the anticipated ring's `commit_out` block
     /// shifts every downstream column by `n_anticipated * k_max`. `reconstruct_basis`
     /// matches stored cut rows by `CutPool` slot identity, never absolute column index,
     /// so the shift must stay transparent — zero `basis_consistency_failures`.
@@ -464,25 +518,29 @@ mod anticipated_two_plants_smoke {
     //! Training lower bound for a 6-stage system with 2 anticipated thermals
     //! (K_1=2, K_2=4), 1 backup thermal, and 1 hydro.
     //!
-    //! With `n_anticipated=2` and `K_max=4`, the anticipated-state block has
-    //! `2 * 4 = 8` columns in slot-major, plant-minor order — the index arithmetic
-    //! the assertions below depend on:
+    //! With `n_anticipated=2` and `K_max=4`, the commitment-hold block has
+    //! `2 * 4 = 8` columns in slot-major, plant-minor order
+    //! (`ant_start + slot * n_anticipated + plant`) — the index arithmetic the
+    //! assertions below depend on:
     //!
     //! ```text
-    //! ant_start + 0 = slot 0, plant 0  (K=2 plant — delivery slot)
-    //! ant_start + 1 = slot 0, plant 1  (K=4 plant — delivery slot)
-    //! ant_start + 2 = slot 1, plant 0  (K=2 plant — decision slot)
-    //! ant_start + 3 = slot 1, plant 1  (K=4 plant)
-    //! ant_start + 4 = slot 2, plant 0  (PADDING for K=2 plant)
-    //! ant_start + 5 = slot 2, plant 1  (K=4 plant)
-    //! ant_start + 6 = slot 3, plant 0  (PADDING for K=2 plant)
-    //! ant_start + 7 = slot 3, plant 1  (K=4 plant — decision slot)
+    //! ant_start + 0 = slot 0, plant 0  (K=2)
+    //! ant_start + 1 = slot 0, plant 1  (K=4)
+    //! ant_start + 2 = slot 1, plant 0  (K=2)
+    //! ant_start + 3 = slot 1, plant 1  (K=4)
+    //! ant_start + 4 = slot 2, plant 0  (K=2)
+    //! ant_start + 5 = slot 2, plant 1  (K=4)
+    //! ant_start + 6 = slot 3, plant 0  (K=2)
+    //! ant_start + 7 = slot 3, plant 1  (K=4)
     //! ```
     //!
-    //! The shift invariant asserts slot 1 at stage `t` equals slot 0 at stage `t+1`.
-    //! It uses t=1→t=2, not t=0→t=1: at t=0 `basis_cache[0]` and `basis_cache[1]`
-    //! carry the same state (the trivial identity), so t=1→t=2 exercises a genuine
-    //! backward-to-backward ring advancement.
+    //! Under the HOLD geometry each commitment is held at its delivery-target modular
+    //! slot (`m mod k_max`) until it matures — the ring never shifts slots. The carry
+    //! invariant asserts a not-yet-matured commitment (plant 1's slot-3 delivery, held
+    //! across stages 0-2) keeps the SAME slot across the consecutive forward-outgoing
+    //! captures `basis_cache[1]` (stage 0) and `basis_cache[2]` (stage 1). It uses
+    //! stage 0->1, not the trivial `basis_cache[0] == basis_cache[1]` identity, so it
+    //! exercises a genuine forward-to-forward hold advancement.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -495,12 +553,13 @@ mod anticipated_two_plants_smoke {
         StageStateConfig,
     };
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -517,7 +576,7 @@ mod anticipated_two_plants_smoke {
 
     // Pinned from a converged run of this fixture (no closed form); re-pin only
     // after a deliberate fixture change.
-    const EXPECTED_LB: f64 = 0.0_f64;
+    const EXPECTED_LB: f64 = 13_020_000.000_000_002_f64;
 
     // ---------------------------------------------------------------------------
     // System builder
@@ -643,13 +702,15 @@ mod anticipated_two_plants_smoke {
         );
 
         let n_stages = 6_usize;
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, n_stages, 31);
         let stages: Vec<Stage> = (0..n_stages)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -707,13 +768,9 @@ mod anticipated_two_plants_smoke {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -798,18 +855,19 @@ mod anticipated_two_plants_smoke {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![
-                AnticipatedCommitmentHistory {
-                    thermal_id: ant_id_k2,
-                    values_mw: vec![60.0, 30.0],
-                },
-                AnticipatedCommitmentHistory {
-                    thermal_id: ant_id_k4,
-                    values_mw: vec![20.0, 25.0, 30.0, 35.0],
-                },
-            ],
+            past_anticipated_commitments: [
+                super::windowed_commitments_daily(ant_id_k2, calendar_anchor, 31, &[60.0, 30.0]),
+                super::windowed_commitments_daily(
+                    ant_id_k4,
+                    calendar_anchor,
+                    31,
+                    &[20.0, 25.0, 30.0, 35.0],
+                ),
+            ]
+            .concat(),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -833,6 +891,7 @@ mod anticipated_two_plants_smoke {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -843,13 +902,13 @@ mod anticipated_two_plants_smoke {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 12 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -903,13 +962,36 @@ mod anticipated_two_plants_smoke {
          If intentional, update EXPECTED_LB."
         );
 
+        // Convergence certificate. This fixture is a single deterministic path
+        // (branching_factor 1, one forward pass), so the forward simulation is a
+        // feasible policy whose cost bounds the optimum from above while the cuts
+        // bound it from below: final_lb <= optimum <= final_ub. A closed gap
+        // therefore certifies final_lb IS the extensive-form optimum, independent
+        // of its magnitude — and covers the heterogeneous-lead ring (a K=2 and a
+        // K=4 plant sharing one k_max=4 ring) the single-plant closed-form anchors
+        // do not reach. final_ub_std == 0 confirms final_ub is that exact point
+        // cost, not a Monte Carlo estimate, so the gap is a point certificate.
+        let lb = result.final_lb;
+        let ub = result.final_ub;
+        let convergence_gap = (lb - ub).abs() / ub.abs().max(1.0);
+        assert!(
+            convergence_gap < 1e-9,
+            "LB==UB convergence certificate failed: final_lb={lb}, final_ub={ub}, \
+         gap={convergence_gap} (must be < 1e-9 for a converged deterministic run)."
+        );
+        assert!(
+            result.final_ub_std < 1e-6,
+            "single deterministic forward path must yield ~zero UB std; got {}",
+            result.final_ub_std
+        );
+
         let state = setup.stage_state();
         assert_eq!(state.n_anticipated, 2);
         assert_eq!(state.k_max, 4);
 
         let n_anticipated = state.n_anticipated;
         let k_max = state.k_max;
-        let ant_start = state.anticipated_slots_out.start;
+        let ant_start = state.commit_out.start;
         let ant_block_len = n_anticipated * k_max;
 
         let basis_cache = &result.basis_cache;
@@ -938,12 +1020,26 @@ mod anticipated_two_plants_smoke {
             .state_at_capture
             .as_slice();
 
-        let slot1_p0_at_stage1 = s1[ant_start + n_anticipated];
-        let slot0_p0_at_stage2 = s2[ant_start];
+        // HOLD (carry, not shift): a not-yet-matured commitment is held in its
+        // OWN modular slot across forward stages, never shifted to a lower slot.
+        // Plant 1 (K=4, id 5) holds its delivery-3 commitment in slot `3 mod 4 = 3`
+        // across stages 0-2, maturing only at stage 3, so the SAME slot carries the
+        // same value across the consecutive forward-outgoing captures bc[1] (stage
+        // 0) and bc[2] (stage 1). Under the retired shift geometry this invariant
+        // instead read `slot 1 @ stage t == slot 0 @ stage t+1`.
+        let plant1 = 1_usize;
+        let slot3_p1 = ant_start + 3 * n_anticipated + plant1;
         assert!(
-            (slot1_p0_at_stage1 - slot0_p0_at_stage2).abs() < 1e-9,
-            "ring-buffer shift invariant violated: slot-1@stage-1={slot1_p0_at_stage1}, \
-         slot-0@stage-2={slot0_p0_at_stage2}"
+            s1[slot3_p1].abs() > 1e-9,
+            "carry check must exercise a non-zero held commitment; got {}",
+            s1[slot3_p1]
+        );
+        assert!(
+            (s1[slot3_p1] - s2[slot3_p1]).abs() < 1e-9,
+            "commitment-hold carry violated: plant 1's slot-3 commitment must be held \
+         in place across the forward transition (bc[1]={}, bc[2]={}), not shifted",
+            s1[slot3_p1],
+            s2[slot3_p1]
         );
     }
 }
@@ -957,6 +1053,7 @@ mod anticipated_simulation_ring_buffer {
     //!
     //! not the seeded `past_anticipated_commitments` a broken ring would surface.
 
+    use cobre_io::config::{SimulationSelection, TrainingSelection};
     use std::sync::mpsc;
 
     use cobre_core::entities::{
@@ -970,11 +1067,11 @@ mod anticipated_simulation_ring_buffer {
         StageStateConfig,
     };
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -998,8 +1095,9 @@ mod anticipated_simulation_ring_buffer {
     /// expensive backup (id 4), 150 MW load, ring seeded with `past_commitments_mw`.
     ///
     /// The non-zero seed is intentional: constructing `System` directly via
-    /// `SystemBuilder::new()` bypasses `cobre-io`'s validator that rejects non-zero
-    /// `values_mw` — that rule applies to JSON through `load_case`, not here.
+    /// `SystemBuilder::new()` bypasses `cobre-io`'s semantic validation of
+    /// `past_anticipated_commitments` (coverage tiling, commissioning-window
+    /// checks) — those rules apply to JSON through `load_case`, not here.
     fn build_system(
         k: usize,
         past_commitments_mw: Vec<f64>,
@@ -1108,13 +1206,15 @@ mod anticipated_simulation_ring_buffer {
             },
         );
 
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, n_stages, 31);
         let stages: Vec<Stage> = (0..n_stages)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -1169,13 +1269,9 @@ mod anticipated_simulation_ring_buffer {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 1.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 1.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -1271,12 +1367,15 @@ mod anticipated_simulation_ring_buffer {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: past_commitments_mw,
-            }],
+            past_anticipated_commitments: super::windowed_commitments_daily(
+                anticipated_id,
+                calendar_anchor,
+                31,
+                &past_commitments_mw,
+            ),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -1300,6 +1399,7 @@ mod anticipated_simulation_ring_buffer {
     fn build_config(training_iters: u32) -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -1310,22 +1410,22 @@ mod anticipated_simulation_ring_buffer {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: training_iters,
                 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
             simulation: IoSimulationConfig {
                 enabled: true,
-                num_scenarios: 1,
                 io_channel_capacity: 8,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
                 ..IoSimulationConfig::default()
             },
             exports: ExportsConfig::default(),
@@ -1338,7 +1438,9 @@ mod anticipated_simulation_ring_buffer {
     // ---------------------------------------------------------------------------
 
     /// K=1 case of the module-doc invariant: stage-1 matured commitment equals the
-    /// stage-0 decision, not the non-zero seed a missing ring-buffer shift surfaces.
+    /// stage-0 decision, not the non-zero seed a missing ring carry-advance surfaces.
+    /// (K=1 byte-stable across the shift-to-hold switchover: depth-1 ring, so hold and
+    /// shift render identical rows; the fn name predates the switchover.)
     #[test]
     fn simulation_ring_buffer_shifts_anticipated_state_k1() {
         let k: usize = 1;
@@ -1348,7 +1450,7 @@ mod anticipated_simulation_ring_buffer {
         // fixed paths agree and neuter the test.
         let seed: Vec<f64> = vec![7.0];
 
-        let system = build_system(k, seed.clone(), n_stages);
+        let system = build_system(k, seed, n_stages);
         let config = build_config(50);
         let mut setup = build_setup_in_code(system, &config);
         let comm = StubComm;
@@ -1426,7 +1528,7 @@ mod anticipated_simulation_ring_buffer {
             .expect("anticipated_committed_mw must be Some at stage 0 under always-active fishing");
         assert!(
             (c0 - 7.0).abs() < 1e-6,
-            "committed_at(0) must equal the K=1 seed values_mw[0]=7.0; got {c0}",
+            "committed_at(0) must equal the K=1 seed window[0].value_mw=7.0; got {c0}",
         );
         assert!(
             d0.abs() > 1e-6,
@@ -1436,27 +1538,28 @@ mod anticipated_simulation_ring_buffer {
         let c1 = committed_at(1).expect("committed at stage 1 must exist (K <= 1)");
         assert!(
             (c1 - d0).abs() < 1e-6,
-            "REGRESSION (ring-buffer shift): stage 1 committed ({c1}) must equal \
+            "REGRESSION (commitment-hold carry): stage 1 committed ({c1}) must equal \
          stage 0 decision ({d0}). On the buggy code path the ring buffer was \
-         never shifted in simulation, so stage 1's Cat 6 RHS carried the \
+         not advanced in simulation, so stage 1's fishing RHS carried the \
          residual `seed - d_0` (negative when d_0 > seed) and the LP was \
-         infeasible. With the shift, Cat 6 RHS = d_0 and gt_anticipated at \
-         stage 1 saturates at d_0 (cost zeroed at delivery).",
+         infeasible. With the carry advance, the fishing RHS = d_0 and gt_anticipated \
+         at stage 1 saturates at d_0 (cost zeroed at delivery).",
         );
     }
 
-    /// K=2 case of the module-doc invariant: the two pre-horizon stages read the seed
-    /// slots, and from stage 2 the matured commitment equals the decision made K=2
-    /// stages earlier (two shifts carry it into slot 0), never the seed, never zero.
+    /// K=2 case of the module-doc invariant: the two pre-horizon stages fish the seed
+    /// at their maturing modular slots, and from stage 2 the matured commitment equals
+    /// the decision made K=2 stages earlier (held at its slot until maturity), never the
+    /// seed, never zero.
     #[test]
-    fn simulation_ring_buffer_shifts_anticipated_state_k2() {
+    fn simulation_commitment_hold_carries_anticipated_state_k2() {
         let k: usize = 2;
         let n_stages: usize = 6;
         // Seed slots are distinct from d_0 (which saturates near the thermal max of
-        // 100), so neither slot can coincide with a decision and mask a missing shift.
+        // 100), so neither slot can coincide with a decision and mask a missing carry.
         let seed: Vec<f64> = vec![50.0, 30.0];
 
-        let system = build_system(k, seed.clone(), n_stages);
+        let system = build_system(k, seed, n_stages);
         let config = build_config(10);
         let mut setup = build_setup_in_code(system, &config);
         let comm = StubComm;
@@ -1511,19 +1614,20 @@ mod anticipated_simulation_ring_buffer {
                 .and_then(|th| th.anticipated_committed_mw)
         };
 
-        // Pre-horizon: stage 0 reads seed slot 0; stage 1 reads slot 1 after the
-        // stage-0 shift moves it into slot 0.
+        // Pre-horizon: stage 0 fishes its maturing slot `0 mod 2 = 0` (seed[0]);
+        // stage 1 fishes its maturing slot `1 mod 2 = 1` (seed[1]) — each seed is
+        // held at its own modular slot, never shifted.
         let c0 = committed_at(0)
             .expect("committed_at(0) must be Some under always-active fishing with K=2");
         assert!(
             (c0 - 50.0).abs() < 1e-6,
-            "committed_at(0) must equal K=2 seed values_mw[0]=50.0; got {c0}",
+            "committed_at(0) must equal K=2 seed window[0].value_mw=50.0; got {c0}",
         );
         let c1 = committed_at(1)
             .expect("committed_at(1) must be Some under always-active fishing with K=2");
         assert!(
             (c1 - 30.0).abs() < 1e-6,
-            "committed_at(1) must equal K=2 seed values_mw[1]=30.0 (shifted to slot 0); got {c1}",
+            "committed_at(1) must equal K=2 seed window[1].value_mw=30.0 (held at slot 1 mod 2); got {c1}",
         );
 
         let d0 = decision_at(0).expect("decision at stage 0 must exist (0 + K < n_stages)");
@@ -1536,11 +1640,11 @@ mod anticipated_simulation_ring_buffer {
         let c2 = committed_at(2).expect("committed at stage 2 must exist (K <= 2)");
         assert!(
             (c2 - d0).abs() < 1e-6,
-            "REGRESSION (ring-buffer shift, K=2): stage 2 committed ({c2}) must \
+            "REGRESSION (commitment-hold carry, K=2): stage 2 committed ({c2}) must \
          equal stage 0 decision ({d0}). On the buggy code path the ring \
-         buffer was never shifted in simulation, so stage 2's Cat 6 RHS \
-         carried a stale residual instead of the d_0 that the two shifts \
-         (end of stage 0, end of stage 1) propagated into slot 0.",
+         buffer was not advanced in simulation, so stage 2's fishing RHS \
+         carried a stale residual instead of the d_0 that was held at its \
+         modular slot from stage 0 until it matures at stage 2.",
         );
     }
 }
@@ -1550,17 +1654,17 @@ mod anticipated_generic_constraint_e2e {
     //! `anticipated_decision(N)`: one pins that a binding cap raises the lower bound,
     //! one that the validator rejects the reference on a non-anticipated thermal.
 
+    use cobre_io::config::TrainingSelection;
     use std::path::Path;
 
     use chrono::NaiveDate;
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ConstraintExpression, ConstraintSense, ContractBlockBounds, EntityId, GenericConstraint,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InitialConditions,
-        LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
-        ResolvedPenalties, SlackConfig, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
-        VariableRef,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ConstraintExpression,
+        ContractBlockBounds, EntityId, GenericConstraint, HydroBlockBounds, HydroStageBounds,
+        HydroStagePenalties, InitialConditions, LineBlockBounds, LineStagePenalties, LinearTerm,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
+        ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties, SlackConfig,
+        SystemBuilder, ThermalBlockBounds, ThermalStageBounds, VariableRef,
         entities::{bus::DeficitSegment, thermal::AnticipatedConfig},
         scenario::LoadModel,
         temporal::{
@@ -1664,13 +1768,15 @@ mod anticipated_generic_constraint_e2e {
             },
         );
 
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, N_STAGES, 1);
         let stages: Vec<Stage> = (0..N_STAGES)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -1719,15 +1825,7 @@ mod anticipated_generic_constraint_e2e {
                     filling_min_rate_m3s: 0.0,
                     water_withdrawal_m3s: 0.0,
                 },
-                hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 0.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 0.0,
-                    max_diversion_m3s: None,
-                },
+                hydro_block: HydroBlockBounds::default(),
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
@@ -1809,12 +1907,15 @@ mod anticipated_generic_constraint_e2e {
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: ANT_THERMAL_ID,
-                values_mw: vec![0.0, 0.0],
-            }],
+            past_anticipated_commitments: super::windowed_commitments_daily(
+                ANT_THERMAL_ID,
+                calendar_anchor,
+                1,
+                &[0.0, 0.0],
+            ),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         let mut builder = SystemBuilder::new()
@@ -1843,6 +1944,7 @@ mod anticipated_generic_constraint_e2e {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -1853,13 +1955,13 @@ mod anticipated_generic_constraint_e2e {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -1895,11 +1997,12 @@ mod anticipated_generic_constraint_e2e {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
 
         let config = build_config();
@@ -1907,9 +2010,17 @@ mod anticipated_generic_constraint_e2e {
 
         let id_map: std::collections::HashMap<i32, usize> =
             [(1_i32, 0_usize)].into_iter().collect();
-        let raw_bounds: Vec<(i32, i32, Option<i32>, f64)> = (0..N_STAGES as i32)
-            .map(|stage_id| (1_i32, stage_id, None::<i32>, CONSTRAINT_BOUND_MW))
-            .collect();
+        let raw_bounds = (0..N_STAGES as i32)
+            .map(|stage_id| {
+                (
+                    1_i32,
+                    stage_id,
+                    None::<i32>,
+                    None,
+                    Some(CONSTRAINT_BOUND_MW),
+                )
+            })
+            .collect::<Vec<_>>();
         let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, raw_bounds.into_iter());
 
         let constrained_system = build_system(vec![constraint], generic_bounds);
@@ -2029,7 +2140,6 @@ mod anticipated_generic_constraint_e2e {
       "id": 1,
       "name": "bad_constraint",
       "expression": "anticipated_decision(3)",
-      "sense": "<=",
       "slack": { "enabled": false }
     }
   ]
@@ -2043,7 +2153,7 @@ mod anticipated_generic_constraint_e2e {
             &constraints_dir.join("generic_constraint_bounds.parquet"),
             1,    // constraint_id
             0,    // stage_id
-            25.0, // bound
+            25.0, // bound_upper
         )
         .expect("write generic_constraint_bounds.parquet");
 
@@ -2058,28 +2168,28 @@ mod anticipated_generic_constraint_e2e {
       "start_date": "2024-01-01",
       "end_date": "2024-02-01",
       "blocks": [{ "id": 0, "name": "S", "hours": 744 }],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 1,
       "start_date": "2024-02-01",
       "end_date": "2024-03-01",
       "blocks": [{ "id": 0, "name": "S", "hours": 672 }],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 2,
       "start_date": "2024-03-01",
       "end_date": "2024-04-01",
       "blocks": [{ "id": 0, "name": "S", "hours": 744 }],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 3,
       "start_date": "2024-04-01",
       "end_date": "2024-05-01",
       "blocks": [{ "id": 0, "name": "S", "hours": 720 }],
-      "num_scenarios": 1
+      "num_openings": 1
     }
   ]
 }"#,
@@ -2094,7 +2204,8 @@ mod anticipated_generic_constraint_e2e {
   "storage": [],
   "filling_storage": [],
   "past_anticipated_commitments": [
-    { "thermal_id": 2, "values_mw": [0.0, 0.0] }
+    { "thermal_id": 2, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 },
+    { "thermal_id": 2, "start_date": "2024-02-01", "end_date": "2024-03-01", "value_mw": 0.0 }
   ]
 }"#,
         )
@@ -2132,10 +2243,10 @@ mod anticipated_generic_constraint_e2e {
             case_dir.join("config.json"),
             r#"{
   "training": {
-    "forward_passes": 1,
+    "selection": { "method": "sampled", "forward_passes": 1 },
     "stopping_rules": [{ "type": "iteration_limit", "limit": 2 }]
   },
-  "simulation": { "enabled": false, "num_scenarios": 1 },
+  "simulation": { "enabled": false },
   "modeling": { "inflow_non_negativity": { "method": "none" } }
 }"#,
         )
@@ -2164,7 +2275,7 @@ mod anticipated_generic_constraint_e2e {
         path: &Path,
         constraint_id: i32,
         stage_id: i32,
-        bound: f64,
+        bound_upper: f64,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use arrow::array::{Float64Array, Int32Array};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -2176,7 +2287,8 @@ mod anticipated_generic_constraint_e2e {
             Field::new("constraint_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
             Field::new("block_id", DataType::Int32, true),
-            Field::new("bound", DataType::Float64, false),
+            Field::new("bound_lower", DataType::Float64, true),
+            Field::new("bound_upper", DataType::Float64, true),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -2185,7 +2297,8 @@ mod anticipated_generic_constraint_e2e {
                 Arc::new(Int32Array::from(vec![constraint_id])),
                 Arc::new(Int32Array::from(vec![stage_id])),
                 Arc::new(Int32Array::new_null(1)),
-                Arc::new(Float64Array::from(vec![bound])),
+                Arc::new(Float64Array::new_null(1)),
+                Arc::new(Float64Array::from(vec![bound_upper])),
             ],
         )?;
 
@@ -2303,6 +2416,7 @@ mod d37_anticipated_commissioning_simulation {
     //! window, an undelivered pre-entry commitment, an un-drained ring) could still
     //! hash-match. This test exercises those paths through train + simulate.
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -2334,8 +2448,8 @@ mod d37_anticipated_commissioning_simulation {
         // deterministic scenario so the thermal extraction paths run.
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: 1,
             io_channel_capacity: 8,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
             ..SimulationConfig::default()
         };
 
@@ -2445,7 +2559,7 @@ mod d37_anticipated_commissioning_simulation {
 
         // The ring drains within K stages after exit: no in-window decision is made
         // after the last in-window delivery (stage EXIT-1), so by stage EXIT + K - 1
-        // the buffer has shifted all residual commitments out and committed MW reads 0.
+        // the buffer has drained all residual commitments and committed MW reads 0.
         let drain_stage = EXIT + K - 1;
         let committed_drain = t1_at(scenario, drain_stage)
             .anticipated_committed_mw
@@ -2548,12 +2662,13 @@ mod anticipated_commitment_at_cap {
         StageStateConfig,
     };
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -2678,13 +2793,15 @@ mod anticipated_commitment_at_cap {
         );
 
         let n_stages = 4_usize;
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, n_stages, 31);
         let stages: Vec<Stage> = (0..n_stages)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -2739,13 +2856,9 @@ mod anticipated_commitment_at_cap {
 
         fn default_hydro_block_bounds() -> HydroBlockBounds {
             HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             }
         }
 
@@ -2824,15 +2937,18 @@ mod anticipated_commitment_at_cap {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            // Two pre-study commitments at `seed_mw`: the stage-0 delivery is
-            // pinned directly, the stage-1 delivery is carried one K=2 ring
-            // shift first.
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: vec![seed_mw, seed_mw],
-            }],
+            // Two pre-study commitment windows at `seed_mw`: the stage-0 delivery
+            // matures immediately, the stage-1 delivery is held at its own K=2 modular
+            // slot until it matures at stage 1.
+            past_anticipated_commitments: super::windowed_commitments_daily(
+                anticipated_id,
+                calendar_anchor,
+                31,
+                &[seed_mw, seed_mw],
+            ),
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -2852,6 +2968,7 @@ mod anticipated_commitment_at_cap {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -2862,13 +2979,13 @@ mod anticipated_commitment_at_cap {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 4 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),

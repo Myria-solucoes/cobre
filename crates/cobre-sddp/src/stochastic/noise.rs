@@ -13,6 +13,7 @@ use crate::indexer::StateSpace;
 use crate::{
     InflowNonNegativityMethod,
     context::{StageContext, TrainingContext},
+    setup::node_graph::StageIdx,
     workspace::ScratchBuffers,
 };
 
@@ -63,7 +64,7 @@ pub(crate) fn has_par_model(stochastic: &StochasticContext, n_hydros: usize) -> 
 /// applying [`compute_effective_eta`] clamping under truncation.
 pub(crate) fn transform_inflow_noise(
     raw_noise: &[f64],
-    stage: usize,
+    stage: StageIdx,
     current_state: &[f64],
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
@@ -80,16 +81,16 @@ pub(crate) fn transform_inflow_noise(
 #[allow(clippy::similar_names)]
 pub(crate) fn compute_water_balance_rhs(
     raw_noise: &[f64],
-    stage: usize,
+    stage: StageIdx,
     current_state: &[f64],
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
     scratch: &mut ScratchBuffers,
 ) {
     let n_hydros = ctx.n_hydros;
-    let stage_offset = stage * n_hydros;
-    let base_row = ctx.base_rows[stage];
-    let template_row_lower = &ctx.templates[stage].row_lower;
+    let stage_offset = stage.0 * n_hydros;
+    let base_row = ctx.base_row(stage);
+    let template_row_lower = &ctx.template(stage).row_lower;
     let noise_scale = ctx.noise_scale;
     let inflow_method = training_ctx.inflow_method;
     let stochastic = training_ctx.stochastic;
@@ -121,7 +122,7 @@ pub(crate) fn compute_water_balance_rhs(
             // evaluate_par_batch expects the n_hydros PAR series only.
             evaluate_par_batch(
                 par_lp,
-                stage,
+                stage.0,
                 &scratch.lag_matrix_buf,
                 &raw_noise[..n_hydros],
                 &mut scratch.par_inflow_buf,
@@ -134,7 +135,7 @@ pub(crate) fn compute_water_balance_rhs(
                 let zero_targets = &scratch.zero_targets_buf[..n_hydros];
                 solve_par_noise_batch(
                     par_lp,
-                    stage,
+                    stage.0,
                     &scratch.lag_matrix_buf,
                     zero_targets,
                     &mut scratch.eta_floor_buf,
@@ -161,8 +162,8 @@ pub(crate) fn compute_water_balance_rhs(
 
         // Z-inflow RHS in m3/s: no zeta, no withdrawal (unlike the water-balance RHS above).
         if has_par {
-            let base = par_lp.deterministic_base(stage, h);
-            let sigma = par_lp.sigma(stage, h);
+            let base = par_lp.deterministic_base(stage.0, h);
+            let sigma = par_lp.sigma(stage.0, h);
             scratch.z_inflow_rhs_buf.push(base + sigma * eta_eff);
         } else {
             scratch.z_inflow_rhs_buf.push(0.0);
@@ -226,7 +227,7 @@ pub(crate) use cobre_stochastic::par::lag_kernel::PrimaryLagAccum as LagAccumSta
 /// # Anticipated-thermal state
 ///
 /// Does NOT touch the anticipated ring: it transitions in-LP via
-/// `anticipated_slots_out`'s definition rows and rides the same
+/// `commit_out`'s definition rows and rides the same
 /// plain-copy-outgoing path as storage and travel-time buckets.
 pub(crate) fn accumulate_and_shift_lag_state(
     state: &mut [f64],
@@ -260,6 +261,77 @@ pub(crate) fn accumulate_and_shift_lag_state(
     );
 }
 
+/// Trajectory-carried scratch accumulators captured at a node's outgoing edge
+/// and restored as its children's incoming state — the water-travel/derived-lag
+/// counterpart of the LP-column state that rides the record's `state` field.
+/// Empty/zero on a study with no PAR lags or downstream travel time (the K-fan
+/// path), where every field below is length-0 or `0.0`.
+#[derive(Clone, Default)]
+pub(crate) struct AccumSnapshot {
+    lag_accumulator: Vec<f64>,
+    lag_weight_accum: Vec<f64>,
+    downstream_accumulator: Vec<f64>,
+    downstream_weight_accum: f64,
+    downstream_completed_lags: Vec<f64>,
+    downstream_n_completed: usize,
+}
+
+impl AccumSnapshot {
+    pub(crate) fn capture_from(&mut self, ws_scratch: &ScratchBuffers) {
+        self.lag_accumulator.clear();
+        self.lag_accumulator
+            .extend_from_slice(&ws_scratch.lag_accumulator);
+        self.lag_weight_accum.clear();
+        self.lag_weight_accum
+            .extend_from_slice(&ws_scratch.lag_weight_accum);
+        self.downstream_accumulator.clear();
+        self.downstream_accumulator
+            .extend_from_slice(&ws_scratch.downstream_accumulator);
+        self.downstream_weight_accum = ws_scratch.downstream_weight_accum;
+        self.downstream_completed_lags.clear();
+        self.downstream_completed_lags
+            .extend_from_slice(&ws_scratch.downstream_completed_lags);
+        self.downstream_n_completed = ws_scratch.downstream_n_completed;
+    }
+
+    pub(crate) fn copy_into(&self, dst: &mut AccumSnapshot) {
+        dst.lag_accumulator.clear();
+        dst.lag_accumulator.extend_from_slice(&self.lag_accumulator);
+        dst.lag_weight_accum.clear();
+        dst.lag_weight_accum
+            .extend_from_slice(&self.lag_weight_accum);
+        dst.downstream_accumulator.clear();
+        dst.downstream_accumulator
+            .extend_from_slice(&self.downstream_accumulator);
+        dst.downstream_weight_accum = self.downstream_weight_accum;
+        dst.downstream_completed_lags.clear();
+        dst.downstream_completed_lags
+            .extend_from_slice(&self.downstream_completed_lags);
+        dst.downstream_n_completed = self.downstream_n_completed;
+    }
+
+    pub(crate) fn restore_into(&self, ws_scratch: &mut ScratchBuffers) {
+        ws_scratch.lag_accumulator.clear();
+        ws_scratch
+            .lag_accumulator
+            .extend_from_slice(&self.lag_accumulator);
+        ws_scratch.lag_weight_accum.clear();
+        ws_scratch
+            .lag_weight_accum
+            .extend_from_slice(&self.lag_weight_accum);
+        ws_scratch.downstream_accumulator.clear();
+        ws_scratch
+            .downstream_accumulator
+            .extend_from_slice(&self.downstream_accumulator);
+        ws_scratch.downstream_weight_accum = self.downstream_weight_accum;
+        ws_scratch.downstream_completed_lags.clear();
+        ws_scratch
+            .downstream_completed_lags
+            .extend_from_slice(&self.downstream_completed_lags);
+        ws_scratch.downstream_n_completed = self.downstream_n_completed;
+    }
+}
+
 /// Transform raw load noise `η` into patched load-balance RHS values, one per
 /// load bus and block, clamped at zero so load demand is never negative.
 pub(crate) fn transform_load_noise(
@@ -267,7 +339,7 @@ pub(crate) fn transform_load_noise(
     n_hydros: usize,
     n_load_buses: usize,
     stochastic: &StochasticContext,
-    stage: usize,
+    stage: StageIdx,
     block_count: usize,
     load_rhs_buf: &mut Vec<f64>,
 ) {
@@ -278,11 +350,11 @@ pub(crate) fn transform_load_noise(
     let load_lp = stochastic.normal();
     for lb_idx in 0..n_load_buses {
         let eta = raw_noise[n_hydros + lb_idx];
-        let mean = load_lp.mean(stage, lb_idx);
-        let std = load_lp.std(stage, lb_idx);
+        let mean = load_lp.mean(stage.0, lb_idx);
+        let std = load_lp.std(stage.0, lb_idx);
         let realization = (mean + std * eta).max(0.0);
         for blk in 0..block_count {
-            let factor = load_lp.block_factor(stage, lb_idx, blk);
+            let factor = load_lp.block_factor(stage.0, lb_idx, blk);
             load_rhs_buf.push(realization * factor);
         }
     }
@@ -301,8 +373,8 @@ pub(crate) struct NcsNoiseOffsets {
 ///
 /// Availability `α = clamp(mean + std · η, 0, 1)` is a **dimensionless factor**;
 /// the realized cap is `max_gen · α · block_factor`. The parquet `(mean, std)`
-/// are stored as factors, not MW. (Authoritative home of this contract; see
-/// `.claude/rules/sddp.md`.)
+/// are stored as factors, not MW (the authoritative statement of the NCS
+/// stochastic availability-factor contract).
 ///
 /// With `allow_curtailment == false` the lower bound equals the upper bound, so
 /// the source must run at exactly the realized availability (aggregate
@@ -319,7 +391,7 @@ pub(crate) fn transform_ncs_noise(
     raw_noise: &[f64],
     offsets: &NcsNoiseOffsets,
     stochastic: &StochasticContext,
-    stage: usize,
+    stage: StageIdx,
     block_count: usize,
     ncs_max_gen: &[f64],
     ncs_allow_curtailment: &[bool],
@@ -341,14 +413,14 @@ pub(crate) fn transform_ncs_noise(
     let ncs_noise_start = offsets.n_hydros + offsets.n_load_buses;
     for ncs_idx in 0..n_stochastic_ncs {
         let eta = raw_noise[ncs_noise_start + ncs_idx];
-        let mean = ncs_lp.mean(stage, ncs_idx);
-        let std = ncs_lp.std(stage, ncs_idx);
+        let mean = ncs_lp.mean(stage.0, ncs_idx);
+        let std = ncs_lp.std(stage.0, ncs_idx);
         let max_gen = ncs_max_gen[ncs_idx];
         let availability_ratio = (mean + std * eta).clamp(0.0, 1.0);
         let realization = max_gen * availability_ratio;
         let allow_curtailment = ncs_allow_curtailment[ncs_idx];
         for blk in 0..block_count {
-            let factor = ncs_lp.block_factor(stage, ncs_idx, blk);
+            let factor = ncs_lp.block_factor(stage.0, ncs_idx, blk);
             let upper = realization * factor;
             ncs_col_upper_buf.push(upper);
             ncs_col_lower_buf.push(if allow_curtailment { 0.0 } else { upper });
@@ -521,6 +593,7 @@ mod tests {
             compute_effective_eta, gather_dense_ncs_bounds, shift_lag_state,
             transform_inflow_noise, transform_load_noise, transform_ncs_noise,
         },
+        setup::node_graph::StageIdx,
         test_support,
         workspace::ScratchBuffers,
     };
@@ -635,6 +708,7 @@ mod tests {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         }
     }
 
@@ -986,6 +1060,7 @@ mod tests {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &[],
@@ -1009,7 +1084,7 @@ mod tests {
 
         transform_inflow_noise(
             &raw_noise,
-            0,
+            StageIdx(0),
             &current_state,
             &ctx,
             &training_ctx,
@@ -1070,6 +1145,7 @@ mod tests {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &[],
@@ -1093,7 +1169,7 @@ mod tests {
 
         transform_inflow_noise(
             &raw_noise,
-            0,
+            StageIdx(0),
             &current_state,
             &ctx,
             &training_ctx,
@@ -1154,6 +1230,7 @@ mod tests {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &[],
@@ -1177,7 +1254,7 @@ mod tests {
 
         transform_inflow_noise(
             &raw_noise,
-            0,
+            StageIdx(0),
             &current_state,
             &ctx,
             &training_ctx,
@@ -1210,7 +1287,15 @@ mod tests {
         let raw_noise = vec![0.0_f64, 0.0_f64]; // [hydro_eta, load_eta]
         let mut load_rhs_buf = Vec::new();
 
-        transform_load_noise(&raw_noise, 1, 1, &stochastic, 0, 1, &mut load_rhs_buf);
+        transform_load_noise(
+            &raw_noise,
+            1,
+            1,
+            &stochastic,
+            StageIdx(0),
+            1,
+            &mut load_rhs_buf,
+        );
 
         assert_eq!(load_rhs_buf.len(), 1);
         // The block_factor for a single Parallel block is the block duration
@@ -1236,7 +1321,15 @@ mod tests {
         let raw_noise = vec![0.0_f64, -10.0_f64];
         let mut load_rhs_buf = Vec::new();
 
-        transform_load_noise(&raw_noise, 1, 1, &stochastic, 0, 1, &mut load_rhs_buf);
+        transform_load_noise(
+            &raw_noise,
+            1,
+            1,
+            &stochastic,
+            StageIdx(0),
+            1,
+            &mut load_rhs_buf,
+        );
 
         assert_eq!(load_rhs_buf.len(), 1);
         assert!(
@@ -1725,14 +1818,6 @@ mod tests {
     }
 
     // ── downstream accumulation tests ────────────────────────────────────────
-    //
-    // These tests exercise the downstream (coarser-resolution) ring-buffer path
-    // of `accumulate_and_shift_lag_state`.  They validate:
-    //   • quarterly-average accumulation and ring-buffer storage
-    //   • multi-lag PAR(2) fill ordering
-    //   • post-rebuild state reset
-    //   • downstream spillover seeding
-    //   • multi-hydro independence
 
     /// Build a `StageLagTransition` for a standard monthly stage that also
     /// accumulates into the downstream (quarterly) ring buffer.
@@ -2591,7 +2676,7 @@ mod tests {
             &raw_noise,
             &offsets,
             &stoch,
-            0,
+            StageIdx(0),
             n_blks,
             &ncs_max_gen,
             &ncs_allow_curtailment,
@@ -2627,7 +2712,7 @@ mod tests {
             &raw_noise,
             &offsets,
             &stoch,
-            0,
+            StageIdx(0),
             n_blks,
             &ncs_max_gen,
             &ncs_allow_curtailment,

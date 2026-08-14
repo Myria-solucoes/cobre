@@ -23,13 +23,13 @@ fn cobre() -> Command {
 
 const CONFIG_JSON: &str = r#"{
     "training": {
-        "forward_passes": 1,
+        "selection": { "method": "sampled", "forward_passes": 1 },
         "stopping_rules": [
             { "type": "iteration_limit", "limit": 2 }
         ],
         "scenario_source": { "inflow": { "scheme": "in_sample" }, "seed": 42 }
     },
-    "simulation": { "enabled": true, "num_scenarios": 1 }
+    "simulation": { "enabled": true, "selection": { "method": "sampled", "num_scenarios": 1 } }
 }"#;
 
 const PENALTIES_JSON: &str = r#"{
@@ -71,25 +71,26 @@ const STAGES_JSON: &str = r#"{
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 2
+            "num_openings": 2
         },
         {
             "id": 1,
             "start_date": "2024-02-01",
             "end_date": "2024-03-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 672.0 }],
-            "num_scenarios": 2
+            "num_openings": 2
         }
     ]
 }"#;
 
-/// Anticipated thermal id=2 has `lead_stages=1`, so `values_mw` must have
-/// exactly one entry — the prior commitment before the study start.
+/// Anticipated thermal id=2 has `lead_stages=1`, so its commitment windows
+/// must tile exactly one leading delivery stage — the prior commitment before
+/// the study start, covering stage 0's `[2024-01-01, 2024-02-01)` span.
 const INITIAL_CONDITIONS_JSON: &str = r#"{
     "storage": [],
     "filling_storage": [],
     "past_anticipated_commitments": [
-        { "thermal_id": 2, "values_mw": [0.0] }
+        { "thermal_id": 2, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 }
     ]
 }"#;
 const BUSES_JSON: &str =

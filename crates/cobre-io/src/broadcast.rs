@@ -66,6 +66,8 @@ pub enum BroadcastParameterKind {
     Seasonal(Vec<(i32, f64)>),
     /// Computed-parameter specification.
     Computed(BroadcastComputedParameter),
+    /// Sorted, unique-keyed `(stage_id, block_id, value)` triples.
+    PerStageBlock(Vec<(i32, i32, f64)>),
 }
 
 /// Postcard-safe mirror of [`ComputedParameter`]. Externally-tagged.
@@ -116,6 +118,7 @@ impl From<&ParameterKind> for BroadcastParameterKind {
             ParameterKind::Computed { computed_spec } => {
                 Self::Computed(BroadcastComputedParameter::from(*computed_spec))
             }
+            ParameterKind::PerStageBlock { values } => Self::PerStageBlock(values.clone()),
         }
     }
 }
@@ -129,6 +132,7 @@ impl From<BroadcastParameterKind> for ParameterKind {
             BroadcastParameterKind::Computed(c) => Self::Computed {
                 computed_spec: ComputedParameter::from(c),
             },
+            BroadcastParameterKind::PerStageBlock(values) => Self::PerStageBlock { values },
         }
     }
 }
@@ -457,6 +461,65 @@ mod tests {
         assert_eq!(restored, system);
     }
 
+    /// A generic constraint's affine bound remainder (`bound_upper_affine`) rides the
+    /// constraint's derived serde through the `System` postcard wire — there is no
+    /// hand-written mirror for `GenericConstraint`, so the restored System must equal
+    /// the original. Uses a genuine multi-component remainder (a nonzero constant plus
+    /// a scaled term), not just the `single` special case, to prove the whole shape
+    /// round-trips.
+    #[test]
+    fn test_round_trip_generic_constraint_bound_ref() {
+        use cobre_core::{
+            AffineBound, ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let gc = GenericConstraint {
+            id: EntityId(0),
+            name: "demand_cap".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroGeneration {
+                        hydro_id: EntityId(1),
+                        block_id: None,
+                        bus_id: None,
+                    },
+                )],
+            },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: None,
+            bound_upper_affine: Some(AffineBound {
+                constant: 12.0,
+                terms: vec![(0.5, EntityId(7))],
+            }),
+        };
+
+        let system = SystemBuilder::new()
+            .buses(vec![minimal_bus(1)])
+            .hydros(vec![minimal_hydro(1, 1)])
+            .generic_constraints(vec![gc])
+            .build()
+            .unwrap();
+
+        let bytes = serialize_system(&system).unwrap();
+        let restored = deserialize_system(&bytes).unwrap();
+
+        assert_eq!(restored, system);
+        assert_eq!(
+            restored.generic_constraints()[0].bound_upper_affine,
+            Some(AffineBound {
+                constant: 12.0,
+                terms: vec![(0.5, EntityId(7))],
+            }),
+            "affine bound remainder must survive broadcast round-trip"
+        );
+    }
+
     #[test]
     fn test_round_trip_anticipated_thermal_system() {
         // Guards against a future Thermal field reorder or AnticipatedConfig schema
@@ -522,10 +585,10 @@ mod tests {
         assert!(bytes.len() < 1024);
     }
 
-    /// Build a `Vec<ScalarParameter>` with one instance of each of the four
+    /// Build a `Vec<ScalarParameter>` with one instance of each of the five
     /// `ParameterKind` variants, covering all code paths through the
     /// postcard serialization layer.
-    fn four_kinds_fixture() -> Vec<ScalarParameter> {
+    fn five_kinds_fixture() -> Vec<ScalarParameter> {
         vec![
             ScalarParameter {
                 id: EntityId(1),
@@ -553,12 +616,19 @@ mod tests {
                     },
                 },
             },
+            ScalarParameter {
+                id: EntityId(5),
+                name: "per_stage_block_param".to_string(),
+                kind: ParameterKind::PerStageBlock {
+                    values: vec![(0, 0, 1.0), (0, 1, 2.0), (1, 0, 3.0)],
+                },
+            },
         ]
     }
 
     #[test]
-    fn round_trip_all_four_parameter_kinds() {
-        let original = four_kinds_fixture();
+    fn round_trip_all_five_parameter_kinds() {
+        let original = five_kinds_fixture();
         let bytes = serialize_parameters(&original).unwrap();
         assert!(!bytes.is_empty());
         let restored = deserialize_parameters(&bytes).unwrap();
@@ -567,7 +637,7 @@ mod tests {
 
     #[test]
     fn serialize_parameters_is_deterministic() {
-        let params = four_kinds_fixture();
+        let params = five_kinds_fixture();
         let bytes_a = serialize_parameters(&params).unwrap();
         let bytes_b = serialize_parameters(&params).unwrap();
         assert_eq!(bytes_a, bytes_b);
@@ -591,8 +661,6 @@ mod tests {
         assert!(err.to_string().contains("<broadcast>"));
     }
 
-    /// `InitialConditions` with `past_anticipated_commitments` survives postcard
-    /// round-trip end-to-end, covering the MPI broadcast path.
     #[test]
     fn test_broadcast_initial_conditions_round_trips_past_anticipated_commitments() {
         let original = InitialConditions {
@@ -601,15 +669,20 @@ mod tests {
             past_anticipated_commitments: vec![
                 AnticipatedCommitmentHistory {
                     thermal_id: EntityId(1),
-                    values_mw: vec![120.0, 180.0],
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    value_mw: 120.0,
                 },
                 AnticipatedCommitmentHistory {
                     thermal_id: EntityId(7),
-                    values_mw: vec![50.0, 75.0, 100.0, 200.0],
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    value_mw: 50.0,
                 },
             ],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         let bytes = postcard::to_allocvec(&original).unwrap();
@@ -622,23 +695,14 @@ mod tests {
             restored.past_anticipated_commitments[0].thermal_id,
             EntityId(1)
         );
-        assert_eq!(
-            restored.past_anticipated_commitments[0].values_mw,
-            vec![120.0, 180.0]
-        );
+        assert!((restored.past_anticipated_commitments[0].value_mw - 120.0).abs() < f64::EPSILON);
         assert_eq!(
             restored.past_anticipated_commitments[1].thermal_id,
             EntityId(7)
         );
-        assert_eq!(
-            restored.past_anticipated_commitments[1].values_mw,
-            vec![50.0, 75.0, 100.0, 200.0]
-        );
+        assert!((restored.past_anticipated_commitments[1].value_mw - 50.0).abs() < f64::EPSILON);
     }
 
-    /// Given an `InitialConditions` with an empty `past_anticipated_commitments`
-    /// vec, when serialized via postcard and deserialized back, the result has
-    /// an empty vec (no panics, no wire-format corruption).
     #[test]
     fn test_broadcast_initial_conditions_empty_past_anticipated_commitments() {
         let original = InitialConditions {
@@ -647,6 +711,7 @@ mod tests {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         let bytes = postcard::to_allocvec(&original).unwrap();

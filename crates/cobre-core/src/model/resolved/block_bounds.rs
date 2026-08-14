@@ -15,7 +15,8 @@
 
 /// Per-block override for a hydro plant's block-eligible bounds.
 ///
-/// Carries only the seven block-eligible hydro columns. Deliberately excludes
+/// Carries only the block-eligible hydro columns — every field on
+/// [`HydroBlockBounds`](super::HydroBlockBounds). Deliberately excludes
 /// `min_storage_hm3`, `max_storage_hm3`, `filling_min_rate_m3s`, and
 /// `water_withdrawal_m3s` — those are stage-level `HydroStageBounds` columns;
 /// a `block_id` on them is an error, not a silent skip.
@@ -34,8 +35,14 @@ pub struct HydroBlockOverride {
     pub min_generation_mw: Option<f64>,
     /// Maximum generation override \[MW\].
     pub max_generation_mw: Option<f64>,
+    /// Minimum diversion flow override \[m³/s\].
+    pub min_diversion_m3s: Option<f64>,
     /// Maximum diversion flow override \[m³/s\].
     pub max_diversion_m3s: Option<f64>,
+    /// Minimum spillage flow override \[m³/s\].
+    pub min_spillage_m3s: Option<f64>,
+    /// Maximum spillage flow override \[m³/s\].
+    pub max_spillage_m3s: Option<f64>,
 }
 
 /// Per-block override for a thermal unit's block-eligible bounds.
@@ -500,10 +507,16 @@ mod tests {
             max_outflow_m3s: Some(4.0),
             min_generation_mw: Some(5.0),
             max_generation_mw: Some(6.0),
-            max_diversion_m3s: Some(7.0),
+            min_diversion_m3s: Some(7.0),
+            max_diversion_m3s: Some(8.0),
+            min_spillage_m3s: Some(9.0),
+            max_spillage_m3s: Some(10.0),
         };
         assert_eq!(hydro.min_turbined_m3s, Some(1.0));
-        assert_eq!(hydro.max_diversion_m3s, Some(7.0));
+        assert_eq!(hydro.min_diversion_m3s, Some(7.0));
+        assert_eq!(hydro.max_diversion_m3s, Some(8.0));
+        assert_eq!(hydro.min_spillage_m3s, Some(9.0));
+        assert_eq!(hydro.max_spillage_m3s, Some(10.0));
 
         let thermal = ThermalBlockOverride {
             min_generation_mw: Some(1.0),

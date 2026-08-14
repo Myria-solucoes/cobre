@@ -6,13 +6,14 @@
 
 pub mod aggregation;
 pub mod config;
+pub(crate) mod enumerated;
 pub mod error;
 pub mod extraction;
 pub mod pipeline;
 pub(crate) mod state;
 pub mod types;
 
-pub use aggregation::aggregate_simulation;
+pub use aggregation::{SimulationWeighting, aggregate_simulation};
 pub use config::SimulationConfig;
 pub use error::SimulationError;
 pub use extraction::{
@@ -21,9 +22,8 @@ pub use extraction::{
 };
 pub use pipeline::{SimulationOutputSpec, SimulationRunResult, simulate};
 pub use types::{
-    CategoryCostStats, ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult,
-    SimulationCostResult, SimulationExchangeResult, SimulationGenericViolationResult,
-    SimulationHydroResult, SimulationInflowLagResult, SimulationNonControllableResult,
-    SimulationPumpingResult, SimulationScenarioResult, SimulationStageResult, SimulationSummary,
-    SimulationThermalResult,
+    ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
+    SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroResult,
+    SimulationInflowLagResult, SimulationNonControllableResult, SimulationPumpingResult,
+    SimulationScenarioResult, SimulationStageResult, SimulationSummary, SimulationThermalResult,
 };

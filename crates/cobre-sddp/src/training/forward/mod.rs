@@ -22,6 +22,7 @@ use crate::{
     cut::pool::CutPool,
     dcs::DcsParams,
     error::SddpError,
+    setup::node_graph::{NodePos, StageIdx},
     solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, SolverWorkspace},
@@ -29,6 +30,7 @@ use crate::{
 
 mod basis_capture;
 mod delta_cut_batch;
+mod enumerated;
 mod sampler;
 mod stage_solve;
 mod stats_aggregation;
@@ -38,9 +40,11 @@ mod tests;
 
 pub use delta_cut_batch::build_delta_cut_row_batch_into;
 pub use sampler::build_sampler_from_ctx;
-pub use stats_aggregation::sync_forward;
+pub use stats_aggregation::{ForwardBound, sync_forward};
 
 pub(crate) use basis_capture::write_capture_metadata;
+pub use enumerated::EnumeratedForwardScratch;
+pub(crate) use enumerated::{EnumeratedForwardResult, EnumeratedParams, run_enumerated_forward};
 pub(crate) use stage_solve::run_forward_stage;
 
 /// Local statistics from one rank's forward pass.
@@ -125,7 +129,7 @@ pub struct ForwardPassBatch<'a> {
 /// keep the argument count within the clippy `too_many_arguments` threshold.
 pub(crate) struct StageKey<'a> {
     /// 0-based stage index.
-    pub(crate) t: usize,
+    pub(crate) t: StageIdx,
     /// 0-based global scenario index (rank offset + local scenario index).
     pub(crate) m: usize,
     /// Local scenario index within this worker's partition.
@@ -150,6 +154,10 @@ pub(crate) struct StageKey<'a> {
     /// solved lazily against the cut pool from the cut-free base template; when
     /// `None`, the frozen all-cuts path is used.
     pub(crate) dcs: Option<DcsParams>,
+    /// Canonical node-graph position this visit resolved to
+    /// (`NodeGraph::nodes` index) — the pool/node-id resolution site, never
+    /// `t` itself once a stage carries more than one alive node.
+    pub(crate) node: NodePos,
 }
 
 /// Execute the forward pass for one training iteration on this rank.
@@ -193,6 +201,17 @@ where
     use crate::forward_pass_state::{ForwardPassInputs, ForwardPassState};
     let n_workers = workspaces.len().max(1);
     let num_stages = training_ctx.horizon.num_stages();
+    // This shim bypasses the session's static-terminal-template priming bake
+    // (it has no `IterationScratch` to read), so it derives the same
+    // fcf.pools-based value that bake would otherwise have captured.
+    let terminal_has_boundary_cuts = (num_stages > 0)
+        .then(|| {
+            training_ctx
+                .node_graph
+                .any_stage_node(StageIdx(num_stages - 1))
+        })
+        .flatten()
+        .is_some_and(|n| fcf.pools[training_ctx.node_graph.nodes[n].pool_id].warm_start_count > 0);
     let mut state = ForwardPassState::new(n_workers, num_stages, batch.local_forward_passes);
     let mut inputs = ForwardPassInputs {
         workspaces,
@@ -200,6 +219,7 @@ where
         ctx,
         frozen,
         fcf,
+        terminal_has_boundary_cuts,
         training_ctx,
         records,
         local_forward_passes: batch.local_forward_passes,

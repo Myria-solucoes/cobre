@@ -11,11 +11,11 @@ use super::validate::{
 };
 use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
-    ExternalNcsRow, ExternalScenarioRow, GenericConstraint, Hydro, InflowHistoryRow, InflowModel,
-    InitialConditions, Line, LoadModel, NcsModel, NetworkTopology, NonControllableSource,
-    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
-    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
-    ValidationError,
+    ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
+    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
+    NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
+    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
+    ResolvedPenalties, Stage, Thermal, ValidationError,
 };
 
 /// Builder for constructing a validated, immutable [`System`].
@@ -54,7 +54,7 @@ pub struct SystemBuilder {
     contracts: Vec<EnergyContract>,
     non_controllable_sources: Vec<NonControllableSource>,
     stages: Vec<Stage>,
-    policy_graph: PolicyGraph,
+    policy_graph: HorizonGraph,
     penalties: ResolvedPenalties,
     bounds: ResolvedBounds,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
@@ -71,6 +71,7 @@ pub struct SystemBuilder {
     external_scenarios: Vec<ExternalScenarioRow>,
     external_load_scenarios: Vec<ExternalLoadRow>,
     external_ncs_scenarios: Vec<ExternalNcsRow>,
+    post_study_stages: Option<PostStudyStages>,
 }
 
 impl Default for SystemBuilder {
@@ -92,7 +93,7 @@ impl SystemBuilder {
             contracts: Vec::new(),
             non_controllable_sources: Vec::new(),
             stages: Vec::new(),
-            policy_graph: PolicyGraph::default(),
+            policy_graph: HorizonGraph::default(),
             penalties: ResolvedPenalties::empty(),
             bounds: ResolvedBounds::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
@@ -109,6 +110,7 @@ impl SystemBuilder {
             external_scenarios: Vec::new(),
             external_load_scenarios: Vec::new(),
             external_ncs_scenarios: Vec::new(),
+            post_study_stages: None,
         }
     }
 
@@ -172,7 +174,7 @@ impl SystemBuilder {
 
     /// Set the policy graph.
     #[must_use]
-    pub fn policy_graph(mut self, policy_graph: PolicyGraph) -> Self {
+    pub fn policy_graph(mut self, policy_graph: HorizonGraph) -> Self {
         self.policy_graph = policy_graph;
         self
     }
@@ -295,6 +297,14 @@ impl SystemBuilder {
     #[must_use]
     pub fn external_ncs_scenarios(mut self, rows: Vec<ExternalNcsRow>) -> Self {
         self.external_ncs_scenarios = rows;
+        self
+    }
+
+    /// Set the post-study boundary calendar and cost/bounds; `None` when
+    /// `post_study_stages.json` is absent.
+    #[must_use]
+    pub fn post_study_stages(mut self, post_study_stages: Option<PostStudyStages>) -> Self {
+        self.post_study_stages = post_study_stages;
         self
     }
 
@@ -466,6 +476,7 @@ impl SystemBuilder {
             external_scenarios: self.external_scenarios,
             external_load_scenarios: self.external_load_scenarios,
             external_ncs_scenarios: self.external_ncs_scenarios,
+            post_study_stages: self.post_study_stages,
         })
     }
 }
@@ -609,9 +620,8 @@ mod tests {
 mod proptests {
     use super::*;
     use crate::{
-        Block, BlockMode, ConstraintExpression, ConstraintSense, ContractType, DeficitSegment,
-        HydroGenerationModel, NoiseMethod, ScenarioSourceConfig, SlackConfig, StageRiskConfig,
-        StageStateConfig,
+        Block, BlockMode, ConstraintExpression, ContractType, DeficitSegment, HydroGenerationModel,
+        NoiseMethod, ScenarioSourceConfig, SlackConfig, StageRiskConfig, StageStateConfig,
     };
     use proptest::prelude::*;
 
@@ -789,11 +799,12 @@ mod proptests {
             name: format!("gc{id}"),
             description: None,
             expression: ConstraintExpression { terms: vec![] },
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         }
     }
 

@@ -2076,10 +2076,10 @@ fn line_exchange_unknown_id_returns_empty() {
 /// Column layout (no hydros, no FPHA, no evap):
 ///   storage:               [0, 0)    empty
 ///   lags:                  [0, 0)    empty
-///   anticipated_slots_out: [0, 0 + 2*1) = [0, 2)  (k_max=2, n_anticipated=1, outgoing)
+///   commit_out:            [0, 0 + 2*1) = [0, 2)  (k_max=2, n_anticipated=1, outgoing)
 ///   z_inflow:              [2, 2)    empty
 ///   storage_in:            [2, 2)    empty
-///   anticipated_state:     [2, 4)    (incoming, relocated)
+///   commit_in:             [2, 4)    (incoming, relocated)
 ///   theta:                 4
 ///   decision_start:        5
 ///   thermal:               [5, 5 + 2*2) = [5, 9)  (T=2, K=2)

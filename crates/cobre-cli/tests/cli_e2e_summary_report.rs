@@ -50,7 +50,7 @@ fn assert_ordered(haystack: &str, needle_a: &str, needle_b: &str) {
 }
 
 /// Expected simulation mean cost for `examples/1dtoy` (seed 42, deterministic).
-const EXPECTED_MEAN_COST: f64 = 14_532_064.352_935_942;
+const EXPECTED_MEAN_COST: f64 = 9_679_385.922_404_844;
 
 #[test]
 fn run_then_summary_and_report_preserve_the_deterministic_end_block() {
@@ -104,7 +104,7 @@ fn run_then_summary_and_report_preserve_the_deterministic_end_block() {
         "Lower bound:  1.55955e7",
         "Upper bound:  5.79592e5",
         "LP solves:    5632",
-        "Expected cost: 1.45321e7",
+        "Expected cost: 9.67939e6",
         "1 constant",
         "0 linearized, 1 without",
         // Provenance Inflow line; the hydro-production sub-section is

@@ -57,7 +57,9 @@ ZERO_CONTRACT_CASE = _REPO_ROOT / "examples" / "1dtoy"
 # writer-derived column, present in the parquet even though it is not a
 # `SimulationContractResult` struct field.
 CONTRACT_SCHEMA_FIELDS = {
+    "scenario_id",
     "stage_id",
+    "node_id",
     "block_id",
     "contract_id",
     "power_mw",
@@ -144,7 +146,9 @@ def _read_contract_rows(parquet: pathlib.Path) -> list[dict[str, object]]:
         block_key = -1 if block is None else block
         return (row[_SORT_FIELDS[0]], block_key, row[_SORT_FIELDS[2]])
 
-    rows = pq.read_table(parquet).to_pylist()
+    # ParquetFile (not read_table): scenario_id is both the Hive partition key and
+    # an in-file column, so read_table's dataset path would try to merge them.
+    rows = pq.ParquetFile(parquet).read().to_pylist()
     return sorted(rows, key=sort_key)
 
 

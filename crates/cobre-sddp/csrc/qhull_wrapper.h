@@ -26,9 +26,9 @@
  *           carries one unambiguous unit normal. This removes the per-facet
  *           normal ambiguity that merged (non-simplicial) facets introduce and
  *           keeps the output a deterministic function of the input ordering.
- *   - "Pp"  suppresses qhull's precision warnings. This is output-only and does
- *           not change the hull geometry; without it a narrow/degenerate cloud
- *           prints multi-line diagnostics to stderr from every parallel worker.
+ *   - "Pp"  suppresses a separate class of qhull precision-warning text outside
+ *           the hard errexit path. This is output-only and does not change the
+ *           hull geometry.
  *   - Joggle ("QJ") is deliberately ABSENT: joggle perturbs the input with a
  *     pseudo-random offset, which destroys reproducibility. No randomized
  *     perturbation of any kind is enabled.
@@ -50,6 +50,16 @@
  * corruption, an error raised while already handling an error, a NULL error
  * file) that call qh_exit() and terminate the process, as in upstream qhull.
  * qhull resources are released on every return path — success and error alike.
+ *
+ * A narrow/degenerate cloud's hard errexit diagnostic (e.g. QH6154, "Initial
+ * simplex is flat") is written to a captured in-memory stream
+ * (`open_memstream`, falling back to `tmpfile()` and finally to `stderr` —
+ * never NULL; Windows lacks `open_memstream` and starts the chain at
+ * `tmpfile()`) instead of the process's stderr, so a near-coplanar cloud does
+ * not dump multi-line text from every parallel worker. The captured text is
+ * discarded unread on every path: the soft-recovery below already succeeds
+ * without it, and the hard-failure status already maps to a hydro-naming
+ * error on the Rust side.
  *
  * ---------------------------------------------------------------------------
  * Hyperplane convention

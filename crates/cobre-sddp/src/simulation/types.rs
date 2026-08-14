@@ -20,12 +20,16 @@
 //! `losses_mw`, `outflow_m3s`. See simulation-architecture.md SS3.4 for the
 //! complete list.
 
+use chrono::NaiveDate;
+
+use crate::setup::NodeId;
+
 /// Cost breakdown for one (stage, block) pair.
 ///
 /// Corresponds to one row in the costs output schema
 /// (output-schemas.md SS5.1). Contains both aggregate totals and
 /// per-category breakdowns used for cost statistics (SS4.2).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationCostResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -96,7 +100,7 @@ pub struct SimulationCostResult {
 /// Corresponds to one row in the hydros output schema
 /// (output-schemas.md SS5.2). Derived columns (`generation_mwh`,
 /// `outflow_m3s`) are computed by the output writer.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationHydroResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -183,7 +187,7 @@ pub struct SimulationHydroResult {
 ///
 /// Corresponds to one row in the `hydro_bus_generation` output schema. Field
 /// for field the mirror of `HydroBusWriteRecord`.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationHydroBusResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -204,7 +208,7 @@ pub struct SimulationHydroBusResult {
 /// Corresponds to one row in the thermals output schema
 /// (output-schemas.md SS5.3). The derived column `generation_mwh`
 /// is computed by the output writer.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationThermalResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -232,7 +236,7 @@ pub struct SimulationThermalResult {
 /// (output-schemas.md SS5.4). Derived columns (`net_flow_mw`,
 /// `losses_mw`, and all `MWh` energy columns) are computed by the output
 /// writer.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationExchangeResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -255,7 +259,7 @@ pub struct SimulationExchangeResult {
 /// Corresponds to one row in the buses output schema
 /// (output-schemas.md SS5.5). Derived columns (`load_mwh`,
 /// `deficit_mwh`, `excess_mwh`) are computed by the output writer.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationBusResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -278,7 +282,7 @@ pub struct SimulationBusResult {
 /// Corresponds to one row in the `pumping_stations` output schema
 /// (output-schemas.md SS5.6). Derived columns (`pumped_volume_hm3`,
 /// `energy_consumption_mwh`) are computed by the output writer.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationPumpingResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -303,7 +307,7 @@ pub struct SimulationPumpingResult {
 /// Corresponds to one row in the contracts output schema
 /// (output-schemas.md SS5.7). The derived column `energy_mwh` is
 /// computed by the output writer.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationContractResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -326,7 +330,7 @@ pub struct SimulationContractResult {
 /// Corresponds to one row in the `non_controllables` output schema
 /// (output-schemas.md SS5.8). Derived columns (`generation_mwh`,
 /// `curtailment_mwh`) are computed by the output writer.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationNonControllableResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -351,7 +355,7 @@ pub struct SimulationNonControllableResult {
 /// Corresponds to one row in the `inflow_lags` output schema
 /// (output-schemas.md SS5.10). Only populated for hydro plants whose
 /// PAR(p) model has AR order > 0.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationInflowLagResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -371,7 +375,7 @@ pub struct SimulationInflowLagResult {
 /// travel-time arc owns `L_j` rows, one per maturity bucket. Empty for a plant
 /// with no incoming arc, so the whole table is absent for a non-travel-time
 /// study (`n_buckets == 0`).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationTransitBucketResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -389,12 +393,35 @@ pub struct SimulationTransitBucketResult {
     pub delayed_arrival_hm3: f64,
 }
 
+/// One rolling-seed release window for a declared travel-time arc's upstream
+/// hydro, in the same shape [`cobre_core::HydroPastDefluence`] carries.
+///
+/// Corresponds to one row in the `transit_seed` output partition. Reconstructed
+/// from the scenario's realized releases (never the LP's terminal bucket
+/// state), covering the trailing `[study_end − travel_time_hours, study_end)`
+/// span: one window per in-study stage overlapping that span, plus the
+/// stitched pre-study windows sliced from the run's own `past_defluences` when
+/// the arc's travel time exceeds the study horizon. Scenario-level (no
+/// stage/node axis — a window's own date range anchors it). Empty for a study
+/// with no declared travel-time arc.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SimulationTransitSeedResult {
+    /// Upstream hydro plant entity ID whose release feeds the arc.
+    pub hydro_id: i32,
+    /// Start of the release window (inclusive).
+    pub start_date: NaiveDate,
+    /// End of the release window (exclusive).
+    pub end_date: NaiveDate,
+    /// Realized mean release rate over the window, in m³/s.
+    pub value_m3s: f64,
+}
+
 /// Generic constraint violation for one (stage, block, constraint) tuple.
 ///
 /// Corresponds to one row in the violations/generic output schema
 /// (output-schemas.md SS5.11). Only entries with non-zero slack values
 /// are included.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationGenericViolationResult {
     /// Stage index (0-based).
     pub stage_id: u32,
@@ -402,10 +429,36 @@ pub struct SimulationGenericViolationResult {
     pub block_id: Option<u32>,
     /// Generic constraint entity ID.
     pub constraint_id: i32,
-    /// Violation slack value (non-negative).
+    /// Violation slack value: non-negative for a one-sided constraint, the signed net
+    /// `s_plus - s_minus` (may be negative) for a two-sided constraint (both bounds finite).
     pub slack_value: f64,
     /// Cost incurred for this violation.
     pub slack_cost: f64,
+}
+
+/// Post-horizon commitment lane result for one declared window, one terminal
+/// scenario.
+///
+/// Corresponds to one row in the `anticipated_lanes` output schema, keyed
+/// `(thermal_id, delivery_date)` — distinct from the per-plant
+/// [`SimulationThermalResult::anticipated_committed_mw`]/
+/// [`SimulationThermalResult::anticipated_decision_mw`] columns, which stay
+/// unchanged. Emitted once per lane, at the window's own in-study decider
+/// stage — the only stage whose LP carries both the decision column and this
+/// snapshot of the ring's carried state. Absent for a study with no
+/// `future_anticipated_deliveries`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SimulationAnticipatedLaneResult {
+    /// Stage index (0-based) — the lane's own in-study decider stage.
+    pub stage_id: u32,
+    /// Thermal unit entity ID owning this lane.
+    pub thermal_id: i32,
+    /// `YYYYMM01` anchor of the lane's resolved post-study delivery stage.
+    pub delivery_date: i32,
+    /// Deposited decision in MW, read from the post-horizon decision column.
+    pub deposited_decision_mw: f64,
+    /// Carried committed value in MW, read from the lane's `commit_out` ring slot.
+    pub carried_committed_mw: f64,
 }
 
 /// All simulation results for a single stage within one scenario.
@@ -414,10 +467,15 @@ pub struct SimulationGenericViolationResult {
 /// scenario. Each per-entity-type [`Vec`] holds one entry per (block, entity)
 /// pair within the stage. Entity types that are absent from the system or that
 /// produce no violations result in empty [`Vec`]s.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationStageResult {
     /// Stage index (0-based).
     pub stage_id: u32,
+    /// Declared id of the `NodeGraph` node this scenario's sampled walk visits at
+    /// this stage (`node_graph.node_ids[node]`). On a chain this is the
+    /// degenerate per-stage node id; it is never gated on whether `nodes[]` was
+    /// declared. Broadcast onto every entity row written for the stage.
+    pub node_id: NodeId,
     /// Cost breakdown results for this stage (one entry per block).
     pub costs: Vec<SimulationCostResult>,
     /// Hydro plant results for this stage.
@@ -449,13 +507,16 @@ pub struct SimulationStageResult {
     /// Empty if no generic constraints exist or no violations occurred.
     /// Only non-zero violations are included.
     pub generic_violations: Vec<SimulationGenericViolationResult>,
+    /// Post-horizon commitment lane records for this stage.
+    /// Empty except at a declared window's own in-study decider stage.
+    pub anticipated_lanes: Vec<SimulationAnticipatedLaneResult>,
 }
 
 /// Per-category cost totals for one scenario, summed across all stages.
 ///
 /// Matches the category breakdown in SS4.2 and is retained in the compact
 /// cost buffer even after per-stage detail is streamed to the output writer.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScenarioCategoryCosts {
     /// Sum of thermal and contract costs: `thermal_cost + contract_cost`.
     pub resource_cost: f64,
@@ -477,7 +538,7 @@ pub struct ScenarioCategoryCosts {
 /// Payload type of the bounded channel connecting simulation threads to the
 /// background I/O thread (SS6.1); at most `channel_capacity` instances exist at
 /// once (SS3.3). Must be `Send` — pinned by the `assert_send` static check below.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationScenarioResult {
     /// 0-based scenario identifier, unique across all MPI ranks.
     /// Determines the Hive partition path:
@@ -500,66 +561,28 @@ pub struct SimulationScenarioResult {
     /// Summary — in that case only `scenario_id`, `total_cost`, and
     /// `per_category_costs` are populated.
     pub stages: Vec<SimulationStageResult>,
+
+    /// Rolling-seed release windows for the next run's `past_defluences`
+    /// input, one entry per declared arc's upstream hydro per emitted window.
+    /// Empty when the study declares no travel-time arc.
+    pub transit_seed: Vec<SimulationTransitSeedResult>,
 }
 
 /// Aggregate simulation statistics computed after all scenarios complete.
 ///
-/// Produced by MPI aggregation on rank 0 (simulation-architecture.md SS4.4)
-/// and returned as the `Ok` value of `fn simulate()`.
-///
-/// On non-rank-0 processes, `mean_cost`, `std_cost`, `cvar`, and
-/// `category_stats` reflect only locally computed partial data; the
-/// authoritative values are on rank 0 (SS4.4).
+/// Produced by weighted MPI aggregation
+/// ([`crate::simulation::aggregation::aggregate_simulation`]), identical on
+/// every rank, and returned as the `Ok` value of `fn simulate()`.
 #[derive(Debug)]
 pub struct SimulationSummary {
-    /// Mean total cost across all scenarios: `mean_cost = (1/S) * sum(C_s for s in 1..=S)`.
+    /// Weighted mean total cost across all scenarios:
+    /// `mean_cost = Σ wᵢ·Cᵢ` under the caller-selected
+    /// [`SimulationWeighting`](crate::simulation::aggregation::SimulationWeighting).
     pub mean_cost: f64,
     /// Sample standard deviation of total cost: `std_cost = sqrt((1/(S-1)) * sum((C_s - mean_cost)^2 for s in 1..=S))`.
     pub std_cost: f64,
-    /// Minimum total cost across all scenarios.
-    pub min_cost: f64,
-    /// Maximum total cost across all scenarios.
-    pub max_cost: f64,
-    /// `CVaR` (Conditional Value-at-Risk) at the configured confidence level `cvar_alpha`.
-    /// Mean of the worst `(1 - cvar_alpha)` fraction of scenario costs. See simulation-architecture.md SS4.1.
-    pub cvar: f64,
-    /// Confidence level used for `CVaR` computation. Must be in `(0, 1)`.
-    pub cvar_alpha: f64,
-    /// Per-category cost statistics (mean, max, frequency) for each of the five cost categories.
-    pub category_stats: Vec<CategoryCostStats>,
-    /// Fraction of scenarios with at least one stage having deficit > 0.
-    pub deficit_frequency: f64,
-    /// Total deficit energy (`MWh`) summed across all scenarios and stages.
-    pub total_deficit_mwh: f64,
-    /// Total spillage energy (`MWh`) summed across all scenarios and stages.
-    pub total_spillage_mwh: f64,
     /// Number of scenarios simulated (across all ranks).
     pub n_scenarios: u32,
-}
-
-/// Per-category cost statistics for one cost category (SS4.2).
-///
-/// Each of the five cost categories (resource, recourse, violation,
-/// regularization, imputed) produces one `CategoryCostStats` entry in
-/// [`SimulationSummary::category_stats`].
-#[derive(Debug)]
-pub struct CategoryCostStats {
-    /// Category name. Matches the SS4.2 table:
-    /// `"resource"`, `"recourse"`, `"violation"`, `"regularization"`,
-    /// `"imputed"`.
-    pub category: String,
-
-    /// Mean cost for this category across all scenarios.
-    pub mean: f64,
-
-    /// Maximum cost for this category across all scenarios.
-    pub max: f64,
-
-    /// Fraction of scenarios where the category cost is non-zero.
-    ///
-    /// Particularly relevant for deficit (recourse) and constraint
-    /// violations.
-    pub frequency: f64,
 }
 
 const _: fn() = || {
@@ -570,7 +593,7 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::{
-        CategoryCostStats, ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult,
+        NodeId, ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult,
         SimulationCostResult, SimulationExchangeResult, SimulationGenericViolationResult,
         SimulationHydroBusResult, SimulationHydroResult, SimulationInflowLagResult,
         SimulationNonControllableResult, SimulationPumpingResult, SimulationScenarioResult,
@@ -981,6 +1004,7 @@ mod tests {
     fn stage_result_empty_optional_vecs() {
         let stage = SimulationStageResult {
             stage_id: 0,
+            node_id: NodeId(0),
             costs: vec![],
             hydros: vec![],
             hydro_bus_generation: vec![],
@@ -993,6 +1017,7 @@ mod tests {
             inflow_lags: vec![],
             transit_buckets: vec![],
             generic_violations: vec![],
+            anticipated_lanes: vec![],
         };
 
         assert!(stage.pumping_stations.is_empty());
@@ -1001,6 +1026,7 @@ mod tests {
         assert!(stage.inflow_lags.is_empty());
         assert!(stage.transit_buckets.is_empty());
         assert!(stage.generic_violations.is_empty());
+        assert!(stage.anticipated_lanes.is_empty());
     }
 
     #[test]
@@ -1014,6 +1040,7 @@ mod tests {
         let stages: Vec<SimulationStageResult> = (0..12)
             .map(|i| SimulationStageResult {
                 stage_id: i,
+                node_id: NodeId(i as i32),
                 costs: vec![],
                 hydros: vec![],
                 hydro_bus_generation: vec![],
@@ -1026,6 +1053,7 @@ mod tests {
                 inflow_lags: vec![],
                 transit_buckets: vec![],
                 generic_violations: vec![],
+                anticipated_lanes: vec![],
             })
             .collect();
 
@@ -1040,6 +1068,7 @@ mod tests {
                 imputed_cost: 50_000.0,
             },
             stages,
+            transit_seed: vec![],
         };
 
         assert_eq!(result.scenario_id, 42);
@@ -1064,55 +1093,15 @@ mod tests {
     }
 
     #[test]
-    fn category_cost_stats_construction() {
-        let stats = CategoryCostStats {
-            category: "recourse".to_string(),
-            mean: 500.0,
-            max: 2000.0,
-            frequency: 0.15,
-        };
-
-        assert_eq!(stats.category, "recourse");
-        assert_eq!(stats.mean, 500.0);
-        assert_eq!(stats.max, 2000.0);
-        assert_eq!(stats.frequency, 0.15);
-    }
-
-    #[test]
     fn simulation_summary_construction() {
-        let category_stats: Vec<CategoryCostStats> = (0_i32..5)
-            .map(|i| CategoryCostStats {
-                category: format!("cat_{i}"),
-                mean: f64::from(i) * 100.0,
-                max: f64::from(i) * 500.0,
-                frequency: 0.1 * f64::from(i),
-            })
-            .collect();
-
         let summary = SimulationSummary {
             mean_cost: 1_500_000.0,
             std_cost: 200_000.0,
-            min_cost: 900_000.0,
-            max_cost: 2_100_000.0,
-            cvar: 1_900_000.0,
-            cvar_alpha: 0.95,
-            category_stats,
-            deficit_frequency: 0.08,
-            total_deficit_mwh: 12_500.0,
-            total_spillage_mwh: 3_200.0,
             n_scenarios: 2000,
         };
 
         assert_eq!(summary.mean_cost, 1_500_000.0);
         assert_eq!(summary.std_cost, 200_000.0);
-        assert_eq!(summary.min_cost, 900_000.0);
-        assert_eq!(summary.max_cost, 2_100_000.0);
-        assert_eq!(summary.cvar, 1_900_000.0);
-        assert_eq!(summary.cvar_alpha, 0.95);
-        assert_eq!(summary.category_stats.len(), 5);
-        assert_eq!(summary.deficit_frequency, 0.08);
-        assert_eq!(summary.total_deficit_mwh, 12_500.0);
-        assert_eq!(summary.total_spillage_mwh, 3_200.0);
         assert_eq!(summary.n_scenarios, 2000);
     }
 }

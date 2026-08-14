@@ -20,9 +20,10 @@ use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochasti
 
 use cobre_comm::LocalBackend;
 
+use super::stats_aggregation::weighted_cost_reduction;
 use super::{
-    ForwardPassBatch, ForwardResult, SyncResult, build_delta_cut_row_batch_into, run_forward_pass,
-    sync_forward,
+    ForwardBound, ForwardPassBatch, ForwardResult, SyncResult, build_delta_cut_row_batch_into,
+    run_forward_pass, sync_forward,
 };
 use crate::cut::row::build_cut_row_batch_into;
 use crate::solve::partition;
@@ -36,6 +37,7 @@ use crate::{
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
+    setup::{NodeId, NodePos},
     test_support,
     trajectory::TrajectoryRecord,
     workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
@@ -215,6 +217,7 @@ fn empty_records(n: usize) -> Vec<TrajectoryRecord> {
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: NodeId(0),
             state: Vec::new(),
         })
         .collect()
@@ -550,7 +553,7 @@ fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<M
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(state.n_state),
         scratch: ScratchBuffers {
             noise_buf: Vec::with_capacity(state.hydro_count),
@@ -582,6 +585,7 @@ fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<M
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -632,6 +636,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 2,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -704,6 +709,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -763,6 +769,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 2,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -835,6 +842,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -898,6 +906,7 @@ fn cost_statistics_accumulated_correctly() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 2,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -970,6 +979,7 @@ fn cost_statistics_accumulated_correctly() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -1067,7 +1077,7 @@ fn ub_statistics_four_scenarios_correct_mean_and_std() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 4).unwrap();
+    let result = sync_forward(&local, &comm, 4, ForwardBound::Statistical).unwrap();
 
     assert_eq!(result.global_ub_mean, 75.0, "mean must be 300/4 = 75");
 
@@ -1107,7 +1117,7 @@ fn acceptance_criterion_ub_mean() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 4).unwrap();
+    let result = sync_forward(&local, &comm, 4, ForwardBound::Statistical).unwrap();
 
     assert_eq!(result.global_ub_mean, 75.0);
     let expected_std = (500.0_f64 / 3.0).sqrt();
@@ -1137,7 +1147,7 @@ fn canonical_summation_identical_regardless_of_partition() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result_single = sync_forward(&single_rank, &comm, 4).unwrap();
+    let result_single = sync_forward(&single_rank, &comm, 4, ForwardBound::Statistical).unwrap();
 
     // Build the full global buffer manually; sequential summation must yield
     // the same statistics as the single-rank result above.
@@ -1176,7 +1186,7 @@ fn bessel_correction_single_scenario_zero_std_and_ci() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 1).unwrap();
+    let result = sync_forward(&local, &comm, 1, ForwardBound::Statistical).unwrap();
 
     assert_eq!(
         result.global_ub_std, 0.0,
@@ -1205,7 +1215,7 @@ fn negative_variance_guard_produces_zero_std_not_nan() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 2).unwrap();
+    let result = sync_forward(&local, &comm, 2, ForwardBound::Statistical).unwrap();
 
     assert!(
         !result.global_ub_std.is_nan(),
@@ -1234,7 +1244,7 @@ fn sync_forward_local_backend_global_equals_local() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 2).unwrap();
+    let result = sync_forward(&local, &comm, 2, ForwardBound::Statistical).unwrap();
 
     // In single-rank mode, allgatherv is an identity copy.
     assert_eq!(
@@ -1255,7 +1265,7 @@ fn sync_forward_sync_time_ms_is_valid_u64() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 2).unwrap();
+    let result = sync_forward(&local, &comm, 2, ForwardBound::Statistical).unwrap();
     // sync_time_ms is u64 — any value is a valid non-negative u64.
     // We just verify the field exists and doesn't overflow to something absurd.
     let _ = result.sync_time_ms;
@@ -1319,12 +1329,108 @@ fn sync_forward_comm_error_wraps_as_sddp_communication() {
         stage_stats: Vec::new(),
     };
     let comm = FailingComm;
-    let err = sync_forward(&local, &comm, 1).unwrap_err();
+    let err = sync_forward(&local, &comm, 1, ForwardBound::Statistical).unwrap_err();
 
     assert!(
         matches!(err, SddpError::Communication(_)),
         "CommError must be wrapped as SddpError::Communication, got: {err:?}"
     );
+}
+
+// ── Unit tests: exact probability-weighted upper bound ───────────────────
+
+/// `Σ wᵢ·cᵢ` on a hand-checked vector: costs [10, 20, 30] with weights
+/// [0.5, 0.25, 0.25] → 5.0 + 5.0 + 7.5 = 17.5 (every product exact in f64).
+#[test]
+fn weighted_cost_reduction_matches_hand_computed_sum() {
+    let costs = [10.0_f64, 20.0, 30.0];
+    let weights = [0.5_f64, 0.25, 0.25];
+    assert_eq!(weighted_cost_reduction(&costs, &weights), 17.5);
+}
+
+/// Uniform `wᵢ = 1/n` reproduces the arithmetic mean bit-for-bit: for
+/// [1, 2, 3, 4] the reduction equals `10/4 = 2.5`.
+#[test]
+fn weighted_cost_reduction_uniform_weights_reproduce_mean() {
+    let costs = [1.0_f64, 2.0, 3.0, 4.0];
+    let uniform = vec![1.0_f64 / 4.0; 4];
+    let mean = costs.iter().sum::<f64>() / 4.0;
+    assert_eq!(
+        weighted_cost_reduction(&costs, &uniform).to_bits(),
+        mean.to_bits(),
+        "uniform-weighted reduction must reproduce the arithmetic mean bit-for-bit"
+    );
+}
+
+/// A single element returns its own `w·c`: `w = 1` yields the cost verbatim,
+/// and a non-unit weight scales it — pinning that the reduction is `Σ w·c`,
+/// never a weight-ignoring special case at `n == 1`.
+#[test]
+fn weighted_cost_reduction_single_element_is_weighted_cost() {
+    assert_eq!(weighted_cost_reduction(&[42.0], &[1.0]), 42.0);
+    assert_eq!(weighted_cost_reduction(&[42.0], &[0.5]), 21.0);
+}
+
+/// `sync_forward` under [`ForwardBound::Exact`] reports the probability-weighted
+/// `Σ w·c` — distinct from the Welford mean the same costs would give — with the
+/// standard deviation and CI half-width both zeroed.
+#[test]
+fn sync_forward_exact_reduces_weighted_sum_and_zeroes_ci() {
+    let local = ForwardResult {
+        scenario_costs: vec![100.0, 200.0],
+        elapsed_ms: 0,
+        lp_solves: 0,
+        setup_time_ms: 0,
+        load_imbalance_ms: 0,
+        scheduling_overhead_ms: 0,
+        stage_stats: Vec::new(),
+    };
+    let comm = LocalBackend;
+    let weights = [0.75_f64, 0.25];
+    let result = sync_forward(
+        &local,
+        &comm,
+        2,
+        ForwardBound::Exact {
+            path_weights: &weights,
+        },
+    )
+    .unwrap();
+
+    // 0.75*100 + 0.25*200 = 125.0, whereas the sampled Welford mean would be 150.0.
+    assert_eq!(result.global_ub_mean, 125.0);
+    assert_eq!(result.global_ub_std, 0.0);
+    assert_eq!(result.ci_95_half_width, 0.0);
+}
+
+/// The degenerate single-path enumeration (`w = 1`) reports that path's cost as
+/// the exact bound with a zero CI half-width.
+#[test]
+fn sync_forward_exact_single_path_returns_cost_with_zero_ci() {
+    let local = ForwardResult {
+        scenario_costs: vec![500.0],
+        elapsed_ms: 0,
+        lp_solves: 0,
+        setup_time_ms: 0,
+        load_imbalance_ms: 0,
+        scheduling_overhead_ms: 0,
+        stage_stats: Vec::new(),
+    };
+    let comm = LocalBackend;
+    let weights = [1.0_f64];
+    let result = sync_forward(
+        &local,
+        &comm,
+        1,
+        ForwardBound::Exact {
+            path_weights: &weights,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.global_ub_mean, 500.0);
+    assert_eq!(result.global_ub_std, 0.0);
+    assert_eq!(result.ci_95_half_width, 0.0);
 }
 
 // ── Unit tests: warm-start basis caching ─────────────────────────────────
@@ -1341,6 +1447,7 @@ fn run_one_iteration(
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1410,6 +1517,7 @@ fn run_one_iteration(
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -1447,7 +1555,6 @@ fn run_one_iteration(
 #[test]
 fn warm_start_first_iteration_cold_second_iteration_warm() {
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     // Single workspace and a shared basis store (1 scenario × 3 stages).
@@ -1463,7 +1570,7 @@ fn warm_start_first_iteration_cold_second_iteration_warm() {
 
     // After first iteration, all 3 stages for scenario 0 have a cached basis.
     assert!(
-        (0..3).all(|t| basis_store.get(0, t).is_some()),
+        (0..3).all(|t| basis_store.get(0, NodePos(t)).is_some()),
         "basis_store must be fully populated for scenario 0 after the first iteration"
     );
 
@@ -1479,7 +1586,6 @@ fn warm_start_first_iteration_cold_second_iteration_warm() {
 #[test]
 fn basis_invalidated_on_solver_error() {
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     // Call 4 = second iteration, stage 1 (calls 0-2 = first iteration
     // stages 0,1,2; calls 3,4,5 = second iteration stages 0,1,2).
@@ -1490,7 +1596,7 @@ fn basis_invalidated_on_solver_error() {
 
     run_one_iteration(&mut ws, &mut basis_store).unwrap();
     assert!(
-        (0..3).all(|t| basis_store.get(0, t).is_some()),
+        (0..3).all(|t| basis_store.get(0, NodePos(t)).is_some()),
         "basis_store must be fully populated for scenario 0 after iteration 1"
     );
 
@@ -1502,14 +1608,14 @@ fn basis_invalidated_on_solver_error() {
     );
 
     assert!(
-        basis_store.get(0, 1).is_none(),
-        "basis_store.get(0, 1) must be None after solver error at stage 1"
+        basis_store.get(0, NodePos(1)).is_none(),
+        "basis_store.get(0, NodePos(1)) must be None after solver error at stage 1"
     );
 
     // Stage 0 succeeded in iteration 2 — its basis was re-extracted.
     assert!(
-        basis_store.get(0, 0).is_some(),
-        "basis_store.get(0, 0) must be Some (stage 0 succeeded before error)"
+        basis_store.get(0, NodePos(0)).is_some(),
+        "basis_store.get(0, NodePos(0)) must be Some (stage 0 succeeded before error)"
     );
 }
 
@@ -1575,6 +1681,7 @@ fn test_forward_pass_parallel_cost_agreement() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -1620,6 +1727,7 @@ fn test_forward_pass_parallel_cost_agreement() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -1733,6 +1841,7 @@ fn test_forward_pass_work_distribution() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -1811,19 +1920,6 @@ fn test_forward_pass_work_distribution() {
 /// `mean_m3s` and `std_m3s`. Used by truncation tests.
 #[allow(clippy::too_many_lines)]
 fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
-    use std::collections::BTreeMap;
-
-    use chrono::NaiveDate;
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
-    use cobre_core::scenario::{
-        CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-    };
-    use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
-    };
-    use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
-
     let bus = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
@@ -2062,6 +2158,7 @@ fn run_single_stage_forward(
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2176,6 +2273,7 @@ fn none_method_unchanged_with_truncation_code_present() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 2,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -2247,6 +2345,7 @@ fn none_method_unchanged_with_truncation_code_present() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2503,6 +2602,7 @@ fn test_forward_pass_parallel_infeasibility() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2578,7 +2678,7 @@ fn forward_pass_load_noise_positive_realization() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
     let state = test_support::state_layout(1, 0);
-    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -2620,6 +2720,7 @@ fn forward_pass_load_noise_positive_realization() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2669,6 +2770,7 @@ fn forward_pass_load_noise_positive_realization() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2739,7 +2841,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
     let state = test_support::state_layout(1, 0);
-    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -2781,6 +2883,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2830,6 +2933,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2937,6 +3041,7 @@ fn forward_pass_no_load_buses_unchanged() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -3004,7 +3109,6 @@ fn test_build_delta_empty_pool() {
     // Empty pool → num_rows == 0, row_starts == [0], col_indices empty.
     let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3031,14 +3135,13 @@ fn test_build_delta_single_iteration_filter() {
     // emits only the iteration-2 cut.
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     // iteration=1, fwd_idx=0: slot = 0 + 1*1 + 0 = 1
-    fcf.add_cut(0, 1, 0, 10.0, &[1.0]);
+    fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0]);
     // iteration=2, fwd_idx=0: slot = 0 + 2*1 + 0 = 2
-    fcf.add_cut(0, 2, 0, 20.0, &[2.0]);
+    fcf.add_cut(NodeId(0), 0, 2, 0, 20.0, &[2.0]);
     // iteration=3, fwd_idx=0: slot = 0 + 3*1 + 0 = 3
-    fcf.add_cut(0, 3, 0, 30.0, &[3.0]);
+    fcf.add_cut(NodeId(0), 0, 3, 0, 30.0, &[3.0]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3064,15 +3167,14 @@ fn test_build_delta_skips_deactivated_cuts() {
     // iteration-1 cuts are emitted.
     let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
     // iteration=1, fwd_idx=0: slot = 0 + 1*2 + 0 = 2
-    fcf.add_cut(0, 1, 0, 10.0, &[1.0]);
+    fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0]);
     // iteration=1, fwd_idx=1: slot = 0 + 1*2 + 1 = 3
-    fcf.add_cut(0, 1, 1, 20.0, &[2.0]);
+    fcf.add_cut(NodeId(0), 0, 1, 1, 20.0, &[2.0]);
 
     // Deactivate slot 2 (the first iteration-1 cut).
     fcf.pools[0].deactivate(&[2]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3108,14 +3210,13 @@ fn test_build_delta_excludes_warm_start_cuts() {
     let mut pool = CutPool::new_with_warm_start(1, 2, 10, &[warm_record]);
     // Now add a training cut at iteration=1, fwd_idx=0:
     // slot = warm_start_count(1) + 1*2 + 0 = 3
-    pool.add_cut(1, 0, 7.0, &[1.0]);
+    pool.add_cut(NodeId(0), 1, 0, 7.0, &[1.0]);
 
     // Build an FCF with 2 stages (n_state=1, 2 fwd passes, 10 max iters).
     let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
     fcf.pools[0] = pool;
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
@@ -3140,12 +3241,11 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
     // full builders must produce byte-identical output.
     let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
     // iteration=1, fwd_idx=0: slot = 1*2+0 = 2
-    fcf.add_cut(0, 1, 0, 10.0, &[1.0]);
+    fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0]);
     // iteration=1, fwd_idx=1: slot = 1*2+1 = 3
-    fcf.add_cut(0, 1, 1, 20.0, &[3.0]);
+    fcf.add_cut(NodeId(0), 0, 1, 1, 20.0, &[3.0]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
 
     let mut batch_full = empty_delta_batch();
     build_cut_row_batch_into(
@@ -3195,7 +3295,6 @@ fn test_build_delta_sparse_path() {
     // n_hydro=1, n_lag=1: n_state=2 (vol + lag).
     // nonzero_state_indices should be non-empty (check via indexer).
     let state = test_support::state_layout(1, 1);
-    let _indexer = test_support::geom(1, 1);
     // nonzero_state_indices is the mask for non-trivially-zero state dims.
     let mask_len = state.nonzero_state_indices.len();
 
@@ -3206,7 +3305,7 @@ fn test_build_delta_sparse_path() {
     }
 
     let mut fcf = FutureCostFunction::new(2, state.n_state, 1, 10, &[0; 2]);
-    fcf.add_cut(0, 1, 0, 5.0, &vec![1.0; state.n_state]);
+    fcf.add_cut(NodeId(0), 0, 1, 0, 5.0, &vec![1.0; state.n_state]);
 
     let mut batch = empty_delta_batch();
     build_delta_cut_row_batch_into(
@@ -3229,11 +3328,10 @@ fn test_build_delta_reuses_out_buffer() {
     // Call twice; second call must produce correct output even when `batch`
     // had stale data from the first call.
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-    fcf.add_cut(0, 1, 0, 11.0, &[1.0]);
-    fcf.add_cut(0, 2, 0, 22.0, &[2.0]);
+    fcf.add_cut(NodeId(0), 0, 1, 0, 11.0, &[1.0]);
+    fcf.add_cut(NodeId(0), 0, 2, 0, 22.0, &[2.0]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     // First call: iteration 1 → should yield the iteration-1 cut.
@@ -3268,10 +3366,9 @@ fn test_build_delta_reuses_out_buffer() {
 fn test_build_delta_clears_row_starts() {
     // batch.row_starts[0] must be 0 regardless of prior state.
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-    fcf.add_cut(0, 1, 0, 5.0, &[1.0]);
+    fcf.add_cut(NodeId(0), 0, 1, 0, 5.0, &[1.0]);
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
 
     // Pre-populate batch with garbage.
     let mut batch = RowBatch {
@@ -3318,21 +3415,13 @@ fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
     let mut pool = CutPool::new_with_warm_start(1, 1, 10, &[ws_record]);
     // One iteration-1 cut at slot 1 (warm_start_count=1, so slot = 1+1*1+0 = 2,
     // but new_with_warm_start sets warm_start_count=1 → slot = 1+1*1+0 = 2).
-    pool.add_cut(1, 0, 7.0, &[1.0]);
+    pool.add_cut(NodeId(0), 1, 0, 7.0, &[1.0]);
 
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     fcf.pools[0] = pool;
 
     let state = test_support::state_layout(1, 0);
-    let _indexer = test_support::geom(1, 0);
-    let mut batch = RowBatch {
-        num_rows: 0,
-        row_starts: Vec::new(),
-        col_indices: Vec::new(),
-        values: Vec::new(),
-        row_lower: Vec::new(),
-        row_upper: Vec::new(),
-    };
+    let mut batch = empty_delta_batch();
 
     build_delta_cut_row_batch_into(
         &mut batch,
@@ -3373,6 +3462,7 @@ mod dcs_forward {
     use crate::DEFAULT_COST_SCALE_FACTOR;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::PatchBuffer;
+    use crate::setup::{NodeId, NodePos, StageIdx};
     use crate::test_support;
     use crate::trajectory::TrajectoryRecord;
     use crate::workspace::{BasisStore, SolverWorkspace, WorkspaceSizing};
@@ -3471,12 +3561,13 @@ mod dcs_forward {
     /// initial set omits the binding slot 1 (stale `last_active_iter`).
     fn fwd_pool() -> FutureCostFunction {
         let mut fcf = FutureCostFunction::new(1, 1, 8, 10, &[0]);
-        fcf.add_cut(0, 0, 0, 1.0, &[0.0]);
-        fcf.add_cut(0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
-        fcf.add_cut(0, 0, 2, 3.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 1.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
+        fcf.add_cut(NodeId(0), 0, 0, 2, 3.0, &[0.0]);
         let meta = |generated: u64, last: u64| CutMetadata {
             iteration_generated: generated,
             forward_pass_index: 0,
+            node: NodeId(0),
             active_count: 0,
             last_active_iter: last,
         };
@@ -3502,13 +3593,14 @@ mod dcs_forward {
             noise_dim: 1,
             n_anticipated: 0,
             k_max: 0,
+            n_commitment: 0,
         };
         let solver = ActiveSolver::new().expect("ActiveSolver::new()");
         SolverWorkspace::new(
             0,
             0,
             solver,
-            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             1,
             sizing,
         )
@@ -3596,6 +3688,7 @@ mod dcs_forward {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -3629,10 +3722,11 @@ mod dcs_forward {
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: NodeId(0),
             state: Vec::new(),
         }];
         let key = StageKey {
-            t: 0,
+            t: StageIdx(0),
             m: 0,
             local_m: 0,
             num_stages: 2,
@@ -3642,6 +3736,7 @@ mod dcs_forward {
             terminal_has_boundary_cuts: false,
             pool: &fcf.pools[0],
             dcs,
+            node: NodePos(0),
         };
         let mut slices = basis_store.split_workers_mut(1);
         let stage_cost = run_forward_stage(
@@ -3810,6 +3905,7 @@ mod transit_bucket_copy_gap {
     use crate::horizon_mode::HorizonMode;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::{PatchBuffer, StageGeometry};
+    use crate::setup::{NodeId, NodePos, StageIdx};
     use crate::test_support;
     use crate::trajectory::TrajectoryRecord;
     use crate::workspace::{BasisStore, SolverWorkspace, WorkspaceSizing};
@@ -3890,12 +3986,13 @@ mod transit_bucket_copy_gap {
             noise_dim: 1,
             n_anticipated: 1,
             k_max: 1,
+            n_commitment: 0,
         };
         SolverWorkspace::new(
             0,
             0,
             MockSolver::always_ok(transit_bucket_solution()),
-            PatchBuffer::new(1, 1, 0, 0, 1, 1, 1),
+            PatchBuffer::new(1, 1, 0, 0, 1, 1, 1, 0),
             4,
             sizing,
         )
@@ -3947,6 +4044,7 @@ mod transit_bucket_copy_gap {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, 1),
@@ -3974,10 +4072,11 @@ mod transit_bucket_copy_gap {
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: NodeId(0),
             state: Vec::new(),
         }];
         let key = StageKey {
-            t: 0,
+            t: StageIdx(0),
             m: 0,
             local_m: 0,
             num_stages: 1,
@@ -3987,6 +4086,7 @@ mod transit_bucket_copy_gap {
             terminal_has_boundary_cuts: false,
             pool: &fcf.pools[0],
             dcs: None,
+            node: NodePos(0),
         };
         let mut slices = basis_store.split_workers_mut(1);
         run_forward_stage(
@@ -4003,7 +4103,7 @@ mod transit_bucket_copy_gap {
     }
 
     /// The bucket and anticipated-ring state (`state[transit_buckets_out]`,
-    /// `state[anticipated_slots_out]`) ride the state-assembly plain copy: each
+    /// `state[commit_out]`) ride the state-assembly plain copy: each
     /// equals its own LP primal column, untouched by the lag-shift (the only
     /// remaining state-assembly overwrite, at index 1).
     #[test]

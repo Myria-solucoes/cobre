@@ -166,13 +166,13 @@ fn find_productivity_for_stage(config: &ProductionModelConfig, stage: &Stage) ->
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        DeficitSegment, EntityId, Hydro,
+        DeficitSegment, EntityId, HorizonGraph, Hydro,
         entities::{Bus, HydroGenerationModel, HydroPenalties},
         initial_conditions::InitialConditions,
         penalty::GlobalPenaltyDefaults,
         temporal::{
-            Block, BlockMode, NoiseMethod, PolicyGraph, ScenarioSourceConfig, Stage,
-            StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+            StageStateConfig,
         },
     };
 
@@ -180,8 +180,8 @@ mod tests {
     use crate::{
         config::{
             Config, EstimationConfig, ExportsConfig, ModelingConfig, ParallelismConfig,
-            PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingRuleConfig, TrainingConfig,
-            TrainingSolverConfig, UpperBoundEvaluationConfig,
+            PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingMode, StoppingRuleConfig,
+            TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
         },
         extensions::{
             HydroEnergyProductivityRow, ProductionModelConfig, SeasonConfig, SelectionMode,
@@ -304,17 +304,18 @@ mod tests {
     fn base_parsed_data() -> ParsedData {
         let config = Config {
             schema: None,
+            state_space: crate::config::StateSpaceConfig::default(),
             modeling: ModelingConfig::default(),
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: None,
-                forward_passes: Some(10),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 100 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 10 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             simulation: SimulationConfig::default(),
@@ -338,8 +339,9 @@ mod tests {
             config,
             penalties: global_penalties,
             stages: StagesData {
+                openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage(0)],
-                policy_graph: PolicyGraph::default(),
+                policy_graph: HorizonGraph::default(),
             },
             initial_conditions: InitialConditions {
                 storage: vec![],
@@ -347,7 +349,9 @@ mod tests {
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
+                future_anticipated_deliveries: vec![],
             },
+            post_study_stages: None,
             buses: vec![Bus {
                 id: EntityId(1),
                 name: "BUS_1".to_string(),

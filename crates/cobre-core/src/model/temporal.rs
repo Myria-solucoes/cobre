@@ -1,10 +1,11 @@
-//! Temporal domain types — stages, blocks, seasons, and the policy graph.
+//! Temporal domain types — stages, blocks, seasons, and stage transitions.
 //!
 //! This module defines the types that describe the time structure of a
 //! multi-stage stochastic optimization problem: how the study horizon is
 //! partitioned into stages, how stages are subdivided into load blocks,
-//! how stages relate to seasonal patterns, and how the policy graph
-//! encodes stage-to-stage transitions.
+//! how stages relate to seasonal patterns, and how a [`Transition`] represents
+//! one stage-to-stage edge. [`super::horizon`] assembles transitions and nodes
+//! into the horizon-wide topology.
 //!
 //! These are clarity-first data types following the dual-nature design
 //! principle: they use `Vec<T>`, `String`, and `Option` for readability
@@ -510,7 +511,7 @@ impl SeasonMap {
 // Transition (SS12.9)
 // ---------------------------------------------------------------------------
 
-/// A single transition in the policy graph, representing a directed
+/// A single transition in the horizon graph, representing a directed
 /// edge from one stage to another with an associated probability and
 /// optional discount rate override.
 ///
@@ -524,10 +525,10 @@ impl SeasonMap {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Transition {
-    /// Source stage ID. Must exist in the stage set.
+    /// Source endpoint: a node id when the horizon graph declares `nodes`, a stage id otherwise.
     pub source_id: i32,
 
-    /// Target stage ID. Must exist in the stage set.
+    /// Target endpoint: a node id when the horizon graph declares `nodes`, a stage id otherwise.
     pub target_id: i32,
 
     /// Transition probability. Outgoing probabilities from each source
@@ -535,54 +536,39 @@ pub struct Transition {
     pub probability: f64,
 
     /// Per-transition annual discount rate override; `None` uses the
-    /// [`PolicyGraph`] global rate.
+    /// [`HorizonGraph`](crate::HorizonGraph) global rate.
     /// See [Discount Rate §3](../math/discount-rate.md).
     pub annual_discount_rate_override: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
-// PolicyGraph (SS12.10)
+// Node (SS12.9.1)
 // ---------------------------------------------------------------------------
 
-/// Parsed and validated policy graph defining stage transitions,
-/// horizon type, and global discount rate.
+/// A single horizon-graph node: one decision point at a study stage, carrying the
+/// per-stage external-library realization it addresses.
 ///
-/// The clarity-first graph topology loaded from `stages.json`; the solver-level
-/// `HorizonMode` enum is built from it at initialization.
-/// See [Horizon Mode Trait](../architecture/horizon-mode-trait.md).
+/// A declared [`HorizonGraph::nodes`](crate::HorizonGraph::nodes) makes the graph
+/// node-native — the engine solves the node graph directly and [`Transition`]
+/// endpoints are node ids. An empty `nodes` leaves the graph a stage chain
+/// (endpoints are stage ids).
 ///
-/// Source: `stages.json` `policy_graph`.
-/// See [Input Scenarios §1.2](input-scenarios.md).
+/// Source: `stages.json` `policy_graph.nodes[]`.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct PolicyGraph {
-    /// Horizon type: finite (acyclic chain) or cyclic (infinite periodic).
-    pub graph_type: PolicyGraphType,
+pub struct Node {
+    /// Unique node id; [`Transition`] endpoints reference it under a declared graph.
+    pub id: i32,
 
-    /// Global annual discount rate; `0.0` disables discounting. Must be `> 0`
-    /// for cyclic graphs to converge (validation rule 7).
-    /// See [Discount Rate §3](../math/discount-rate.md).
-    pub annual_discount_rate: f64,
+    /// Declared study-stage id this node sits at; a domain id, never an array index.
+    pub stage_id: i32,
 
-    /// Stage transitions. Finite horizon: a linear chain or DAG. Cyclic: at least
-    /// one back-edge (`source_id >= target_id`).
-    pub transitions: Vec<Transition>,
+    /// Per-stage external-library realization column this node carries; `None` at a
+    /// stage with no slot-occupying external class.
+    pub scenario_id: Option<i32>,
 
-    /// Season definitions; `None` when none are provided or required.
-    pub season_map: Option<SeasonMap>,
-}
-
-impl Default for PolicyGraph {
-    /// A finite-horizon graph with no transitions and no discounting; `cobre-io`
-    /// replaces it with the graph loaded from `stages.json`.
-    fn default() -> Self {
-        Self {
-            graph_type: PolicyGraphType::FiniteHorizon,
-            annual_discount_rate: 0.0,
-            transitions: Vec::new(),
-            season_map: None,
-        }
-    }
+    /// Optional human-readable label.
+    pub label: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -635,46 +621,6 @@ mod tests {
             stage.end_date - stage.start_date,
             chrono::TimeDelta::days(31)
         );
-    }
-
-    #[test]
-    fn test_policy_graph_construction() {
-        let transitions = vec![
-            Transition {
-                source_id: 1,
-                target_id: 2,
-                probability: 1.0,
-                annual_discount_rate_override: None,
-            },
-            Transition {
-                source_id: 2,
-                target_id: 3,
-                probability: 1.0,
-                annual_discount_rate_override: Some(0.08),
-            },
-            Transition {
-                source_id: 3,
-                target_id: 4,
-                probability: 1.0,
-                annual_discount_rate_override: None,
-            },
-        ];
-
-        let graph = PolicyGraph {
-            graph_type: PolicyGraphType::FiniteHorizon,
-            annual_discount_rate: 0.06,
-            transitions,
-            season_map: None,
-        };
-
-        assert_eq!(graph.graph_type, PolicyGraphType::FiniteHorizon);
-        assert!((graph.annual_discount_rate - 0.06).abs() < f64::EPSILON);
-        assert_eq!(graph.transitions.len(), 3);
-        assert_eq!(
-            graph.transitions[1].annual_discount_rate_override,
-            Some(0.08)
-        );
-        assert!(graph.season_map.is_none());
     }
 
     #[test]
@@ -910,43 +856,5 @@ mod tests {
         let season_map = d30_shaped_season_map();
         let july_15 = NaiveDate::from_ymd_opt(2024, 7, 15).unwrap();
         assert_eq!(season_map.season_for_date(july_15), Some(6));
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_policy_graph_serde_roundtrip() {
-        let graph = PolicyGraph {
-            graph_type: PolicyGraphType::FiniteHorizon,
-            annual_discount_rate: 0.06,
-            transitions: vec![
-                Transition {
-                    source_id: 1,
-                    target_id: 2,
-                    probability: 1.0,
-                    annual_discount_rate_override: None,
-                },
-                Transition {
-                    source_id: 2,
-                    target_id: 3,
-                    probability: 1.0,
-                    annual_discount_rate_override: None,
-                },
-            ],
-            season_map: None,
-        };
-
-        let json = serde_json::to_string(&graph).unwrap();
-
-        assert!(
-            json.contains("\"graph_type\":\"FiniteHorizon\""),
-            "JSON did not contain expected graph_type: {json}"
-        );
-        assert!(
-            json.contains("\"annual_discount_rate\":0.06"),
-            "JSON did not contain expected annual_discount_rate: {json}"
-        );
-
-        let deserialized: PolicyGraph = serde_json::from_str(&json).unwrap();
-        assert_eq!(graph, deserialized);
     }
 }

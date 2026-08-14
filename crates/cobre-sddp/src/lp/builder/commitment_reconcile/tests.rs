@@ -1,4 +1,9 @@
-use super::{Reconciliation, drift_margin, reconcile_commitment};
+use super::{
+    BoundRelaxations, DeliveryPins, Reconciliation, StageGeometry, drift_margin,
+    fill_bound_relaxations, reconcile_commitment,
+};
+use crate::indexer::StateSpace;
+use cobre_solver::StageTemplate;
 
 /// A generation column's scale is well below 1, so its bound round-trips through
 /// `raw / scale * scale`; any value here exercises that round-trip.
@@ -160,5 +165,86 @@ fn comparison_uses_the_scaled_round_tripped_bound() {
         reconcile_commitment(enforced, 0.0, upper_scaled, GEN_SCALE),
         Reconciliation::InBounds,
         "a commitment at the ENFORCED bound is in bounds by definition"
+    );
+}
+
+// =========================================================================
+// fill_bound_relaxations / DeliveryPins: hold-slot re-homing
+// =========================================================================
+
+fn minimal_gen_template(gen_col_upper: f64) -> StageTemplate {
+    StageTemplate {
+        num_cols: 1,
+        num_rows: 0,
+        num_nz: 0,
+        col_starts: vec![0, 0],
+        row_indices: Vec::new(),
+        values: Vec::new(),
+        col_lower: vec![0.0],
+        col_upper: vec![gen_col_upper],
+        objective: vec![0.0],
+        row_lower: Vec::new(),
+        row_upper: Vec::new(),
+        n_transfer: 0,
+        n_dual_relevant: 0,
+        n_hydro: 0,
+        max_par_order: 0,
+        col_scale: Vec::new(),
+        row_scale: Vec::new(),
+        n_state: 0,
+    }
+}
+
+/// `A=1`, `k_max=2`: the in-study ring holds two DIFFERENT commitments, one per
+/// slot. Delivery/decision stage `3` resolves to the modular slot `3 % 2 = 1`
+/// (`StateSpace::commitment_hold_in_study_offset`) — never slot `0`, the
+/// retired shift-ring's always-maturing-here convention. Slot `1` carries a
+/// commitment drifted within [`drift_margin`] past the generation column's
+/// cap; slot `0` carries an unrelated, deep-in-bounds value that would wrongly
+/// short-circuit to [`Reconciliation::InBounds`] (no relaxation pushed) were
+/// the retired slot-0 read still in place.
+#[test]
+fn fill_bound_relaxations_relaxes_the_stage_modular_hold_slot() {
+    let state_layout = StateSpace::new(0, 0, 0, Vec::new(), 1, 2, vec![2], &[]);
+    assert_eq!(state_layout.commit_out, 0..2);
+    assert_eq!(state_layout.n_state, 2);
+
+    let cap = 1_000.0_f64;
+    let margin = drift_margin(cap);
+    let drifted = margin.mul_add(0.5, cap);
+    let pinned_state = vec![500.0_f64, drifted];
+
+    let template = minimal_gen_template(cap);
+    let geometry = StageGeometry {
+        thermal: 0..1,
+        ..StageGeometry::default()
+    };
+    let anticipated_thermal_indices = [0_usize];
+
+    let pins = DeliveryPins {
+        state_layout: &state_layout,
+        pinned_state: &pinned_state,
+        template: &template,
+        geometry: &geometry,
+        anticipated_thermal_indices: &anticipated_thermal_indices,
+        n_blks: 1,
+        stage_idx: 3,
+        n_stages: 5,
+    };
+
+    let mut relaxations = BoundRelaxations::default();
+    fill_bound_relaxations(&pins, &mut relaxations)
+        .expect("drift within the margin must not be refused");
+
+    assert_eq!(
+        relaxations.indices,
+        vec![0],
+        "the thermal's single generation column must be relaxed, proving slot 1 \
+         (not the retired always-slot-0 read) was reconciled"
+    );
+    assert!(
+        relaxations.upper[0] >= drifted,
+        "the relaxed bound must admit the drifted commitment: {} < {drifted}",
+        relaxations.upper[0]
     );
 }

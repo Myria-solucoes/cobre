@@ -2,8 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use cobre_core::{EntityId, Hydro};
+
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
-use super::ENVELOPE_TOLERANCE;
+use super::envelope_tolerance;
 
 pub(super) fn check_cascade_acyclic(data: &ParsedData, ctx: &mut ValidationContext) {
     if data.hydros.is_empty() {
@@ -125,6 +127,49 @@ pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext)
                 ),
             );
         }
+    }
+}
+
+/// Rejects a `min_diversion_m3s` override on a hydro that declares no `diversion`
+/// channel: with no channel, [`resolve_bounds`](crate::resolution::resolve_bounds)
+/// pins the diversion column to `[0, 0]`, so a positive floor is the infeasible
+/// `[min > 0, 0]`.
+///
+/// This is a same-column, override-vs-declaration check only. Cross-row and
+/// cross-source min/max inversion — an override floor exceeding a maximum
+/// declared elsewhere, whether from a differently-keyed override row or from the
+/// entity's own `DiversionChannel.max_flow_m3s` — is deliberately not validated
+/// here: a combinatorial checker re-implementing the resolver's precedence would
+/// duplicate it and drift. That residual surfaces as LP infeasibility instead.
+pub(super) fn check_diversion_floor_requires_channel(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    let declared: HashMap<EntityId, &Hydro> = data.hydros.iter().map(|h| (h.id, h)).collect();
+
+    for row in &data.hydro_bounds {
+        let Some(min_diversion) = row.min_diversion_m3s.filter(|&m| m > 0.0) else {
+            continue;
+        };
+        let Some(&hydro) = declared.get(&row.hydro_id) else {
+            continue;
+        };
+        if hydro.diversion.is_some() {
+            continue;
+        }
+
+        let entity_str = format!("Hydro {}", hydro.id.0);
+        ctx.add_error(
+            ErrorKind::InvalidValue,
+            "constraints/hydro_bounds.parquet",
+            Some(&entity_str),
+            format!(
+                "{entity_str}: hydro_bounds row at stage_id={} sets min_diversion_m3s=\
+                 {min_diversion}, but the hydro declares no diversion channel; diversion is \
+                 pinned [0, 0] with no channel, making a positive floor infeasible",
+                row.stage_id
+            ),
+        );
     }
 }
 
@@ -409,6 +454,13 @@ pub(super) fn check_geometry_monotonicity(data: &ParsedData, ctx: &mut Validatio
             let prev = &pair[0];
             let curr = &pair[1];
 
+            // `volume_hm3` stays a raw strict comparison, deliberately not
+            // tolerance-shifted like `height_m`/`area_km2` below: a duplicate
+            // volume between two distinct rows is a real data error (a
+            // vertical, non-function segment of the V-H curve), never a
+            // round-off artifact — these are direct parquet field reads with
+            // no arithmetic upstream, so there is no computed-vs-computed
+            // residual for a tolerance to absorb.
             if curr.volume_hm3 <= prev.volume_hm3 {
                 ctx.add_error(
                     ErrorKind::BusinessRuleViolation,
@@ -421,7 +473,8 @@ pub(super) fn check_geometry_monotonicity(data: &ParsedData, ctx: &mut Validatio
                 );
             }
 
-            if curr.height_m < prev.height_m {
+            let height_tolerance = envelope_tolerance(prev.height_m);
+            if curr.height_m < prev.height_m - height_tolerance {
                 ctx.add_error(
                     ErrorKind::BusinessRuleViolation,
                     "system/hydro_geometry.parquet",
@@ -433,7 +486,8 @@ pub(super) fn check_geometry_monotonicity(data: &ParsedData, ctx: &mut Validatio
                 );
             }
 
-            if curr.area_km2 < prev.area_km2 {
+            let area_tolerance = envelope_tolerance(prev.area_km2);
+            if curr.area_km2 < prev.area_km2 - area_tolerance {
                 ctx.add_error(
                     ErrorKind::BusinessRuleViolation,
                     "system/hydro_geometry.parquet",
@@ -612,7 +666,7 @@ pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationCon
         }
 
         let turbined_sum: f64 = hydro.unit_groups.iter().map(|g| g.max_turbined_m3s).sum();
-        let turbined_tolerance = ENVELOPE_TOLERANCE * hydro.max_turbined_m3s.abs().max(1.0);
+        let turbined_tolerance = envelope_tolerance(hydro.max_turbined_m3s);
         if turbined_sum > hydro.max_turbined_m3s + turbined_tolerance {
             ctx.add_error(
                 ErrorKind::InvalidValue,
@@ -630,7 +684,7 @@ pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationCon
         }
 
         let generation_sum: f64 = hydro.unit_groups.iter().map(|g| g.max_generation_mw).sum();
-        let generation_tolerance = ENVELOPE_TOLERANCE * hydro.max_generation_mw.abs().max(1.0);
+        let generation_tolerance = envelope_tolerance(hydro.max_generation_mw);
         if generation_sum > hydro.max_generation_mw + generation_tolerance {
             ctx.add_error(
                 ErrorKind::InvalidValue,
@@ -652,7 +706,7 @@ pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationCon
         // declared`, so the violation condition is `sum < declared - tolerance`
         // — the mirror of rule 41's `sum > declared + tolerance` ceiling check.
         let min_turbined_sum: f64 = hydro.unit_groups.iter().map(|g| g.min_turbined_m3s).sum();
-        let min_turbined_tolerance = ENVELOPE_TOLERANCE * hydro.min_turbined_m3s.abs().max(1.0);
+        let min_turbined_tolerance = envelope_tolerance(hydro.min_turbined_m3s);
         if min_turbined_sum < hydro.min_turbined_m3s - min_turbined_tolerance {
             ctx.add_error(
                 ErrorKind::InvalidValue,
@@ -669,7 +723,7 @@ pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationCon
         }
 
         let min_generation_sum: f64 = hydro.unit_groups.iter().map(|g| g.min_generation_mw).sum();
-        let min_generation_tolerance = ENVELOPE_TOLERANCE * hydro.min_generation_mw.abs().max(1.0);
+        let min_generation_tolerance = envelope_tolerance(hydro.min_generation_mw);
         if min_generation_sum < hydro.min_generation_mw - min_generation_tolerance {
             ctx.add_error(
                 ErrorKind::InvalidValue,
@@ -701,8 +755,10 @@ mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use crate::FphaHyperplaneRow;
+    use crate::constraints::HydroBoundsRow;
     use crate::validation::{ErrorKind, ValidationContext};
     use chrono::NaiveDate;
+    use cobre_core::DiversionChannel;
 
     // ── Cascade acyclicity tests ───────────────────────────────────────────────
 
@@ -929,6 +985,119 @@ mod tests {
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
         assert!(ctx.has_errors());
+    }
+
+    // ── Diversion floor requires channel tests ────────────────────────────────
+
+    /// A `min_diversion_m3s` override on a hydro declaring no `diversion` channel
+    /// emits exactly one InvalidValue finding naming the hydro and the column.
+    #[test]
+    fn test_min_diversion_without_channel_emits_one_finding() {
+        let hydro = make_hydro(7, None);
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![HydroBoundsRow {
+            hydro_id: EntityId::from(7),
+            stage_id: 0,
+            min_diversion_m3s: Some(5.0),
+            ..Default::default()
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        let findings: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::InvalidValue && e.message.contains("min_diversion_m3s")
+            })
+            .collect();
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one min_diversion_m3s finding, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            findings[0].message.contains("Hydro 7"),
+            "message should name Hydro 7, got: {}",
+            findings[0].message
+        );
+    }
+
+    #[test]
+    fn test_min_diversion_zero_without_channel_emits_no_finding() {
+        let hydro = make_hydro(7, None);
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![HydroBoundsRow {
+            hydro_id: EntityId::from(7),
+            stage_id: 0,
+            min_diversion_m3s: Some(0.0),
+            ..Default::default()
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("min_diversion_m3s")),
+            "a zero floor resolves the channel-less diversion column to [0, 0] (feasible), \
+             so it must not be rejected, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// The same override on a hydro that DOES declare a diversion channel emits
+    /// no finding.
+    #[test]
+    fn test_min_diversion_with_channel_emits_no_finding() {
+        let mut hydro = make_hydro(7, None);
+        hydro.diversion = Some(DiversionChannel {
+            downstream_id: EntityId::from(9),
+            max_flow_m3s: 10.0,
+        });
+        let mut data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![HydroBoundsRow {
+            hydro_id: EntityId::from(7),
+            stage_id: 0,
+            min_diversion_m3s: Some(5.0),
+            ..Default::default()
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("min_diversion_m3s")),
+            "a hydro with a declared diversion channel should not trigger the \
+             no-channel finding, got: {:?}",
+            ctx.errors()
+        );
     }
 
     // ── Lifecycle consistency tests ───────────────────────────────────────────
@@ -1844,6 +2013,123 @@ mod tests {
         assert!(
             msg.contains("height"),
             "message should mention 'height', got: {msg}"
+        );
+    }
+
+    /// A `height_m` decrease within the relative-with-floor tolerance (a hair
+    /// below the previous row, on a ~100 m curve) must not be rejected.
+    #[test]
+    fn test_geometry_height_within_relative_tolerance_no_error() {
+        let geometry = vec![
+            make_geom_row(2, 10.0, 100.0, 1.0),
+            // Decrease of 1e-8, an order of magnitude below the 1e-7 tolerance.
+            make_geom_row(2, 20.0, 100.0 - 1e-8, 1.5),
+        ];
+        let data = make_data(
+            vec![make_hydro(2, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            geometry,
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "a height decrease within relative tolerance must not be rejected, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A `height_m` decrease beyond the tolerance (an order of magnitude
+    /// larger) is still rejected — the tolerance must have power.
+    #[test]
+    fn test_geometry_height_beyond_tolerance_still_errors() {
+        let geometry = vec![
+            make_geom_row(2, 10.0, 100.0, 1.0),
+            // Decrease of 1e-6, an order of magnitude above the 1e-7 tolerance.
+            make_geom_row(2, 20.0, 100.0 - 1e-6, 1.5),
+        ];
+        let data = make_data(
+            vec![make_hydro(2, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            geometry,
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let relevant: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::BusinessRuleViolation && e.message.contains("height"))
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "a height decrease beyond tolerance must still be rejected, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// An `area_km2` decrease within the relative-with-floor tolerance must
+    /// not be rejected.
+    #[test]
+    fn test_geometry_area_within_relative_tolerance_no_error() {
+        let geometry = vec![
+            make_geom_row(2, 10.0, 100.0, 1.0),
+            // Decrease of 1e-10, an order of magnitude below the 1e-9 floor
+            // tolerance (area_km2 magnitude is below the envelope_tolerance floor).
+            make_geom_row(2, 20.0, 110.0, 1.0 - 1e-10),
+        ];
+        let data = make_data(
+            vec![make_hydro(2, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            geometry,
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "an area decrease within relative tolerance must not be rejected, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// An `area_km2` decrease beyond the tolerance (an order of magnitude
+    /// larger) is still rejected — the tolerance must have power.
+    #[test]
+    fn test_geometry_area_beyond_tolerance_still_errors() {
+        let geometry = vec![
+            make_geom_row(2, 10.0, 100.0, 1.0),
+            // Decrease of 1e-8, an order of magnitude above the 1e-9 floor tolerance.
+            make_geom_row(2, 20.0, 110.0, 1.0 - 1e-8),
+        ];
+        let data = make_data(
+            vec![make_hydro(2, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            geometry,
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let relevant: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::BusinessRuleViolation && e.message.contains("area"))
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "an area decrease beyond tolerance must still be rejected, got: {:?}",
+            ctx.errors()
         );
     }
 

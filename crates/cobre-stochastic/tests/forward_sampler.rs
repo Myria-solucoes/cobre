@@ -294,6 +294,9 @@ fn insample_dispatch_returns_tree_slice_of_correct_dim() {
             perm_scratch: &mut perm_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: ctx.tree_view().n_openings(0),
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -333,11 +336,23 @@ fn insample_copy_equivalence_matches_direct_call() {
             perm_scratch: &mut perm_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: ctx.tree_view().n_openings(0),
+            pinned_scenario: None,
         })
         .unwrap();
 
     let tree_view = ctx.tree_view();
-    let (_direct_idx, direct_slice) = sample_forward(&tree_view, ctx.base_seed(), 0, 0, 0, 0);
+    let (_direct_idx, direct_slice) = sample_forward(
+        &tree_view,
+        ctx.base_seed(),
+        0,
+        0,
+        0,
+        0,
+        0,
+        tree_view.n_openings(0),
+    );
 
     assert_eq!(
         result.as_slice(),
@@ -375,6 +390,9 @@ fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
             perm_scratch: &mut perm_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -419,6 +437,9 @@ fn out_of_sample_is_deterministic() {
             perm_scratch: &mut perm_a,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -432,6 +453,9 @@ fn out_of_sample_is_deterministic() {
             perm_scratch: &mut perm_b,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -473,6 +497,9 @@ fn out_of_sample_scenario_changes_noise() {
             perm_scratch: &mut perm_0,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -486,6 +513,9 @@ fn out_of_sample_scenario_changes_noise() {
             perm_scratch: &mut perm_1,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -532,6 +562,9 @@ fn out_of_sample_noise_is_finite() {
                 perm_scratch: &mut perm_scratch,
                 total_scenarios,
                 noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
+                pinned_scenario: None,
             })
             .unwrap();
 
@@ -579,6 +612,9 @@ fn out_of_sample_correlation_matches_target() {
                 perm_scratch: &mut perm_scratch,
                 total_scenarios: n_scenarios,
                 noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
+                pinned_scenario: None,
             })
             .unwrap();
 
@@ -640,6 +676,9 @@ fn out_of_sample_per_stage_method_mixing() {
                     perm_scratch: &mut perm_scratch,
                     total_scenarios,
                     noise_group_id: 0,
+                    node_opening_offset: 0,
+                    node_opening_len: 0,
+                    pinned_scenario: None,
                 })
                 .unwrap();
 
@@ -766,6 +805,9 @@ fn out_of_sample_resume_invariance() {
             perm_scratch: &mut perm_first,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
     let first_values: Vec<f64> = first.as_slice().to_vec();
@@ -780,6 +822,9 @@ fn out_of_sample_resume_invariance() {
             perm_scratch: &mut perm_resume,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 

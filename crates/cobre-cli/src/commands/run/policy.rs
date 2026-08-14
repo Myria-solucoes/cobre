@@ -21,9 +21,11 @@ use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::inject_boundary_cuts;
 use cobre_sddp::load_boundary_cuts;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
+use cobre_sddp::resolve_boundary_source_stage;
 use cobre_sddp::validate_policy_load;
 
 use crate::error::CliError;
+use crate::summary::print_boundary_summary;
 
 use super::RunContext;
 
@@ -54,7 +56,7 @@ fn load_and_validate_checkpoint(
     })?;
     rescale_checkpoint_cuts_for_load(
         &mut checkpoint.stage_cuts,
-        checkpoint.metadata.cost_scale_factor,
+        checkpoint.metadata.producer.cost_scale_factor,
         setup.stage_data.stage_templates.cost_scale_factor,
     );
 
@@ -68,21 +70,33 @@ fn load_and_validate_checkpoint(
 
     // The terminal pool is always full-config, so its manifest witnesses every
     // state family's slot identity — a terminal-only comparison covers all stages.
+    // `state_dimension` is per-pool now (the global metadata copy is gone), so the
+    // source dimension is the terminal pool payload's own.
     let current_manifest = setup.build_terminal_entity_manifest(system);
     let checkpoint_terminal_manifest: &[EntitySlot] = checkpoint
         .stage_cuts
         .last()
         .map_or(&[], |s| s.entity_manifest.as_slice());
+    let source_state_dim = checkpoint
+        .stage_cuts
+        .last()
+        .map_or(0, |s| s.state_dimension);
+    let source_graph = &checkpoint.metadata.graph_manifest;
+    let current_graph = setup.build_graph_manifest();
 
     let source = PolicyStageManifest {
-        state_dimension: checkpoint.metadata.state_dimension,
+        state_dimension: source_state_dim,
         num_stages: checkpoint.metadata.num_stages,
+        n_pools: source_graph.n_pools,
         slots: checkpoint_terminal_manifest,
+        graph: source_graph,
     };
     let current = PolicyStageManifest {
         state_dimension: state_dim,
         num_stages: n_stages,
+        n_pools: current_graph.n_pools,
         slots: &current_manifest,
+        graph: &current_graph,
     };
     let proof = validate_policy_load::<FullFcf>(&source, &current).map_err(CliError::from)?;
 
@@ -103,10 +117,23 @@ fn load_checkpoint_into_setup(
     proof: &PolicyLoadProof<FullFcf>,
     setup: &mut StudySetup,
 ) -> Result<(), CliError> {
+    // The pre-replacement (cold-path) FCF already carries the per-pool arrays
+    // `new_per_pool` derived for this study; the resume path reuses them
+    // verbatim rather than substituting a scalar.
+    let pool_state_dimensions: Vec<usize> =
+        setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+    let visit_bounds: Vec<u64> = setup
+        .fcf
+        .pools
+        .iter()
+        .map(|p| u64::from(p.visit_stride))
+        .collect();
     // Reserve one extra slot for cuts added in the final iteration.
     let warm_fcf = FutureCostFunction::new_with_warm_start(
         proof,
         &checkpoint.stage_cuts,
+        &pool_state_dimensions,
+        &visit_bounds,
         setup.loop_params.forward_passes,
         setup.loop_params.max_iterations.saturating_add(1),
     )
@@ -116,9 +143,10 @@ fn load_checkpoint_into_setup(
     // cold-starts.
     if !checkpoint.stage_bases.is_empty() {
         let basis_cache = build_basis_cache_from_checkpoint(
-            setup.stage_data.stage_templates.templates.len(),
             &checkpoint.stage_bases,
             &checkpoint.stage_cuts,
+            &setup.node_graph.node_ids,
+            &setup.node_graph.node_pool_ids(),
         );
         setup.set_warm_start_basis_cache(basis_cache);
     }
@@ -154,6 +182,9 @@ pub(super) fn apply_training_policy(
                 load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
             load_checkpoint_into_setup(&checkpoint, &proof, setup)?;
             if ctx.is_root && !ctx.quiet {
+                // Pool 0 (the chain's stage-0 / lowest-id pool) stands in as a
+                // representative sample for this advisory message, not a
+                // per-pool count.
                 let warm_count = setup.fcf.pools[0].warm_start_count;
                 let _ = ctx.stderr.write_line(&format!(
                     "Warm-start: loaded {warm_count} cuts per stage from prior policy."
@@ -178,7 +209,7 @@ pub(super) fn apply_training_policy(
             }
             let (checkpoint, proof) =
                 load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
-            let completed = u64::from(checkpoint.metadata.completed_iterations);
+            let completed = u64::from(checkpoint.metadata.producer.completed_iterations);
             if completed >= setup.loop_params.max_iterations && ctx.is_root && !ctx.quiet {
                 let _ = ctx.stderr.write_line(&format!(
                     "WARNING: Checkpoint already completed {completed} iterations \
@@ -202,13 +233,30 @@ pub(super) fn apply_training_policy(
     // Must run after the match: warm-start replaces the whole FCF first, then
     // boundary cuts overwrite only the terminal pool.
     if let Some(bp) = root_config.and_then(|c| c.policy.boundary.as_ref()) {
-        let boundary_path = ctx.output_dir.join(&bp.path);
+        // Resolve against the CASE dir (an external source checkpoint), never the
+        // current run's output dir; an absolute `bp.path` passes through unchanged.
+        let boundary_path = ctx.case_dir.join(&bp.path);
         // Rationale: the cast cannot truncate — `state_dimension` counts FCF
         // state variables (one per reservoir/lag), bounded by the validated study
         // dimensions and far below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
+        let target_delivery_intervals = setup.build_terminal_anticipated_delivery_intervals(system);
+        let source_stage = if let Some(idx) = bp.source_stage {
+            idx
+        } else {
+            let resolved =
+                resolve_boundary_source_stage(&boundary_path, &target_delivery_intervals)
+                    .map_err(CliError::from)?;
+            if ctx.is_root && !ctx.quiet {
+                let _ = ctx.stderr.write_line(&format!(
+                    "Boundary source_stage resolved to {resolved} (no explicit \
+                     policy.boundary.source_stage configured)."
+                ));
+            }
+            resolved
+        };
         let stderr = &ctx.stderr;
         let quiet = ctx.quiet;
         let is_root = ctx.is_root;
@@ -217,23 +265,34 @@ pub(super) fn apply_training_policy(
                 let _ = stderr.write_line(&format!("warning: {msg}"));
             }
         };
+        // Already widened to this boundary policy's depth in `load_case_and_config`,
+        // so the load-time depth guard is a defensive check, never a user error.
+        let effective_inflow_lag_depth = root_config.and_then(|c| c.state_space.inflow_lag_depth);
         let boundary_records = load_boundary_cuts(
             &boundary_path,
-            bp.source_stage,
+            source_stage,
             state_dim,
             &current_manifest,
+            &target_delivery_intervals,
+            effective_inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,
         )
         .map_err(CliError::from)?;
         inject_boundary_cuts(setup, &boundary_records);
         if ctx.is_root && !ctx.quiet {
-            let _ = ctx.stderr.write_line(&format!(
-                "Boundary cuts: loaded {} cuts from stage {} of {}",
+            print_boundary_summary(
+                &ctx.stderr,
                 boundary_records.len(),
-                bp.source_stage,
-                boundary_path.display()
-            ));
+                source_stage,
+                &boundary_path,
+                boundary_records.report(),
+            );
+        }
+        if ctx.is_root {
+            for line in boundary_records.report().detail_lines() {
+                tracing::debug!("{line}");
+            }
         }
     }
 
@@ -265,25 +324,33 @@ pub(super) fn load_policy_for_simulation(
 
     let (checkpoint, proof) = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
 
-    let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
-        .map_err(CliError::from)?;
+    let pool_state_dimensions: Vec<usize> =
+        setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+    let loaded_fcf = FutureCostFunction::from_deserialized(
+        &proof,
+        &checkpoint.stage_cuts,
+        &pool_state_dimensions,
+    )
+    .map_err(CliError::from)?;
     setup.replace_fcf(loaded_fcf);
 
     let basis_cache = build_basis_cache_from_checkpoint(
-        setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
         &checkpoint.stage_cuts,
+        &setup.node_graph.node_ids,
+        &setup.node_graph.node_pool_ids(),
     );
 
     Ok(TrainingResult::new(
-        checkpoint.metadata.final_lower_bound,
+        checkpoint.metadata.producer.final_lower_bound,
         checkpoint
             .metadata
+            .producer
             .best_upper_bound
             .unwrap_or(f64::INFINITY),
         0.0,
         0.0,
-        checkpoint.metadata.completed_iterations.into(),
+        checkpoint.metadata.producer.completed_iterations.into(),
         "loaded from checkpoint".to_string(),
         0,
         basis_cache,

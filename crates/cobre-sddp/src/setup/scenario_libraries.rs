@@ -7,6 +7,7 @@ use cobre_core::{
     EntityId, InflowHistoryRow, Stage,
     scenario::{
         ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, HistoricalYears, LoadModel, NcsModel,
+        SamplingScheme,
     },
     temporal::{SeasonMap, StageLagTransition},
 };
@@ -169,7 +170,12 @@ pub(crate) fn build_external_inflow_library(
 
 /// Build and validate an [`ExternalScenarioLibrary`] for load.
 ///
-/// Uses canonical bus ID list from `load_models` (buses with `std_mw > 0.0`).
+/// Canonical bus ID list from `load_models`, filtered by
+/// [`LoadModel::is_noise_member`] — the same authority `noise_entity_order`
+/// consumes, so a σ=0 bus keeps its noise-vector slot under the external
+/// scheme. `load_scheme` is the CALLING phase's own resolved scheme; a phase
+/// whose scheme diverges from the training-derived noise-vector width is
+/// caught by `assert_external_library_widths`, not here.
 ///
 /// # Errors
 ///
@@ -177,13 +183,14 @@ pub(crate) fn build_external_inflow_library(
 pub(crate) fn build_external_load_library(
     external_rows: &[ExternalLoadRow],
     load_models: &[LoadModel],
+    load_scheme: SamplingScheme,
     stages: &[Stage],
     forward_passes: u32,
 ) -> Result<ExternalScenarioLibrary, SddpError> {
     let n_stages = stages.len();
     let mut bus_ids: Vec<EntityId> = load_models
         .iter()
-        .filter(|m| m.std_mw > 0.0)
+        .filter(|m| m.is_noise_member(load_scheme))
         .map(|m| m.bus_id)
         .collect();
     bus_ids.sort_unstable_by_key(|id| id.0);

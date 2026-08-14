@@ -642,6 +642,106 @@ fn migration_equivalence_point_k0_degeneracy() {
     );
 }
 
+// rv3-like calendar: two July weekly stages (168h each) + one
+// August monthly stage (744h, 31 days), H = 2 months.
+const RV3_STAGE_LENGTHS_HOURS: [f64; 3] = [168.0, 168.0, 744.0];
+const RV3_LEAD_HOURS: f64 = 1464.0; // 2 months (61 days) at 24h/day.
+
+#[test]
+fn test_resolve_future_delivery_decider_september_week_resolves_to_july_trunk() {
+    // end_w chosen so end_w - H lands inside stage 0 (the first July week):
+    // target = 100h (inside [0, 168)) => end_w = 100 + 1464 = 1564h.
+    let window_end_hours = 100.0 + RV3_LEAD_HOURS;
+    let resolution =
+        resolve_future_delivery_decider(RV3_LEAD_HOURS, &RV3_STAGE_LENGTHS_HOURS, window_end_hours);
+
+    assert_eq!(resolution, Some((0, DeciderKind::Trunk)));
+}
+
+#[test]
+fn test_resolve_future_delivery_decider_october_month_resolves_to_august_terminal_fan() {
+    // end_w chosen so end_w - H lands inside stage 2 (August, the last
+    // operative stage): target = 500h (inside [336, 1080)) => end_w = 500 +
+    // 1464 = 1964h.
+    let window_end_hours = 500.0 + RV3_LEAD_HOURS;
+    let resolution =
+        resolve_future_delivery_decider(RV3_LEAD_HOURS, &RV3_STAGE_LENGTHS_HOURS, window_end_hours);
+
+    assert_eq!(resolution, Some((2, DeciderKind::TerminalFan)));
+}
+
+#[test]
+fn test_resolve_future_delivery_decider_out_of_reach_precedes_horizon() {
+    // end_w - H < 0: the window's own end is closer than the lead can reach
+    // back into the study at all.
+    let window_end_hours = 100.0;
+    let resolution =
+        resolve_future_delivery_decider(RV3_LEAD_HOURS, &RV3_STAGE_LENGTHS_HOURS, window_end_hours);
+
+    assert_eq!(resolution, None);
+}
+
+// Defensive symmetric bound: end_w - H beyond the horizon end (1080h total)
+// has no in-study containing stage either -- also out of the lead's reach,
+// just on the far side, and must not return an out-of-range stage index.
+#[test]
+fn test_resolve_future_delivery_decider_out_of_reach_beyond_horizon_end() {
+    let window_end_hours = 5000.0 + RV3_LEAD_HOURS;
+    let resolution =
+        resolve_future_delivery_decider(RV3_LEAD_HOURS, &RV3_STAGE_LENGTHS_HOURS, window_end_hours);
+
+    assert_eq!(resolution, None);
+}
+
+// Boundary tie: target landing exactly on a stage boundary resolves to the
+// earlier stage, matching resolve_decider_physical's tie convention (the
+// in-study byte-identity regression below pins that convention on the
+// existing path; this pins the same rule reused on the new path).
+#[test]
+fn test_resolve_future_delivery_decider_boundary_tie_resolves_earlier() {
+    // target == 168.0 exactly (the boundary between stage 0 and stage 1):
+    // end_w = 168.0 + RV3_LEAD_HOURS.
+    let window_end_hours = 168.0 + RV3_LEAD_HOURS;
+    let resolution =
+        resolve_future_delivery_decider(RV3_LEAD_HOURS, &RV3_STAGE_LENGTHS_HOURS, window_end_hours);
+
+    assert_eq!(resolution, Some((0, DeciderKind::Trunk)));
+}
+
+// Regression: resolve_decider_physical / resolve_point / AnticipatedResolution
+// stay byte-identical to a captured baseline -- the in-study ring, k_max, and
+// the in-study resolve path are untouched by adding the post-horizon resolver.
+#[test]
+fn test_in_study_path_byte_identity_regression() {
+    let stage_lengths_hours = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0];
+    let resolution = resolve_point(LeadTime::Time(720.0), &stage_lengths_hours, 7);
+    assert_eq!(
+        resolution,
+        PointResolution {
+            decider: vec![None, None, None, None, Some(3), Some(4), Some(5)],
+            decision_sets: vec![vec![], vec![], vec![], vec![4], vec![5], vec![6], vec![]],
+            depth: vec![0, 0, 0, 1, 1, 1, 0],
+        },
+        "resolve_point's in-study path must stay byte-identical"
+    );
+
+    let anticipated = AnticipatedResolution::resolve(
+        &[LeadTime::Time(720.0), LeadTime::Stages(2)],
+        &stage_lengths_hours,
+        7,
+    );
+    assert_eq!(anticipated.k_max, 2, "k_max must stay byte-identical");
+    assert_eq!(
+        anticipated.max_fanout, 1,
+        "max_fanout must stay byte-identical"
+    );
+    assert_eq!(
+        anticipated.per_plant[0].decider,
+        vec![None, None, None, None, Some(3), Some(4), Some(5)],
+        "per-plant decider must stay byte-identical"
+    );
+}
+
 #[test]
 fn migration_equivalence_point_stage_count() {
     let resolution = resolve_point(

@@ -16,7 +16,7 @@ even when the logical outputs are identical.  Therefore:
 - **Schema identity IS guaranteed**: same column names, same dtypes, same
   column order.
 - **Non-timing column identity IS guaranteed**: all integer and string columns
-  (`iteration`, `phase`, `stage`, `opening`, `lp_solves`, etc.) must be
+  (`iteration`, `phase`, `stage_id`, `opening_index`, `lp_solves`, etc.) must be
   identical for the same deterministic case.
 
 This is the correct definition of "Python parity" for outputs that record
@@ -51,9 +51,10 @@ TIMING_COLS = frozenset(
 # rank and worker_id are present; add_rows_time_ms was removed.
 EXPECTED_COLUMNS = [
     "iteration",
+    "scenario_id",
     "phase",
-    "stage",
-    "opening",
+    "stage_id",
+    "opening_index",
     "rank",
     "worker_id",
     "lp_solves",
@@ -132,24 +133,24 @@ def d01_python_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
 
 
 def test_python_writes_opening_column(d01_python_output: pathlib.Path) -> None:
-    """Python run produces iterations.parquet with the `opening` column (Int32, nullable)."""
+    """Python run produces iterations.parquet with the `opening_index` column (Int32, nullable)."""
     parquet_path = d01_python_output / "training" / "solver" / "iterations.parquet"
     assert parquet_path.exists(), (
         "training/solver/iterations.parquet must exist after Python run"
     )
 
     schema = pq.read_schema(parquet_path)
-    assert "opening" in schema.names, (
-        f"iterations.parquet must contain 'opening' column; got: {schema.names}"
+    assert "opening_index" in schema.names, (
+        f"iterations.parquet must contain 'opening_index' column; got: {schema.names}"
     )
 
     # opening must be nullable Int32.
-    field = schema.field("opening")
+    field = schema.field("opening_index")
     assert pa.types.is_int32(field.type), (
-        f"opening column must be Int32, got {field.type}"
+        f"opening_index column must be Int32, got {field.type}"
     )
     assert field.nullable, (
-        "opening column must be nullable (NULL for non-backward phases)"
+        "opening_index column must be nullable (NULL for non-backward phases)"
     )
 
 
@@ -160,7 +161,7 @@ def test_python_opening_column_values(d01_python_output: pathlib.Path) -> None:
     )
 
     phases = table.column("phase").to_pylist()
-    openings = table.column("opening").to_pylist()
+    openings = table.column("opening_index").to_pylist()
 
     for phase, opening in zip(phases, openings):
         if phase == "backward":

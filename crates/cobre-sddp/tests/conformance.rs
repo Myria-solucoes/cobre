@@ -417,9 +417,9 @@ mod stopping_rule_conformance {
             iteration,
             wall_time_seconds: 0.0,
             lower_bound: lb,
+            upper_bound: 0.0,
             lower_bound_history: history,
             shutdown_requested: shutdown,
-            simulation_costs: None,
         }
     }
 
@@ -479,9 +479,9 @@ mod stopping_rule_conformance {
                         iteration: iter_limit,
                         wall_time_seconds: 1000.0,
                         lower_bound: 100.0,
+                        upper_bound: 0.0,
                         lower_bound_history: history,
                         shutdown_requested: shutdown,
-                        simulation_costs: None,
                     };
                     let (should_stop, results) = rule_set.evaluate(&state);
                     assert!(
@@ -541,6 +541,7 @@ mod cut_conformance {
         CutPool,
         wire::{CutWireHeader, cut_wire_size, deserialize_cut, serialize_cut},
     };
+    use cobre_sddp::setup::NodeId;
 
     /// Verify `CutWireHeader` serialize/deserialize round-trip with `n_state=3`.
     #[test]
@@ -550,6 +551,7 @@ mod cut_conformance {
         let coefficients = [1.0_f64, 2.0, 3.0];
 
         let slot_index = 7_u32;
+        let node_id = -5_i32;
         let iteration = 2_u32;
         let forward_pass_index = 1_u32;
 
@@ -557,6 +559,7 @@ mod cut_conformance {
         serialize_cut(
             &mut buf,
             slot_index,
+            node_id,
             iteration,
             forward_pass_index,
             intercept,
@@ -569,6 +572,7 @@ mod cut_conformance {
             header,
             CutWireHeader {
                 slot_index,
+                node_id,
                 iteration,
                 forward_pass_index,
                 intercept,
@@ -597,9 +601,9 @@ mod cut_conformance {
     fn cut_pool_add_then_active_cuts_returns_correct_data() {
         let mut pool = CutPool::new(10, 1, 1, 0);
 
-        pool.add_cut(0, 0, 10.0, &[1.0]);
-        pool.add_cut(1, 0, 20.0, &[2.0]);
-        pool.add_cut(2, 0, 30.0, &[3.0]);
+        pool.add_cut(NodeId(0), 0, 0, 10.0, &[1.0]);
+        pool.add_cut(NodeId(0), 1, 0, 20.0, &[2.0]);
+        pool.add_cut(NodeId(0), 2, 0, 30.0, &[3.0]);
 
         let active: Vec<(usize, f64, &[f64])> = pool.active_cuts().collect();
         assert_eq!(active.len(), 3, "must return all 3 active cuts");
@@ -662,8 +666,8 @@ mod convergence_conformance {
     }
 
     const CONVERGENCE_CASES: &[(&str, f64, f64, f64)] = &[
-        ("gap_formula_large_ub", 100.0, 110.0, 10.0 / 110.0),
-        ("gap_formula_small_ub_max_guard", 0.3, 0.5, 0.2),
+        ("gap_formula_large_lb", 100.0, 110.0, 10.0 / 100.0),
+        ("gap_formula_small_lb_max_guard", 0.3, 0.5, 0.2),
         ("lb_history_monotonic", 0.0, 0.0, 0.0), // sentinel; logic below uses lb_values
         ("iteration_limit_exact_trigger", 0.0, 0.0, 0.0), // sentinel; logic below uses loop
     ];
@@ -672,7 +676,7 @@ mod convergence_conformance {
     fn convergence_monitor_parameter_sweep() {
         for (idx, &(desc, lb, ub, expected_gap)) in CONVERGENCE_CASES.iter().enumerate() {
             match idx {
-                // gap = (UB - LB) / max(1, |UB|).
+                // gap = (UB - LB) / max(1, |LB|).
                 0 | 1 => {
                     let mut monitor = make_monitor(100);
                     monitor.update(lb, &make_sync_result(ub));
@@ -855,6 +859,7 @@ mod lb_conformance {
             0,
             0,
             0,
+            0,
         );
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
@@ -894,6 +899,7 @@ mod lb_conformance {
         ];
         let inflow_method = InflowNonNegativityMethod::None;
         let training_ctx = TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state_layout,
             cut_state_layouts: &cut_state_layouts,
@@ -1079,6 +1085,8 @@ fn build_geometry(
         diversion: diversion_start..thermal_start,
         thermal: thermal_start..thermal_end,
         anticipated_decision: 0..0,
+        commitment_decision: 0..0,
+        commitment_decision_windows: Vec::new(),
         line_fwd: line_fwd_start..line_rev_start,
         line_rev: line_rev_start..deficit_start,
         deficit: deficit_start..excess_start,

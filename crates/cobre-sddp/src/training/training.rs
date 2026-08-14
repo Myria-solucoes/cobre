@@ -20,6 +20,7 @@ use crate::{
     SddpError, SolverProfiles, TrainingConfig,
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
+    setup::NodePos,
     solver_stats::SolverStatsLogEntry,
     training_session::{IterationOutcome, TrainingSession},
     workspace::CapturedBasis,
@@ -84,8 +85,9 @@ pub struct TrainingResult {
     /// decides whether to persist it based on `exports.states`.
     pub visited_archive: Option<VisitedStatesArchive>,
 
-    /// Final-iteration frozen templates, one per stage. Always `Some`: freeze
-    /// runs unconditionally before the first iteration and is never reverted.
+    /// Final-iteration frozen templates, one per POOL (each is a pool's base
+    /// stage template plus that pool's active cuts). Always `Some`: freeze runs
+    /// unconditionally before the first iteration and is never reverted.
     pub frozen_templates: Option<Vec<StageTemplate>>,
 }
 
@@ -164,24 +166,32 @@ fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, Sdd
 /// for the i32 and f64 buffers). Single-rank runs skip the broadcast and clone
 /// local scenario 0 directly.
 ///
+/// Each reconstructed basis's `node_id` now rides the wire payload
+/// (`try_from_broadcast_payload` reads it), so no out-of-band fill from a
+/// per-stage node array is needed. The single-rank clone path likewise keeps
+/// the `node_id` capture set via `write_capture_metadata`. The cache is sized
+/// and keyed by `basis_store.num_nodes()` (one slot per canonical node), so a
+/// branching graph's leaf nodes are broadcast too, never truncated at
+/// `num_stages`.
+///
 /// # Errors
 ///
 /// Returns `SddpError::Communication(CommError::InvalidBufferSize { .. })` when
 /// a buffer length exceeds `i32::MAX`, `SddpError::Communication` when a
 /// `comm.broadcast` fails, or `SddpError::Validation` when a length prefix is
-/// inconsistent with the received buffer (naming the offending stage).
+/// inconsistent with the received buffer (naming the offending node).
 pub(crate) fn broadcast_basis_cache<C: Communicator>(
     basis_store: &BasisStore,
-    num_stages: usize,
     comm: &C,
 ) -> Result<Vec<Option<CapturedBasis>>, SddpError> {
+    let num_nodes = basis_store.num_nodes();
     // Single-rank fast path: no communication needed — clone the full
     // CapturedBasis including metadata (cut_row_slots, state_at_capture,
     // base_row_count) so that simulation reconstruction has full slot
     // identity on single-rank runs.
     if comm.size() == 1 {
-        let cache = (0..num_stages)
-            .map(|t| basis_store.get(0, t).cloned())
+        let cache = (0..num_nodes)
+            .map(|t| basis_store.get(0, NodePos(t)).cloned())
             .collect();
         return Ok(cache);
     }
@@ -196,8 +206,8 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
     let mut buf: Vec<i32> = Vec::new();
     let mut f64_buf: Vec<f64> = Vec::new();
     if comm.rank() == 0 {
-        for t in 0..num_stages {
-            match basis_store.get(0, t) {
+        for t in 0..num_nodes {
+            match basis_store.get(0, NodePos(t)) {
                 None => buf.push(0_i32),
                 Some(captured) => captured.to_broadcast_payload(&mut buf, &mut f64_buf),
             }
@@ -235,12 +245,12 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
     f64_buf.resize(f64_total_len, 0.0_f64);
     comm.broadcast(&mut f64_buf, 0).map_err(SddpError::from)?;
 
-    let mut cache: Vec<Option<CapturedBasis>> = Vec::with_capacity(num_stages);
+    let mut cache: Vec<Option<CapturedBasis>> = Vec::with_capacity(num_nodes);
     let mut pos = 0_usize;
     let mut f64_pos = 0_usize;
-    for stage in 0..num_stages {
+    for node in 0..num_nodes {
         let captured = CapturedBasis::try_from_broadcast_payload(
-            stage,
+            node,
             &buf,
             &mut pos,
             &f64_buf,

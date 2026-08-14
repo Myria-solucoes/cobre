@@ -27,7 +27,7 @@
 use super::{ResolvedBlockBounds, ResolvedHydroUnitGroupBounds};
 
 /// Stage-level hydro bounds for a given (hydro, stage) pair — the four
-/// stage-boundary-stock columns; [`HydroBlockBounds`] holds the seven
+/// stage-boundary-stock columns; [`HydroBlockBounds`] holds the
 /// block-eligible columns instead.
 ///
 /// Resolved from `hydros.json` overlaid with optional per-stage overrides from
@@ -76,7 +76,10 @@ pub struct HydroStageBounds {
 ///     max_outflow_m3s: None,
 ///     min_generation_mw: 0.0,
 ///     max_generation_mw: 100.0,
+///     min_diversion_m3s: None,
 ///     max_diversion_m3s: None,
+///     min_spillage_m3s: None,
+///     max_spillage_m3s: None,
 /// };
 /// let c = b; // Copy
 /// assert!((c.max_turbined_m3s - 500.0).abs() < f64::EPSILON);
@@ -97,8 +100,33 @@ pub struct HydroBlockBounds {
     pub min_generation_mw: f64,
     /// Maximum generation \[MW\]. Hard upper bound.
     pub max_generation_mw: f64,
+    /// Minimum diversion flow \[m³/s\]. `None` = unbounded below.
+    pub min_diversion_m3s: Option<f64>,
     /// Maximum diversion flow \[m³/s\]. Hard upper bound. `None` = no diversion channel.
     pub max_diversion_m3s: Option<f64>,
+    /// Minimum spillage flow \[m³/s\]. `None` = unbounded below.
+    pub min_spillage_m3s: Option<f64>,
+    /// Maximum spillage flow \[m³/s\]. `None` = unbounded above.
+    pub max_spillage_m3s: Option<f64>,
+}
+
+/// Neutral test scaffold — `0.0` minima/maxima, `None` optionals — never a
+/// bound source; production sites construct `HydroBlockBounds` exhaustively.
+impl Default for HydroBlockBounds {
+    fn default() -> Self {
+        Self {
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 0.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 0.0,
+            min_diversion_m3s: None,
+            max_diversion_m3s: None,
+            min_spillage_m3s: None,
+            max_spillage_m3s: None,
+        }
+    }
 }
 
 /// Dense per-(hydro, stage) cell pairing [`HydroStageBounds`] and
@@ -274,7 +302,8 @@ pub struct ContractBlockBounds {
 ///     min_turbined_m3s: 0.0, max_turbined_m3s: 50.0,
 ///     min_outflow_m3s: 0.0, max_outflow_m3s: None,
 ///     min_generation_mw: 0.0, max_generation_mw: 30.0,
-///     max_diversion_m3s: None,
+///     min_diversion_m3s: None, max_diversion_m3s: None,
+///     min_spillage_m3s: None, max_spillage_m3s: None,
 /// };
 /// let thermal_default = ThermalStageBounds { cost_per_mwh: 50.0 };
 /// let thermal_block_default = ThermalBlockBounds { min_generation_mw: 0.0, max_generation_mw: 100.0 };
@@ -505,7 +534,8 @@ impl ResolvedBounds {
     ///             min_turbined_m3s: 0.0, max_turbined_m3s: 500.0,
     ///             min_outflow_m3s: 0.0, max_outflow_m3s: None,
     ///             min_generation_mw: 0.0, max_generation_mw: 0.0,
-    ///             max_diversion_m3s: None,
+    ///             min_diversion_m3s: None, max_diversion_m3s: None,
+    ///             min_spillage_m3s: None, max_spillage_m3s: None,
     ///         },
     ///         thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
     ///         thermal_block: ThermalBlockBounds { min_generation_mw: 0.0, max_generation_mw: 0.0 },
@@ -571,7 +601,8 @@ impl ResolvedBounds {
     ///     min_turbined_m3s: 0.0, max_turbined_m3s: 0.0,
     ///     min_outflow_m3s: 0.0, max_outflow_m3s: None,
     ///     min_generation_mw: 0.0, max_generation_mw: 0.0,
-    ///     max_diversion_m3s: None,
+    ///     min_diversion_m3s: None, max_diversion_m3s: None,
+    ///     min_spillage_m3s: None, max_spillage_m3s: None,
     /// };
     ///
     /// let bounds = ResolvedBounds::new(
@@ -752,7 +783,10 @@ impl ResolvedBounds {
             max_outflow_m3s: over.max_outflow_m3s.or(cell.max_outflow_m3s),
             min_generation_mw: over.min_generation_mw.unwrap_or(cell.min_generation_mw),
             max_generation_mw: over.max_generation_mw.unwrap_or(cell.max_generation_mw),
+            min_diversion_m3s: over.min_diversion_m3s.or(cell.min_diversion_m3s),
             max_diversion_m3s: over.max_diversion_m3s.or(cell.max_diversion_m3s),
+            min_spillage_m3s: over.min_spillage_m3s.or(cell.min_spillage_m3s),
+            max_spillage_m3s: over.max_spillage_m3s.or(cell.max_spillage_m3s),
         }
     }
 
@@ -810,7 +844,8 @@ impl ResolvedBounds {
     ///     min_turbined_m3s: 0.0, max_turbined_m3s: 0.0,
     ///     min_outflow_m3s: 0.0, max_outflow_m3s: None,
     ///     min_generation_mw: 0.0, max_generation_mw: 0.0,
-    ///     max_diversion_m3s: None,
+    ///     min_diversion_m3s: None, max_diversion_m3s: None,
+    ///     min_spillage_m3s: None, max_spillage_m3s: None,
     /// };
     ///
     /// let bounds = ResolvedBounds::new(
@@ -882,7 +917,8 @@ impl ResolvedBounds {
     ///     min_turbined_m3s: 0.0, max_turbined_m3s: 0.0,
     ///     min_outflow_m3s: 0.0, max_outflow_m3s: None,
     ///     min_generation_mw: 0.0, max_generation_mw: 0.0,
-    ///     max_diversion_m3s: None,
+    ///     min_diversion_m3s: None, max_diversion_m3s: None,
+    ///     min_spillage_m3s: None, max_spillage_m3s: None,
     /// };
     ///
     /// let bounds = ResolvedBounds::new(
@@ -957,7 +993,8 @@ impl ResolvedBounds {
     ///     min_turbined_m3s: 0.0, max_turbined_m3s: 0.0,
     ///     min_outflow_m3s: 0.0, max_outflow_m3s: None,
     ///     min_generation_mw: 0.0, max_generation_mw: 0.0,
-    ///     max_diversion_m3s: None,
+    ///     min_diversion_m3s: None, max_diversion_m3s: None,
+    ///     min_spillage_m3s: None, max_spillage_m3s: None,
     /// };
     ///
     /// let bounds = ResolvedBounds::new(
@@ -1153,13 +1190,10 @@ mod tests {
 
     fn make_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 500.0,
             min_outflow_m3s: 5.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -1604,15 +1638,7 @@ mod tests {
                 filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
-            hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
-                max_turbined_m3s: 0.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
-                max_generation_mw: 0.0,
-                max_diversion_m3s: None,
-            },
+            hydro_block: HydroBlockBounds::default(),
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
@@ -1649,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hydro_block_bounds_has_seven_fields() {
+    fn test_hydro_block_bounds_has_ten_fields() {
         let b = HydroBlockBounds {
             min_turbined_m3s: 3.0,
             max_turbined_m3s: 4.0,
@@ -1657,14 +1683,20 @@ mod tests {
             max_outflow_m3s: Some(6.0),
             min_generation_mw: 7.0,
             max_generation_mw: 8.0,
-            max_diversion_m3s: Some(9.0),
+            min_diversion_m3s: Some(9.0),
+            max_diversion_m3s: Some(10.0),
+            min_spillage_m3s: Some(11.0),
+            max_spillage_m3s: Some(12.0),
         };
         assert!((b.min_turbined_m3s - 3.0).abs() < f64::EPSILON);
         assert!((b.max_turbined_m3s - 4.0).abs() < f64::EPSILON);
         assert!((b.min_generation_mw - 7.0).abs() < f64::EPSILON);
         assert!((b.max_generation_mw - 8.0).abs() < f64::EPSILON);
         assert_eq!(b.max_outflow_m3s, Some(6.0));
-        assert_eq!(b.max_diversion_m3s, Some(9.0));
+        assert_eq!(b.min_diversion_m3s, Some(9.0));
+        assert_eq!(b.max_diversion_m3s, Some(10.0));
+        assert_eq!(b.min_spillage_m3s, Some(11.0));
+        assert_eq!(b.max_spillage_m3s, Some(12.0));
     }
 
     #[test]
@@ -1870,7 +1902,10 @@ mod tests {
             && opt_f64_bits_eq(a.max_outflow_m3s, b.max_outflow_m3s)
             && a.min_generation_mw.to_bits() == b.min_generation_mw.to_bits()
             && a.max_generation_mw.to_bits() == b.max_generation_mw.to_bits()
+            && opt_f64_bits_eq(a.min_diversion_m3s, b.min_diversion_m3s)
             && opt_f64_bits_eq(a.max_diversion_m3s, b.max_diversion_m3s)
+            && opt_f64_bits_eq(a.min_spillage_m3s, b.min_spillage_m3s)
+            && opt_f64_bits_eq(a.max_spillage_m3s, b.max_spillage_m3s)
     }
 
     fn thermal_block_bounds_bits_eq(a: &ThermalBlockBounds, b: &ThermalBlockBounds) -> bool {
@@ -1931,10 +1966,25 @@ mod tests {
                     },
                     min_generation_mw: base + 7.0,
                     max_generation_mw: base + 8.0,
+                    min_diversion_m3s: if (e + s) % 2 == 0 {
+                        Some(base + 9.0)
+                    } else {
+                        None
+                    },
                     max_diversion_m3s: if (e + s) % 2 == 0 {
                         None
                     } else {
                         Some(base + 9.0)
+                    },
+                    min_spillage_m3s: if (e + s) % 2 == 0 {
+                        None
+                    } else {
+                        Some(base + 12.0)
+                    },
+                    max_spillage_m3s: if (e + s) % 2 == 0 {
+                        Some(base + 13.0)
+                    } else {
+                        None
                     },
                 };
                 *table.thermal_bounds_mut(e, s) = ThermalStageBounds {
@@ -2311,13 +2361,9 @@ mod tests {
     #[test]
     fn test_hydro_block_base_ignores_the_overlay() {
         let hbl = HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 500.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         };
         let mut table = ResolvedBounds::new(
             &BoundsCountsSpec {
@@ -2485,6 +2531,59 @@ mod tests {
             table.hydro_bounds_at_block(0, 1, 1).max_diversion_m3s,
             Some(80.0)
         );
+    }
+
+    /// The three widened axes (`min_diversion_m3s`, `min_spillage_m3s`,
+    /// `max_spillage_m3s`) merge via `.or(...)`, matching every other
+    /// `Option<f64>` block-eligible column: a base of `None` plus an overlay
+    /// `Some` on block 1 resolves to that value at block 1 only; block 0,
+    /// with no override, stays `None`.
+    #[test]
+    fn test_widened_axes_or_precedence() {
+        let mut table = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 1,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro_block: HydroBlockBounds::default(),
+                ..zero_defaults()
+            },
+        );
+
+        let mut block = ResolvedBlockBounds::new(&BlockBoundsCountsSpec {
+            n_hydros: 1,
+            n_thermals: 0,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: 1,
+            max_blocks: 2,
+        });
+        {
+            let over = block
+                .hydro_override_mut(0, 0, 1)
+                .expect("in-range override cell");
+            over.min_diversion_m3s = Some(3.0);
+            over.min_spillage_m3s = Some(4.0);
+            over.max_spillage_m3s = Some(5.0);
+        }
+        table.set_block_overlay(block);
+
+        let block_1 = table.hydro_bounds_at_block(0, 0, 1);
+        assert_eq!(block_1.min_diversion_m3s, Some(3.0));
+        assert_eq!(block_1.min_spillage_m3s, Some(4.0));
+        assert_eq!(block_1.max_spillage_m3s, Some(5.0));
+
+        let block_0 = table.hydro_bounds_at_block(0, 0, 0);
+        assert_eq!(block_0.min_diversion_m3s, None);
+        assert_eq!(block_0.min_spillage_m3s, None);
+        assert_eq!(block_0.max_spillage_m3s, None);
     }
 
     #[cfg(feature = "serde")]

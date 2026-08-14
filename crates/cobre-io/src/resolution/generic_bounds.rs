@@ -19,7 +19,7 @@ use crate::constraints::GenericConstraintBoundsRow;
 ///
 /// ```
 /// use cobre_core::GenericConstraint;
-/// use cobre_core::generic_constraint::{ConstraintExpression, ConstraintSense, SlackConfig};
+/// use cobre_core::generic_constraint::{ConstraintExpression, SlackConfig};
 /// use cobre_core::EntityId;
 /// use cobre_io::constraints::GenericConstraintBoundsRow;
 /// use cobre_io::resolution::resolve_generic_constraint_bounds;
@@ -28,16 +28,18 @@ use crate::constraints::GenericConstraintBoundsRow;
 ///     id: EntityId(0),
 ///     name: "c0".to_string(),
 ///     description: None,
-///     sense: ConstraintSense::LessEqual,
 ///     expression: ConstraintExpression { terms: vec![] },
 ///     slack: SlackConfig { enabled: false, penalty: None },
+///     bound_lower_affine: None,
+///     bound_upper_affine: None,
 /// };
 ///
 /// let row = GenericConstraintBoundsRow {
 ///     constraint_id: 0,
 ///     stage_id: 1,
 ///     block_id: None,
-///     bound: 500.0,
+///     bound_lower: Some(500.0),
+///     bound_upper: None,
 /// };
 ///
 /// let table = resolve_generic_constraint_bounds(&[constraint], &[row]);
@@ -47,7 +49,9 @@ use crate::constraints::GenericConstraintBoundsRow;
 ///
 /// let slice = table.bounds_for_stage(0, 1);
 /// assert_eq!(slice.len(), 1);
-/// assert_eq!(slice[0], (None, 500.0));
+/// assert_eq!(slice[0].block_id, None);
+/// assert_eq!(slice[0].bound_lower, Some(500.0));
+/// assert_eq!(slice[0].bound_upper, None);
 /// ```
 #[must_use]
 pub fn resolve_generic_constraint_bounds(
@@ -62,9 +66,15 @@ pub fn resolve_generic_constraint_bounds(
 
     ResolvedGenericConstraintBounds::new(
         &id_to_idx,
-        raw_bounds
-            .iter()
-            .map(|r| (r.constraint_id, r.stage_id, r.block_id, r.bound)),
+        raw_bounds.iter().map(|r| {
+            (
+                r.constraint_id,
+                r.stage_id,
+                r.block_id,
+                r.bound_lower,
+                r.bound_upper,
+            )
+        }),
     )
 }
 
@@ -81,7 +91,8 @@ pub fn resolve_generic_constraint_bounds(
 mod tests {
     use super::*;
     use cobre_core::EntityId;
-    use cobre_core::generic_constraint::{ConstraintExpression, ConstraintSense};
+    use cobre_core::generic_constraint::ConstraintExpression;
+    use cobre_core::model::resolved::GenericConstraintBoundEntry;
 
     fn make_constraint(id: i32) -> GenericConstraint {
         use cobre_core::generic_constraint::SlackConfig;
@@ -89,26 +100,30 @@ mod tests {
             id: EntityId(id),
             name: format!("c{id}"),
             description: None,
-            sense: ConstraintSense::LessEqual,
             expression: ConstraintExpression { terms: vec![] },
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         }
     }
 
+    /// `bound_upper` defaults to `None` — every call site below is byte-neutral
+    /// unless it opts in explicitly.
     fn make_row(
         constraint_id: i32,
         stage_id: i32,
         block_id: Option<i32>,
-        bound: f64,
+        bound_lower: f64,
     ) -> GenericConstraintBoundsRow {
         GenericConstraintBoundsRow {
             constraint_id,
             stage_id,
             block_id,
-            bound,
+            bound_lower: Some(bound_lower),
+            bound_upper: None,
         }
     }
 
@@ -144,12 +159,12 @@ mod tests {
 
         let s0 = table.bounds_for_stage(0, 0);
         assert_eq!(s0.len(), 1);
-        assert!((s0[0].1 - 100.0).abs() < f64::EPSILON);
-        assert!(s0[0].0.is_none());
+        assert!((s0[0].bound_lower.expect("lower present") - 100.0).abs() < f64::EPSILON);
+        assert!(s0[0].block_id.is_none());
 
         let s1 = table.bounds_for_stage(0, 1);
         assert_eq!(s1.len(), 1);
-        assert!((s1[0].1 - 200.0).abs() < f64::EPSILON);
+        assert!((s1[0].bound_lower.expect("lower present") - 200.0).abs() < f64::EPSILON);
     }
 
     /// Block-specific bounds: multiple (`block_id`, bound) pairs for one (constraint, stage).
@@ -166,9 +181,51 @@ mod tests {
         assert!(table.is_active(0, 0));
         let slice = table.bounds_for_stage(0, 0);
         assert_eq!(slice.len(), 3);
-        assert_eq!(slice[0], (None, 50.0));
-        assert_eq!(slice[1], (Some(0), 60.0));
-        assert_eq!(slice[2], (Some(1), 70.0));
+        assert_eq!(
+            slice[0],
+            GenericConstraintBoundEntry {
+                block_id: None,
+                bound_lower: Some(50.0),
+                bound_upper: None,
+            }
+        );
+        assert_eq!(
+            slice[1],
+            GenericConstraintBoundEntry {
+                block_id: Some(0),
+                bound_lower: Some(60.0),
+                bound_upper: None,
+            }
+        );
+        assert_eq!(
+            slice[2],
+            GenericConstraintBoundEntry {
+                block_id: Some(1),
+                bound_lower: Some(70.0),
+                bound_upper: None,
+            }
+        );
+    }
+
+    /// `bound_upper`, when the row carries one, flows through resolution into the
+    /// resolved entry alongside `bound` — the widened pipe's actual contract.
+    #[test]
+    fn test_bound_upper_flows_through_resolution() {
+        let constraints = vec![make_constraint(0)];
+        let mut row = make_row(0, 0, None, 50.0);
+        row.bound_upper = Some(90.0);
+        let table = resolve_generic_constraint_bounds(&constraints, &[row]);
+
+        let slice = table.bounds_for_stage(0, 0);
+        assert_eq!(slice.len(), 1);
+        assert_eq!(
+            slice[0],
+            GenericConstraintBoundEntry {
+                block_id: None,
+                bound_lower: Some(50.0),
+                bound_upper: Some(90.0),
+            }
+        );
     }
 
     /// Rows referencing unknown constraint IDs are silently skipped.
@@ -185,7 +242,7 @@ mod tests {
         // No entry for the unknown constraint (idx 0 is constraint_id=0, not 99).
         let slice = table.bounds_for_stage(0, 0);
         assert_eq!(slice.len(), 1);
-        assert!((slice[0].1 - 100.0).abs() < f64::EPSILON);
+        assert!((slice[0].bound_lower.expect("lower present") - 100.0).abs() < f64::EPSILON);
     }
 
     /// Acceptance criterion: constraint 0 at stage 0 `is_active` returns true.
@@ -214,6 +271,13 @@ mod tests {
         let table = resolve_generic_constraint_bounds(&constraints, &rows);
         let slice = table.bounds_for_stage(0, 0);
         assert_eq!(slice.len(), 1);
-        assert_eq!(slice[0], (None, 100.0));
+        assert_eq!(
+            slice[0],
+            GenericConstraintBoundEntry {
+                block_id: None,
+                bound_lower: Some(100.0),
+                bound_upper: None,
+            }
+        );
     }
 }

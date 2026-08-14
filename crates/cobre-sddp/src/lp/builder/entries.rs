@@ -1,8 +1,8 @@
 use cobre_core::commissioning::{Phase, filling_phase};
-use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, EntityId, Stage};
+use cobre_core::{BlockMode, CoefficientRef, ContractType, EntityId, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
-use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
+use crate::hydro_models::EvaporationModel;
 use crate::indexer::{
     AnticipatedLocal, BlockIdx, Boundary, EvapLocal, FphaCellLocal, HydroCell, HydroSys, LineSys,
     StateSpace, anticipated_resolution_for,
@@ -11,33 +11,73 @@ use crate::indexer::{
 use super::M3S_TO_HM3;
 use super::delivery_ring::DeliveryRing;
 use super::fpha_cursor::for_each_fpha_plane;
-use super::layout::{StageLayout, TemplateBuildCtx};
+use super::layout::{StageLayout, StageProductionRole, TemplateBuildCtx};
 use crate::generic_constraints::{
     CascadeRefs, ContractRefs, EntityPositionMaps, PumpingRefs, contract_family_slot,
 };
 
 use std::ops::Range;
 
-/// The one dense anticipated-thermal ring (`n_lanes = n_anticipated`,
-/// slot-major/plant-minor) every anticipated call site shares — the single owner
-/// of its out/in block construction.
+/// The in-study commitment-hold ring (`n_lanes = n_anticipated`,
+/// slot-major/plant-minor, `depth = k_max`, modular-addressed) every
+/// anticipated call site shares — the single owner of its out/in block
+/// construction. Borrows the LEADING `n_anticipated * k_max` sub-range of the
+/// merged [`StateSpace::commit_out`]/[`StateSpace::commit_in`] region; see
+/// [`commitment_hold_post_horizon_ring`] for the trailing sub-range.
 pub(super) fn anticipated_ring(layout: &StageLayout) -> DeliveryRing {
     let state = layout.state;
+    let n_ant_state = layout.n_anticipated * layout.k_max;
     DeliveryRing::new(
-        state.anticipated_slots_out.clone(),
-        state.anticipated_state.clone(),
+        state.commit_out.start..state.commit_out.start + n_ant_state,
+        state.commit_in.start..state.commit_in.start + n_ant_state,
         layout.n_anticipated,
         layout.k_max,
     )
 }
 
-/// Fishing coupling per genuinely-anticipated plant: summed per-block thermal
-/// energy equals the slot-0 committed power scaled to `MWh` (`MW × block_hours`). A
-/// `K = 0` self-delivery excludes the plant's row (`anticipated_fishing_row_pos`),
-/// so its ordinary thermal generation carries no fishing coupling.
+/// The terminal post-horizon lane ring (`n_lanes = n_commitment`, `depth =
+/// 1` — no lead-stage axis, a window's state never shifts slots). Borrows
+/// the TRAILING `n_commitment` sub-range of the merged
+/// [`StateSpace::commit_out`]/[`StateSpace::commit_in`] region, immediately
+/// after [`anticipated_ring`]'s in-study sub-range.
+pub(super) fn commitment_hold_post_horizon_ring(layout: &StageLayout) -> DeliveryRing {
+    let state = layout.state;
+    let n_ant_state = layout.n_anticipated * layout.k_max;
+    let out_base = state.commit_out.start + n_ant_state;
+    let in_base = state.commit_in.start + n_ant_state;
+    DeliveryRing::new(
+        out_base..out_base + state.n_commitment,
+        in_base..in_base + state.n_commitment,
+        state.n_commitment,
+        1,
+    )
+}
+
+/// Fishing (consumption) coupling: for every anticipated plant whose
+/// delivery matures THIS stage
+/// (`layout.anticipated.anticipated_fishing_row_pos`, `None` at a `K = 0`
+/// self-delivery or when no delivery matures here), fish UNCONDITIONALLY —
+/// active or commissioning-inactive alike. A commissioning-inactive delivery
+/// was never latched (its decision column stays dormant `[0, 0]`,
+/// `fill_anticipated_columns`), so its `in_col` carries `0` and this equality
+/// pins that stage's thermal generation to `0` — the correct, harmless
+/// outcome for a delivery the plant's window cannot receive. Carrying it
+/// instead (the retired alternative) collided with the SAME stage's fresh
+/// latch for the next delivery sharing the same modular residue whenever a
+/// plant's own lead defines `k_max` (no other anticipated plant reaches
+/// deeper): two definition rows on one `out_col` pinned a freshly-costed
+/// decision to a stale carried value, producing a false `Infeasible` or a
+/// silent zero-commit release-mode (`debug_assert` compiled out). Fishing
+/// reads only `in_col` and never writes `out_col`, so it cannot collide with
+/// the latch — sums per-block thermal energy against the maturing slot's
+/// committed power scaled to `MWh` (`MW × block_hours`), preserving the
+/// pre-migration `+h_b`/`−H` coefficient shape exactly; only its slot
+/// addressing is modular (`stage_idx mod k_max`, via
+/// [`crate::indexer::StateSpace::commitment_hold_in_study_offset`]).
 pub(super) fn fill_anticipated_fishing_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
+    stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
@@ -49,6 +89,10 @@ pub(super) fn fill_anticipated_fishing_entries(
         let Some(pos) = layout.anticipated.anticipated_fishing_row_pos[local_idx] else {
             continue;
         };
+        // A `Some` position here implies at least one anticipated plant
+        // exists, so `k_max >= 1` (every anticipated thermal's own
+        // `lead_stages >= 1`) — no divide-by-zero guard needed.
+        let slot = stage_idx % layout.k_max;
         let row = layout.anticipated.row_anticipated_fishing_start + pos;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
@@ -62,7 +106,7 @@ pub(super) fn fill_anticipated_fishing_entries(
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
         }
-        let col_state = ring.in_col(0, local_idx);
+        let col_state = ring.in_col(slot, local_idx);
         col_entries[col_state].push((row, -block_hours_total));
         n_active += 1;
     }
@@ -72,10 +116,12 @@ pub(super) fn fill_anticipated_fishing_entries(
     );
 }
 
-/// Encode the anticipated ring's delivery-decision deposit row
-/// `slot^out − decision_col = 0` for each plant with a genuine, active decision
-/// this stage (`anticipated_decision_row_pos`). `slot = delivery_stage − stage_idx − 1`
-/// — computed directly from the delivery stage, never a `depth`-derived boundary.
+/// Encode the commitment-hold ring's delivery-decision LATCH row
+/// `slot^out − decision_col = 0` for each plant with a genuine, active
+/// decision this stage (`anticipated_decision_row_pos`). `slot =
+/// delivery_stage mod k_max` — the modular, delivery-target-keyed slot
+/// [`crate::indexer::StateSpace::commitment_hold_in_study_offset`] addresses,
+/// never a distance-derived boundary.
 pub(super) fn fill_anticipated_state_out_def_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -102,12 +148,7 @@ pub(super) fn fill_anticipated_state_out_def_entries(
             "a genuine decision's delivery stage must be strictly after the decision \
              stage (K=0 self-delivery must already be excluded)"
         );
-        let slot = delivery_stage - stage_idx - 1;
-        debug_assert!(
-            slot < layout.k_max,
-            "delivery slot {slot} must be within the sized ring depth {}",
-            layout.k_max
-        );
+        let slot = delivery_stage % layout.k_max;
         let col_decision = layout.anticipated.col_anticipated_decision_start + local_idx;
         ring.emit_deposit(slot, local_idx, row, col_decision, col_entries);
         n_active += 1;
@@ -118,17 +159,23 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     );
 }
 
-/// Encode the anticipated ring's interior shift rows `slot_k^out − slot_{k+1}^in = 0`
-/// (`k < K_i − 1`, reachable slots per `anticipated_slot_row_pos`) via
-/// [`DeliveryRing::emit_shift_rows`]. A masked slot gets no row — its outgoing column
-/// is frozen `[0, 0]` by `fill_anticipated_slot_columns` (the two-sided masking contract).
+/// Encode the future-window commitment-carry rows (same-slot hold,
+/// `slot^out − slot^in = 0`) via [`DeliveryRing::emit_carry_rows`] — the
+/// same-slot hold identity replacing the retired Markov-1
+/// [`DeliveryRing::emit_shift_rows`] for the anticipated family (the water
+/// travel-time ring keeps `emit_shift_rows` unchanged; its physics genuinely
+/// shift). `anticipated_slot_row_pos` carries every STRICTLY FUTURE,
+/// not-yet-due in-flight slot; the commitment maturing THIS stage is always
+/// fished ([`fill_anticipated_fishing_entries`], never carried), so this
+/// family never duplicates it. A slot with no row here is beyond the study
+/// horizon, not yet ready, or handled by the latch/maturity rows.
 fn fill_anticipated_slot_definition_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let row_start = layout.anticipated.row_anticipated_slot_definition_start;
     let ring = anticipated_ring(layout);
-    let n_reachable = ring.emit_shift_rows(
+    let n_reachable = ring.emit_carry_rows(
         &layout.anticipated.anticipated_slot_row_pos,
         row_start,
         col_entries,
@@ -138,6 +185,38 @@ fn fill_anticipated_slot_definition_entries(
         "fill_anticipated_slot_definition_entries: reachable-slot count must match \
          n_anticipated_slot_definition_rows"
     );
+}
+
+/// Encode the terminal post-horizon lanes' per-window row: at window `w`'s
+/// own decider stage, the LATCH row (`out_col(w) +1`, `decision_col −1`, via
+/// [`DeliveryRing::emit_deposit`]); every other stage, the CARRY row
+/// (`out_col(w) +1`, `in_col(w) −1`, via [`DeliveryRing::emit_carry_rows`]'s
+/// same-slot hold identity at `depth = 1`). No fish arm exists for a
+/// post-horizon lane — it is never consumed in-study; the boundary FCF prices
+/// the carried state (`fill_commitment_decision_columns` books the fuel).
+fn fill_commitment_post_horizon_entries(
+    layout: &StageLayout,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
+    let state = layout.state;
+    if state.n_commitment == 0 {
+        return;
+    }
+    let ring = commitment_hold_post_horizon_ring(layout);
+    let row_start = layout.anticipated.row_commitment_start;
+    let decision_start = layout.anticipated.col_commitment_decision_start;
+    let decision_windows = &layout.anticipated.commitment_decision_windows;
+
+    for w in 0..state.n_commitment {
+        let row = row_start + w;
+        if let Ok(local_idx) = decision_windows.binary_search(&w) {
+            let decision_col = decision_start + local_idx;
+            ring.emit_deposit(0, w, row, decision_col, col_entries);
+        } else {
+            col_entries[ring.out_col(0, w)].push((row, 1.0));
+            col_entries[ring.in_col(0, w)].push((row, -1.0));
+        }
+    }
 }
 
 /// Returns `true` when hydro `h_idx` is in the `PreFilling` phase at this stage.
@@ -960,7 +1039,9 @@ pub(super) fn fill_pumping_water_entries(
 /// and deficit/excess slacks. Each hydro CELL credits its own bus
 /// (`HydroCellIndex::bus_of`) — `Hydro` carries no bus of its own, only its unit
 /// groups do: FPHA cells enter with `g_c` at `+1.0`; constant-productivity cells
-/// with `rho * turbine_col(cell)`, the plant's shared `rho`.
+/// with `rho * turbine_col(cell)`, the plant's shared `rho`; a commissioning-dormant
+/// FPHA plant ([`StageProductionRole::Dormant`]) credits nothing — it has no
+/// generation column and no productivity to price its frozen turbine column at.
 ///
 /// Pumping power is a negative injection: the `pumping_flow` column enters with
 /// `−consumption_mw_per_m3s` (no separate power column). A positive coefficient would
@@ -977,45 +1058,34 @@ pub(super) fn fill_load_balance_entries(
 
     for h_idx in 0..ctx.hydros.len() {
         let h_sys = HydroSys::new(h_idx);
-        if let Some(local_idx) = layout.fpha_local_index[h_idx] {
-            debug_assert!(
-                matches!(
-                    ctx.production_models.model(h_idx, stage_idx),
-                    ResolvedProductionModel::Fpha { .. }
-                ),
-                "FPHA local-index table inconsistent with production model for hydro {h_idx}"
-            );
-            let cell_base = layout.fpha_cell_local_start[local_idx.get()];
-            for (offset, c) in ctx.hydro_cell_index.cells_of(h_sys).enumerate() {
-                let cell = HydroCell::new(c);
-                if let Some(&b_idx) = ctx.bus_pos.get(&ctx.hydro_cell_index.bus_of(cell)) {
-                    let cell_local = FphaCellLocal::new(cell_base + offset);
-                    for blk in (0..n_blks).map(BlockIdx::new) {
-                        let row = grid.flat(row_load, b_idx, blk);
-                        let col = layout.generation_col(cell_local, blk);
-                        col_entries[col].push((row, 1.0));
+        match layout.stage_production_role(ctx.production_models, h_idx, stage_idx) {
+            StageProductionRole::Fpha(local_idx) => {
+                let cell_base = layout.fpha_cell_local_start[local_idx.get()];
+                for (offset, c) in ctx.hydro_cell_index.cells_of(h_sys).enumerate() {
+                    let cell = HydroCell::new(c);
+                    if let Some(&b_idx) = ctx.bus_pos.get(&ctx.hydro_cell_index.bus_of(cell)) {
+                        let cell_local = FphaCellLocal::new(cell_base + offset);
+                        for blk in (0..n_blks).map(BlockIdx::new) {
+                            let row = grid.flat(row_load, b_idx, blk);
+                            let col = layout.generation_col(cell_local, blk);
+                            col_entries[col].push((row, 1.0));
+                        }
                     }
                 }
             }
-        } else {
-            let rho = match ctx.production_models.model(h_idx, stage_idx) {
-                ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
-                ResolvedProductionModel::Fpha { .. } => {
-                    unreachable!(
-                        "non-FPHA branch reached for FPHA resolved model at hydro {h_idx}"
-                    );
-                }
-            };
-            for c in ctx.hydro_cell_index.cells_of(h_sys) {
-                let cell = HydroCell::new(c);
-                if let Some(&b_idx) = ctx.bus_pos.get(&ctx.hydro_cell_index.bus_of(cell)) {
-                    for blk in (0..n_blks).map(BlockIdx::new) {
-                        let row = grid.flat(row_load, b_idx, blk);
-                        let col = layout.turbine_col(cell, blk);
-                        col_entries[col].push((row, rho));
+            StageProductionRole::Constant(rho) => {
+                for c in ctx.hydro_cell_index.cells_of(h_sys) {
+                    let cell = HydroCell::new(c);
+                    if let Some(&b_idx) = ctx.bus_pos.get(&ctx.hydro_cell_index.bus_of(cell)) {
+                        for blk in (0..n_blks).map(BlockIdx::new) {
+                            let row = grid.flat(row_load, b_idx, blk);
+                            let col = layout.turbine_col(cell, blk);
+                            col_entries[col].push((row, rho));
+                        }
                     }
                 }
             }
+            StageProductionRole::Dormant => {}
         }
     }
 
@@ -1285,20 +1355,12 @@ pub(super) fn fill_generic_constraint_entries(
             stage.blocks[entry.block_idx].duration_hours
         };
 
-        match entry.sense {
-            ConstraintSense::LessEqual => {
-                row_lower[row] = f64::NEG_INFINITY;
-                row_upper[row] = entry.bound;
-            }
-            ConstraintSense::GreaterEqual => {
-                row_lower[row] = entry.bound;
-                row_upper[row] = f64::INFINITY;
-            }
-            ConstraintSense::Equal => {
-                row_lower[row] = entry.bound;
-                row_upper[row] = entry.bound;
-            }
-        }
+        // The interval IS the constraint: shape derives from the null-pattern.
+        // A missing endpoint falls back to the unbounded direction (visibly open),
+        // never a cross-fill from the other endpoint (would silently fabricate a
+        // bound) — referential validation guarantees at least one is present.
+        row_lower[row] = entry.bound_lower.unwrap_or(f64::NEG_INFINITY);
+        row_upper[row] = entry.bound_upper.unwrap_or(f64::INFINITY);
 
         for term in &constraint.expression.terms {
             let pairs = resolve_variable_ref(
@@ -1316,7 +1378,9 @@ pub(super) fn fill_generic_constraint_entries(
                 let coef = match term.coefficient {
                     CoefficientRef::Literal(v) => v,
                     CoefficientRef::Parameter(param_id) => {
-                        ctx.resolved.resolved_parameters.get(param_id, stage_idx)
+                        ctx.resolved
+                            .resolved_parameters
+                            .get(param_id, stage_idx, entry.block_idx)
                     }
                 };
                 col_entries[col].push((row, coef * term.scale * multiplier));
@@ -1330,11 +1394,14 @@ pub(super) fn fill_generic_constraint_entries(
             col_upper[plus_col] = f64::INFINITY;
             objective[plus_col] = obj_coeff;
 
-            // Slack sign convention: `LHS - s_g <= bound`, `LHS + s_g >= bound`, and
-            // `LHS + s_g_plus - s_g_minus == bound`.
-            let plus_coeff = match entry.sense {
-                ConstraintSense::LessEqual => -1.0,
-                ConstraintSense::GreaterEqual | ConstraintSense::Equal => 1.0,
+            // Slack sign convention: `LHS - s_plus <= upper` (upper-only, relaxing
+            // downward) or `LHS + s_plus >= lower` (lower-only or two-sided,
+            // relaxing upward); a two-sided row additionally gets `s_minus` below,
+            // relaxing the upper bound the same way `s_plus` relaxes the lower one.
+            let plus_coeff = if entry.bound_upper.is_some() && entry.bound_lower.is_none() {
+                -1.0
+            } else {
+                1.0
             };
             col_entries[plus_col].push((row, plus_coeff));
 
@@ -1405,13 +1472,13 @@ pub(super) fn fill_z_inflow_entries(
 /// - **Max outflow** (`<=`, per hydro): `q + s + d - sigma_above`
 /// - **Min turbine** (`>=`, per CELL): `q_c + sigma_below_c`
 /// - **Min generation** (`>=`, per CELL): `var_c + sigma_below_c`, where `var_c`
-///   is `rho * q_c` for constant-productivity hydros or the cell's own
-///   generation column `g_c` for FPHA.
+///   is `rho * q_c` for constant-productivity hydros, the cell's own generation
+///   column `g_c` for FPHA, or absent (`sigma_below_c` alone absorbs the floor)
+///   for a commissioning-dormant FPHA plant.
 ///
 /// The two power-side families couple only the CELL's own columns to the
 /// CELL's own slack — never summed across a plant's cells the way the two
-/// flow families above are — see the min-floor contract in
-/// `.claude/rules/sddp.md`.
+/// flow families above are — see the min-floor contract.
 pub(super) fn fill_operational_violation_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -1421,7 +1488,7 @@ pub(super) fn fill_operational_violation_entries(
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
 
-    for (h_idx, fpha_local_entry) in layout.fpha_local_index.iter().enumerate() {
+    for h_idx in 0..layout.n_h {
         for blk in (0..n_blks).map(BlockIdx::new) {
             let row = grid.flat(
                 layout.slack.oper_violation.min_outflow_rows.start,
@@ -1473,50 +1540,63 @@ pub(super) fn fill_operational_violation_entries(
         }
 
         // Per-cell min-generation row: FPHA couples the cell's own generation
-        // column; ConstantProductivity couples the cell's own turbine column at rho.
-        if let Some(&local_fpha_idx) = fpha_local_entry.as_ref() {
-            let fpha_base = layout.fpha_local_first_cell(local_fpha_idx).get();
-            for (offset, c) in ctx
-                .hydro_cell_index
-                .cells_of(HydroSys::new(h_idx))
-                .enumerate()
-            {
-                let cell = HydroCell::new(c);
-                for blk in (0..n_blks).map(BlockIdx::new) {
-                    let row = grid.flat(
-                        layout.slack.oper_violation.min_generation_rows.start,
-                        c,
-                        blk,
-                    );
-                    let col_g = layout.generation_col(FphaCellLocal::new(fpha_base + offset), blk);
-                    col_entries[col_g].push((row, 1.0));
-                    let col_slack = layout.generation_below_col(cell, blk);
-                    col_entries[col_slack].push((row, 1.0));
+        // column; ConstantProductivity couples the cell's own turbine column at
+        // rho. A commissioning-dormant FPHA plant (`StageProductionRole::Dormant`)
+        // couples neither — it has no generation column and no productivity to
+        // price its frozen turbine column at — leaving only the row's own slack
+        // to absorb a nonzero floor, exactly as a dormant ConstantProductivity
+        // plant's frozen (`rho * 0`) turbine term already does.
+        match layout.stage_production_role(ctx.production_models, h_idx, stage_idx) {
+            StageProductionRole::Fpha(local_fpha_idx) => {
+                let fpha_base = layout.fpha_local_first_cell(local_fpha_idx).get();
+                for (offset, c) in ctx
+                    .hydro_cell_index
+                    .cells_of(HydroSys::new(h_idx))
+                    .enumerate()
+                {
+                    let cell = HydroCell::new(c);
+                    for blk in (0..n_blks).map(BlockIdx::new) {
+                        let row = grid.flat(
+                            layout.slack.oper_violation.min_generation_rows.start,
+                            c,
+                            blk,
+                        );
+                        let col_g =
+                            layout.generation_col(FphaCellLocal::new(fpha_base + offset), blk);
+                        col_entries[col_g].push((row, 1.0));
+                        let col_slack = layout.generation_below_col(cell, blk);
+                        col_entries[col_slack].push((row, 1.0));
+                    }
                 }
             }
-        } else {
-            // Read rho from the resolved per-stage production model, not a static field.
-            let rho = match ctx.production_models.model(h_idx, stage_idx) {
-                ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
-                ResolvedProductionModel::Fpha { .. } => {
-                    unreachable!(
-                        "Fpha resolved model in ConstantProductivity LP path for hydro \
-                         {h_idx}; validate production model assignment upstream"
-                    );
+            StageProductionRole::Constant(rho) => {
+                for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
+                    let cell = HydroCell::new(c);
+                    for blk in (0..n_blks).map(BlockIdx::new) {
+                        let row = grid.flat(
+                            layout.slack.oper_violation.min_generation_rows.start,
+                            c,
+                            blk,
+                        );
+                        let col_q = layout.turbine_col(cell, blk);
+                        col_entries[col_q].push((row, rho));
+                        let col_slack = layout.generation_below_col(cell, blk);
+                        col_entries[col_slack].push((row, 1.0));
+                    }
                 }
-            };
-            for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
-                let cell = HydroCell::new(c);
-                for blk in (0..n_blks).map(BlockIdx::new) {
-                    let row = grid.flat(
-                        layout.slack.oper_violation.min_generation_rows.start,
-                        c,
-                        blk,
-                    );
-                    let col_q = layout.turbine_col(cell, blk);
-                    col_entries[col_q].push((row, rho));
-                    let col_slack = layout.generation_below_col(cell, blk);
-                    col_entries[col_slack].push((row, 1.0));
+            }
+            StageProductionRole::Dormant => {
+                for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
+                    let cell = HydroCell::new(c);
+                    for blk in (0..n_blks).map(BlockIdx::new) {
+                        let row = grid.flat(
+                            layout.slack.oper_violation.min_generation_rows.start,
+                            c,
+                            blk,
+                        );
+                        let col_slack = layout.generation_below_col(cell, blk);
+                        col_entries[col_slack].push((row, 1.0));
+                    }
                 }
             }
         }
@@ -1540,13 +1620,14 @@ pub(super) fn build_stage_matrix_entries(
     fill_pumping_water_entries(ctx, stage, layout, &mut col_entries);
     fill_anticipated_state_out_def_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_anticipated_slot_definition_entries(layout, &mut col_entries);
+    fill_commitment_post_horizon_entries(layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
     fill_fpha_entries(ctx, stage, stage_idx, layout, &mut col_entries);
     fill_evaporation_entries(ctx, stage, stage_idx, layout, &mut col_entries);
     fill_z_inflow_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_operational_violation_entries(ctx, stage_idx, layout, &mut col_entries);
-    fill_anticipated_fishing_entries(ctx, stage, layout, &mut col_entries);
+    fill_anticipated_fishing_entries(ctx, stage, stage_idx, layout, &mut col_entries);
 
     col_entries
 }
@@ -1643,9 +1724,9 @@ mod assemble_csc_tests {
 mod parameter_resolution_tests {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CoefficientRef,
-        ConstraintExpression, ConstraintSense, ContractBlockBounds, DeficitSegment, EntityId,
-        GenericConstraint, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        LineBlockBounds, LineStagePenalties, NcsStagePenalties, ParameterKind, PenaltiesCountsSpec,
+        ConstraintExpression, ContractBlockBounds, DeficitSegment, EntityId, GenericConstraint,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+        LineStagePenalties, NcsStagePenalties, ParameterKind, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
         ResolvedPenalties, ScalarParameter, SlackConfig, StageId, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -1691,13 +1772,9 @@ mod parameter_resolution_tests {
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -1896,6 +1973,7 @@ mod parameter_resolution_tests {
             &[],
             &stage_to_season,
             &stage_ids,
+            &vec![1usize; n_stages],
             n_stages,
             1_000_000.0,
         )
@@ -1925,6 +2003,7 @@ mod parameter_resolution_tests {
             &[],
             &stage_to_season,
             &stage_ids,
+            &vec![1usize; n_stages],
             n_stages,
             1_000_000.0,
         )
@@ -1951,6 +2030,7 @@ mod parameter_resolution_tests {
             &[],
             &stage_to_season,
             &stage_ids,
+            &vec![1usize; n_stages],
             n_stages,
             1_000_000.0,
         )
@@ -1978,11 +2058,12 @@ mod parameter_resolution_tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         }
     }
 
@@ -2007,11 +2088,12 @@ mod parameter_resolution_tests {
                     },
                 }],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         }
     }
 
@@ -2022,9 +2104,9 @@ mod parameter_resolution_tests {
         n_stages: usize,
     ) -> ResolvedGenericConstraintBounds {
         let id_map: HashMap<i32, usize> = [(constraint_id.0, 0)].into_iter().collect();
-        let rows: Vec<(i32, i32, Option<i32>, f64)> = (0..n_stages)
-            .map(|s| (constraint_id.0, s as i32, None, 50.0_f64))
-            .collect();
+        let rows = (0..n_stages)
+            .map(|s| (constraint_id.0, s as i32, None, None, Some(50.0_f64)))
+            .collect::<Vec<_>>();
         ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter())
     }
 
@@ -2176,6 +2258,7 @@ mod zero_cost_tests {
     use crate::indexer::{BlockIdx, HydroCellIndex, ThermalSys};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
     use crate::resolved_parameters::ResolvedParameters;
+    use crate::setup::PostStudyResolved;
 
     use super::super::columns::{ColumnBufs, fill_stage_columns, fill_thermal_columns};
     use super::super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
@@ -2239,15 +2322,7 @@ mod zero_cost_tests {
                         filling_min_rate_m3s: 0.0,
                         water_withdrawal_m3s: 0.0,
                     },
-                    hydro_block: HydroBlockBounds {
-                        min_turbined_m3s: 0.0,
-                        max_turbined_m3s: 0.0,
-                        min_outflow_m3s: 0.0,
-                        max_outflow_m3s: None,
-                        min_generation_mw: 0.0,
-                        max_generation_mw: 0.0,
-                        max_diversion_m3s: None,
-                    },
+                    hydro_block: HydroBlockBounds::default(),
                     thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                     thermal_block: ThermalBlockBounds {
                         min_generation_mw: 0.0,
@@ -2337,6 +2412,7 @@ mod zero_cost_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: PostStudyResolved::default(),
                 n_hydros: 0,
                 n_thermals,
                 n_lines: 0,
@@ -2558,10 +2634,12 @@ mod zero_cost_tests {
             );
         }
 
-        // CSC coupling: anticipated_state slot-0 column carries (row, -block_hours_total)
-        // for each plant under the always-active predicate.
+        // CSC coupling: the maturing slot's incoming (commit_in) column carries
+        // (row, -block_hours_total) for each plant under the always-active
+        // predicate. At stage 0 the maturing slot is 0 (0 mod k_max), so it is
+        // commit_in slot 0 = col_anticipated_state_start() + local_idx.
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
-        fill_anticipated_fishing_entries(&ctx, &stage, &layout, &mut col_entries);
+        fill_anticipated_fishing_entries(&ctx, &stage, 0, &layout, &mut col_entries);
 
         let block_hours_total: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
         let expected_neg = -block_hours_total;
@@ -2644,18 +2722,30 @@ mod zero_cost_tests {
         let layout0 = StageLayout::new(&ctx, &state, &stage0, 0);
         let (col_lower, col_upper, _objective) = fill_stage_columns(&ctx, &stage0, 0, &layout0);
         let leads = [2_usize, 3];
-        for (i, &lead) in leads.iter().enumerate() {
-            let col = layout0.anticipated.col_anticipated_slots_out_start + (lead - 1) * 2 + i;
+        let k_max = 3_usize;
+        // Hold deposit slot = delivery mod k_max (delivery = stage 0 + lead), the
+        // modular slot fill_anticipated_columns re-frees for an active decision —
+        // not the retired shift newest-slot K-1. plant 0 (K=2) -> slot 2, plant 1
+        // (K=3) -> slot 0.
+        let deposit_cols: Vec<usize> = leads
+            .iter()
+            .enumerate()
+            .map(|(i, &lead)| {
+                let slot = lead % k_max;
+                layout0.anticipated.col_anticipated_slots_out_start + slot * 2 + i
+            })
+            .collect();
+        for (i, &col) in deposit_cols.iter().enumerate() {
             assert_eq!(
                 col_lower[col],
                 f64::NEG_INFINITY,
-                "stage 0, plant {i}: col_lower expected -INF, got {}",
+                "stage 0, plant {i}: deposit-slot col_lower expected -INF, got {}",
                 col_lower[col]
             );
             assert_eq!(
                 col_upper[col],
                 f64::INFINITY,
-                "stage 0, plant {i}: col_upper expected +INF, got {}",
+                "stage 0, plant {i}: deposit-slot col_upper expected +INF, got {}",
                 col_upper[col]
             );
         }
@@ -2670,8 +2760,11 @@ mod zero_cost_tests {
             layout5.anticipated.n_anticipated_state_out_def_rows,
         );
         let (col_lower5, col_upper5, _objective5) = fill_stage_columns(&ctx, &stage5, 5, &layout5);
-        for (i, &lead) in leads.iter().enumerate() {
-            let col = layout5.anticipated.col_anticipated_slots_out_start + (lead - 1) * 2 + i;
+        // At the inactive stage every anticipated slot is masked [0, 0] (no
+        // interior carry, no active deposit), so the SAME physical deposit
+        // columns that were free at stage 0 are now frozen. The ring's slot base
+        // is stage-invariant, so reuse the stage-0 deposit columns directly.
+        for (i, &col) in deposit_cols.iter().enumerate() {
             assert_eq!(
                 col_lower5[col], 0.0,
                 "stage 5, plant {i}: col_lower expected 0.0, got {}",
@@ -2729,8 +2822,10 @@ mod zero_cost_tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// At stage 0 with `K=[2,3]` and `n_stages=6`, both plants are active.
-    /// For each active plant `i`, the CSC entry list must contain:
-    /// - `(def_row_i, +1.0)` on plant `i`'s own newest ring slot
+    /// For each active plant `i`, the latch (deposit) CSC entry list must contain:
+    /// - `(def_row_i, +1.0)` on plant `i`'s own delivery slot `delivery mod k_max`
+    ///   (`delivery = 0 + K_i`: plant 0 -> slot 2, plant 1 -> slot 0), not the retired
+    ///   shift newest-slot `K-1`
     /// - `(def_row_i, -1.0)` on `col_anticipated_decision_start + i`
     #[test]
     fn test_fill_anticipated_state_out_def_entries_two_active_plants() {
@@ -2743,10 +2838,11 @@ mod zero_cost_tests {
         fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
 
         let leads = [2_usize, 3];
+        let k_max = 3_usize;
         for (k, &lead) in leads.iter().enumerate() {
             let row = layout.anticipated.row_anticipated_state_out_def_start + k;
-            let col_state_out =
-                layout.anticipated.col_anticipated_slots_out_start + (lead - 1) * 2 + k;
+            let slot = lead % k_max; // delivery (0 + lead) mod k_max
+            let col_state_out = layout.anticipated.col_anticipated_slots_out_start + slot * 2 + k;
             let col_decision = layout.anticipated.col_anticipated_decision_start + k;
 
             assert!(
@@ -2772,15 +2868,16 @@ mod zero_cost_tests {
     // Two-sided masking: row cap and column freeze in one regression
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// An interior ring slot beyond the horizon-reachable cap gets BOTH sides of
-    /// the masking contract together: no definition row AND a frozen `[0, 0]`
-    /// outgoing column — never one without the other.
+    /// A commitment-hold slot whose delivery target lands past the horizon gets
+    /// BOTH sides of the masking contract together: no carry definition row AND a
+    /// frozen `[0, 0]` outgoing column — never one without the other.
     ///
-    /// Fixture: one plant, `K=3`, `n_stages=6`, evaluated at `stage_idx=4`
-    /// (`horizon_cap = 6 - 4 - 1 = 1`). Interior slots are 0 and 1
-    /// (`slot + 1 < K`); slot 0 is `< horizon_cap` (reachable), slot 1 is not
-    /// (masked). Slot 2 is the plant's own newest slot, governed by the
-    /// separate `anticipated_state_out_def` mechanism, not this one.
+    /// Fixture: one plant, `K=3`, `n_stages=6`, evaluated at `stage_idx=4`. The
+    /// depth window is delivery targets `m = 5, 6, 7`; only `m = 5` lands inside
+    /// the horizon, at modular slot `5 mod 3 = 2` (an in-flight interior carry,
+    /// decided at stage 2). Targets `m = 6, 7` map to slots `0` and `1` and are
+    /// past the horizon, so those slots are masked. There is no active deposit at
+    /// this stage (delivery `4 + 3 = 7 >= n_stages`).
     #[test]
     fn anticipated_slot_masking_ships_row_cap_and_column_freeze_together() {
         let mut fixtures = AntFixtures::new();
@@ -2792,9 +2889,9 @@ mod zero_cost_tests {
 
         assert_eq!(
             layout.anticipated.anticipated_slot_row_pos,
-            vec![Some(0), None, None],
-            "slot 0 reachable (row pos 0), slot 1 masked, slot 2 belongs to the \
-             deposit mechanism (never populated here)"
+            vec![None, None, Some(0)],
+            "slot 2 reachable (m=5, row pos 0); slots 0 and 1 map to past-horizon \
+             targets m=6, m=7 and are masked"
         );
         assert_eq!(layout.anticipated.n_anticipated_slot_definition_rows, 1);
 
@@ -2805,51 +2902,60 @@ mod zero_cost_tests {
         let base = layout.anticipated.col_anticipated_slots_out_start;
         let row_start = layout.anticipated.row_anticipated_slot_definition_start;
 
-        // Reachable slot 0: free column, a defining row exists, and the CSC
-        // carries the ring-shift's structural +1/-1 pair.
-        let col0 = base;
+        // Reachable slot 2: free column, a defining row exists, and the CSC
+        // carries the same-slot carry identity `out(2) - in(2) = 0`.
+        let col2 = base + 2;
         assert_eq!(
-            col_lower[col0],
+            col_lower[col2],
             f64::NEG_INFINITY,
-            "slot 0 column must be free"
+            "slot 2 column must be free"
         );
-        assert_eq!(col_upper[col0], f64::INFINITY, "slot 0 column must be free");
+        assert_eq!(col_upper[col2], f64::INFINITY, "slot 2 column must be free");
         let row0 = row_start;
         assert_eq!(
             row_lower[row0], 0.0,
-            "slot 0 definition row must be an equality"
+            "slot 2 definition row must be an equality"
         );
         assert_eq!(
             row_upper[row0], 0.0,
-            "slot 0 definition row must be an equality"
+            "slot 2 definition row must be an equality"
         );
         assert!(
-            col_entries[col0]
+            col_entries[col2]
                 .iter()
                 .any(|&(r, v)| r == row0 && (v - 1.0).abs() < 1e-15),
-            "slot 0 outgoing column must carry the +1.0 structural term at its \
-             definition row; got {:?}",
-            col_entries[col0]
+            "slot 2 outgoing column must carry the +1.0 structural term at its \
+             carry definition row; got {:?}",
+            col_entries[col2]
         );
-        let incoming_slot1 = state.anticipated_state.start + 1;
+        // The carry pins the SAME slot's incoming column (in(2)), never in(slot+1).
+        let incoming_slot2 = state.commit_in.start + 2;
         assert!(
-            col_entries[incoming_slot1]
+            col_entries[incoming_slot2]
                 .iter()
                 .any(|&(r, v)| r == row0 && (v + 1.0).abs() < 1e-15),
-            "slot 1's incoming pin must carry the -1.0 structural term at slot \
-             0's definition row; got {:?}",
-            col_entries[incoming_slot1]
+            "slot 2's own incoming pin must carry the -1.0 structural term at slot \
+             2's carry definition row (same slot); got {:?}",
+            col_entries[incoming_slot2]
         );
 
-        // Masked slot 1: frozen column, no defining row, no CSC entry.
-        let col1 = base + 1;
-        assert_eq!(col_lower[col1], 0.0, "masked slot 1 column must be frozen");
-        assert_eq!(col_upper[col1], 0.0, "masked slot 1 column must be frozen");
-        assert!(
-            col_entries[col1].is_empty(),
-            "masked slot 1 must carry no CSC entries; got {:?}",
-            col_entries[col1]
-        );
+        // Masked slots 0 and 1: frozen columns, no defining row, no CSC entry.
+        for masked_slot in [0_usize, 1] {
+            let col = base + masked_slot;
+            assert_eq!(
+                col_lower[col], 0.0,
+                "masked slot {masked_slot} column must be frozen"
+            );
+            assert_eq!(
+                col_upper[col], 0.0,
+                "masked slot {masked_slot} column must be frozen"
+            );
+            assert!(
+                col_entries[col].is_empty(),
+                "masked slot {masked_slot} must carry no CSC entries; got {:?}",
+                col_entries[col]
+            );
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2857,13 +2963,13 @@ mod zero_cost_tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Equivalence pin: `fill_anticipated_slot_definition_entries`'s
-    /// `DeliveryRing::emit_shift_rows` routing reproduces the open-coded reference
-    /// formula (`+1` on `anticipated_slots_out.start + global_slot`, `-1` on
-    /// `anticipated_state.start + (slot + 1) * n_anticipated + plant`, for every
-    /// reachable global slot) on a fixed two-plant, heterogeneous-`K` fixture
-    /// (`K = [3, 2]`).
+    /// `DeliveryRing::emit_carry_rows` routing reproduces the open-coded carry
+    /// identity (`+1` on `commit_out.start + global_slot`, `-1` on
+    /// `commit_in.start + global_slot` — the SAME slot, `out(slot) - in(slot) = 0`,
+    /// never the retired shift target `in(slot + 1)`) for every reachable global
+    /// slot on a fixed two-plant, heterogeneous-`K` fixture (`K = [3, 2]`).
     #[test]
-    fn fill_anticipated_slot_definition_entries_matches_pre_migration_formula_across_heterogeneous_plants()
+    fn fill_anticipated_slot_definition_entries_matches_open_coded_carry_formula_across_heterogeneous_plants()
      {
         let (fixtures, stage) = build_anticipated_ctx_n_stages_6();
         let ctx = fixtures.make_ctx(2, 3, vec![3, 2], vec![0, 1], 2);
@@ -2873,7 +2979,6 @@ mod zero_cost_tests {
         let mut actual: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
         fill_anticipated_slot_definition_entries(&layout, &mut actual);
 
-        let n_ant = ctx.n_anticipated;
         let row_start = layout.anticipated.row_anticipated_slot_definition_start;
         let mut expected: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
         let mut n_expected_reachable = 0_usize;
@@ -2885,10 +2990,9 @@ mod zero_cost_tests {
         {
             let Some(pos) = *pos else { continue };
             let row = row_start + pos;
-            let slot = global_slot / n_ant;
-            let plant = global_slot % n_ant;
-            expected[state.anticipated_slots_out.start + global_slot].push((row, 1.0));
-            expected[state.anticipated_state.start + (slot + 1) * n_ant + plant].push((row, -1.0));
+            // Carry identity: +1 on the outgoing slot, -1 on the SAME incoming slot.
+            expected[state.commit_out.start + global_slot].push((row, 1.0));
+            expected[state.commit_in.start + global_slot].push((row, -1.0));
             n_expected_reachable += 1;
         }
 
@@ -2913,7 +3017,7 @@ mod zero_cost_tests {
     /// `K = 0` exclusion: a `LeadTime(720.0)` plant on the uniform 31-day-month
     /// calendar `[744,744,744,744]` h resolves `depth == [0,0,0,0]` (every
     /// delivery self-delivers, hand-derived from the calendar). No
-    /// anticipated slot, deposit row, interior-shift row, or fishing row is
+    /// anticipated slot, deposit row, interior carry row, or fishing row is
     /// ever emitted for this plant, at any stage — the stage LP dispatches its
     /// generation as ordinary, unconstrained thermal output (no fishing
     /// coupling), never an underflow.
@@ -2943,7 +3047,7 @@ mod zero_cost_tests {
             );
             assert_eq!(
                 layout.anticipated.n_anticipated_slot_definition_rows, 0,
-                "stage {stage_idx}: K=0 must exclude every interior-shift row"
+                "stage {stage_idx}: K=0 must exclude every interior carry row"
             );
             assert_eq!(
                 layout.anticipated_decision().len(),
@@ -2959,7 +3063,7 @@ mod zero_cost_tests {
             fill_anticipated_state_out_def_rows(&layout, &mut row_lower, &mut row_upper);
 
             let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
-            fill_anticipated_fishing_entries(&ctx, &stage, &layout, &mut col_entries);
+            fill_anticipated_fishing_entries(&ctx, &stage, stage_idx, &layout, &mut col_entries);
             fill_anticipated_state_out_def_entries(&ctx, stage_idx, &layout, &mut col_entries);
 
             // The plant's ordinary thermal generation columns carry no entry
@@ -3081,14 +3185,13 @@ mod pumping_water_tests {
 
     use cobre_core::{
         BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology,
-        CoefficientRef, ConstraintExpression, ConstraintSense, ContractBlockBounds, ContractType,
-        DeficitSegment, EnergyContract, EntityId, GenericConstraint, Hydro, HydroBlockBounds,
-        HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroUnitGroup, Line,
-        LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingBlockBounds, PumpingStation, ResolvedBounds,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal, ThermalBlockBounds,
-        ThermalStageBounds, VariableRef,
+        CoefficientRef, ConstraintExpression, ContractBlockBounds, ContractType, DeficitSegment,
+        EnergyContract, EntityId, GenericConstraint, Hydro, HydroBlockBounds, HydroGenerationModel,
+        HydroStageBounds, HydroStagePenalties, HydroUnitGroup, Line, LineBlockBounds,
+        LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingBlockBounds, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig,
+        Stage, Thermal, ThermalBlockBounds, ThermalStageBounds, VariableRef,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -3102,6 +3205,7 @@ mod pumping_water_tests {
     };
     use crate::lead_time::{AnticipatedResolution, SpreadResolution, resolve_spread};
     use crate::resolved_parameters::ResolvedParameters;
+    use crate::setup::PostStudyResolved;
     use crate::test_support::make_unit_group;
 
     use super::super::M3S_TO_HM3;
@@ -3113,7 +3217,8 @@ mod pumping_water_tests {
     };
     use super::{
         LpMatrixBuffers, assemble_csc, build_stage_matrix_entries, fill_fpha_entries,
-        fill_generic_constraint_entries, fill_load_balance_entries, fill_pumping_water_entries,
+        fill_generic_constraint_entries, fill_load_balance_entries,
+        fill_operational_violation_entries, fill_pumping_water_entries,
         fill_transit_bucket_definition_entries, resolve_chrono_arrival_density,
     };
 
@@ -3169,13 +3274,9 @@ mod pumping_water_tests {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 50.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 45.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -3570,15 +3671,46 @@ mod pumping_water_tests {
             }
         }
 
-        /// Attach a generic constraint (and its active-at-stage-0 bound) so the
-        /// LP builder resolves the constraint's expression against the pumping
-        /// columns. Used by the end-to-end resolver-integration test.
-        fn with_generic_constraint(mut self, constraint: GenericConstraint, bound: f64) -> Self {
+        /// Attach a generic constraint (and its active-at-stage-0 upper-only bound)
+        /// so the LP builder resolves the constraint's expression against the
+        /// pumping columns. Used by the end-to-end resolver-integration test.
+        fn with_generic_constraint(
+            mut self,
+            constraint: GenericConstraint,
+            bound_upper: f64,
+        ) -> Self {
             let constraint_id = constraint.id.0;
             let id_map: HashMap<i32, usize> = [(constraint_id, 0)].into_iter().collect();
             let rows = (0..N_STAGES).map(|s| {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                (constraint_id, s as i32, None, bound)
+                (constraint_id, s as i32, None, None, Some(bound_upper))
+            });
+            self.resolved_generic_bounds =
+                ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+            self.generic_constraints = vec![constraint];
+            self
+        }
+
+        /// Like [`Self::with_generic_constraint`], but sets BOTH endpoints — a
+        /// two-sided row, whose slack allocation and net-report path differ from
+        /// the one-sided row above.
+        fn with_generic_constraint_range(
+            mut self,
+            constraint: GenericConstraint,
+            bound_lower: f64,
+            bound_upper: f64,
+        ) -> Self {
+            let constraint_id = constraint.id.0;
+            let id_map: HashMap<i32, usize> = [(constraint_id, 0)].into_iter().collect();
+            let rows = (0..N_STAGES).map(|s| {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                (
+                    constraint_id,
+                    s as i32,
+                    None,
+                    Some(bound_lower),
+                    Some(bound_upper),
+                )
             });
             self.resolved_generic_bounds =
                 ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
@@ -3731,6 +3863,7 @@ mod pumping_water_tests {
                 arc_spread_chrono: HashMap::new(),
                 arc_arrival_density: HashMap::new(),
                 per_stage_mask: Vec::new(),
+                post_study_resolved: PostStudyResolved::default(),
                 n_hydros: self.hydros.len(),
                 n_thermals: self.thermals.len(),
                 n_lines: self.lines.len(),
@@ -4148,11 +4281,12 @@ mod pumping_water_tests {
             expression: ConstraintExpression {
                 terms: vec![import_term],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         let fixtures = PumpFixtures::new_with_contracts(
             vec![fixture_hydro(1), fixture_hydro(2)],
@@ -4351,11 +4485,12 @@ mod pumping_water_tests {
                     },
                 ],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
 
         // Run the production assemble sequence into a CSC for a fixture. Takes the
@@ -5126,8 +5261,8 @@ mod pumping_water_tests {
     /// groups have distinct minima (discriminates a max-fold mutation), and the
     /// plant's OWN declared `min_turbined_m3s`/`min_generation_mw` are set below
     /// EVERY cell's own group-sum (discriminates a `.min(plant)` clamp). Pins the
-    /// min-floor contract in `.claude/rules/sddp.md`: RHS = plain sum of the
-    /// cell's own groups, never a fold, never a plant clamp, never apportioned.
+    /// min-floor contract: RHS = plain sum of the cell's own groups, never a
+    /// fold, never a plant clamp, never apportioned.
     fn min_floor_fixture() -> Hydro {
         let mut hydro = fixture_hydro_ds(20, None);
         hydro.min_turbined_m3s = 1.0;
@@ -7195,11 +7330,12 @@ mod pumping_water_tests {
                     },
                 ],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
 
         let fixtures = PumpFixtures::new(
@@ -7251,9 +7387,140 @@ mod pumping_water_tests {
                 1.0 + consumption,
                 "blk {blk}: pumping column {col} must carry flow(1.0) + power({consumption}) on generic row {row}"
             );
-            // The row bound proves the constraint participates with the right sense.
-            assert_eq!(row_upper[row], 40.0, "blk {blk}: <= row upper bound");
-            assert_eq!(row_lower[row], f64::NEG_INFINITY, "blk {blk}: <= row lower");
+            // The row bound proves the constraint participates as an upper-only row.
+            assert_eq!(
+                row_upper[row], 40.0,
+                "blk {blk}: upper-only row upper bound"
+            );
+            assert_eq!(
+                row_lower[row],
+                f64::NEG_INFINITY,
+                "blk {blk}: upper-only row lower"
+            );
+        }
+    }
+
+    /// AC: a two-sided row (both `bound_lower` and `bound_upper` present) carries
+    /// `row_lower = bound_lower` and `row_upper = bound_upper`, and — with slack
+    /// enabled — TWO slack columns (plus then minus): the two-sidedness test in
+    /// `allocate_generic_slack_cols` must derive from the row's own endpoint pair,
+    /// not a constraint-level label, or a two-sided row's upper bound would carry
+    /// no relaxation and no error would surface anywhere downstream.
+    #[test]
+    fn two_sided_row_bounds_and_two_slack_columns() {
+        let station_id = EntityId(10);
+        let penalty = 25.0_f64;
+        let constraint = GenericConstraint {
+            id: EntityId(7),
+            name: "gc_range".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm {
+                    coefficient: CoefficientRef::Literal(1.0),
+                    scale: 1.0,
+                    variable: VariableRef::PumpingFlow {
+                        station_id,
+                        block_id: None,
+                    },
+                }],
+            },
+            slack: SlackConfig {
+                enabled: true,
+                penalty: Some(penalty),
+            },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
+        };
+
+        let fixtures = PumpFixtures::new(
+            vec![fixture_hydro(1), fixture_hydro(2)],
+            vec![station_full(station_id.0, 1, 2, 0.0, 50.0, 1, 0.5)],
+        )
+        .with_generic_constraint_range(constraint, 5.0, 20.0);
+        let ctx = fixtures.make_ctx();
+        let block_hours = [300.0, 444.0];
+        let stage = two_block_stage(0, block_hours);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let n_blks = layout.n_blks;
+        assert_eq!(
+            layout.rows.n_generic_rows, n_blks,
+            "block-dependent two-sided constraint must expand to one row per block"
+        );
+        assert_eq!(
+            layout.generic_constraint_rows.len(),
+            n_blks,
+            "one GenericConstraintRowEntry per block"
+        );
+
+        for (blk, entry) in layout.generic_constraint_rows.iter().enumerate() {
+            let plus_col = entry
+                .slack_plus_col
+                .unwrap_or_else(|| panic!("blk {blk}: a slack-enabled row must get a plus column"));
+            let minus_col = entry.slack_minus_col.unwrap_or_else(|| {
+                panic!(
+                    "blk {blk}: a two-sided row with slack enabled must get a minus slack column"
+                )
+            });
+            assert_eq!(
+                minus_col,
+                plus_col + 1,
+                "blk {blk}: minus slack must be a DISTINCT column immediately after plus slack"
+            );
+        }
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut row_lower = vec![f64::NEG_INFINITY; layout.rows.num_rows];
+        let mut row_upper = vec![f64::INFINITY; layout.rows.num_rows];
+        let mut buffers = LpMatrixBuffers {
+            col_entries: &mut col_entries,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+            row_lower: &mut row_lower,
+            row_upper: &mut row_upper,
+        };
+
+        fill_generic_constraint_entries(&ctx, &stage, 0, &layout, &mut buffers);
+
+        assert_eq!(
+            block_hours.len(),
+            n_blks,
+            "fixture has exactly n_blks blocks"
+        );
+        for (blk, &hours) in block_hours.iter().enumerate() {
+            let row = layout.rows.row_generic_start + blk;
+            assert_eq!(
+                row_lower[row], 5.0,
+                "blk {blk}: two-sided row lower = bound_lower"
+            );
+            assert_eq!(
+                row_upper[row], 20.0,
+                "blk {blk}: two-sided row upper = bound_upper"
+            );
+
+            let entry = &layout.generic_constraint_rows[blk];
+            let plus_col = entry.slack_plus_col.unwrap();
+            let minus_col = entry.slack_minus_col.unwrap();
+            assert!(
+                col_entries[plus_col].contains(&(row, 1.0)),
+                "blk {blk}: plus-slack coefficient must be +1.0 (relaxes the lower bound)"
+            );
+            assert!(
+                col_entries[minus_col].contains(&(row, -1.0)),
+                "blk {blk}: minus-slack coefficient must be -1.0 (relaxes the upper bound)"
+            );
+            let expected_obj = penalty * hours;
+            assert_eq!(
+                objective[plus_col], expected_obj,
+                "blk {blk}: plus-slack objective coefficient"
+            );
+            assert_eq!(
+                objective[minus_col], expected_obj,
+                "blk {blk}: minus-slack objective coefficient"
+            );
         }
     }
 
@@ -9338,5 +9605,153 @@ mod pumping_water_tests {
         let q_max = (EVAP_INTERCEPT + EVAP_SLOPE * 100.0).abs() * 2.0;
         assert_eq!(col_lower[flow_col], -q_max);
         assert_eq!(col_upper[flow_col], q_max);
+    }
+
+    // ── Commissioning-dormant FPHA plant (A.1 regression) ────────────────────
+
+    /// A commissioning FPHA plant with a future `entry_stage_id`: resolution is
+    /// phase-blind (`ResolvedProductionModel::Fpha` at every stage, including
+    /// stage 0) while `identify_fpha_hydros` gates it `PreFilling` out of
+    /// `fpha_local_index` — the fixture that reproduced the
+    /// commissioning-dormant FPHA panic before `StageProductionRole::Dormant`.
+    /// A nonzero group `min_generation_mw` exercises the min-generation floor
+    /// while the plant is dormant, so the operational-violation test below can
+    /// confirm the row's own slack — not a `var_c` term the plant has no
+    /// column for — is what keeps it satisfiable.
+    fn dormant_fpha_fixture() -> PumpFixtures {
+        let mut dormant = fixture_hydro(1);
+        dormant.entry_stage_id = Some(2);
+        dormant.unit_groups[0].min_generation_mw = 5.0;
+        let production_models = ProductionModelSet::new(
+            vec![vec![
+                ResolvedProductionModel::Fpha {
+                    planes: vec![FphaPlane {
+                        intercept: 1000.0,
+                        gamma_v: 4.0,
+                        gamma_q: 0.6,
+                        gamma_s: 0.3,
+                    }],
+                };
+                N_STAGES
+            ]],
+            1,
+            N_STAGES,
+        );
+        PumpFixtures::new(vec![dormant], Vec::new()).with_production_models(production_models)
+    }
+
+    /// AC1: the LP builds (no `unreachable!` panic) and the dormant plant is
+    /// excluded from the FPHA index, exactly as a resolved-Fpha commissioning
+    /// plant that never reaches a stage template today would be.
+    #[test]
+    fn test_dormant_fpha_plant_is_excluded_from_fpha_index() {
+        let fixture = dormant_fpha_fixture();
+        let ctx = fixture.make_ctx();
+        let stage = three_block_stage(0);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        assert!(
+            layout.fpha_local_index[0].is_none(),
+            "the dormant plant must be gated out of the FPHA index by identify_fpha_hydros"
+        );
+        assert!(
+            layout.fpha_hydro_indices.is_empty(),
+            "a solely-dormant plant reserves no FPHA generation column region at all"
+        );
+    }
+
+    /// AC2: `fill_load_balance_entries` does not panic on a dormant FPHA plant
+    /// and credits its bus with zero generation — never priced as
+    /// `ConstantProductivity` on its frozen turbine column.
+    #[test]
+    fn test_dormant_fpha_plant_load_balance_contributes_nothing() {
+        let fixture = dormant_fpha_fixture();
+        let ctx = fixture.make_ctx();
+        let stage = three_block_stage(0);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_load_balance_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let bus_pos = *ctx.bus_pos.get(&EntityId(1)).unwrap();
+        let grid = layout.block_grid();
+        let row_load = layout.rows.load_balance.start;
+        let cell = HydroCell::new(
+            ctx.hydro_cell_index
+                .cells_of(HydroSys::new(0))
+                .next()
+                .unwrap(),
+        );
+
+        for blk_idx in 0..layout.n_blks {
+            let blk = BlockIdx::new(blk_idx);
+            let row = grid.flat(row_load, bus_pos, blk);
+            let col_turbine = layout.turbine_col(cell, blk);
+            assert_eq!(
+                entry_count_at(&col_entries, col_turbine, row),
+                0,
+                "blk {blk_idx}: a dormant FPHA plant must not be priced as \
+                 ConstantProductivity on its frozen turbine column"
+            );
+        }
+    }
+
+    /// AC3: `fill_operational_violation_entries` does not panic on a dormant
+    /// FPHA plant; the min-generation row's own slack alone absorbs the
+    /// plant's nonzero floor — the row stays satisfiable via the slack, not a
+    /// `var_c` term coupling a column the plant has none of.
+    #[test]
+    fn test_dormant_fpha_plant_operational_violation_contributes_nothing() {
+        let fixture = dormant_fpha_fixture();
+        let ctx = fixture.make_ctx();
+        let stage = three_block_stage(0);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_operational_violation_entries(&ctx, 0, &layout, &mut col_entries);
+        let (row_lower, _row_upper) = fill_stage_rows(&ctx, &stage, 0, &layout);
+
+        let grid = layout.block_grid();
+        let cell_idx = ctx
+            .hydro_cell_index
+            .cells_of(HydroSys::new(0))
+            .next()
+            .unwrap();
+        let cell = HydroCell::new(cell_idx);
+
+        for blk_idx in 0..layout.n_blks {
+            let blk = BlockIdx::new(blk_idx);
+            let row = grid.flat(
+                layout.slack.oper_violation.min_generation_rows.start,
+                cell_idx,
+                blk,
+            );
+            assert_eq!(
+                row_lower[row], 5.0,
+                "blk {blk_idx}: the dormant plant's own group min_generation_mw still \
+                 sets a nonzero floor"
+            );
+            let col_turbine = layout.turbine_col(cell, blk);
+            assert_eq!(
+                entry_count_at(&col_entries, col_turbine, row),
+                0,
+                "blk {blk_idx}: no rho-priced turbine term for a plant with no productivity"
+            );
+            let col_slack = layout.generation_below_col(cell, blk);
+            assert_eq!(
+                raw_coeff_at(&col_entries, col_slack, row),
+                1.0,
+                "blk {blk_idx}: the row's own slack must still absorb the floor, keeping \
+                 it satisfiable rather than structurally infeasible"
+            );
+            assert_eq!(
+                entry_count_at(&col_entries, col_slack, row),
+                1,
+                "blk {blk_idx}: exactly one slack entry, no duplicate or leftover var_c term"
+            );
+        }
     }
 }

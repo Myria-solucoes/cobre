@@ -12,6 +12,13 @@ from .model import System
 __version__: str
 
 def version_info() -> dict[str, Any]: ...
+def write_policy_checkpoint(
+    path: Union[str, Path],
+    stage_cuts: Sequence[Mapping[str, Any]],
+    metadata: Mapping[str, Any],
+    stage_bases: Optional[Sequence[Mapping[str, Any]]] = None,
+    stage_states: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> None: ...
 
 class Study:
     def __init__(

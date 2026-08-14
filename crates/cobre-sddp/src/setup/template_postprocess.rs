@@ -1,6 +1,6 @@
 //! Template post-processing: discount factors, LP scaling, and noise pre-scaling.
 
-use cobre_core::{PolicyGraph, Stage, System};
+use cobre_core::{HorizonGraph, Stage, System};
 
 use crate::indexer::StateSpace;
 use crate::scaling_report::ScalingReport;
@@ -13,21 +13,20 @@ use crate::{lp_builder, lp_builder::StageTemplates};
 /// Compute per-stage one-step discount factors from study stages and a policy graph.
 ///
 /// `discount_factors[t] = 1 / (1 + r_t)^(Dt / 365.25)` where `r_t` is the annual
-/// discount rate for the transition departing stage `t` (global or per-transition
-/// override) and `Dt` is the stage duration in days. When `rate == 0.0`, the factor
-/// is `1.0` (no discounting).
+/// discount rate for stage `t` (`HorizonGraph::stage_discount_rate_overrides` keyed
+/// by `Stage::id`, else the global `annual_discount_rate`) and `Dt` is the stage
+/// duration in days. When `rate == 0.0`, the factor is `1.0` (no discounting).
 pub(crate) fn compute_per_stage_discount_factors(
     study_stages: &[&Stage],
-    pg: &PolicyGraph,
+    pg: &HorizonGraph,
 ) -> Vec<f64> {
     study_stages
         .iter()
         .map(|stage| {
             let rate = pg
-                .transitions
-                .iter()
-                .find(|tr| tr.source_id == stage.id)
-                .and_then(|tr| tr.annual_discount_rate_override)
+                .stage_discount_rate_overrides
+                .get(&stage.id)
+                .copied()
                 .unwrap_or(pg.annual_discount_rate);
             if rate == 0.0 {
                 1.0
@@ -84,8 +83,8 @@ pub(crate) fn postprocess_templates(
     //
     // Use the per-stage `StageGeometry::theta_col` (= authoritative
     // `StageLayout::col_theta()`), NOT a re-derivation from `n_state`/`n_hydros`:
-    // that hand arithmetic omits the anticipated ring's `anticipated_slots_out`/
-    // `anticipated_state` blocks and, with anticipated thermals, lands on a
+    // that hand arithmetic omits the commitment-hold region's `commit_out`/
+    // `commit_in` blocks and, with anticipated thermals, lands on a
     // zero-cost `storage_in` column, silently disabling discounting (`0 * d = 0`).
     {
         let theta_cols: Vec<usize> = stage_templates
@@ -113,7 +112,7 @@ pub(crate) fn postprocess_templates(
 
         let mut col_scale =
             lp_builder::compute_col_scale(tmpl.num_cols, &tmpl.col_starts, &tmpl.values);
-        lp_builder::apply_anticipated_col_scale_unscale(&mut col_scale, state_layout);
+        lp_builder::apply_commitment_hold_col_scale_unscale(&mut col_scale, state_layout);
         lp_builder::apply_col_scale(tmpl, &col_scale);
         tmpl.col_scale.clone_from(&col_scale);
         let row_scale = lp_builder::compute_row_scale(
@@ -169,7 +168,90 @@ pub(crate) fn postprocess_templates(
     clippy::float_cmp
 )]
 mod tests {
-    use super::compute_cumulative_discount_factors;
+    use super::{compute_cumulative_discount_factors, compute_per_stage_discount_factors};
+    use chrono::NaiveDate;
+    use cobre_core::HorizonGraph;
+    use cobre_core::temporal::{
+        BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use std::collections::HashMap;
+
+    fn one_year_stage(id: i32) -> Stage {
+        Stage {
+            index: 0,
+            id,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            season_id: None,
+            blocks: vec![],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// A `stages[].annual_discount_rate_override` (carried on
+    /// `HorizonGraph::stage_discount_rate_overrides`) sets that stage's rate,
+    /// overriding the global `annual_discount_rate` (B2).
+    #[test]
+    fn stage_discount_override_is_read_off_the_stage() {
+        let stage = one_year_stage(0);
+        let days = f64::from((stage.end_date - stage.start_date).num_days() as i32);
+        let mut overrides = HashMap::new();
+        overrides.insert(0, 0.10);
+        let pg = HorizonGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.06,
+            transitions: vec![],
+            nodes: vec![],
+            stage_discount_rate_overrides: overrides,
+            season_map: None,
+        };
+
+        let factors = compute_per_stage_discount_factors(&[&stage], &pg);
+        let expected = 1.0 / (1.0_f64 + 0.10).powf(days / 365.25);
+        assert!(
+            (factors[0] - expected).abs() < 1e-12,
+            "stage override 0.10 must set the rate, got {}",
+            factors[0]
+        );
+        let global = 1.0 / (1.0_f64 + 0.06).powf(days / 365.25);
+        assert!(
+            (factors[0] - global).abs() > 1e-6,
+            "override must differ from the global-rate factor"
+        );
+    }
+
+    /// A stage with no override falls back to the global `annual_discount_rate`.
+    #[test]
+    fn stage_without_override_uses_global_rate() {
+        let stage = one_year_stage(0);
+        let days = f64::from((stage.end_date - stage.start_date).num_days() as i32);
+        let pg = HorizonGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.06,
+            transitions: vec![],
+            nodes: vec![],
+            stage_discount_rate_overrides: HashMap::new(),
+            season_map: None,
+        };
+
+        let factors = compute_per_stage_discount_factors(&[&stage], &pg);
+        let expected = 1.0 / (1.0_f64 + 0.06).powf(days / 365.25);
+        assert!(
+            (factors[0] - expected).abs() < 1e-12,
+            "absent override must fall back to the global rate, got {}",
+            factors[0]
+        );
+    }
 
     #[test]
     fn cumulative_discount_factors_length_matches_n_stages() {

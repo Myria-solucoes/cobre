@@ -20,6 +20,7 @@ use crate::{
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
+    setup::node_graph::Traversal,
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -41,8 +42,9 @@ fn run_simulate<S, C: cobre_comm::Communicator>(
     config: &SimulationConfig,
     output: SimulationOutputSpec<'_>,
     frozen_templates: Option<&[cobre_solver::StageTemplate]>,
-    stage_bases: &[Option<CapturedBasis>],
+    node_bases: &[Option<CapturedBasis>],
     comm: &C,
+    traversal: &Traversal,
 ) -> Result<super::SimulationRunResult, SimulationError>
 where
     S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
@@ -57,8 +59,9 @@ where
         config,
         output,
         frozen_templates,
-        stage_bases,
+        node_bases,
         comm,
+        traversal,
     };
     state.run(&mut inputs)
 }
@@ -75,9 +78,10 @@ fn run_simulate_with_profile<S, C: cobre_comm::Communicator>(
     config: &SimulationConfig,
     output: SimulationOutputSpec<'_>,
     frozen_templates: Option<&[cobre_solver::StageTemplate]>,
-    stage_bases: &[Option<CapturedBasis>],
+    node_bases: &[Option<CapturedBasis>],
     comm: &C,
     profile: cobre_solver::ActiveProfile,
+    traversal: &Traversal,
 ) -> Result<super::SimulationRunResult, SimulationError>
 where
     S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
@@ -93,8 +97,9 @@ where
         config,
         output,
         frozen_templates,
-        stage_bases,
+        node_bases,
         comm,
+        traversal,
     };
     state.run(&mut inputs)
 }
@@ -507,7 +512,7 @@ fn single_workspace_with_load_buses(
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0, 0),
         current_state: Vec::with_capacity(1),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -539,6 +544,7 @@ fn single_workspace_with_load_buses(
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -555,7 +561,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0), // N=1, L=0
+        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0), // N=1, L=0
         current_state: Vec::with_capacity(1),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -587,6 +593,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -837,6 +844,7 @@ fn simulation_load_patches_applied() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -878,10 +886,15 @@ fn simulation_load_patches_applied() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1003,6 +1016,7 @@ fn simulation_no_load_buses_unchanged() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1044,10 +1058,15 @@ fn simulation_no_load_buses_unchanged() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1140,6 +1159,7 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1181,11 +1201,16 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
         resolved,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1289,6 +1314,7 @@ fn simulation_inflow_extraction_unaffected() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1330,10 +1356,15 @@ fn simulation_inflow_extraction_unaffected() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1548,7 +1579,7 @@ fn single_workspace_with_hydros(
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(hydro_count),
         scratch: ScratchBuffers {
             noise_buf: Vec::new(),
@@ -1580,6 +1611,7 @@ fn single_workspace_with_hydros(
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -1665,6 +1697,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1706,10 +1739,15 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1798,6 +1836,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1839,10 +1878,15 @@ fn simulation_none_method_produces_raw_negative_noise() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )
     .unwrap();
 
@@ -1888,9 +1932,12 @@ mod dcs_simulation {
     use crate::dcs::DcsParams;
     use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
     use crate::horizon_mode::HorizonMode;
+    use crate::setup::NodePos;
 
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::{PatchBuffer, StageGeometry};
+    use crate::setup::NodeId;
+    use crate::setup::node_graph::StageIdx;
     use crate::simulation::types::{SimulationCostResult, SimulationStageResult};
     use crate::test_support;
     use crate::workspace::{SolverWorkspace, WorkspaceSizing};
@@ -1981,12 +2028,13 @@ mod dcs_simulation {
     /// omits the binding slot 1 (stale `last_active_iter`).
     fn sim_pool() -> FutureCostFunction {
         let mut fcf = FutureCostFunction::new(1, 1, 8, 10, &[0]);
-        fcf.add_cut(0, 0, 0, 1.0, &[0.0]);
-        fcf.add_cut(0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
-        fcf.add_cut(0, 0, 2, 3.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 1.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
+        fcf.add_cut(NodeId(0), 0, 0, 2, 3.0, &[0.0]);
         let meta = |generated: u64, last: u64| CutMetadata {
             iteration_generated: generated,
             forward_pass_index: 0,
+            node: NodeId(0),
             active_count: 0,
             last_active_iter: last,
         };
@@ -2012,13 +2060,14 @@ mod dcs_simulation {
             noise_dim: 1,
             n_anticipated: 0,
             k_max: 0,
+            n_commitment: 0,
         };
         let solver = ActiveSolver::new().expect("ActiveSolver::new()");
         SolverWorkspace::new(
             0,
             0,
             solver,
-            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
             1,
             sizing,
         )
@@ -2108,6 +2157,7 @@ mod dcs_simulation {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, 1),
@@ -2151,11 +2201,17 @@ mod dcs_simulation {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         };
         let ids = SimStageIds {
-            t: 0,
+            t: StageIdx(0),
             stage_id_u32: 0,
             scenario_id: 0,
+            node: NodePos(0),
+            node_id: NodeId(0),
         };
         let load_spec = SimStageLoadSpec {
             frozen_template: frozen,
@@ -2313,6 +2369,9 @@ mod anticipated_ring_matches_forward_propagation {
     use crate::indexer::StateSpace;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::PatchBuffer;
+    use crate::setup::NodeId;
+    use crate::setup::NodePos;
+    use crate::setup::node_graph::StageIdx;
     use crate::simulation::extraction::EntityCounts;
     use crate::test_support;
     use crate::training::forward::{StageKey, run_forward_stage};
@@ -2456,6 +2515,7 @@ mod anticipated_ring_matches_forward_propagation {
             noise_dim: 0,
             n_anticipated: 1,
             k_max: 2,
+            n_commitment: 0,
         }
     }
 
@@ -2473,7 +2533,7 @@ mod anticipated_ring_matches_forward_propagation {
             0,
             0,
             SequencedSolver::new(ring_sequence(num_cols)),
-            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2),
+            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2, 0),
             state.n_state,
             ring_sizing(state.n_state),
         );
@@ -2487,6 +2547,7 @@ mod anticipated_ring_matches_forward_propagation {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
+                node_id: NodeId(0),
                 state: Vec::new(),
             })
             .collect();
@@ -2495,7 +2556,7 @@ mod anticipated_ring_matches_forward_propagation {
         for (t, template) in templates.iter().enumerate() {
             ws.solver.load_model(template);
             let key = StageKey {
-                t,
+                t: StageIdx(t),
                 m: 0,
                 local_m: 0,
                 num_stages: N_STAGES,
@@ -2505,6 +2566,7 @@ mod anticipated_ring_matches_forward_propagation {
                 terminal_has_boundary_cuts: false,
                 pool: &fcf.pools[t],
                 dcs: None,
+                node: NodePos(t),
             };
             run_forward_stage(
                 &mut ws,
@@ -2534,7 +2596,7 @@ mod anticipated_ring_matches_forward_propagation {
             0,
             0,
             SequencedSolver::new(ring_sequence(num_cols)),
-            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2),
+            PatchBuffer::new(0, 0, 0, 0, 0, 1, 2, 0),
             state.n_state,
             ring_sizing(state.n_state),
         );
@@ -2581,6 +2643,10 @@ mod anticipated_ring_matches_forward_propagation {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         };
         let lookups = SimLookups::build(
             training_ctx.study_dims,
@@ -2594,9 +2660,11 @@ mod anticipated_ring_matches_forward_propagation {
         for (t, template) in templates.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let ids = SimStageIds {
-                t,
+                t: StageIdx(t),
                 stage_id_u32: t as u32,
                 scenario_id: 0,
+                node: NodePos(t),
+                node_id: NodeId(t as i32),
             };
             let load_spec = SimStageLoadSpec {
                 frozen_template: template,
@@ -2663,6 +2731,7 @@ mod anticipated_ring_matches_forward_propagation {
             downstream_par_order: 0,
         };
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &cut_state_layouts,
@@ -2711,4 +2780,53 @@ mod anticipated_ring_matches_forward_propagation {
             }
         }
     }
+}
+
+/// The pin the two simulation node-visit sites set is the shared
+/// `node_pinned_scenario`: `None` at a `Generated` node (the sampled/generated
+/// byte-parity guarantee) and the declared column `k` at an `External` node.
+#[test]
+fn simulation_node_pin_is_none_for_generated_and_declared_column_for_external() {
+    use crate::setup::node_graph::{
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        StageIdx,
+    };
+
+    let external = NodeRuntime {
+        stage: StageIdx(0),
+        pool_id: 0,
+        openings: NodeOpenings {
+            source: OpeningSource::External,
+            offset: 5,
+            len: 1,
+            q: 1.0,
+        },
+    };
+    let generated = NodeRuntime {
+        stage: StageIdx(1),
+        pool_id: 1,
+        openings: NodeOpenings {
+            source: OpeningSource::Generated,
+            offset: 0,
+            len: 3,
+            q: 1.0 / 3.0,
+        },
+    };
+    let ng = NodeGraph {
+        node_ids: vec![NodeId(0), NodeId(1)].into(),
+        nodes: vec![external, generated].into(),
+        successors: vec![
+            vec![NodeSuccessor {
+                child: NodePos(1),
+                probability: 1.0,
+            }],
+            Vec::new(),
+        ]
+        .into(),
+        n_pools: 2,
+        pool_stage: vec![StageIdx(0), StageIdx(1)],
+    };
+
+    assert_eq!(ng.node_pinned_scenario(NodePos(0)), Some(5));
+    assert_eq!(ng.node_pinned_scenario(NodePos(1)), None);
 }

@@ -1,15 +1,16 @@
 //! Training-phase configuration types for `config.json → training`.
 
+use std::fmt;
 use std::num::NonZeroUsize;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::scenario_source::RawScenarioSourceConfig;
 
 /// Training parameters (`config.json → training`).
 ///
-/// `forward_passes` and `stopping_rules` are mandatory — the loader returns
-/// [`crate::LoadError::SchemaError`] if either is absent.
+/// A forward-pass count (via `selection`) and `stopping_rules` are mandatory —
+/// the loader returns [`crate::LoadError::SchemaError`] if either is absent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -22,19 +23,14 @@ pub struct TrainingConfig {
     #[serde(default)]
     pub tree_seed: Option<i64>,
 
-    /// Number of forward-pass scenario trajectories $M$ per iteration.
-    ///
-    /// **Mandatory** — no default. The loader rejects any config that omits this field.
-    pub forward_passes: Option<u32>,
-
     /// List of stopping rule configurations.
     ///
     /// **Mandatory** — no default. Must contain at least one `iteration_limit` rule.
     pub stopping_rules: Option<Vec<StoppingRuleConfig>>,
 
-    /// How multiple stopping rules combine: `"any"` (OR) or `"all"` (AND).
-    #[serde(default = "TrainingConfig::default_stopping_mode")]
-    pub stopping_mode: String,
+    /// How multiple stopping rules combine: `any` (OR) or `all` (AND).
+    #[serde(default)]
+    pub stopping_mode: StoppingMode,
 
     /// Row-selection settings.
     // Rationale: the type stays algorithm-neutral (`RowSelectionConfig`) per the
@@ -56,15 +52,85 @@ pub struct TrainingConfig {
     /// When absent, all classes default to `in_sample`.
     #[serde(default)]
     pub scenario_source: Option<RawScenarioSourceConfig>,
+
+    /// Phase-level scenario selection. The forward-pass count lives in the
+    /// `sampled` arm; absent is a missing-count load error.
+    #[serde(default)]
+    pub selection: Option<TrainingSelection>,
+}
+
+/// Training-phase scenario selection and its method-specific parameters
+/// (`config.json → training.selection`).
+///
+/// Internally tagged on `method`; the tag is the semantic selection word, never
+/// a mechanism name. `sampled` runs `forward_passes` trajectories per iteration;
+/// `enumerated` walks the scenario openings exhaustively. Each variant carries
+/// only its own parameters, so pairing a count with `enumerated` is a parse
+/// error under `deny_unknown_fields` rather than a runtime-gated combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum TrainingSelection {
+    /// Sampled forward passes: `forward_passes` trajectories per iteration.
+    Sampled {
+        /// Number of forward-pass trajectories per iteration.
+        forward_passes: u32,
+    },
+    /// Exhaustive enumeration of the scenario openings.
+    // A braced variant, not a unit one: serde enforces `deny_unknown_fields`
+    // only for braced variants of an internally tagged enum, and this variant
+    // must reject a stray `forward_passes`.
+    Enumerated {},
+}
+
+/// Effective training forward-pass resolution
+/// ([`Config::resolve_forward_passes`](super::Config::resolve_forward_passes)):
+/// either a concrete sampled count or a signal that the count is derived from
+/// the policy graph downstream, since config load holds no graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardPassesResolution {
+    /// `forward_passes` sampled trajectories per iteration.
+    Sampled(u32),
+    /// Exhaustive enumeration; the count is derived from the policy graph.
+    Enumerated,
 }
 
 impl TrainingConfig {
     pub(super) fn default_enabled() -> bool {
         true
     }
+}
 
-    pub(super) fn default_stopping_mode() -> String {
-        "any".to_string()
+/// How multiple stopping rules combine into a single stop decision
+/// (`config.json → training.stopping_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum StoppingMode {
+    /// Stop when any configured rule triggers (OR).
+    #[default]
+    Any,
+    /// Stop when all configured rules trigger at the same iteration (AND).
+    All,
+}
+
+impl<'de> Deserialize<'de> for StoppingMode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "any" => Ok(Self::Any),
+            "all" => Ok(Self::All),
+            other => Err(serde::de::Error::unknown_variant(other, &["any", "all"])),
+        }
+    }
+}
+
+impl fmt::Display for StoppingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Any => f.write_str("any"),
+            Self::All => f.write_str("all"),
+        }
     }
 }
 
@@ -319,15 +385,16 @@ pub struct ParallelismConfig {
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum BackwardScheduler {
-    /// Per-trial-point backward scheduling (the default): each parallel work
-    /// unit is one whole trial point.
+    /// By-scenario backward scheduling (the default): each parallel work
+    /// unit claims one whole trial point (a row of the backward work
+    /// rectangle).
     // A braced variant, not a unit one: serde enforces `deny_unknown_fields`
     // only for braced variants of an internally tagged enum, and this variant
     // must reject `block_size`.
-    TrialPoint {},
-    /// Opening-block backward scheduling: each parallel work unit is one
-    /// (trial point, opening-block) pair claimed dynamically by workers.
-    OpeningBlock {
+    ByScenario {},
+    /// By-node backward scheduling: each parallel work unit claims one
+    /// (trial point, opening-block) tile of the backward work rectangle.
+    ByNode {
         /// Openings per block. Absent resolves per stage to `⌈|Ω_s|/2⌉` (half
         /// the openings, rounded up); a set value is clamped to
         /// `min(|Ω_s|, block_size)`.
@@ -338,7 +405,7 @@ pub enum BackwardScheduler {
 
 impl Default for BackwardScheduler {
     fn default() -> Self {
-        Self::TrialPoint {}
+        Self::ByScenario {}
     }
 }
 
@@ -418,18 +485,20 @@ pub enum StoppingRuleConfig {
         /// Relative improvement threshold.
         tolerance: f64,
     },
-    /// Stop when both the bound and simulated policy costs have stabilized.
-    Simulation {
-        /// Number of Monte Carlo forward simulations per check.
-        replications: u32,
-        /// Iterations between checks.
-        period: u32,
-        /// Number of past iterations for bound stability check.
-        bound_window: u32,
-        /// Normalized distance threshold between consecutive simulation results.
-        distance_tol: f64,
-        /// Relative tolerance for bound stability.
-        bound_tol: f64,
+    /// Stop when the exact upper bound is within tolerance of the lower
+    /// bound. At least one of `tolerance` / `relative_tolerance` must be
+    /// present (checked at `from_config`). Admissible only under enumerated
+    /// forward selection, where the upper bound is the exact bound a gap rule
+    /// requires rather than a statistical estimate.
+    Gap {
+        /// Absolute gap tolerance, canonical R$.
+        #[serde(default)]
+        tolerance: Option<f64>,
+        /// Relative gap tolerance in percent (e.g. `0.01` means 0.01%), compared
+        /// against `100·gap / max(1, |lower_bound|)` — the same convention the
+        /// reported `gap_percent` uses.
+        #[serde(default)]
+        relative_tolerance: Option<f64>,
     },
 }
 
@@ -478,7 +547,7 @@ pub struct LipschitzConfig {
 mod tests {
     use super::{
         BackwardScheduler, DualEdgeWeight, NonZeroUsize, PresolveMode, PriceStrategy,
-        ScaleStrategy, SelectionMethod, TrainingConfig,
+        ScaleStrategy, SelectionMethod, StoppingRuleConfig, TrainingConfig, TrainingSelection,
     };
 
     /// A `dynamic` selection block round-trips through the tagged enum, with
@@ -486,7 +555,7 @@ mod tests {
     #[test]
     fn dynamic_selection_block_round_trips() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "cut_selection": {
                 "row_activity_tolerance": 1e-6,
@@ -528,7 +597,7 @@ mod tests {
     #[test]
     fn level1_selection_block_round_trips_with_defaults() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "cut_selection": { "selection": { "method": "level1" } }
         }"#;
@@ -553,7 +622,7 @@ mod tests {
     #[test]
     fn omitting_selection_disables_row_selection() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "cut_selection": {}
         }"#;
@@ -566,7 +635,7 @@ mod tests {
     #[test]
     fn wrong_method_field_is_deserialize_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "cut_selection": {
                 "selection": { "method": "level1", "max_added_per_round": 3 }
@@ -583,7 +652,7 @@ mod tests {
     #[test]
     fn bad_method_string_is_deserialize_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "cut_selection": { "selection": { "method": "dynmic" } }
         }"#;
@@ -594,7 +663,7 @@ mod tests {
     #[test]
     fn domination_without_tolerance_is_missing_field_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "cut_selection": { "selection": { "method": "domination" } }
         }"#;
@@ -611,7 +680,7 @@ mod tests {
     #[test]
     fn backward_solver_profile_block_round_trips() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "solver": {
                 "backward": {
@@ -639,7 +708,7 @@ mod tests {
     #[test]
     fn backward_solver_profile_new_fields_round_trip() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "solver": {
                 "backward": {
@@ -665,7 +734,7 @@ mod tests {
     #[test]
     fn forward_solver_profile_block_round_trips() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "solver": {
                 "forward": {
@@ -686,7 +755,7 @@ mod tests {
     #[test]
     fn backward_solver_profile_unknown_field_is_deserialize_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "solver": { "backward": { "dual_edge_weght": "devex" } }
         }"#;
@@ -702,7 +771,7 @@ mod tests {
     #[test]
     fn backward_solver_profile_presolv_typo_is_deserialize_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "solver": { "backward": { "presolv": "off" } }
         }"#;
@@ -718,7 +787,7 @@ mod tests {
     #[test]
     fn backward_solver_profile_bad_enum_value_is_deserialize_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "solver": { "backward": { "scale": "curtis_reid" } }
         }"#;
@@ -727,83 +796,106 @@ mod tests {
     }
 
     #[test]
-    fn backward_scheduler_defaults_to_trial_point_when_absent() {
+    fn backward_scheduler_defaults_to_by_scenario_when_absent() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }]
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
-            BackwardScheduler::TrialPoint {}
+            BackwardScheduler::ByScenario {}
         );
     }
 
-    /// `{"method": "opening_block", "block_size": 4}` round-trips into the
-    /// `OpeningBlock` variant carrying `Some(4)`.
+    /// `{"method": "by_node", "block_size": 4}` round-trips into the
+    /// `ByNode` variant carrying `Some(4)`.
     #[test]
-    fn opening_block_scheduler_and_block_size_round_trip() {
+    fn by_node_scheduler_and_block_size_round_trip() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "opening_block", "block_size": 4 }
+                "backward_scheduler": { "method": "by_node", "block_size": 4 }
             }
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
-            BackwardScheduler::OpeningBlock {
+            BackwardScheduler::ByNode {
                 block_size: NonZeroUsize::new(4)
             }
         );
     }
 
-    /// An `opening_block` scheduler without `block_size` round-trips into
+    /// A `by_node` scheduler without `block_size` round-trips into
     /// `block_size: None` (the per-stage `⌈|Ω_s|/2⌉` resolution).
     #[test]
-    fn opening_block_scheduler_without_block_size_round_trips() {
+    fn by_node_scheduler_without_block_size_round_trips() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "opening_block" }
+                "backward_scheduler": { "method": "by_node" }
             }
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
-            BackwardScheduler::OpeningBlock { block_size: None }
+            BackwardScheduler::ByNode { block_size: None }
         );
     }
 
-    /// `block_size` under `trial_point` is a deserialize error under
+    /// `block_size` under `by_scenario` is a deserialize error under
     /// `deny_unknown_fields` — the invalid combination is unrepresentable, not
     /// warned-and-ignored.
     #[test]
-    fn block_size_under_trial_point_is_deserialize_error() {
+    fn block_size_under_by_scenario_is_deserialize_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "trial_point", "block_size": 4 }
+                "backward_scheduler": { "method": "by_scenario", "block_size": 4 }
             }
         }"#;
         let result = serde_json::from_str::<TrainingConfig>(json);
         assert!(
             result.is_err(),
-            "block_size under trial_point must be rejected"
+            "block_size under by_scenario must be rejected"
         );
+    }
+
+    /// The retired `trial_point` / `opening_block` spellings are unknown-variant
+    /// deserialize errors — no `serde(alias)` accepts them (clean break, no
+    /// deprecated-with-fallback).
+    #[test]
+    fn retired_scheduler_spellings_are_deserialize_error() {
+        for method in ["trial_point", "opening_block"] {
+            let json = format!(
+                r#"{{
+                    "selection": {{ "method": "sampled", "forward_passes": 4 }},
+                    "stopping_rules": [{{ "type": "iteration_limit", "limit": 100 }}],
+                    "parallelism": {{
+                        "backward_scheduler": {{ "method": "{method}" }}
+                    }}
+                }}"#
+            );
+            let result = serde_json::from_str::<TrainingConfig>(&json);
+            assert!(
+                result.is_err(),
+                "retired scheduler spelling '{method}' must be an unknown-variant error"
+            );
+        }
     }
 
     /// A misspelled scheduler `method` is an unknown-variant deserialize error.
     #[test]
     fn unknown_scheduler_method_is_deserialize_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "openin_block" }
+                "backward_scheduler": { "method": "by_nod" }
             }
         }"#;
         let result = serde_json::from_str::<TrainingConfig>(json);
@@ -814,10 +906,10 @@ mod tests {
     #[test]
     fn block_size_zero_is_deserialize_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "opening_block", "block_size": 0 }
+                "backward_scheduler": { "method": "by_node", "block_size": 0 }
             }
         }"#;
         let result = serde_json::from_str::<TrainingConfig>(json);
@@ -839,7 +931,7 @@ mod tests {
         ] {
             let json = format!(
                 r#"{{
-                    "forward_passes": 4,
+                    "selection": {{ "method": "sampled", "forward_passes": 4 }},
                     "stopping_rules": [{{ "type": "iteration_limit", "limit": 100 }}],
                     {stale}
                 }}"#
@@ -852,13 +944,68 @@ mod tests {
         }
     }
 
+    /// A `sampled` phase selection round-trips into the `Sampled` variant.
+    #[test]
+    fn sampled_selection_round_trips() {
+        let json = r#"{
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "selection": { "method": "sampled", "forward_passes": 8 }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.selection,
+            Some(TrainingSelection::Sampled { forward_passes: 8 })
+        );
+    }
+
+    /// The removed root `forward_passes` alias is an unknown-field deserialize
+    /// error under `deny_unknown_fields`; the count lives solely in the
+    /// `selection.sampled` arm.
+    #[test]
+    fn root_forward_passes_alias_is_deserialize_error() {
+        let alias = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }]
+        }"#;
+        assert!(
+            serde_json::from_str::<TrainingConfig>(alias).is_err(),
+            "root forward_passes must be rejected as an unknown field"
+        );
+
+        let arm = r#"{
+            "selection": { "method": "sampled", "forward_passes": 4 },
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }]
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(arm).unwrap();
+        assert_eq!(
+            cfg.selection,
+            Some(TrainingSelection::Sampled { forward_passes: 4 })
+        );
+    }
+
+    /// A count under `enumerated` is unrepresentable — `deny_unknown_fields` on
+    /// the braced variant rejects it at parse time, so the invalid pairing is
+    /// never gated at runtime.
+    #[test]
+    fn enumerated_selection_with_count_is_deserialize_error() {
+        let json = r#"{
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "selection": { "method": "enumerated", "forward_passes": 8 }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "a count under enumerated must be rejected as unrepresentable"
+        );
+    }
+
     /// A parameter belonging to a different stopping-rule type is a
     /// deserialize error under `deny_unknown_fields` (here `seconds` under
     /// `iteration_limit`), never a silently ignored key.
     #[test]
     fn wrong_stopping_rule_field_is_deserialize_error() {
         let json = r#"{
-            "forward_passes": 4,
+            "selection": { "method": "sampled", "forward_passes": 4 },
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100, "seconds": 60.0 }
             ]
@@ -868,5 +1015,43 @@ mod tests {
             result.is_err(),
             "a time_limit-only field under iteration_limit must be rejected"
         );
+    }
+
+    /// A `gap` rule with only `tolerance` set deserializes into
+    /// `StoppingRuleConfig::Gap`.
+    #[test]
+    fn gap_stopping_rule_tolerance_only_round_trips() {
+        let json = r#"{
+            "selection": { "method": "sampled", "forward_passes": 4 },
+            "stopping_rules": [{ "type": "gap", "tolerance": 1000.0 }]
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let rules = cfg.stopping_rules.expect("stopping_rules present");
+        assert!(matches!(
+            rules[0],
+            StoppingRuleConfig::Gap {
+                tolerance: Some(t),
+                relative_tolerance: None
+            } if (t - 1000.0).abs() < f64::EPSILON
+        ));
+    }
+
+    /// A `gap` rule with only `relative_tolerance` set deserializes into
+    /// `StoppingRuleConfig::Gap`.
+    #[test]
+    fn gap_stopping_rule_relative_tolerance_only_round_trips() {
+        let json = r#"{
+            "selection": { "method": "sampled", "forward_passes": 4 },
+            "stopping_rules": [{ "type": "gap", "relative_tolerance": 0.01 }]
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let rules = cfg.stopping_rules.expect("stopping_rules present");
+        assert!(matches!(
+            rules[0],
+            StoppingRuleConfig::Gap {
+                tolerance: None,
+                relative_tolerance: Some(rt)
+            } if (rt - 0.01).abs() < f64::EPSILON
+        ));
     }
 }

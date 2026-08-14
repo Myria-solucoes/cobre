@@ -28,7 +28,7 @@ fn local_distribution() -> DistributionInfo {
         backend: "local".to_string(),
         world_size: 1,
         ranks_participated: 1,
-        num_nodes: 1,
+        num_hosts: 1,
         threads_per_rank: 1,
         mpi_library: None,
         mpi_standard: None,
@@ -42,7 +42,24 @@ fn local_distribution() -> DistributionInfo {
 }
 
 fn write_training_fixture(dir: &Path) {
-    let metadata = TrainingMetadata {
+    write_training_metadata_fixture(dir, &training_metadata_fixture());
+}
+
+fn write_training_fixture_with_loaded_boundary_cuts(dir: &Path) {
+    let mut metadata = training_metadata_fixture();
+    metadata.row_pool.total_generated = 10_009;
+    metadata.row_pool.total_active = 10_009;
+    metadata.row_pool.total_loaded = 10_000;
+    write_training_metadata_fixture(dir, &metadata);
+}
+
+fn write_training_metadata_fixture(dir: &Path, metadata: &TrainingMetadata) {
+    std::fs::create_dir_all(dir.join("training")).unwrap();
+    write_training_metadata(&dir.join("training/metadata.json"), metadata).unwrap();
+}
+
+fn training_metadata_fixture() -> TrainingMetadata {
+    TrainingMetadata {
         cobre_version: "0.0.0-test".to_string(),
         hostname: "fixture-host".to_string(),
         solver: "highs".to_string(),
@@ -82,11 +99,13 @@ fn write_training_fixture(dir: &Path) {
             rows_in_lp_total: 0,
             rows_in_lp_solve_count: 0,
             rows_in_lp_max: 0,
+            total_loaded: 0,
         },
         bounds: MetadataBounds {
             final_lower_bound: 48_500.0,
             final_upper_bound: Some(49_000.0),
             final_upper_bound_std: Some(250.0),
+            final_upper_bound_kind: "statistical".to_string(),
         },
         solve_stats: MetadataTrainingSolveStats {
             total_lp_solves: Some(840),
@@ -100,10 +119,7 @@ fn write_training_fixture(dir: &Path) {
         setup: None,
         production_fit_deviation: None,
         distribution: local_distribution(),
-    };
-
-    std::fs::create_dir_all(dir.join("training")).unwrap();
-    write_training_metadata(&dir.join("training/metadata.json"), &metadata).unwrap();
+    }
 }
 
 fn write_simulation_fixture(dir: &Path) {
@@ -124,8 +140,6 @@ fn write_simulation_fixture(dir: &Path) {
         cost: Some(MetadataCost {
             mean_cost: 1.0e6,
             std_cost: 2.0e4,
-            cvar: 1.2e6,
-            cvar_alpha: 0.95,
         }),
         solve_stats: MetadataSimulationSolveStats {
             total_lp_solves: Some(5_000),
@@ -296,6 +310,51 @@ fn summary_only_training_required_minimal_dir() {
     assert!(!stderr.contains("Hydro models"));
     assert!(!stderr.contains("Model provenance"));
     assert!(!stderr.contains("Simulation complete"));
+}
+
+#[test]
+fn summary_omits_loaded_annotation_when_nothing_was_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+
+    write_training_fixture(path);
+
+    let output = cobre()
+        .args(["summary", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(stderr.contains("90 active / 100 generated"));
+    assert!(
+        !stderr.contains("loaded boundary"),
+        "no boundary policy was loaded; must render exactly as today: {stderr}"
+    );
+}
+
+#[test]
+fn summary_splits_generated_from_loaded_boundary_cuts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+
+    write_training_fixture_with_loaded_boundary_cuts(path);
+
+    let output = cobre()
+        .args(["summary", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(
+        stderr.contains("10009 active / 10009 generated (9 this run + 10000 loaded boundary)"),
+        "expected the generated count split into this-run vs. loaded boundary cuts: {stderr}"
+    );
 }
 
 #[test]

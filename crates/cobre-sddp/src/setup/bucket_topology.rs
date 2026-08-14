@@ -122,30 +122,20 @@ fn horizon_cap_active(active: usize, stage: usize, n_stages: usize) -> usize {
     active.min(n_stages - 1 - stage)
 }
 
-/// Fraction of pre-study period `m`'s release — spanning
-/// `[t_v - cumulative_before - period_duration, t_v - cumulative_before)` in
-/// real time before stage 0 — landing in study stage `d` (at `result[d]`). The
-/// IC-anchor analogue of [`resolve_spread`]'s `k`, resolved against the forward
-/// calendar directly: [`window_period_overlaps`] depends only on relative
-/// offsets, so this equals anchoring a local calendar at period `m`.
-pub(crate) fn ic_anchor_k(
-    t_v: f64,
-    cumulative_before: f64,
-    period_duration: f64,
-    study_durations: &[f64],
-) -> Vec<f64> {
-    let window_start = t_v - cumulative_before - period_duration;
-    window_period_overlaps(window_start, period_duration, study_durations)
-        .into_iter()
-        .map(|overlap| overlap / period_duration)
-        .collect()
-}
-
 /// Build the [`TransitBucketTopology`]: confluence aggregates every arc feeding
 /// one downstream plant into a single block of depth `max_i L_i` (never one
 /// block per arc), sized as the max over every in-study stage anchor and the
 /// pre-study IC anchor, in canonical `(operational_start_date, id)` order.
-pub(crate) fn build_transit_bucket_topology(system: &System) -> TransitBucketTopology {
+///
+/// `boundary_present` (the caller's `config.policy.boundary.is_some()`) gates
+/// [`horizon_cap_active`]: `false` reproduces today's capped mask byte-for-byte
+/// (Terminal credit deferred); `true` un-caps the terminal deep-lag slots so
+/// they stay live and reach the boundary-priced cut-state projection (the
+/// "Delivery-family right-boundary pricing" contract).
+pub(crate) fn build_transit_bucket_topology(
+    system: &System,
+    boundary_present: bool,
+) -> TransitBucketTopology {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
     let arcs_by_downstream = declared_arcs(system);
@@ -184,11 +174,16 @@ pub(crate) fn build_transit_bucket_topology(system: &System) -> TransitBucketTop
             // net deposit at this stage still carries mass through the ring
             // shift and must stay in the active range.
             let active = own_release_by_stage[stage].max(ic_depth.saturating_sub(stage));
-            let capped = horizon_cap_active(active, stage, n_stages);
-            debug_assert!(
-                stage + capped < n_stages,
-                "capped active lag {capped} at stage {stage} must not target n_stages={n_stages} or beyond"
-            );
+            let capped = if boundary_present {
+                active
+            } else {
+                let capped = horizon_cap_active(active, stage, n_stages);
+                debug_assert!(
+                    stage + capped < n_stages,
+                    "capped active lag {capped} at stage {stage} must not target n_stages={n_stages} or beyond"
+                );
+                capped
+            };
             mask_row.push(capped);
         }
     }
@@ -541,7 +536,7 @@ mod tests {
         let downstream = hydro(1, None, None);
         let system = build_system(vec![downstream], uniform_stages(3, 24.0));
 
-        let topology = build_transit_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system, false);
 
         assert_eq!(topology.n_buckets, 0);
         assert!(topology.column_order.is_empty());
@@ -554,7 +549,7 @@ mod tests {
         let upstream = hydro(2, Some(1), Some(0.0));
         let system = build_system(vec![downstream, upstream], uniform_stages(3, 24.0));
 
-        let topology = build_transit_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system, false);
 
         assert_eq!(topology.n_buckets, 0);
     }
@@ -569,7 +564,7 @@ mod tests {
             uniform_stages(10, 24.0),
         );
 
-        let topology = build_transit_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system, false);
 
         assert_eq!(topology.per_plant_depth, vec![5]);
         assert_eq!(topology.n_buckets, 5);
@@ -601,7 +596,7 @@ mod tests {
         );
         assert_eq!(ic_depth, 2, "the IC anchor must give L_arc(IC) == 2");
 
-        let topology = build_transit_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system, false);
 
         assert_eq!(topology.per_plant_depth, vec![2]);
         assert_eq!(topology.n_buckets, 2);
@@ -633,7 +628,7 @@ mod tests {
         let ic_depth = ic_only_depth(24.0, &durations);
         assert_eq!(ic_depth, in_study_max, "uniform calendar: no IC deepening");
 
-        let topology = build_transit_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system, false);
 
         assert_eq!(topology.per_plant_depth, vec![in_study_max]);
     }
@@ -660,7 +655,7 @@ mod tests {
         );
         assert_eq!(ic_depth, 3, "the IC anchor must also reach 3 stages ahead");
 
-        let topology = build_transit_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system, false);
 
         assert_eq!(
             topology.per_plant_depth,
@@ -688,6 +683,49 @@ mod tests {
         }
     }
 
+    /// `boundary_present = true` un-caps every stage's mask to the raw
+    /// `uncapped_active_by_stage` value (including the terminal stage), while
+    /// sizing (`per_plant_depth`/`column_order`/`n_buckets`) stays identical to
+    /// the gated-off build — the keep-live contract touches only the mask.
+    #[test]
+    fn test_boundary_present_uncaps_terminal_deep_lag_mask() {
+        let downstream = hydro(1, None, None);
+        let upstream = hydro(2, Some(1), Some(72.0));
+        let durations = [24.0, 24.0, 24.0];
+        let system = build_system(
+            vec![downstream, upstream],
+            stages_with_durations(&durations),
+        );
+
+        let topology_off = build_transit_bucket_topology(&system, false);
+        let topology_on = build_transit_bucket_topology(&system, true);
+
+        assert_eq!(
+            topology_on.per_plant_depth, topology_off.per_plant_depth,
+            "un-capping the mask must not grow the global depth sizing"
+        );
+        assert_eq!(
+            topology_on.column_order, topology_off.column_order,
+            "un-capping the mask must not change the canonical column order"
+        );
+        assert_eq!(
+            topology_on.n_buckets, topology_off.n_buckets,
+            "un-capping the mask must not change the global bucket count"
+        );
+
+        assert_eq!(
+            topology_off.per_stage_mask,
+            vec![vec![2], vec![1], vec![0]],
+            "gated-off mask must stay exactly the horizon-capped sequence"
+        );
+        assert_eq!(
+            topology_on.per_stage_mask,
+            vec![vec![3], vec![3], vec![3]],
+            "boundary-present mask must reach the raw uncapped active lag at every \
+             stage, terminal included"
+        );
+    }
+
     #[test]
     fn test_column_order_is_declaration_order_invariant() {
         let downstream = hydro(1, None, None);
@@ -699,8 +737,8 @@ mod tests {
         );
         let system_b = build_system(vec![upstream, downstream], uniform_stages(5, 24.0));
 
-        let topology_a = build_transit_bucket_topology(&system_a);
-        let topology_b = build_transit_bucket_topology(&system_b);
+        let topology_a = build_transit_bucket_topology(&system_a, false);
+        let topology_b = build_transit_bucket_topology(&system_b, false);
 
         assert_eq!(topology_a.column_order, topology_b.column_order);
         assert_eq!(topology_a.per_plant_depth, topology_b.per_plant_depth);
@@ -724,7 +762,7 @@ mod tests {
         let upstream = hydro(2, Some(1), Some(24.0));
         let system = build_system(vec![downstream, upstream], uniform_stages(10, 24.0));
 
-        let topology = build_transit_bucket_topology(&system);
+        let topology = build_transit_bucket_topology(&system, false);
         let arc_stage_weights = build_arc_stage_weights(&system);
 
         let upstream_idx = 1;
@@ -846,7 +884,7 @@ mod tests {
     /// A single Parallel source stage feeds one chronological arrival stage:
     /// the stored arrival density is the arrival-frame delivery split
     /// (`[0.8, 0.2]`), not the duration-weighted uniform fallback
-    /// (`[0.4, 0.6]`) a parallel sender used to collapse to.
+    /// (`[0.4, 0.6]`).
     #[test]
     fn test_build_arc_arrival_density_parallel_sender_is_not_duration_uniform() {
         let downstream = hydro(1, None, None);

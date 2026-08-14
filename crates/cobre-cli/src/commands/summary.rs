@@ -137,7 +137,7 @@ fn convergence_fallback(metadata: &TrainingMetadata) -> ConvergenceSummary {
         total_lp_solves: 0,
         total_time_ms: 0,
         final_lower_bound: 0.0,
-        final_upper_bound_mean: 0.0,
+        final_upper_bound: 0.0,
         final_upper_bound_std: 0.0,
         final_gap_percent: metadata.convergence.final_gap_percent,
     }
@@ -161,7 +161,7 @@ fn build_training_summary(
         upper_bound: metadata
             .bounds
             .final_upper_bound
-            .unwrap_or(convergence.final_upper_bound_mean),
+            .unwrap_or(convergence.final_upper_bound),
         upper_bound_std: metadata
             .bounds
             .final_upper_bound_std
@@ -169,6 +169,7 @@ fn build_training_summary(
         gap_percent: convergence.final_gap_percent.unwrap_or(0.0),
         total_rows_active: metadata.row_pool.total_active,
         total_rows_generated: metadata.row_pool.total_generated,
+        total_rows_loaded: metadata.row_pool.total_loaded,
         rows_in_lp_total: metadata.row_pool.rows_in_lp_total,
         rows_in_lp_solve_count: metadata.row_pool.rows_in_lp_solve_count,
         rows_in_lp_max: metadata.row_pool.rows_in_lp_max,
@@ -343,11 +344,13 @@ mod tests {
                 rows_in_lp_total: 0,
                 rows_in_lp_solve_count: 0,
                 rows_in_lp_max: 0,
+                total_loaded: 0,
             },
             bounds: MetadataBounds {
                 final_lower_bound: 48_500.0,
                 final_upper_bound: Some(49_000.0),
                 final_upper_bound_std: Some(250.0),
+                final_upper_bound_kind: "statistical".to_string(),
             },
             solve_stats: MetadataTrainingSolveStats {
                 total_lp_solves: Some(84_000),
@@ -364,7 +367,7 @@ mod tests {
                 backend: "local".to_string(),
                 world_size: 1,
                 ranks_participated: 1,
-                num_nodes: 1,
+                num_hosts: 1,
                 threads_per_rank: 1,
                 mpi_library: None,
                 mpi_standard: None,
@@ -382,7 +385,7 @@ mod tests {
             total_lp_solves: 70_000,
             total_time_ms: 12_345,
             final_lower_bound: 48_500.0,
-            final_upper_bound_mean: 49_000.0,
+            final_upper_bound: 49_000.0,
             final_upper_bound_std: 250.0,
             final_gap_percent: Some(1.03),
         }
@@ -406,8 +409,6 @@ mod tests {
             cost: Some(MetadataCost {
                 mean_cost: 1.0e6,
                 std_cost: 2.0e4,
-                cvar: 1.2e6,
-                cvar_alpha: 0.95,
             }),
             solve_stats: MetadataSimulationSolveStats {
                 total_lp_solves: Some(5_000),
@@ -421,7 +422,7 @@ mod tests {
                 backend: "local".to_string(),
                 world_size: 1,
                 ranks_participated: 1,
-                num_nodes: 1,
+                num_hosts: 1,
                 threads_per_rank: 1,
                 mpi_library: None,
                 mpi_standard: None,
@@ -457,6 +458,7 @@ mod tests {
         assert!((summary.gap_percent - 1.03).abs() < 1e-9);
         assert_eq!(summary.total_rows_active, 980_000);
         assert_eq!(summary.total_rows_generated, 1_250_000);
+        assert_eq!(summary.total_rows_loaded, 0);
         // From the parquet (70_000), not metadata.solve_stats (84_000).
         assert_eq!(summary.total_lp_solves, 70_000);
         assert_eq!(summary.total_time_ms, 12_345);
@@ -480,17 +482,32 @@ mod tests {
     }
 
     #[test]
+    fn build_training_summary_maps_metadata_total_loaded() {
+        let mut metadata = make_training_metadata();
+        metadata.row_pool.total_generated = 10_009;
+        metadata.row_pool.total_active = 10_009;
+        metadata.row_pool.total_loaded = 10_000;
+        let convergence = make_convergence_summary();
+
+        let summary = build_training_summary(&metadata, &convergence, None);
+
+        assert_eq!(summary.total_rows_generated, 10_009);
+        assert_eq!(summary.total_rows_loaded, 10_000);
+    }
+
+    #[test]
     fn build_training_summary_bounds_prefer_metadata_when_present() {
         let mut metadata = make_training_metadata();
         metadata.bounds = MetadataBounds {
             final_lower_bound: 48_750.0,
             final_upper_bound: Some(49_500.0),
             final_upper_bound_std: Some(310.0),
+            final_upper_bound_kind: "statistical".to_string(),
         };
         // Convergence carries different values to prove metadata wins.
         let convergence = ConvergenceSummary {
             final_lower_bound: 40_000.0,
-            final_upper_bound_mean: 49_000.0,
+            final_upper_bound: 49_000.0,
             final_upper_bound_std: 250.0,
             ..make_convergence_summary()
         };
@@ -509,10 +526,11 @@ mod tests {
             final_lower_bound: 0.0,
             final_upper_bound: None,
             final_upper_bound_std: None,
+            final_upper_bound_kind: "statistical".to_string(),
         };
         let convergence = ConvergenceSummary {
             final_lower_bound: 48_500.0,
-            final_upper_bound_mean: 49_000.0,
+            final_upper_bound: 49_000.0,
             final_upper_bound_std: 250.0,
             ..make_convergence_summary()
         };
@@ -612,7 +630,7 @@ mod tests {
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: 1,
             mpi_library: None,
             mpi_standard: None,
@@ -640,7 +658,7 @@ mod tests {
             backend: "mpi".to_string(),
             world_size: 8,
             ranks_participated: 8,
-            num_nodes: 2,
+            num_hosts: 2,
             threads_per_rank: 4,
             mpi_library: Some("Open MPI v4.1.6".to_string()),
             mpi_standard: Some("MPI 4.0".to_string()),
@@ -685,7 +703,7 @@ mod tests {
             backend: "mpi".to_string(),
             world_size: 2,
             ranks_participated: 2,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: 1,
             mpi_library: Some("Open MPI v4.1.6".to_string()),
             mpi_standard: Some("MPI 4.0".to_string()),
@@ -708,7 +726,7 @@ mod tests {
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: 1,
             mpi_library: None,
             mpi_standard: None,

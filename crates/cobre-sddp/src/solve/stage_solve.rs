@@ -1,5 +1,9 @@
-//! Unified LP-solve entry point shared by the three hot-path drivers
-//! (`forward.rs`, `backward.rs`, `simulation/pipeline.rs`).
+//! LP-solve entry points shared by the hot-path drivers (`forward.rs`,
+//! `backward.rs`, `simulation/pipeline.rs`): [`run_stage_solve`] (the default,
+//! slot-identity warm-start via `reconstruct_basis`) and
+//! [`run_stage_solve_terminal_static`] (terminal-forward-only, a 1:1 basis
+//! apply that skips slot-identity reconciliation because the terminal
+//! template's shape never changes after priming).
 
 use cobre_solver::{SolutionView, SolverError, SolverInterface};
 
@@ -9,6 +13,7 @@ use crate::{
     cut::pool::CutPool,
     error::SddpError,
     indexer::StateSpace,
+    setup::{NodeId, StageIdx},
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
@@ -25,13 +30,16 @@ pub struct StageInputs<'a> {
     /// Stored basis from the previous iteration, if any.
     pub stored_basis: Option<&'a CapturedBasis>,
     /// Stage index `t`.
-    pub stage_index: usize,
+    pub stage_index: StageIdx,
     /// Scenario index `m`.
     pub scenario_index: usize,
     /// Training iteration (1-based) on the forward pass; `None` on backward and
     /// simulation. Forward supplies it so `SddpError::Infeasible { iteration }`
     /// is populated without the caller re-wrapping the error.
     pub iteration: Option<u64>,
+    /// Declared id of the node being solved (`NodeGraph::node_ids[node]`); a
+    /// `stored_basis` whose `node_id` differs is treated as cold.
+    pub node_id: NodeId,
 }
 
 /// Execute one LP solve at stage `t` for scenario `m`, owning basis
@@ -57,12 +65,14 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
             .resize(inputs.pool.populated(), None);
     }
 
-    let view = if let Some(captured) = inputs.stored_basis {
+    let stored_basis = filtered_stored_basis(inputs);
+
+    let solved = if let Some(captured) = stored_basis {
         // `base_row_count` is the non-frozen template row count so cut rows are
         // matched by slot identity, not positional copy from the stored basis.
         let target = ReconstructionTarget {
-            base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
-            num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
+            base_row_count: inputs.stage_context.template(inputs.stage_index).num_rows,
+            num_cols: inputs.stage_context.template(inputs.stage_index).num_cols,
         };
 
         let _ = reconstruct_basis(
@@ -91,26 +101,88 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
 
         ws.solver.record_reconstruction_stats();
 
-        ws.solver.solve(Some(&ws.scratch_basis)).map_err(|e| {
-            map_solver_error(
-                e,
-                inputs.stage_index,
-                inputs.scenario_index,
-                inputs.iteration,
-            )
-        })?
+        ws.solver.solve(Some(&ws.scratch_basis))
     } else {
-        ws.solver.solve(None).map_err(|e| {
-            map_solver_error(
-                e,
-                inputs.stage_index,
-                inputs.scenario_index,
-                inputs.iteration,
-            )
-        })?
+        ws.solver.solve(None)
     };
 
-    Ok(view)
+    finish_solve(solved, inputs)
+}
+
+/// Terminal-forward-only 1:1 basis apply, bypassing [`reconstruct_basis`]'s
+/// slot-identity reconciliation.
+///
+/// The terminal leaf's active-cut set is fixed once primed (a leaf never
+/// gains or loses a cut), so the terminal template's shape never changes
+/// across iterations: a node-matching stored basis maps onto the current LP
+/// by plain position. A stored basis that fails the node-tag filter, or whose
+/// shape does not match the current template (should be impossible given
+/// that invariance), is treated as cold — never applied — rather than
+/// risking `solve`'s own hard assertion on a column-count mismatch.
+///
+/// # Errors
+///
+/// Same as [`run_stage_solve`]: `SolverError::Infeasible` bubbles as
+/// `SddpError::Infeasible { .. }`; other solver errors propagate as
+/// `SddpError::Solver`.
+pub fn run_stage_solve_terminal_static<'ws, S: SolverInterface>(
+    ws: &'ws mut SolverWorkspace<S>,
+    inputs: &StageInputs<'_>,
+) -> Result<SolutionView<'ws>, SddpError> {
+    let stored_basis = filtered_stored_basis(inputs)
+        .filter(|captured| terminal_basis_shape_matches(captured, inputs));
+
+    let solved = if let Some(captured) = stored_basis {
+        ws.scratch_basis.col_status.clear();
+        ws.scratch_basis
+            .col_status
+            .extend_from_slice(&captured.basis.col_status);
+        ws.scratch_basis.row_status.clear();
+        ws.scratch_basis
+            .row_status
+            .extend_from_slice(&captured.basis.row_status);
+
+        ws.solver.solve(Some(&ws.scratch_basis))
+    } else {
+        ws.solver.solve(None)
+    };
+
+    finish_solve(solved, inputs)
+}
+
+/// A stored basis whose `node_id` differs from the node being solved is
+/// treated as cold: a resampled path may visit a different node than the
+/// one that captured it, and CLP accepts a shape-mismatched basis silently,
+/// so the check must live here, never delegated to a solver-specific path.
+fn filtered_stored_basis<'a>(inputs: &StageInputs<'a>) -> Option<&'a CapturedBasis> {
+    inputs
+        .stored_basis
+        .filter(|captured| captured.node_id == inputs.node_id)
+}
+
+/// Whether `captured`'s column/row status vectors already match the terminal
+/// template's current shape (base rows plus active cuts) — the only shape a
+/// genuine same-node terminal capture can have.
+fn terminal_basis_shape_matches(captured: &CapturedBasis, inputs: &StageInputs<'_>) -> bool {
+    let template = inputs.stage_context.template(inputs.stage_index);
+    captured.basis.col_status.len() == template.num_cols
+        && captured.basis.row_status.len() == template.num_rows + inputs.pool.active_count()
+}
+
+/// Map a raw solve `Result` to the `SddpError` the caller returns, filling in
+/// stage/scenario/iteration context on the `Infeasible` path.
+fn finish_solve<'ws>(
+    solved: Result<SolutionView<'ws>, SolverError>,
+    inputs: &StageInputs<'_>,
+) -> Result<SolutionView<'ws>, SddpError> {
+    solved.map_err(|e| {
+        map_solver_error(
+            e,
+            inputs.stage_index.0,
+            inputs.scenario_index,
+            inputs.iteration,
+        )
+    })
 }
 
 /// Map a [`SolverError`] to a [`SddpError`] with stage/scenario context.
@@ -176,19 +248,19 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
     }
 }
 
-/// Assert the bucket and anticipated-ring state rode the state-assembly plain
+/// Assert the bucket and commitment-hold state rode the state-assembly plain
 /// copy untouched.
 ///
 /// The forward/simulation assembly plain-copies `unscaled_primal[..n_state]`
 /// into the advanced state, then overwrites only `inflow_lags` in place;
-/// `transit_buckets_out` and `anticipated_slots_out` sit in the shift-gap that
-/// overwrite never reaches, because both outgoing columns equal their
-/// state-vector index (the `storage` identity convention). Call after the lag
-/// overwrite, before the caller moves `unscaled_primal` back into scratch.
+/// `transit_buckets_out` and `commit_out` sit in the shift-gap that overwrite
+/// never reaches, because both outgoing columns equal their state-vector
+/// index (the `storage` identity convention). Call after the lag overwrite,
+/// before the caller moves `unscaled_primal` back into scratch.
 // Rationale: this checks a verbatim copy invariant (`extend_from_slice`), not
 // a numerical result, so exact equality is the correct comparison — a
 // tolerance would mask the one bug this guards against (an overwrite landing
-// on the bucket/anticipated-ring range).
+// on the bucket/commitment-hold range).
 #[allow(clippy::float_cmp)]
 pub(crate) fn debug_assert_bucket_copy_gap_intact(
     assembled_state: &[f64],
@@ -199,10 +271,10 @@ pub(crate) fn debug_assert_bucket_copy_gap_intact(
         layout
             .transit_buckets_out
             .clone()
-            .chain(layout.anticipated_slots_out.clone())
+            .chain(layout.commit_out.clone())
             .all(|j| assembled_state[j] == unscaled_primal[j]),
-        "bucket/anticipated-ring state must equal the LP primal's identity \
-         columns: the lag overwrite must never touch the bucket/anticipated-ring \
+        "bucket/commitment-hold state must equal the LP primal's identity \
+         columns: the lag overwrite must never touch the bucket/commitment-hold \
          shift-gap"
     );
 }
@@ -216,12 +288,13 @@ mod tests {
     use cobre_solver::BasisStatus::{Basic as B, Lower as L};
     use cobre_solver::{ActiveSolver, SolverError, SolverInterface, StageTemplate};
 
-    use super::{StageInputs, run_stage_solve};
+    use super::{StageInputs, run_stage_solve, run_stage_solve_terminal_static};
     use crate::{
         SddpError,
         context::StageContext,
         cut::pool::CutPool,
         lp_builder::PatchBuffer,
+        setup::{NodeId, StageIdx},
         test_support::state_layout_with_transit_buckets,
         workspace::{CapturedBasis, SolverWorkspace, WorkspaceSizing},
     };
@@ -291,7 +364,7 @@ mod tests {
             0,
             0,
             solver,
-            PatchBuffer::new(0, 0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(0, 0, 0, 0, 0, 0, 0, 0),
             0,
             WorkspaceSizing::default(),
         )
@@ -347,9 +420,10 @@ mod tests {
             stage_context: &ctx,
             pool: &pool,
             stored_basis: None,
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 0,
             iteration: Some(1),
+            node_id: NodeId(0),
         };
 
         let result = run_stage_solve(&mut ws, &inputs);
@@ -390,6 +464,7 @@ mod tests {
             template.num_rows,
             0,
             1,
+            NodeId(5), // node_id — matches inputs.node_id below (the match/warm case)
         );
         captured.basis.col_status.clear();
         captured.basis.col_status.push(B); // x0 BASIC
@@ -404,9 +479,10 @@ mod tests {
             stage_context: &ctx,
             pool: &pool,
             stored_basis: Some(&captured),
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 0,
             iteration: None,
+            node_id: NodeId(5),
         };
 
         let result = run_stage_solve(&mut ws, &inputs);
@@ -443,9 +519,10 @@ mod tests {
             stage_context: &ctx,
             pool: &pool,
             stored_basis: None,
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 7,
             iteration: Some(42),
+            node_id: NodeId(0),
         };
 
         let result = run_stage_solve(&mut ws, &inputs);
@@ -491,15 +568,17 @@ mod tests {
             template.num_rows,
             0,
             1,
+            NodeId(9), // node_id — matches inputs.node_id below (the match/warm case)
         );
 
         let inputs = StageInputs {
             stage_context: &ctx,
             pool: &pool,
             stored_basis: Some(&all_lower),
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 3,
             iteration: Some(5),
+            node_id: NodeId(9),
         };
 
         match run_stage_solve(&mut ws, &inputs) {
@@ -516,6 +595,269 @@ mod tests {
             }
             other => panic!("expected Err(SddpError::BasisShapeMismatch {{ .. }}), got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Node-tag mismatch: cross-node reuse is treated as cold
+    // -----------------------------------------------------------------------
+
+    /// The same deficit-shaped `CapturedBasis` `basis_deficit_rejected_before_solver_sees_it`
+    /// uses to prove the warm path surfaces `BasisShapeMismatch` — but tagged with a
+    /// node id that does NOT match `inputs.node_id`. The mismatch must drop to the
+    /// cold path before `reconstruct_basis`/`enforce_basic_count_invariant` ever see
+    /// the deficit-shaped basis, so the solve succeeds instead of erroring.
+    #[test]
+    fn run_stage_solve_cross_node_stored_basis_is_treated_as_cold() {
+        let template = make_template();
+        let templates = std::slice::from_ref(&template);
+        let ctx = make_context(templates);
+        let pool = make_empty_pool();
+        let mut ws = make_workspace(&template);
+        ws.scratch.recon_slot_lookup = vec![None; 16];
+
+        // Deficit shape identical to basis_deficit_rejected_before_solver_sees_it —
+        // would surface as BasisShapeMismatch if the warm path were taken.
+        let stored_at_node_a = CapturedBasis::new(
+            template.num_cols,
+            template.num_rows,
+            template.num_rows,
+            0,
+            1,
+            NodeId(1), // node A
+        );
+
+        let inputs = StageInputs {
+            stage_context: &ctx,
+            pool: &pool,
+            stored_basis: Some(&stored_at_node_a),
+            stage_index: StageIdx(0),
+            scenario_index: 3,
+            iteration: Some(5),
+            node_id: NodeId(2), // node B — mismatches the stored basis's node A
+        };
+
+        let result = run_stage_solve(&mut ws, &inputs);
+        assert!(
+            result.is_ok(),
+            "a node-id mismatch must drop to the cold path, never attempting the \
+             deficit-shaped stored basis: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Terminal-static entry: 1:1 basis apply, no reconstruct_basis
+    // -----------------------------------------------------------------------
+
+    /// The terminal-static entry applies a node-matching stored basis
+    /// verbatim — `ws.scratch_basis` ends up byte-identical to the stored
+    /// `col_status`/`row_status` — and never calls `reconstruct_basis`:
+    /// `basis_reconstructions` (incremented only by `record_reconstruction_stats`,
+    /// which `run_stage_solve`'s reconstruct branch calls and
+    /// `run_stage_solve_terminal_static` does not) stays at zero.
+    #[test]
+    fn run_stage_solve_terminal_static_applies_basis_1to1_without_reconstruct_basis() {
+        let template = make_template();
+        let templates = std::slice::from_ref(&template);
+        let ctx = make_context(templates);
+        let pool = make_empty_pool();
+        let mut ws = make_workspace(&template);
+
+        let mut captured = CapturedBasis::new(
+            template.num_cols,
+            template.num_rows,
+            template.num_rows,
+            0,
+            1,
+            NodeId(5),
+        );
+        captured.basis.col_status.clear();
+        captured.basis.col_status.push(B);
+        captured.basis.col_status.push(B);
+        captured.basis.col_status.push(L);
+        captured.basis.row_status.clear();
+        captured.basis.row_status.push(L);
+        captured.basis.row_status.push(L);
+        captured.state_at_capture.push(6.0);
+
+        let inputs = StageInputs {
+            stage_context: &ctx,
+            pool: &pool,
+            stored_basis: Some(&captured),
+            stage_index: StageIdx(0),
+            scenario_index: 0,
+            iteration: None,
+            node_id: NodeId(5),
+        };
+
+        // `basis_reconstructions` is HiGHS-only telemetry (CLP's
+        // `SolverInterface` never overrides `record_reconstruction_stats`), so
+        // it is meaningful only under the `highs` backend; the backend-agnostic
+        // proof that no reconstruction happened is the byte-for-byte copy
+        // assertion below, which runs under both backends.
+        #[cfg(feature = "highs")]
+        assert_eq!(
+            ws.solver.statistics().basis_reconstructions,
+            0,
+            "sanity: a fresh workspace starts with no reconstructions"
+        );
+
+        let result = run_stage_solve_terminal_static(&mut ws, &inputs);
+        assert!(
+            result.is_ok(),
+            "terminal-static warm start should succeed: {result:?}"
+        );
+        assert_eq!(
+            ws.scratch_basis.col_status, captured.basis.col_status,
+            "terminal-static must copy col_status verbatim, never reconstruct it"
+        );
+        assert_eq!(
+            ws.scratch_basis.row_status, captured.basis.row_status,
+            "terminal-static must copy row_status verbatim, never reconstruct it"
+        );
+        #[cfg(feature = "highs")]
+        assert_eq!(
+            ws.solver.statistics().basis_reconstructions,
+            0,
+            "run_stage_solve_terminal_static must never invoke reconstruct_basis"
+        );
+    }
+
+    /// Interior (non-terminal) warm starts still go through `reconstruct_basis`:
+    /// `basis_reconstructions` increments by exactly one, unlike the
+    /// terminal-static entry above. HiGHS-only: CLP's `SolverInterface` never
+    /// overrides `record_reconstruction_stats`, so the counter would stay `0`
+    /// there regardless of whether `reconstruct_basis` ran.
+    #[cfg(feature = "highs")]
+    #[test]
+    fn run_stage_solve_interior_warm_start_invokes_reconstruct_basis() {
+        let template = make_template();
+        let templates = std::slice::from_ref(&template);
+        let ctx = make_context(templates);
+        let pool = make_empty_pool();
+        let mut ws = make_workspace(&template);
+        ws.scratch.recon_slot_lookup = vec![None; 16];
+
+        let mut captured = CapturedBasis::new(
+            template.num_cols,
+            template.num_rows,
+            template.num_rows,
+            0,
+            1,
+            NodeId(5),
+        );
+        captured.basis.col_status.clear();
+        captured.basis.col_status.push(B);
+        captured.basis.col_status.push(B);
+        captured.basis.col_status.push(L);
+        captured.basis.row_status.clear();
+        captured.basis.row_status.push(L);
+        captured.basis.row_status.push(L);
+        captured.state_at_capture.push(6.0);
+
+        let inputs = StageInputs {
+            stage_context: &ctx,
+            pool: &pool,
+            stored_basis: Some(&captured),
+            stage_index: StageIdx(0),
+            scenario_index: 0,
+            iteration: None,
+            node_id: NodeId(5),
+        };
+
+        let result = run_stage_solve(&mut ws, &inputs);
+        assert!(
+            result.is_ok(),
+            "interior warm start should succeed: {result:?}"
+        );
+        assert_eq!(
+            ws.solver.statistics().basis_reconstructions,
+            1,
+            "run_stage_solve's slot-identity path must invoke reconstruct_basis"
+        );
+    }
+
+    /// The terminal-static entry preserves the node-tag filter: a stored basis
+    /// tagged at a different node must drop to cold before
+    /// `terminal_basis_shape_matches` ever inspects the shape — mirrors
+    /// `run_stage_solve_cross_node_stored_basis_is_treated_as_cold` above.
+    #[test]
+    fn run_stage_solve_terminal_static_cross_node_stored_basis_is_treated_as_cold() {
+        let template = make_template();
+        let templates = std::slice::from_ref(&template);
+        let ctx = make_context(templates);
+        let pool = make_empty_pool();
+        let mut ws = make_workspace(&template);
+
+        // Deficit shape (all LOWER) — would be nonsense to apply even if the
+        // node tag matched; the point here is that the node mismatch alone
+        // must drop to cold before this shape is ever inspected.
+        let stored_at_node_a = CapturedBasis::new(
+            template.num_cols,
+            template.num_rows,
+            template.num_rows,
+            0,
+            1,
+            NodeId(1),
+        );
+
+        let inputs = StageInputs {
+            stage_context: &ctx,
+            pool: &pool,
+            stored_basis: Some(&stored_at_node_a),
+            stage_index: StageIdx(0),
+            scenario_index: 3,
+            iteration: Some(5),
+            node_id: NodeId(2), // node B — mismatches the stored basis's node A
+        };
+
+        let result = run_stage_solve_terminal_static(&mut ws, &inputs);
+        assert!(
+            result.is_ok(),
+            "a node-id mismatch must drop to the cold path on the terminal-static \
+             entry too: {result:?}"
+        );
+    }
+
+    /// A shape mismatch on the terminal-static path — genuinely impossible
+    /// given the terminal template's structural invariance, but defended
+    /// against rather than risking `solve`'s own hard assertion on a
+    /// column-count mismatch — must also drop to cold, never applying the
+    /// wrongly-shaped basis.
+    #[test]
+    fn run_stage_solve_terminal_static_shape_mismatch_is_treated_as_cold() {
+        let template = make_template();
+        let templates = std::slice::from_ref(&template);
+        let ctx = make_context(templates);
+        let pool = make_empty_pool();
+        let mut ws = make_workspace(&template);
+
+        // col_status.len() == template.num_cols + 1: node id matches, so only
+        // the shape check can stop this from being applied.
+        let wrong_shape = CapturedBasis::new(
+            template.num_cols + 1,
+            template.num_rows,
+            template.num_rows,
+            0,
+            1,
+            NodeId(5),
+        );
+
+        let inputs = StageInputs {
+            stage_context: &ctx,
+            pool: &pool,
+            stored_basis: Some(&wrong_shape),
+            stage_index: StageIdx(0),
+            scenario_index: 0,
+            iteration: None,
+            node_id: NodeId(5),
+        };
+
+        let result = run_stage_solve_terminal_static(&mut ws, &inputs);
+        assert!(
+            result.is_ok(),
+            "a col/row shape mismatch must drop to the cold path, never applying \
+             the wrongly-shaped basis: {result:?}"
+        );
     }
 
     /// `SolverError::BasisInconsistent` must route to `SddpError::Solver`, not
@@ -556,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
+    #[should_panic(expected = "bucket/commitment-hold state must equal the LP primal's identity")]
     fn debug_assert_bucket_copy_gap_intact_panics_when_bucket_diverges() {
         let layout = state_layout_with_transit_buckets(0, 0, 2, vec![(0, 0), (0, 1)], 0, 0, vec![]);
         let primal = vec![7.0, 11.0];
@@ -566,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_assert_bucket_copy_gap_intact_passes_when_anticipated_ring_matches_primal() {
+    fn debug_assert_bucket_copy_gap_intact_passes_when_commitment_hold_matches_primal() {
         let layout = state_layout_with_transit_buckets(0, 0, 0, vec![], 2, 1, vec![1, 1]);
         let primal = vec![3.0, 5.0];
         let assembled = primal.clone();
@@ -574,12 +916,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
-    fn debug_assert_bucket_copy_gap_intact_panics_when_anticipated_ring_diverges() {
+    #[should_panic(expected = "bucket/commitment-hold state must equal the LP primal's identity")]
+    fn debug_assert_bucket_copy_gap_intact_panics_when_commitment_hold_diverges() {
         let layout = state_layout_with_transit_buckets(0, 0, 0, vec![], 2, 1, vec![1, 1]);
         let primal = vec![3.0, 5.0];
         let mut assembled = primal.clone();
-        assembled[0] = 999.0; // simulate an accidental overwrite of the anticipated-ring slot
+        assembled[0] = 999.0; // simulate an accidental overwrite of the commitment-hold slot
         super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
     }
 }

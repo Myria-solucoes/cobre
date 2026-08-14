@@ -65,7 +65,7 @@ const LEGACY_TRAINING_JSON: &str = r#"{
     "backend": "local",
     "world_size": 1,
     "ranks_participated": 1,
-    "num_nodes": 1,
+    "num_hosts": 1,
     "threads_per_rank": 1
   }
 }"#;
@@ -90,7 +90,7 @@ const LEGACY_SIM_JSON: &str = r#"{
     "backend": "local",
     "world_size": 1,
     "ranks_participated": 1,
-    "num_nodes": 1,
+    "num_hosts": 1,
     "threads_per_rank": 1
   }
 }"#;
@@ -100,7 +100,7 @@ const MULTI_NODE_DISTRIBUTION_JSON: &str = r#"{
   "backend": "mpi",
   "world_size": 8,
   "ranks_participated": 8,
-  "num_nodes": 2,
+  "num_hosts": 2,
   "threads_per_rank": 4,
   "mpi_library": "Open MPI v4.1.6",
   "mpi_standard": "MPI 4.0",
@@ -138,6 +138,7 @@ fn legacy_training_json_deserializes_with_defaults() {
 
     assert_eq!(decoded.iterations.completed, 100);
     assert_eq!(decoded.row_pool.total_generated, 1_250_000);
+    assert_eq!(decoded.row_pool.total_loaded, 0);
 }
 
 #[test]
@@ -173,7 +174,7 @@ fn legacy_training_fixture_omits_new_keys() {
         "legacy training fixture must omit the `solve_stats` key to exercise back-compat"
     );
     assert!(
-        !LEGACY_TRAINING_JSON.contains("hosts"),
+        !LEGACY_TRAINING_JSON.contains("\"hosts\""),
         "legacy training fixture must omit the `hosts` key to exercise back-compat"
     );
     assert!(
@@ -197,7 +198,7 @@ fn legacy_simulation_fixture_omits_new_keys() {
         "legacy simulation fixture must omit the `solve_stats` key to exercise back-compat"
     );
     assert!(
-        !LEGACY_SIM_JSON.contains("hosts"),
+        !LEGACY_SIM_JSON.contains("\"hosts\""),
         "legacy simulation fixture must omit the `hosts` key to exercise back-compat"
     );
 }
@@ -211,7 +212,7 @@ fn multi_node_distribution_deserializes_with_correct_rank_lists() {
 
     assert_eq!(decoded.backend, "mpi");
     assert_eq!(decoded.world_size, 8);
-    assert_eq!(decoded.num_nodes, 2);
+    assert_eq!(decoded.num_hosts, 2);
     assert_eq!(decoded.hosts.len(), 2);
 
     assert_eq!(decoded.hosts[0].hostname, "node01");
@@ -227,7 +228,7 @@ fn fully_populated_distribution() -> DistributionInfo {
         backend: "mpi".to_string(),
         world_size: 8,
         ranks_participated: 8,
-        num_nodes: 2,
+        num_hosts: 2,
         threads_per_rank: 4,
         mpi_library: Some("Open MPI v4.1.6".to_string()),
         mpi_standard: Some("MPI 4.0".to_string()),
@@ -287,11 +288,13 @@ fn fully_populated_training_metadata() -> TrainingMetadata {
             rows_in_lp_total: 0,
             rows_in_lp_solve_count: 0,
             rows_in_lp_max: 0,
+            total_loaded: 50_000,
         },
         bounds: MetadataBounds {
             final_lower_bound: 48_500.0,
             final_upper_bound: Some(49_000.0),
             final_upper_bound_std: Some(250.0),
+            final_upper_bound_kind: "statistical".to_string(),
         },
         solve_stats: MetadataTrainingSolveStats {
             total_lp_solves: Some(84_000),
@@ -338,8 +341,6 @@ fn fully_populated_simulation_metadata() -> SimulationMetadata {
         cost: Some(MetadataCost {
             mean_cost: 12_345.6,
             std_cost: 200.0,
-            cvar: 13_000.0,
-            cvar_alpha: 0.95,
         }),
         solve_stats: MetadataSimulationSolveStats {
             total_lp_solves: Some(50_000),
@@ -362,6 +363,10 @@ fn training_metadata_new_fields_survive_write_read_roundtrip() {
     write_training_metadata(&path, &original).expect("write must succeed");
     let decoded = read_training_metadata(&path).expect("read must succeed");
 
+    assert_eq!(
+        decoded.row_pool.total_loaded,
+        original.row_pool.total_loaded
+    );
     assert_eq!(
         decoded.bounds.final_lower_bound,
         original.bounds.final_lower_bound
@@ -429,8 +434,6 @@ fn simulation_metadata_new_fields_survive_write_read_roundtrip() {
     let decoded_cost = decoded.cost.expect("cost must survive roundtrip");
     assert_eq!(decoded_cost.mean_cost, original_cost.mean_cost);
     assert_eq!(decoded_cost.std_cost, original_cost.std_cost);
-    assert_eq!(decoded_cost.cvar, original_cost.cvar);
-    assert_eq!(decoded_cost.cvar_alpha, original_cost.cvar_alpha);
 
     assert_eq!(
         decoded.solve_stats.total_lp_solves,

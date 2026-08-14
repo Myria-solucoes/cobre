@@ -7,46 +7,66 @@
 //! `gatherv`): every rank receives all data and computes stats locally, avoiding
 //! a subsequent broadcast.
 
-use cobre_comm::{Communicator, ReduceOp};
+use cobre_comm::Communicator;
 
+use crate::risk_measure::RiskMeasure;
 use crate::simulation::{
     config::SimulationConfig,
     error::SimulationError,
-    types::{CategoryCostStats, ScenarioCategoryCosts, SimulationSummary},
+    types::{ScenarioCategoryCosts, SimulationSummary},
 };
 
-/// Hardcoded `CVaR` confidence level for the minimal viable solver.
-const CVAR_ALPHA: f64 = 0.95;
+/// Gathered per-scenario `(scenario_id, total_cost, weight)`, canonical
+/// order — `weight` is `Some` only under [`SimulationWeighting::Census`].
+/// Surfaced by [`aggregate_simulation`] for
+/// `simulation/scenario_summary.parquet`.
+pub type GatheredScenarioCosts = Vec<(u32, f64, Option<f64>)>;
 
-/// Number of per-category cost fields in [`ScenarioCategoryCosts`].
-const N_CATEGORIES: usize = 5;
-
-/// Category names in field declaration order (matching `ScenarioCategoryCosts`).
-const CATEGORY_NAMES: [&str; N_CATEGORIES] = [
-    "resource",
-    "recourse",
-    "violation",
-    "regularization",
-    "imputed",
-];
+/// Which weighting [`aggregate_simulation`] applies to the gathered
+/// per-scenario costs, mirroring
+/// [`ForwardBound`](crate::training::forward::ForwardBound) at
+/// `sync_forward`'s call site.
+#[derive(Debug, Clone, Copy)]
+pub enum SimulationWeighting<'a> {
+    /// Monte Carlo sampling: every gathered scenario carries the sample-mean
+    /// weight `1.0 / n`.
+    Uniform,
+    /// A declared census: per-scenario leaf-path probabilities, aligned to
+    /// the canonical gathered order — one weight per admitted leaf path, from
+    /// `setup/mod.rs`'s `resolve_enumerated_simulation_count`.
+    Census {
+        /// Per-scenario probability weights, canonical gathered order.
+        /// Must sum to `1.0` within `1e-9`.
+        weights: &'a [f64],
+    },
+}
 
 /// Aggregate per-scenario cost data across all MPI ranks into a
 /// [`SimulationSummary`] that is identical on all ranks.
 ///
-/// `deficit_frequency`, `total_deficit_mwh`, and `total_spillage_mwh` are `0.0`:
-/// deferred, pending per-stage deficit/spillage accumulation in the forward pass.
+/// `weighting` selects the reduction: [`SimulationWeighting::Uniform`] is the
+/// sampled Monte-Carlo estimator (`mean_cost = Σ cᵢ/n`, `std_cost` the
+/// Bessel-corrected sample std); [`SimulationWeighting::Census`] is the exact
+/// probability-weighted expectation over a declared census's leaf-path
+/// probabilities (`mean_cost = Σ wᵢ·cᵢ`, `std_cost = √(Σ wᵢ·(cᵢ − mean_cost)²)`,
+/// the true weighted population variance — no Bessel correction, since the
+/// census is exhaustive rather than sampled).
+///
+/// Also returns the gathered canonical-order per-scenario `(scenario_id,
+/// total_cost, weight)` rows — `weight` is `Some` only under `Census` — for
+/// `simulation/scenario_summary.parquet`.
 ///
 /// # Errors
 ///
 /// Returns `Err(SimulationError::IoError { message })` if any collective
-/// operation (`allreduce`, `allgatherv`) fails.
+/// operation (`allgatherv`) fails.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use cobre_comm::LocalBackend;
 /// use cobre_sddp::Phase;
-/// use cobre_sddp::simulation::aggregation::aggregate_simulation;
+/// use cobre_sddp::simulation::aggregation::{SimulationWeighting, aggregate_simulation};
 /// use cobre_sddp::simulation::{ScenarioCategoryCosts, SimulationConfig};
 ///
 /// let zero_cats = ScenarioCategoryCosts {
@@ -66,33 +86,21 @@ const CATEGORY_NAMES: [&str; N_CATEGORIES] = [
 /// };
 /// let comm = LocalBackend;
 ///
-/// let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
+/// let (summary, gathered) =
+///     aggregate_simulation(&local_costs, &config, &comm, SimulationWeighting::Uniform).unwrap();
 /// assert_eq!(summary.n_scenarios, 1);
 /// assert_eq!(summary.mean_cost, 100.0);
-/// assert_eq!(summary.cvar, 100.0);
 /// assert_eq!(summary.std_cost, 0.0);
+/// assert_eq!(gathered, vec![(0, 100.0, None)]);
 /// ```
 pub fn aggregate_simulation<C: Communicator>(
     local_costs: &[(u32, f64, ScenarioCategoryCosts)],
     config: &SimulationConfig,
     comm: &C,
-) -> Result<SimulationSummary, SimulationError> {
+    weighting: SimulationWeighting<'_>,
+) -> Result<(SimulationSummary, GatheredScenarioCosts), SimulationError> {
     let num_ranks = comm.size();
     let n_local = local_costs.len();
-
-    let (local_min, local_max) = compute_local_min_max(local_costs);
-    let mut global_min_buf = [0.0_f64];
-    let mut global_max_buf = [0.0_f64];
-    comm.allreduce(&[local_min], &mut global_min_buf, ReduceOp::Min)
-        .map_err(|e| SimulationError::IoError {
-            message: format!("allreduce(Min) failed: {e}"),
-        })?;
-    comm.allreduce(&[local_max], &mut global_max_buf, ReduceOp::Max)
-        .map_err(|e| SimulationError::IoError {
-            message: format!("allreduce(Max) failed: {e}"),
-        })?;
-    let global_min = global_min_buf[0];
-    let global_max = global_max_buf[0];
 
     // Per-rank scenario counts give the displacement layout for the data gather.
     #[allow(clippy::cast_possible_truncation)]
@@ -127,69 +135,55 @@ pub fn aggregate_simulation<C: Communicator>(
         "gathered scenario count must match configured n_scenarios"
     );
 
+    // `assign_scenarios` (simulation/extraction.rs) hands each rank a
+    // contiguous, ascending scenario_id range in rank order, exactly the
+    // layout this allgatherv's counts/displs already reproduce — so gathered
+    // position IS canonical scenario_id, with no second collective needed.
+    #[cfg(debug_assertions)]
+    {
+        let base = cost_displs[comm.rank()];
+        for (i, (id, _, _)) in local_costs.iter().enumerate() {
+            debug_assert_eq!(
+                usize::try_from(*id).unwrap_or(usize::MAX),
+                base + i,
+                "aggregate_simulation: scenario_id must equal its canonical gathered position"
+            );
+        }
+    }
+
     let n = total_gathered;
-    let (mean_cost, std_cost) = compute_mean_std(&cost_recv);
-    let cvar = compute_cvar(&cost_recv, CVAR_ALPHA);
+    let weights = resolve_weights(weighting, n);
 
-    let cat_send = pack_category_costs(local_costs);
-    let cat_send_count = n_local * N_CATEGORIES;
-    let cat_counts: Vec<usize> = counts_recv
+    let mean_cost = RiskMeasure::Expectation.evaluate_risk(&cost_recv, &weights);
+    let is_census = matches!(weighting, SimulationWeighting::Census { .. });
+    let std_cost = if is_census {
+        compute_weighted_std(&cost_recv, &weights, mean_cost)
+    } else {
+        compute_std(&cost_recv, mean_cost)
+    };
+    let gathered: GatheredScenarioCosts = cost_recv
         .iter()
-        .map(|&c| usize::try_from(c).unwrap_or(usize::MAX) * N_CATEGORIES)
+        .zip(&weights)
+        .enumerate()
+        .map(|(i, (&cost, &w))| {
+            #[allow(clippy::cast_possible_truncation)]
+            let scenario_id = i as u32;
+            (scenario_id, cost, is_census.then_some(w))
+        })
         .collect();
-    let cat_displs: Vec<usize> = cost_displs.iter().map(|&d| d * N_CATEGORIES).collect();
-    let cat_total = total_gathered * N_CATEGORIES;
 
-    debug_assert_eq!(
-        cat_send.len(),
-        cat_send_count,
-        "packed category buffer length mismatch"
-    );
-
-    let mut cat_recv = vec![0.0_f64; cat_total];
-    comm.allgatherv(&cat_send, &mut cat_recv, &cat_counts, &cat_displs)
-        .map_err(|e| SimulationError::IoError {
-            message: format!("allgatherv(categories) failed: {e}"),
-        })?;
-
-    let category_stats = compute_category_stats(&cat_recv, n);
-
-    Ok(SimulationSummary {
-        mean_cost,
-        std_cost,
-        min_cost: global_min,
-        max_cost: global_max,
-        cvar,
-        cvar_alpha: CVAR_ALPHA,
-        category_stats,
-        deficit_frequency: 0.0,
-        total_deficit_mwh: 0.0,
-        total_spillage_mwh: 0.0,
-        #[allow(clippy::cast_possible_truncation)]
-        n_scenarios: total_gathered as u32,
-    })
+    Ok((
+        SimulationSummary {
+            mean_cost,
+            std_cost,
+            #[allow(clippy::cast_possible_truncation)]
+            n_scenarios: total_gathered as u32,
+        },
+        gathered,
+    ))
 }
 
 // ── Private helpers ────────────────────────────────────────────────────────────
-
-/// Compute local min and max total costs.
-///
-/// Returns `(f64::INFINITY, f64::NEG_INFINITY)` when `local_costs` is empty,
-/// which after `allreduce(Min)` / `allreduce(Max)` across ranks yields the
-/// correct global values from any rank that has scenarios.
-fn compute_local_min_max(local_costs: &[(u32, f64, ScenarioCategoryCosts)]) -> (f64, f64) {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    for (_, cost, _) in local_costs {
-        if *cost < min {
-            min = *cost;
-        }
-        if *cost > max {
-            max = *cost;
-        }
-    }
-    (min, max)
-}
 
 /// Prefix-sum displacements from per-rank counts: `(displs, total)`, where
 /// `displs[r]` is rank `r`'s start offset in the receive buffer.
@@ -203,124 +197,63 @@ fn compute_displs_and_total(counts_recv: &[u64]) -> (Vec<usize>, usize) {
     (displs, offset)
 }
 
-/// Compute mean and Bessel-corrected standard deviation from a slice of costs.
-///
-/// Returns `(0.0, 0.0)` for empty input and `(mean, 0.0)` when `n <= 1`
-/// (no variance with a single observation).
-fn compute_mean_std(costs: &[f64]) -> (f64, f64) {
-    let n = costs.len();
-    if n == 0 {
-        return (0.0, 0.0);
+/// Resolve `weighting` into a per-scenario weight vector of length `n`,
+/// canonical gathered order.
+fn resolve_weights(weighting: SimulationWeighting<'_>, n: usize) -> Vec<f64> {
+    match weighting {
+        SimulationWeighting::Uniform => {
+            #[allow(clippy::cast_precision_loss)]
+            let w = 1.0 / (n as f64);
+            vec![w; n]
+        }
+        SimulationWeighting::Census { weights } => {
+            debug_assert_eq!(
+                weights.len(),
+                n,
+                "Census weight vector length ({}) must match gathered scenario count ({n})",
+                weights.len()
+            );
+            debug_assert!(
+                (weights.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+                "Census weights must sum to 1.0 within 1e-9"
+            );
+            weights.to_vec()
+        }
     }
+}
 
-    let sum: f64 = costs.iter().sum();
-    #[allow(clippy::cast_precision_loss)]
-    let mean = sum / n as f64;
-
+/// Sample standard deviation (Bessel-corrected) of `costs` around `mean`.
+///
+/// Returns `0.0` for `costs.len() <= 1` (no variance with a single
+/// observation, or none).
+fn compute_std(costs: &[f64], mean: f64) -> f64 {
+    let n = costs.len();
     if n <= 1 {
-        return (mean, 0.0);
+        return 0.0;
     }
 
     let sum_sq_diff: f64 = costs.iter().map(|&c| (c - mean) * (c - mean)).sum();
     #[allow(clippy::cast_precision_loss)]
     let variance = sum_sq_diff / (n as f64 - 1.0);
-    let std_dev = variance.max(0.0).sqrt();
-
-    (mean, std_dev)
+    variance.max(0.0).sqrt()
 }
 
-/// Compute `CVaR` at confidence level `alpha` from a cost slice.
+/// True weighted population variance of `costs` around `mean`, weighted by
+/// `weights` (canonical gathered order, summing to `1.0`).
 ///
-/// Sorts costs in descending order and returns the mean of the worst
-/// `max(1, ceil((1 - alpha) * n))` scenarios. When `costs` is empty,
-/// returns `0.0`.
-///
-/// The tail size is computed as `n - floor(alpha * n)` to avoid the
-/// floating-point imprecision of `ceil((1 - alpha) * n)` (for example,
-/// `1.0 - 0.95 = 0.050000000000000044` in IEEE 754 double precision, which
-/// would cause `ceil(0.050...044 * 100) = 6` instead of `5`).
-fn compute_cvar(costs: &[f64], alpha: f64) -> f64 {
-    let n = costs.len();
-    if n == 0 {
+/// No Bessel correction: unlike [`compute_std`], a census is an exhaustive
+/// population, not a sample. Returns `0.0` for `costs.len() <= 1`.
+fn compute_weighted_std(costs: &[f64], weights: &[f64], mean: f64) -> f64 {
+    if costs.len() <= 1 {
         return 0.0;
     }
 
-    let mut sorted = costs.to_vec();
-    sorted.sort_by(|a, b| b.total_cmp(a));
-
-    // `n - floor(alpha * n)`, not `ceil((1 - alpha) * n)` — see fn doc.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation
-    )]
-    let scenarios_in_tail = {
-        let alpha_n = (alpha * n as f64).floor() as usize;
-        n - alpha_n
-    };
-    let tail_size = scenarios_in_tail.max(1).min(n);
-
-    let tail_sum: f64 = sorted[..tail_size].iter().sum();
-    #[allow(clippy::cast_precision_loss)]
-    let cvar = tail_sum / tail_size as f64;
-    cvar
-}
-
-/// Pack per-category costs into a flat f64 buffer, stride [`N_CATEGORIES`] in
-/// `CATEGORY_NAMES` order (the order `compute_category_stats` unpacks).
-fn pack_category_costs(local_costs: &[(u32, f64, ScenarioCategoryCosts)]) -> Vec<f64> {
-    let mut buf = Vec::with_capacity(local_costs.len() * N_CATEGORIES);
-    for (_, _, cats) in local_costs {
-        buf.push(cats.resource_cost);
-        buf.push(cats.recourse_cost);
-        buf.push(cats.violation_cost);
-        buf.push(cats.regularization_cost);
-        buf.push(cats.imputed_cost);
-    }
-    buf
-}
-
-/// Compute per-category statistics from the gathered flat buffer (stride
-/// [`N_CATEGORIES`]: element `s * N_CATEGORIES + k` is category `k` of scenario
-/// `s`), one [`CategoryCostStats`] per category in `CATEGORY_NAMES` order.
-fn compute_category_stats(cat_buf: &[f64], n: usize) -> Vec<CategoryCostStats> {
-    let mut stats = Vec::with_capacity(N_CATEGORIES);
-
-    for k in 0..N_CATEGORIES {
-        let (mean, max, frequency) = if n == 0 {
-            (0.0, 0.0, 0.0)
-        } else {
-            let mut sum = 0.0_f64;
-            let mut local_max = f64::NEG_INFINITY;
-            let mut nonzero_count = 0usize;
-
-            for s in 0..n {
-                let val = cat_buf[s * N_CATEGORIES + k];
-                sum += val;
-                if val > local_max {
-                    local_max = val;
-                }
-                if val != 0.0 {
-                    nonzero_count += 1;
-                }
-            }
-
-            #[allow(clippy::cast_precision_loss)]
-            let mean = sum / n as f64;
-            #[allow(clippy::cast_precision_loss)]
-            let frequency = nonzero_count as f64 / n as f64;
-            (mean, local_max, frequency)
-        };
-
-        stats.push(CategoryCostStats {
-            category: CATEGORY_NAMES[k].to_string(),
-            mean,
-            max,
-            frequency,
-        });
-    }
-
-    stats
+    let weighted_sum_sq_diff: f64 = costs
+        .iter()
+        .zip(weights)
+        .map(|(&c, &w)| w * (c - mean) * (c - mean))
+        .sum();
+    weighted_sum_sq_diff.max(0.0).sqrt()
 }
 
 #[cfg(test)]
@@ -336,13 +269,8 @@ mod tests {
 
     use cobre_comm::LocalBackend;
 
-    use super::{
-        CVAR_ALPHA, N_CATEGORIES, compute_cvar, compute_local_min_max, compute_mean_std,
-        pack_category_costs,
-    };
-    use crate::simulation::{
-        aggregation::aggregate_simulation, config::SimulationConfig, types::ScenarioCategoryCosts,
-    };
+    use super::{SimulationWeighting, aggregate_simulation};
+    use crate::simulation::{config::SimulationConfig, types::ScenarioCategoryCosts};
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -364,135 +292,10 @@ mod tests {
         }
     }
 
-    // ── Unit tests: compute_local_min_max ──────────────────────────────────────
+    // ── AC1: Uniform weighted mean matches RiskMeasure::Expectation ───────────
 
     #[test]
-    fn local_min_max_basic() {
-        let cats = zero_cats();
-        let costs = vec![(0u32, 100.0, cats)];
-        let (min, max) = compute_local_min_max(&costs);
-        assert_eq!(min, 100.0);
-        assert_eq!(max, 100.0);
-    }
-
-    #[test]
-    fn local_min_max_multiple() {
-        let costs: Vec<(u32, f64, ScenarioCategoryCosts)> = vec![
-            (0, 300.0, zero_cats()),
-            (1, 100.0, zero_cats()),
-            (2, 200.0, zero_cats()),
-        ];
-        let (min, max) = compute_local_min_max(&costs);
-        assert_eq!(min, 100.0);
-        assert_eq!(max, 300.0);
-    }
-
-    #[test]
-    fn local_min_max_empty_returns_infinities() {
-        let (min, max) = compute_local_min_max(&[]);
-        assert!(min.is_infinite() && min.is_sign_positive());
-        assert!(max.is_infinite() && max.is_sign_negative());
-    }
-
-    // ── Unit tests: compute_mean_std ───────────────────────────────────────────
-
-    #[test]
-    fn mean_std_five_costs() {
-        // costs = [100, 200, 300, 400, 500], mean = 300
-        // Bessel-corrected variance = 100000 / 4 = 25000, std = sqrt(25000)
-        let costs = [100.0_f64, 200.0, 300.0, 400.0, 500.0];
-        let (mean, std) = compute_mean_std(&costs);
-        assert_eq!(mean, 300.0);
-        let expected_std = 25000.0_f64.sqrt();
-        assert!(
-            (std - expected_std).abs() < 1e-9,
-            "std={std} expected={expected_std}"
-        );
-    }
-
-    #[test]
-    fn mean_std_single_scenario_yields_zero_std() {
-        let costs = [42.0_f64];
-        let (mean, std) = compute_mean_std(&costs);
-        assert_eq!(mean, 42.0);
-        assert_eq!(std, 0.0);
-    }
-
-    #[test]
-    fn mean_std_empty_yields_zeros() {
-        let (mean, std) = compute_mean_std(&[]);
-        assert_eq!(mean, 0.0);
-        assert_eq!(std, 0.0);
-    }
-
-    // ── Unit tests: compute_cvar ───────────────────────────────────────────────
-
-    #[test]
-    fn cvar_five_scenarios_alpha_095() {
-        // costs = [100, 200, 300, 400, 500], alpha = 0.95
-        // tail_size = n - floor(0.95 * 5) = 5 - 4 = 1
-        // cvar = mean of top 1 = 500.0
-        let costs = [100.0_f64, 200.0, 300.0, 400.0, 500.0];
-        let cvar = compute_cvar(&costs, 0.95);
-        assert_eq!(cvar, 500.0);
-    }
-
-    #[test]
-    fn cvar_single_scenario_equals_cost() {
-        let costs = [42.0_f64];
-        let cvar = compute_cvar(&costs, CVAR_ALPHA);
-        assert_eq!(cvar, 42.0);
-    }
-
-    #[test]
-    fn cvar_empty_returns_zero() {
-        let cvar = compute_cvar(&[], 0.95);
-        assert_eq!(cvar, 0.0);
-    }
-
-    #[test]
-    fn cvar_100_scenarios_alpha_095() {
-        // costs 1.0..=100.0, alpha=0.95
-        // tail_size = 100 - floor(0.95 * 100) = 100 - 95 = 5
-        // top 5: 100, 99, 98, 97, 96 → mean = 490/5 = 98.0
-        let costs: Vec<f64> = (1..=100).map(f64::from).collect();
-        let cvar = compute_cvar(&costs, 0.95);
-        assert_eq!(cvar, 98.0);
-    }
-
-    // ── Unit tests: pack_category_costs ───────────────────────────────────────
-
-    #[test]
-    fn pack_category_costs_layout() {
-        let cats = ScenarioCategoryCosts {
-            resource_cost: 1.0,
-            recourse_cost: 2.0,
-            violation_cost: 3.0,
-            regularization_cost: 4.0,
-            imputed_cost: 5.0,
-        };
-        let local_costs = vec![(0u32, 15.0, cats)];
-        let packed = pack_category_costs(&local_costs);
-        assert_eq!(packed.len(), N_CATEGORIES);
-        assert_eq!(packed[0], 1.0, "resource_cost at index 0");
-        assert_eq!(packed[1], 2.0, "recourse_cost at index 1");
-        assert_eq!(packed[2], 3.0, "violation_cost at index 2");
-        assert_eq!(packed[3], 4.0, "regularization_cost at index 3");
-        assert_eq!(packed[4], 5.0, "imputed_cost at index 4");
-    }
-
-    #[test]
-    fn pack_category_costs_empty() {
-        let packed = pack_category_costs(&[]);
-        assert!(packed.is_empty());
-    }
-
-    // ── Integration tests: aggregate_simulation with LocalBackend ─────────────
-
-    #[test]
-    fn aggregate_basic_three_scenarios_mean_min_max() {
-        // AC: local_costs [(0,100), (1,200), (2,150)], n_scenarios=3
-        // mean=150, min=100, max=200, n_scenarios=3
+    fn aggregate_uniform_mean_matches_risk_measure_expectation() {
         let local_costs = vec![
             (0u32, 100.0, zero_cats()),
             (1u32, 200.0, zero_cats()),
@@ -501,178 +304,265 @@ mod tests {
         let config = make_config(3);
         let comm = LocalBackend;
 
-        let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
-        assert_eq!(summary.mean_cost, 150.0);
-        assert_eq!(summary.min_cost, 100.0);
-        assert_eq!(summary.max_cost, 200.0);
-        assert_eq!(summary.n_scenarios, 3);
-        assert_eq!(summary.cvar_alpha, 0.95);
-    }
+        let (summary, _gathered) =
+            aggregate_simulation(&local_costs, &config, &comm, SimulationWeighting::Uniform)
+                .unwrap();
 
-    #[test]
-    fn aggregate_cvar_five_scenarios() {
-        // AC: 5 scenarios [100,200,300,400,500], alpha=0.95
-        // tail_size = 5 - floor(4.75) = 5 - 4 = 1, cvar = 500.0
-        let local_costs: Vec<(u32, f64, ScenarioCategoryCosts)> = (0u32..5)
-            .map(|i| (i, f64::from(i + 1) * 100.0, zero_cats()))
-            .collect();
-        let config = make_config(5);
-        let comm = LocalBackend;
-
-        let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
-        assert_eq!(summary.cvar, 500.0);
-    }
-
-    #[test]
-    fn aggregate_single_scenario_std_zero_cvar_equals_cost() {
-        // AC: n=1, std=0.0, cvar=total_cost
-        let local_costs = vec![(0u32, 999.0, zero_cats())];
-        let config = make_config(1);
-        let comm = LocalBackend;
-
-        let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
-        assert_eq!(summary.std_cost, 0.0);
-        assert_eq!(summary.cvar, 999.0);
-        assert_eq!(summary.mean_cost, 999.0);
-        assert_eq!(summary.min_cost, 999.0);
-        assert_eq!(summary.max_cost, 999.0);
-    }
-
-    #[test]
-    fn aggregate_category_stats_frequency() {
-        // AC: resource_cost non-zero in 3 of 5 scenarios
-        // → category_stats[0].frequency = 0.6, category = "resource"
-        let local_costs: Vec<(u32, f64, ScenarioCategoryCosts)> = (0i32..5)
-            .map(|i| {
-                let cats = if i < 3 {
-                    ScenarioCategoryCosts {
-                        resource_cost: 100.0,
-                        recourse_cost: 0.0,
-                        violation_cost: 0.0,
-                        regularization_cost: 0.0,
-                        imputed_cost: 0.0,
-                    }
-                } else {
-                    zero_cats()
-                };
-                let total = if i < 3 { 100.0 } else { 0.0 };
-                #[allow(clippy::cast_sign_loss)]
-                (i as u32, total, cats)
-            })
-            .collect();
-        let config = make_config(5);
-        let comm = LocalBackend;
-
-        let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
-        let resource_stats = &summary.category_stats[0];
-        assert_eq!(resource_stats.category, "resource");
+        let expected = crate::risk_measure::RiskMeasure::Expectation
+            .evaluate_risk(&[100.0, 200.0, 150.0], &[1.0 / 3.0; 3]);
+        assert_eq!(summary.mean_cost, expected);
         assert!(
-            (resource_stats.frequency - 0.6).abs() < 1e-12,
-            "expected frequency=0.6, got {}",
-            resource_stats.frequency
+            (summary.mean_cost - 150.0).abs() < 1e-9,
+            "mean_cost {} not within 1e-9 of the old sum/n value 150.0",
+            summary.mean_cost
+        );
+        assert_eq!(summary.n_scenarios, 3);
+    }
+
+    // ── AC3: Census weighting seam on synthetic weights ────────────────────────
+
+    #[test]
+    fn aggregate_census_weighted_mean() {
+        let local_costs = vec![(0u32, 10.0, zero_cats()), (1u32, 30.0, zero_cats())];
+        let config = make_config(2);
+        let comm = LocalBackend;
+        let weights = [0.5, 0.5];
+
+        let (summary, gathered) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .unwrap();
+
+        assert_eq!(summary.mean_cost, 20.0);
+        assert_eq!(
+            gathered,
+            vec![(0, 10.0, Some(0.5)), (1, 30.0, Some(0.5))],
+            "gathered rows must carry the census weight, canonical scenario-id order"
+        );
+    }
+
+    // ── Census weighted variance: exactness ────────────────────────────────────
+
+    #[test]
+    fn aggregate_census_weighted_std_exact() {
+        let local_costs = vec![(0u32, 10.0, zero_cats()), (1u32, 30.0, zero_cats())];
+        let config = make_config(2);
+        let comm = LocalBackend;
+        let weights = [0.5, 0.5];
+
+        let (summary, _gathered) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .unwrap();
+
+        // 0.5*(10-20)^2 + 0.5*(30-20)^2 = 0.5*100 + 0.5*100 = 100, sqrt(100) = 10.
+        assert_eq!(summary.mean_cost, 20.0);
+        assert_eq!(summary.std_cost, 10.0);
+    }
+
+    #[test]
+    fn aggregate_census_weighted_std_three_point_unequal_weights() {
+        let local_costs = vec![
+            (0u32, 10.0, zero_cats()),
+            (1u32, 20.0, zero_cats()),
+            (2u32, 50.0, zero_cats()),
+        ];
+        let config = make_config(3);
+        let comm = LocalBackend;
+        let weights = [0.25, 0.25, 0.5];
+
+        let (summary, _gathered) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .unwrap();
+
+        let mean: f64 = 0.25 * 10.0 + 0.25 * 20.0 + 0.5 * 50.0;
+        let expected_std: f64 = (0.25 * (10.0 - mean) * (10.0 - mean)
+            + 0.25 * (20.0 - mean) * (20.0 - mean)
+            + 0.5 * (50.0 - mean) * (50.0 - mean))
+            .sqrt();
+
+        assert_eq!(summary.mean_cost, mean);
+        assert!(
+            (summary.std_cost - expected_std).abs() < 1e-9,
+            "expected std={expected_std}, got {}",
+            summary.std_cost
         );
     }
 
     #[test]
-    fn aggregate_category_stats_mean_max() {
-        // resource_cost: 100, 200, 300 → mean=200, max=300
-        let local_costs: Vec<(u32, f64, ScenarioCategoryCosts)> = vec![
-            (
-                0,
-                100.0,
-                ScenarioCategoryCosts {
-                    resource_cost: 100.0,
-                    recourse_cost: 0.0,
-                    violation_cost: 0.0,
-                    regularization_cost: 0.0,
-                    imputed_cost: 0.0,
-                },
-            ),
-            (
-                1,
-                200.0,
-                ScenarioCategoryCosts {
-                    resource_cost: 200.0,
-                    recourse_cost: 0.0,
-                    violation_cost: 0.0,
-                    regularization_cost: 0.0,
-                    imputed_cost: 0.0,
-                },
-            ),
-            (
-                2,
-                300.0,
-                ScenarioCategoryCosts {
-                    resource_cost: 300.0,
-                    recourse_cost: 0.0,
-                    violation_cost: 0.0,
-                    regularization_cost: 0.0,
-                    imputed_cost: 0.0,
-                },
-            ),
+    fn aggregate_uniform_gathered_rows_carry_no_weight() {
+        let local_costs = vec![(0u32, 100.0, zero_cats())];
+        let config = make_config(1);
+        let comm = LocalBackend;
+
+        let (_summary, gathered) =
+            aggregate_simulation(&local_costs, &config, &comm, SimulationWeighting::Uniform)
+                .unwrap();
+
+        assert_eq!(gathered, vec![(0, 100.0, None)]);
+    }
+
+    // ── AC5: struct-shape / no hard-coded 0.0 ──────────────────────────────────
+
+    #[test]
+    fn aggregate_summary_carries_exactly_three_fields() {
+        let local_costs = vec![(0u32, 999.0, zero_cats())];
+        let config = make_config(1);
+        let comm = LocalBackend;
+
+        let (summary, _gathered) =
+            aggregate_simulation(&local_costs, &config, &comm, SimulationWeighting::Uniform)
+                .unwrap();
+
+        // Exhaustive destructure: a field added to `SimulationSummary` without a
+        // matching test update fails to compile here.
+        let crate::simulation::types::SimulationSummary {
+            mean_cost,
+            std_cost,
+            n_scenarios,
+        } = summary;
+        assert_eq!(mean_cost, 999.0);
+        assert_eq!(std_cost, 0.0);
+        assert_eq!(n_scenarios, 1);
+    }
+
+    // ── AC2 (part): removed symbols do not exist ───────────────────────────────
+    //
+    // A grep-asserted inspection test: `compute_cvar`, `CVAR_ALPHA`,
+    // `compute_local_min_max`, `pack_category_costs`, `compute_category_stats`,
+    // `N_CATEGORIES`, and `CATEGORY_NAMES` are not just unreferenced but ABSENT
+    // from the crate source — the actual `cvar`/`cvar_alpha` field removal is
+    // pinned by the struct-shape test above, which would fail to compile if
+    // either field returned.
+    #[test]
+    fn removed_cvar_and_category_symbols_are_absent_from_source() {
+        // Declaration-form needles (`fn X(`/`const X`), assembled at runtime
+        // via `format!` so this test's own needle text never appears
+        // contiguously in the source it inspects — `include_str!` brings in
+        // the whole file verbatim, including this test.
+        let source = include_str!("aggregation.rs");
+        let needles = [
+            format!("fn compute_{}(", "cvar"),
+            format!("const CVAR_{}", "ALPHA"),
+            format!("fn compute_local_{}(", "min_max"),
+            format!("fn pack_{}(", "category_costs"),
+            format!("fn compute_{}(", "category_stats"),
+            format!("const N_{}", "CATEGORIES"),
+            format!("const {}_NAMES", "CATEGORY"),
+        ];
+        for needle in &needles {
+            assert!(
+                !source.contains(needle.as_str()),
+                "removed declaration {needle} must not reappear in aggregation.rs"
+            );
+        }
+    }
+
+    // ── AC4 (unit-level repeat check; the rank/thread-shape gate lives in
+    //    tests/mpi_wire.rs::simulation_aggregation_determinism) ────────────────
+
+    #[test]
+    fn aggregate_mean_std_bit_identical_across_repeated_calls() {
+        let local_costs = vec![
+            (0u32, 100.0, zero_cats()),
+            (1u32, 200.0, zero_cats()),
+            (2u32, 150.0, zero_cats()),
+            (3u32, 400.0, zero_cats()),
+        ];
+        let config = make_config(4);
+        let comm = LocalBackend;
+
+        let (single_rank, _) =
+            aggregate_simulation(&local_costs, &config, &comm, SimulationWeighting::Uniform)
+                .unwrap();
+        let (repeat, _) =
+            aggregate_simulation(&local_costs, &config, &comm, SimulationWeighting::Uniform)
+                .unwrap();
+
+        assert_eq!(
+            single_rank.mean_cost.to_bits(),
+            repeat.mean_cost.to_bits(),
+            "mean_cost must be bit-identical across repeated identical-shape runs"
+        );
+        assert_eq!(
+            single_rank.std_cost.to_bits(),
+            repeat.std_cost.to_bits(),
+            "std_cost must be bit-identical across repeated identical-shape runs"
+        );
+    }
+
+    #[test]
+    fn aggregate_census_std_bit_identical_across_repeated_calls() {
+        let local_costs = vec![
+            (0u32, 10.0, zero_cats()),
+            (1u32, 20.0, zero_cats()),
+            (2u32, 50.0, zero_cats()),
         ];
         let config = make_config(3);
         let comm = LocalBackend;
+        let weights = [0.25, 0.25, 0.5];
 
-        let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
-        let resource = &summary.category_stats[0];
-        assert_eq!(resource.mean, 200.0);
-        assert_eq!(resource.max, 300.0);
-        assert_eq!(resource.frequency, 1.0);
+        let (single_rank, _) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .unwrap();
+        let (repeat, _) = aggregate_simulation(
+            &local_costs,
+            &config,
+            &comm,
+            SimulationWeighting::Census { weights: &weights },
+        )
+        .unwrap();
+
+        assert_eq!(
+            single_rank.mean_cost.to_bits(),
+            repeat.mean_cost.to_bits(),
+            "census mean_cost must be bit-identical across repeated identical-shape runs"
+        );
+        assert_eq!(
+            single_rank.std_cost.to_bits(),
+            repeat.std_cost.to_bits(),
+            "census std_cost must be bit-identical across repeated identical-shape runs"
+        );
     }
 
     #[test]
-    fn aggregate_category_names_in_order() {
-        // Verify category names match spec order.
-        let local_costs = vec![(0u32, 0.0, zero_cats())];
+    fn aggregate_single_scenario_std_zero() {
+        let local_costs = vec![(0u32, 999.0, zero_cats())];
         let config = make_config(1);
         let comm = LocalBackend;
 
-        let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
-        assert_eq!(summary.category_stats.len(), N_CATEGORIES);
-        assert_eq!(summary.category_stats[0].category, "resource");
-        assert_eq!(summary.category_stats[1].category, "recourse");
-        assert_eq!(summary.category_stats[2].category, "violation");
-        assert_eq!(summary.category_stats[3].category, "regularization");
-        assert_eq!(summary.category_stats[4].category, "imputed");
-    }
-
-    #[test]
-    fn aggregate_operational_stats_are_zero_placeholders() {
-        let local_costs = vec![(0u32, 50.0, zero_cats())];
-        let config = make_config(1);
-        let comm = LocalBackend;
-
-        let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
-        assert_eq!(summary.deficit_frequency, 0.0);
-        assert_eq!(summary.total_deficit_mwh, 0.0);
-        assert_eq!(summary.total_spillage_mwh, 0.0);
-    }
-
-    #[test]
-    fn aggregate_cvar_100_scenarios() {
-        // Costs 1.0..=100.0, alpha=0.95
-        // tail_size = 100 - floor(95) = 5, cvar = (96+97+98+99+100)/5 = 98.0
-        let local_costs: Vec<(u32, f64, ScenarioCategoryCosts)> = (1u32..=100)
-            .map(|i| (i - 1, f64::from(i), zero_cats()))
-            .collect();
-        let config = make_config(100);
-        let comm = LocalBackend;
-
-        let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
-        assert_eq!(summary.cvar, 98.0);
+        let (summary, _gathered) =
+            aggregate_simulation(&local_costs, &config, &comm, SimulationWeighting::Uniform)
+                .unwrap();
+        assert_eq!(summary.std_cost, 0.0);
+        assert_eq!(summary.mean_cost, 999.0);
     }
 
     #[test]
     fn aggregate_std_five_costs_bessel_corrected() {
-        // costs [100,200,300,400,500], std = sqrt(25000)
         let local_costs: Vec<(u32, f64, ScenarioCategoryCosts)> = (0u32..5)
             .map(|i| (i, f64::from(i + 1) * 100.0, zero_cats()))
             .collect();
         let config = make_config(5);
         let comm = LocalBackend;
 
-        let summary = aggregate_simulation(&local_costs, &config, &comm).unwrap();
+        let (summary, _gathered) =
+            aggregate_simulation(&local_costs, &config, &comm, SimulationWeighting::Uniform)
+                .unwrap();
         let expected_std = 25000.0_f64.sqrt();
         assert!(
             (summary.std_cost - expected_std).abs() < 1e-9,

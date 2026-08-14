@@ -2,6 +2,7 @@
 
 use cobre_core::{Stage, scenario::SamplingScheme, temporal::StageLagTransition};
 use cobre_solver::StageTemplate;
+use cobre_stochastic::par::resolve_stage_lag_transition;
 use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext};
 
 use crate::{
@@ -10,6 +11,7 @@ use crate::{
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::StageGeometry,
+    setup::node_graph::{NodeGraph, StageIdx},
 };
 
 /// Immutable per-stage LP layout and noise scaling parameters.
@@ -108,17 +110,95 @@ impl StageContext<'_> {
     /// Returns the noise group ID for stage index `t`.
     #[inline]
     #[must_use]
-    pub fn noise_group_id_at(&self, t: usize) -> u32 {
+    pub fn noise_group_id_at(&self, t: StageIdx) -> u32 {
         if self.noise_group_ids.is_empty() {
             #[allow(clippy::cast_possible_truncation)]
-            return t as u32;
+            return t.0 as u32;
         }
         debug_assert!(
-            t < self.noise_group_ids.len(),
+            t.0 < self.noise_group_ids.len(),
             "stage index {t} out of bounds for noise_group_ids (len={})",
             self.noise_group_ids.len()
         );
-        self.noise_group_ids[t]
+        self.noise_group_ids[t.0]
+    }
+
+    /// Stage `t`'s LP template.
+    #[inline]
+    #[must_use]
+    pub fn template(&self, t: StageIdx) -> &StageTemplate {
+        &self.templates[t.0]
+    }
+
+    /// Row index of the first water-balance row at stage `t`.
+    #[inline]
+    #[must_use]
+    pub fn base_row(&self, t: StageIdx) -> usize {
+        self.base_rows[t.0]
+    }
+
+    /// Stage `t`'s equipment geometry, or `None` in a test fixture built
+    /// without a stage table (the reader falls back to `StageGeometry::default`).
+    #[inline]
+    #[must_use]
+    pub fn geometry(&self, t: StageIdx) -> Option<&StageGeometry> {
+        self.geometry_per_stage.get(t.0)
+    }
+
+    /// Blocks at stage `t`, or `0` when `block_counts_per_stage` is unpopulated.
+    #[inline]
+    #[must_use]
+    pub fn block_count(&self, t: StageIdx) -> usize {
+        self.block_counts_per_stage.get(t.0).copied().unwrap_or(0)
+    }
+
+    /// Row index of the first load-balance row at stage `t`.
+    #[inline]
+    #[must_use]
+    pub fn load_balance_row_start(&self, t: StageIdx) -> usize {
+        self.load_balance_row_starts[t.0]
+    }
+
+    /// First NCS generation column at stage `t`.
+    #[inline]
+    #[must_use]
+    pub fn ncs_col_start(&self, t: StageIdx) -> usize {
+        self.ncs_col_starts[t.0]
+    }
+
+    /// One-step discount factor for the transition departing stage `t`, or
+    /// `1.0` when `discount_factors` is unpopulated.
+    #[inline]
+    #[must_use]
+    pub fn discount_factor(&self, t: StageIdx) -> f64 {
+        self.discount_factors.get(t.0).copied().unwrap_or(1.0)
+    }
+
+    /// Cumulative discount factor for present-value costing at stage `t`, or
+    /// `1.0` when `cumulative_discount_factors` is unpopulated.
+    #[inline]
+    #[must_use]
+    pub fn cumulative_discount_factor(&self, t: StageIdx) -> f64 {
+        self.cumulative_discount_factors
+            .get(t.0)
+            .copied()
+            .unwrap_or(1.0)
+    }
+
+    /// Declared study `stage_id` at position `t`, or `None` if `study_stage_ids`
+    /// is shorter than the study (never in production).
+    #[inline]
+    #[must_use]
+    pub fn study_stage_id(&self, t: StageIdx) -> Option<i32> {
+        self.study_stage_ids.get(t.0).copied()
+    }
+
+    /// Precomputed lag accumulation weights and period-finalization flags for
+    /// stage `t`.
+    #[inline]
+    #[must_use]
+    pub fn stage_lag(&self, t: StageIdx) -> StageLagTransition {
+        resolve_stage_lag_transition(self.stage_lag_transitions, t.0)
     }
 }
 
@@ -134,12 +214,13 @@ pub struct TrainingContext<'a> {
     /// `n_state`, the resolvers, and the mask. Every hot-path state-column read
     /// resolves through this handle.
     pub state: &'a StateSpace,
-    /// Per-pool cut-state projection, indexed by pool `t` (paired 1:1 with
-    /// `FutureCostFunction::pools`). The backward pass reads
-    /// `cut_state_layouts[t]` when solving stage `t+1` to size pool `t`'s
-    /// extracted subgradient and every per-stage backward buffer. Empty on the
-    /// non-training paths (simulation, lower-bound eval), which never extract
-    /// cuts.
+    /// Per-pool cut-state projection, indexed by pool id (paired 1:1 with
+    /// `FutureCostFunction::pools`), resolved from the node graph's
+    /// `node → pool` map. The backward pass reads `cut_state_layouts[pool_id]`
+    /// when solving a node's successor to size that node's own pool's
+    /// extracted subgradient and every per-stage backward buffer. On the
+    /// chain degeneracy `pool_id == stage`. Empty on the non-training paths
+    /// (simulation, lower-bound eval), which never extract cuts.
     pub cut_state_layouts: &'a [CutStateProjection],
     /// Single owner of the study-invariant, non-state LP shape: non-state entity
     /// counts, optional-column presence flags, anticipated-thermal identity list.
@@ -180,4 +261,11 @@ pub struct TrainingContext<'a> {
     /// past `start_iteration`, the backward pass solves each stage LP lazily;
     /// otherwise the frozen all-cuts path is used.
     pub dcs: Option<DcsParams>,
+    /// The runtime node graph (F7): node identity/order, the `node → pool`
+    /// map, and per-node Ω views/out-edges. Absent `nodes[]` this is the
+    /// byte-exact chain degeneracy (one node per stage, C1). Discount is NOT
+    /// carried here — it stays per-stage on
+    /// [`StageContext::cumulative_discount_factors`], reached through a
+    /// node's own `stage` field.
+    pub node_graph: &'a NodeGraph,
 }

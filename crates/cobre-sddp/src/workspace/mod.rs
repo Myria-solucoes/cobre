@@ -29,4 +29,4 @@ pub use workspace::{
     SolverWorkspace, WorkspacePool, WorkspaceSizing,
 };
 #[cfg_attr(not(test), allow(unused_imports))]
-pub(crate) use workspace::{BackwardAccumulators, OpeningBlockScratch};
+pub(crate) use workspace::{BackwardAccumulators, ByNodeScratch};

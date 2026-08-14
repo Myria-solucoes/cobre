@@ -14,10 +14,12 @@
 // seam from `common::builders` — a no-op today, not dead code.
 #![allow(clippy::needless_update)]
 
+use cobre_io::config::{SimulationSelection, TrainingSelection};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc;
 
 use chrono::NaiveDate;
+use cobre_comm::Communicator;
 use cobre_core::{
     DeficitSegment, EntityId, SystemBuilder, TrainingEvent,
     scenario::{
@@ -30,20 +32,25 @@ use cobre_core::{
     },
 };
 use cobre_solver::{
-    ActiveProfile, Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+    ActiveProfile, ActiveSolver, Basis, RowBatch, SolverError, SolverInterface, SolverStatistics,
+    StageTemplate,
 };
 use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
 };
 
+use cobre_io::output::simulation_writer::{
+    ScenarioWritePayload, SimulationParquetWriter, write_scenario_summary,
+};
 use cobre_io::{
-    Config, EstimationConfig, MetadataSimulationSolveStats, PolicyCheckpointMetadata,
-    PolicyCutRecord, PolicyMode, SimulationOutput, StageCutsPayload, write_policy_checkpoint,
-    write_results,
+    Config, EstimationConfig, MetadataSimulationSolveStats, ParquetWriterConfig,
+    PolicyCheckpointMetadata, PolicyCutRecord, PolicyMode, SimulationOutput, StageCutsPayload,
+    write_policy_checkpoint, write_results,
 };
 use cobre_sddp::{
-    Phase, PrepareHydroModelsResult, ResolvedParameters, SolverProfiles, StoppingMode,
-    StoppingRule, StoppingRuleSet, TrainingConfig, build_training_output,
+    CapturedBasis, Phase, PrepareHydroModelsResult, ResolvedParameters, SimulationSummary,
+    SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    aggregate_simulation, build_training_output,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -53,13 +60,27 @@ use cobre_sddp::{
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
+    setup::{
+        SimulationEnumeratedRequest, StudySetup,
+        node_graph::{NodePos, Traversal},
+    },
     simulate,
-    simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
+    simulation::{
+        EntityCounts, SimulationConfig, SimulationOutputSpec, SimulationScenarioResult,
+        aggregation::GatheredScenarioCosts,
+    },
+    solver_stats::SolverStatsDelta,
+    test_support::{
+        branching_tree_setup_enumerated, extensive_form_optimum, k_fan_setup_enumerated,
+        node_prefix_counts, node_scenario_count, single_path_enumerated_setup,
+        trunk_fan_setup_enumerated, water_binding_external_fan_setup,
+    },
     train,
     workspace::{SolverWorkspace, WorkspaceSizing},
 };
 
 mod common;
+use common::Rank0Of2;
 use common::StubComm;
 use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
@@ -400,6 +421,7 @@ fn make_config() -> Config {
     };
     Config {
         schema: None,
+        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig::default(),
             cost_scale_factor: None,
@@ -407,13 +429,13 @@ fn make_config() -> Config {
         training: IoTrainingConfig {
             enabled: true,
             tree_seed: None,
-            forward_passes: Some(1),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 3 }]),
-            stopping_mode: "any".to_string(),
+            stopping_mode: cobre_io::config::StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
+            selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig {
@@ -424,10 +446,10 @@ fn make_config() -> Config {
         },
         simulation: IoSimulationConfig {
             enabled: false,
-            num_scenarios: 0,
             io_channel_capacity: 64,
             scenario_source: None,
             solver: None,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 0 }),
         },
         exports: ExportsConfig::default(),
         estimation: EstimationConfig::default(),
@@ -581,6 +603,7 @@ fn train_simulate_write_cycle() {
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -631,6 +654,7 @@ fn train_simulate_write_cycle() {
     let cut_state_layouts = all_enabled_cut_state_layouts(&fx.state, fx.n_stages);
     let study_dims = study_dims_for(0, 0, 0, 0, false);
     let training_context = TrainingContext {
+        node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
         horizon: &fx.horizon,
         state: &fx.state,
         cut_state_layouts: &cut_state_layouts,
@@ -667,7 +691,7 @@ fn train_simulate_write_cycle() {
 
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
 
-    let training_output = build_training_output(&result.result, &events, &fcf);
+    let training_output = build_training_output(&result.result, &events, &fcf, false);
 
     assert_eq!(training_output.convergence_records.len(), 3);
 
@@ -724,22 +748,25 @@ fn train_simulate_write_cycle() {
 
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
     let policy_metadata = PolicyCheckpointMetadata {
+        format_version: cobre_io::FORMAT_VERSION,
         cobre_version: env!("CARGO_PKG_VERSION").to_string(),
         created_at: "2026-03-08T00:00:00Z".to_string(),
-        completed_iterations: result.result.iterations as u32,
-        final_lower_bound: result.result.final_lb,
-        best_upper_bound: Some(result.result.final_ub),
-        state_dimension: fcf.state_dimension as u32,
         num_stages: fx.n_stages as u32,
-        max_iterations: 3,
-        forward_passes: 1,
-        warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
-        warm_start_counts,
-        rng_seed: 42,
-        total_visited_states: 0,
-        training_block_mode: "parallel".to_string(),
-        training_block_mode_per_stage: vec![],
-        cost_scale_factor: None,
+        graph_manifest: cobre_io::GraphManifest::default(),
+        producer: cobre_io::ProducerBlock {
+            completed_iterations: result.result.iterations as u32,
+            final_lower_bound: result.result.final_lb,
+            best_upper_bound: Some(result.result.final_ub),
+            max_iterations: 3,
+            forward_passes: 1,
+            warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
+            warm_start_counts,
+            rng_seed: 42,
+            total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
+        },
     };
 
     write_policy_checkpoint(
@@ -779,7 +806,16 @@ fn train_simulate_write_cycle() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
+        PatchBuffer::new(
+            fx.state.hydro_count,
+            fx.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ),
         fx.state.n_state,
         WorkspaceSizing {
             hydro_count: fx.state.hydro_count,
@@ -854,10 +890,15 @@ fn train_simulate_write_cycle() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &sim_comm,
+        &Traversal::default(),
     )
     .expect("simulate must succeed");
 
@@ -891,7 +932,7 @@ fn train_simulate_write_cycle() {
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: 1,
             mpi_library: None,
             mpi_standard: None,
@@ -964,10 +1005,10 @@ fn train_simulate_write_cycle() {
         let content = std::fs::read_to_string(&policy_meta_path).unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&content).expect("policy/metadata.json must be valid JSON");
-        assert_eq!(value["completed_iterations"].as_u64(), Some(3));
+        assert_eq!(value["producer"]["completed_iterations"].as_u64(), Some(3));
     }
 
-    let stage_bin_path = policy_dir.join("cuts/stage_000.bin");
+    let stage_bin_path = policy_dir.join("cuts/000.bin");
     assert!(stage_bin_path.is_file());
     {
         let metadata = std::fs::metadata(&stage_bin_path).unwrap();
@@ -1190,13 +1231,10 @@ fn make_min_outflow_system() -> cobre_core::System {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
                 min_outflow_m3s: 50.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -1388,6 +1426,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 1,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1411,6 +1450,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let cut_state_layouts = all_enabled_cut_state_layouts(&state, n_stages);
     let training_context = TrainingContext {
+        node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &cut_state_layouts,
@@ -1475,7 +1515,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
+        PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0, 0),
         state.n_state,
         WorkspaceSizing {
             hydro_count: state.hydro_count,
@@ -1526,10 +1566,15 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             energy_conversion: &ec2,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &StubComm,
+        &Traversal::default(),
     )
     .expect("simulate must succeed");
 
@@ -1539,19 +1584,240 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     assert_eq!(results.len(), 1, "expected exactly 1 scenario result");
 
     let scenario = &results[0];
-    let mut found_nonzero_slack = false;
-    for stage_result in &scenario.stages {
-        for hydro_result in &stage_result.hydros {
-            if (hydro_result.outflow_slack_below_m3s - expected_slack_m3s).abs() < 1e-6 {
-                found_nonzero_slack = true;
-            }
-        }
-    }
+    let found_nonzero_slack = scenario.stages.iter().any(|stage_result| {
+        stage_result.hydros.iter().any(|hydro_result| {
+            (hydro_result.outflow_slack_below_m3s - expected_slack_m3s).abs() < 1e-6
+        })
+    });
     assert!(
         found_nonzero_slack,
         "Expected at least one hydro result with outflow_slack_below_m3s = {expected_slack_m3s:.6} \
          (sentinel_m3s={sentinel_m3s} / zeta={zeta}), but all were zero. \
          This indicates the extraction path does not read from the slack column.",
+    );
+}
+
+/// A `SimulationSelection::Enumerated` study with derived
+/// `K == 1` (the [`Fixture`]'s single-opening chain) dispatches
+/// `SimulationState::run` to `run_enumerated_simulation`, and its single
+/// `SimulationScenarioResult` is bit-for-bit equal to the sampled
+/// simulation's single scenario on the same trained study — both walks visit
+/// the graph's one and only root-to-leaf path, drawing noise from the same
+/// `(scenario = 0, iteration = 0, stage)` seed either way, so the two must
+/// coincide exactly.
+#[test]
+fn enumerated_census_k1_matches_sampled_single_scenario() {
+    use cobre_sddp::setup::node_graph::Traversal;
+
+    let fx = Fixture::new(2);
+    let mut fcf = make_fcf(fx.n_stages);
+    let mut solver = MockSolver::with_fixed(100.0);
+    let comm = StubComm;
+
+    let training_config = TrainingConfig {
+        loop_config: LoopConfig {
+            forward_passes: 1,
+            training_enumerated: false,
+            max_iterations: 3,
+            start_iteration: 0,
+            n_fwd_threads: 1,
+            max_blocks: 1,
+            stopping_rules: iteration_limit(3),
+        },
+        cut_management: CutManagementConfig {
+            cut_selection: None,
+            budget: None,
+            cut_activity_tolerance: 0.0,
+            warm_start_cuts: 0,
+            risk_measures: fx.risk_measures.clone(),
+        },
+        events: EventConfig {
+            event_sender: None,
+            checkpoint_interval: None,
+            shutdown_flag: None,
+            export_states: false,
+        },
+    };
+
+    let block_counts_per_stage = vec![1usize; fx.n_stages];
+    let stage_ctx = StageContext {
+        geometry_per_stage: &[],
+        templates: &fx.templates,
+        base_rows: &fx.base_rows,
+        noise_scale: &[],
+        n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
+        n_load_buses: 0,
+        load_balance_row_starts: &[],
+        load_bus_indices: &[],
+        block_counts_per_stage: &block_counts_per_stage,
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+        ncs_max_gen: &[],
+        ncs_allow_curtailment: &[],
+        discount_factors: &[],
+        cumulative_discount_factors: &[],
+        stage_lag_transitions: &[],
+        noise_group_ids: &[],
+        downstream_par_order: 0,
+    };
+    let cut_state_layouts = all_enabled_cut_state_layouts(&fx.state, fx.n_stages);
+    let study_dims = study_dims_for(0, 0, 0, 0, false);
+    let node_graph = cobre_sddp::test_support::chain_node_graph(&fx.stochastic);
+    let training_context = TrainingContext {
+        node_graph: &node_graph,
+        horizon: &fx.horizon,
+        state: &fx.state,
+        cut_state_layouts: &cut_state_layouts,
+        study_dims: &study_dims,
+        inflow_method: &InflowNonNegativityMethod::None,
+        stochastic: &fx.stochastic,
+        initial_state: &fx.initial_state,
+        inflow_scheme: SamplingScheme::InSample,
+        load_scheme: SamplingScheme::InSample,
+        ncs_scheme: SamplingScheme::InSample,
+        historical_library: None,
+        external_inflow_library: None,
+        external_load_library: None,
+        external_ncs_library: None,
+        lag_accum_seed: &[],
+        lag_weight_seed: &[],
+        dcs: None,
+        stages: &[],
+    };
+    train(
+        &mut solver,
+        training_config,
+        &mut fcf,
+        &stage_ctx,
+        &training_context,
+        &comm,
+        || Ok(MockSolver::with_fixed(100.0)),
+        None,
+        SolverProfiles::default(),
+    )
+    .expect("train must succeed");
+
+    let derived_k = cobre_sddp::test_support::node_scenario_count(&node_graph)
+        .expect("node_scenario_count must not overflow on this trivial fixture");
+    assert_eq!(
+        derived_k, 1,
+        "the fixture's single-opening chain must derive exactly one enumerated path"
+    );
+
+    let entity_counts = EntityCounts {
+        hydro_ids: vec![1],
+        hydro_productivities: vec![1.0],
+        thermal_ids: vec![],
+        line_ids: vec![],
+        bus_ids: vec![0],
+        pumping_station_ids: vec![],
+        contract_ids: vec![],
+        non_controllable_ids: vec![],
+    };
+    let zero_ec = EnergyConversion {
+        equivalent_productivity_mw_per_m3s: 0.0,
+        reference_volume_hm3: 0.0,
+        reference_outflow_m3s: 0.0,
+    };
+    let ec = EnergyConversionSet::new(
+        vec![vec![zero_ec; fx.n_stages]; 1],
+        vec![vec![0.0_f64; fx.n_stages]; 1],
+        1,
+        fx.n_stages,
+    );
+    let sim_config = SimulationConfig {
+        n_scenarios: 1,
+        io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
+    };
+    let hydro_cell_index = cobre_sddp::test_support::identity_hydro_cell_index(256);
+    let hydro_productivities_per_stage = vec![vec![1.0]; fx.n_stages];
+
+    let run_sim =
+        |traversal: &Traversal| -> cobre_sddp::simulation::types::SimulationScenarioResult {
+            let sim_solver = MockSolver::with_fixed(100.0);
+            let mut sim_workspaces = vec![SolverWorkspace::new(
+                0,
+                0,
+                sim_solver,
+                PatchBuffer::new(
+                    fx.state.hydro_count,
+                    fx.state.max_par_order,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+                fx.state.n_state,
+                WorkspaceSizing {
+                    hydro_count: fx.state.hydro_count,
+                    max_par_order: fx.state.max_par_order,
+                    n_load_buses: 0,
+                    max_blocks: 0,
+                    downstream_par_order: 0,
+                    ..WorkspaceSizing::default()
+                },
+            )];
+            let (result_tx, result_rx) = mpsc::sync_channel(4);
+            simulate(
+                &mut sim_workspaces,
+                &stage_ctx,
+                &fcf,
+                &training_context,
+                &sim_config,
+                SimulationOutputSpec {
+                    result_tx: &result_tx,
+                    zeta_per_stage: &[],
+                    hydro_cell_index: &hydro_cell_index,
+                    block_hours_per_stage: &[],
+                    entity_counts: &entity_counts,
+                    generic_constraint_row_entries: &[],
+                    ncs_col_starts: &[],
+                    n_ncs: 0,
+                    pumping_col_starts: &[],
+                    n_pumping: 0,
+                    geometry_per_stage: &[],
+                    pumping_consumption_mw_per_m3s: &[],
+                    contract_prices_per_stage: &[],
+                    contract_is_import: &[],
+                    ncs_entity_ids_per_stage: &[],
+                    diversion_upstream: &HashMap::new(),
+                    hydro_productivities_per_stage: &hydro_productivities_per_stage,
+                    energy_conversion: &ec,
+                    hydro_min_storage_hm3: &[0.0],
+                    event_sender: None,
+                    commitment_window_delivery_dates: &[],
+                    transit_seed_arcs: &[],
+                    past_defluences: &[],
+                    study_stage_dates: &[],
+                },
+                None,
+                &[],
+                &comm,
+                traversal,
+            )
+            .expect("simulate must succeed");
+            drop(result_tx);
+            let mut results: Vec<_> = result_rx.into_iter().collect();
+            assert_eq!(results.len(), 1, "K=1 must produce exactly one scenario");
+            results.remove(0)
+        };
+
+    let enumerated_plan = Traversal::resolve(&node_graph, true, 1);
+    let enum_scenario = run_sim(&enumerated_plan);
+    let sampled_scenario = run_sim(&Traversal::default());
+
+    assert_eq!(
+        enum_scenario, sampled_scenario,
+        "the enumerated K=1 census's single scenario must be bit-for-bit equal to the \
+         sampled simulation's single scenario on the same trained study"
     );
 }
 
@@ -1568,4 +1834,673 @@ fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<Cu
     (0..n_stages)
         .map(|_| CutStateProjection::new(global, full))
         .collect()
+}
+
+// ── Census execution: value oracle, exact mean/variance, dedup, thread
+//    determinism ────────────────────────────────────────────────────────────
+
+/// Relative + absolute LP tolerance for census-mean-vs-extensive-form-value
+/// comparison. Mirrors `extensive_form_oracle.rs`'s `REL_TOL`/`ABS_TOL`
+/// unchanged (not re-derived): the backend primal/dual feasibility tolerance is
+/// `≈ 1e-9`, scaled by the objective magnitude, bounding the gap between the
+/// extensive-form LP and the trained policy's own accumulated solves.
+const CENSUS_REL_TOL: f64 = 1e-6;
+const CENSUS_ABS_TOL: f64 = 1e-4;
+
+/// `true` when `a` and `b` agree within [`CENSUS_REL_TOL`]·|scale| + [`CENSUS_ABS_TOL`].
+fn census_close(a: f64, b: f64) -> bool {
+    (a - b).abs() <= CENSUS_ABS_TOL + CENSUS_REL_TOL * a.abs().max(b.abs())
+}
+
+/// Train `setup` single-rank/single-thread to convergence (mirrors
+/// `extensive_form_oracle.rs`'s `train_bounds`, dropping the returned bounds —
+/// callers here read the trained policy's simulated cost instead).
+fn train_census_fixture_to_convergence(mut setup: StudySetup) -> StudySetup {
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("training must return Ok");
+    assert!(
+        outcome.error.is_none(),
+        "training must not error: {:?}",
+        outcome.error
+    );
+    setup
+}
+
+/// Convert a trained `setup` to a census (`enumerated`) simulation: derives
+/// `K` from the graph itself ([`node_scenario_count`]) and installs it onto
+/// `simulation_config.n_scenarios` — the field `Traversal::resolve`'s
+/// `SimulationSelection::Enumerated` arm derives its own plan from
+/// `node_graph` regardless, but `assign_scenarios`/`aggregate_simulation`
+/// read `simulation_config.n_scenarios` directly, so it must match `K`.
+fn as_enumerated_census(mut setup: StudySetup) -> StudySetup {
+    let derived_k: u32 = node_scenario_count(&setup.node_graph)
+        .expect("node_scenario_count must not overflow on these fixtures")
+        .try_into()
+        .expect("K must fit u32 on these fixtures");
+    setup.simulation_enumerated = SimulationEnumeratedRequest::Enumerated;
+    setup.simulation_config.n_scenarios = derived_k;
+    setup
+}
+
+/// One census `simulate()` call's full outcome: the per-scenario detailed
+/// results (canonical `scenario_id` order), the aggregated summary and
+/// gathered `(scenario_id, cost, probability)` rows, and the total realized
+/// LP-solve count across every workspace this run used (the dedup-scale
+/// invariant R3 checks) — measured via the solver-statistics delta around
+/// `simulate()`, the same source `run_worker_scenarios` uses, since
+/// `SimulationRunResult::solver_stats` is per-LEAF (a shared node's stats are
+/// replicated into every leaf that visits it) and cannot answer "how many
+/// solves actually happened."
+struct CensusRun {
+    results: Vec<SimulationScenarioResult>,
+    summary: SimulationSummary,
+    gathered: GatheredScenarioCosts,
+    actual_lp_solves: u64,
+}
+
+/// Run `setup`'s (already-census-converted) simulation under `n_threads`
+/// workers on `comm`, aggregating with the traversal-derived
+/// [`cobre_sddp::SimulationWeighting`]. Generic over the communicator so the
+/// same path runs under a single-rank stub and the 2-rank `Rank0Of2` shape.
+fn run_census<C: Communicator>(setup: &StudySetup, comm: &C, n_threads: usize) -> CensusRun {
+    let mut pool = setup
+        .create_workspace_pool(comm, n_threads, ActiveSolver::new)
+        .expect("workspace pool");
+    let stats_before: Vec<SolverStatistics> = pool
+        .workspaces
+        .iter()
+        .map(|ws| ws.solver.statistics())
+        .collect();
+
+    let n_scenarios = setup.simulation_config().n_scenarios.max(1) as usize;
+    let (result_tx, result_rx) = mpsc::sync_channel(n_scenarios);
+    let sim_run_result = setup
+        .simulate(&mut pool.workspaces, comm, &result_tx, None, None, &[])
+        .expect("census simulate must succeed");
+    drop(result_tx);
+    let mut results: Vec<SimulationScenarioResult> = result_rx.into_iter().collect();
+    results.sort_by_key(|r| r.scenario_id);
+
+    let actual_lp_solves: u64 = stats_before
+        .iter()
+        .zip(pool.workspaces.iter().map(|ws| ws.solver.statistics()))
+        .map(|(before, after)| SolverStatsDelta::from_snapshots(before, &after).lp_solves)
+        .sum();
+
+    let traversal = Traversal::resolve(
+        &setup.node_graph,
+        true,
+        setup.simulation_config().n_scenarios,
+    );
+    let weighting = traversal.simulation_weighting();
+    let (summary, gathered) = aggregate_simulation(
+        &sim_run_result.costs,
+        setup.simulation_config(),
+        comm,
+        weighting,
+    )
+    .expect("aggregate_simulation must succeed");
+
+    CensusRun {
+        results,
+        summary,
+        gathered,
+        actual_lp_solves,
+    }
+}
+
+/// One census run's warm-start accounting: per-scenario cost as raw bits (for
+/// bit-identity comparison), the summed warm-start basis offers, and the summed
+/// basis-consistency rejections across every workspace.
+struct WarmStartRun {
+    per_scenario_cost_bits: Vec<(u32, u64)>,
+    basis_offered: u64,
+    basis_consistency_failures: u64,
+}
+
+/// Census `simulate()` with a caller-supplied warm-start cache, measuring the
+/// warm-start offer/reject deltas across a fresh workspace pool.
+fn run_census_with_bases<C: Communicator>(
+    setup: &StudySetup,
+    comm: &C,
+    n_threads: usize,
+    stage_bases: &[Option<CapturedBasis>],
+) -> WarmStartRun {
+    let mut pool = setup
+        .create_workspace_pool(comm, n_threads, ActiveSolver::new)
+        .expect("workspace pool");
+    let before: Vec<SolverStatistics> = pool
+        .workspaces
+        .iter()
+        .map(|ws| ws.solver.statistics())
+        .collect();
+
+    let n_scenarios = setup.simulation_config().n_scenarios.max(1) as usize;
+    let (result_tx, result_rx) = mpsc::sync_channel(n_scenarios);
+    setup
+        .simulate(
+            &mut pool.workspaces,
+            comm,
+            &result_tx,
+            None,
+            None,
+            stage_bases,
+        )
+        .expect("census simulate must succeed");
+    drop(result_tx);
+    let mut results: Vec<SimulationScenarioResult> = result_rx.into_iter().collect();
+    results.sort_by_key(|r| r.scenario_id);
+
+    let (basis_offered, basis_consistency_failures) = before
+        .iter()
+        .zip(pool.workspaces.iter().map(|ws| ws.solver.statistics()))
+        .map(|(b, a)| SolverStatsDelta::from_snapshots(b, &a))
+        .fold((0_u64, 0_u64), |(off, fail), d| {
+            (off + d.basis_offered, fail + d.basis_consistency_failures)
+        });
+
+    WarmStartRun {
+        per_scenario_cost_bits: results
+            .iter()
+            .map(|r| (r.scenario_id, r.total_cost.to_bits()))
+            .collect(),
+        basis_offered,
+        basis_consistency_failures,
+    }
+}
+
+/// Pool-fill warms the previously-cold terminal leaves of an enumerated census:
+/// training captures a basis only at the scenario-0 leaf, so every sibling leaf
+/// starts `None`; `StudySetup::simulate` fills them from the shared pool. Stripping
+/// the leaf pool of every capture (`stripped`) removes the fill's source, so its
+/// leaves stay cold — the offered-basis delta between the two is the fill's work.
+/// The filled bases must be ACCEPTED (0 consistency failures) and must not move
+/// the objective (per-scenario cost bit-identical warm-vs-cold), and the run must
+/// be bit-reproducible across thread shapes (never `hot == cold`).
+#[test]
+fn enumerated_census_pool_fill_warms_previously_cold_leaves() {
+    let mut setup = branching_tree_setup_enumerated(30);
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("training must return Ok");
+    assert!(
+        outcome.error.is_none(),
+        "training must not error: {:?}",
+        outcome.error
+    );
+    let sparse = outcome.result.basis_cache;
+
+    let setup = as_enumerated_census(setup);
+
+    let leaves: Vec<usize> = (0..setup.node_graph.successors.len())
+        .filter(|&i| setup.node_graph.successors[NodePos(i)].is_empty())
+        .collect();
+    assert!(
+        leaves.len() >= 2,
+        "fixture must fan into >= 2 same-pool terminal leaves; got {}",
+        leaves.len()
+    );
+    let captured_leaves = leaves.iter().filter(|&&i| sparse[i].is_some()).count();
+    assert!(
+        captured_leaves >= 1,
+        "training must capture >= 1 terminal-leaf basis to seed the fill"
+    );
+
+    let mut stripped = sparse.clone();
+    for &i in &leaves {
+        stripped[i] = None;
+    }
+
+    let filled = run_census_with_bases(&setup, &comm, 1, &sparse);
+    let no_leaf_source = run_census_with_bases(&setup, &comm, 1, &stripped);
+
+    assert!(
+        filled.basis_offered >= no_leaf_source.basis_offered + leaves.len() as u64,
+        "pool-fill must warm every terminal leaf: offered {} vs stripped {} (>= +{} leaves)",
+        filled.basis_offered,
+        no_leaf_source.basis_offered,
+        leaves.len()
+    );
+    assert_eq!(
+        filled.basis_consistency_failures, 0,
+        "every re-tagged filled basis must be accepted (same-pool template, own node_id)"
+    );
+    assert_eq!(
+        filled.per_scenario_cost_bits, no_leaf_source.per_scenario_cost_bits,
+        "warm != cold: the moved dispatch vertex must not move the per-scenario cost"
+    );
+
+    let filled_4 = run_census_with_bases(&setup, &comm, 4, &sparse);
+    assert_eq!(
+        filled.per_scenario_cost_bits, filled_4.per_scenario_cost_bits,
+        "per-scenario cost must be bit-identical at threads=1 vs threads=4"
+    );
+}
+
+/// R1 — value oracle. `branching_tree_setup_enumerated` branches at BOTH
+/// interior stages under non-uniform weights (the shape a shape-based
+/// admission clause would have rejected — see `extensive_form_oracle.rs`);
+/// trained to convergence, its census `mean_cost` must close to the
+/// independently-computed extensive-form optimum, never `hot == cold`.
+#[test]
+fn census_mean_cost_closes_to_extensive_form_value() {
+    let setup = branching_tree_setup_enumerated(30);
+    let optimum = extensive_form_optimum(&setup);
+    let setup = as_enumerated_census(train_census_fixture_to_convergence(setup));
+
+    let comm = StubComm;
+    let run = run_census(&setup, &comm, 1);
+
+    assert!(
+        census_close(run.summary.mean_cost, optimum),
+        "census mean_cost {} must close to the extensive-form optimum {optimum} (gap {})",
+        run.summary.mean_cost,
+        run.summary.mean_cost - optimum
+    );
+}
+
+/// R2 — exact mean + variance on the DECOMP K-fan's known per-leaf weights.
+/// `k_fan_policy_graph`'s leaf `i` (`1..=k`) carries the declared, non-uniform
+/// edge probability `i / Σj` — hand-derived here from the fixture's own
+/// documented construction, independent of the engine's plan weights — and
+/// `summary.mean_cost`/`std_cost` must equal the weighted `Σ w·c` /
+/// `√Σ w(c−μ)²` computed independently in this test from the per-path costs
+/// `aggregate_simulation` gathers.
+#[test]
+fn census_mean_and_variance_match_hand_computed_weighted_formula() {
+    let k = 4usize;
+    let fixture = k_fan_setup_enumerated(k, 30);
+    let setup = as_enumerated_census(train_census_fixture_to_convergence(fixture.setup));
+
+    let comm = StubComm;
+    let run = run_census(&setup, &comm, 1);
+
+    assert_eq!(
+        run.gathered.len(),
+        k,
+        "gathered rows must have exactly k entries"
+    );
+    let total_weight: f64 = (1..=k).map(|i| i as f64).sum();
+    let mut costs = Vec::with_capacity(k);
+    let mut weights = Vec::with_capacity(k);
+    for (idx, &(scenario_id, cost, weight)) in run.gathered.iter().enumerate() {
+        assert_eq!(
+            scenario_id, idx as u32,
+            "gathered rows must be canonical ascending scenario_id"
+        );
+        let w = weight.expect("census weight must be populated (Some) under Census weighting");
+        let expected_w = (idx + 1) as f64 / total_weight;
+        assert!(
+            (w - expected_w).abs() < 1e-9,
+            "leaf {idx}'s weight {w} must equal the fixture's declared edge probability \
+             {expected_w} (= (idx+1)/Σj)"
+        );
+        costs.push(cost);
+        weights.push(w);
+    }
+
+    let weight_sum: f64 = weights.iter().sum();
+    assert!(
+        (weight_sum - 1.0).abs() < 1e-9,
+        "weights must sum to 1.0, got {weight_sum}"
+    );
+
+    let hand_mean: f64 = costs.iter().zip(&weights).map(|(c, w)| c * w).sum();
+    let hand_var: f64 = costs
+        .iter()
+        .zip(&weights)
+        .map(|(c, w)| w * (c - hand_mean).powi(2))
+        .sum();
+    let hand_std = hand_var.sqrt();
+
+    assert!(
+        (run.summary.mean_cost - hand_mean).abs() < 1e-9,
+        "summary.mean_cost {} must equal the hand-computed Σw·c {hand_mean} within 1e-9",
+        run.summary.mean_cost
+    );
+    assert!(
+        (run.summary.std_cost - hand_std).abs() < 1e-9,
+        "summary.std_cost {} must equal the hand-computed √Σw(c−μ)² {hand_std} within 1e-9",
+        run.summary.std_cost
+    );
+}
+
+/// Exact mean + variance census oracle on genuinely DISTINCT per-leaf costs.
+/// `census_mean_and_variance_match_hand_computed_weighted_formula` above runs on
+/// `k_fan_setup_enumerated`, whose deficit-dominated leaves are bit-identical
+/// (`ρ = 0` placeholder) — so `Σ w·c = c` for any weight vector and the weighted
+/// variance is `≈ 0`, neither assertion has power to catch a mis-weighted or
+/// uniform-weighted census. `water_binding_external_fan_setup`'s scarce reservoir
+/// and non-zero productivity (`ρ = 0.95`) make each leaf's own inflow bind,
+/// producing distinct costs; its leaf `i` (`1..=k`) carries the same declared edge
+/// probability `i / Σj` as the k-fan above, hand-derived here independent of the
+/// engine's plan weights.
+#[test]
+fn census_distinct_cost_mean_and_variance_match_hand_computed_weighted_formula() {
+    let k = 3usize;
+    let fixture = water_binding_external_fan_setup(k, 30);
+    let setup = as_enumerated_census(train_census_fixture_to_convergence(fixture));
+
+    let comm = StubComm;
+    let run = run_census(&setup, &comm, 1);
+
+    assert_eq!(
+        run.gathered.len(),
+        k,
+        "gathered rows must have exactly k entries"
+    );
+    let total_weight: f64 = (1..=k).map(|i| i as f64).sum();
+    let mut costs = Vec::with_capacity(k);
+    let mut weights = Vec::with_capacity(k);
+    for (idx, &(scenario_id, cost, weight)) in run.gathered.iter().enumerate() {
+        assert_eq!(
+            scenario_id, idx as u32,
+            "gathered rows must be canonical ascending scenario_id"
+        );
+        let w = weight.expect("census weight must be populated (Some) under Census weighting");
+        let expected_w = (idx + 1) as f64 / total_weight;
+        assert!(
+            (w - expected_w).abs() < 1e-9,
+            "leaf {idx}'s weight {w} must equal the fixture's declared edge probability \
+             {expected_w} (= (idx+1)/Σj)"
+        );
+        costs.push(cost);
+        weights.push(w);
+    }
+
+    let weight_sum: f64 = weights.iter().sum();
+    assert!(
+        (weight_sum - 1.0).abs() < 1e-9,
+        "weights must sum to 1.0, got {weight_sum}"
+    );
+
+    // Non-degeneracy self-check: without this, a fixture that silently degenerated
+    // to equal per-leaf costs would leave the mean/variance assertions below vacuous.
+    let max_cost = costs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let min_cost = costs.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        max_cost - min_cost > 1.0,
+        "per-leaf costs must be genuinely distinct (max {max_cost} - min {min_cost} must exceed \
+         1.0); a fixture that degenerated to equal costs would make the mean/variance \
+         assertions below vacuous: {costs:?}"
+    );
+
+    let hand_mean: f64 = costs.iter().zip(&weights).map(|(c, w)| c * w).sum();
+    let hand_var: f64 = costs
+        .iter()
+        .zip(&weights)
+        .map(|(c, w)| w * (c - hand_mean).powi(2))
+        .sum();
+    let hand_std = hand_var.sqrt();
+
+    assert!(
+        (run.summary.mean_cost - hand_mean).abs() < 1e-9,
+        "summary.mean_cost {} must equal the hand-computed Σw·c {hand_mean} within 1e-9",
+        run.summary.mean_cost
+    );
+    assert!(
+        (run.summary.std_cost - hand_std).abs() < 1e-9,
+        "summary.std_cost {} must equal the hand-computed √Σw(c−μ)² {hand_std} within 1e-9",
+        run.summary.std_cost
+    );
+    assert!(
+        run.summary.std_cost > 0.0,
+        "summary.std_cost must be strictly positive on this distinct-cost fixture, got {}",
+        run.summary.std_cost
+    );
+}
+
+/// R3 — dedup correctness + solve count, on a trunk-then-fan graph whose
+/// `t_trunk` trunk nodes are shared by every one of the `k` leaves.
+///
+/// (a) Extract-once identity: every leaf's stage-`t` per-entity row for a
+/// shared trunk stage must equal every OTHER leaf's — both are copies of the
+/// SAME node's single extracted result, so they must be bit-identical.
+/// (b) Dedup-scale: the single-rank solve count must equal the enumerated
+/// forward's own `Σ forward_solve_counts` dedup-scale assertion — that
+/// quantity is `pub(crate)`-only, but on any admitted enumerated fixture
+/// (single-predecessor, one opening per node) `node_prefix_counts` gives
+/// exactly `1` per node (`assert_reachable_prefixes_match`'s precondition,
+/// `extensive_form_oracle.rs`) — the same equality
+/// `forward_solve_counts_k_fan_matches_hand_computed_prefix_counts`
+/// (`setup/node_graph.rs`) pins from inside the crate — so their sum equals
+/// the node count, proving no per-path re-solve.
+#[test]
+fn census_shared_trunk_rows_extract_once_and_solve_count_matches_dedup() {
+    let t_trunk = 3usize;
+    let k = 3usize;
+    let fixture = trunk_fan_setup_enumerated(t_trunk, k, 5);
+    let setup = as_enumerated_census(train_census_fixture_to_convergence(fixture.setup));
+
+    let comm = StubComm;
+    let run = run_census(&setup, &comm, 1);
+    assert_eq!(run.results.len(), k, "census must produce exactly k leaves");
+
+    for t in 0..t_trunk {
+        let first = &run.results[0].stages[t];
+        for other in &run.results[1..] {
+            assert_eq!(
+                &other.stages[t], first,
+                "leaf {}'s stage {t} row must equal leaf {}'s — both extract the same \
+                 shared trunk node's single result",
+                other.scenario_id, run.results[0].scenario_id
+            );
+        }
+    }
+
+    let prefix_counts =
+        node_prefix_counts(&setup.node_graph).expect("node_prefix_counts must not overflow");
+    assert!(
+        prefix_counts.iter().all(|&c| c == 1),
+        "every node on this admitted (single-predecessor, |Ω|=1) fixture must have exactly \
+         one root-to-node prefix: {prefix_counts:?}"
+    );
+    let expected_solves: u64 = prefix_counts.iter().sum();
+    assert_eq!(
+        run.actual_lp_solves, expected_solves,
+        "single-rank census solve count must equal Σ forward_solve_counts (no per-path re-solve)"
+    );
+}
+
+/// A [`cobre_core::System`] whose only purpose is driving
+/// [`SimulationParquetWriter::new`]'s directory/block-hours setup for R4's
+/// byte-comparison — the writer reads only `system.stages()` (block hours)
+/// and entity counts, never the policy graph, so this need not reproduce a
+/// census fixture's branching structure. Mirrors the single-hydro/single-bus,
+/// one-744h-block-per-stage shape every K-fan/branching-tree/trunk-fan fixture
+/// in `test_support.rs` documents, parameterized only by stage count.
+fn writer_shape_system(n_stages: usize) -> cobre_core::System {
+    let stages: Vec<_> = (0..n_stages)
+        .map(|idx| {
+            make_stage(
+                idx,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: Some(0),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                },
+            )
+        })
+        .collect();
+    SystemBuilder::new()
+        .stages(stages)
+        .build()
+        .expect("writer_shape_system: SystemBuilder::build must succeed")
+}
+
+/// Write `results`/`gathered`'s `scenario_summary.parquet` and per-entity
+/// (hydros) Parquet under a fresh `TempDir`, returning the raw bytes of both
+/// — `scenario_summary.parquet` verbatim, the hydros files concatenated in
+/// sorted-path order (one file per `scenario_id=NNNN/` Hive partition).
+fn write_census_parquet_outputs(
+    n_stages: usize,
+    results: Vec<SimulationScenarioResult>,
+    gathered: &GatheredScenarioCosts,
+) -> (Vec<u8>, Vec<u8>) {
+    let tmp = tempfile::TempDir::new().expect("tempdir must succeed");
+    let system = writer_shape_system(n_stages);
+    let config = ParquetWriterConfig::default();
+    let mut writer = SimulationParquetWriter::new(tmp.path(), &system, &config)
+        .expect("SimulationParquetWriter::new must succeed");
+    for scenario in results {
+        writer
+            .write_scenario(ScenarioWritePayload::from(scenario))
+            .expect("write_scenario must succeed");
+    }
+    let _ = writer.finalize(0);
+
+    let rows: Vec<(u32, Option<f64>, f64)> = gathered
+        .iter()
+        .map(|&(id, cost, weight)| (id, weight, cost))
+        .collect();
+    write_scenario_summary(tmp.path(), &rows).expect("write_scenario_summary must succeed");
+
+    let summary_bytes = std::fs::read(tmp.path().join("simulation/scenario_summary.parquet"))
+        .expect("read scenario_summary.parquet");
+
+    let hydros_dir = tmp.path().join("simulation/hydros");
+    let mut hydro_files: Vec<std::path::PathBuf> = if hydros_dir.is_dir() {
+        std::fs::read_dir(&hydros_dir)
+            .expect("read_dir simulation/hydros")
+            .filter_map(std::result::Result::ok)
+            .flat_map(|partition| {
+                std::fs::read_dir(partition.path())
+                    .expect("read_dir a hydros scenario partition")
+                    .filter_map(std::result::Result::ok)
+                    .map(|e| e.path())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    hydro_files.sort();
+    assert!(
+        !hydro_files.is_empty(),
+        "the writer must have produced at least one simulation/hydros/ parquet file"
+    );
+    let mut hydro_bytes = Vec::new();
+    for f in hydro_files {
+        hydro_bytes.extend(std::fs::read(&f).expect("read a hydros parquet file"));
+    }
+
+    (summary_bytes, hydro_bytes)
+}
+
+/// R4 — thread bit-invariance. For a fixed `K >= 2` census, `mean_cost`/
+/// `std_cost` (`to_bits()`), the `scenario_summary.parquet` bytes (including
+/// the `probability` column), and a per-entity (hydros) Parquet file must be
+/// bit-identical across `--threads 1`, `2`, and `4` — the replicate model's
+/// canonical claim-order-independent scatter plus the fixed-order gather-then-
+/// sum reduction make the whole output topology-invariant, never merely the
+/// aggregate scalars.
+#[test]
+fn census_output_is_bit_identical_across_thread_counts() {
+    let k = 4usize;
+    let fixture = k_fan_setup_enumerated(k, 30);
+    let setup = as_enumerated_census(train_census_fixture_to_convergence(fixture.setup));
+    let n_stages = setup.num_stages();
+    let comm = StubComm;
+
+    let mut summaries = Vec::with_capacity(3);
+    let mut parquet_outputs = Vec::with_capacity(3);
+    for &n_threads in &[1usize, 2, 4] {
+        let run = run_census(&setup, &comm, n_threads);
+        summaries.push((
+            run.summary.mean_cost.to_bits(),
+            run.summary.std_cost.to_bits(),
+        ));
+        parquet_outputs.push(write_census_parquet_outputs(
+            n_stages,
+            run.results,
+            &run.gathered,
+        ));
+    }
+
+    for n_threads in [2usize, 4] {
+        let idx = if n_threads == 2 { 1 } else { 2 };
+        assert_eq!(
+            summaries[idx], summaries[0],
+            "mean_cost/std_cost bit patterns must be identical between threads=1 and \
+             threads={n_threads}"
+        );
+        assert_eq!(
+            parquet_outputs[idx].0, parquet_outputs[0].0,
+            "scenario_summary.parquet bytes must be identical between threads=1 and \
+             threads={n_threads}"
+        );
+        assert_eq!(
+            parquet_outputs[idx].1, parquet_outputs[0].1,
+            "the hydros Parquet bytes must be identical between threads=1 and \
+             threads={n_threads}"
+        );
+    }
+}
+
+/// Rank-shape invariance of the census SWEEP. Mirrors the forward engine's
+/// `enumerated_single_path_2rank_stub_matches_single_rank`: a single-path
+/// (`K == 1`) census driven end-to-end through `StudySetup::simulate` must
+/// produce bit-identical `mean_cost`/`std_cost` under a single-rank stub and the
+/// 2-rank `Rank0Of2` shape. Unlike `census_output_is_bit_identical_across_thread_counts`
+/// (threads only, `world_size == 1`) and the `mpi_wire.rs` rank-shape gate
+/// (`aggregate_simulation` on hand-built costs, never the sweep), this exercises
+/// the full `world_size == 2` sweep pipeline — `assign_scenarios` /
+/// `mark_own_paths` / `run_sweep` / `re_expand`, then the gather-then-sum
+/// aggregate. `Rank0Of2` is faithful ONLY at `K == 1`, where rank 1's
+/// `assign_scenarios` share is empty (the zero it leaves unwritten IS what a
+/// genuine rank 1 would send); genuine cross-rank trunk replication is covered
+/// by the real-MPI SLURM job, the same ceiling the forward engine's stub carries.
+#[test]
+fn census_single_path_sweep_bit_identical_across_rank_shapes() {
+    let setup = as_enumerated_census(train_census_fixture_to_convergence(
+        single_path_enumerated_setup(30),
+    ));
+
+    // Power self-checks: `Rank0Of2` is faithful only when rank 1 does zero work,
+    // i.e. the census resolves to a single path, and the stub genuinely presents
+    // a 2-rank world (never a vacuous size-1 comparison).
+    assert_eq!(
+        setup.simulation_config().n_scenarios,
+        1,
+        "single_path fixture must resolve to K == 1 for Rank0Of2 faithfulness"
+    );
+    assert_eq!(Rank0Of2.size(), 2, "Rank0Of2 must present a 2-rank world");
+
+    let single = run_census(&setup, &StubComm, 1);
+    let two_rank = run_census(&setup, &Rank0Of2, 1);
+
+    assert_eq!(
+        single.summary.mean_cost.to_bits(),
+        two_rank.summary.mean_cost.to_bits(),
+        "census mean_cost must be bitwise identical between world_size 1 and 2"
+    );
+    assert_eq!(
+        single.summary.std_cost.to_bits(),
+        two_rank.summary.std_cost.to_bits(),
+        "census std_cost must be bitwise identical between world_size 1 and 2"
+    );
+    assert_eq!(
+        single.summary.std_cost, 0.0,
+        "a single-path census is a degenerate zero-variance distribution"
+    );
 }

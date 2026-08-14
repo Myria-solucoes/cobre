@@ -8,10 +8,11 @@ use std::collections::HashMap;
 
 use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
-    ExternalNcsRow, ExternalScenarioRow, GenericConstraint, Hydro, InflowHistoryRow, InflowModel,
-    InitialConditions, Line, LoadModel, NcsModel, NetworkTopology, NonControllableSource,
-    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
-    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
+    ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
+    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
+    NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
+    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
+    ResolvedPenalties, Stage, Thermal,
 };
 
 mod builder;
@@ -88,7 +89,7 @@ pub struct System {
     /// Ordered list of stages (study + pre-study), sorted by `id` (canonical order).
     stages: Vec<Stage>,
     /// Policy graph defining stage transitions, horizon type, and discount rate.
-    policy_graph: PolicyGraph,
+    policy_graph: HorizonGraph,
 
     #[cfg_attr(feature = "serde", serde(skip))]
     stage_index: HashMap<i32, usize>,
@@ -128,6 +129,11 @@ pub struct System {
     external_load_scenarios: Vec<ExternalLoadRow>,
     /// Raw external NCS scenario rows, sorted by `(stage_id, scenario_id, ncs_id)` ascending.
     external_ncs_scenarios: Vec<ExternalNcsRow>,
+
+    /// Post-study boundary calendar and per-`(thermal, post-study stage)`
+    /// cost/bounds; `None` when `post_study_stages.json` is absent (inert).
+    /// Boundary-only input: never a dispatched stage in `system.stages()`.
+    post_study_stages: Option<PostStudyStages>,
 }
 
 const _: () = {
@@ -151,7 +157,7 @@ struct SystemRepr {
     cascade: CascadeTopology,
     network: NetworkTopology,
     stages: Vec<Stage>,
-    policy_graph: PolicyGraph,
+    policy_graph: HorizonGraph,
     penalties: ResolvedPenalties,
     bounds: ResolvedBounds,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
@@ -168,6 +174,7 @@ struct SystemRepr {
     external_scenarios: Vec<ExternalScenarioRow>,
     external_load_scenarios: Vec<ExternalLoadRow>,
     external_ncs_scenarios: Vec<ExternalNcsRow>,
+    post_study_stages: Option<PostStudyStages>,
 }
 
 #[cfg(feature = "serde")]
@@ -209,6 +216,7 @@ impl From<SystemRepr> for System {
             external_scenarios: repr.external_scenarios,
             external_load_scenarios: repr.external_load_scenarios,
             external_ncs_scenarios: repr.external_ncs_scenarios,
+            post_study_stages: repr.post_study_stages,
         };
         system.rebuild_indices();
         system
@@ -381,7 +389,7 @@ impl System {
 
     /// Returns a reference to the policy graph.
     #[must_use]
-    pub fn policy_graph(&self) -> &PolicyGraph {
+    pub fn policy_graph(&self) -> &HorizonGraph {
         &self.policy_graph
     }
 
@@ -488,6 +496,13 @@ impl System {
     #[must_use]
     pub fn external_ncs_scenarios(&self) -> &[ExternalNcsRow] {
         &self.external_ncs_scenarios
+    }
+
+    /// Returns the post-study boundary calendar and cost/bounds, or `None` when
+    /// `post_study_stages.json` was absent at case-load time.
+    #[must_use]
+    pub fn post_study_stages(&self) -> Option<&PostStudyStages> {
+        self.post_study_stages.as_ref()
     }
 
     /// Replace `inflow_models` and `correlation`, returning the `System` with all
@@ -1485,8 +1500,10 @@ mod tests {
 
     #[test]
     fn test_system_resolved_generic_bounds_accessor() {
+        use crate::model::resolved::GenericConstraintBoundEntry;
+
         let id_map: HashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
-        let rows = vec![(0i32, 0i32, None::<i32>, 100.0f64)];
+        let rows = vec![(0i32, 0i32, None::<i32>, Some(100.0f64), None::<f64>)];
         let table = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
         let system = SystemBuilder::new()
@@ -1498,7 +1515,14 @@ mod tests {
         assert!(!system.resolved_generic_bounds().is_active(1, 0));
         let slice = system.resolved_generic_bounds().bounds_for_stage(0, 0);
         assert_eq!(slice.len(), 1);
-        assert_eq!(slice[0], (None, 100.0));
+        assert_eq!(
+            slice[0],
+            GenericConstraintBoundEntry {
+                block_id: None,
+                bound_lower: Some(100.0),
+                bound_upper: None,
+            }
+        );
     }
 
     #[test]
@@ -1548,6 +1572,7 @@ mod tests {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         let system = SystemBuilder::new()
@@ -1566,10 +1591,12 @@ mod tests {
         use crate::temporal::PolicyGraphType;
 
         let stages = vec![make_stage(0), make_stage(1)];
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: None,
         };
 
@@ -1684,10 +1711,10 @@ mod tests {
     fn fully_populated_system_survives_postcard_roundtrip_intact() {
         use crate::{
             AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-            ConstraintExpression, ConstraintSense, ContractBlockBounds, CorrelationEntity,
-            CorrelationGroup, CorrelationProfile, CorrelationScheduleEntry, DeficitSegment,
-            HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStagePenalties,
-            HydroStorage, LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
+            ConstraintExpression, ContractBlockBounds, CorrelationEntity, CorrelationGroup,
+            CorrelationProfile, CorrelationScheduleEntry, DeficitSegment, HydroBlockBounds,
+            HydroPastDefluence, HydroStageBounds, HydroStagePenalties, HydroStorage,
+            LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
             PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraphType, PumpingBlockBounds,
             RecentObservation, SlackConfig, ThermalBlockBounds, ThermalStageBounds, Transition,
             VariableRef,
@@ -1747,7 +1774,8 @@ mod tests {
         let stage0 = make_stage(0);
         let stage1 = make_stage(1);
 
-        let policy_graph = PolicyGraph {
+        let policy_graph = HorizonGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::Cyclic,
             annual_discount_rate: 0.08,
             transitions: vec![
@@ -1764,6 +1792,7 @@ mod tests {
                     annual_discount_rate_override: Some(0.05),
                 },
             ],
+            nodes: Vec::new(),
             season_map: None,
         };
 
@@ -1829,6 +1858,7 @@ mod tests {
                     min_generation_mw: 5.0,
                     max_generation_mw: 200.0,
                     max_diversion_m3s: Some(20.0),
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 85.0 },
                 thermal_block: ThermalBlockBounds {
@@ -1853,7 +1883,7 @@ mod tests {
 
         let resolved_generic_bounds = ResolvedGenericConstraintBounds::new(
             &std::collections::HashMap::from([(1i32, 0usize)]),
-            vec![(1i32, 0i32, None::<i32>, 777.0f64)].into_iter(),
+            vec![(1i32, 0i32, None::<i32>, Some(777.0f64), None::<f64>)].into_iter(),
         );
 
         let mut resolved_load_factors = ResolvedLoadFactors::new(2, 2, 1);
@@ -1956,7 +1986,9 @@ mod tests {
             }],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: EntityId(1),
-                values_mw: vec![100.0, 200.0],
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                value_mw: 100.0,
             }],
             recent_observations: vec![RecentObservation {
                 hydro_id: EntityId(1),
@@ -1970,6 +2002,7 @@ mod tests {
                 end_date: NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
                 value_m3s: 320.0,
             }],
+            future_anticipated_deliveries: vec![],
         };
 
         let generic_constraints = vec![GenericConstraint {
@@ -1986,11 +2019,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: true,
                 penalty: Some(2500.0),
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         }];
 
         let inflow_history = vec![

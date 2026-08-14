@@ -1,5 +1,6 @@
 //! Accessor methods and context builders for [`StudySetup`].
 
+use chrono::NaiveDate;
 use cobre_core::System;
 use cobre_core::commissioning::commissioning_active;
 use cobre_core::scenario::SamplingScheme;
@@ -21,7 +22,9 @@ use crate::{
 
 use super::StudySetup;
 use crate::dcs::DcsParams;
-use crate::policy_export::build_stage_entity_manifest;
+use crate::policy_export::{
+    build_graph_manifest, build_stage_entity_delivery_intervals, build_stage_entity_manifest,
+};
 
 impl StudySetup {
     /// Replace the FCF with a pre-loaded policy.
@@ -63,7 +66,7 @@ impl StudySetup {
     }
 
     /// Test-support hook: override the backward-pass scheduler
-    /// (`training.parallelism.backward_scheduler`) to force `opening_block`
+    /// (`training.parallelism.backward_scheduler`) to force `by_node`
     /// without a config file edit.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_scheduler(&mut self, scheduler: BackwardScheduler) {
@@ -101,13 +104,15 @@ impl StudySetup {
         &self.stage_data.state
     }
 
-    /// Build the per-slot entity-identity manifest for the terminal stage's cut
-    /// pool — the stage a boundary policy injects into.
+    /// Build the per-slot entity-identity manifest for the terminal cut pool —
+    /// the pool a boundary policy injects into.
     ///
     /// Delegates to
     /// [`build_stage_entity_manifest`],
     /// the single owner of identity resolution shared with the checkpoint writer,
-    /// against the terminal stage's projection. The caller passes the result to
+    /// against the terminal pool's projection (the last entry of
+    /// `cut_state_layouts`, pool-id-indexed; on the chain degeneracy this is the
+    /// terminal stage). The caller passes the result to
     /// [`load_boundary_cuts`](crate::load_boundary_cuts) so a boundary cut whose
     /// slot identity diverges from the current study is rejected rather than
     /// silently mis-loaded.
@@ -116,11 +121,43 @@ impl StudySetup {
     #[must_use]
     pub fn build_terminal_entity_manifest(&self, system: &System) -> Vec<EntitySlot> {
         let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        // `terminal_idx` is a pool ordinal (`== n_pools - 1`); its owning stage
+        // resolves through `pool_stage`, never `study_stage_ids[terminal_idx]`,
+        // which is OOB once `n_pools > n_stages` on a branching graph.
+        let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx].0];
         build_stage_entity_manifest(
             system,
             &self.stage_data.state,
             &self.stage_data.cut_state_layouts[terminal_idx],
-            self.study_stage_ids[terminal_idx],
+            stage_id,
+        )
+    }
+
+    /// Build the per-slot post-horizon delivery interval for the terminal cut
+    /// pool, aligned 1:1 with [`Self::build_terminal_entity_manifest`]:
+    /// `Some((start, end))` for a live, dated `AnticipatedThermalState`
+    /// post-horizon lane slot, `None` elsewhere.
+    ///
+    /// Delegates to [`build_stage_entity_delivery_intervals`], the companion
+    /// [`build_stage_entity_manifest`] walks in lockstep, against the SAME
+    /// terminal pool projection — the two outputs are aligned by construction,
+    /// never a re-derived subindex convention. The caller passes the result to
+    /// [`load_boundary_cuts`](crate::load_boundary_cuts) so the boundary
+    /// reconciliation's date-driven fan-out
+    /// (`crate::policy::reconcile::build_rebind`) can resolve each target
+    /// slot's real calendar span.
+    ///
+    /// `system` is passed explicitly because [`StudySetup`] does not own it.
+    #[must_use]
+    pub fn build_terminal_anticipated_delivery_intervals(
+        &self,
+        system: &System,
+    ) -> Vec<Option<(NaiveDate, NaiveDate)>> {
+        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        build_stage_entity_delivery_intervals(
+            system,
+            &self.stage_data.state,
+            &self.stage_data.cut_state_layouts[terminal_idx],
         )
     }
 
@@ -128,6 +165,17 @@ impl StudySetup {
     #[must_use]
     pub fn num_stages(&self) -> usize {
         self.methodology.horizon.num_stages()
+    }
+
+    /// Build the value-function artifact's graph manifest for the current study
+    /// — node list, edges, and node → pool map — from the runtime node graph.
+    ///
+    /// Delegates to [`build_graph_manifest`], the single owner shared with the
+    /// checkpoint writer, so the manifest written into an artifact and the one
+    /// the full-FCF load path validates against can never diverge.
+    #[must_use]
+    pub fn build_graph_manifest(&self) -> cobre_io::GraphManifest {
+        build_graph_manifest(&self.node_graph, &self.study_stage_ids)
     }
 
     /// Per-stage stochastic-NCS dormancy mask, reconstructed for the out-of-crate
@@ -219,6 +267,7 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
+            node_graph: &self.node_graph,
         }
     }
 
@@ -286,6 +335,7 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
+            node_graph: &self.node_graph,
         }
     }
 }

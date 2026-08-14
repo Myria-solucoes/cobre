@@ -15,7 +15,7 @@ use crate::{
         StageInputs, debug_assert_bucket_copy_gap_intact, fill_unscaled, run_stage_solve,
     },
     training::stage_solve_prep::{
-        InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
+        InflowNoise, LoadNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
     trajectory::TrajectoryRecord,
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
@@ -24,9 +24,6 @@ use crate::{
 use super::{StageKey, write_capture_metadata};
 
 /// Execute the stage-level LP solve for one (scenario, stage) pair.
-///
-/// Applies noise patches, warm-starts the solver, records the trajectory step,
-/// and updates the current state and basis store for the next stage.
 ///
 /// Returns the stage cost on success, or propagates the solver error.
 ///
@@ -60,20 +57,24 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         terminal_has_boundary_cuts,
         pool,
         dcs,
+        node,
     } = *key;
+    let node_graph = training_ctx.node_graph;
+    let pool_id = node_graph.nodes[node].pool_id;
+    let node_id = node_graph.node_ids[node];
     let state = training_ctx.state;
     let horizon = training_ctx.horizon;
+    let template = &ctx.templates[t.0];
 
     // DCS path: load the cut-free base template here (the caller skips its frozen
     // load). Loading the frozen template instead would make the lazy loop's fresh
     // CutRowMap double-append the embedded cut rows.
     if dcs.is_some() {
-        ws.solver.load_model(&ctx.templates[t]);
+        ws.solver.load_model(template);
     }
 
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(&ws.current_state),
-        opening_mode: OpeningMode::SingleRealized,
         load_noise: LoadNoise::Present,
         inflow_noise: InflowNoise::Transform,
         raw_noise,
@@ -90,11 +91,11 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // Zero theta at the terminal stage (no successor to penalise), but NOT when
     // boundary cuts are loaded — those constrain theta from below and must stay
     // visible in the objective.
-    if horizon.is_terminal(t + 1) && !terminal_has_boundary_cuts {
+    if horizon.is_terminal(t.next().0) && !terminal_has_boundary_cuts {
         ws.solver.set_col_bounds(&[state.theta], &[0.0], &[0.0]);
     }
 
-    let col_scale = &ctx.templates[t].col_scale;
+    let col_scale = &template.col_scale;
 
     // `mem::take` the scratch buffer out before the solve borrows ws, so it can
     // be filled from `view` slices tied to ws while `&mut ws` is live; restored
@@ -119,13 +120,14 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             // Forward pass solves one LP per (stage, scenario): always a fresh
             // solve, never a carried continuation.
             continue_carry: false,
+            node_id,
         };
         lazy_solve_preloaded(
             &mut ws.solver,
-            &ctx.templates[t],
+            template,
             pool,
             state,
-            &training_ctx.cut_state_layouts[t],
+            &training_ctx.cut_state_layouts[pool_id],
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,
@@ -142,17 +144,21 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         let inputs = StageInputs {
             stage_context: ctx,
             pool,
-            stored_basis: basis_slice.get_mut(m, t).as_ref(),
+            // Warm-start basis keyed by NODE, matching the backward pass and the
+            // store's node axis; keying by stage would alias sibling nodes that
+            // share a stage, forcing every branching warm-start cold.
+            stored_basis: basis_slice.get_mut(m, node).as_ref(),
             stage_index: t,
             scenario_index: m,
             iteration: Some(iteration),
+            node_id,
         };
 
         let view = run_stage_solve(ws, &inputs).map_err(|e| {
             // Invalidate the stored basis on Infeasible so the next warm-start
             // attempt cold-solves.
             if matches!(e, SddpError::Infeasible { .. }) {
-                *basis_slice.get_mut(m, t) = None;
+                *basis_slice.get_mut(m, node) = None;
             }
             e
         })?;
@@ -163,14 +169,23 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         objective
     };
 
-    let d_t = ctx.discount_factors.get(t).copied().unwrap_or(1.0);
-    let stage_cost = (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor;
-    let rec = &mut worker_records[local_m * num_stages + t];
-    // Only rec.state is consumed downstream; the backward pass needs no primal
-    // or dual here, and simulation reads them directly from the solver.
+    let d_t = ctx.discount_factors.get(t.0).copied().unwrap_or(1.0);
+    // Terminal boundary θ (post-horizon value-to-go) stays in the reported cost;
+    // the interior subtraction would drop it from the UB alone. sddp.md
+    // "Terminal boundary FCF in the reported total cost".
+    let stage_cost = if horizon.is_terminal(t.next().0) && terminal_has_boundary_cuts {
+        view_objective * ctx.cost_scale_factor
+    } else {
+        (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor
+    };
+    let rec = &mut worker_records[local_m * num_stages + t.0];
+    // rec.primal/dual stay empty: only state and node_id feed downstream
+    // consumers (the backward pass reads state; node_id tags the visit for
+    // per-node output) — simulation reads primal/dual directly from the solver.
     rec.primal.clear();
     rec.dual.clear();
     rec.stage_cost = stage_cost;
+    rec.node_id = node_id;
 
     // Save incoming lag values before overwriting state with primal.
     let lag_start = state.inflow_lags.start;
@@ -183,7 +198,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     ws.current_state.clear();
     ws.current_state
         .extend_from_slice(&unscaled_primal[..state.n_state]);
-    let stage_lag = resolve_stage_lag_transition(ctx.stage_lag_transitions, t);
+    let stage_lag = resolve_stage_lag_transition(ctx.stage_lag_transitions, t.0);
     let downstream_par_order = ws
         .scratch
         .downstream_completed_lags
@@ -217,25 +232,27 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // Capture the post-solve basis for next iteration's warm-start — frozen arm
     // ONLY. A DCS-solve basis describes the lazy resident-subset row layout, not
     // the frozen layout the warm-start reconstruction expects, so capturing it
-    // would corrupt the warm-start; the DCS path leaves the (m, t) slot untouched.
+    // would corrupt the warm-start; the DCS path leaves the (m, node) slot untouched.
     if dcs.is_none() {
-        let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
-        let captured = basis_slice.get_mut(m, t).get_or_insert_with(|| {
+        let cut_row_count = basis_row_capacity.saturating_sub(template.num_rows);
+        let captured = basis_slice.get_mut(m, node).get_or_insert_with(|| {
             CapturedBasis::new(
-                ctx.templates[t].num_cols,
+                template.num_cols,
                 basis_row_capacity,
-                ctx.templates[t].num_rows,
+                template.num_rows,
                 cut_row_count,
                 state.n_state,
+                node_id,
             )
         });
         ws.solver.get_basis(&mut captured.basis);
         write_capture_metadata(
             captured,
             pool,
-            ctx.templates[t].num_rows,
+            template.num_rows,
             cut_row_count,
             &ws.current_state[..state.n_state],
+            node_id,
         );
     }
     Ok(stage_cost)

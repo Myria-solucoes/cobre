@@ -34,10 +34,12 @@ pub struct StageData {
     /// study without multi-bus groups (see [`HydroCellIndex`] module docs).
     pub(crate) hydro_cell_index: HydroCellIndex,
 
-    /// Per-pool cut-state projection, indexed by stage (pool) `t`, paired 1:1
-    /// with [`crate::FutureCostFunction::pools`] (`pool t` sized by
-    /// `cut_state_layouts[t].n_slots()`) — the single owner of each pool's
-    /// cut-state dimension.
+    /// Per-pool cut-state projection, indexed by pool id, paired 1:1 with
+    /// [`crate::FutureCostFunction::pools`] (pool `p` sized by
+    /// `cut_state_layouts[p].n_slots()`) — the single owner of each pool's
+    /// cut-state dimension. `pool_id` is resolved from the node graph's
+    /// `node → pool` map (`NodeGraph::n_pools`); on the chain degeneracy
+    /// `pool_id == stage`.
     pub(crate) cut_state_layouts: Vec<CutStateProjection>,
 
     /// Study stages (id >= 0) in index order.

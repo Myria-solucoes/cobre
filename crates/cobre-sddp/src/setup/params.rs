@@ -2,13 +2,32 @@
 
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
-use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig, StoppingRuleConfig};
+use cobre_io::config::{
+    BackwardScheduler, ForwardPassesResolution, NumScenariosResolution, PhaseSolverProfileConfig,
+    StoppingRuleConfig,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     InflowNonNegativityMethod, SddpError,
     cut_selection::{CutSelectionStrategy, parse_cut_selection_config},
     stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet},
 };
+
+/// Simulation's `enumerated`-selection declaration, carried on
+/// [`StudyParams`]/[`ConstructionConfig`] until the node graph resolves
+/// [`StudyParams::n_scenarios`] (config load holds no graph to derive the
+/// count from). A plain externally-tagged enum carrying no
+/// `#[serde(tag = ...)]`, so it round-trips over the MPI broadcast wire
+/// without a postcard mirror type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SimulationEnumeratedRequest {
+    /// `sampled` selection (or the default); [`StudyParams::n_scenarios`] is
+    /// already final.
+    Sampled,
+    /// `enumerated` selection declared; the count is graph-derived downstream.
+    Enumerated,
+}
 
 /// Default number of forward-pass trajectories when not specified in config.
 pub const DEFAULT_FORWARD_PASSES: u32 = 1;
@@ -41,12 +60,25 @@ const COST_SCALE_FACTOR_ADVISORY_MAX: f64 = 1e12;
 pub struct StudyParams {
     /// Random seed for noise generation.
     pub seed: u64,
-    /// Number of forward-pass trajectories per training iteration.
+    /// Number of forward-pass trajectories per training iteration. A
+    /// placeholder ([`DEFAULT_FORWARD_PASSES`]) when [`Self::training_enumerated`]
+    /// is `true`, until the node graph resolves the derived count.
     pub forward_passes: u32,
+    /// `true` when `training.selection = enumerated` is declared — the setup
+    /// layer re-resolves [`Self::forward_passes`] from the node graph once it
+    /// exists (config load holds no graph to derive the count from).
+    pub training_enumerated: bool,
     /// Stopping rule set (rules + mode) governing when training halts.
     pub stopping_rule_set: StoppingRuleSet,
-    /// Number of simulation scenarios (0 if simulation is disabled).
+    /// Number of simulation scenarios (0 if simulation is disabled, or a
+    /// placeholder while [`Self::simulation_enumerated`] is
+    /// [`SimulationEnumeratedRequest::Enumerated`], until the node graph
+    /// resolves the derived count).
     pub n_scenarios: u32,
+    /// `simulation.selection`'s resolution — the setup layer re-resolves
+    /// [`Self::n_scenarios`] from the node graph once it exists when this is
+    /// [`SimulationEnumeratedRequest::Enumerated`].
+    pub simulation_enumerated: SimulationEnumeratedRequest,
     /// Buffer capacity for the simulation output channel.
     pub io_channel_capacity: usize,
     /// Policy directory path string.
@@ -69,13 +101,24 @@ pub struct StudyParams {
     /// Simulation solver profile override (`simulation.solver`).
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
     /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
-    /// carrying the opening-block size when the `opening_block` method is
+    /// carrying the opening-block size when the `by_node` method is
     /// selected.
     pub backward_scheduler: BackwardScheduler,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
     /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
     /// time — one value per study.
     pub cost_scale_factor: f64,
+    /// Effective inflow-lag state depth (`state_space.inflow_lag_depth`, already
+    /// widened to a loaded boundary policy's required depth by the setup entry
+    /// point); `None` when neither is declared. Widens `L_state` in
+    /// `resolve_state_layout` via `widen_lag_state_depth`.
+    pub inflow_lag_depth: Option<u32>,
+    /// `policy.boundary.is_some()`: whether the study declares a terminal
+    /// boundary FCF. Threaded into `build_transit_bucket_topology` so the
+    /// water-bucket terminal mask un-caps only for a study that will load one
+    /// (the "Terminal credit deferred" contract); the ACTUAL boundary cuts
+    /// load later, after `StudySetup` construction.
+    pub boundary_present: bool,
 }
 
 impl StudyParams {
@@ -90,10 +133,13 @@ impl StudyParams {
             .tree_seed
             .map_or(DEFAULT_SEED, i64::unsigned_abs);
 
-        let forward_passes = config
-            .training
-            .forward_passes
-            .unwrap_or(DEFAULT_FORWARD_PASSES);
+        let (forward_passes, training_enumerated) = match config.resolve_forward_passes() {
+            Some(ForwardPassesResolution::Sampled(n)) => (n, false),
+            None => (DEFAULT_FORWARD_PASSES, false),
+            // The node graph does not exist yet; DEFAULT_FORWARD_PASSES is a
+            // placeholder `from_broadcast_params` overwrites once it does.
+            Some(ForwardPassesResolution::Enumerated) => (DEFAULT_FORWARD_PASSES, true),
+        };
 
         let rule_configs = match &config.training.stopping_rules {
             Some(rules) if !rules.is_empty() => rules.clone(),
@@ -118,18 +164,29 @@ impl StudyParams {
                     iterations: u64::from(iterations),
                     tolerance,
                 }),
-                StoppingRuleConfig::Simulation { .. } => Err(SddpError::Validation(
-                    "simulation-based stopping rule is not yet implemented; \
-                     use iteration_limit, time_limit, or bound_stalling"
-                        .to_string(),
-                )),
+                StoppingRuleConfig::Gap {
+                    tolerance,
+                    relative_tolerance,
+                } => {
+                    if tolerance.is_none() && relative_tolerance.is_none() {
+                        Err(SddpError::Validation(
+                            "gap stopping rule requires at least one of tolerance / \
+                             relative_tolerance to be present"
+                                .to_string(),
+                        ))
+                    } else {
+                        Ok(StoppingRule::Gap {
+                            tolerance,
+                            relative_tolerance,
+                        })
+                    }
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let stopping_mode = if config.training.stopping_mode.eq_ignore_ascii_case("all") {
-            StoppingMode::All
-        } else {
-            StoppingMode::Any
+        let stopping_mode = match config.training.stopping_mode {
+            cobre_io::config::StoppingMode::Any => StoppingMode::Any,
+            cobre_io::config::StoppingMode::All => StoppingMode::All,
         };
 
         let stopping_rule_set = StoppingRuleSet {
@@ -137,10 +194,15 @@ impl StudyParams {
             mode: stopping_mode,
         };
 
-        let n_scenarios = if config.simulation.enabled {
-            config.simulation.num_scenarios
+        let (n_scenarios, simulation_enumerated) = if config.simulation.enabled {
+            match config.resolve_num_scenarios() {
+                NumScenariosResolution::Sampled(n) => (n, SimulationEnumeratedRequest::Sampled),
+                // The node graph does not exist yet; 0 is a placeholder
+                // `from_broadcast_params` overwrites once it does.
+                NumScenariosResolution::Enumerated => (0, SimulationEnumeratedRequest::Enumerated),
+            }
         } else {
-            0
+            (0, SimulationEnumeratedRequest::Sampled)
         };
 
         let io_channel_capacity =
@@ -197,11 +259,24 @@ impl StudyParams {
             );
         }
 
+        let inflow_lag_depth = config.state_space.inflow_lag_depth;
+        if inflow_lag_depth == Some(0) {
+            return Err(SddpError::Validation(
+                "state_space.inflow_lag_depth (0) must be >= 1; omit the field to leave the \
+                 depth undeclared"
+                    .to_string(),
+            ));
+        }
+
+        let boundary_present = config.policy.boundary.is_some();
+
         Ok(Self {
             seed,
             forward_passes,
+            training_enumerated,
             stopping_rule_set,
             n_scenarios,
+            simulation_enumerated,
             io_channel_capacity,
             policy_path,
             inflow_method,
@@ -213,6 +288,8 @@ impl StudyParams {
             simulation_solver,
             backward_scheduler,
             cost_scale_factor,
+            inflow_lag_depth,
+            boundary_present,
         })
     }
 
@@ -225,8 +302,10 @@ impl StudyParams {
         ConstructionConfig {
             seed: self.seed,
             forward_passes: self.forward_passes,
+            training_enumerated: self.training_enumerated,
             stopping_rule_set: self.stopping_rule_set,
             n_scenarios: self.n_scenarios,
+            simulation_enumerated: self.simulation_enumerated,
             io_channel_capacity: self.io_channel_capacity,
             policy_path: self.policy_path,
             inflow_method: self.inflow_method,
@@ -240,6 +319,8 @@ impl StudyParams {
             simulation_solver: self.simulation_solver,
             backward_scheduler: self.backward_scheduler,
             cost_scale_factor: self.cost_scale_factor,
+            inflow_lag_depth: self.inflow_lag_depth,
+            boundary_present: self.boundary_present,
         }
     }
 }
@@ -257,12 +338,26 @@ impl StudyParams {
 pub struct ConstructionConfig {
     /// Random seed for noise generation.
     pub seed: u64,
-    /// Number of forward-pass trajectories per training iteration.
+    /// Number of forward-pass trajectories per training iteration. A
+    /// placeholder ([`DEFAULT_FORWARD_PASSES`]) when [`Self::training_enumerated`]
+    /// is `true`, until [`StudySetup::from_broadcast_params`](super::StudySetup::from_broadcast_params)
+    /// resolves the derived count from the node graph.
     pub forward_passes: u32,
+    /// `true` when `training.selection = enumerated` is declared — the setup
+    /// layer re-resolves [`Self::forward_passes`] from the node graph once it
+    /// exists (config load holds no graph to derive the count from).
+    pub training_enumerated: bool,
     /// Stopping rule set (rules + mode) governing when training halts.
     pub stopping_rule_set: StoppingRuleSet,
-    /// Number of simulation scenarios (0 if simulation is disabled).
+    /// Number of simulation scenarios (0 if simulation is disabled, or a
+    /// placeholder while [`Self::simulation_enumerated`] is
+    /// [`SimulationEnumeratedRequest::Enumerated`], until the node graph
+    /// resolves the derived count).
     pub n_scenarios: u32,
+    /// `simulation.selection`'s resolution — the setup layer re-resolves
+    /// [`Self::n_scenarios`] from the node graph once it exists when this is
+    /// [`SimulationEnumeratedRequest::Enumerated`].
+    pub simulation_enumerated: SimulationEnumeratedRequest,
     /// Buffer capacity for the simulation output channel.
     pub io_channel_capacity: usize,
     /// Policy directory path string.
@@ -284,8 +379,8 @@ pub struct ConstructionConfig {
     /// cut selection strategy. Defaults to `false`; set based on
     /// `exports.states`.
     pub export_states: bool,
-    /// Loaded `system/scalar_parameters.json` entries, or empty when the file is
-    /// absent or the manifest flag `system_scalar_parameters_json` is `false`.
+    /// Loaded `constraints/generic_parameters.json` entries, or empty when the file is
+    /// absent or the manifest flag `constraints_generic_parameters_json` is `false`.
     /// Consumed by `build_resolved_parameters` to populate the per-`(parameter_id,
     /// stage_idx)` lookup table used by the LP builder.
     pub scalar_parameters: Vec<ScalarParameter>,
@@ -296,13 +391,22 @@ pub struct ConstructionConfig {
     /// Simulation solver profile override (`simulation.solver`).
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
     /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
-    /// carrying the opening-block size when the `opening_block` method is
+    /// carrying the opening-block size when the `by_node` method is
     /// selected.
     pub backward_scheduler: BackwardScheduler,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
     /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
     /// time — one value per study.
     pub cost_scale_factor: f64,
+    /// Effective inflow-lag state depth (`state_space.inflow_lag_depth`, already
+    /// widened to a loaded boundary policy's required depth by the setup entry
+    /// point); `None` when neither is declared. Widens `L_state` in
+    /// `resolve_state_layout` via `widen_lag_state_depth`.
+    pub inflow_lag_depth: Option<u32>,
+    /// `policy.boundary.is_some()`; threaded into
+    /// `bucket_topology::build_transit_bucket_topology` so every rank builds
+    /// the identical (un-capped-or-not) water-bucket terminal mask.
+    pub boundary_present: bool,
 }
 
 #[cfg(test)]
@@ -312,10 +416,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        BoundaryPolicy, Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, ParallelismConfig,
         PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-        StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+        SimulationSelection, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
+        TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use tracing::{Event, Level, Metadata, Subscriber, span};
 
@@ -392,6 +497,7 @@ mod tests {
     fn base_test_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -401,13 +507,13 @@ mod tests {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -421,7 +527,7 @@ mod tests {
     /// budget-below-forward-passes warning fires.
     fn config_with_budget_below_forward_passes() -> Config {
         let mut config = base_test_config();
-        config.training.forward_passes = Some(2);
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 2 });
         config.training.cut_selection = RowSelectionConfig {
             max_active_per_stage: Some(1),
             ..RowSelectionConfig::default()
@@ -429,16 +535,51 @@ mod tests {
         config
     }
 
-    /// Stopping rules containing a `Simulation` entry.
-    fn config_with_simulation_stopping_rule() -> Config {
+    /// Stopping rules containing a `Gap` entry with neither `tolerance` nor
+    /// `relative_tolerance` set.
+    fn config_with_gap_stopping_rule_neither_field() -> Config {
         let mut config = base_test_config();
-        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Simulation {
-            replications: 100,
-            period: 12,
-            bound_window: 10,
-            distance_tol: 0.05,
-            bound_tol: 0.01,
+        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
+            tolerance: None,
+            relative_tolerance: None,
         }]);
+        config
+    }
+
+    /// Stopping rules containing a well-formed absolute-only `Gap` entry.
+    fn config_with_gap_stopping_rule() -> Config {
+        let mut config = base_test_config();
+        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
+            tolerance: Some(1000.0),
+            relative_tolerance: None,
+        }]);
+        config
+    }
+
+    /// A relative-only `Gap` entry with no user `BoundStalling`.
+    fn config_with_gap_relative_only() -> Config {
+        let mut config = base_test_config();
+        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
+            tolerance: None,
+            relative_tolerance: Some(0.01),
+        }]);
+        config
+    }
+
+    /// A relative-only `Gap` entry alongside a user-declared `BoundStalling` —
+    /// both rules pass through unchanged.
+    fn config_with_gap_relative_and_user_bound_stalling() -> Config {
+        let mut config = base_test_config();
+        config.training.stopping_rules = Some(vec![
+            StoppingRuleConfig::Gap {
+                tolerance: None,
+                relative_tolerance: Some(0.01),
+            },
+            StoppingRuleConfig::BoundStalling {
+                iterations: 7,
+                tolerance: 0.5,
+            },
+        ]);
         config
     }
 
@@ -447,6 +588,25 @@ mod tests {
     fn config_with_cost_scale_factor(value: Option<f64>) -> Config {
         let mut config = base_test_config();
         config.modeling.cost_scale_factor = value;
+        config
+    }
+
+    /// `state_space.inflow_lag_depth` set to `value` (`None` reproduces the
+    /// default-absent shape).
+    fn config_with_inflow_lag_depth(value: Option<u32>) -> Config {
+        let mut config = base_test_config();
+        config.state_space.inflow_lag_depth = value;
+        config
+    }
+
+    /// `policy.boundary` present or absent; the checkpoint `path` is never
+    /// read by `from_config` (only `.is_some()` matters here).
+    fn config_with_boundary(present: bool) -> Config {
+        let mut config = base_test_config();
+        config.policy.boundary = present.then(|| BoundaryPolicy {
+            path: "unused".to_string(),
+            source_stage: None,
+        });
         config
     }
 
@@ -556,28 +716,224 @@ mod tests {
         }
     }
 
-    /// `from_config` must return `SddpError::Validation` when the stopping
-    /// rules list contains a `simulation_based` entry, because the feature is
-    /// not yet implemented. Silent no-op (fold into iteration limit) is
-    /// forbidden.
+    /// An absent `state_space.inflow_lag_depth` resolves to `None` — today's
+    /// undeclared-depth shape.
     #[test]
-    fn from_config_rejects_simulation_stopping_rule() {
+    fn inflow_lag_depth_absent_resolves_to_none() {
+        let params = StudyParams::from_config(&config_with_inflow_lag_depth(None))
+            .expect("absent inflow_lag_depth is valid");
+        assert_eq!(params.inflow_lag_depth, None);
+    }
+
+    /// A present `state_space.inflow_lag_depth` resolves to `Some(value)` and is
+    /// carried through to the derived `ConstructionConfig`.
+    #[test]
+    fn inflow_lag_depth_present_resolves_and_carries_to_construction_config() {
+        let params = StudyParams::from_config(&config_with_inflow_lag_depth(Some(12)))
+            .expect("12 is a valid inflow_lag_depth");
+        assert_eq!(params.inflow_lag_depth, Some(12));
+        let construction = params.into_construction_config();
+        assert_eq!(construction.inflow_lag_depth, Some(12));
+    }
+
+    /// `from_config` rejects `state_space.inflow_lag_depth == 0` with
+    /// `SddpError::Validation` naming the field.
+    #[test]
+    fn inflow_lag_depth_zero_rejected() {
         use crate::SddpError;
 
-        let err = StudyParams::from_config(&config_with_simulation_stopping_rule())
-            .expect_err("Simulation stopping rule must be rejected");
+        let err = StudyParams::from_config(&config_with_inflow_lag_depth(Some(0)))
+            .expect_err("inflow_lag_depth of 0 must be rejected");
+        assert!(
+            matches!(err, SddpError::Validation(_)),
+            "expected SddpError::Validation, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("state_space.inflow_lag_depth"),
+            "error message must name 'state_space.inflow_lag_depth'; got: {err}"
+        );
+    }
+
+    /// An absent `policy.boundary` resolves `boundary_present` to `false`.
+    #[test]
+    fn boundary_present_absent_resolves_to_false() {
+        let params = StudyParams::from_config(&config_with_boundary(false))
+            .expect("absent policy.boundary is valid");
+        assert!(!params.boundary_present);
+    }
+
+    /// A present `policy.boundary` resolves `boundary_present` to `true` and
+    /// carries through to the derived `ConstructionConfig`.
+    #[test]
+    fn boundary_present_true_resolves_and_carries_to_construction_config() {
+        let params = StudyParams::from_config(&config_with_boundary(true))
+            .expect("present policy.boundary is valid");
+        assert!(params.boundary_present);
+        let construction = params.into_construction_config();
+        assert!(construction.boundary_present);
+    }
+
+    /// `from_config` rejects a `Gap` rule with neither `tolerance` nor
+    /// `relative_tolerance` set, naming both fields.
+    #[test]
+    fn from_config_rejects_gap_stopping_rule_with_neither_field() {
+        use crate::SddpError;
+
+        let err = StudyParams::from_config(&config_with_gap_stopping_rule_neither_field())
+            .expect_err("Gap stopping rule with neither field must be rejected");
         assert!(
             matches!(err, SddpError::Validation(_)),
             "expected SddpError::Validation, got: {err:?}"
         );
         let msg = err.to_string();
         assert!(
-            msg.contains("simulation-based stopping rule"),
-            "error message must mention 'simulation-based stopping rule'; got: {msg}"
+            msg.contains("tolerance"),
+            "error message must mention 'tolerance'; got: {msg}"
         );
         assert!(
-            msg.contains("not yet implemented"),
-            "error message must say 'not yet implemented'; got: {msg}"
+            msg.contains("relative_tolerance"),
+            "error message must mention 'relative_tolerance'; got: {msg}"
+        );
+    }
+
+    /// `from_config` maps a well-formed absolute-only `Gap` rule to the runtime
+    /// rule and injects no `BoundStalling` — no rule is ever auto-added.
+    #[test]
+    fn from_config_maps_absolute_gap_rule() {
+        use crate::stopping_rule::StoppingRule;
+
+        let params = StudyParams::from_config(&config_with_gap_stopping_rule())
+            .expect("a well-formed Gap rule maps successfully");
+        let rules = &params.stopping_rule_set.rules;
+        assert!(
+            rules.iter().any(|r| matches!(
+                r,
+                StoppingRule::Gap {
+                    tolerance: Some(_),
+                    relative_tolerance: None
+                }
+            )),
+            "the Gap rule must be present as a runtime rule: {rules:?}"
+        );
+        assert!(
+            !rules
+                .iter()
+                .any(|r| matches!(r, StoppingRule::BoundStalling { .. })),
+            "no bound_stalling rule may be auto-added: {rules:?}"
+        );
+    }
+
+    /// A relative-tolerance `Gap` with no user `BoundStalling` maps to the `Gap`
+    /// rule alone — no `BoundStalling` companion is auto-injected, and nothing is
+    /// logged about one.
+    #[test]
+    fn from_config_relative_gap_does_not_inject_bound_stalling_companion() {
+        use crate::stopping_rule::StoppingRule;
+
+        let (subscriber, messages) = WarnRecorder::new();
+        let params = tracing::subscriber::with_default(subscriber, || {
+            StudyParams::from_config(&config_with_gap_relative_only())
+                .expect("a relative-only Gap rule maps successfully")
+        });
+        let rules = &params.stopping_rule_set.rules;
+        assert!(
+            !rules
+                .iter()
+                .any(|r| matches!(r, StoppingRule::BoundStalling { .. })),
+            "a relative-only Gap must not auto-inject a bound_stalling companion: {rules:?}"
+        );
+        let recorded = messages.lock().unwrap();
+        assert!(
+            !recorded.iter().any(|m| m.contains("companion")),
+            "no companion-injection advisory may be logged: {recorded:?}"
+        );
+    }
+
+    /// A user-declared `BoundStalling` alongside a `Gap` rule passes through
+    /// unchanged and is never doubled.
+    #[test]
+    fn from_config_gap_with_user_bound_stalling_passes_through() {
+        use crate::stopping_rule::StoppingRule;
+
+        let params = StudyParams::from_config(&config_with_gap_relative_and_user_bound_stalling())
+            .expect("Gap + explicit BoundStalling maps successfully");
+        let rules = &params.stopping_rule_set.rules;
+        let bound_stallings: Vec<&StoppingRule> = rules
+            .iter()
+            .filter(|r| matches!(r, StoppingRule::BoundStalling { .. }))
+            .collect();
+        assert_eq!(
+            bound_stallings.len(),
+            1,
+            "the user's BoundStalling must be the only one present: {rules:?}"
+        );
+        assert!(
+            matches!(
+                bound_stallings[0],
+                StoppingRule::BoundStalling {
+                    tolerance,
+                    iterations
+                } if *tolerance == 0.5 && *iterations == 7
+            ),
+            "the user's BoundStalling values must survive: {rules:?}"
+        );
+    }
+
+    /// `from_config` resolves the forward-pass count from a `sampled` selection.
+    #[test]
+    fn from_config_resolves_forward_passes_from_selection() {
+        let mut via_selection = base_test_config();
+        via_selection.training.selection = Some(TrainingSelection::Sampled { forward_passes: 8 });
+        let params_selection = StudyParams::from_config(&via_selection)
+            .expect("sampled selection is a valid forward-pass source");
+        assert_eq!(params_selection.forward_passes, 8);
+    }
+
+    /// `from_config` resolves the simulation scenario count from a `sampled`
+    /// selection when simulation is enabled.
+    #[test]
+    fn from_config_resolves_num_scenarios_from_selection() {
+        let mut config = base_test_config();
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 500 });
+        let params =
+            StudyParams::from_config(&config).expect("sampled simulation selection is valid");
+        assert_eq!(params.n_scenarios, 500);
+        assert_eq!(
+            params.simulation_enumerated,
+            super::SimulationEnumeratedRequest::Sampled
+        );
+    }
+
+    /// `from_config` accepts a training `enumerated` selection (the load-time
+    /// rejection is lifted): `forward_passes` carries the
+    /// [`super::DEFAULT_FORWARD_PASSES`] placeholder and `training_enumerated`
+    /// signals the setup layer to re-resolve it from the node graph.
+    #[test]
+    fn from_config_accepts_training_enumerated_selection() {
+        let mut config = base_test_config();
+        config.training.selection = Some(TrainingSelection::Enumerated {});
+        let params =
+            StudyParams::from_config(&config).expect("enumerated training selection is valid");
+        assert_eq!(params.forward_passes, super::DEFAULT_FORWARD_PASSES);
+        assert!(params.training_enumerated);
+    }
+
+    /// `from_config` accepts a simulation `enumerated` selection: `n_scenarios`
+    /// carries the `0` placeholder and the request is
+    /// [`super::SimulationEnumeratedRequest::Enumerated`], with the census count
+    /// resolved from the node graph downstream.
+    #[test]
+    fn from_config_accepts_simulation_enumerated_selection() {
+        let mut config = base_test_config();
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Enumerated {});
+        let params =
+            StudyParams::from_config(&config).expect("enumerated simulation selection is valid");
+        assert_eq!(params.n_scenarios, 0);
+        assert_eq!(
+            params.simulation_enumerated,
+            super::SimulationEnumeratedRequest::Enumerated
         );
     }
 

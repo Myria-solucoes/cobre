@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use cobre_core::{
-    EntityId, GenericConstraint, ScalarParameter,
+    EntityId, GenericConstraint, PostStudyStages, ScalarParameter,
     entities::{Bus, EnergyContract, Hydro, Line, NonControllableSource, PumpingStation, Thermal},
     initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
@@ -26,10 +26,11 @@ use crate::{
         BusPenaltyOverrideRow, ContractBoundsRow, GenericConstraintBoundsRow, HydroBoundsRow,
         HydroPenaltyOverrideRow, HydroUnitGroupBoundsRow, LineBoundsRow, LinePenaltyOverrideRow,
         NcsBoundsRow, NcsPenaltyOverrideRow, PumpingBoundsRow, ThermalBoundsRow,
-        load_contract_bounds, load_generic_constraint_bounds, load_generic_constraints,
-        load_hydro_bounds, load_hydro_unit_group_bounds, load_line_bounds, load_ncs_bounds,
-        load_penalty_overrides_bus, load_penalty_overrides_hydro, load_penalty_overrides_line,
-        load_penalty_overrides_ncs, load_pumping_bounds, load_thermal_bounds,
+        build_line_bus_pair_index, load_contract_bounds, load_generic_constraint_bounds,
+        load_generic_constraints, load_hydro_bounds, load_hydro_unit_group_bounds,
+        load_line_bounds, load_ncs_bounds, load_penalty_overrides_bus,
+        load_penalty_overrides_hydro, load_penalty_overrides_line, load_penalty_overrides_ncs,
+        load_pumping_bounds, load_thermal_bounds,
     },
     extensions::{
         FphaHyperplaneRow, HydroEnergyProductivityRow, HydroGeometryRow, PlaneReductionConfig,
@@ -39,6 +40,7 @@ use crate::{
     },
     initial_conditions::parse_initial_conditions,
     penalties::parse_penalties,
+    post_study_stages::parse_post_study_stages,
     scenarios::{
         ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, InflowAnnualComponentRow,
         InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow, LoadFactorEntry,
@@ -75,6 +77,8 @@ pub(crate) struct ParsedData {
     pub(crate) stages: StagesData,
     /// `initial_conditions.json`.
     pub(crate) initial_conditions: InitialConditions,
+    /// `post_study_stages.json`. `None` when absent.
+    pub(crate) post_study_stages: Option<PostStudyStages>,
 
     /// `system/buses.json`.
     pub(crate) buses: Vec<Bus>,
@@ -102,7 +106,7 @@ pub(crate) struct ParsedData {
     pub(crate) hydro_energy_productivity_rows: Vec<HydroEnergyProductivityRow>,
     /// `system/fpha_hyperplanes.parquet`.
     pub(crate) fpha_hyperplanes: Vec<FphaHyperplaneRow>,
-    /// `system/scalar_parameters.json`.
+    /// `constraints/generic_parameters.json`.
     // Rationale: the field is populated by the schema-validation layer for the expression-resolution
     // step that substitutes `@name` sigils in constraint expressions; removing it would discard
     // the parsed data and require re-parsing from disk at that step.
@@ -252,6 +256,15 @@ pub(crate) fn validate_schema(
     let initial_conditions = parse_or_error(
         parse_initial_conditions(&case_root.join("initial_conditions.json")),
         "initial_conditions.json",
+        ctx,
+    );
+
+    // `Option` (not the aggregate): callers distinguish "no file" from an empty deck.
+    let post_study_stages: Option<PostStudyStages> = optional_or_error(
+        manifest.post_study_stages_json,
+        || parse_post_study_stages(&case_root.join("post_study_stages.json")).map(Some),
+        || None,
+        "post_study_stages.json",
         ctx,
     );
 
@@ -527,10 +540,10 @@ pub(crate) fn validate_schema(
     // Must load BEFORE generic_constraints below: it resolves the `@name` sigils
     // in constraint expressions. Reordering breaks that resolution.
     let scalar_parameters: Vec<ScalarParameter> = optional_or_error(
-        manifest.system_scalar_parameters_json,
-        || parse_scalar_parameters_json(&case_root.join("system/scalar_parameters.json")),
+        manifest.constraints_generic_parameters_json,
+        || parse_scalar_parameters_json(&case_root.join("constraints/generic_parameters.json")),
         Vec::new,
-        "system/scalar_parameters.json",
+        "constraints/generic_parameters.json",
         ctx,
     );
 
@@ -544,9 +557,11 @@ pub(crate) fn validate_schema(
     let generic_constraints = optional_or_error(
         manifest.constraints_generic_constraints_json,
         || {
+            let line_pair_index = build_line_bus_pair_index(lines.as_deref().unwrap_or(&[]))?;
             load_generic_constraints(
                 Some(&case_root.join("constraints/generic_constraints.json")),
                 &scalar_name_to_id,
+                &line_pair_index,
             )
         },
         Vec::new,
@@ -654,6 +669,7 @@ pub(crate) fn validate_schema(
         penalties,
         stages,
         initial_conditions,
+        post_study_stages,
         buses,
         thermals,
         hydros,
@@ -790,7 +806,7 @@ mod tests {
     // field name is "limit" (not "max_iterations").
     const VALID_CONFIG_JSON: &str = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ]
@@ -831,7 +847,7 @@ mod tests {
     // stages.json: `target_id` in transitions must be an integer (not null).
     // For a single-stage finite horizon we omit transitions entirely.
     // Only mandatory per-stage fields: id, start_date, end_date, blocks,
-    // num_scenarios. season_id, block_mode, state_variables, risk_measure,
+    // num_openings. season_id, block_mode, state_variables, risk_measure,
     // sampling_method all have serde defaults and are optional.
     const VALID_STAGES_JSON: &str = r#"{
         "policy_graph": {
@@ -845,7 +861,7 @@ mod tests {
                 "start_date": "2024-01-01",
                 "end_date": "2024-02-01",
                 "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-                "num_scenarios": 50
+                "num_openings": 50
             }
         ]
     }"#;

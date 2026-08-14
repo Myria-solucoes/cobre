@@ -252,11 +252,9 @@ pub fn load_noise_openings(path: Option<&Path>) -> Result<Vec<NoiseOpeningRow>, 
 ///     external_load_scenarios: vec![],
 ///     external_ncs_scenarios: vec![],
 ///     load_factors: vec![],
-///     noise_openings: vec![],
 /// };
 /// assert!(data.inflow_models.is_empty());
 /// assert!(data.correlation.profiles.is_empty());
-/// assert!(data.noise_openings.is_empty());
 /// ```
 #[derive(Debug, Clone)]
 pub struct ScenarioData {
@@ -278,8 +276,6 @@ pub struct ScenarioData {
     pub external_ncs_scenarios: Vec<ExternalNcsRow>,
     /// Load factor entries, sorted by `(bus_id, stage_id)`.
     pub load_factors: Vec<LoadFactorEntry>,
-    /// Noise opening rows, sorted by `(stage_id, opening_index, entity_index)`.
-    pub noise_openings: Vec<NoiseOpeningRow>,
 }
 
 // ── load_scenarios ────────────────────────────────────────────────────────────
@@ -389,12 +385,6 @@ pub fn load_scenarios(
             .then(|| scenarios_dir.join("external_ncs_scenarios.parquet"))
             .as_deref(),
     )?;
-    let noise_openings = load_noise_openings(
-        manifest
-            .scenarios_noise_openings_parquet
-            .then(|| scenarios_dir.join("noise_openings.parquet"))
-            .as_deref(),
-    )?;
     let ncs_models = load_ncs_stats(
         manifest
             .scenarios_non_controllable_stats_parquet
@@ -424,7 +414,6 @@ pub fn load_scenarios(
         external_load_scenarios,
         external_ncs_scenarios,
         load_factors,
-        noise_openings,
     })
 }
 
@@ -551,20 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_scenarios_noise_openings_absent() {
-        let dir = TempDir::new().unwrap();
-        let manifest = FileManifest::default();
-
-        let data =
-            load_scenarios(dir.path(), &manifest).expect("empty manifest should always succeed");
-
-        assert!(
-            data.noise_openings.is_empty(),
-            "noise_openings should be empty when scenarios_noise_openings_parquet flag is false"
-        );
-    }
-
-    #[test]
     fn test_load_scenarios_no_annual_file_yields_none_field() {
         let dir = TempDir::new().unwrap();
         let manifest = FileManifest::default();
@@ -611,7 +586,7 @@ mod tests {
                     "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
                     "season_id": 0,
                     "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-                    "num_scenarios": 10
+                    "num_openings": 10
                 }]
             }"#,
         )

@@ -86,16 +86,24 @@ impl NoiseEntityOrder {
     }
 }
 
-/// Derive `system`'s canonical noise-entity layout.
+/// Derive `system`'s canonical noise-entity layout under `schemes`.
 ///
 /// Single owner: every site sizing or slicing the noise vector calls this rather
 /// than re-deriving a class block — a second copy that omits the NCS block sizes
 /// the noise vector short, and the samplers' NCS class offset
 /// (`hydro_ids.len() + load_bus_ids.len()`) then indexes past the end of a row.
-/// An NCS with `std = 0` is included: it contributes zero noise after the
-/// transform, and dropping it would shift the canonical entity order.
+/// An NCS with `std = 0` is included unconditionally: it contributes zero noise
+/// after the transform, and dropping it would shift the canonical entity order.
+///
+/// Load-bus membership defers to [`LoadModel::is_noise_member`], the single
+/// membership authority — this fn does not re-derive the predicate. Inflow
+/// stays all-hydros and NCS stays unfiltered; only load's membership reads
+/// `schemes`. Every caller must pass the SAME resolved `schemes` (the training
+/// scenario source) so the external-library width check, the opening-tree
+/// layout, and the backward assembly all agree on which entities occupy the
+/// vector.
 #[must_use]
-pub fn noise_entity_order(system: &System) -> NoiseEntityOrder {
+pub fn noise_entity_order(system: &System, schemes: &ClassSchemes) -> NoiseEntityOrder {
     let sorted_dedup = |mut ids: Vec<EntityId>| {
         ids.sort_unstable_by_key(|id| id.0);
         ids.dedup();
@@ -108,7 +116,7 @@ pub fn noise_entity_order(system: &System) -> NoiseEntityOrder {
             system
                 .load_models()
                 .iter()
-                .filter(|m| m.std_mw > 0.0)
+                .filter(|m| m.is_noise_member(schemes.load.unwrap_or(SamplingScheme::InSample)))
                 .map(|m| m.bus_id)
                 .collect(),
         ),
@@ -446,7 +454,7 @@ pub fn build_stochastic_context(
         .cloned()
         .collect();
 
-    let noise_order = noise_entity_order(system);
+    let noise_order = noise_entity_order(system, &schemes);
     let dim = noise_order.dim();
     let entity_order = noise_order.entity_order();
     let NoiseEntityOrder {
@@ -1216,7 +1224,14 @@ mod tests {
             .build()
             .unwrap();
 
-        let order = noise_entity_order(&system);
+        let order = noise_entity_order(
+            &system,
+            &ClassSchemes {
+                inflow: None,
+                load: None,
+                ncs: None,
+            },
+        );
 
         assert_eq!(order.dim(), 5, "2 hydros + 1 stochastic load bus + 2 NCS");
         assert_eq!(
@@ -1229,6 +1244,55 @@ mod tests {
                 EntityId(21)
             ],
             "blocks concatenate as hydros ++ load buses ++ NCS, each canonically ordered"
+        );
+    }
+
+    /// R2: a `std_mw = 0.0` load bus is excluded by default (`std_mw > 0.0`
+    /// only, unchanged), but included once its class scheme is `External` --
+    /// membership becomes external-additive without touching inflow
+    /// (all-hydros) or NCS (unfiltered, the C5 invariant above).
+    #[test]
+    fn noise_entity_order_load_membership_is_external_additive() {
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0), make_bus(10)])
+            .hydros(vec![make_hydro(1)])
+            .stages(vec![make_stage(0, 0, 3)])
+            .inflow_models(vec![make_inflow_model(1, 0, 30.0, vec![])])
+            .load_models(vec![
+                make_load_model(10, 0, 100.0, 10.0),
+                make_load_model(0, 0, 50.0, 0.0),
+            ])
+            .correlation(identity_correlation(&[1]))
+            .build()
+            .unwrap();
+
+        let default_order = noise_entity_order(
+            &system,
+            &ClassSchemes {
+                inflow: None,
+                load: None,
+                ncs: None,
+            },
+        );
+        assert_eq!(
+            default_order.load_bus_ids,
+            vec![EntityId(10)],
+            "without an External load scheme, membership stays std_mw > 0 only"
+        );
+
+        let external_order = noise_entity_order(
+            &system,
+            &ClassSchemes {
+                inflow: None,
+                load: Some(SamplingScheme::External),
+                ncs: None,
+            },
+        );
+        assert_eq!(
+            external_order.load_bus_ids,
+            vec![EntityId(0), EntityId(10)],
+            "load_scheme == External admits the std_mw == 0.0 bus alongside the \
+             stochastic one"
         );
     }
 

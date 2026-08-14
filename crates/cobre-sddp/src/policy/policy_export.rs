@@ -4,52 +4,60 @@
 //! trained [`FutureCostFunction`] and [`TrainingResult`] into the `cobre-io`
 //! policy types needed by [`cobre_io::write_policy_checkpoint`].
 
+// Rationale: the counts and indices harvested from a trained FutureCostFunction
+// (cut counts, warm-start counts, state/slot indices) are small non-negative
+// usize/u32 values written into fixed-width FlatBuffers fields; the narrowing
+// casts are pervasive across this file's converters and each is bounded far
+// below its target width.
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use crate::visited_states::VisitedStatesArchive;
+use chrono::NaiveDate;
 use cobre_core::System;
 use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
-    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, OwnedPolicyCutRecord, PolicyBasisRecord,
-    PolicyCutRecord, StageCutsPayload, StageStatesPayload,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
+    OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, StageCutsPayload, StageStatesPayload,
 };
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
+use crate::indexer::{CommitmentHoldAddress, CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
+use crate::setup::{
+    NodeGraph, NodePos, post_horizon_delivery_date, post_horizon_delivery_interval,
+    year_month_day_anchor,
+};
 use crate::training::TrainingResult;
 
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
+pub(crate) const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
 /// `EntityType::HydroInflowLag` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
+pub(crate) const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
 /// `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
+pub(crate) const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 /// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
-
-/// Canonical absolute delivery/arrival calendar anchor of a stage `start_date`,
-/// encoded `year * 12 + (month - 1)`. Year-month granularity is what makes the
-/// anchor stable across stage resolutions: the same calendar month maps to the
-/// same anchor whether resolved from a weekly or a monthly stage.
-fn year_month_anchor(date: chrono::NaiveDate) -> i32 {
-    use chrono::Datelike;
-    // `month0()` is 0..=11, so the conversion never fails.
-    date.year() * 12 + i32::try_from(date.month0()).unwrap_or(0)
-}
+pub(crate) const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
 
 /// Build the per-slot entity-identity manifest for one stage's cut pool: one
 /// [`EntitySlot`] per enabled cut-state dimension of `projection`.
 ///
-/// Slots are emitted in `projection`'s storage → lag → buckets → anticipated order, so slot
-/// `j` describes the entity owning positional coefficient `j` — the order a
-/// consumer matches the manifest against the cut coefficients. Each slot is
-/// classified by the global [`StateSpace`] region containing its incoming-state
-/// column ([`CutStateProjection::incoming_column`]), never by
-/// re-deriving column arithmetic.
+/// Slots are emitted in `projection`'s storage → lag → buckets →
+/// commitment-hold order, so slot `j` describes the entity owning positional
+/// coefficient `j` — the order a consumer matches the manifest against the cut
+/// coefficients. Each slot is classified by the global [`StateSpace`] region
+/// containing its incoming-state column ([`CutStateProjection::incoming_column`]),
+/// never by re-deriving column arithmetic.
 ///
 /// Each hydro-region slot's `was_active` comes from [`hydro_operating_active`].
+/// The commitment-hold region covers both the in-study anticipated ring and the
+/// terminal post-horizon lanes; a post-horizon lane reuses
+/// `EntityType::AnticipatedThermalState` (no new discriminant), keyed on its
+/// owning thermal's id with `subindex = k_max + local_window_index` — offset
+/// past the ring's own `[0, k_max)` domain so a thermal owning both ring slots
+/// and post-horizon lanes never collides on `(entity_type, entity_id,
+/// subindex)`; its `delivery_date` is the `YYYYMM01` anchor of the window's
+/// resolved destination post-study stage (`StateSpace::commitment_window_dest_stage`).
 ///
 /// # Panics (debug builds only)
 ///
@@ -69,12 +77,16 @@ pub fn build_stage_entity_manifest(
         .iter()
         .filter(|t| t.anticipated_config.is_some())
         .collect();
-    // Single owner of the anticipated ring's slot-major/plant-minor addressing
-    // (see `lp_builder::delivery_ring`); only `slot_lane_at`'s reverse
-    // decomposition is read here — the manifest never emits ring rows/columns.
+    // Single owner of the in-study anticipated ring's slot-major/plant-minor
+    // addressing (see `lp_builder::delivery_ring`); only `slot_lane_at`'s
+    // reverse decomposition is read here — the manifest never emits ring
+    // rows/columns. Built over `commit_out`/`commit_in`'s LEADING in-study
+    // sub-range (width `n_ant_state`); the trailing post-horizon lanes resolve
+    // separately below, never through this ring.
+    let n_ant_state = n_anticipated * global_layout.k_max;
     let anticipated_ring = DeliveryRing::new(
-        global_layout.anticipated_slots_out.clone(),
-        global_layout.anticipated_state.clone(),
+        global_layout.commit_out.start..global_layout.commit_out.start + n_ant_state,
+        global_layout.commit_in.start..global_layout.commit_in.start + n_ant_state,
         n_anticipated,
         global_layout.k_max,
     );
@@ -88,28 +100,30 @@ pub fn build_stage_entity_manifest(
     let anchor_at = |offset: usize| -> i32 {
         current_stage_idx
             .and_then(|t| study_stages.get(t + offset))
-            .map_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, |s| {
-                year_month_anchor(s.start_date)
+            .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |s| {
+                year_month_day_anchor(s.start_date)
             })
     };
 
     let anticipated_slot = |offset: usize| -> EntitySlot {
         let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
         let plant = anticipated_thermals[plant_pos];
-        // The ring shifts one stage per transition, so slot `slot_idx` observed
-        // at stage `t` matures at delivery stage `t + slot_idx` regardless of
-        // lead mode (constant `LeadStages` or calendar-derived `LeadTime`).
-        // Reachability uses the SAME per-plant bound the LP masking itself
-        // uses (`anticipated_lead_stages[plant_pos]`, populated from
-        // `AnticipatedResolution` for both lead modes by
-        // `resolve_anticipated_commitments`): a slot beyond it is structural
-        // padding (frozen `[0, 0]`), not a real commitment, even when
-        // `t + slot_idx` itself still lands inside the horizon — the
-        // multi-plant heterogeneous-lead case.
+        // `slot_idx` is the ring's modular residue `m mod k_max`, NOT a
+        // distance-to-maturity: the delivery stage is the next `m >= t` in that
+        // residue class (`t + delta` below), so the slot maturing at `t` is
+        // `t mod k_max` delivering at `m = t` — matching the producer
+        // `fill_anticipated_fishing_entries`. Dating the slot at `t + slot_idx`
+        // (the retired shift-ring form) is wrong whenever `t mod k_max != 0`.
+        // Reachability uses the SAME per-plant bound the LP masking itself uses
+        // (`anticipated_lead_stages[plant_pos]`): a slot beyond it is structural
+        // padding (frozen `[0, 0]`), not a real commitment, even when `m` itself
+        // still lands inside the horizon — the multi-plant heterogeneous-lead case.
         let k_i = global_layout.anticipated_lead_stages[plant_pos];
-        let delivery_anchor = if slot_idx < k_i {
-            current_stage_idx.map_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, |t| {
-                let m = t + slot_idx;
+        let delivery_date = if slot_idx < k_i {
+            current_stage_idx.map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |t| {
+                let delta = (slot_idx + global_layout.k_max - t % global_layout.k_max)
+                    % global_layout.k_max;
+                let m = t + delta;
                 // Defensive cross-check against the resolver (the single owner
                 // of c(m), from `resolve_point`): a within-study decider must
                 // have already fired by `t`; a pre-study (IC-seeded) delivery
@@ -125,17 +139,52 @@ pub fn build_stage_entity_manifest(
                         .is_none_or(|decided_at| decided_at <= t),
                     "anticipated delivery {m} observed at stage {t} was not yet decided"
                 );
-                anchor_at(slot_idx)
+                anchor_at(delta)
             })
         } else {
-            ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL
+            ENTITY_SLOT_DELIVERY_DATE_SENTINEL
         };
         EntitySlot {
             entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
             entity_id: plant.id.0,
             subindex: slot_idx as u32,
             was_active: commissioning_active(plant.entry_stage_id, plant.exit_stage_id, stage_id),
-            delivery_anchor,
+            delivery_date,
+        }
+    };
+
+    // Reuses the anticipated-thermal family (no new EntityType discriminant):
+    // `subindex = k_max + local_window_index`, where `local_window_index` is
+    // the count of prior windows sharing this owner in
+    // `commitment_window_thermal_id`'s canonical order. Offsetting past
+    // `[0, k_max)` — the ring's own subindex domain — is what keeps a thermal
+    // owning both ring slots and commitment windows collision-free on
+    // `(entity_type, entity_id, subindex)`; dropping the `k_max` offset would
+    // silently alias a commitment window onto a genuine ring slot.
+    let commitment_slot = |w: usize| -> EntitySlot {
+        let thermal_id = global_layout.commitment_window_thermal_id[w];
+        let local_window_index = global_layout.commitment_window_thermal_id[..w]
+            .iter()
+            .filter(|&&id| id == thermal_id)
+            .count();
+        let subindex = global_layout.k_max + local_window_index;
+        debug_assert!(
+            subindex >= global_layout.k_max,
+            "commitment-block subindex must land outside the ring's [0, k_max) domain"
+        );
+        let owning_thermal = anticipated_thermals.iter().find(|t| t.id == thermal_id);
+        debug_assert!(
+            owning_thermal.is_some(),
+            "commitment window {w}'s owning thermal {thermal_id:?} must be an anticipated thermal"
+        );
+        let delivery_date = post_horizon_delivery_date(system, global_layout, w, thermal_id);
+        EntitySlot {
+            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_id: thermal_id.0,
+            subindex: subindex as u32,
+            was_active: owning_thermal
+                .is_some_and(|t| commissioning_active(t.entry_stage_id, t.exit_stage_id, stage_id)),
+            delivery_date,
         }
     };
 
@@ -156,7 +205,7 @@ pub fn build_stage_entity_manifest(
                         hydro.exit_stage_id,
                         stage_id,
                     ),
-                    delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+                    delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
                 }
             }
             StateRegion::Lag => {
@@ -173,7 +222,7 @@ pub fn build_stage_entity_manifest(
                         hydro.exit_stage_id,
                         stage_id,
                     ),
-                    delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+                    delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
                 }
             }
             StateRegion::Buckets => {
@@ -190,10 +239,13 @@ pub fn build_stage_entity_manifest(
                         stage_id,
                     ),
                     // Water in this bucket arrives `lag` stages after this one.
-                    delivery_anchor: anchor_at(lag),
+                    delivery_date: anchor_at(lag),
                 }
             }
-            StateRegion::Anticipated => anticipated_slot(offset),
+            StateRegion::CommitmentHold => match global_layout.commitment_hold_address(offset) {
+                CommitmentHoldAddress::InStudy { .. } => anticipated_slot(offset),
+                CommitmentHoldAddress::PostHorizon { window } => commitment_slot(window),
+            },
         };
         manifest.push(slot);
     }
@@ -204,6 +256,41 @@ pub fn build_stage_entity_manifest(
         "manifest length must equal projection.n_slots()"
     );
     manifest
+}
+
+/// Build the per-slot post-horizon delivery INTERVAL, in LOCKSTEP with
+/// [`build_stage_entity_manifest`]'s `0..projection.n_slots()` classification
+/// walk: `Some((start, end))` for a live, dated post-horizon commitment-window
+/// lane slot ([`post_horizon_delivery_interval`]'s resolved destination
+/// window), `None` for every other slot (storage/lag/bucket/in-study-ring).
+/// Alignment with [`build_stage_entity_manifest`]'s output is by
+/// construction — both classify the same slot the same way — never a
+/// re-derived subindex convention. The in-study anticipated ring's own
+/// dating (stage-dependent) has no bearing here: a ring slot always reads
+/// `None`, so this function needs no `stage_id` parameter.
+#[must_use]
+pub fn build_stage_entity_delivery_intervals(
+    system: &System,
+    global_layout: &StateSpace,
+    projection: &CutStateProjection,
+) -> Vec<Option<(NaiveDate, NaiveDate)>> {
+    (0..projection.n_slots())
+        .map(|j| {
+            let (region, offset) =
+                global_layout.classify_incoming_column(projection.incoming_column(CutSlot::new(j)));
+            match region {
+                StateRegion::CommitmentHold => {
+                    match global_layout.commitment_hold_address(offset) {
+                        CommitmentHoldAddress::InStudy { .. } => None,
+                        CommitmentHoldAddress::PostHorizon { window } => {
+                            post_horizon_delivery_interval(system, global_layout, window)
+                        }
+                    }
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Build per-stage vectors of **all** populated [`PolicyCutRecord`]s from the FCF pools.
@@ -219,7 +306,7 @@ pub fn build_stage_cut_records(fcf: &FutureCostFunction) -> Vec<Vec<PolicyCutRec
                 .map(|i| {
                     let meta = pool.metadata(i);
                     PolicyCutRecord {
-                        cut_id: meta.iteration_generated * u64::from(pool.forward_passes)
+                        cut_id: meta.iteration_generated * u64::from(pool.visit_stride)
                             + u64::from(meta.forward_pass_index),
                         slot_index: i as u32,
                         iteration: meta.iteration_generated as u32,
@@ -386,11 +473,18 @@ pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, V
     (col, row)
 }
 
-/// Build per-stage [`PolicyBasisRecord`] references from pre-converted basis data.
+/// Build per-node [`PolicyBasisRecord`] references from pre-converted basis data.
+///
+/// `training_result.basis_cache` is node-indexed (one slot per `node_graph`
+/// position), so the enumeration index is the node ordinal, carried into
+/// `stage_id`. `num_cut_rows` counts the node's OWN pool's affine rows —
+/// resolved through `node_graph.nodes[node].pool_id`, never `fcf.pools[node]`,
+/// which reads the wrong pool once `n_pools != n_nodes` on a branching graph.
 #[must_use]
 pub fn build_stage_basis_records<'a>(
     fcf: &FutureCostFunction,
     training_result: &TrainingResult,
+    node_graph: &NodeGraph,
     basis_col_u8: &'a [Vec<u8>],
     basis_row_u8: &'a [Vec<u8>],
 ) -> Vec<PolicyBasisRecord<'a>> {
@@ -398,17 +492,18 @@ pub fn build_stage_basis_records<'a>(
         .basis_cache
         .iter()
         .enumerate()
-        .filter_map(|(stage_idx, opt)| {
+        .filter_map(|(node, opt)| {
             opt.as_ref().map(|_| {
+                let pool = node_graph.nodes[NodePos(node)].pool_id;
                 let num_cut_rows = fcf
                     .pools
-                    .get(stage_idx)
+                    .get(pool)
                     .map_or(0, |pool| pool.populated().min(pool.capacity) as u32);
                 PolicyBasisRecord {
-                    stage_id: stage_idx as u32,
+                    stage_id: node as u32,
                     iteration: training_result.iterations as u32,
-                    column_status: &basis_col_u8[stage_idx],
-                    row_status: &basis_row_u8[stage_idx],
+                    column_status: &basis_col_u8[node],
+                    row_status: &basis_row_u8[node],
                     num_cut_rows,
                 }
             })
@@ -416,28 +511,82 @@ pub fn build_stage_basis_records<'a>(
         .collect()
 }
 
+/// Build the value-function artifact's graph manifest from the runtime node
+/// graph: one manifest node per canonical position carrying its declared id, its
+/// stage id (resolved through `study_stage_ids`), and its pool id, plus the
+/// flattened edge list. `pool_id` IS the node → pool map; leaf nodes sharing a
+/// pool all name the same `pool_id`.
+///
+/// Single owner shared by the checkpoint writer and the full-FCF load-path
+/// graph-identity check, so the two cannot derive a divergent manifest for the
+/// same study.
+#[must_use]
+pub fn build_graph_manifest(node_graph: &NodeGraph, study_stage_ids: &[i32]) -> GraphManifest {
+    let nodes = node_graph
+        .nodes
+        .iter_indexed()
+        .map(|(pos, node)| ManifestNode {
+            id: node_graph.node_ids[pos].0,
+            stage_id: study_stage_ids.get(node.stage.0).copied().unwrap_or(-1),
+            pool_id: node.pool_id as u32,
+        })
+        .collect();
+    let edges = node_graph
+        .successors
+        .iter_indexed()
+        .flat_map(|(pos, succs)| {
+            let source_id = node_graph.node_ids[pos].0;
+            succs.iter().map(move |succ| ManifestEdge {
+                source_id,
+                target_id: node_graph.node_ids[succ.child].0,
+                probability: succ.probability,
+            })
+        })
+        .collect();
+    GraphManifest {
+        n_pools: node_graph.n_pools as u32,
+        nodes,
+        edges,
+    }
+}
+
 /// Build per-stage [`StageStatesPayload`]s from the visited states archive.
 ///
 /// Returns an empty `Vec` if the archive is `None` (non-Dominated strategies).
-/// `stage_manifests[t]` is the same per-pool entity manifest the cut payloads
-/// carry, attached to stage `t`'s states payload.
+/// `archive` is indexed per NODE (one `NodeStates` per `node_graph` position);
+/// `stage_manifests` is indexed per POOL, one entry per `fcf.pools` slot —
+/// the same array [`build_stage_cuts_payloads`] indexes. A branching graph has
+/// strictly more nodes than pools (sibling leaves share one pool), so node
+/// position `pos`'s manifest is `stage_manifests[node_graph.nodes[pos].pool_id]`
+/// — never `stage_manifests[pos.0]`, which is only safe when `pool_id == pos.0`
+/// (pool id is not itself a `NodePos`, so this substitution still type-checks).
+///
+/// `stage_id` carries the node's STUDY STAGE (`node_graph.nodes[pos].stage`);
+/// `node_id` carries the node's own declared id (`node_graph.node_ids[pos]`) —
+/// both distinct from the node's position `pos`, so a branching artifact's
+/// per-node states are attributable to their stage, their declared id, and
+/// their position independently.
 #[must_use]
 pub fn build_stage_states_payloads<'a>(
     archive: Option<&'a VisitedStatesArchive>,
     stage_manifests: &'a [Vec<EntitySlot>],
+    node_graph: &NodeGraph,
 ) -> Vec<StageStatesPayload<'a>> {
     let Some(archive) = archive else {
         return Vec::new();
     };
-    (0..archive.num_stages())
+    (0..archive.num_nodes())
         .map(|t| {
-            let stage = archive.stage(t);
+            let pos = NodePos(t);
+            let node = archive.node(pos);
+            let pool_id = node_graph.nodes[pos].pool_id;
             StageStatesPayload {
-                stage_id: t as u32,
-                state_dimension: stage.state_dimension() as u32,
-                count: stage.count() as u32,
-                data: stage.states(),
-                entity_manifest: &stage_manifests[t],
+                stage_id: node_graph.nodes[pos].stage.0 as u32,
+                node_id: node_graph.node_ids[pos].0,
+                state_dimension: node.state_dimension() as u32,
+                count: node.count() as u32,
+                data: node.states(),
+                entity_manifest: &stage_manifests[pool_id],
             }
         })
         .collect()
@@ -449,29 +598,36 @@ pub fn build_stage_states_payloads<'a>(
     clippy::expect_used,
     clippy::panic,
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::unreadable_literal
 )]
 mod tests {
     use super::{
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
-        ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, build_stage_entity_manifest,
+        ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, EntitySlot,
+        build_stage_entity_manifest, build_stage_states_payloads, year_month_day_anchor,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
+    use crate::setup::{
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        StageIdx,
+    };
     use crate::test_support;
+    use crate::visited_states::VisitedStatesArchive;
     use cobre_core::commissioning::hydro_operating_active;
     use cobre_core::temporal::StageStateConfig;
     use cobre_core::{
         AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
-        HydroGenerationModel, HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage,
-        StageRiskConfig, System, SystemBuilder, Thermal,
+        HydroGenerationModel, HydroPenalties, NoiseMethod, PostStudyStage, PostStudyStages,
+        ScenarioSourceConfig, Stage, StageRiskConfig, System, SystemBuilder, Thermal,
         resolved::{
             BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, HydroBlockBounds,
             HydroStageBounds, LineBlockBounds, PumpingBlockBounds, ResolvedBounds,
             ThermalBlockBounds, ThermalStageBounds,
         },
     };
-    use cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL;
+    use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 
     const ALL_ENABLED: StageStateConfig = StageStateConfig {
         storage: true,
@@ -512,13 +668,9 @@ mod tests {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 50.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 45.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -631,9 +783,12 @@ mod tests {
     /// `System` with 2 hydros and 1 anticipated thermal (`lead_stages = 2`),
     /// matching the `N=2, L=2, A=1, k_max=2` layout fixture. `hydros` carry the
     /// supplied commissioning windows so `was_active` can be exercised.
+    /// `post_study_stages` threads straight to the builder — `None` for a
+    /// fixture with no post-horizon lane.
     fn system_2h_1ant(
         h1_window: (Option<i32>, Option<i32>),
         h2_window: (Option<i32>, Option<i32>),
+        post_study_stages: Option<PostStudyStages>,
     ) -> System {
         let bounds = ResolvedBounds::new(
             &BoundsCountsSpec {
@@ -656,8 +811,21 @@ mod tests {
             .thermals(vec![anticipated_thermal(1, 2)])
             .stages(vec![make_stage()])
             .bounds(bounds)
+            .post_study_stages(post_study_stages)
             .build()
             .expect("valid system")
+    }
+
+    /// A single post-study stage starting `start_date`, covering exactly one
+    /// destination window (`commitment_window_dest_stage[w] == 0`).
+    fn post_study_stages_from(start_date: chrono::NaiveDate) -> PostStudyStages {
+        PostStudyStages {
+            stages: vec![PostStudyStage {
+                start_date,
+                duration_hours: 720.0,
+            }],
+            thermal_bounds: Vec::new(),
+        }
     }
 
     /// The `N=2, L=2, A=1, k_max=2` global layout the fixture system maps onto.
@@ -671,7 +839,7 @@ mod tests {
     /// slots typed 2 (plant id 1, ring subindex 0,1).
     #[test]
     fn all_enabled_classification_identity_and_subindex() {
-        let system = system_2h_1ant((None, None), (None, None));
+        let system = system_2h_1ant((None, None), (None, None), None);
         let global = layout_2h_1ant();
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
@@ -727,7 +895,7 @@ mod tests {
     /// `subindex ==` the maturity lag `d` (`transit_bucket_column_order[b].1`).
     #[test]
     fn bucket_slots_classify_as_transit_bucket_with_downstream_id_and_lag() {
-        let system = system_2h_1ant((None, None), (None, None));
+        let system = system_2h_1ant((None, None), (None, None), None);
         let global = test_support::state_layout_with_transit_buckets(
             2,
             2,
@@ -778,7 +946,7 @@ mod tests {
     /// (`HydroInflowLag`) slot. Anticipated state is always included.
     #[test]
     fn storage_only_drops_lag_slots() {
-        let system = system_2h_1ant((None, None), (None, None));
+        let system = system_2h_1ant((None, None), (None, None), None);
         let global = layout_2h_1ant();
         let projection = CutStateProjection::new(&global, STORAGE_ONLY);
 
@@ -813,7 +981,7 @@ mod tests {
     #[test]
     fn was_active_matches_hydro_operating_active_for_dormant_window() {
         let h1_window = (Some(2), Some(5));
-        let system = system_2h_1ant(h1_window, (None, None));
+        let system = system_2h_1ant(h1_window, (None, None), None);
         let global = layout_2h_1ant();
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
         let stage_id = 1;
@@ -926,11 +1094,14 @@ mod tests {
             .expect("valid 3-stage 2-anticipated-plant system")
     }
 
-    /// An `AnticipatedThermalState` ring slot's `delivery_anchor` is the
-    /// year-month of its delivery stage (`current index + ring slot`), resolved
-    /// through the attached `AnticipatedResolution`; storage/lag slots stay at the
-    /// sentinel. At stage index 1 (2024-05) with `lead_stages = 2`, ring slot 1
-    /// delivers at index 2 (2024-06 → `2024*12 + 5`).
+    /// An `AnticipatedThermalState` ring slot's `delivery_date` is the `YYYYMMDD`
+    /// of its delivery stage — the next stage `m >= t` whose residue `m mod k_max`
+    /// equals the slot — resolved through the attached `AnticipatedResolution`;
+    /// storage/lag slots stay at the sentinel. At stage index 1 with `k_max = 2`
+    /// (residue 1), ring slot 1 matures now at index 1 (2024-05) and ring slot 0
+    /// delivers next at index 2 (2024-06). Stage index 1 is chosen because
+    /// `t mod k_max != 0`, where the residue mapping differs from the retired
+    /// shift form `t + slot`.
     #[test]
     fn anticipated_slot_delivery_anchor_matches_delivery_stage_year_month() {
         let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadStages(2));
@@ -949,13 +1120,13 @@ mod tests {
         assert_eq!(manifest.len(), 4);
         assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
         assert_eq!(
-            manifest[0].delivery_anchor, ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
-            "storage slot carries no delivery anchor"
+            manifest[0].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "storage slot carries no delivery date"
         );
         assert_eq!(manifest[1].entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG);
         assert_eq!(
-            manifest[1].delivery_anchor, ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
-            "inflow-lag slot carries no delivery anchor"
+            manifest[1].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "inflow-lag slot carries no delivery date"
         );
 
         assert_eq!(
@@ -964,9 +1135,8 @@ mod tests {
         );
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
-            manifest[2].delivery_anchor,
-            2024 * 12 + 4,
-            "ring slot 0 delivers at index 1 (2024-05)"
+            manifest[2].delivery_date, 20240601,
+            "ring slot 0 (residue 0) at stage index 1 delivers next at index 2 (2024-06)"
         );
 
         assert_eq!(
@@ -975,15 +1145,14 @@ mod tests {
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].delivery_anchor,
-            2024 * 12 + 5,
-            "ring slot 1 delivers at index 2 (2024-06)"
+            manifest[3].delivery_date, 20240501,
+            "ring slot 1 (residue 1) at stage index 1 matures now at index 1 (2024-05)"
         );
     }
 
     /// A ring slot whose delivery stage lands past the horizon reads the
     /// sentinel: at the last stage (index 2), ring slot 1 would deliver at index
-    /// 3, which does not exist, so its anchor is the sentinel.
+    /// 3, which does not exist, so its date is the sentinel.
     #[test]
     fn anticipated_slot_delivery_anchor_past_horizon_is_sentinel() {
         let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadStages(2));
@@ -1000,10 +1169,10 @@ mod tests {
 
         // Ring slot 0 delivers at index 2 (2024-06); ring slot 1 at index 3 (gone).
         assert_eq!(manifest[2].subindex, 0);
-        assert_eq!(manifest[2].delivery_anchor, 2024 * 12 + 5);
+        assert_eq!(manifest[2].delivery_date, 20240601);
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].delivery_anchor, ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            manifest[3].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             "delivery past the horizon reads the sentinel"
         );
     }
@@ -1028,15 +1197,13 @@ mod tests {
 
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
-            manifest[2].delivery_anchor,
-            2024 * 12 + 4,
-            "ring slot 0 delivers at index 1 (2024-05)"
+            manifest[2].delivery_date, 20240601,
+            "ring slot 0 (residue 0) at stage index 1 delivers next at index 2 (2024-06)"
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].delivery_anchor,
-            2024 * 12 + 5,
-            "ring slot 1 delivers at index 2 (2024-06)"
+            manifest[3].delivery_date, 20240501,
+            "ring slot 1 (residue 1) at stage index 1 matures now at index 1 (2024-05)"
         );
     }
 
@@ -1064,32 +1231,375 @@ mod tests {
         assert_eq!(manifest[2].entity_id, 1, "slot0/plant0 = ℓ=1 plant");
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
-            manifest[2].delivery_anchor,
-            2024 * 12 + 3,
+            manifest[2].delivery_date, 20240401,
             "ℓ=1 plant slot 0 delivers at index 0 (2024-04)"
         );
 
         assert_eq!(manifest[3].entity_id, 2, "slot0/plant1 = ℓ=2 plant");
         assert_eq!(manifest[3].subindex, 0);
         assert_eq!(
-            manifest[3].delivery_anchor,
-            2024 * 12 + 3,
+            manifest[3].delivery_date, 20240401,
             "ℓ=2 plant slot 0 delivers at index 0 (2024-04)"
         );
 
         assert_eq!(manifest[4].entity_id, 1, "slot1/plant0 = ℓ=1 plant");
         assert_eq!(manifest[4].subindex, 1);
         assert_eq!(
-            manifest[4].delivery_anchor, ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            manifest[4].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             "ℓ=1 plant slot 1 is structural padding beyond its own lead"
         );
 
         assert_eq!(manifest[5].entity_id, 2, "slot1/plant1 = ℓ=2 plant");
         assert_eq!(manifest[5].subindex, 1);
         assert_eq!(
-            manifest[5].delivery_anchor,
-            2024 * 12 + 4,
+            manifest[5].delivery_date, 20240501,
             "ℓ=2 plant slot 1 delivers at index 1 (2024-05)"
         );
+    }
+
+    // -- Terminal commitment-hold post-horizon lane: real manifest arm --
+
+    /// A declared post-horizon commitment window joins the manifest with a
+    /// real `EntitySlot`: reused `AnticipatedThermalState` type, the owning
+    /// thermal's id, and the real `YYYYMM01` delivery date of its resolved
+    /// destination post-study stage — never the sentinel. The in-study ring
+    /// and storage/lag slots' own delivery dates are unaffected.
+    #[test]
+    fn commitment_hold_post_horizon_slot_carries_real_delivery_date() {
+        let dest_start = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let system = system_2h_1ant(
+            (None, None),
+            (None, None),
+            Some(post_study_stages_from(dest_start)),
+        );
+        let global = StateSpace::new_with_commitment_hold_windows(
+            2,
+            2,
+            0,
+            Vec::new(),
+            1,
+            2,
+            vec![2],
+            &[2, 2],
+            1,
+            vec![0],
+            vec![EntityId(1)],
+            vec![(0.0, 0.0)],
+            vec![0],
+        );
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        // Layout N=2, L=2, A=1, k_max=2, W=1: storage 0..2, lag 2..6,
+        // anticipated 6..8, post-horizon lane at 8.
+        assert_eq!(manifest.len(), 9);
+        let slot = &manifest[8];
+        assert_eq!(slot.entity_type, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE);
+        assert_eq!(slot.entity_id, 1, "commitment window owned by thermal 1");
+        assert_eq!(
+            slot.subindex, 2,
+            "k_max (2) + local_window_index (0), the sole window for this thermal"
+        );
+        assert_eq!(
+            slot.delivery_date, 20261101,
+            "delivery date is the destination post-study stage's day-01 anchor"
+        );
+
+        // Feature-interaction guard: storage/lag never carry a delivery date,
+        // and the in-study ring's own dates (the sole stage, then past-horizon)
+        // are unaffected by post-horizon resolution.
+        for storage_or_lag in &manifest[0..6] {
+            assert_eq!(
+                storage_or_lag.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                "storage/lag slots carry no delivery date"
+            );
+        }
+        assert_eq!(
+            manifest[6].delivery_date, 20240101,
+            "ring slot 0 delivers at the system's only stage (2024-01)"
+        );
+        assert_eq!(
+            manifest[7].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "ring slot 1 delivers past the single-stage horizon"
+        );
+    }
+
+    /// User-ratified subindex formula (`k_max + local_window_index`): a
+    /// thermal owning BOTH ring slots (`[0, k_max)`) and post-horizon
+    /// commitment windows gets fully disjoint subindices on `(entity_type,
+    /// entity_id)` — the collision the `k_max` offset exists to forbid. Two
+    /// windows for the SAME thermal also get distinct subindices from each
+    /// other.
+    #[test]
+    fn commitment_hold_post_horizon_subindex_never_collides_with_ring_subindex() {
+        let dest_start = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let system = system_2h_1ant(
+            (None, None),
+            (None, None),
+            Some(post_study_stages_from(dest_start)),
+        );
+        let global = StateSpace::new_with_commitment_hold_windows(
+            2,
+            2,
+            0,
+            Vec::new(),
+            1,
+            2,
+            vec![2],
+            &[2, 2],
+            2,
+            vec![0, 0],
+            vec![EntityId(1), EntityId(1)],
+            vec![(0.0, 0.0), (0.0, 0.0)],
+            vec![0, 0],
+        );
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        let same_family_subindices: Vec<u32> = manifest
+            .iter()
+            .filter(|s| s.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE && s.entity_id == 1)
+            .map(|s| s.subindex)
+            .collect();
+        assert_eq!(
+            same_family_subindices.len(),
+            4,
+            "thermal 1 must own 2 ring slots + 2 commitment windows"
+        );
+
+        let distinct: std::collections::BTreeSet<u32> =
+            same_family_subindices.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            4,
+            "every slot sharing (entity_type, entity_id) must carry a distinct subindex; \
+             got {same_family_subindices:?}"
+        );
+        assert_eq!(
+            distinct,
+            std::collections::BTreeSet::from([0, 1, 2, 3]),
+            "ring occupies [0, k_max), commitment windows occupy k_max.."
+        );
+    }
+
+    // -- build_stage_states_payloads: node-vs-pool manifest indexing --
+
+    /// A 7-node binary tree mirroring `setup::tests::
+    /// node_native_binary_tree_loads_and_constructs_node_graph`'s fixture:
+    /// nodes 0/1/2 are internal and each own their own pool (0/1/2); leaves
+    /// 3/4/5/6 share pool 3. `n_pools == 4 < nodes.len() == 7`.
+    fn binary_tree_node_graph() -> NodeGraph {
+        let opening = NodeOpenings {
+            source: OpeningSource::Generated,
+            offset: 0,
+            len: 1,
+            q: 1.0,
+        };
+        let node = |stage: usize, pool_id: usize| NodeRuntime {
+            stage: StageIdx(stage),
+            pool_id,
+            openings: opening,
+        };
+        let edge = |child: usize| NodeSuccessor {
+            child: NodePos(child),
+            probability: 0.5,
+        };
+        NodeGraph {
+            node_ids: vec![
+                NodeId(0),
+                NodeId(1),
+                NodeId(2),
+                NodeId(3),
+                NodeId(4),
+                NodeId(5),
+                NodeId(6),
+            ]
+            .into(),
+            nodes: vec![
+                node(0, 0),
+                node(1, 1),
+                node(1, 2),
+                node(2, 3),
+                node(2, 3),
+                node(2, 3),
+                node(2, 3),
+            ]
+            .into(),
+            successors: vec![
+                vec![edge(1), edge(2)],
+                vec![edge(3), edge(4)],
+                vec![edge(5), edge(6)],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ]
+            .into(),
+            n_pools: 4,
+            pool_stage: vec![StageIdx(0), StageIdx(1), StageIdx(1), StageIdx(2)],
+        }
+    }
+
+    /// A one-slot manifest tagging `pool_id` into `entity_id`, so a payload's
+    /// manifest can be traced back to the pool it came from.
+    fn manifest_for_pool(pool_id: usize) -> Vec<EntitySlot> {
+        vec![EntitySlot {
+            entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+            entity_id: 100 + i32::try_from(pool_id).unwrap(),
+            subindex: 0,
+            was_active: true,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        }]
+    }
+
+    /// On a branching graph, `archive.num_nodes() (7) > stage_manifests.len()
+    /// (4)`: indexing the manifest directly by node position `t` is wrong — it
+    /// panics out of bounds the moment `t >= 4`. Indexing through
+    /// `node_graph.nodes[t].pool_id` stays in range and resolves every one of
+    /// the 4 leaves (t = 3..=6) to the SAME shared pool-3 manifest.
+    ///
+    /// Also pins U13: `stage_id` carries `node_graph.nodes[t].stage` (the
+    /// binary tree's stage 2 for every leaf, not the leaves' distinct node
+    /// positions 3..=6) and `node_id` carries `node_graph.node_ids[t]`.
+    #[test]
+    fn tree_states_payload_resolves_manifest_through_node_pool_id() {
+        let node_graph = binary_tree_node_graph();
+        let stage_manifests: Vec<Vec<EntitySlot>> =
+            (0..node_graph.n_pools).map(manifest_for_pool).collect();
+
+        let mut archive = VisitedStatesArchive::new(node_graph.nodes.len(), 1, 1, 1);
+        for t in 0..node_graph.nodes.len() {
+            archive.archive_gathered_states(NodePos(t), &[0.0], 1);
+        }
+
+        let payloads = build_stage_states_payloads(Some(&archive), &stage_manifests, &node_graph);
+
+        assert_eq!(payloads.len(), 7, "one payload per node, not per pool");
+        for (t, payload) in payloads.iter().enumerate() {
+            let pos = NodePos(t);
+            let expected_pool = node_graph.nodes[pos].pool_id;
+            assert_eq!(
+                payload.entity_manifest.len(),
+                1,
+                "node {t} manifest must not be empty"
+            );
+            assert_eq!(
+                payload.entity_manifest[0].entity_id,
+                100 + i32::try_from(expected_pool).unwrap(),
+                "node {t} must carry pool {expected_pool}'s manifest, not stage_manifests[{t}]"
+            );
+            assert_eq!(
+                payload.stage_id, node_graph.nodes[pos].stage.0 as u32,
+                "node {t}'s stage_id must be its STUDY STAGE, not its node position"
+            );
+            assert_eq!(
+                payload.node_id, node_graph.node_ids[pos].0,
+                "node {t}'s node_id must be its declared node id"
+            );
+        }
+
+        // The 4 leaves all resolve to the one shared pool-3 manifest and the
+        // one shared terminal stage, despite carrying 4 distinct node ids.
+        for (t, payload) in payloads[3..=6].iter().enumerate() {
+            assert_eq!(payload.entity_manifest[0].entity_id, 103);
+            assert_eq!(payload.stage_id, 2, "every leaf sits at stage 2");
+            assert_eq!(
+                payload.node_id,
+                i32::try_from(3 + t).unwrap(),
+                "leaves keep their own distinct node ids"
+            );
+        }
+    }
+
+    /// On a branching (K-fan) graph, `build_stage_basis_records` is node-indexed
+    /// (one record per `basis_cache` node slot, `stage_id == node ordinal`) and
+    /// resolves each record's `num_cut_rows` through the node's OWN pool
+    /// (`node_graph.nodes[node].pool_id`), never `fcf.pools[node_ordinal]` —
+    /// which for leaves 4/5/6 (ordinal > `n_pools - 1`) reads no pool at all.
+    /// The 4 leaves all report the shared pool-3 count.
+    #[test]
+    fn build_stage_basis_records_resolves_num_cut_rows_via_node_pool() {
+        use super::{build_stage_basis_records, convert_basis_cache};
+        use crate::TrainingResult;
+        use crate::cut::FutureCostFunction;
+        use crate::workspace::CapturedBasis;
+        use cobre_solver::Basis;
+
+        let node_graph = binary_tree_node_graph(); // 7 nodes; pools 0/1/2 + shared 3
+
+        // 4 pools; pool 3 (shared leaf pool) gets 2 cuts, pools 0/1/2 get 1 each.
+        let mut fcf = FutureCostFunction::new(4, 1, 1, 10, &[0; 4]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 0.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 1, 0, 0, 0.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 2, 0, 0, 0.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 3, 0, 0, 0.0, &[0.0]);
+        fcf.add_cut(NodeId(0), 3, 1, 0, 0.0, &[0.0]);
+
+        let empty_basis = || CapturedBasis {
+            basis: Basis {
+                col_status: Vec::new(),
+                row_status: Vec::new(),
+            },
+            base_row_count: 0,
+            cut_row_slots: Vec::new(),
+            state_at_capture: Vec::new(),
+            node_id: NodeId(0),
+        };
+        let basis_cache: Vec<Option<CapturedBasis>> = (0..7).map(|_| Some(empty_basis())).collect();
+        let training_result = TrainingResult::new(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+            "t".to_string(),
+            0,
+            basis_cache,
+            Vec::new(),
+            None,
+            None,
+        );
+
+        let (col, row) = convert_basis_cache(&training_result);
+        let records = build_stage_basis_records(&fcf, &training_result, &node_graph, &col, &row);
+
+        assert_eq!(records.len(), 7, "one basis record per node, not per pool");
+        for (node, rec) in records.iter().enumerate() {
+            assert_eq!(
+                rec.stage_id as usize, node,
+                "stage_id must carry the node ordinal"
+            );
+            let pool = node_graph.nodes[NodePos(node)].pool_id;
+            let expected = if pool == 3 { 2 } else { 1 };
+            assert_eq!(
+                rec.num_cut_rows, expected,
+                "node {node} num_cut_rows must reflect its own pool {pool}, not fcf.pools[{node}]"
+            );
+        }
+    }
+
+    #[test]
+    fn year_month_day_anchor_same_month_dates_are_equal() {
+        let weekly_stage_start = chrono::NaiveDate::from_ymd_opt(2026, 9, 5).unwrap();
+        let monthly_stage_start = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+
+        assert_eq!(year_month_day_anchor(weekly_stage_start), 20260901);
+        assert_eq!(year_month_day_anchor(monthly_stage_start), 20260901);
+    }
+
+    #[test]
+    fn year_month_day_anchor_always_normalizes_to_day_01() {
+        let dates = [
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2027, 2, 28).unwrap(),
+        ];
+
+        for date in dates {
+            assert_eq!(year_month_day_anchor(date) % 100, 1);
+        }
     }
 }

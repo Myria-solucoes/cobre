@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use cobre_core::{EntityId, Hydro, HydroUnitGroup};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
-use super::ENVELOPE_TOLERANCE;
+use super::envelope_tolerance;
 
 /// Per-family constants the rejection messages need: the capitalized family
 /// name, the row's id-field name, the row-kind label, and the source Parquet
@@ -52,7 +52,7 @@ const LINE: FamilyMeta = FamilyMeta {
 
 const PUMPING: FamilyMeta = FamilyMeta {
     family: "Pumping",
-    entity_label: "station_id",
+    entity_label: "pumping_station_id",
     row_label: "pumping_bounds",
     file: "constraints/pumping_bounds.parquet",
 };
@@ -257,7 +257,10 @@ pub(super) fn check_duplicate_bound_rows(data: &ParsedData, ctx: &mut Validation
                 ("max_outflow_m3s", row.max_outflow_m3s),
                 ("min_generation_mw", row.min_generation_mw),
                 ("max_generation_mw", row.max_generation_mw),
+                ("min_diversion_m3s", row.min_diversion_m3s),
                 ("max_diversion_m3s", row.max_diversion_m3s),
+                ("min_spillage_m3s", row.min_spillage_m3s),
+                ("max_spillage_m3s", row.max_spillage_m3s),
                 ("filling_min_rate_m3s", row.filling_min_rate_m3s),
                 ("water_withdrawal_m3s", row.water_withdrawal_m3s),
             ],
@@ -573,7 +576,7 @@ pub(super) fn check_bound_raises_declared_capacity(data: &ParsedData, ctx: &mut 
 
         for (column, value, declared_value) in columns {
             let Some(value) = value else { continue };
-            let tolerance = ENVELOPE_TOLERANCE * declared_value.abs().max(1.0);
+            let tolerance = envelope_tolerance(declared_value);
             if value > declared_value + tolerance {
                 emit_raises_declared_capacity_error(
                     row.hydro_id.0,
@@ -658,7 +661,7 @@ pub(super) fn check_group_bound_raises_declared_capacity(
 
         for (column, value, declared_value) in columns {
             let Some(value) = value else { continue };
-            let tolerance = ENVELOPE_TOLERANCE * declared_value.abs().max(1.0);
+            let tolerance = envelope_tolerance(declared_value);
             if value > declared_value + tolerance {
                 emit_group_raises_declared_capacity_error(
                     row.hydro_id.0,
@@ -723,8 +726,12 @@ fn emit_group_raises_declared_capacity_error(
 mod tests {
     use std::collections::HashSet;
 
-    use cobre_core::temporal::{PolicyGraph, PolicyGraphType};
-    use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, Hydro, Thermal};
+    use cobre_core::temporal::PolicyGraphType;
+    use cobre_core::{
+        AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, HorizonGraph, Hydro, Thermal,
+    };
+
+    use chrono::NaiveDate;
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
@@ -748,12 +755,23 @@ mod tests {
     /// Stage 0 declares 3 blocks, stage 1 declares 2 — the two counts must
     /// stay distinct so a global-maximum bug and a per-stage lookup diverge.
     fn two_stage_study_stages() -> StagesData {
+        // Contiguous 30-day (720 h) stages so the block-hour totals and the
+        // calendar-date span agree — the alignment StageCalendar coverage needs.
+        let mut stage_0 = make_stage_with_blocks(0, 3);
+        stage_0.start_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        stage_0.end_date = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
+        let mut stage_1 = make_stage_with_blocks(1, 2);
+        stage_1.start_date = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
+        stage_1.end_date = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
         StagesData {
-            stages: vec![make_stage_with_blocks(0, 3), make_stage_with_blocks(1, 2)],
-            policy_graph: PolicyGraph {
+            openings_declared: std::collections::HashSet::new(),
+            stages: vec![stage_0, stage_1],
+            policy_graph: HorizonGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: None,
             },
         }
@@ -795,18 +813,8 @@ mod tests {
         HydroBoundsRow {
             hydro_id: EntityId::from(id),
             stage_id,
-            min_turbined_m3s: None,
-            max_turbined_m3s: None,
-            min_storage_hm3: None,
-            max_storage_hm3: None,
-            min_outflow_m3s: None,
-            max_outflow_m3s: None,
-            min_generation_mw: None,
-            max_generation_mw: None,
-            max_diversion_m3s: None,
-            filling_min_rate_m3s: None,
-            water_withdrawal_m3s: None,
             block_id,
+            ..Default::default()
         }
     }
 
@@ -981,11 +989,14 @@ mod tests {
             vec![],
             vec![],
             StagesData {
+                openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage_with_blocks(0, 1), make_stage_with_blocks(1, 3)],
-                policy_graph: PolicyGraph {
+                policy_graph: HorizonGraph {
+                    stage_discount_rate_overrides: std::collections::HashMap::new(),
                     graph_type: PolicyGraphType::FiniteHorizon,
                     annual_discount_rate: 0.06,
                     transitions: vec![],
+                    nodes: Vec::new(),
                     season_map: None,
                 },
             },
@@ -1209,6 +1220,44 @@ mod tests {
         );
     }
 
+    /// Two rows for the same `(hydro_id, stage_id, block_id)` both setting
+    /// `min_spillage_m3s` collide — pins that the widened duplicate-row column
+    /// list registers the new spillage/diversion axes, not just the
+    /// pre-existing seven.
+    #[test]
+    fn test_duplicate_min_spillage_m3s_rejected() {
+        let mut data = make_data(
+            vec![],
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![
+            HydroBoundsRow {
+                min_spillage_m3s: Some(1.0),
+                ..hydro_row(1, 0, Some(0))
+            },
+            HydroBoundsRow {
+                min_spillage_m3s: Some(2.0),
+                ..hydro_row(1, 0, Some(0))
+            },
+        ];
+
+        let errors = duplicate_errors(&data);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, got: {errors:?}"
+        );
+        assert!(
+            errors[0].message.contains("min_spillage_m3s"),
+            "message: {}",
+            errors[0].message
+        );
+    }
+
     // ── group family (hydro_unit_group_bounds) ───────────────────────────────
 
     #[test]
@@ -1218,11 +1267,14 @@ mod tests {
             vec![],
             vec![],
             StagesData {
+                openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage_with_blocks(0, 2)],
-                policy_graph: PolicyGraph {
+                policy_graph: HorizonGraph {
+                    stage_discount_rate_overrides: std::collections::HashMap::new(),
                     graph_type: PolicyGraphType::FiniteHorizon,
                     annual_discount_rate: 0.06,
                     transitions: vec![],
+                    nodes: Vec::new(),
                     season_map: None,
                 },
             },
@@ -1531,11 +1583,14 @@ mod tests {
             vec![],
             vec![],
         );
-        // Coverage-length-matched, in-bounds, windowless history so no rule
-        // other than the one under test finds anything in this fixture.
+        // Full-coverage, in-bounds, zero-rate window over the single leading
+        // delivery stage (stage 0) so no rule other than the one under test
+        // finds anything in this fixture.
         data.initial_conditions.past_anticipated_commitments = vec![AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(1),
-            values_mw: vec![0.0],
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+            value_mw: 0.0,
         }];
         // The anticipated thermal (1) appears at both stages and the plain
         // thermal (2) appears at stage 0 too, so `stage_id` cannot stand in

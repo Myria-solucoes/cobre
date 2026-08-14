@@ -35,7 +35,7 @@ use crate::run::{
     build_study_setup, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
     run_simulation_phase_py, run_training_phase_py, run_training_phase_py_streaming,
     write_evaporation_models_if_any, write_fpha_deviation_points_if_any,
-    write_fpha_hyperplanes_if_any, write_training_artifacts,
+    write_fpha_hyperplanes_if_any, write_generic_constraint_echo_if_any, write_training_artifacts,
 };
 
 /// Map a [`PhaseError`] to a Python exception through the single
@@ -89,6 +89,9 @@ pub struct Study {
     warnings: Vec<cobre_io::ReportEntry>,
     /// The output directory fixed at construction time.
     output_dir: PathBuf,
+    /// The case (input) directory fixed at construction time — the root
+    /// `policy.boundary.path` (an external source checkpoint) resolves against.
+    case_dir: PathBuf,
     /// The requested thread count, stored for later `train`/`simulate` calls.
     threads: Option<u32>,
 }
@@ -111,6 +114,12 @@ pub struct Policy {
     /// The trained (or loaded) study FCF (the cut pool). `Study::simulate`
     /// `replace_fcf`s it into the study before simulating.
     fcf: FutureCostFunction,
+    /// The study's true stage count (`StudySetup::num_stages`), resolved at
+    /// construction time from the live `Study` this policy came from — NOT
+    /// `fcf.pools.len()`, which counts pools (equal to the stage count only on
+    /// the chain degeneracy; `fcf.pools` is keyed by pool id, resolved through
+    /// the node graph's `node → pool` map).
+    num_stages: usize,
 }
 
 #[pymethods]
@@ -153,10 +162,10 @@ impl Policy {
     // `stage`/`state` are the natural API names, hence the `similar_names` allow.
     #[allow(clippy::needless_pass_by_value, clippy::similar_names)]
     fn evaluate(&self, stage: usize, state: Vec<f64>) -> PyResult<f64> {
-        let n_stages = self.fcf.pools.len();
-        if stage >= n_stages {
+        if stage >= self.num_stages {
             return Err(PyIndexError::new_err(format!(
-                "stage {stage} out of range (policy has {n_stages} stages)"
+                "stage {stage} out of range (policy has {} stages)",
+                self.num_stages
             )));
         }
         let dim = self.fcf.state_dimension;
@@ -197,10 +206,10 @@ impl Policy {
     /// - `ImportError` if `NumPy` is not installed (propagated verbatim from the
     ///   lazy `import numpy`; `NumPy` is a soft, lazily imported dependency).
     fn cut_matrix(&self, py: Python<'_>, stage: usize) -> PyResult<Py<PyAny>> {
-        let n_stages = self.fcf.pools.len();
-        if stage >= n_stages {
+        if stage >= self.num_stages {
             return Err(PyIndexError::new_err(format!(
-                "stage {stage} out of range (policy has {n_stages} stages)"
+                "stage {stage} out of range (policy has {} stages)",
+                self.num_stages
             )));
         }
         let dim = self.fcf.state_dimension;
@@ -303,6 +312,7 @@ impl Study {
             hydro_models_summary,
             warnings,
             output_dir: resolved_output,
+            case_dir,
             threads,
         })
     }
@@ -406,11 +416,13 @@ impl Study {
             return Ok(Policy {
                 training_result: synthetic,
                 fcf: self.setup.fcf.clone(),
+                num_stages: self.setup.num_stages(),
             });
         }
 
         let seed = self.seed;
         let output_dir = self.output_dir.clone();
+        let case_dir = self.case_dir.clone();
         let threads = self.threads;
         let setup = &mut self.setup;
         let system = self.system.as_ref();
@@ -425,7 +437,7 @@ impl Study {
                 run_in_scoped_pool(threads, |n| {
                     // FCF replacement BEFORE training — shared verbatim with
                     // `run_via_study`.
-                    apply_training_policy_mode(setup, system, config, &output_dir)?;
+                    apply_training_policy_mode(setup, system, config, &output_dir, &case_dir)?;
 
                     // `None` keeps the collect-after-return path bit-identical (the
                     // no-callback golden parity anchor); `Some` uses the drain thread.
@@ -448,6 +460,7 @@ impl Study {
                     write_fpha_hyperplanes_if_any(&output_dir, setup)?;
                     write_evaporation_models_if_any(&output_dir, setup, system)?;
                     write_fpha_deviation_points_if_any(&output_dir, setup, config)?;
+                    write_generic_constraint_echo_if_any(&output_dir, setup, system)?;
 
                     Ok::<_, PhaseError>((training, callback_error))
                 })?
@@ -473,6 +486,7 @@ impl Study {
         Ok(Policy {
             training_result: training.result,
             fcf: setup.fcf.clone(),
+            num_stages: setup.num_stages(),
         })
     }
 
@@ -517,6 +531,7 @@ impl Study {
         Ok(Policy {
             training_result,
             fcf,
+            num_stages: setup.num_stages(),
         })
     }
 

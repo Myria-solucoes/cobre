@@ -10,14 +10,14 @@
       "start_date": "2024-01-01",
       "end_date": "2024-02-01",
       "blocks": [{ "id": 0, "name": "FLAT", "hours": 720 }],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 1,
       "start_date": "2024-02-01",
       "end_date": "2024-03-01",
       "blocks": [{ "id": 0, "name": "FLAT", "hours": 720 }],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 2,
@@ -28,7 +28,7 @@
         { "id": 1, "name": "SHOULDER", "hours": 240 },
         { "id": 2, "name": "OFF_PEAK", "hours": 240 }
       ],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 3,
@@ -38,7 +38,7 @@
         { "id": 0, "name": "HEAVY", "hours": 360 },
         { "id": 1, "name": "LIGHT", "hours": 360 }
       ],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 4,
@@ -49,14 +49,14 @@
         { "id": 1, "name": "SHOULDER", "hours": 240 },
         { "id": 2, "name": "OFF_PEAK", "hours": 240 }
       ],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 5,
       "start_date": "2024-06-01",
       "end_date": "2024-07-01",
       "blocks": [{ "id": 0, "name": "FLAT", "hours": 720 }],
-      "num_scenarios": 1
+      "num_openings": 1
     }
   ]
 }

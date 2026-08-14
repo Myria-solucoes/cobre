@@ -265,14 +265,139 @@ determinism regression.
 
 ## Cut pool is append-only; basis matches by slot identity
 
-Cuts are never removed from the LP. Deactivation toggles a cut row's RHS bounds
-to the `±f64::INFINITY` sentinel (trivially satisfied); every cut keeps a stable
-slot index for the lifetime of the run. The per-iteration template refreeze
-encodes **only active cuts** (one row per `active_cuts()` entry), not inactive
-cuts at sentinel bounds. Warm-start basis reconstruction therefore matches stored
-cut rows to current LP rows by **`CutPool` slot identity**, never by row count.
-`reconstruct_basis` is the single hot-path entry point — never bypass it.
-Read: `cut/pool.rs`, `cut/basis_reconstruct.rs`.
+**One pool per pool id.** A pool is addressed by its 0-based **pool id**,
+resolved from the node graph's `node → pool` map (`NodeGraph`,
+`NodeRuntime.pool_id`); on the degenerate one-node-per-stage graph (`nodes[]`
+absent) `pool_id == stage`, so every read reduces byte-for-byte to the
+pre-node-native stage read. Sibling fan nodes at one level may share a pool.
+
+**Append-only within a pool.** Cuts are never removed from the LP. Deactivation
+toggles a cut row's RHS bounds to the `±f64::INFINITY` sentinel (trivially
+satisfied); every cut keeps a stable slot index for the lifetime of the run,
+placed by `slot_index`'s deterministic function of `warm_start_count`,
+`iteration`, `iteration_base`, `visit_stride`, and `forward_pass_index`. The
+per-iteration template refreeze encodes **only active cuts** (one row per
+`active_cuts()` entry), not inactive cuts at sentinel bounds.
+
+**Growth is between-iteration and append-only.** A pool's capacity may grow
+between iterations (`CutPool::grow`, when a node's realized visit rate would
+exceed its construction-time `visit_stride` floor) — never mid-iteration. Growth
+is `Vec::resize`, which only appends new slots, so every populated slot keeps its
+index across the realloc. Relocating or re-packing a populated slot on growth is
+the wrong-but-compiling alternative — it silently invalidates every stored
+basis's slot-identity match. Each cut record also carries its generating
+`node_id` (`CutMetadata.node`, set by `add_cut(node_id, …)`); this is
+**provenance only** (carried onto the MPI cut wire) and never affects which slot
+the cut lands in — the append-only, slot-identity contract is independent of
+`node_id`.
+
+**Basis matches by slot, never by count or column.** Warm-start basis
+reconstruction matches stored cut rows to current LP rows by **`CutPool` slot
+identity**, never by row count and never by absolute column index. On the
+frozen hot path `reconstruct_basis` is the single entry point for every pool
+whose cut set can still grow — the entire interior — and must never be
+bypassed there. The terminal-static short-circuit below is the SOLE licensed
+bypass, and only because a terminal pool's cut set is provably invariant.
+Read: `cut/pool.rs` (`CutPool::grow`, `add_cut`, `CutMetadata.node`,
+`slot_index`), `cut/fcf.rs` (the `node → pool` map / pool-id addressing),
+`cut/basis_reconstruct.rs`. Pinned by
+`test_anticipated_5stage_k2_warm_start_zero_basis_rejections`
+(`tests/anticipated_scenarios.rs` — the anticipated ring shifts every downstream
+column, yet the run records zero basis rejections because reconstruction matches
+by slot identity, not column index) and the slot-identity reconstruction
+regressions in `tests/cut_basis.rs`.
+
+### The terminal stage bypasses reconstruction with a 1:1 basis apply
+
+The terminal stage solves against a baked static template whose active-cut set
+is fixed once primed — a leaf never gains or loses a cut — so the template's
+shape never changes across iterations. There the slot-identity reconstruction
+above is REPLACED by a plain 1:1 basis apply (`run_stage_solve_terminal_static`,
+selected only at the terminal forward solve by `solve_forward_node`'s
+`is_terminal` gate): a node-matching stored basis maps onto the current LP by
+position and is copied verbatim into `scratch_basis` with no reconstruction.
+This is the sole licensed bypass of `reconstruct_basis` on the frozen hot path,
+and it is safe ONLY because the terminal cut set is provably invariant. The
+node-tag filter and a shape guard still gate the apply: a stored basis whose
+`node_id` mismatches the node being solved (`filtered_stored_basis`), or whose
+column/row status length does not match the current template
+(`terminal_basis_shape_matches`), drops to cold rather than applying a
+wrong-shaped basis.
+
+Applying this short-circuit on an interior node — or on any node whose cut set
+is NOT provably invariant — is the wrong-but-compiling alternative: an interior
+pool's shape changes as deeper backward levels append cuts, so a 1:1 apply
+matches a stored basis against a differently-shaped LP and silently warm-starts
+from the wrong factorization. The interior hot path is untouched —
+`reconstruct_basis` remains its sole entry, reached through `run_stage_solve`.
+Read: `solve/stage_solve.rs` (`run_stage_solve_terminal_static`,
+`filtered_stored_basis`, `terminal_basis_shape_matches`, and `run_stage_solve`
+for the interior path), `training/forward/enumerated.rs` (`solve_forward_node`'s
+`is_terminal` gate). Pinned by
+`run_stage_solve_terminal_static_applies_basis_1to1_without_reconstruct_basis`
+(the verbatim copy, no reconstruction) and its interior counterpart
+`run_stage_solve_interior_warm_start_invokes_reconstruct_basis` (an interior
+warm start still invokes `reconstruct_basis`), plus
+`run_stage_solve_terminal_static_cross_node_stored_basis_is_treated_as_cold` and
+`run_stage_solve_terminal_static_shape_mismatch_is_treated_as_cold` (the
+node-tag and shape guards each drop to cold), all in `solve/stage_solve.rs`.
+
+## A stored basis warm-starts only at its own node (node-tag)
+
+A `CapturedBasis` carries the declared `node_id` it was captured at
+(`CapturedBasis::new(…, NodeId)`, `NodeGraph::node_ids[node]`). Every apply site
+warm-starts from a stored basis **only when its `node_id` matches the node being
+solved** and treats a mismatch as **cold** (`stored_basis.filter(|c| c.node_id
+== node_id)`). A resampled path may revisit a stage at a different node than the
+one whose basis is cached there, and warm-starting across that boundary reuses a
+basis built against a different LP.
+
+This node-tag check is the **sole** line of defence, not defence in depth:
+**CLP accepts a shape-mismatched (or otherwise wrong) warm basis silently**,
+whereas HiGHS validates and rejects it loudly
+(`reference_solver_basis_validation_asymmetry`). A cross-node warm-start is
+therefore a silent wrong-vertex / wrong-dual on the CLP backend with no solver
+backstop — so the check must live in cobre's own apply path, never be delegated
+to the solver. Dropping the `node_id` filter, or comparing pool id instead of the
+declared node id (sibling fan nodes share a pool — see the append-only section
+above), is the wrong-but-compiling alternative: it compiles, warm-starts from the
+wrong LP, and at a degenerate optimum settles on a different-but-equally-valid
+vertex, silently breaking the run-to-run reproducibility and declaration-order
+invariance the determinism contract requires.
+Read: `workspace/workspace.rs` (`CapturedBasis::node_id`, `CapturedBasis::new`),
+`solve/stage_solve.rs` (`run_stage_solve`'s `node_id` filter, `StageInputs::
+node_id`), `cut/dcs.rs` (the same cross-node-reuse rejection on the DCS path).
+Pinned directly by `run_stage_solve_cross_node_stored_basis_is_treated_as_cold`
+(`solve/stage_solve.rs` — a deficit-shaped basis tagged at a mismatching node
+drops to cold instead of erroring) and its DCS companion in `cut/dcs.rs`; the
+reproducibility the check protects is pinned by the `opening_order_determinism`
+gate in `tests/mpi_wire.rs` (bitwise `final_lb` across thread and rank shapes).
+
+### Simulation pool-fill re-tags a shared-pool sibling basis, never pool-matches
+
+Enumerated simulation warms each terminal leaf's solve from a stored basis, but
+training captures one only for the single leaf its scenario-0 forward walked; the
+other same-pool leaves would otherwise cold-solve the boundary-cut-heavy terminal
+LP. `pool_fill_basis_cache` (`setup/node_graph.rs`, called once from
+`StudySetup::simulate`, gated on `simulation_enumerated == Enumerated`) fills each
+empty leaf slot with a same-pool sibling's `CapturedBasis` **re-tagged with the
+target leaf's own `node_id`**. This is the licensed way to warm sibling fan leaves
+WITHOUT weakening the node-tag filter above: the filter still matches `node_id` to
+node exactly, and the re-tag is sound ONLY because same-`pool_id` nodes share one
+frozen template, so a sibling's basis has identical column/cut-row shape and is
+structurally valid at the target leaf. Reuse routes through the tolerant
+slot-identity `reconstruct_basis` path, which re-validates shape.
+
+Relaxing the filter to a pool-id match instead of re-tagging — the exact
+wrong-but-compiling alternative the paragraph above forbids — would let a basis
+from a genuinely different-shaped LP through, which CLP accepts silently. The
+precondition is same-`pool_id` ⇒ same-template-shape; if a future change bakes
+node-specific data into a shared template or widens pool sharing across differing
+shapes, this bypass is no longer safe. Read: `setup/node_graph.rs`
+(`pool_fill_basis_cache`), `setup/orchestration.rs` (`StudySetup::simulate` call
+site). Pinned by `enumerated_census_pool_fill_warms_previously_cold_leaves`
+(`tests/simulation_integration.rs`): zero basis-consistency failures and
+warm-vs-cold per-scenario cost bit-identity.
 
 ## NCS stochastic availability is a dimensionless factor
 
@@ -291,11 +416,14 @@ real bug caught during D15). The patch inputs ride on `StageContext`
 site reads.
 Read: `training/lower_bound.rs`, `training/stage_solve_prep.rs`.
 
-## Per-stage exchange in the backward pass
+## Per-level exchange in the backward pass
 
-`exchange()` is called inside the backward loop, once per stage, not in a
-separate pre-pass before the loop.
-Read: `training/backward_pass_state.rs`.
+`exchange()` is called inside the reverse-topological sweep, once per
+cut-sharing level (one node — == one stage — per level absent `nodes[]`), not
+in a separate pre-pass before the loop. The level driver owns the one state
+exchange and the one batched cut exchange per level; a per-node collective
+would scale the collective count with node count.
+Read: `training/backward_pass_state.rs` (`run_one_backward_level`).
 
 ## Backward opening order is warm-start-only
 
@@ -320,17 +448,24 @@ solve position — or handing solve-order-permuted probabilities to
 makes the cut depend on solve order, silently
 breaking declaration-order invariance and run-to-run reproducibility.
 Read: `stochastic/noise_key.rs` (`build_noise_key_table`, `apply_chain_order`),
-`training/backward/trial_point.rs` (`process_trial_point_backward` — solves by
+`training/backward/by_scenario.rs` (`process_by_scenario_backward` — solves by
 `solve_order`, aggregates by canonical ω), `training/backward/outcome_aggregation.rs`
 (`write_opening_outcome`). Pinned by the `opening_order_determinism` gate in
 `tests/mpi_wire.rs` (threads=k / threads=1 / a same-shape repeat / a 2-rank
 stub, bitwise `final_lb`) and the MPI SLURM Integration job's rank-invariance
 comparison on `examples/4ree`.
 
-## Opening-block scheduler is warm-start-only
+## By-node scheduler is warm-start-only
 
-The opt-in opening-block scheduler
-(`training.parallelism.backward_scheduler = { method = opening_block }`)
+The live scheduler spellings are `by_scenario` (the default) and `by_node`, both
+under `training.parallelism.backward_scheduler`. The retired `trial_point` /
+`opening_block` spellings are unknown-variant deserialize errors — a clean break
+with no `serde(alias)` fallback — pinned by
+`retired_scheduler_spellings_are_deserialize_error`
+(`crates/cobre-io/src/config/training.rs`).
+
+The opt-in by-node scheduler
+(`training.parallelism.backward_scheduler = { method = by_node }`)
 reassigns the backward pass's work unit from a whole trial point to an
 opening-block: workers claim `(trial point, block)` units in any order from a
 shared atomic counter, warm-chaining each block's openings from a fresh
@@ -343,27 +478,27 @@ is produced. Aggregating the arena in claim/solve-position order, or keying it
 on the claim index instead of `(m, ω)`, is the wrong-but-compiling
 alternative — CVaR's tail weighting is order-sensitive, so it silently breaks
 CVaR reproducibility and declaration-order invariance the same way a
-solve-order-keyed aggregation would break the trial-point path above. An
-active Dynamic Cut Selection iteration always falls back to the trial-point
-path: the opening-block scheduler's frozen-LP load is incompatible with
+solve-order-keyed aggregation would break the by-scenario path above. An
+active Dynamic Cut Selection iteration always falls back to the by-scenario
+path: the by-node scheduler's frozen-LP load is incompatible with
 DCS's cut-free lazy core.
-Read: `training/backward/opening_block.rs`
-(`process_stage_backward_opening_block`'s claim loop,
-`opening_block_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
-`training/backward_pass_state.rs` (`run_one_backward_stage`'s
-`use_opening_block` dispatch). Pinned by
-`opening_block_scheduler_determinism_expectation` and
-`opening_block_scheduler_determinism_cvar` in `tests/mpi_wire.rs` (threads=4
+Read: `training/backward/by_node.rs`
+(`process_stage_backward_by_node`'s claim loop,
+`by_node_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
+`training/backward_pass_state.rs` (`compute_one_backward_node`'s
+scheduler dispatch via `resolve_backward_scheduler`). Pinned by
+`by_node_scheduler_determinism_expectation` and
+`by_node_scheduler_determinism_cvar` in `tests/mpi_wire.rs` (threads=4
 / a same-shape threads=4 repeat / threads=2 / threads=1 / a `Rank0Of2`
 2-rank stub, bitwise `final_lb`, on both an expectation and a `CVaR`
-configuration), `opening_block_degenerates_on_single_opening`
-(opening-block-vs-trial-point equality on a single-opening case whose
+configuration), `by_node_degenerates_on_single_opening`
+(by-node-vs-by-scenario equality on a single-opening case whose
 resolved block count is `1`), and
-`opening_block_handles_non_uniform_cut_projection`
-(opening-block-vs-trial-point equality on a case whose per-stage cut-state
+`by_node_handles_non_uniform_cut_projection`
+(by-node-vs-by-scenario equality on a case whose per-stage cut-state
 projection dimension varies across stages).
 
-**Hardest-first claim order is result-neutral.** Under `OpeningBlock`,
+**Hardest-first claim order is result-neutral.** Under `ByNode`,
 claims are further ordered hardest-`(stage, block)`-first
 (longest-processing-time, LPT) by the PREVIOUS iteration's per-`(stage,
 block)` mean `simplex_iterations` pivot — never per-`(m, block)`, since
@@ -381,13 +516,69 @@ claim order itself nondeterministic across otherwise-identical runs.
 `BackwardPassState::run` swaps it in from `block_pivots` once per call, never
 per stage; reading `block_pivots` instead during the sweep is stale
 (reset-then-partially-filled).
-Read: `training/backward/opening_block.rs`
-(`process_stage_backward_opening_block`'s `block_order`-indexed decode,
+Read: `training/backward/by_node.rs`
+(`process_stage_backward_by_node`'s `block_order`-indexed decode,
 `hardest_first_block_order`, `identity_block_order`),
-`training/backward_pass_state.rs` (`run_one_backward_stage`'s block-order
+`training/backward_pass_state.rs` (`compute_one_backward_node`'s block-order
 computation, the `run` swap). Pinned by
 `hardest_first_claim_order_is_result_neutral` in `tests/mpi_wire.rs`
 (hardest-first on vs off, bitwise `final_lb`).
+
+## Joint risk is applied once over the flattened successor×opening vector
+
+A branching node's backward cut applies the stage `RiskMeasure` **once** over the
+single flattened joint outcome vector spanning every successor and every one of
+their openings, weighted by the product `P(n→child)·q_{child,ω}` and ordered
+canonically — ascending child node id, then within-child opening.
+`RiskMeasure::aggregate_cut_into` runs exactly once per trial point over that joint
+arena; `assemble_outcome_weights` fills the product weights in the canonical order
+the aggregation depends on (`CVaR`'s tail weighting is index-order-sensitive).
+
+Applying the measure per child and then probability-averaging the children — a
+NESTED measure — is the wrong-but-compiling alternative. It is indistinguishable
+from the joint form in both degenerate regimes (a single successor, or a single
+opening per successor), and with one opening per node — the pure-branching case the
+measure exists for — the within-node measure is vacuous, so the nested form
+collapses to plain expectation with NO tail weighting at all. On a genuine fan the
+two differ: joint `CVaR₀.₅` over outcomes `[10, 20, 30, 40]` at weight `0.25`
+concentrates on the worst two → `35`, while `max`-per-child-then-average gives
+`(20 + 40)/2 = 30`.
+
+Read: `convergence/risk_measure.rs` (`RiskMeasure::aggregate_cut_into`),
+`setup/node_graph.rs` (`assemble_outcome_weights` — the canonical product-weight
+fill), `training/backward/by_scenario.rs` (`process_by_scenario_backward`),
+`training/backward/by_node.rs` (`by_node_finish`), `training/backward/replicated.rs`
+(the replicated path applies the same single aggregation over the same flattened
+arena). Pinned by `joint_cvar_differs_from_nested_per_child_then_average` in
+`convergence/risk_measure.rs` (the analytical `35`-vs-`30` mutation control).
+
+## The branching backward integrates every successor exhaustively
+
+The backward at a node solves **every** successor and **every** one of their
+openings, regardless of which successor the forward pass drew. Sampling selects
+WHICH TRIAL STATES receive a cut; it never truncates a cut's INTEGRATION AXIS.
+`assemble_outcome_weights` iterates the node's whole successor list independent of
+the forward draw, and each child loads its OWN LP — frozen template, delta cut
+batch, pool, basis key, External column — and solves its own openings. A chain is
+the one-element case: one successor, one LP load per trial point, exactly as the
+chain backward solves all of a trial point's openings rather than only the sampled
+one.
+
+"Solve only the sampled child" (the child-0 collapse) is the forbidden
+optimization: pricing every leaf against a single child's LP overstates future
+cost, so `final_lb` overshoots the true first-stage value — `final_lb > final_ub`,
+an invalid lower bound that still compiles and still converges.
+
+Read: `setup/node_graph.rs` (`assemble_outcome_weights`, `successor_outcome_count`
+— the full-successor flatten), `training/backward/by_scenario.rs`
+(`process_by_scenario_backward` — each child loads its own LP),
+`training/backward/by_node.rs` (`by_node_finish` — the opening-block scheduler over
+the same reified outcome set). Pinned by
+`water_binding_external_fan_final_lb_matches_extensive_form` (a distinct-column
+external fan whose reservoir binds, where the child-0 collapse would overshoot the
+extensive-form optimum) and its by-node companion
+`water_binding_external_fan_by_node_matches_extensive_form`, both in
+`tests/branching_value_oracle.rs`.
 
 ## No EWMA upper bound
 
@@ -395,6 +586,90 @@ computation, the `run` swap). Pinned by
 there is no exponentially-weighted smoothing. Gap closure is immediate for
 deterministic cases.
 Read: `convergence/convergence.rs`.
+
+## Terminal boundary FCF is booked in the reported total cost
+
+The forward trajectory cost and the simulation per-scenario cost both reconstruct
+a path total as `Σ_t cum_d(t)·stage_cost(t)`, where the interior `stage_cost(t) =
+(view.objective − d_t·θ_t)·cost_scale` subtracts the discounted epigraph `θ_t` —
+the future cost-to-go a later stage realizes as its own immediate cost. At the
+TERMINAL stage under a boundary policy (`terminal_has_boundary_cuts`, i.e.
+`fcf.pools[terminal].warm_start_count > 0`) `θ_t` prices the POST-HORIZON
+value-to-go, which no later stage realizes, so it is KEPT in the reported cost
+(`stage_cost = view.objective·cost_scale`) — matching the lower bound, which
+already carries it through `θ_0`'s cuts (`evaluate_lower_bound` pushes the full
+stage-0 `view.objective`). The present values coincide exactly because `θ_t`'s
+objective coefficient IS `d_t`, so `cum_d(t)·d_t·θ_t = cum_d(t+1)·θ_t` is the same
+term the LB books.
+
+Subtracting `θ_t` at the terminal boundary stage — the interior form — is the
+wrong-but-compiling alternative: it drops the post-horizon FCF from the UB /
+simulation cost alone, leaving `LB ≫ UB` (a NEGATIVE gap the stopping rule's
+`.max(0.0)` clamp then reads as "converged"). The branch is gated on
+`terminal && terminal_has_boundary_cuts`; a non-boundary study pins terminal `θ`
+to `[0, 0]` (forward) or leaves the terminal pool empty with `θ`'s `0.0` lower
+bound driving it to `0` (simulation), so the fix is byte-neutral there.
+
+Read: `training/forward/enumerated.rs` (`solve_forward_node`),
+`training/forward/stage_solve.rs` (`run_forward_stage`), `simulation/pipeline.rs`
+(`extract_sim_stage_result`, flag computed in `solve_simulation_stage`). Do NOT
+change `evaluate_lower_bound` (`training/lower_bound.rs`) — it is correct — and do
+NOT fold `θ` into the per-stage `compute_cost_result` breakdown
+(`simulation/extraction.rs`), which reports `immediate_cost`/`future_cost`
+separately by design. Pinned by `terminal_boundary_fcf_training_gap_is_consistent`
+and `terminal_boundary_fcf_simulation_cost_includes_post_horizon`
+(`tests/branching_value_oracle.rs`).
+
+## Fused terminal slice projects with the parent pool, not the leaf pool
+
+Terminal-leaf fusion reuses an External terminal leaf's forward-solved
+`(objective, duals)` as the penultimate-stage Benders cut instead of re-solving
+the leaf in the backward. The forward MUST project that slice with the leaf's
+CUT-GENERATING PARENT pool (`cut_state_layouts[parent.pool_id]`, where `parent =
+build_parent_map()[leaf]`) — the identical projection the backward's
+`SuccessorSpec::cut_state` uses for the currently-solving parent node — NOT the
+leaf's own (terminal, no-successor) pool. The two pools' `n_slots()` differ
+whenever the terminal pool and the parent's successor-sized pool project
+different state dimensions (`build_cut_state_layouts` seeds every pool at full
+state and only shrinks non-leaf pools to their successor's `state_config`).
+Projecting with the leaf's own pool is the wrong-but-compiling alternative: it
+emits a wrong-length/wrong-projection dual slice the consumer still accepts,
+corrupting the fused cut (surfaces as an `allgather_outcomes` length-invariant
+violation, or a silently mis-projected cut driving a NEGATIVE gap).
+
+Fusion reuses the forward-captured slice ONLY for a leaf
+`is_external_terminal_leaf` admits (External, single-opening, terminal) — the
+one case where the forward and the backward read the byte-identical LP — and is
+DISABLED under DCS (`params.dcs.is_none()`): DCS solves a lazily cut-reduced
+forward LP that need not match the full frozen template the backward loads, so a
+fused DCS slice could under-price the cut. A Generated terminal leaf (forward
+samples one opening, backward integrates all of them) is NOT eligible and keeps
+the exhaustive backward integration the branching contract requires (see "The
+branching backward integrates every successor exhaustively" above); reusing its
+single forward opening would understate the cut and drive `final_lb` above
+`final_ub`. A parentless leaf (a malformed graph) captures nothing and falls
+back to a direct backward solve.
+
+Read: `training/forward/enumerated.rs` (`solve_forward_node`, `fusion_cut_state`),
+`training/backward_pass_state.rs` (`SuccessorSpec::cut_state`),
+`setup/node_graph.rs` (`NodeGraph::is_external_terminal_leaf`, the single
+eligibility source the forward capture and the backward consume both read, so the
+two cannot drift). The projection is pinned by
+`enumerated_forward_fused_slice_projects_with_parent_pool_not_leaf_pool` and
+`external_distinct_fan_heterogeneous_cut_state_matches_extensive_form`; the
+eligibility gate by
+`is_external_terminal_leaf_true_for_terminal_external_single_opening`,
+`is_external_terminal_leaf_false_for_generated_terminal_leaf`, and
+`is_external_terminal_leaf_false_for_interior_external_node`
+(`setup/node_graph.rs`); and the External-fuses / Generated-integrates-exhaustively
+split end-to-end by the `terminal_fusion` oracle's
+`water_binding_external_fan_fused_cut_matches_independently_derived_cut` (the fused
+cut is a valid supporting hyperplane),
+`external_distinct_fan_backward_performs_zero_terminal_leaf_solves` (fusion removes
+every External terminal-leaf backward solve), and
+`terminal_generated_fan_integrates_exhaustively_and_backward_solves_every_leaf` (a
+Generated fan is never fused and solves every leaf every iteration), all in
+`tests/branching_value_oracle.rs`.
 
 ## Spillage is frozen `[0, 0]` during PreFilling
 
@@ -416,19 +691,99 @@ Read: `lp/builder/columns.rs` (`fill_spillage_columns`). Cases: D38, D39, D42
 Every policy load — full-FCF warm-start/resume/simulation-only and terminal
 boundary-cut injection — routes through `validate_policy_load`, the single
 entry point; there is no opt-out or bypass path. Its check matrix keys off
-`PolicyLoadKind`: `state_dimension` equality and per-slot `slot_identity`
-(`entity_type`, `entity_id`, `subindex`) are hard-rejected for both `FullFcf`
+`PolicyLoadKind`: `state_dimension` equality is hard-rejected for both `FullFcf`
 and `BoundaryInjection`; `num_stages` equality is hard-rejected only for
 `FullFcf` — a `BoundaryInjection` load skips it deliberately, since a monthly
-source study may legitimately feed a weekly+monthly current study.
-`col_scale`/LP prescaling is explicitly NOT a compatibility dimension: a state
-variable's identity and physical unit are independent of how the LP happens to
-scale its column, so comparing `col_scale` would falsely reject a policy whose
-entities genuinely match but whose scaling strategy or magnitude differs from
-the current study's — the forbidden alternative this contract rules out.
-Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`). Pinned
-by the `validate_policy_load_full_fcf_*` and
-`validate_policy_load_boundary_injection_*` tests in that module's test suite.
+source study may legitimately feed a weekly+monthly current study. Per-slot
+`slot_identity` (`entity_type`, `entity_id`, `subindex`) is an EXACT positional
+match (`compare_manifest_slot_identity`) only under `FullFcf`; a
+`BoundaryInjection` load does NOT exact-match here — its slot identity is
+RECONCILED instead, by `reconcile::build_rebind`/`rebind_cut` inside
+`load_boundary_cuts`, confined to that one load path. Storage and inflow-lag are
+the state's must-correspond core: a target slot of either family with no source
+counterpart REJECTS, naming the offending hydro or lag depth. The entity
+(`entity_type`/`entity_id`) is NEVER relaxed for any family — only the matching
+MECHANISM changes (identity hashmap vs. exact position), and only a date family's
+calendar `subindex` is ever relaxed (that relaxation is the dated fan-out
+reconciliation, not this core). `col_scale`/LP prescaling is explicitly NOT a
+compatibility dimension: a state variable's identity and physical unit are
+independent of how the LP happens to scale its column, so comparing `col_scale`
+would falsely reject a policy whose entities genuinely match but whose scaling
+strategy or magnitude differs from the current study's — the forbidden
+alternative this contract rules out.
+Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`,
+`PolicyLoadKind::CHECK_SLOT_IDENTITY_EXACT`), `policy/reconcile.rs`
+(`build_rebind`, `rebind_cut`). Pinned by the `validate_policy_load_full_fcf_*`
+(FullFcf exact match, unchanged) and
+`validate_policy_load_boundary_injection_does_not_check_slot_identity`
+(BoundaryInjection defers to reconcile) tests, plus `policy::reconcile`'s unit
+tests and `tests/boundary_reconcile_defaults.rs`.
+
+### Dated anticipated fan-out reconciliation is hour-weighted by the SOURCE month
+
+The calendar-`subindex` relaxation the parent section reserves for a date family
+IS this fan-out, and it is confined to `AnticipatedThermalState` slots inside
+`load_boundary_cuts`. A source study prices its anticipated commitments on a
+monthly delivery calendar; the current study delivers them on a post-study weekly
+(and monthly) calendar. `resolve_anticipated` reconciles each target slot `w`
+against the source months `M` it overlaps **by real calendar date**, not by
+subindex: full coverage yields `RebindOp::Blend` with per-month weight
+`overlap_hours(w, M) / H_M` — divided by the **source** month's hours `H_M`, the
+conservation identity that makes a slot's fanned coefficients sum back to the
+source's (a covered target slot's coeff ratio equals `H_w / H_M`). A target slot
+straddling into unpriced time yields `RebindOp::Renormalize`: the same weights
+additionally scaled by `H_w / Σ_covered overlap`, so the covered months' price
+density replicates across the uncovered span instead of deflating the boundary FCF
+with an implicit `0.0` term. No covered month yields `Zero`.
+
+Only a POST-HORIZON lane fans out. A dated target slot with NO resolved delivery
+interval is an IN-STUDY ring slot — a commitment delivered WITHIN the current
+horizon (a matured commitment fished at the terminal stage, or a `K = 0`
+sub-stage-lead delivery self-delivered there) — and resolves to `Zero`: the
+terminal boundary FCF prices only post-horizon obligations, so a within-horizon
+delivery, already discharged inside the study, contributes nothing. This is
+sound BECAUSE a post-horizon lane reads its `delivery_date` and its
+`target_interval` from the SAME destination-stage index into 1:1-length vectors
+(`build_stage_entity_manifest` and `build_stage_entity_delivery_intervals` walk
+in lockstep, `post_study_calendar_stages` mapping stages 1:1), so a post-horizon
+lane is always `dated ⟺ Some(interval)`; a `None` interval on a dated slot
+therefore marks the in-study ring uniquely, never a failed post-horizon
+resolution. Two wrong-but-compiling alternatives: `RebindOp::Reject` here (the
+retired behavior) aborts a legitimate boundary load the moment any anticipated
+thermal delivers in-horizon (the K=0-at-terminal case — the manifest DELIBERATELY
+dates a matures-this-stage slot, pinned by
+`anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`); resolving
+the in-study slot an in-horizon interval and fanning it out would wrongly `Blend`
+a within-horizon delivery against the source's months.
+
+`Blend` and `Renormalize` are semantically distinct and MUST NOT be collapsed:
+`rebind_cut` applies both through the identical weighted-sum, so unifying them
+reads like harmless dedup — but only `build_rebind` carries the `Renormalize`
+anti-deflation scale, and dropping it silently understates the boundary FCF on any
+partial-coverage calendar. Two further wrong-but-compiling alternatives: dividing
+by the **target** slot's `H_w` instead of the source `H_M` (breaks the
+`H_w / H_M` conservation ratio), and joining on `subindex` instead of the real
+interval (anticipated delivery is NON-monotone in subindex — the modular
+delivery-target residue of the ring contract above — so a subindex join misaligns
+months to weeks). Source month intervals are reconstructed from the `YYYYMM01`
+day-01 delivery anchor (`decode_month_anchor`, the exact inverse of
+`year_month_day_anchor`); an exact or superset match reconciles byte-for-byte
+(`Copy`). The `H_w / covered` division is guarded: `resolve_anticipated` returns
+`Zero` on `terms.is_empty()` before it can divide by a zero covered span.
+Read: `policy/reconcile.rs` (`resolve_anticipated`, `build_rebind`, `rebind_cut`,
+`decode_month_anchor`, `overlap_hours`, the `Blend`/`Renormalize` variants),
+`setup/mod.rs` (`year_month_day_anchor`), `setup/accessors.rs`
+(`build_terminal_anticipated_delivery_intervals`, the target-interval companion),
+`policy/policy_load.rs` (`load_boundary_cuts` threads the target delivery
+intervals). Pinned by the `hm_distribute_conservation` fixtures in
+`tests/anticipated_core.rs` (coeff ratio equals `H_w / H_M`, invariant to the
+delivery stage's hours), the `Blend`/`Renormalize` `rebind_cut` unit tests (both
+apply identical mechanics, distinction is only the weight),
+`tests/boundary_reconcile_defaults.rs` (the fan-out matrix and the superset
+bit-identity `to_bits` pin), and
+`build_rebind_dated_in_study_ring_slot_with_no_interval_yields_zero` (a dated
+target slot with no interval resolves to `Zero`, not a reject, even when a source
+month would overlap it).
 
 ## Initial-state seeding resolves IDs through a position map, never `binary_search`
 
@@ -518,8 +873,8 @@ carries `k_0` onto the balance row — never a separate once-per-stage family
 (the deposit share itself is emitted at the call site, never through
 `DeliveryRing::emit_deposit`, which only the anticipated ring calls). Incoming
 buckets are pinned via column bounds, resolved through
-`StateSpace::state_to_lp_incoming_column`'s explicit bucket arm, never the
-`anticipated_state` catch-all. Subgradient extraction
+`StateSpace::state_to_lp_incoming_column`'s explicit `transit_buckets_in` arm,
+never falling through to the commitment-hold `commit_in` arm. Subgradient extraction
 divides the incoming bucket column's reduced cost by `col_scale`
 (`extract_duals_from_view`, the same rc/col_scale contract as storage); the
 cut row renders the **outgoing** bucket column through
@@ -600,25 +955,96 @@ declaration order of their hydros produce identical `column_order`,
 incoming buckets directly from its `past_defluences` windows — never a
 positional walk over a fixed pre-study calendar. For upstream hydro `i`'s
 window `[start_date, end_date)`, `e_off = start_0 − end_date` and
-`width = end_date − start_date` feed `ic_anchor_k` exactly as it already
+`width = end_date − start_date` feed the shared `StageCalendar`'s
+`hour_window_shares(t_v, cumulative_before, period_duration)` — a pure
+hour-clock overlap over the study-stage durations, exactly as it already
 takes `(cumulative_before, period_duration)`: the windowed derivation lives
 entirely in how the caller computes those two offsets from calendar dates,
-never inside `ic_anchor_k` itself. A hydro may carry multiple, non-contiguous
-windows; the seed must `filter` over every window with a matching `hydro_id`
-and deposit each one independently
+never inside the resolver itself. A hydro may carry multiple, non-contiguous
+windows; the seed must `filter` over every
+window with a matching `hydro_id` and deposit each one independently
 (`volume = width · M3S_TO_HM3 · value_m3s`, `seed[start+d] += k[d] · volume`)
 — a `.find()` would silently keep only the first window and drop the rest,
 understating the seed with no error. There is no fallback for incomplete
 coverage: `cobre-io`'s `validate_travel_time` row-5 gate guarantees every
 declared arc's windows cover `[start_0 − t_v, start_0)` before setup ever
 runs this seed.
-Read: `setup/bucket_seed.rs` (`build_initial_transit_bucket_state`),
-`setup/bucket_topology.rs` (`ic_anchor_k`). Pinned by the single-window
+Read: `setup/mod.rs` (`build_initial_transit_bucket_state`,
+`splice_transit_bucket_seed`), `cobre-stochastic`'s
+`season_cast::StageCalendar::hour_window_shares`. Pinned by the single-window
 unroll regression (the `k`-weighted deposit matches the closed-form
 half-share), the gapped-two-window additive regression (two non-contiguous
 windows for one arc contribute independently), and the seed's own
 declaration-order-invariance regression (distinct from, and in addition to,
 the topology-level ordering pin above).
+
+### Delivery-family right-boundary pricing
+
+Both delivery-family carriers — the anticipated-thermal hold ring
+(`## Anticipated thermal commitments`) and the water travel-time bucket ring —
+keep terminal in-flight state LIVE and price it through the SAME already-generic
+cut-state projection (`β·state`), never a per-family pricing arm.
+`StateRegion::cut_enabled` returns `true` for both `Buckets` and `CommitmentHold`
+at every pool, the terminal pool included, and `CutStateProjection::new` walks
+every cut-enabled region's `state_dim_range` with no entity-type and no per-stage
+arm — so a kept-live terminal slot of either family is already a priced FCF
+dimension a loaded boundary cut's `β` lands on directly. The projection carries
+every such slot today; only whether the slot holds live value or a masked
+`[0, 0]` structural zero depends on the per-family fill. A per-family
+terminal-pricing arm is the forbidden alternative: the projection already owns
+the coefficient, so a second path double-counts or misaligns it.
+
+The two carriers reach that live terminal state through a LOAD-BEARING asymmetry
+that must not be flattened into one shared keep-live helper:
+
+- **Thermal is additive and inert by default.** Its post-horizon lanes are an
+  appended block `fill_anticipated_slot_columns` holds open `(-inf, inf)` at
+  every stage, terminal included. No post-horizon commitment is ever created
+  without an injected boundary, so the open block perturbs nothing for a study
+  that loads none — it is inert until a boundary fills it.
+- **Water is the ring's own capped slots and is NOT inert.** Its terminal state
+  is the bucket ring's own horizon-capped deep-lag slots, which
+  `horizon_cap_active` masks `[0, 0]` at the terminal (Terminal credit deferred
+  below). Un-masking them re-enables their definition rows, deposit share, and
+  outgoing columns — a live LP change, not an inert appendage — so it MUST be
+  gated on `config.policy.boundary` presence: a zero-terminal-value study (no
+  boundary) keeps the masked layout byte-for-byte, and only a boundary-loaded
+  study opens the terminal slots.
+
+Un-masking the water terminal slots UNCONDITIONALLY — dropping the
+`config.policy.boundary` gate — is the wrong-but-compiling alternative. It
+re-enables the terminal deposit and outgoing columns for every study, so a
+zero-terminal-value water-travel-time study, whose terminal value is still zero,
+now routes the end-of-horizon release into a bucket slot it used to drop; the LP
+the solver sees changes, silently perturbing every existing water-travel-time
+golden even though the optimal cost is unchanged. Byte-neutrality for the
+no-boundary case is the property the gate protects.
+
+The water terminal state is also EMITTED for rolling seeding (the `transit_seed`
+output, reconstructed from realized turbined+spilled releases in the
+`past_defluences` schema so a follow-on run reuses `build_initial_transit_bucket_state`
+verbatim). That rolling round-trip is faithful ONLY for `t_v <= horizon`: the seed
+reader derives its `StageCalendar` from the receiving study's own un-padded stage
+list, so it cannot represent an in-transit lag deeper than that study's stage
+count. For `t_v > horizon` the deep pre-study mass beyond the horizon is not
+carried across the seam — the SAME Terminal credit deferred imprecision (below),
+surfacing at the rolling boundary rather than being introduced by the emit format
+(a direct bucket-state emit would hit the identical reader truncation). This is a
+ratified scope boundary, not a bug; lifting it requires the seed reader to
+represent lags past the horizon. Pinned by the `#[ignore]`d
+`round_trip_continuity_needs_the_leftover_seed_stitch_when_travel_time_exceeds_horizon`
+reproduction, alongside the passing `t_v <= horizon` round-trip, in
+`tests/hydro_sim.rs`.
+Read: `lp/indexer/state_space.rs` (`StateRegion::cut_enabled`),
+`lp/indexer/cut_state_projection.rs` (`CutStateProjection::new`),
+`setup/bucket_topology.rs` (`horizon_cap_active`), `lp/builder/columns.rs`
+(`fill_anticipated_slot_columns`, `fill_transit_bucket_columns`),
+`crates/cobre-io/src/config/policy.rs` (`PolicyConfig::boundary`). Pinned by
+`every_bucket_dim_projects_including_deep_terminal_lags` (every bucket dim, the
+deep-lag terminal slots included, appears exactly once in the cut-state
+projection with no entity-type or per-stage gate) and
+`commitment_hold_post_horizon_joins_the_projection` (the thermal post-horizon
+lanes join the same projection), both in `lp/indexer/cut_state_projection.rs`.
 
 ### Terminal credit deferred
 
@@ -635,6 +1061,13 @@ why dropping the row is safe: the finite horizon's zero terminal value
 (`HorizonMode::Finite`, the only implemented mode) makes a masked slot's cut
 coefficient structurally zero, so no solution loses value by never routing
 water into it — the residual mass has no receiving stage either way. This
+safe-drop is scoped to a zero-terminal-value study — one with no
+`config.policy.boundary`: with a boundary loaded the terminal value is not zero,
+the masked slot's coefficient is no longer structurally zero, and dropping the
+slot would lose real value — the case the Delivery-family right-boundary pricing
+convention above handles, keeping the terminal bucket state live and pricing it
+through the shared cut-state projection, gated on `config.policy.boundary`
+presence so this drop stays byte-for-byte for a zero-terminal-value study. This
 under-values end-of-horizon upstream release; it is a documented target-stage
 imprecision, not a bug to patch by capping
 `TransitBucketTopology::per_plant_depth`/`column_order` too — those size from the
@@ -697,104 +1130,204 @@ pins that `fill_parallel_water_entries` never reads it.
 
 ### Pre-study anticipated commitments: calendar-derived coverage
 
-`AnticipatedCommitmentHistory::values_mw` (`cobre-core`) is an ordinal,
-delivery-stage-indexed vector — `values_mw[j]` is the MW delivered at the
-`j`-th pre-study-committed delivery stage — never date-windowed like
-`past_defluences`. Its length must equal the calendar-derived count of
-pre-study-committed delivery stages: `LeadStages(l)` clamps to
-`min(l, n_stages)`; `LeadTime(delta)` counts the leading study stages whose
-stage-end cumulative hours are `<= delta` (tie-inclusive). `cobre-io`'s
-`check_anticipated_thermals` computes this count itself, via
-`required_anticipated_commitment_count`, rather than calling into the
-solver crate's point-commitment resolver (cobre-io is upstream and cannot
-depend on it), and hard-rejects any length mismatch as a
-`BusinessRuleViolation`. A `len == lead_stages` gate is a plausible-looking
-alternative that silently mis-covers a `LeadTime`-configured plant on a
-non-uniform calendar, since the required count is calendar-derived, not a
-constant stage count; there is no fallback comparable to the one already
-rejected for `past_defluences` coverage above.
-Read: `crates/cobre-io/src/validation/semantic/thermal.rs`
-(`required_anticipated_commitment_count`, `check_anticipated_thermals`).
+`AnticipatedCommitmentHistory` (`cobre-core`) is a windowed record —
+`{thermal_id, start_date, end_date, value_mw}`, one commitment window per
+entry, mirroring `HydroPastDefluence`'s shape — never a per-stage array
+indexed by delivery order. A plant's commitment windows must TILE its
+calendar-derived leading delivery stages EXACTLY at coverage `1.0`: no gap
+(a leading stage left uncovered) and no over-coverage (a window reaching a
+stage at or beyond the horizon); overlap between two windows of the same
+plant is rejected earlier, at parse time, by the shared windowed-record
+validator that also serves `past_defluences` and `recent_observations`. The
+leading-stage count is calendar-derived, computed independently of the
+solver crate's point-commitment resolver (`cobre-io` is upstream and cannot
+depend on it): `LeadStages(l)` clamps to `min(l, n_stages)`; `LeadTime(delta)`
+counts the leading study stages whose stage-end cumulative hours are
+`<= delta` (tie-inclusive). `check_anticipated_thermals` resolves this count,
+then hands the plant's windows to the shared `StageCalendar` resolver — the
+same calendar walk `past_defluences` coverage uses — via `covers_exactly`
+(gap detection over the leading count) and a per-stage `coverage` sum
+(over-coverage detection beyond it); either failure hard-rejects as a
+`BusinessRuleViolation`, no fallback. A count-only gate
+(`records.len() == leading_stage_count`) is a plausible-looking alternative
+that accepts the right NUMBER of windows while missing a leading stage and
+duplicating another — silently mis-covering the plant — since only per-stage
+tiling, not a count, proves every leading stage is covered exactly once.
+Read: `crates/cobre-core/src/constraints/initial_conditions.rs`
+(`AnticipatedCommitmentHistory`), `crates/cobre-io/src/validation/semantic/thermal.rs`
+(`check_anticipated_thermals`, `lead_delivery_stage_count`,
+`check_commitment_coverage`), `crates/cobre-stochastic/src/season_cast/mod.rs`
+(`StageCalendar::covers_exactly`, `StageCalendar::coverage`).
 Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
 `test_anticipated_lead_time_coverage_pmo_calendar_under_coverage_rejected`.
 
-### In-LP anticipated ring: definition-row sign & two-sided masking
+### In-LP anticipated ring: definition-row sign, hold carry & asymmetric masking
 
-The anticipated ring is `DeliveryRing`'s other instantiation (the shared
-skeleton above): an outgoing block (`StateSpace::anticipated_slots_out`,
+The in-study anticipated ring is `DeliveryRing`'s other instantiation (the shared
+skeleton above), borrowing the LEADING `n_anticipated * k_max` sub-range of the
+merged commitment-hold region: an outgoing block (`StateSpace::commit_out`,
 identity-resolved by `state_to_lp_column`, contributing to `n_state`) and a
-separate incoming block (`StateSpace::anticipated_state`, pinned via
-`state_to_lp_incoming_column`) — never one dual-purpose range shifted
-out-of-LP. There is no Rust-side shift step: the ring transition is resolved
-entirely by the definition rows below, and `current_state`/`state_at_capture`
-read the outgoing block by the same plain copy already used for storage and
-travel-time buckets.
+separate incoming block (`StateSpace::commit_in`, pinned via
+`state_to_lp_incoming_column`) — never one dual-purpose range shifted out-of-LP.
+There is no Rust-side shift step: the ring transition is resolved entirely by the
+definition rows below, and `current_state`/`state_at_capture` read the outgoing
+block by the same plain copy already used for storage and travel-time buckets.
+Slots are keyed by DELIVERY-TARGET RESIDUE, not by distance to maturity: delivery
+target `m`'s slot is `m mod k_max`, slot-major/plant-minor
+(`StateSpace::commitment_hold_in_study_offset(plant, m) = (m mod k_max) *
+n_anticipated + plant`).
 
-An interior slot's outgoing column is pinned to the next slot's incoming value
-by the shared ring-shift row, `slot_k^out − slot_{k+1}^in = 0`
-(`fill_anticipated_slot_definition_entries` routes it through
-`DeliveryRing::emit_shift_rows`); the plant's own newest slot (`k = k_i − 1`)
-is pinned instead to the fresh decision column, `slot_{k_i-1}^out =
-decision_col`, via the shared skeleton's deposit primitive
-(`fill_anticipated_state_out_def_entries` calls `DeliveryRing::emit_deposit`
-directly). Both row families render `[0, 0]`
+The interior transition is the same-slot HOLD identity, not a Markov-1 shift. An
+in-flight, not-yet-due slot's outgoing column is pinned to its OWN incoming column,
+`slot^out − slot^in = 0`, via `DeliveryRing::emit_carry_rows` (`+1` on
+`out_col(slot, lane)`, `−1` on `in_col(slot, lane)` — the SAME slot), routed by
+`fill_anticipated_slot_definition_entries`. This REPLACES the retired Markov-1
+shift `slot_k^out − slot_{k+1}^in = 0` (`emit_shift_rows`, whose `−1` lands on the
+NEXT slot): a commitment does not migrate slots stage-to-stage — it is held at its
+delivery-target residue until it matures. The water travel-time ring keeps
+`emit_shift_rows`, because its physics genuinely shift; only the anticipated family
+carries. `build_anticipated_slot_row_pos` covers only STRICTLY FUTURE, not-yet-due
+slots; the commitment maturing THIS stage is always fished (see the always-fish
+contract below), never carried here.
+
+The deposit / latch pins a plant's fresh decision into the slot of its OWN delivery
+target, `slot^out = decision_col` (`slot = delivery_stage mod k_max`), via the
+shared skeleton's deposit primitive (`DeliveryRing::emit_deposit`, `+1` on
+`out_col(slot, lane)`, `−1` on `decision_col`), routed by
+`fill_anticipated_state_out_def_entries`. Both row families render `[0, 0]` bounds
 (`fill_anticipated_slot_definition_rows` / `fill_anticipated_state_out_def_rows`):
-the `+1`/`−1` structural coefficients on each side of the row do the shift,
-never the bounds.
+the `+1`/`−1` structural coefficients on each side do the carry/deposit, never the
+bounds.
 
-A slot beyond the horizon-reachable window (`build_anticipated_slot_row_pos`'s
-per-slot `Option<usize>`, `None` when unreachable) gets BOTH sides of the
-shared masking contract together via `DeliveryRing::freeze_masked_columns`: no
-definition row (the row-cap side) AND a frozen `[0, 0]` outgoing column
-(`fill_anticipated_slot_columns`, the column-freeze side — the same
-commissioning-dormant-column convention as NCS/thermal/line/station/contract).
+Masking is ASYMMETRIC across the merged region. The in-study slots keep the
+two-sided reachability masking the shared skeleton always ships together: a masked
+position (`build_anticipated_slot_row_pos`'s per-slot `None`) gets NO definition
+row (the row-cap side) AND a frozen `[0, 0]` outgoing column
+(`DeliveryRing::freeze_masked_columns`, the column-freeze side, over the open
+signed `(-inf, inf)` reachable bound a committed MW value needs) in the SAME pass;
+wiring only one side leaves either a dangling row on a frozen column or a free
+column with no defining constraint, both wrong-but-compiling. The trailing
+post-horizon lanes are NOT masked — `freeze_masked_columns` is retired for them
+(`fill_anticipated_slot_columns` keeps them open `(-inf, inf)` at EVERY stage,
+terminal included) so the boundary FCF prices the carried state (`β·x`) while the
+decision column books the delivery-anchored post-study fuel
+(`fill_commitment_decision_columns`, fuel-exclusive β so the two do not
+double-count). Freezing a post-horizon lane `[0, 0]` would zero a commitment the
+terminal boundary must carry.
 
-A slot beyond a plant's OWN `StateSpace::anticipated_lead_stages[plant]`
-bound is structural padding even when `t + slot_idx` itself still lands
-inside the horizon — the multi-plant heterogeneous-lead case, where two
-plants sharing one `k_max`-wide ring have different per-plant reachable
-widths. `policy::policy_export::build_stage_entity_manifest` applies this
-same bound before populating `EntitySlot::delivery_anchor`, never a depth- or
-decider-only check: `AnticipatedResolution::decision_sets`/`depth` count only
-within-study-decided commitments and silently exclude a still-draining
-pre-study seed, undercounting a ring position that legitimately holds one. The
-manifest resolves a ring column back to `(slot, plant)` via
-`DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col` — never
-a re-derived `offset % n_anticipated`/`offset / n_anticipated` pair.
+The policy manifest resolves a ring column back to `(slot, plant)` via
+`DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col`, never a
+hand-rolled `offset / n_anticipated`/`offset % n_anticipated` pair — and dates it
+at its MODULAR delivery stage: the next `m >= t` in the slot's residue class
+(`delta = (slot_idx + k_max − t mod k_max) mod k_max`, `m = t + delta`), NEVER
+`t + slot_idx` (the retired shift-ring form, wrong whenever `t mod k_max != 0`).
+Reachability uses the plant's OWN `StateSpace::anticipated_lead_stages[plant]`
+bound (`slot_idx < k_i`), not a depth- or decider-only check
+(`AnticipatedResolution::decision_sets`/`depth` count only within-study-decided
+commitments and silently exclude a still-draining pre-study seed): a slot beyond
+that bound is structural padding dated at the sentinel even when its delivery
+target `m` still lands inside the horizon — the multi-plant heterogeneous-lead
+case, where plants sharing one `k_max`-wide ring have different reachable widths.
+`build_stage_entity_manifest` applies this before populating
+`EntitySlot::delivery_date`.
 
-Read: `lp/indexer/state_space.rs` (`StateSpace::state_to_lp_column`,
-`state_to_lp_incoming_column`), `lp/builder/layout.rs`
-(`build_anticipated_slot_row_pos`), `lp/builder/entries.rs`
+The sign / `col_scale` invariants are unchanged from storage and the water buckets:
+the incoming column's reduced cost is DIVIDED by `col_scale` on extract
+(`extract_duals_from_view`) and the outgoing column's cut coefficient is MULTIPLIED
+back on render (`push_scaled_coefficient`); `col_scale` is forced to `1.0` across
+the whole region (the reconcile contract below).
+
+Read: `lp/indexer/state_space.rs` (`StateSpace::commit_out`,
+`StateSpace::commit_in`, `commitment_hold_in_study_offset`, `state_to_lp_column`,
+`state_to_lp_incoming_column`), `lp/builder/delivery_ring.rs`
+(`DeliveryRing::emit_carry_rows`, `emit_deposit`, `freeze_masked_columns`,
+`slot_lane_at`), `lp/builder/entries.rs`
 (`fill_anticipated_slot_definition_entries`,
 `fill_anticipated_state_out_def_entries`, `anticipated_ring`), `lp/builder/rows.rs`
-(`fill_anticipated_slot_definition_rows`), `lp/builder/columns.rs`
+(`fill_anticipated_slot_definition_rows`, `fill_anticipated_state_out_def_rows`),
+`lp/builder/layout.rs` (`build_anticipated_slot_row_pos`), `lp/builder/columns.rs`
 (`fill_anticipated_slot_columns`), `policy/policy_export.rs`
 (`build_stage_entity_manifest`). Pinned by the `state_to_lp_column`
-`anticipated_slots_out`-identity regressions, the combined row-cap-and-
-column-freeze regression asserting both sides in one test, the backward-cut
-coefficient propagation regressions (K=1, K=2, K=3) confirming the ring-routed
-definition rows produce the correct subgradient values, and the manifest's
-padding-vs-reachable delivery-anchor regression.
+`commit_out`-identity regressions
+(`state_to_lp_column_commit_out_is_identity_no_lag`,
+`state_to_lp_column_commit_out_identity_multi_plant_heterogeneous_k`), the
+carry-vs-shift and masking primitives
+(`emit_carry_rows_targets_the_same_slot_where_emit_shift_rows_targets_the_next`,
+`emit_carry_rows_masked_position_emits_no_row`,
+`freeze_masked_columns_masks_identically_across_reachable_bound`), the open-coded
+carry-formula regression
+(`fill_anticipated_slot_definition_entries_matches_open_coded_carry_formula_across_heterogeneous_plants`),
+the backward-cut coefficient-propagation regressions
+(`two_stage_k1_anticipated_cut_coefficient_matches_analytical`,
+`three_stage_k2_anticipated_cut_coefficient_propagates_correctly`,
+`four_stage_k3_anticipated_cut_coefficient_propagates_correctly`), and the
+manifest delivery-anchor regressions
+(`anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`,
+`anticipated_slot_delivery_anchor_past_horizon_is_sentinel`,
+`anticipated_slot_padding_beyond_own_lead_is_sentinel`).
+
+### In-study maturity always fishes; carry-to-terminal is the post-horizon lane's alone
+
+The in-study maturity arm ALWAYS fishes. For every in-study delivery maturing this
+stage (`build_anticipated_fishing_row_pos`'s `Some`, driven by
+`PointResolution::is_anticipated_at`; `None` only at a `K = 0` self-delivery),
+`fill_anticipated_fishing_entries` emits the must-generate coupling
+UNCONDITIONALLY — active OR commissioning-inactive alike: `+h_b` (block hours) on
+each of the plant's per-block thermal generation columns and `−H` (the stage's
+total hours) on the maturing slot's INCOMING column `in_col(stage_idx mod k_max)`.
+It reads `commit_in` and NEVER writes `commit_out`. A commissioning-inactive
+delivery was never latched — its decision column stays dormant `[0, 0]`
+(`fill_anticipated_columns`) — so its `in_col` carries `0` and this equality pins
+that stage's thermal generation to `0`, the correct, harmless outcome for a
+delivery the plant's window cannot receive.
+
+The wrong-but-compiling alternative is a two-way
+`fish-iff-commissioning-active-else-carry` branch. Because fishing reads only
+`in_col` while a carry WRITES `out_col`, the carry arm's `out_col` write collides
+with the SAME stage's fresh delivery latch on that slot whenever a future-entry
+plant's pre-entry ramp shares the maturing slot's modular residue (the case a
+plant's own lead defines `k_max`, so no other plant reaches deeper): two definition
+rows on one `out_col` pin a freshly-costed decision to a stale carried value, a
+release-silent LP corruption surfacing as a false `Infeasible` or a silent
+zero-commit (the guarding `debug_assert` is compiled out of release).
+Carry-to-terminal is owned SOLELY by the post-horizon lane family
+(`fill_commitment_post_horizon_entries`), never the maturity arm. The always-fish
+`+h_b`/`−H` coefficient shape is exactly the pre-migration one; only its slot
+addressing is modular (`stage_idx mod k_max`, via `commitment_hold_in_study_offset`).
+
+Read: `lp/builder/entries.rs` (`fill_anticipated_fishing_entries`,
+`fill_commitment_post_horizon_entries`), `lp/builder/layout.rs`
+(`build_anticipated_fishing_row_pos`), `lp/builder/columns.rs`
+(`fill_anticipated_columns`). Pinned by `fishing_rows_always_active_stage_zero`
+(every plant gets a fishing row regardless of activity, coupling on the maturing
+slot's `commit_in` column at `−H`), `fishing_rows_fill_all_plants`,
+`anticipated_commissioning_window_gates_simulation_output` (a
+commissioning-inactive delivery), and
+`simulation_commitment_hold_carries_anticipated_state_k2` (the maturing seed is
+fished, not carried, across the pre-horizon stages).
 
 ### End-of-horizon masking is exact, never a dropped commitment
 
-Unlike the water ring's Terminal credit deferred subsection, no anticipated
-commitment is ever discarded at the horizon boundary — none is created there
-in the first place. `is_anticipated_decision_active`/
+Unlike the water ring's Terminal credit deferred subsection, no in-study
+anticipated commitment is ever discarded at the horizon boundary — none is
+created there in the first place. `is_anticipated_decision_active`/
 `is_anticipated_decision_active_for_delivery` gate a decision column's
 existence on the strict clause `stage_idx + K_i < n_stages`;
 `PointResolution::decider` itself has a fixed domain `m in [0, n_stages)`, so
 no code path ever computes a commitment targeting a delivery past the
 horizon and then truncates it. `build_anticipated_slot_row_pos`'s per-slot
-`None` (no definition row) and `fill_anticipated_slot_columns`'s frozen
-`[0, 0]` outgoing column, at a `(stage_idx, slot)` pair whose target
-`m = stage_idx + slot + 1 >= n_stages`, are therefore always vacuous: the
-masked slot is provably zero for every valid configuration, never a real
-value the model declines to route anywhere. This differs in kind from
-water's masking: a masked bucket discards a genuine non-zero `k_d`-weighted
-release share deposited every stage regardless of the arc's travel time — an
-admitted target-stage imprecision — while the anticipated gate prevents the
-decision from ever existing, so nothing of value is lost. Crediting a masked
+`None` (no carry row) and `fill_anticipated_slot_columns`'s frozen
+`[0, 0]` outgoing column, at a slot whose delivery target
+`m = stage_idx + depth + 1 >= n_stages` (`depth in 0..k_max`), are therefore
+always vacuous: the masked slot is provably zero for every valid
+configuration, never a real value the model declines to route anywhere. A
+commissioning-inactive in-study delivery is likewise pinned to `0` — not by
+masking but by the always-fish arm reading a dormant slot's `in_col` of `0`
+(the always-fish contract above) — so it too loses nothing of value. This
+differs in kind from water's masking: a masked bucket discards a genuine
+non-zero `k_d`-weighted release share deposited every stage regardless of the
+arc's travel time — an admitted target-stage imprecision — while the
+anticipated gate prevents the decision from ever existing. Crediting a masked
 slot as if it held a dropped commitment would introduce value the model
 never computed, for a delivery stage that does not exist.
 Read: `lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active`,
@@ -811,8 +1344,9 @@ Each anticipated plant gets AT MOST ONE decision column per stage
 (`col_anticipated_decision_start + local_idx`), driven by
 `PointResolution::genuine_decisions_at(stage_idx).next()` (a `K = 0`
 self-delivery already excluded — see below). That decision deposits into its
-OWN ring slot, `slot = delivery_stage − stage_idx − 1` — computed DIRECTLY from
-the decision's own delivery stage, never from a `depth`-derived boundary.
+OWN ring slot, `slot = delivery_stage mod k_max` — computed DIRECTLY from the
+decision's own delivery stage (`fill_anticipated_state_out_def_entries`), never
+from a `depth`-derived boundary.
 
 **`depth[t]` is not the ring's per-stage occupancy boundary.** `depth[t]`
 (`PointResolution::depth`) counts only IN-STUDY decided items still in flight
@@ -822,13 +1356,14 @@ plant can have BOTH an IC-seeded item and a fresh in-study decision occupying
 the ring at the same stage (e.g. a constant-lead plant's stage 0), so
 `depth[t] − genuine_count(t)` under-counts and mis-targets the slot — the
 wrong-but-plausible shortcut `PointResolution::is_ready_at`'s doc comment
-warns against. The correct interior/deposit/padding split is checked PER SLOT
-directly: slot `k`'s target `m = stage_idx + k + 1` is a deposit iff
-`decider[m] == Some(stage_idx)`, an interior shift iff `is_ready_at(m,
-stage_idx)` and not a deposit, else padding. `decider` is nondecreasing in
-`m`, so readiness is monotonic and slots are ready in a contiguous prefix from
-slot 0 — the property that makes the per-slot check well-founded without
-needing an aggregate boundary.
+warns against. The correct interior/deposit/padding split is checked PER
+DELIVERY TARGET directly (`build_anticipated_slot_row_pos`): for each
+`m = stage_idx + depth + 1` (`depth in 0..k_max`), its ring slot `m mod k_max`
+is a deposit iff `decider[m] == Some(stage_idx)`, an interior carry iff
+`is_ready_at(m, stage_idx)` and not a deposit, else padding or past-horizon.
+`decider` is nondecreasing in `m`, so readiness is monotonic and the ready
+delivery targets form a contiguous prefix — the property that makes the
+per-target check well-founded without needing an aggregate boundary.
 
 **`K = 0` (sub-stage lead, `c(m) = m`) is excluded from the ring entirely —
 exclude-with-advisory, never a hard error, never an underflow.** A
@@ -843,8 +1378,12 @@ coupling, no anticipated row at all) at that stage. A setup-time
 stage, and the `lead_stages == 0` alternative — never emitted per-scenario or
 per-trajectory.
 
+The single-decider deposit is TODAY's fill; making a coarse decision stage
+anchor several delivery stages (`|genuine C(t)| > 1`, fan-out) is the deferred
+multi-decider capability the fan-out contract below reserves.
+
 Read: `lead_time/mod.rs` (`PointResolution::genuine_decisions_at`,
-`self_delivered_stages`, `is_anticipated_at`, `is_ready_at`),
+`self_delivered_stages`, `is_anticipated_at`, `is_ready_at`, `depth`),
 `lp/indexer/anticipated_gate.rs`
 (`is_anticipated_decision_active_for_delivery`,
 `anticipated_resolution_for`), `lp/builder/layout.rs`
@@ -852,19 +1391,28 @@ Read: `lead_time/mod.rs` (`PointResolution::genuine_decisions_at`,
 `build_anticipated_fishing_row_pos`), `lp/builder/columns.rs`
 (`fill_anticipated_columns`), `lp/builder/entries.rs`
 (`fill_anticipated_state_out_def_entries`, `fill_anticipated_fishing_entries`),
-`setup/mod.rs` (`warn_on_sub_stage_lead`). Pinned by the `K = 0`
-zero-emission-plus-advisory regression (no anticipated slot/row/fishing
-coupling at any stage, one advisory per self-delivered stage).
+`setup/mod.rs` (`warn_on_sub_stage_lead`). Pinned by
+`k0_sub_stage_lead_emits_no_anticipated_rows_or_fishing_coupling` (no
+anticipated slot/row/fishing coupling at any stage, one advisory per
+self-delivered stage) and `five_stage_k2_anticipated_state_ring_buffer_evolution`
+(the modular deposit/carry occupancy across stages).
 
-### Fan-out configurations are rejected at setup
+### Fan-out is representable, but the LP fill retains its setup-time reject
 
-The LP builder has no fan-out representation: every anticipated plant gets at
-most one decision column per stage (above). A `LeadTime` plant whose
-resolution would fan out (`|genuine C(t)| > 1` at any decision stage) never
-reaches it — `resolve_state_layout` rejects any
+The hold family MAKES fan-out representable: the ring holds N independent fixed
+slots keyed by delivery-target residue, and the modular key `m mod k_max` is a
+bijection on the in-flight set regardless of fan-out — several deliveries
+anchored to one coarse decision stage occupy distinct residues, so there is no
+slot collision and no extra state sizing. What is NOT yet built is the LP FILL:
+every anticipated plant still gets at most one decision column per stage
+(`PointResolution::genuine_decisions_at(stage_idx).next()`, the single-decider
+contract above), so a `LeadTime` plant whose resolution would fan out
+(`|genuine C(t)| > 1` at any decision stage) has no way to deposit its several
+decisions. `resolve_state_layout` therefore RETAINS the reject — it fails any
 `AnticipatedResolution::max_fanout > 1` configuration with
 `SddpError::Validation`, naming the fanning plant (`first_fanned_plant_id`)
-before a study's stage templates exist. This is the SOLE fan-out guard, not a
+before a study's stage templates exist. This is the SOLE fan-out guard: a
+reserved-capability gate pending the deferred multi-decider fill, NOT a
 belt-and-braces check backed by column/entry/row-position handling that no
 longer exists.
 Read: `setup/mod.rs` (`resolve_state_layout`, `first_fanned_plant_id`). Pinned
@@ -933,7 +1481,7 @@ Delivery-anchoring keeps the committed value inside the delivery stage's
 generation bounds **in exact arithmetic only**. The value that actually reaches
 the delivery stage is the solver's computed value for a **basic** ring-slot
 column: `slot_out` is defined by an equality row (`slot_out − decision = 0`, or
-the interior shift), so the simplex produces it through the basis factorization,
+the interior carry), so the simplex produces it through the basis factorization,
 and it is accurate only to the backend's `primal_feasibility_tolerance` (`1e-9`
 on HiGHS and CLP) — never to 1 ULP. A commitment at its cap therefore arrives a
 hair outside it, and the fishing equality's no-slack pin turns that hair into
@@ -952,8 +1500,8 @@ plant generating past its cap.
 Two forbidden alternatives, both of which have shipped:
 
 - **Deleting the reconciliation on the premise that unscaling makes it
-  redundant.** `apply_anticipated_col_scale_unscale` (`col_scale = 1.0` on
-  `anticipated_slots_out ∪ anticipated_state`) removes the ring _carry_ drift and
+  redundant.** `apply_commitment_hold_col_scale_unscale` (`col_scale = 1.0` on
+  `commit_out ∪ commit_in`) removes the ring _carry_ drift and
   is retained — the carry is bit-exact and the decision column's own value is
   bit-exact at its bound. It cannot remove the drift the basis factorization
   introduces at the deposit row, because exactness there is the solver's to give
@@ -967,7 +1515,7 @@ Two forbidden alternatives, both of which have shipped:
 Read: `lp/builder/commitment_reconcile.rs` (`reconcile_commitment`,
 `fill_bound_relaxations`, `drift_margin`), `training/stage_solve_prep.rs`
 (`StageSolvePrep::reconcile_commitments`), `lp/builder/scaling.rs`
-(`apply_anticipated_col_scale_unscale`). Pinned by
+(`apply_commitment_hold_col_scale_unscale`). Pinned by
 `anticipated_commitment_drifted_over_cap_is_absorbed` (a seed a hair past the cap
 trains; it returns `Infeasible` the moment the reconciliation is disabled) and
 `anticipated_commitment_over_cap_seed_is_refused` (a genuine over-commitment is

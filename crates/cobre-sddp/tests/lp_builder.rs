@@ -48,12 +48,13 @@ mod extraction_nonuniform_block_bases {
     //!    every cost category is an objective·primal·scale sum and the breakdown is
     //!    expected to reconcile to the LP objective to within floating-point round-off.
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
     use cobre_core::{TrainingEvent, scenario::ScenarioSource};
     use cobre_sddp::{
-        SimulationScenarioResult, StudySetup, aggregate_simulation,
+        SimulationScenarioResult, SimulationWeighting, StudySetup, aggregate_simulation,
         hydro_models::prepare_hydro_models,
         setup::{StudyParams, prepare_stochastic},
     };
@@ -84,7 +85,8 @@ mod extraction_nonuniform_block_bases {
 
         let mut config_with_sim = config.clone();
         config_with_sim.simulation.enabled = true;
-        config_with_sim.simulation.num_scenarios = 1;
+        config_with_sim.simulation.selection =
+            Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
         let params = StudyParams::from_config(&config_with_sim)
             .expect("StudyParams::from_config must succeed");
@@ -148,8 +150,13 @@ mod extraction_nonuniform_block_bases {
         let scenario_results = drain_handle.join().expect("drain thread must not panic");
 
         let sim_config = setup.simulation_config();
-        let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
-            .expect("aggregate_simulation must succeed");
+        let (_summary, _gathered) = aggregate_simulation(
+            &local_costs.costs,
+            sim_config,
+            &comm,
+            SimulationWeighting::Uniform,
+        )
+        .expect("aggregate_simulation must succeed");
 
         scenario_results
     }
@@ -541,7 +548,7 @@ mod fixture_operational_start_date_order {
 
 mod policy_entity_manifest {
     //! Integration coverage for the embedded per-slot entity manifest written into
-    //! `policy/cuts/stage_NNN.bin` by the shared `write_checkpoint`.
+    //! `policy/cuts/<pool>.bin` by the shared `write_checkpoint`.
     //!
     //! Trains a deterministic case to a policy checkpoint through the same
     //! `write_checkpoint` both front ends call, then reads the cut files back and
@@ -988,13 +995,9 @@ mod cell_partition_gates {
                     water_withdrawal_m3s: 0.0,
                 },
                 hydro_block: HydroBlockBounds {
-                    min_turbined_m3s: 0.0,
                     max_turbined_m3s: 100_000.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
                     max_generation_mw: 100_000.0,
-                    max_diversion_m3s: None,
+                    ..Default::default()
                 },
                 thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
                 thermal_block: ThermalBlockBounds {

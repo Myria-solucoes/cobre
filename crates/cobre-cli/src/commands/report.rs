@@ -100,12 +100,10 @@ pub fn execute(args: ReportArgs) -> Result<(), CliError> {
         });
     }
 
-    // training/metadata.json is required; absence is an error.
     let training_metadata_path = results_dir.join("training/metadata.json");
     let training: TrainingMetadata =
         read_training_metadata(&training_metadata_path).map_err(CliError::from)?;
 
-    // simulation/metadata.json is optional (absent when simulation was skipped).
     let simulation_metadata_path = results_dir.join("simulation/metadata.json");
     let simulation: Option<SimulationMetadata> = read_optional_metadata(&simulation_metadata_path)?;
 
@@ -116,7 +114,6 @@ pub fn execute(args: ReportArgs) -> Result<(), CliError> {
 
     let status = training.status.clone();
 
-    // Capture convenience values before `training`/`simulation` move into the struct.
     let bounds = training.bounds.clone();
     let cost = simulation.as_ref().and_then(|s| s.cost.clone());
 
@@ -205,7 +202,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#
@@ -225,7 +222,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#
@@ -275,7 +272,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#
@@ -294,15 +291,13 @@ mod tests {
             "scenarios": { "total": 100, "completed": 100, "failed": 0 },
             "cost": {
                 "mean_cost": 789012.0,
-                "std_cost": 4321.0,
-                "cvar": 800000.0,
-                "cvar_alpha": 0.95
+                "std_cost": 4321.0
             },
             "distribution": {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#

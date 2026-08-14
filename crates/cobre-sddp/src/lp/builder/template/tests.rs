@@ -13,6 +13,7 @@
 )]
 
 use chrono::NaiveDate;
+use cobre_core::scenario::SamplingScheme;
 use cobre_core::{
     AnticipatedConfig, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties,
     ContractBlockBounds, ContractType, DeficitSegment, EnergyContract, EntityId, Hydro,
@@ -53,13 +54,9 @@ fn default_hydro_bounds() -> HydroStageBounds {
 
 fn default_hydro_block_bounds() -> HydroBlockBounds {
     HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 250.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     }
 }
 
@@ -203,6 +200,27 @@ fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
         .penalties(penalties)
         .build()
         .expect("system_with_thermals: valid system")
+}
+
+/// `system_with_thermals`'s bus carries a `std_mw == 0.0` load model; its slot
+/// is admitted under `SamplingScheme::External` and excluded under
+/// `SamplingScheme::InSample` (the byte-neutral default every other caller
+/// threads).
+#[test]
+fn collect_load_bus_indices_honors_threaded_scheme() {
+    let system = system_with_thermals(vec![]);
+    let bus_pos: std::collections::BTreeMap<EntityId, usize> = system
+        .buses()
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+
+    let external = super::collect_load_bus_indices(&system, &bus_pos, SamplingScheme::External);
+    assert_eq!(external, vec![0]);
+
+    let in_sample = super::collect_load_bus_indices(&system, &bus_pos, SamplingScheme::InSample);
+    assert!(in_sample.is_empty());
 }
 
 /// Build empty [`ResolvedParameters`] (no parameters).
@@ -448,6 +466,7 @@ fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
 
     let ids: Vec<i32> = ctx.pumping_stations.iter().map(|p| p.id.0).collect();
@@ -510,6 +529,7 @@ fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
 
     assert_eq!(
@@ -593,6 +613,7 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
@@ -784,6 +805,7 @@ fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
 
     assert_eq!(ctx.contracts.len(), 2);
@@ -845,6 +867,7 @@ fn stage_layout_geometry_populates_contract_ranges() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     let stage = system
         .stages()
@@ -902,6 +925,7 @@ fn stage_layout_geometry_empty_contracts_are_pumping_end_anchored() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     let stage = system
         .stages()
@@ -1049,6 +1073,7 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
 }
 
@@ -1127,6 +1152,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
 
     assert_eq!(ctx.n_anticipated, 2, "n_anticipated");
@@ -1203,6 +1229,7 @@ fn build_template_build_ctx_zero_anticipated_when_none() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
 
     assert_eq!(ctx.n_anticipated, 0, "n_anticipated");
@@ -1606,6 +1633,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
 
     assert_eq!(ctx_a.n_anticipated, 2);
@@ -1685,6 +1713,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         arc_spread_chrono: ctx_a.arc_spread_chrono.clone(),
         arc_arrival_density: ctx_a.arc_arrival_density.clone(),
         per_stage_mask: ctx_a.per_stage_mask.clone(),
+        post_study_resolved: ctx_a.post_study_resolved.clone(),
     };
 
     assert_eq!(
@@ -1810,7 +1839,7 @@ fn stage_templates_empty_is_all_empty_with_n_hydros() {
 /// global rate, so the postprocessed per-stage factors are all < 1.0 and the
 /// cumulative vector compounds below the 1.0 placeholder.
 fn discounted_multi_stage_system() -> cobre_core::System {
-    use cobre_core::{PolicyGraph, PolicyGraphType};
+    use cobre_core::{HorizonGraph, PolicyGraphType};
 
     let n_stages = 3_usize;
     let thermals = vec![Thermal {
@@ -1914,10 +1943,12 @@ fn discounted_multi_stage_system() -> cobre_core::System {
         },
     );
 
-    let policy_graph = PolicyGraph {
+    let policy_graph = HorizonGraph {
+        stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.10,
         transitions: Vec::new(),
+        nodes: Vec::new(),
         season_map: None,
     };
 
@@ -1943,8 +1974,8 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
     let par_lp = PrecomputedPar::default();
     let normal_lp = PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
-    let topology = build_transit_bucket_topology(&system);
-    let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology)
+    let topology = build_transit_bucket_topology(&system, false);
+    let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology, None)
         .expect("resolve_state_layout: valid test fixture");
     let hydro_cell_index = HydroCellIndex::build(system.hydros());
 
@@ -1962,6 +1993,7 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
         &topology.arc_spread_chrono,
         &topology.arc_arrival_density,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     )
     .expect("build_stage_templates: valid system");
 
@@ -2135,7 +2167,7 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
                 max_outflow_m3s: Some(800.0),
                 min_generation_mw: 5.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -2271,6 +2303,7 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -2625,7 +2658,7 @@ fn relocated_diagnostic_template_operational_violation_correctness() {
 // ── build_filling_v_target backward fold ─────────────────────────────────
 
 use cobre_core::FillingConfig;
-use std::collections::BTreeMap as VTargetMap;
+use std::collections::HashMap as VTargetMap;
 
 /// A single non-cascade hydro carrying a `FillingConfig`
 /// (`start_stage_id`/`entry_stage_id`), used by the `build_filling_v_target`
@@ -3032,6 +3065,7 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     let state = state_layout_for(&ctx);
     let stage = &system.stages()[0];
@@ -3146,6 +3180,7 @@ fn block_layout_and_template(
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -3693,6 +3728,7 @@ fn stage_geometry_rerouted_ranges_match_layout_source_at_every_stage() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     let state = state_layout_for(&ctx);
 
@@ -4017,13 +4053,9 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -4139,6 +4171,7 @@ fn filling_block_layout_and_template(
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -4462,6 +4495,7 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     assert_eq!(ctx.k_max, 1, "ctx.k_max");
     assert_eq!(
@@ -4559,6 +4593,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
         arc_arrival_density,
         max_par_order,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     );
     assert_eq!(ctx.anticipated_lead_stages, vec![1]);
 
@@ -4658,8 +4693,8 @@ fn build_stage_templates_never_emits_k0_advisory_itself() {
     let par_lp = PrecomputedPar::default();
     let normal_lp = PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
-    let topology = build_transit_bucket_topology(&system);
-    let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology)
+    let topology = build_transit_bucket_topology(&system, false);
+    let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology, None)
         .expect("resolve_state_layout: valid test fixture");
     let per_stage_mask = topology.per_stage_mask;
     let hydro_cell_index = HydroCellIndex::build(system.hydros());
@@ -4680,6 +4715,7 @@ fn build_stage_templates_never_emits_k0_advisory_itself() {
             &topology.arc_spread_chrono,
             &topology.arc_arrival_density,
             &hydro_cell_index,
+            SamplingScheme::InSample,
         )
         .expect("valid system");
     });

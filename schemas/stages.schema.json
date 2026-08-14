@@ -27,6 +27,21 @@
       ],
       "type": "object"
     },
+    "RawBlockMode": {
+      "description": "Block formulation mode discriminator (`stages.json` `stages[].block_mode`).",
+      "oneOf": [
+        {
+          "const": "parallel",
+          "description": "Independent sub-periods solved simultaneously.",
+          "type": "string"
+        },
+        {
+          "const": "chronological",
+          "description": "Sequential blocks with intra-stage state transitions.",
+          "type": "string"
+        }
+      ]
+    },
     "RawCVarParams": {
       "additionalProperties": false,
       "description": "`CVaR` parameters nested inside the `cvar` key.",
@@ -48,6 +63,79 @@
       ],
       "type": "object"
     },
+    "RawNode": {
+      "additionalProperties": false,
+      "description": "Intermediate type for one policy-graph node.",
+      "properties": {
+        "id": {
+          "description": "Unique node id, referenced by `transitions` endpoints when `nodes` is declared.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "label": {
+          "default": null,
+          "description": "Optional human-readable label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scenario_id": {
+          "default": null,
+          "description": "Per-stage external-library realization column this node carries. Required at a\nstage carrying a slot-occupying external class, omitted where none. `scenario_id: k`\nis exactly the degenerate one-element weighted opening set\n`[{ \"scenario_id\": k, \"probability\": 1.0 }]` (documented equivalence; the\nweighted-list spelling is not parsed here).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stage_id": {
+          "description": "Declared study-stage id this node sits at; resolved against the study stages, never an array index.",
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "stage_id"
+      ],
+      "type": "object"
+    },
+    "RawNoiseMethod": {
+      "description": "Opening-tree noise-generation method discriminator (`stages.json`\n`stages[].sampling_method`).",
+      "oneOf": [
+        {
+          "const": "saa",
+          "description": "Sample Average Approximation (pure Monte Carlo).",
+          "type": "string"
+        },
+        {
+          "const": "lhs",
+          "description": "Latin Hypercube Sampling.",
+          "type": "string"
+        },
+        {
+          "const": "qmc_sobol",
+          "description": "Quasi-Monte Carlo with Sobol sequences.",
+          "type": "string"
+        },
+        {
+          "const": "qmc_halton",
+          "description": "Quasi-Monte Carlo with Halton sequences.",
+          "type": "string"
+        },
+        {
+          "const": "selective",
+          "description": "Selective/representative sampling.",
+          "type": "string"
+        },
+        {
+          "const": "historical_residuals",
+          "description": "Historical residuals from the historical scenario library.",
+          "type": "string"
+        }
+      ]
+    },
     "RawPolicyGraph": {
       "additionalProperties": false,
       "description": "Intermediate type for the `policy_graph` sub-object.",
@@ -57,6 +145,13 @@
           "format": "double",
           "type": "number"
         },
+        "nodes": {
+          "description": "Policy-graph nodes. Absent ⇒ the graph is a stage chain and `transitions`\nendpoints are stage ids.",
+          "items": {
+            "$ref": "#/$defs/RawNode"
+          },
+          "type": "array"
+        },
         "transitions": {
           "description": "Stage transitions.",
           "items": {
@@ -65,8 +160,8 @@
           "type": "array"
         },
         "type": {
-          "description": "Horizon type: `\"finite_horizon\"` or `\"cyclic\"`.",
-          "type": "string"
+          "$ref": "#/$defs/RawPolicyGraphType",
+          "description": "Horizon type. Only `finite_horizon` is supported; `cyclic` is reserved\nand rejected during conversion (no engine consumer today)."
         }
       },
       "required": [
@@ -74,6 +169,21 @@
         "annual_discount_rate"
       ],
       "type": "object"
+    },
+    "RawPolicyGraphType": {
+      "description": "Horizon type discriminator (`stages.json` `policy_graph.type`).\n\nBoth variants parse; `cyclic` is rejected as reserved during conversion\n(see [`convert_policy_graph_type`]), never at parse, so the reserved message\nfires rather than a generic unknown-variant error.",
+      "oneOf": [
+        {
+          "const": "finite_horizon",
+          "description": "Acyclic stage chain with a definite end stage.",
+          "type": "string"
+        },
+        {
+          "const": "cyclic",
+          "description": "Infinite periodic horizon (reserved; not yet supported).",
+          "type": "string"
+        }
+      ]
     },
     "RawPreStudyStage": {
       "additionalProperties": false,
@@ -216,10 +326,19 @@
       "additionalProperties": false,
       "description": "Intermediate type for a study stage entry.",
       "properties": {
+        "annual_discount_rate_override": {
+          "default": null,
+          "description": "Per-stage annual discount rate override; absent uses `policy_graph.annual_discount_rate`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "block_mode": {
+          "$ref": "#/$defs/RawBlockMode",
           "default": "parallel",
-          "description": "Block mode: `\"parallel\"` (default) or `\"chronological\"`.",
-          "type": "string"
+          "description": "Block mode: `parallel` (default) or `chronological`."
         },
         "blocks": {
           "description": "Load blocks within this stage.",
@@ -237,20 +356,24 @@
           "format": "int32",
           "type": "integer"
         },
-        "num_scenarios": {
-          "description": "Number of scenarios (branching factor). Must be > 0.",
+        "num_openings": {
+          "default": null,
+          "description": "Number of within-node openings. Required (and `> 0`) on the chain dialect and\nat a generated-openings stage under `nodes[]`; rejected where a stage carries\nonly external openings.",
           "format": "uint32",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "risk_measure": {
           "$ref": "#/$defs/RawRiskMeasure",
           "description": "Risk measure: `\"expectation\"` or `{\"cvar\": {\"alpha\": ..., \"lambda\": ...}}`."
         },
         "sampling_method": {
+          "$ref": "#/$defs/RawNoiseMethod",
           "default": "saa",
-          "description": "Sampling method for noise generation. Default: `\"saa\"`.",
-          "type": "string"
+          "description": "Sampling method for noise generation. Default: `saa`."
         },
         "season_id": {
           "default": null,
@@ -282,8 +405,7 @@
         "id",
         "start_date",
         "end_date",
-        "blocks",
-        "num_scenarios"
+        "blocks"
       ],
       "type": "object"
     },
@@ -323,12 +445,12 @@
           "type": "number"
         },
         "source_id": {
-          "description": "Source stage ID.",
+          "description": "Source endpoint: a node id when `policy_graph.nodes` is non-empty, a stage id otherwise.",
           "format": "int32",
           "type": "integer"
         },
         "target_id": {
-          "description": "Target stage ID.",
+          "description": "Target endpoint: a node id when `policy_graph.nodes` is non-empty, a stage id otherwise.",
           "format": "int32",
           "type": "integer"
         }

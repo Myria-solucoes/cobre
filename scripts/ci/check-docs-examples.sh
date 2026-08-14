@@ -58,7 +58,7 @@ readonly TRAINING_METADATA_KEYS=(
   distribution
 )
 
-# Expected keys that policy/metadata.json must carry.
+# Expected keys the policy/metadata.json `producer` block must carry.
 readonly POLICY_METADATA_KEYS=(
   warm_start_counts
   warm_start_cuts
@@ -120,10 +120,10 @@ echo "training/metadata.json: ${#TRAINING_METADATA_KEYS[@]} expected top-level k
 policy_meta="$OUT_DIR/policy/metadata.json"
 [[ -f "$policy_meta" ]] || fail "policy/metadata.json was not written."
 for key in "${POLICY_METADATA_KEYS[@]}"; do
-  jq -e "has(\"$key\")" "$policy_meta" >/dev/null \
-    || fail "policy/metadata.json is missing expected key \`$key\`."
+  jq -e ".producer | has(\"$key\")" "$policy_meta" >/dev/null \
+    || fail "policy/metadata.json is missing expected key \`producer.$key\`."
 done
-echo "policy/metadata.json: expected keys present (${POLICY_METADATA_KEYS[*]}) ✓"
+echo "policy/metadata.json: expected producer keys present (${POLICY_METADATA_KEYS[*]}) ✓"
 
 # ── Invariant 4: report stdout has EXACTLY the expected ReportOutput keys ─────
 report_keys="$("$BIN" report "$OUT_DIR" --color never | jq -r 'keys | sort | join(",")')"

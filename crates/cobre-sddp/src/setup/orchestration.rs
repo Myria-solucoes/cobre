@@ -25,7 +25,8 @@ use crate::{
     workspace::{CapturedBasis, SolverWorkspace, WorkspacePool, WorkspaceSizing},
 };
 
-use super::StudySetup;
+use super::node_graph::pool_fill_basis_cache;
+use super::{SimulationEnumeratedRequest, StudySetup, Traversal};
 use crate::build_training_output;
 use crate::simulate;
 use crate::train;
@@ -121,6 +122,7 @@ impl StudySetup {
         let training_config = TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: self.loop_params.forward_passes,
+                training_enumerated: self.loop_params.training_enumerated,
                 max_iterations: self.loop_params.max_iterations,
                 start_iteration: self.loop_params.start_iteration,
                 n_fwd_threads: n_threads,
@@ -195,6 +197,7 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
+            node_graph: &self.node_graph,
         };
 
         let warm_start_basis_cache = self.warm_start_basis_cache.take();
@@ -222,7 +225,7 @@ impl StudySetup {
     /// # Errors
     ///
     /// Returns `SimulationError` on LP infeasibility, solver failure, channel closure,
-    /// or if `frozen_templates.len() != num_stages`.
+    /// or if `frozen_templates.len() != n_pools`.
     pub fn simulate<S, C: Communicator>(
         &self,
         workspaces: &mut [SolverWorkspace<S>],
@@ -237,6 +240,29 @@ impl StudySetup {
     {
         let stage_ctx = self.stage_ctx();
         let training_ctx = self.simulation_ctx();
+        let is_enumerated = matches!(
+            self.simulation_enumerated,
+            SimulationEnumeratedRequest::Enumerated
+        );
+        let traversal = Traversal::resolve(
+            &self.node_graph,
+            is_enumerated,
+            self.simulation_config().n_scenarios,
+        );
+
+        // Pool-fill confined to this simulate-local buffer: the source cache
+        // (and any checkpoint exported from it) stays sparse, so a warm-start
+        // resume-training reseeds only genuine captures — never a filled leaf.
+        let filled_bases: Option<Vec<Option<CapturedBasis>>> = is_enumerated.then(|| {
+            let mut owned = stage_bases.to_vec();
+            pool_fill_basis_cache(
+                &mut owned,
+                &self.node_graph.node_pool_ids(),
+                &self.node_graph.node_ids,
+            );
+            owned
+        });
+        let stage_bases = filled_bases.as_deref().unwrap_or(stage_bases);
 
         let output = SimulationOutputSpec {
             result_tx,
@@ -265,6 +291,10 @@ impl StudySetup {
             energy_conversion: &self.energy_conversion,
             hydro_min_storage_hm3: &self.hydro_min_storage_hm3,
             event_sender,
+            commitment_window_delivery_dates: &self.commitment_window_delivery_dates,
+            transit_seed_arcs: &self.transit_seed_arcs,
+            past_defluences: &self.past_defluences,
+            study_stage_dates: &self.study_stage_dates,
         };
 
         simulate(
@@ -277,6 +307,7 @@ impl StudySetup {
             frozen_templates,
             stage_bases,
             comm,
+            &traversal,
         )
     }
 
@@ -287,7 +318,12 @@ impl StudySetup {
         result: &TrainingResult,
         events: &[TrainingEvent],
     ) -> TrainingOutput {
-        build_training_output(result, events, &self.fcf)
+        build_training_output(
+            result,
+            events,
+            &self.fcf,
+            self.loop_params.training_enumerated,
+        )
     }
 
     /// Create a [`WorkspacePool`] of `n_threads` workspaces sized for this study.
@@ -331,6 +367,7 @@ impl StudySetup {
                 noise_dim: 0,
                 n_anticipated: self.stage_data.state.n_anticipated,
                 k_max: self.stage_data.state.k_max,
+                n_commitment: self.stage_data.state.n_commitment,
             },
             solver_factory,
         )?;

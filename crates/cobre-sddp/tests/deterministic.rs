@@ -15,6 +15,7 @@
     clippy::too_many_lines
 )]
 
+use cobre_io::config::SimulationSelection;
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -24,7 +25,7 @@ use cobre_io::{
     PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, write_policy_checkpoint,
 };
 use cobre_sddp::{
-    StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
+    SimulationWeighting, StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
     lead_time::resolve_spread, setup::prepare_stochastic,
 };
 use cobre_solver::{ActiveSolver, SolverInterface};
@@ -114,7 +115,7 @@ fn run_with_simulation(
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    config_with_sim.simulation.num_scenarios = 1;
+    config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
     let mut setup = build_setup_for_case(
         case_dir,
@@ -157,8 +158,13 @@ fn run_with_simulation(
     let scenario_results = drain_handle.join().expect("drain thread must not panic");
 
     let sim_config = setup.simulation_config();
-    let summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
-        .expect("aggregate_simulation must succeed");
+    let (summary, _gathered) = aggregate_simulation(
+        &local_costs.costs,
+        sim_config,
+        &comm,
+        SimulationWeighting::Uniform,
+    )
+    .expect("aggregate_simulation must succeed");
 
     (result, scenario_results, summary)
 }
@@ -954,52 +960,30 @@ fn d_case_energy_outputs() {
 /// Linear VHA: (0 hm3 → 0.5 km²), (100 hm3 → 1.0 km²), (200 hm3 → 1.5 km²).
 /// Uniform slope da/dv = 0.005 km²/hm3.
 ///
-/// ## Evaporation coefficient derivation
+/// ## Evaporation coefficient derivation (calendar-month rate)
 ///
-/// Midpoint reference_volume = (0 + 200) / 2 = 100 hm3.
-/// a_ref = 1.0 km², da/dv = 0.005 km²/hm3.
-/// stage_hours = 730 h → mm_km2_to_m3s = 1 / (3.6 × 730) = 1/2628.
-/// monthly_evaporation_mm = 100 mm.
-/// volume_slope_m3s_per_hm3 = (1/2628) × 100 × 0.005 = 1/5256.
-/// intercept_m3s            = (1/2628) × 100 × 1.0 − (1/5256) × 100 = 25/1314.
+/// Midpoint reference_volume = (0 + 200) / 2 = 100 hm3; a_ref = 1.0 km²,
+/// da/dv = 0.005 km²/hm3; monthly_evaporation_mm = 100.
 ///
-/// ## Water-balance model (α = κ × volume_slope_m3s_per_hm3 / 2 = 1/4000)
+/// The flow is a monthly-average rate: `mm_km2_to_m3s = 1 / (3.6 × month_hours)`,
+/// dividing by the stage's CALENDAR month, not its nominal 730 h. The two stages
+/// therefore carry DIFFERENT coefficients — stage 0 is January (744 h →
+/// `1/2678.4`) and stage 1 is February 2024 (696 h leap → `1/2505.6`) — and each
+/// deposits only its `stage_hours / month_hours` share of the month's
+/// evaporation, the property this case pins. (A `stage_hours` divisor would
+/// cancel against the water-balance coupling and deposit a whole month on any
+/// stage; see `resolve_evaporation_models`.)
 ///
-/// Substituting evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3/2 × (V_out + V_in) into the LP:
-///   V_out × (1 + α) = V_in × (1 − α) + κ × (q_in − q_turb) − κ × intercept_m3s
+/// ## Expected cost
 ///
-/// ## Expected cost derivation (κ = 657/250 hm3/(m3/s))
-///
-/// The gradient of total cost w.r.t. turb₀ is proportional to
-/// `−1 + (1−α)/(1+α) < 0`, so increasing turb₀ decreases total cost.
-/// The optimal stage-0 policy is therefore turb₀ = 50 m3/s (full capacity).
-///
-/// ### Stage 0 (turb₀ = 50, V_in₀ = 100 hm3)
-///
-/// V_out₀ = [100×(1−α) + κ×(40 − 50) − κ×intercept_m3s] / (1+α)
-///         = 294580/4001 ≈ 73.627 hm3.
-/// gen_h₀ = 50 MW, gen_th₀ = 30 MW.
-/// Stage 0 cost = 30 × 50 × 730 = 1,095,000 $.
-///
-/// ### Stage 1 (terminal, V_in₁ = V_out₀ = 294580/4001 hm3)
-///
-/// turb₁_max = V_in₁ × (1−α) / κ + 10 − intercept_m3s
-///           = 399452585/10514628 ≈ 37.990 m3/s  (<50, so binding).
-/// At turb₁ = turb₁_max: V_out₁ = 0.
-///
-/// gen_th₁ = 80 − turb₁_max = 441717655/10514628 ≈ 42.010 MW.
-/// Stage 1 cost = gen_th₁ × 50 × 730 = 55214706875/36009 ≈ 1,533,358.52 $.
-///
-/// ### Total cost
-///
-/// Total = 1,095,000 + 55214706875/36009
-///       = 39439545000/36009 + 55214706875/36009
-///       = **94644561875/36009 ≈ 2,628,358.52 $**
-///
-/// D08 cost > D02 cost (≈ 2,626,111.11 $): evaporation consumes additional water
-/// in the reservoir, leaving less for stage-1 generation and requiring more
-/// thermal dispatch.
-pub const D08_EXPECTED_COST: f64 = 94_644_561_875.0 / 36_009.0;
+/// The model and optimal policy are D02's (stage-0 `turb₀ = 50 m3/s`, full
+/// capacity), plus evaporation drawing the reservoir down. The study converges
+/// (`LB == UB`, gap < 1e-6) to the value below — above D02's ≈ 2,626,111.11 $
+/// because evaporation consumes water that would otherwise generate, forcing more
+/// thermal dispatch. The converged optimum, not a closed-form rational: the
+/// calendar-month divisors (744, 696) do not reduce cleanly the way the retired
+/// nominal-730 h derivation did.
+pub const D08_EXPECTED_COST: f64 = 2_628_380.531_119_177;
 
 #[cfg_attr(
     not(feature = "slow-tests"),
@@ -1367,7 +1351,7 @@ fn d12_checkpoint_round_trip() {
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    config_with_sim.simulation.num_scenarios = 1;
+    config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
     let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
         .expect("StudySetup must build");
@@ -1447,22 +1431,25 @@ fn d12_checkpoint_round_trip() {
     let n_stages = fcf.pools.len();
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
     let policy_metadata = PolicyCheckpointMetadata {
+        format_version: cobre_io::FORMAT_VERSION,
         cobre_version: env!("CARGO_PKG_VERSION").to_string(),
         created_at: "2026-03-16T00:00:00Z".to_string(),
-        completed_iterations: result.iterations as u32,
-        final_lower_bound: result.final_lb,
-        best_upper_bound: Some(result.final_ub),
-        state_dimension: fcf.state_dimension as u32,
         num_stages: n_stages as u32,
-        max_iterations: 100,
-        forward_passes: 1,
-        warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
-        warm_start_counts,
-        rng_seed: 42,
-        total_visited_states: 0,
-        training_block_mode: "parallel".to_string(),
-        training_block_mode_per_stage: vec![],
-        cost_scale_factor: None,
+        graph_manifest: cobre_io::GraphManifest::default(),
+        producer: cobre_io::ProducerBlock {
+            completed_iterations: result.iterations as u32,
+            final_lower_bound: result.final_lb,
+            best_upper_bound: Some(result.final_ub),
+            max_iterations: 100,
+            forward_passes: 1,
+            warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
+            warm_start_counts,
+            rng_seed: 42,
+            total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
+        },
     };
 
     write_policy_checkpoint(
@@ -1482,8 +1469,8 @@ fn d12_checkpoint_round_trip() {
         "D12: checkpoint must have 2 stages"
     );
     assert_eq!(
-        checkpoint.metadata.state_dimension, 1,
-        "D12: checkpoint must have state_dimension == 1 (one hydro = one storage state)"
+        checkpoint.stage_cuts[0].state_dimension, 1,
+        "D12: checkpoint must have per-pool state_dimension == 1 (one hydro = one storage state)"
     );
     assert!(
         !checkpoint.stage_cuts.is_empty(),
@@ -1493,11 +1480,8 @@ fn d12_checkpoint_round_trip() {
     let metadata_path = policy_dir.join("metadata.json");
     assert!(metadata_path.is_file(), "D12: metadata.json must exist");
 
-    let stage_bin_path = policy_dir.join("cuts/stage_000.bin");
-    assert!(
-        stage_bin_path.is_file(),
-        "D12: cuts/stage_000.bin must exist"
-    );
+    let stage_bin_path = policy_dir.join("cuts/000.bin");
+    assert!(stage_bin_path.is_file(), "D12: cuts/000.bin must exist");
 
     let mut pool = setup
         .create_workspace_pool(&comm, 1, ActiveSolver::new)
@@ -1523,8 +1507,13 @@ fn d12_checkpoint_round_trip() {
     let _scenario_results = drain_handle.join().expect("drain thread must not panic");
 
     let sim_config = setup.simulation_config();
-    let summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
-        .expect("aggregate_simulation must succeed");
+    let (summary, _gathered) = aggregate_simulation(
+        &local_costs.costs,
+        sim_config,
+        &comm,
+        SimulationWeighting::Uniform,
+    )
+    .expect("aggregate_simulation must succeed");
 
     assert_eq!(
         summary.n_scenarios, 1,
@@ -1577,7 +1566,8 @@ fn d13_generic_constraint() {
         Field::new("constraint_id", DataType::Int32, false),
         Field::new("stage_id", DataType::Int32, false),
         Field::new("block_id", DataType::Int32, true),
-        Field::new("bound", DataType::Float64, false),
+        Field::new("bound_lower", DataType::Float64, true),
+        Field::new("bound_upper", DataType::Float64, true),
     ]));
 
     let batch = RecordBatch::try_new(
@@ -1586,6 +1576,7 @@ fn d13_generic_constraint() {
             Arc::new(Int32Array::from(vec![1, 1])),
             Arc::new(Int32Array::from(vec![0, 1])),
             Arc::new(Int32Array::new_null(2)), // block_id null = all blocks
+            Arc::new(Float64Array::new_null(2)), // upper-only: no bound_lower
             Arc::new(Float64Array::from(vec![10.0, 10.0])),
         ],
     )
@@ -1609,6 +1600,146 @@ fn d13_generic_constraint() {
         "D13: gap={:.2e}",
         result.final_gap
     );
+}
+
+/// Range constraint whose LOWER bound binds, forcing thermal dispatch above
+/// its own physical cap and into a genuine, reported band violation. The
+/// range sibling of `d13`: same system, differing only in the constraint.
+///
+/// ## Case setup
+///
+/// - 1 bus, 1 thermal T0: capacity 30 MW at $50/MWh, deterministic load 20 MW,
+///   2 stages each with 730 hours, no hydro (identical to `d13`'s system).
+/// - 1 generic constraint: `35 <= thermal_generation(0) <= 100`
+///   with slack penalty $5000/MWh (`d13`'s slack config, unchanged).
+/// - Deficit cost: $1000/MWh, excess cost: $0.01/MWh (from `penalties.json`).
+///
+/// ## Expected cost derivation
+///
+/// Unconstrained merit-order dispatch sets T0 = 20 MW (matching load; thermal
+/// is far cheaper than deficit, and any MW above load only adds excess cost).
+/// The band's lower bound of 35 MW exceeds T0's own physical cap of 30 MW, so
+/// full compliance is impossible: the LP is forced to trade off dispatch `t`
+/// against deficit/excess/violation cost. For `t` in `[20, 30]`:
+///
+/// ```text
+/// cost(t) = 50t + 0.01(t - 20) + 5000(35 - t)   [thermal + excess + violation]
+///         = -4949.99 t + 174_999.8
+/// ```
+///
+/// strictly decreasing in `t`, so the minimum sits at the right end of the
+/// feasible interval: T0's own 30 MW column cap (never at an interior point,
+/// and the `[0, 20]` branch is strictly higher — same shape as `d13`'s
+/// deficit-vs-violation trade-off, confirmed by direct substitution below).
+///
+/// Cost per stage at T0 = 30 MW (excess is generation above the 20 MW load,
+/// i.e. 10 MW, not above the band):
+///   thermal:    30 MW x $50/MWh x 730 h    = $1,095,000
+///   excess:     10 MW x $0.01/MWh x 730 h  = $73
+///   violation:  5 MW x $5000/MWh x 730 h   = $18,250,000
+///   total:      $19,345,073
+///
+/// Total (2 stages) = 2 x $19,345,073 = **$38,690,146**
+///
+/// ## Discriminating power
+///
+/// A hypothetical implementation that applies only `bound_upper` and silently
+/// drops `bound_lower` (the lower half of the band) would build a row with
+/// `row_lower = -inf`, `row_upper = 100` — never binding, since T0's own cap
+/// (30) is already below 100. Dispatch would then settle back at the
+/// unconstrained merit-order level, T0 = 20 MW (no excess, no deficit, no
+/// violation): cost per stage = 20 MW x $50/MWh x 730 h = $730,000, total (2
+/// stages) = **$1,460,000** — two orders of magnitude below the correct
+/// $38,690,146, so the broken implementation fails this case's cost assertion.
+///
+/// ## Violation record
+///
+/// The band cannot be fully satisfied (35 MW > T0's 30 MW cap), so the
+/// optimum leaves a genuine 5 MW shortfall below the lower bound: each
+/// stage's simulation output reports exactly ONE `generic_violations` record
+/// for constraint 1, with `slack_value` (the net `s_plus - s_minus`) equal to
+/// `5.0` — the fixture is in the VIOLATION-PRESENT case, not the feasible one.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d54_range_constraint() {
+    use arrow::array::{Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let case_dir = Path::new("../../examples/deterministic/d54-range-constraint");
+
+    let constraints_dir = case_dir.join("constraints");
+    std::fs::create_dir_all(&constraints_dir).expect("create constraints dir");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("constraint_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("block_id", DataType::Int32, true),
+        Field::new("bound_lower", DataType::Float64, true),
+        Field::new("bound_upper", DataType::Float64, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 1])),
+            Arc::new(Int32Array::from(vec![0, 1])),
+            Arc::new(Int32Array::new_null(2)), // block_id null = all blocks
+            Arc::new(Float64Array::from(vec![35.0, 35.0])),
+            Arc::new(Float64Array::from(vec![100.0, 100.0])),
+        ],
+    )
+    .expect("RecordBatch");
+
+    let bounds_path = constraints_dir.join("generic_constraint_bounds.parquet");
+    let file = std::fs::File::create(&bounds_path).expect("create parquet file");
+    let mut writer = ArrowWriter::try_new(file, schema, None).expect("ArrowWriter");
+    writer.write(&batch).expect("write batch");
+    writer.close().expect("close writer");
+
+    let (result, scenario_results, summary) = run_with_simulation(case_dir);
+
+    assert_cost(result.final_lb, 38_690_146.0, 1e-2, "D54");
+    assert!(
+        result.iterations <= 10,
+        "D54: iterations={}",
+        result.iterations
+    );
+    assert!(
+        result.final_gap.abs() < 1e-4,
+        "D54: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(summary.mean_cost, 38_690_146.0, 1e-2, "D54-sim");
+
+    assert_eq!(
+        scenario_results.len(),
+        1,
+        "D54: simulation must produce exactly 1 scenario"
+    );
+    let stages = &scenario_results[0].stages;
+    assert_eq!(stages.len(), 2, "D54: expected 2 stages");
+    for stage in stages {
+        assert_eq!(
+            stage.generic_violations.len(),
+            1,
+            "D54 stage {}: expected exactly one generic constraint violation record",
+            stage.stage_id
+        );
+        let violation = &stage.generic_violations[0];
+        assert_eq!(violation.constraint_id, 1, "D54: violation constraint id");
+        assert!(
+            (violation.slack_value - 5.0).abs() < 1e-2,
+            "D54 stage {}: expected a 5 MW band shortfall, got {}",
+            stage.stage_id,
+            violation.slack_value
+        );
+    }
 }
 
 /// Two-stage thermal dispatch with per-block load factors.
@@ -3429,7 +3560,7 @@ fn frozen_vs_fallback_simulation_costs_are_identical() {
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    config_with_sim.simulation.num_scenarios = 4;
+    config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 4 });
 
     let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
         .expect("StudySetup must build");
@@ -4259,9 +4390,10 @@ fn d47_travel_time_confluence_aggregation() {
 /// `U`'s single `past_defluences` window `[2023-12-18, 2024-01-01) = [start_0 -
 /// 336h, start_0)` at 100 m3/s covers exactly the arc's in-transit span
 /// `[start_0 - t_v, start_0)` (so it passes the io coverage gate). The seed
-/// (`build_initial_transit_bucket_state`) unrolls it through `ic_anchor_k`:
+/// (`build_initial_transit_bucket_state`) unrolls it through
+/// `StageCalendar::hour_window_shares`:
 ///   - `e_off = start_0 - end_date = 0`, `width = end_date - start_date = 336`.
-///   - `ic_anchor_k` sets `window_start = t_v - e_off - width = 0` and overlaps
+///   - `hour_window_shares` sets `window_start = t_v - e_off - width = 0` and overlaps
 ///     `[0, 336)` against the weekly stage clock `[168, 168, 168]` -> `[168,
 ///     168]` -> `k = [1/2, 1/2]`.
 ///   - `volume = width * M3S_TO_HM3 * value = 336 * 0.0036 * 100 = 120.96 hm3`.
@@ -5698,7 +5830,7 @@ mod chronological_telescoping {
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
-        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+        TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use cobre_solver::ActiveSolver;
 
@@ -5711,7 +5843,7 @@ mod chronological_telescoping {
     use super::common::builders::{
         BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
     };
-    use super::common::{StubComm, build_setup_in_code};
+    use super::common::{StubComm, build_setup_in_code, try_build_setup_in_code};
 
     const N_STAGES: usize = 3;
     const N_ITERATIONS: u32 = 12;
@@ -5845,13 +5977,9 @@ mod chronological_telescoping {
             water_withdrawal_m3s: 0.0,
         };
         let default_hydro_bounds_block = || HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         };
 
         let bounds = ResolvedBounds::new(
@@ -5917,6 +6045,7 @@ mod chronological_telescoping {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -5969,6 +6098,7 @@ mod chronological_telescoping {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -5978,15 +6108,15 @@ mod chronological_telescoping {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: N_ITERATIONS,
                 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -6028,6 +6158,152 @@ mod chronological_telescoping {
              {parallel_lb} within LP tolerance {tol} (inert interiors); a divergence \
              signals the interior storage path bound"
         );
+    }
+
+    /// A `count == 1` enumerated study (a chain graph, no stochastic branching)
+    /// is admitted, trains to `LB == UB`, and the exact probability-weighted
+    /// bound over its single path (`w = 1`) equals that path's cost with a zero
+    /// CI half-width — the only enumerated case reachable until the all-paths
+    /// forward engine lands.
+    #[test]
+    fn enumerated_count_one_study_reports_exact_bound_with_zero_ci() {
+        use cobre_io::config::TrainingSelection;
+        use cobre_sddp::forward::{ForwardBound, ForwardResult, sync_forward};
+
+        let system = build_system(BlockMode::Parallel);
+        let mut config = build_config();
+        config.training.selection = Some(TrainingSelection::Enumerated {});
+
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated count==1 training must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+
+        let tol = 1e-6 * result.final_ub.abs().max(1.0);
+        assert!(
+            (result.final_lb - result.final_ub).abs() <= tol,
+            "enumerated count==1 must converge LB {} to the exact UB {} within {tol}",
+            result.final_lb,
+            result.final_ub,
+        );
+
+        // The exact reduction over the single trained path reproduces that path's
+        // cost as the upper bound, with the CI half-width zeroed under enumeration.
+        let local = ForwardResult {
+            scenario_costs: vec![result.final_ub],
+            elapsed_ms: 0,
+            lp_solves: 0,
+            setup_time_ms: 0,
+            load_imbalance_ms: 0,
+            scheduling_overhead_ms: 0,
+            stage_stats: Vec::new(),
+        };
+        let sync = sync_forward(
+            &local,
+            &comm,
+            1,
+            ForwardBound::Exact {
+                path_weights: &[1.0],
+            },
+        )
+        .unwrap();
+        assert_eq!(sync.global_ub_mean, result.final_ub);
+        assert_eq!(sync.ci_95_half_width, 0.0);
+    }
+
+    /// Train the parallel-block system under `config` (built deterministically),
+    /// panicking on any training error.
+    fn train_result(config: &Config) -> cobre_sddp::TrainingResult {
+        let mut setup = build_setup_in_code(build_system(BlockMode::Parallel), config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("training must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        outcome.result
+    }
+
+    fn enumerated_config_with_rules(rules: Vec<StoppingRuleConfig>) -> Config {
+        use cobre_io::config::TrainingSelection;
+        let mut config = build_config();
+        config.training.selection = Some(TrainingSelection::Enumerated {});
+        config.training.stopping_rules = Some(rules);
+        config
+    }
+
+    /// An enumerated + expectation study with a `Gap { tolerance }` rule stops via
+    /// the gap rule — before the iteration cap — once the clamped canonical-R$
+    /// `UB_exact − LB` first drops to within the tolerance.
+    #[test]
+    fn enumerated_gap_rule_stops_when_exact_gap_within_tolerance() {
+        // Reference run: iteration limit only → converged exact bounds set the scale.
+        let ref_result = train_result(&enumerated_config_with_rules(vec![
+            StoppingRuleConfig::IterationLimit { limit: 20 },
+        ]));
+        assert!(ref_result.final_ub.is_finite() && ref_result.final_lb.is_finite());
+
+        // 0.1% of the converged bound: above the LP-tolerance floor (so the gap
+        // reaches it) yet a real threshold the exact gap must cross.
+        let tolerance = 1e-3 * ref_result.final_ub.abs().max(1.0);
+        let result = train_result(&enumerated_config_with_rules(vec![
+            StoppingRuleConfig::IterationLimit { limit: 20 },
+            StoppingRuleConfig::Gap {
+                tolerance: Some(tolerance),
+                relative_tolerance: None,
+            },
+        ]));
+
+        assert_eq!(
+            result.reason, "gap",
+            "training must stop via the gap rule, not the iteration cap"
+        );
+        assert!(
+            result.iterations < 20,
+            "the gap rule must stop before the iteration cap (ran {})",
+            result.iterations
+        );
+        let gap = (result.final_ub - result.final_lb).max(0.0);
+        assert!(
+            gap <= tolerance,
+            "the clamped canonical-R$ gap {gap} must be within tolerance {tolerance}"
+        );
+    }
+
+    /// A `Gap` rule under sampled forward selection is rejected at setup by the
+    /// admission gate — the exact upper bound the gap needs is produced only by
+    /// the enumerated engine.
+    #[test]
+    fn sampled_gap_rule_rejected_at_setup() {
+        let mut config = build_config();
+        config.training.stopping_rules = Some(vec![
+            StoppingRuleConfig::IterationLimit { limit: 5 },
+            StoppingRuleConfig::Gap {
+                tolerance: Some(1000.0),
+                relative_tolerance: None,
+            },
+        ]);
+        let err = try_build_setup_in_code(build_system(BlockMode::Parallel), &config)
+            .expect_err("a Gap rule under sampled selection must be rejected");
+        match err {
+            cobre_sddp::SddpError::Validation(msg) => {
+                assert!(msg.contains("gap"), "names the rule: {msg}");
+                assert!(msg.contains("sampled"), "names the selection: {msg}");
+            }
+            other => panic!("expected SddpError::Validation, got {other:?}"),
+        }
     }
 
     /// Train a policy under `train_mode`, write it to a fresh `TempDir` via the
@@ -6148,12 +6424,22 @@ mod chronological_telescoping {
         let mut setup2 = build_setup_in_code(build_system(load_mode), &config);
 
         let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
-            checkpoint.metadata.state_dimension,
+            checkpoint.stage_cuts[0].state_dimension,
             checkpoint.metadata.num_stages,
         );
+        let pool_state_dimensions: Vec<usize> =
+            setup2.fcf.pools.iter().map(|p| p.state_dimension).collect();
+        let visit_bounds: Vec<u64> = setup2
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
             setup2.loop_params.forward_passes,
             setup2.loop_params.max_iterations.saturating_add(1),
         )
@@ -6220,6 +6506,7 @@ mod chronological_attribution {
         NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
         ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -6412,13 +6699,9 @@ mod chronological_attribution {
             water_withdrawal_m3s: 0.0,
         };
         let default_hydro_bounds_block = || HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 10.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         };
 
         let bounds = ResolvedBounds::new(
@@ -6492,6 +6775,7 @@ mod chronological_attribution {
             // these tests inspect LP structure and state dimension, never a
             // seeded value.
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -6523,6 +6807,7 @@ mod chronological_attribution {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -6532,13 +6817,13 @@ mod chronological_attribution {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -6791,6 +7076,7 @@ mod chronological_attribution {
 /// coefficient rather than the loud `FphaMissingEquivalentProductivity` error — the
 /// hazard this module pins.
 mod nonzero_stage_fpha_override_regression {
+    use cobre_io::config::SimulationSelection;
     use std::path::{Path, PathBuf};
 
     use cobre_core::scenario::ScenarioSource;
@@ -6823,8 +7109,12 @@ mod nonzero_stage_fpha_override_regression {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nonzero_stage_fpha_override")
     }
 
-    /// Return hydro `hydro_id`'s result at study position `position`. The fixture
-    /// trains and simulates exactly one scenario, so exactly one match is expected.
+    /// Return hydro `hydro_id`'s result at study `position`. The stage results are
+    /// emitted in ascending study order, so the position is the ordinal index —
+    /// NOT the `stage_id` column value, which now carries the (non-0-based) domain
+    /// id after the output-axis re-key. The fixture trains and simulates exactly
+    /// one scenario, so the flattened stage list is that single scenario's ordered
+    /// stages.
     fn hydro_result_at(
         scenario_results: &[SimulationScenarioResult],
         position: u32,
@@ -6833,7 +7123,7 @@ mod nonzero_stage_fpha_override_regression {
         scenario_results
             .iter()
             .flat_map(|s| &s.stages)
-            .find(|s| s.stage_id == position)
+            .nth(position as usize)
             .unwrap_or_else(|| panic!("no stage at position {position}"))
             .hydros
             .iter()
@@ -6860,6 +7150,21 @@ mod nonzero_stage_fpha_override_regression {
     fn fpha_override_resolves_by_domain_stage_id_end_to_end() {
         let dir = case_dir();
         let (_result, scenario_results, _summary) = super::run_with_simulation(&dir);
+
+        // The output re-key stamps the DOMAIN stage id (not the 0-based position)
+        // into every result row: the stage at study position 1 carries stage_id 11.
+        let stage_at_override = scenario_results
+            .iter()
+            .flat_map(|s| &s.stages)
+            .nth(OVERRIDE_STAGE_POSITION as usize)
+            .expect("override stage present");
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            assert_eq!(
+                stage_at_override.stage_id as i32, OVERRIDE_DOMAIN_STAGE_ID,
+                "output stage_id must carry the declared domain id, not the study position"
+            );
+        }
 
         let at_override =
             hydro_result_at(&scenario_results, OVERRIDE_STAGE_POSITION, FPHA_HYDRO_ID);
@@ -6966,7 +7271,8 @@ mod nonzero_stage_fpha_override_regression {
 
         let mut config_with_sim = config.clone();
         config_with_sim.simulation.enabled = true;
-        config_with_sim.simulation.num_scenarios = 1;
+        config_with_sim.simulation.selection =
+            Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
         let mut setup =
             build_setup_for_case(dir, &config_with_sim, &system, stochastic, hydro_models);
@@ -7026,14 +7332,16 @@ mod custom_weekly_evaporation_regression {
     const A_REF: f64 = 2.0;
     const DA_DV: f64 = 0.005;
     const REFERENCE_VOLUME_HM3: f64 = 300.0;
-    const STAGE_HOURS: f64 = 730.0;
+    /// Evaporation divides by the CALENDAR month, not the stage's nominal 730 h:
+    /// both fixture stages sit in 30-day months (June, November) = 720 h.
+    const MONTH_HOURS: f64 = 720.0;
 
     /// Independent replication (not a call into production code) of the Taylor
     /// linearization `resolve_evaporation_core` computes for a given
     /// `monthly_evaporation_mm`, at this fixture's known geometry constants — the
     /// Tier-4 analytical-derivation pattern.
     fn expected_coefficients(monthly_evaporation_mm: f64) -> (f64, f64) {
-        let mm_km2_to_m3s = 1.0 / (3.6 * STAGE_HOURS);
+        let mm_km2_to_m3s = 1.0 / (3.6 * MONTH_HOURS);
         let slope = mm_km2_to_m3s * monthly_evaporation_mm * DA_DV;
         let intercept =
             mm_km2_to_m3s * monthly_evaporation_mm * A_REF - slope * REFERENCE_VOLUME_HM3;
@@ -7138,6 +7446,2419 @@ mod custom_weekly_evaporation_regression {
             result.final_gap.abs() < 1e-6,
             "weekly evaporation case must still converge: gap={:.2e}",
             result.final_gap
+        );
+    }
+}
+
+#[cfg(feature = "test-support")]
+mod k_fan_branching_sampled_coverage {
+    //! Branching-graph end-to-end sampled coverage on the DECOMP K-fan fixture
+    //! (`cobre_sddp::test_support::k_fan_setup`): a declared root fanning into
+    //! `K` distinct nodes, each with its own leaf, `num_nodes > n_pools` via
+    //! leaf sharing — a shape a chain-only suite cannot reach, where a
+    //! canonical-node-position-as-pool-id conflation bug would misroute or
+    //! overflow a pool instead of hiding behind `node_index == pool_id`.
+    //! Exercises the per-node forward frontier, the reverse-topological
+    //! backward sweep, and the per-pool trial-state routing end-to-end.
+
+    use std::collections::HashSet;
+    use std::sync::mpsc;
+
+    use cobre_sddp::SimulationWeighting;
+    use cobre_sddp::TrainingOutcome;
+    use cobre_sddp::aggregate_simulation;
+    use cobre_sddp::setup::{NodePos, StageIdx};
+    use cobre_sddp::test_support::k_fan_setup;
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+
+    const K: usize = 12;
+    const FORWARD_PASSES: u32 = 3;
+    const MAX_ITERATIONS: u32 = 5;
+
+    /// Train the K-fan fixture single-rank single-thread `sampled`, panicking
+    /// on any training error (a stored-cut slot out-of-bounds panics INSIDE
+    /// `train` via `CutPool::add_cut`'s own `debug_assert`, before this
+    /// function returns).
+    fn train_k_fan() -> (cobre_sddp::test_support::KFanFixture, TrainingOutcome) {
+        let mut fixture = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("k_fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "k_fan training must not error: {:?}",
+            outcome.error
+        );
+        (fixture, outcome)
+    }
+
+    /// Cuts appended to `pool_id` during `iteration`, read from the trained
+    /// [`cobre_sddp::CutPool`]'s own per-slot metadata — never a hard-coded
+    /// count. Every appended cut is 1:1 with a trial point routed to this
+    /// node this iteration (`compute_one_backward_node`'s
+    /// `debug_assert_eq!(staged_cuts_buf.len(), trial_points.len())`), so
+    /// this count IS the seed-deterministic sampled visit count.
+    fn cuts_in_iteration(
+        fixture: &cobre_sddp::test_support::KFanFixture,
+        pool_id: usize,
+        iteration: u64,
+    ) -> u64 {
+        let pool = &fixture.setup.fcf.pools[pool_id];
+        let mut count = 0u64;
+        for slot in 0..pool.populated() {
+            if pool.is_active(slot) && pool.metadata(slot).iteration_generated == iteration {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Load-bearing coverage gate: trains without panic (proving no
+    /// out-of-bounds cut slot — `CutPool::add_cut`'s
+    /// `debug_assert!(slot < capacity)` would panic first), then cross-checks
+    /// the routing structurally: the root (the sole stage-0 node) gets
+    /// exactly `forward_passes` cuts every iteration; the K fan nodes'
+    /// per-iteration cut counts sum to exactly `forward_passes` (every trial
+    /// point routes to exactly one fan node — neither dropped nor
+    /// double-routed); and the shared leaf pool never receives a cut (a leaf
+    /// has no successor to generate one for).
+    #[test]
+    fn k_fan_sampled_routing_sums_to_forward_passes_with_no_oob() {
+        let (fixture, _outcome) = train_k_fan();
+        let node_graph = &fixture.setup.node_graph;
+
+        let cut_generating: Vec<NodePos> = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| !node_graph.successors[pos].is_empty())
+            .collect();
+        assert_eq!(
+            cut_generating.len(),
+            1 + K,
+            "K-fan power precondition: exactly 1 root + K fan nodes must be cut-generating"
+        );
+        let root_pos = *cut_generating
+            .iter()
+            .find(|&&pos| node_graph.nodes[pos].stage == StageIdx(0))
+            .expect("the root is cut-generating and is the fixture's sole stage-0 node");
+        let fan_positions: Vec<NodePos> = cut_generating
+            .iter()
+            .copied()
+            .filter(|&pos| pos != root_pos)
+            .collect();
+        assert_eq!(
+            fan_positions.len(),
+            K,
+            "K distinct fan nodes must be cut-generating"
+        );
+
+        let leaf_positions: Vec<NodePos> = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| node_graph.successors[pos].is_empty())
+            .collect();
+        assert_eq!(leaf_positions.len(), K, "K leaves, one per fan branch");
+        let leaf_pool = node_graph.nodes[leaf_positions[0]].pool_id;
+        for &pos in &leaf_positions {
+            assert_eq!(
+                node_graph.nodes[pos].pool_id, leaf_pool,
+                "every leaf must share the one leaf-sharing pool"
+            );
+        }
+        assert_eq!(
+            fixture.setup.fcf.pools[leaf_pool].populated(),
+            0,
+            "a leaf has no successor, so it must never generate a cut"
+        );
+
+        let mut touched_fan_nodes = HashSet::new();
+        let root_pool = node_graph.nodes[root_pos].pool_id;
+        for iteration in 1..=u64::from(MAX_ITERATIONS) {
+            assert_eq!(
+                cuts_in_iteration(&fixture, root_pool, iteration),
+                u64::from(FORWARD_PASSES),
+                "iteration {iteration}: the root is the sole stage-0 node, so every forward \
+                 trial point reaches it — its per-iteration cut count must always equal \
+                 forward_passes"
+            );
+
+            let mut fan_total = 0u64;
+            for &pos in &fan_positions {
+                let pool_id = node_graph.nodes[pos].pool_id;
+                let count = cuts_in_iteration(&fixture, pool_id, iteration);
+                assert!(
+                    count <= u64::from(FORWARD_PASSES),
+                    "iteration {iteration}: fan node at position {pos} (pool {pool_id}) got \
+                     {count} cuts, exceeding forward_passes ({FORWARD_PASSES}) — over-routed"
+                );
+                if count > 0 {
+                    touched_fan_nodes.insert(pos);
+                }
+                fan_total += count;
+            }
+            assert_eq!(
+                fan_total,
+                u64::from(FORWARD_PASSES),
+                "iteration {iteration}: the K fan nodes' per-iteration cut counts must sum to \
+                 forward_passes — every forward trial point routes to EXACTLY one fan node, \
+                 never zero (dropped) and never more than one (double-routed)"
+            );
+        }
+
+        assert!(
+            touched_fan_nodes.len() >= 2,
+            "power precondition: the run must genuinely touch >= 2 distinct fan nodes over \
+             {MAX_ITERATIONS} iterations (touched {}), or cross-node misrouting has nothing \
+             to be caught against",
+            touched_fan_nodes.len()
+        );
+    }
+
+    /// Sampled scale gate: sampled solves-per-iteration equals the sampled
+    /// node-visit work — every one of `forward_passes` trial points visits
+    /// exactly `path_length` nodes (root, its sampled fan node, that fan
+    /// node's leaf), so the forward-phase LP-solve count is
+    /// `forward_passes * path_length` every iteration, strictly below the
+    /// per-path enumeration `enumerated_scenario_count` — never the exact
+    /// per-node enumerated visit count (unwired: enumerated execution beyond
+    /// a derived count of 1 is not yet admitted).
+    #[test]
+    fn k_fan_sampled_forward_solves_equal_visit_work_below_enumerated() {
+        let (fixture, outcome) = train_k_fan();
+
+        let path_length = 1 + fixture
+            .setup
+            .node_graph
+            .nodes
+            .iter()
+            .map(|n| n.stage.0)
+            .max()
+            .expect("the K-fan graph has at least one node") as u64;
+        assert_eq!(
+            path_length, 3,
+            "the K-fan is root -> fan -> leaf, 3 stages deep"
+        );
+
+        let expected = u64::from(fixture.forward_passes) * path_length;
+        assert!(
+            expected < fixture.enumerated_scenario_count,
+            "power precondition: forward_passes * path_length ({expected}) must be strictly \
+             below enumerated_scenario_count ({}) — otherwise sampled and enumerated scale \
+             are indistinguishable on this fixture",
+            fixture.enumerated_scenario_count
+        );
+
+        for iteration in 1..=u64::from(MAX_ITERATIONS) {
+            let forward_solves: u64 = outcome
+                .result
+                .solver_stats_log
+                .iter()
+                .filter(|e| e.iteration == iteration && e.phase == "forward")
+                .map(|e| e.delta.lp_solves)
+                .sum();
+            assert_eq!(
+                forward_solves, expected,
+                "iteration {iteration}: forward-phase LP solves must equal forward_passes * \
+                 path_length — a regression toward per-path enumeration would instead scale \
+                 with K"
+            );
+            assert!(
+                forward_solves < fixture.enumerated_scenario_count,
+                "iteration {iteration}: sampled forward work ({forward_solves}) must stay \
+                 strictly below the per-path enumeration ({})",
+                fixture.enumerated_scenario_count
+            );
+        }
+    }
+
+    /// A declared branching graph went infeasible past ~2 iterations before the
+    /// per-pool frozen overlay landed (a leaf stage's frozen template embedded a
+    /// fan node's cut, and the terminal leaf's pinned theta then made the LP
+    /// infeasible). This asserts the K-fan trains the full run without an
+    /// `Infeasible { .. }`, that the frozen overlay is per POOL (not per stage),
+    /// and that each node genuinely warm-starts from its OWN node basis — the
+    /// offered bases are reused and every one is accepted (no slot-identity
+    /// reconstruction failure), not silently all-cold.
+    #[test]
+    fn k_fan_trains_per_pool_frozen_with_reused_node_bases() {
+        let (fixture, outcome) = train_k_fan();
+        let result = outcome.result;
+
+        assert!(
+            result.iterations >= 3,
+            "the K-fan must train past the pre-fix ~2-iteration infeasibility point (ran {})",
+            result.iterations
+        );
+        assert!(result.final_lb.is_finite(), "final_lb must be finite");
+
+        // The frozen overlay is one template per POOL, and this fixture has
+        // strictly more pools than stages (leaf sharing gives n_pools = K+2 over
+        // 3 stages) — so a per-stage overlay could not have produced this length.
+        let node_graph = &fixture.setup.node_graph;
+        let n_pools = node_graph.n_pools;
+        let n_stages: usize = node_graph
+            .nodes
+            .iter()
+            .map(|n| n.stage)
+            .collect::<HashSet<_>>()
+            .len();
+        assert!(
+            n_pools > n_stages,
+            "the K-fan must have more pools ({n_pools}) than stages ({n_stages}) via leaf sharing"
+        );
+        let frozen = result
+            .frozen_templates
+            .as_ref()
+            .expect("training always returns frozen templates");
+        assert_eq!(
+            frozen.len(),
+            n_pools,
+            "frozen overlay must carry one template per pool, not per stage"
+        );
+
+        // Warm-start reuse: forward+backward solves offer stored node bases, and
+        // every offer is accepted. A broken (m, stage) key would alias sibling
+        // nodes, the node_id guard would turn each into a cold solve (no offer),
+        // and `basis_offered` would collapse; a broken slot-identity
+        // reconstruction would instead raise `basis_consistency_failures`.
+        let (offered, rejected) = result
+            .solver_stats_log
+            .iter()
+            .filter(|e| e.phase == "forward" || e.phase == "backward")
+            .fold((0u64, 0u64), |(o, r), e| {
+                (
+                    o + e.delta.basis_offered,
+                    r + e.delta.basis_consistency_failures,
+                )
+            });
+        assert!(
+            offered > 0,
+            "branching warm-start must reuse node bases (basis_offered > 0), not solve all-cold"
+        );
+        assert_eq!(
+            rejected, 0,
+            "every offered node basis must reconstruct by slot and be accepted \
+             (basis_consistency_failures must be 0), got {rejected}"
+        );
+    }
+
+    /// Branching SIMULATION: each scenario's sampled walk visits a fan node and
+    /// its leaf, and each stage solve must load the VISITED node's own pool
+    /// frozen template (the per-pool overlay), not a per-stage mix. Pre-fix this
+    /// went infeasible the same way training did. Asserts every scenario
+    /// simulates to a finite cost.
+    #[test]
+    fn k_fan_simulation_loads_visited_node_pool_cuts() {
+        let (mut fixture, outcome) = train_k_fan();
+        let result = outcome.result;
+
+        // Simulate one scenario per enumerated fan path so several distinct
+        // visited nodes (hence distinct pools) are exercised.
+        let n_scenarios = u32::try_from(K).expect("K fits u32");
+        fixture.setup.simulation_config.n_scenarios = n_scenarios;
+
+        let comm = StubComm;
+        let mut pool = fixture
+            .setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("simulation workspace pool must build");
+
+        let io_capacity = fixture.setup.simulation_config.io_channel_capacity.max(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+        let drain = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+
+        let local_costs = fixture
+            .setup
+            .simulate(
+                &mut pool.workspaces,
+                &comm,
+                &result_tx,
+                None,
+                result.frozen_templates.as_deref(),
+                &result.basis_cache,
+            )
+            .expect("branching simulation must not go infeasible");
+        drop(result_tx);
+        let scenario_results = drain.join().expect("drain thread must not panic");
+
+        assert_eq!(
+            scenario_results.len(),
+            n_scenarios as usize,
+            "every simulated scenario must produce a result"
+        );
+        for r in &scenario_results {
+            assert!(
+                r.total_cost.is_finite(),
+                "scenario {} cost must be finite (a per-stage frozen mix would infeasible)",
+                r.scenario_id
+            );
+        }
+        assert_eq!(
+            local_costs.costs.len(),
+            n_scenarios as usize,
+            "compact cost buffer must carry one entry per scenario"
+        );
+        let (summary, _gathered) = aggregate_simulation(
+            &local_costs.costs,
+            fixture.setup.simulation_config(),
+            &comm,
+            SimulationWeighting::Uniform,
+        )
+        .expect("aggregate_simulation must succeed");
+        assert!(
+            summary.mean_cost.is_finite(),
+            "aggregate mean simulation cost must be finite"
+        );
+    }
+}
+
+mod k_fan_enumerated_exact_bound {
+    //! Enumerated all-paths forward on the DECOMP K-fan (`K >= 2`): the exhaustive
+    //! engine visits every distinct node once, reconstructs each root->leaf path's
+    //! cost, and reduces the exact bound `Σ_ℓ P(ℓ)·C(ℓ)`. The lower bound (an
+    //! independent root Bellman evaluation) is the reference the exact upper bound
+    //! must close to; the forward LP-solve total pins the dedup scale gate.
+
+    use cobre_sddp::TrainingOutcome;
+    use cobre_sddp::test_support::{k_fan_setup_enumerated, try_k_fan_simulation_enumerated};
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+
+    const K: usize = 4;
+    const MAX_ITERATIONS: u32 = 15;
+
+    fn train() -> (cobre_sddp::test_support::KFanFixture, TrainingOutcome) {
+        let mut fixture = k_fan_setup_enumerated(K, MAX_ITERATIONS);
+        assert_eq!(
+            u64::from(fixture.forward_passes),
+            fixture.enumerated_scenario_count,
+            "enumerated forward_passes must resolve to the graph's path count"
+        );
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated K-fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "enumerated K-fan training must not error: {:?}",
+            outcome.error
+        );
+        (fixture, outcome)
+    }
+
+    /// The exact upper bound `Σ_ℓ P(ℓ)·C(ℓ)` closes to the independent lower-bound
+    /// root evaluation (the reference), with a zero CI half-width (a deduplicated
+    /// enumeration carries no sampling distribution). Trains `>= 3` iterations
+    /// without an `Infeasible`.
+    #[test]
+    fn enumerated_k_fan_closes_lb_to_exact_ub_with_zero_ci() {
+        let (_fixture, outcome) = train();
+        let result = outcome.result;
+
+        assert!(
+            result.iterations >= 3,
+            "must train >= 3 iterations (ran {})",
+            result.iterations
+        );
+        assert!(result.final_lb.is_finite() && result.final_ub.is_finite());
+
+        let tol = 1e-6 * result.final_ub.abs().max(1.0);
+        assert!(
+            (result.final_ub - result.final_lb).abs() <= tol,
+            "the exact UB {} must close to the independent LB {} within {tol}",
+            result.final_ub,
+            result.final_lb,
+        );
+        assert_eq!(
+            result.final_ub_std, 0.0,
+            "an enumerated bound has no sampling distribution: std must be 0"
+        );
+    }
+
+    /// Dedup scale gate: the enumerated forward solves each distinct node
+    /// exactly once, so the per-iteration forward LP-solve total equals
+    /// `Σ forward_solve_counts` (the node count on a `|Ω|=1` tree), strictly
+    /// below the naive per-path total `enumerated_scenario_count * path_length`.
+    #[test]
+    fn enumerated_k_fan_forward_solves_equal_dedup_total_below_naive() {
+        let (fixture, outcome) = train();
+        let node_graph = &fixture.setup.node_graph;
+
+        // Σ forward_solve_counts on a |Ω|=1 tree == the node count (π(n) = 1).
+        let dedup_total = node_graph.nodes.len() as u64;
+        let path_length = 1 + node_graph
+            .nodes
+            .iter()
+            .map(|n| n.stage.0)
+            .max()
+            .expect("the K-fan has nodes") as u64;
+        assert_eq!(path_length, 3, "root -> fan -> leaf");
+        let naive_total = fixture.enumerated_scenario_count * path_length;
+        assert!(
+            dedup_total < naive_total,
+            "dedup total ({dedup_total}) must be strictly below naive per-path re-solving \
+             ({naive_total})"
+        );
+
+        for iteration in 1..=u64::from(MAX_ITERATIONS).min(outcome.result.iterations) {
+            let forward_solves: u64 = outcome
+                .result
+                .solver_stats_log
+                .iter()
+                .filter(|e| e.iteration == iteration && e.phase == "forward")
+                .map(|e| e.delta.lp_solves)
+                .sum();
+            assert_eq!(
+                forward_solves, dedup_total,
+                "iteration {iteration}: enumerated forward must solve each node once \
+                 (total {dedup_total}), not re-solve shared prefixes per path"
+            );
+        }
+    }
+
+    /// The simulation-enumerated admissibility guard admits any derived leaf-path
+    /// count on a single-predecessor tree: an enumerated `K >= 2` simulation setup
+    /// resolves `Ok`, with `n_scenarios` set to the derived count `K`.
+    #[test]
+    fn enumerated_k_ge_2_simulation_is_admitted() {
+        let setup = try_k_fan_simulation_enumerated(K)
+            .expect("enumerated K>=2 simulation must be admitted on a single-predecessor tree");
+        assert_eq!(
+            setup.simulation_config.n_scenarios,
+            u32::try_from(K).expect("K fits u32"),
+            "n_scenarios must resolve to the derived leaf-path count K"
+        );
+    }
+}
+
+mod visit_bound_overflow_guard {
+    //! The release-active visit-bound overflow guard
+    //! (`check_visit_bound` in `training/backward_pass_state.rs`): a named
+    //! rejection when a realized routed count exceeds a pool's statistical
+    //! `pool_cut_stride` floor, and structural non-firing on chain and
+    //! enumerated graphs.
+
+    use std::path::Path;
+
+    use cobre_sddp::SddpError;
+    use cobre_sddp::setup::NodePos;
+    use cobre_sddp::test_support::{k_fan_setup, k_fan_setup_enumerated};
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+    use super::run_deterministic_with_setup;
+
+    /// K=2, F=8: the smallest combination found by a documented sweep over
+    /// `(k_fan branch count, forward_passes, max_iterations)` whose
+    /// SAMPLED routing — under `k_fan_setup`'s fixed training seed — realizes
+    /// a routed count above a fan pool's capped stride within the iteration
+    /// budget (the sweep tried k in 2..=30, forward_passes in 3..=20, and
+    /// max_iterations up to 50; every other combination trained clean the
+    /// whole way). Overflow first occurs at iteration <= 27; 30 sits
+    /// comfortably past that.
+    const K: usize = 2;
+    const FORWARD_PASSES: u32 = 8;
+    const MAX_ITERATIONS: u32 = 30;
+
+    /// R2: constructs a fixture whose capped stride sits strictly below a
+    /// realizable routed count, drives training past it, and asserts the
+    /// named rejection.
+    #[test]
+    fn overflow_guard_rejects_realized_visit_count_above_stride() {
+        let mut fixture = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+
+        // Precondition (asserted, not assumed): some fan pool's capped
+        // stride sits STRICTLY below forward_passes, the realizable routed
+        // ceiling — otherwise an overflow cannot occur on this fixture at
+        // all and the test below would pass vacuously.
+        let node_graph = &fixture.setup.node_graph;
+        let capped_pool = (0..node_graph.nodes.len())
+            .map(NodePos)
+            .filter(|&pos| !node_graph.successors[pos].is_empty())
+            .map(|pos| node_graph.nodes[pos].pool_id)
+            .find(|&pool_id| fixture.setup.fcf.pools[pool_id].visit_stride < FORWARD_PASSES)
+            .expect(
+                "power precondition: some fan pool's capped stride must sit strictly below \
+                 forward_passes on this K/forward_passes combination, or an overflow cannot be \
+                 realized on this fixture at all",
+            );
+        assert!(
+            fixture.setup.fcf.pools[capped_pool].visit_stride < FORWARD_PASSES,
+            "power precondition restated: pool {capped_pool}'s stride ({}) must be strictly \
+             below forward_passes ({FORWARD_PASSES})",
+            fixture.setup.fcf.pools[capped_pool].visit_stride
+        );
+
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect(
+                "train() itself must return Ok; a mid-training error surfaces as outcome.error",
+            );
+
+        match outcome.error {
+            Some(SddpError::Validation(msg)) => {
+                assert!(
+                    msg.contains("visit-bound overflow"),
+                    "names the failure: {msg}"
+                );
+                assert!(
+                    msg.contains(&format!("pool {capped_pool}")),
+                    "names the overflowing pool: {msg}"
+                );
+                assert!(msg.contains("stride"), "names the stride: {msg}");
+                assert!(msg.contains("routed"), "names the routed count: {msg}");
+            }
+            other => panic!(
+                "expected a named SddpError::Validation visit-bound rejection on this \
+                 (K={K}, forward_passes={FORWARD_PASSES}, max_iterations={MAX_ITERATIONS}) \
+                 fixture, got {other:?}"
+            ),
+        }
+    }
+
+    /// R3 (chain half): every shipped chain deterministic case already routes
+    /// through the guard on every level; `run_deterministic_with_setup`
+    /// asserts `outcome.error.is_none()` internally, so a misfiring guard
+    /// would already fail this call. Additionally asserts the arithmetic
+    /// identity the non-firing falls out of: a chain pool's reach
+    /// probability is exactly `1`, so its `pool_cut_stride` margin equals
+    /// `forward_passes` bit-for-bit (never merely `>=`).
+    #[test]
+    fn overflow_guard_never_fires_on_chain() {
+        let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
+        let (setup, _system, result) = run_deterministic_with_setup(case_dir);
+        assert!(
+            result.iterations > 0,
+            "must train at least one iteration for the guard to have run at all"
+        );
+        for (pool_id, pool) in setup.fcf.pools.iter().enumerate() {
+            assert_eq!(
+                pool.visit_stride, setup.loop_params.forward_passes,
+                "pool {pool_id}: a chain pool's stride must equal forward_passes exactly \
+                 (reach probability 1, pool_cut_stride's variance-0 identity)"
+            );
+        }
+    }
+
+    /// R3 (enumerated half): the K-fan trained fully enumerated
+    /// (`forward_passes` resolved to the graph's exact path count) must
+    /// never trip the guard — every reachable pool's `pool_cut_stride`
+    /// margin structurally upper-bounds its exact, deterministic enumerated
+    /// visit count (no shape predicate: the margin's `+3σ` term is always
+    /// `>= 0` and its cap never falls below the mean).
+    #[test]
+    fn overflow_guard_never_fires_on_enumerated_k_fan() {
+        const K: usize = 4;
+        const MAX_ITERATIONS: u32 = 8;
+
+        let mut fixture = k_fan_setup_enumerated(K, MAX_ITERATIONS);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated K-fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "the overflow guard must never fire on an enumerated graph: {:?}",
+            outcome.error
+        );
+    }
+}
+
+mod heterogeneous_visit_bound_resume {
+    //! R4/R5: `FutureCostFunction::new_with_warm_start` threads the study's
+    //! per-pool state-dimension and visit-bound arrays — the same per-pool
+    //! contract `new_per_pool` takes — so a resumed run's pool geometry
+    //! matches the cold-start run's. Exercised on the K-fan's HETEROGENEOUS
+    //! per-pool strides (declared non-uniform branch weights): the shape the
+    //! pre-fix scalar substitution (every resumed pool given `forward_passes`
+    //! uniformly as its stride) silently broke.
+
+    use cobre_io::StageCutsReadResult;
+    use cobre_sddp::FutureCostFunction;
+    use cobre_sddp::setup::NodeId;
+    use cobre_sddp::test_support::{k_fan_setup, trivial_full_fcf_proof};
+
+    const K: usize = 4;
+    const FORWARD_PASSES: u32 = 3;
+    const MAX_ITERATIONS: u32 = 5;
+
+    #[test]
+    fn resume_matches_cold_start_stride_and_slots_on_heterogeneous_bounds() {
+        let cold = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        let cold_strides: Vec<u32> = cold
+            .setup
+            .fcf
+            .pools
+            .iter()
+            .map(|p| p.visit_stride)
+            .collect();
+        let cold_dims: Vec<usize> = cold
+            .setup
+            .fcf
+            .pools
+            .iter()
+            .map(|p| p.state_dimension)
+            .collect();
+
+        // Power precondition: the K-fan's declared non-uniform branch weights
+        // give distinct pools distinct strides — the shape a scalar
+        // substitution (every pool given forward_passes uniformly) cannot be
+        // distinguished from the fix on.
+        assert!(
+            cold_strides.iter().any(|&s| s != cold_strides[0]),
+            "power precondition: the K-fan fixture must carry heterogeneous per-pool visit \
+             strides (got {cold_strides:?}), or this test cannot distinguish the fix from the \
+             pre-fix scalar substitution"
+        );
+
+        let proof = trivial_full_fcf_proof(
+            u32::try_from(cold_dims[0]).expect("state dimension fits u32"),
+            u32::try_from(cold.setup.num_stages()).expect("stage count fits u32"),
+        );
+
+        // A checkpoint with no warm-start cuts: this test's concern is the
+        // constructor's per-pool dimension/stride threading, not cut-byte
+        // fidelity (already covered by
+        // `assert_cross_mode_load_preserves_cut_bytes` in
+        // `chronological_telescoping`).
+        let stage_results: Vec<StageCutsReadResult> = cold_dims
+            .iter()
+            .enumerate()
+            .map(|(p, &dim)| StageCutsReadResult {
+                stage_id: u32::try_from(p).expect("pool index fits u32"),
+                state_dimension: u32::try_from(dim).expect("state dimension fits u32"),
+                capacity: 0,
+                warm_start_count: 0,
+                populated_count: 0,
+                cuts: Vec::new(),
+                entity_manifest: Vec::new(),
+            })
+            .collect();
+        let visit_bounds: Vec<u64> = cold_strides.iter().map(|&s| u64::from(s)).collect();
+
+        let mut resumed = FutureCostFunction::new_with_warm_start(
+            &proof,
+            &stage_results,
+            &cold_dims,
+            &visit_bounds,
+            FORWARD_PASSES,
+            u64::from(MAX_ITERATIONS),
+        )
+        .expect("new_with_warm_start must build from the injected per-pool arrays");
+
+        let resumed_strides: Vec<u32> = resumed.pools.iter().map(|p| p.visit_stride).collect();
+        assert_eq!(
+            resumed_strides, cold_strides,
+            "resumed per-pool strides must equal the cold-start run's on a heterogeneous-bound \
+             graph — the deleted scalar substitution replaced every pool's stride with \
+             forward_passes ({FORWARD_PASSES}) uniformly"
+        );
+
+        // Slot-index equivalence: the resumed pool's warm_start_count is 0
+        // (no warm-start cuts here) and its iteration_base defaults to 0,
+        // exactly like a fresh cold pool — so a cut at (iteration=1,
+        // forward_pass_index=0) must land at the documented formula's slot,
+        // `warm_start_count + iteration * stride + forward_pass_index`,
+        // using the COLD-START run's own per-pool stride.
+        for (pool_id, &stride) in cold_strides.iter().enumerate() {
+            resumed.add_cut(
+                NodeId(0),
+                pool_id,
+                1,
+                0,
+                1.0,
+                &vec![0.0; cold_dims[pool_id]],
+            );
+            let expected_slot = stride as usize;
+            assert!(
+                resumed.pools[pool_id].is_active(expected_slot),
+                "pool {pool_id}: a cut at iteration 1, forward_pass_index 0 must land at slot \
+                 {expected_slot} (warm_start_count 0 + iteration 1 * stride {stride} + \
+                 forward_pass_index 0) — the cold-start run's own stride"
+            );
+        }
+    }
+}
+
+/// Enumerated + external activation: a `|Ω| = 1` single-path chain whose nodes
+/// each declare an external scenario column. The forward pin and the backward
+/// `OpeningSource` match make both passes read the same `eta_slice(stage, k)`,
+/// so the exact upper bound over the declared columns meets the lower bound.
+mod enumerated_external {
+    #![allow(clippy::cast_possible_wrap)]
+
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+
+    use chrono::NaiveDate;
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HorizonGraph, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, System,
+        SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        entities::hydro::HydroGenerationModel,
+        scenario::{ExternalScenarioRow, InflowModel, LoadModel, SamplingScheme, ScenarioSource},
+        temporal::{
+            Node as PolicyNode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig,
+            StageStateConfig, Transition,
+        },
+    };
+    use cobre_sddp::{
+        DEFAULT_COST_SCALE_FACTOR, InflowNonNegativityMethod, SimulationScenarioResult,
+        StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
+        hydro_models::PrepareHydroModelsResult,
+        setup::{ConstructionConfig, SimulationEnumeratedRequest},
+    };
+    use cobre_solver::ActiveSolver;
+    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+
+    use crate::common::StubComm;
+    use crate::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+
+    const N_STAGES: usize = 3;
+    /// Raw external inflow (m³/s) each node's declared column realizes — distinct
+    /// per stage, so the pinned column genuinely discriminates: were the backward
+    /// pass to read the generated tree instead, its cut would price a different
+    /// inflow and the lower bound would not meet the exact upper bound.
+    const EXTERNAL_INFLOW_M3S: [f64; N_STAGES] = [90.0, 40.0, 70.0];
+    /// A second external column (`scenario_id = 1`) the nodes do NOT declare.
+    /// Distinct enough that pricing it yields a different converged bound, so a
+    /// simulation walk that hash-selected (as `select_external_scenario` is
+    /// stage-independent, the hash picks one column for every stage of a scenario)
+    /// instead of honoring the node pin would evaluate a different policy — the
+    /// discriminator against a dropped pin.
+    const DECOY_INFLOW_M3S: [f64; N_STAGES] = [0.0, 0.0, 0.0];
+    const INFLOW_MEAN_M3S: f64 = 60.0;
+    const INFLOW_STD_M3S: f64 = 10.0;
+    const DEMAND_MW: f64 = 50.0;
+
+    fn build_system() -> System {
+        let bus_id = EntityId(1);
+        let hydro_id = EntityId(2);
+
+        let bus = make_bus(
+            bus_id,
+            BusSpec {
+                name: "B".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let hydro = make_hydro(
+            hydro_id,
+            HydroSpec {
+                name: "H".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id,
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                specific_productivity_mw_per_m3s_per_m: Some(0.5),
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                ..HydroSpec::default()
+            },
+        );
+
+        let stages: Vec<_> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        season_id: None,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: false,
+                        },
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..StageSpec::default()
+                    },
+                )
+            })
+            .collect();
+
+        let inflow_models: Vec<_> = (0..N_STAGES)
+            .map(|i| InflowModel {
+                hydro_id,
+                stage_id: i as i32,
+                mean_m3s: INFLOW_MEAN_M3S,
+                std_m3s: INFLOW_STD_M3S,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        // Deterministic demand (std 0 ⇒ zero stochastic-load noise dimension), so
+        // the only noise class is the external inflow.
+        let load_models: Vec<_> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id,
+                stage_id: i as i32,
+                mean_mw: DEMAND_MW,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        // Two external columns per stage: column 0 (declared by the nodes here)
+        // and a decoy column 1 the pin must never select.
+        let external_scenarios: Vec<_> = (0..N_STAGES)
+            .flat_map(|i| {
+                [
+                    ExternalScenarioRow {
+                        stage_id: i as i32,
+                        scenario_id: 0,
+                        hydro_id,
+                        value_m3s: EXTERNAL_INFLOW_M3S[i],
+                    },
+                    ExternalScenarioRow {
+                        stage_id: i as i32,
+                        scenario_id: 1,
+                        hydro_id,
+                        value_m3s: DECOY_INFLOW_M3S[i],
+                    },
+                ]
+            })
+            .collect();
+
+        // Single-successor chain; every node declares external column 0, so the
+        // graph is node-native (External openings), a single enumerated path. The
+        // library also carries a decoy column 1 the nodes never declare — a
+        // dropped pin would hash-select it and price a different policy.
+        let nodes: Vec<_> = (0..N_STAGES)
+            .map(|i| PolicyNode {
+                id: i as i32,
+                stage_id: i as i32,
+                scenario_id: Some(0),
+                label: None,
+            })
+            .collect();
+        let transitions: Vec<_> = (0..N_STAGES - 1)
+            .map(|i| Transition {
+                source_id: i as i32,
+                target_id: (i + 1) as i32,
+                probability: 1.0,
+                annual_discount_rate_override: None,
+            })
+            .collect();
+        let policy_graph = HorizonGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions,
+            nodes,
+            stage_discount_rate_overrides: HashMap::new(),
+            season_map: None,
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    max_turbined_m3s: 100.0,
+                    max_generation_mw: 250.0,
+                    ..Default::default()
+                },
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .external_scenarios(external_scenarios)
+            .policy_graph(policy_graph)
+            .bounds(bounds)
+            .penalties(penalties)
+            .build()
+            .expect("enumerated-external chain system must build")
+    }
+
+    fn construction_config(
+        backward_scheduler: cobre_io::config::BackwardScheduler,
+        n_scenarios: u32,
+    ) -> ConstructionConfig {
+        ConstructionConfig {
+            seed: 42,
+            forward_passes: 1,
+            training_enumerated: true,
+            stopping_rule_set: StoppingRuleSet {
+                rules: vec![StoppingRule::IterationLimit { limit: 40 }],
+                mode: StoppingMode::Any,
+            },
+            n_scenarios,
+            simulation_enumerated: SimulationEnumeratedRequest::Sampled,
+            io_channel_capacity: 0,
+            policy_path: String::new(),
+            inflow_method: InflowNonNegativityMethod::None,
+            cut_selection: None,
+            cut_activity_tolerance: 0.0,
+            budget: None,
+            export_states: false,
+            scalar_parameters: Vec::new(),
+            training_solver_backward: None,
+            training_solver_forward: None,
+            simulation_solver: None,
+            backward_scheduler,
+            cost_scale_factor: DEFAULT_COST_SCALE_FACTOR,
+            inflow_lag_depth: None,
+            boundary_present: false,
+        }
+    }
+
+    /// Train the enumerated-external chain under `backward_scheduler` and return
+    /// the converged `(LB, UB)`. Both backward schedulers route an External
+    /// successor node through the same `eta_slice(stage, k)` read.
+    fn train_final_bounds(backward_scheduler: cobre_io::config::BackwardScheduler) -> (f64, f64) {
+        let system = build_system();
+        let source = ScenarioSource {
+            inflow_scheme: SamplingScheme::External,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            seed: Some(42),
+            historical_years: None,
+        };
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            Some(42),
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::External),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("build_stochastic_context must succeed");
+        assert!(
+            stochastic.n_stochastic_ncs() == 0,
+            "fixture must carry no NCS noise dimension"
+        );
+
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        let mut setup = StudySetup::from_broadcast_params(
+            &system,
+            stochastic,
+            construction_config(backward_scheduler, 0),
+            hydro_models,
+            &source,
+            &source,
+        )
+        .expect("StudySetup::from_broadcast_params must build");
+        assert!(
+            setup.scenario_libraries.training.external_inflow.is_some(),
+            "external inflow library must be present under the External scheme"
+        );
+
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated-external training must return Ok");
+        assert!(outcome.error.is_none(), "expected no training error");
+        (outcome.result.final_lb, outcome.result.final_ub)
+    }
+
+    /// By-scenario backward (default): forward and backward both read
+    /// `eta_slice(stage, k)` for the pinned column, so the exact upper bound over
+    /// the declared path meets the lower bound.
+    #[test]
+    fn enumerated_external_chain_lb_equals_ub_by_scenario() {
+        let (lb, ub) = train_final_bounds(cobre_io::config::BackwardScheduler::ByScenario {});
+        assert!(
+            (ub - lb).abs() < 1e-6,
+            "by-scenario enumerated-external forward≡backward must converge LB==UB: \
+             LB = {lb}, UB = {ub}",
+        );
+    }
+
+    /// By-node backward: the opening-block scheduler's claim loop takes the same
+    /// External `eta_slice(stage, k)` read, so it converges to the identical
+    /// LB==UB as the by-scenario path.
+    #[test]
+    fn enumerated_external_chain_lb_equals_ub_by_node() {
+        let (lb, ub) =
+            train_final_bounds(cobre_io::config::BackwardScheduler::ByNode { block_size: None });
+        assert!(
+            (ub - lb).abs() < 1e-6,
+            "by-node enumerated-external forward≡backward must converge LB==UB: \
+             LB = {lb}, UB = {ub}",
+        );
+    }
+
+    /// Train the enumerated-external chain, then run `n_sim` sampled simulation
+    /// scenarios over the same node graph, returning `(LB, UB, per-scenario
+    /// simulation results sorted by scenario id)`.
+    fn train_and_simulate(n_sim: u32) -> (f64, f64, Vec<SimulationScenarioResult>) {
+        let system = build_system();
+        let source = ScenarioSource {
+            inflow_scheme: SamplingScheme::External,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            seed: Some(42),
+            historical_years: None,
+        };
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            Some(42),
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::External),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("build_stochastic_context must succeed");
+
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        let mut setup = StudySetup::from_broadcast_params(
+            &system,
+            stochastic,
+            construction_config(cobre_io::config::BackwardScheduler::ByScenario {}, n_sim),
+            hydro_models,
+            &source,
+            &source,
+        )
+        .expect("StudySetup::from_broadcast_params must build");
+
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated-external training must return Ok");
+        assert!(outcome.error.is_none(), "expected no training error");
+        let (lb, ub) = (outcome.result.final_lb, outcome.result.final_ub);
+
+        let mut pool = setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("create_workspace_pool must succeed");
+        let (result_tx, result_rx) = mpsc::sync_channel(usize::try_from(n_sim.max(1)).unwrap());
+        let drain = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+        setup
+            .simulate(
+                &mut pool.workspaces,
+                &comm,
+                &result_tx,
+                None,
+                None,
+                &outcome.result.basis_cache,
+            )
+            .expect("simulate must return Ok");
+        drop(result_tx);
+        let mut results = drain.join().expect("drain thread must not panic");
+        results.sort_by_key(|r| r.scenario_id);
+        (lb, ub, results)
+    }
+
+    /// Simulation honors the node's external pin: every simulated scenario replays
+    /// the DECLARED column 0 (cost == UB == LB), even though the library carries a
+    /// distinct decoy column 1. A dropped pin would hash-select over both columns
+    /// (`select_external_scenario` is stage-independent, so a scenario reads one
+    /// column for all its stages) and any scenario landing on the decoy would price
+    /// a different, higher-inflow-deprived cost — so `cost == UB` for every scenario
+    /// is the replay proof, not a hash-drawn value.
+    #[test]
+    fn enumerated_external_simulation_replays_the_declared_column() {
+        // The decoy column must differ from the declared one, else the fixture
+        // could not discriminate a pinned replay from a hash-drawn one.
+        assert_ne!(
+            EXTERNAL_INFLOW_M3S, DECOY_INFLOW_M3S,
+            "declared and decoy external columns must differ for the test to have power",
+        );
+        let (lb, ub, results) = train_and_simulate(8);
+        assert!(
+            (ub - lb).abs() < 1e-6,
+            "enumerated-external forward≡backward must converge LB==UB: LB = {lb}, UB = {ub}",
+        );
+        assert!(
+            !results.is_empty(),
+            "simulation must produce at least one scenario"
+        );
+        // The realized incremental inflow each stage is the pinned column's raw
+        // value (no PAR lags), so it discriminates the declared column from the
+        // decoy independently of the deficit-dominated cost: a dropped pin would
+        // hash-select and the scenarios landing on the decoy would report its
+        // inflow instead. The hydro is the sole entity, so `hydros[0]`.
+        for r in &results {
+            assert_eq!(
+                r.stages.len(),
+                N_STAGES,
+                "each simulated scenario must span every stage",
+            );
+            for (t, stage) in r.stages.iter().enumerate() {
+                let realized = stage.hydros[0].incremental_inflow_m3s;
+                assert!(
+                    (realized - EXTERNAL_INFLOW_M3S[t]).abs() < 1e-6,
+                    "scenario {} stage {t}: simulation must replay declared column \
+                     {} m³/s, got {realized} (decoy is {})",
+                    r.scenario_id,
+                    EXTERNAL_INFLOW_M3S[t],
+                    DECOY_INFLOW_M3S[t],
+                );
+            }
+            assert!(
+                (r.total_cost - ub).abs() < 1e-6,
+                "simulated scenario cost must match the exact bound UB {ub}, got {}",
+                r.total_cost,
+            );
+        }
+    }
+}
+
+/// A reduced-projection pool (storage-only cut state, `n_slots < n_state`) must
+/// score cuts against trial states read in its OWN projected space. The
+/// visited-states archive is packed at the global StateDim stride; striding it
+/// by the pool's projected dimension — the pre-fix behavior — reads misaligned
+/// memory and deactivates the wrong cuts. This pins the projected read against
+/// that misaligned read on the storage-only cut-state axis, where they differ.
+#[test]
+fn cut_selection_scores_reduced_projection_in_projected_space() {
+    use cobre_core::temporal::StageStateConfig;
+    use cobre_sddp::cut::CutPool;
+    use cobre_sddp::cut_selection::CutSelectionStrategy;
+    use cobre_sddp::indexer::{CutSlot, CutStateProjection, StateSpace};
+    use cobre_sddp::setup::NodeId;
+
+    // 1 hydro, PAR(1): global state = [storage, lag] → n_state = 2.
+    let global = StateSpace::new(1, 1, 0, Vec::new(), 0, 0, Vec::new(), &[1]);
+    assert_eq!(global.n_state, 2);
+
+    let proj = CutStateProjection::new(
+        &global,
+        StageStateConfig {
+            storage: true,
+            inflow_lags: false,
+        },
+    );
+    let n_slots = proj.n_slots();
+    assert!(
+        n_slots < global.n_state,
+        "precondition: strictly reduced projection (n_slots {n_slots} < n_state {})",
+        global.n_state
+    );
+
+    // 1-D cuts: cut0 = x, cut1 = 3, cut2 = 0.5. Over the storage values only,
+    // cut1 is always at-max, so cut0 and cut2 are dominated.
+    let mut pool = CutPool::new(3, n_slots, 1, 0);
+    pool.add_cut(NodeId(0), 0, 0, 0.0, &[1.0]);
+    pool.add_cut(NodeId(0), 1, 0, 3.0, &[0.0]);
+    pool.add_cut(NodeId(0), 2, 0, 0.5, &[0.0]);
+
+    let strategy = CutSelectionStrategy::Level1 {
+        check_frequency: 1,
+        tie_tolerance: 0.0,
+    };
+
+    // Two trial points, packed at the global StateDim stride [storage, lag]:
+    // small storage, large lag so the misalignment is observable.
+    let n_trials = 2;
+    let global_states = [1.0, 10.0, 2.0, 20.0];
+
+    let mut projected = Vec::new();
+    for m in 0..n_trials {
+        for s in 0..n_slots {
+            let g = proj.global_state_index(CutSlot::new(s)).get();
+            projected.push(global_states[m * global.n_state + g]);
+        }
+    }
+    assert_eq!(
+        projected,
+        vec![1.0, 2.0],
+        "storage-only projection selects the storage StateDim, not a prefix stride"
+    );
+
+    let mut projected_deact = strategy
+        .select_for_stage(&pool, &projected, n_trials, 10, 0)
+        .deactivation_indices();
+    projected_deact.sort_unstable();
+
+    // Pre-fix misaligned read: stride the global buffer by the pool dim,
+    // treating the 4 packed values as 4 one-dim states {1, 10, 2, 20}. cut0 is
+    // at-max at the large lag values, so it survives — the wrong deactivation set.
+    let derived_trials = global_states.len() / n_slots;
+    let mut misaligned_deact = strategy
+        .select_for_stage(&pool, &global_states, derived_trials, 10, 0)
+        .deactivation_indices();
+    misaligned_deact.sort_unstable();
+
+    assert_eq!(
+        projected_deact,
+        vec![0, 2],
+        "projected read deactivates cut0 (never at-max among the storage states) and cut2"
+    );
+    assert_eq!(
+        misaligned_deact,
+        vec![2],
+        "misaligned read wrongly keeps cut0 (at-max at lag values read as storage)"
+    );
+    assert_ne!(
+        projected_deact, misaligned_deact,
+        "the projection must change the deactivation set on a reduced pool"
+    );
+}
+
+/// Dual-folding verification.
+///
+/// On a deterministic PAR(1) trunk the inflow lag is redundant state, so the two
+/// representations the engine supports — folded (`inflow_lags: false`, storage-only
+/// trunk cuts, the production default; the lag is bound-fixed and priced through the
+/// storage future cost) and unfolded (`inflow_lags: true`, the lag carried as an
+/// explicit cut-state dimension) — must agree on the deterministic trunk.
+///
+/// Empirically the fold-invariant quantities are:
+///   * the trunk **cut coefficients**: the two builds share one stage LP (identical
+///     columns, pins, and successor solves) and one deterministic forward
+///     trajectory, so the incoming-storage reduced cost — the storage subgradient —
+///     is **bit-identical** across every trunk cut; only the cut PROJECTION differs
+///     (the unfolded build additionally carries a nonzero lag coefficient the folded
+///     build absorbs into the intercept);
+///   * the **first-stage policy**: both builds realize the same optimal policy, so
+///     the policy cost (`final_ub`) agrees to a stated tolerance — the folded and
+///     unfolded LPs are different, so the simulation may settle on a
+///     different-but-valid vertex at the degenerate optimum (~1 ULP here), the
+///     hot != cold divergence the determinism contract permits (never asserted equal
+///     bit-for-bit).
+///
+/// `final_lb` is deliberately NOT compared between the builds: a non-vacuous fold
+/// (nonzero lag coefficient) forces the unfolded build to carry a redundant lag
+/// dimension the deterministic forward under-samples, so its lower bound stays loose
+/// while the folded build converges (`lb == ub`). That is the correct finding — it
+/// is why folding is the default — not an agreement quantity.
+mod dual_folding_f34 {
+    use cobre_sddp::StudySetup;
+    use cobre_sddp::test_support::{LagFold, dual_folding_setup, pool_cut_state_dimensions};
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::StubComm;
+
+    const FORWARD_PASSES: u32 = 3;
+    const MAX_ITERATIONS: u32 = 12;
+    /// Relative tolerance for the converged-value / policy-cost comparisons: a
+    /// different-but-valid vertex at the degenerate optimum agrees only to solver
+    /// optimality tolerance, never to the bit (the observed `final_ub` gap is ~1 ULP).
+    const VALUE_REL_TOL: f64 = 1e-6;
+    /// A coefficient magnitude above this counts as genuinely nonzero — the trunk
+    /// storage/lag coefficients are ~0.07/0.14, far above solver noise.
+    const NONZERO_EPS: f64 = 1e-9;
+
+    struct Trained {
+        setup: StudySetup,
+        lb: f64,
+        ub: f64,
+    }
+
+    fn train(fold: LagFold) -> Trained {
+        let mut setup = dual_folding_setup(fold, FORWARD_PASSES, MAX_ITERATIONS);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("dual-folding training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "dual-folding training must not error: {:?}",
+            outcome.error
+        );
+        Trained {
+            lb: outcome.result.final_lb,
+            ub: outcome.result.final_ub,
+            setup,
+        }
+    }
+
+    /// Pool ids of the trunk nodes (nodes with a successor own their own pool).
+    fn trunk_pool_ids(setup: &StudySetup) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for (pos, node) in setup.node_graph.nodes.iter_indexed() {
+            if !setup.node_graph.successors[pos].is_empty() && !ids.contains(&node.pool_id) {
+                ids.push(node.pool_id);
+            }
+        }
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Widest successor count over all nodes — the terminal fan's width.
+    fn fan_width(setup: &StudySetup) -> usize {
+        setup
+            .node_graph
+            .nodes
+            .iter_indexed()
+            .map(|(pos, _)| setup.node_graph.successors[pos].len())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Bit pattern of the storage coefficient (cut-state slot 0) of every active cut
+    /// in `pool`, in the canonical append-only order.
+    fn storage_coeff_bits(setup: &StudySetup, pool: usize) -> Vec<u64> {
+        setup
+            .fcf
+            .active_cuts(pool)
+            .map(|(_slot, _intercept, coeffs)| coeffs[0].to_bits())
+            .collect()
+    }
+
+    /// Largest absolute value of coefficient `slot` over `pool`'s active cuts.
+    fn max_abs_coeff(setup: &StudySetup, pool: usize, slot: usize) -> f64 {
+        setup
+            .fcf
+            .active_cuts(pool)
+            .map(|(_s, _i, coeffs)| coeffs.get(slot).copied().unwrap_or(0.0).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: trains two policies; run with --features slow-tests"
+    )]
+    #[test]
+    fn f34_dual_folding_trunk_agreement() {
+        let folded = train(LagFold::Folded);
+        let unfolded = train(LagFold::Unfolded);
+
+        let trunk_a = trunk_pool_ids(&folded.setup);
+        let trunk_b = trunk_pool_ids(&unfolded.setup);
+        assert_eq!(
+            trunk_a, trunk_b,
+            "folded and unfolded share one graph, so their trunk pools coincide"
+        );
+
+        // ── R4: power preconditions — the agreement must not be vacuous ──
+        assert!(
+            fan_width(&folded.setup) >= 2,
+            "terminal fan must carry >= 2 successors (got {})",
+            fan_width(&folded.setup)
+        );
+        assert!(
+            folded.setup.stage_state().max_par_order > 0,
+            "trunk must carry a genuine inflow lag (max_par_order > 0)"
+        );
+
+        let dims_a = pool_cut_state_dimensions(&folded.setup);
+        let dims_b = pool_cut_state_dimensions(&unfolded.setup);
+        for &p in &trunk_a {
+            assert!(
+                dims_b[p] > dims_a[p],
+                "fold must be structurally non-vacuous: unfolded trunk pool {p} must \
+                 project more cut-state dims ({}) than folded ({})",
+                dims_b[p],
+                dims_a[p]
+            );
+        }
+
+        // Numerical non-vacuity: the unfolded build carries a nonzero lag coefficient
+        // (the fold folds something real), and the shared storage coefficient is
+        // nonzero (so its bit-identity below has power).
+        for &p in &trunk_b {
+            assert!(
+                max_abs_coeff(&unfolded.setup, p, 1) > NONZERO_EPS,
+                "unfolded trunk pool {p} must carry a nonzero lag coefficient"
+            );
+        }
+        for &p in &trunk_a {
+            assert!(
+                max_abs_coeff(&folded.setup, p, 0) > NONZERO_EPS,
+                "folded trunk pool {p} must carry a nonzero storage coefficient"
+            );
+        }
+
+        // ── R3: trunk agreement ──
+        // (1) Trunk cut coefficients: the storage subgradient is bit-identical. The
+        //     two builds solve one identical stage LP over one identical deterministic
+        //     trajectory; only the cut projection differs, so the incoming-storage
+        //     reduced cost is fixed bit-for-bit by the determinism contract.
+        for (&pa, &pb) in trunk_a.iter().zip(trunk_b.iter()) {
+            assert_eq!(
+                storage_coeff_bits(&folded.setup, pa),
+                storage_coeff_bits(&unfolded.setup, pb),
+                "trunk storage cut coefficients must be bit-identical (pool {pa})"
+            );
+        }
+
+        // (2) The folded (default) build converges: its lower bound reaches the
+        //     policy cost, so `final_ub` below is the true optimum.
+        assert!(
+            (folded.lb - folded.ub).abs() <= VALUE_REL_TOL * folded.ub.abs(),
+            "folded build must converge: lb {} vs ub {}",
+            folded.lb,
+            folded.ub
+        );
+
+        // (3) First-stage policy: both builds realize the same optimum, compared to a
+        //     stated tolerance because the different LPs may reach a
+        //     different-but-valid vertex (never bit-for-bit; the determinism contract
+        //     forbids asserting hot == cold across a representation change).
+        assert!(
+            (folded.ub - unfolded.ub).abs() <= VALUE_REL_TOL * folded.ub.abs(),
+            "first-stage policy cost must agree within tolerance: folded {} vs unfolded {}",
+            folded.ub,
+            unfolded.ub
+        );
+
+        // (4) The unfolded lower bound is valid (never exceeds the shared optimum),
+        //     even though it stays loose — the redundant deterministic lag is
+        //     under-sampled, so its gap does not close.
+        assert!(
+            unfolded.lb <= unfolded.ub * (1.0 + VALUE_REL_TOL),
+            "unfolded lower bound {} must not exceed the optimum {}",
+            unfolded.lb,
+            unfolded.ub
+        );
+    }
+}
+
+mod f36_gap_attainability {
+    //! Fixture-based gap-attainability check on the enumerated DECOMP K-fan.
+    //! Under enumerated forwards + an expectation measure, the `Gap { tolerance }`
+    //! stopping rule halts training once the EXACT canonical-R$ gap
+    //! `final_ub − final_lb` closes to `<= tolerance`. `final_ub` is exact under
+    //! enumerated (`final_ub_std == 0`), so the gap is a hard quantity, not a
+    //! statistical estimate. `Gap` is admissible only under enumerated +
+    //! expectation (rejected elsewhere at setup — that admission test is owned
+    //! elsewhere and not re-authored here).
+
+    use cobre_sddp::stopping_rule::RULE_GAP;
+    use cobre_sddp::test_support::k_fan_setup_gap;
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+
+    /// Fan width and iteration budget. The enumerated K-fan learns its exact policy
+    /// in a single backward pass, so the gap closes well within the budget; the
+    /// budget only bounds a hypothetical non-converging run.
+    const K: usize = 4;
+    const MAX_ITERATIONS: u32 = 30;
+
+    /// Absolute gap tolerance, canonical R$. The fixture's optimum is ~8.928e7 R$
+    /// and the converged gap sits at the LP-solver ULP floor (~1e-8 R$), so 10.0 R$
+    /// is comfortably above the feasibility-noise floor (~1e-9 × the objective
+    /// magnitude ≈ 0.09 R$) yet far below the objective — a genuinely attainable
+    /// absolute tolerance. A tolerance below the noise floor would leave the gap
+    /// `> tolerance`, so the run would stop on a NON-`gap` rule instead — the
+    /// mandatory `iteration_limit`, the only other rule this fixture declares — and
+    /// the `reason == gap` assertion below is that unattainability failure signal.
+    const GAP_TOLERANCE_R: f64 = 10.0;
+
+    /// Train the gap-configured fixture at `cost_scale_factor`, returning
+    /// `(final_lb, final_ub, final_ub_std, reason)`.
+    fn train_gap(cost_scale_factor: Option<f64>) -> (f64, f64, f64, String) {
+        let mut fixture = k_fan_setup_gap(K, GAP_TOLERANCE_R, MAX_ITERATIONS, cost_scale_factor);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("gap-configured K-fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "gap-configured K-fan training must not error: {:?}",
+            outcome.error
+        );
+        let r = &outcome.result;
+        (r.final_lb, r.final_ub, r.final_ub_std, r.reason.clone())
+    }
+
+    /// Attainability (+ expectation-only): on the enumerated + expectation fixture,
+    /// the achieved canonical-R$ gap closes to `<= GAP_TOLERANCE_R` and the run
+    /// stops on the `gap` rule (not the mandatory `iteration_limit`) — the
+    /// attainability signal.
+    #[test]
+    fn gap_tolerance_attained_under_enumerated_expectation() {
+        let (lb, ub, ub_std, reason) = train_gap(None);
+
+        assert_eq!(
+            ub_std, 0.0,
+            "enumerated forwards give an exact UB: final_ub_std must be 0"
+        );
+        let gap = ub - lb;
+        assert!(
+            gap <= GAP_TOLERANCE_R,
+            "achieved canonical-R$ gap {gap} must close to <= tolerance {GAP_TOLERANCE_R}"
+        );
+        assert_eq!(
+            reason, RULE_GAP,
+            "must stop on the gap rule (attainable tolerance); a non-gap stop \
+             ({reason}) with gap > tolerance is the unattainability failure signal"
+        );
+    }
+
+    /// Canonical-units pinning: the absolute gap comparison is on the UNSCALED
+    /// (canonical-R$) side. The same fixture at `cost_scale_factor == 1.0`
+    /// (unscaled LP) and at a non-unit factor converges to the same
+    /// gap-in-canonical-R$ and the same lower bound. A comparison performed on the
+    /// SCALED bounds would shift the reported bounds by the factor (the non-unit
+    /// run's `final_lb` would be `× 1/factor`) and fail the lb-match. Mirrors
+    /// `d02_single_hydro_cost_scale_invariant`.
+    #[test]
+    fn gap_comparison_is_canonical_units_invariant_to_cost_scale() {
+        let (lb_unit, ub_unit, _, reason_unit) = train_gap(Some(1.0));
+        let (lb_scaled, ub_scaled, _, reason_scaled) = train_gap(Some(1e6));
+
+        assert_eq!(
+            reason_unit, RULE_GAP,
+            "unit-factor run must stop on the gap rule"
+        );
+        assert_eq!(
+            reason_scaled, RULE_GAP,
+            "non-unit-factor run must stop on the gap rule"
+        );
+
+        let gap_unit = ub_unit - lb_unit;
+        let gap_scaled = ub_scaled - lb_scaled;
+        assert!(
+            gap_unit <= GAP_TOLERANCE_R && gap_scaled <= GAP_TOLERANCE_R,
+            "both runs' canonical-R$ gap must close to <= tolerance \
+             (unit {gap_unit}, scaled {gap_scaled})"
+        );
+
+        // Same gap-in-canonical-R$: both converge to the ~0 gap and must agree far
+        // tighter than the stopping tolerance (a genuine equality, not a restatement
+        // of `both <= tolerance`). A scaled-side comparison would let the non-unit
+        // run stop at a canonical gap up to tolerance × factor, diverging here.
+        let gap_match_tol = 1e-3;
+        assert!(
+            (gap_unit - gap_scaled).abs() <= gap_match_tol,
+            "the two runs must close to the same gap-in-canonical-R$ \
+             (unit {gap_unit}, scaled {gap_scaled}, tol {gap_match_tol})"
+        );
+        // The lower bound is scale-invariant in canonical R$ — this carries the
+        // pin's power: a scaled-bounds comparison/report would shift it by the
+        // factor (the ~8.928e7 R$ optimum vs a ~1/factor-shifted value). The
+        // magnitude-relative tolerance admits scaling roundoff yet rejects the
+        // factor-sized shift.
+        let lb_match_tol = 1e-6 * ub_unit.abs().max(1.0);
+        assert!(
+            (lb_unit - lb_scaled).abs() <= lb_match_tol,
+            "canonical-R$ lower bound must be invariant to cost_scale_factor \
+             (unit {lb_unit}, scaled {lb_scaled}, tol {lb_match_tol})"
+        );
+    }
+}
+
+/// Enumerated-study checkpoint export→re-load round-trip under the stride-1
+/// `cut_id` numbering. The sampled half is `d12_checkpoint_round_trip`; this pins
+/// the enumerated half — an enumerated policy's dense stride-1 `cut_id`
+/// (`iteration_generated * visit_stride + forward_pass_index` with `visit_stride
+/// == 1` and `forward_pass_index == 0`, so `cut_id == iteration` for a non-leaf
+/// pool, never `iteration ×` a larger stride) survives write→read intact. The
+/// trunk+fan enumerated graph carries several non-leaf pools (root plus each
+/// fan node) and one shared leaf pool, so the round-trip is pinned across both
+/// stride-1 and stride-0 pools on both backends.
+#[cfg(feature = "test-support")]
+mod enumerated_checkpoint {
+    use std::collections::HashSet;
+
+    use cobre_io::{
+        FORMAT_VERSION, GraphManifest, PolicyCheckpointMetadata, ProducerBlock, StageCutsPayload,
+        read_policy_checkpoint, write_policy_checkpoint,
+    };
+    use cobre_sddp::policy_export::build_stage_cut_records;
+    use cobre_sddp::setup::NodePos;
+    use cobre_sddp::test_support::k_fan_setup_enumerated;
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::StubComm;
+
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    #[test]
+    fn enumerated_checkpoint_round_trips_under_stride_one_cut_ids() {
+        const K: usize = 3;
+        const MAX_ITERATIONS: u32 = 4;
+
+        let mut fixture = k_fan_setup_enumerated(K, MAX_ITERATIONS);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "enumerated training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+        // Required side effect before the cut extraction below (mirrors d12).
+        let _training_output = fixture.setup.build_training_output(&result, &[]);
+
+        // Partition pools into leaf (stride 0) and non-leaf (stride 1).
+        let node_graph = &fixture.setup.node_graph;
+        let mut leaf_pools: HashSet<usize> = HashSet::new();
+        let mut nonleaf_pools: HashSet<usize> = HashSet::new();
+        for i in 0..node_graph.nodes.len() {
+            let pos = NodePos(i);
+            let pool = node_graph.nodes[pos].pool_id;
+            if node_graph.successors[pos].is_empty() {
+                leaf_pools.insert(pool);
+            } else {
+                nonleaf_pools.insert(pool);
+            }
+        }
+        assert!(
+            !nonleaf_pools.is_empty() && !leaf_pools.is_empty(),
+            "the trunk+fan fixture must exercise both non-leaf and leaf pools"
+        );
+
+        let fcf = &fixture.setup.fcf;
+        // R1: the stride that drives the enumerated cut_id numbering.
+        for &p in &nonleaf_pools {
+            assert_eq!(
+                fcf.pools[p].visit_stride, 1,
+                "non-leaf pool {p} sizes at stride 1"
+            );
+        }
+        for &p in &leaf_pools {
+            assert_eq!(
+                fcf.pools[p].visit_stride, 0,
+                "shared leaf pool {p} sizes at stride 0"
+            );
+        }
+
+        // The real export path: cut_id = iteration_generated * visit_stride + fp.
+        let cut_records_per_stage = build_stage_cut_records(fcf);
+
+        // Write-side stride-1 pin: a non-leaf pool's cut_id is dense (== its
+        // iteration), never iteration × a larger stride; the leaf pool emits none.
+        let mut nonleaf_cut_count = 0usize;
+        for (pool_idx, records) in cut_records_per_stage.iter().enumerate() {
+            if nonleaf_pools.contains(&pool_idx) {
+                for rec in records {
+                    assert_eq!(
+                        rec.cut_id,
+                        u64::from(rec.iteration),
+                        "non-leaf pool {pool_idx}: stride-1 cut_id must equal its iteration"
+                    );
+                    nonleaf_cut_count += 1;
+                }
+            } else {
+                assert!(
+                    records.is_empty(),
+                    "leaf pool {pool_idx} generates no cut (stride 0)"
+                );
+            }
+        }
+        assert!(
+            nonleaf_cut_count > 0,
+            "training must produce non-leaf cuts for the round-trip to pin"
+        );
+
+        let active_indices_per_stage: Vec<Vec<u32>> = fcf
+            .pools
+            .iter()
+            .map(|pool| {
+                (0..pool.populated())
+                    .filter(|&slot| pool.is_active(slot))
+                    .map(|slot| slot as u32)
+                    .collect()
+            })
+            .collect();
+
+        let stage_cuts_payloads: Vec<StageCutsPayload<'_>> = fcf
+            .pools
+            .iter()
+            .enumerate()
+            .map(|(pool_idx, pool)| StageCutsPayload {
+                stage_id: pool_idx as u32,
+                state_dimension: pool.state_dimension as u32,
+                capacity: pool.capacity as u32,
+                warm_start_count: pool.warm_start_count,
+                cuts: &cut_records_per_stage[pool_idx],
+                active_cut_indices: &active_indices_per_stage[pool_idx],
+                populated_count: pool.populated() as u32,
+                entity_manifest: &[],
+            })
+            .collect();
+
+        let n_pools = fcf.pools.len();
+        let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
+        let policy_metadata = PolicyCheckpointMetadata {
+            format_version: FORMAT_VERSION,
+            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: "2026-03-16T00:00:00Z".to_string(),
+            num_stages: n_pools as u32,
+            graph_manifest: GraphManifest::default(),
+            producer: ProducerBlock {
+                completed_iterations: result.iterations as u32,
+                final_lower_bound: result.final_lb,
+                best_upper_bound: Some(result.final_ub),
+                max_iterations: MAX_ITERATIONS,
+                forward_passes: fixture.forward_passes,
+                warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
+                warm_start_counts,
+                rng_seed: 42,
+                total_visited_states: 0,
+                training_block_mode: "parallel".to_string(),
+                training_block_mode_per_stage: vec![],
+                cost_scale_factor: None,
+            },
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let policy_dir = tmp.path().join("policy");
+        write_policy_checkpoint(
+            &policy_dir,
+            &stage_cuts_payloads,
+            &[],
+            &policy_metadata,
+            &[],
+        )
+        .expect("write_policy_checkpoint must succeed");
+        let checkpoint =
+            read_policy_checkpoint(&policy_dir).expect("read_policy_checkpoint must succeed");
+
+        assert_eq!(
+            checkpoint.metadata.num_stages as usize, n_pools,
+            "num_stages round-trips"
+        );
+        assert_eq!(checkpoint.stage_cuts.len(), n_pools, "one payload per pool");
+
+        // Every pool's cuts round-trip byte-for-byte, and every reloaded non-leaf
+        // cut still carries the dense stride-1 cut_id (== its iteration).
+        for (pool_idx, stage) in checkpoint.stage_cuts.iter().enumerate() {
+            let written = &cut_records_per_stage[pool_idx];
+            assert_eq!(
+                stage.cuts.len(),
+                written.len(),
+                "pool {pool_idx} cut count round-trips"
+            );
+            assert_eq!(
+                stage.state_dimension as usize, fcf.pools[pool_idx].state_dimension,
+                "pool {pool_idx} state_dimension round-trips"
+            );
+            for (loaded, w) in stage.cuts.iter().zip(written) {
+                assert_eq!(loaded.cut_id, w.cut_id, "cut_id round-trips");
+                assert_eq!(loaded.slot_index, w.slot_index, "slot_index round-trips");
+                assert_eq!(loaded.iteration, w.iteration, "iteration round-trips");
+                assert_eq!(
+                    loaded.intercept.to_bits(),
+                    w.intercept.to_bits(),
+                    "intercept round-trips bit-for-bit"
+                );
+                assert_eq!(
+                    loaded.coefficients.as_slice(),
+                    w.coefficients,
+                    "coefficients round-trip bit-for-bit"
+                );
+            }
+            if nonleaf_pools.contains(&pool_idx) {
+                for loaded in &stage.cuts {
+                    assert_eq!(
+                        loaded.cut_id,
+                        u64::from(loaded.iteration),
+                        "reloaded non-leaf pool {pool_idx}: stride-1 cut_id survives the round-trip"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Terminal in-transit water-bucket keep-live + FCF valuation when a boundary
+/// FCF is present: `build_transit_bucket_topology`'s terminal-lag mask
+/// un-caps only when `config.policy.boundary` is declared, so a
+/// zero-terminal-value study (no boundary) keeps the masked layout
+/// byte-for-byte (Terminal credit deferred), while a boundary-loaded study
+/// carries the deep-lag terminal slots live and prices them through the
+/// already-generic cut-state projection (the Delivery-family right-boundary
+/// pricing contract). Reuses d45's already-vetted
+/// mixed-calendar arc (depth 3 into a 4-stage horizon, so the terminal's own
+/// uncapped reach is nonzero) rather than a fresh fixture.
+#[cfg(feature = "test-support")]
+// Rationale (cast_sign_loss): `StageTemplate`'s CSC arrays (`col_starts`,
+// `row_indices`) are solver-side `i32` indices that are always non-negative
+// by construction (row/column counts, never a sentinel or delta).
+#[allow(clippy::cast_sign_loss)]
+mod water_terminal_fcf_valuation {
+    use std::path::Path;
+
+    use cobre_core::EntityId;
+    use cobre_core::temporal::StageStateConfig;
+    use cobre_io::{
+        BoundaryPolicy, FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata,
+        PolicyCutRecord, ProducerBlock, StageCutsPayload, write_policy_checkpoint,
+    };
+    use cobre_sddp::indexer::CutStateProjection;
+    use cobre_sddp::setup::{NodeId, StageIdx};
+    use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
+    use cobre_sddp::workspace::SolverWorkspace;
+    use cobre_sddp::{
+        CutPool, StudySetup, build_cut_row_batch_into, inject_boundary_cuts, load_boundary_cuts,
+    };
+    use cobre_solver::{
+        ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
+        freeze_rows_into_template,
+    };
+
+    use crate::common::{StubComm, fresh_setup_with};
+
+    const CASE_DIR: &str = "../../examples/deterministic/d45-travel-time-mixed-calendar";
+    const TRAVEL_TIME_HOURS: f64 = 360.0;
+    const STAGE_HOURS: [f64; 4] = [720.0, 168.0, 168.0, 168.0];
+    const DOWNSTREAM_ID: EntityId = EntityId(1);
+    /// Boundary cut intercept `alpha`, positive so the injected cut binds `theta`
+    /// above its zero floor for every in-transit volume `x >= 0`.
+    const ALPHA: f64 = 5.0;
+    /// Boundary cut coefficient `beta` on the terminal bucket slot.
+    const BETA: f64 = 3.0;
+    const TOL: f64 = 1e-6;
+
+    fn case_dir() -> &'static Path {
+        Path::new(CASE_DIR)
+    }
+
+    fn boundary_policy() -> BoundaryPolicy {
+        BoundaryPolicy {
+            path: "unused".to_string(),
+            source_stage: None,
+        }
+    }
+
+    /// This gate's power precondition: the terminal stage's own uncapped
+    /// reach (`resolve_spread` at the last stage, padded past the horizon)
+    /// must be nonzero, or un-capping the mask would be a no-op.
+    fn terminal_uncapped_reach() -> usize {
+        let padded = super::pad_calendar_for_resolution(&STAGE_HOURS, TRAVEL_TIME_HOURS);
+        let terminal = STAGE_HOURS.len() - 1;
+        super::resolve_spread(TRAVEL_TIME_HOURS, terminal, &padded, None).stage_reach
+    }
+
+    /// J's (the downstream plant's) global bucket state index for `lag`
+    /// (`state.transit_buckets_out.start` plus `column_order`'s position),
+    /// resolved by canonical hydro index — the single derivation site every
+    /// helper below reads through.
+    fn bucket_state_index(setup: &StudySetup, lag: usize) -> usize {
+        let system = cobre_io::load_case(case_dir()).expect("load_case must succeed");
+        let j_idx = system
+            .hydros()
+            .iter()
+            .position(|h| h.id == DOWNSTREAM_ID)
+            .expect("downstream plant must exist in the canonical hydro order");
+        let state = setup.stage_state();
+        let pos = state
+            .transit_bucket_column_order
+            .iter()
+            .position(|&(p, l)| p == j_idx && l == lag)
+            .unwrap_or_else(|| panic!("lag {lag} must be a declared bucket slot"));
+        state.transit_buckets_out.start + pos
+    }
+
+    /// Count of nonzero entries in `template` landing on `row` — the
+    /// structural half of the keep-live pin (no solve).
+    fn row_nnz(template: &StageTemplate, row: usize) -> usize {
+        (0..template.num_cols)
+            .flat_map(|col| {
+                let start = template.col_starts[col] as usize;
+                let end = template.col_starts[col + 1] as usize;
+                template.row_indices[start..end].iter().map(|&r| r as usize)
+            })
+            .filter(|&r| r == row)
+            .count()
+    }
+
+    /// `col`'s own CSC entries in `template` — a live bucket outgoing column
+    /// carries exactly one (its own `emit_shift_rows` `+1.0` definition row);
+    /// a masked/frozen one carries none.
+    fn col_entries(template: &StageTemplate, col: usize) -> &[i32] {
+        let start = template.col_starts[col] as usize;
+        let end = template.col_starts[col + 1] as usize;
+        &template.row_indices[start..end]
+    }
+
+    /// Write a synthetic single-cut boundary checkpoint carrying `intercept`
+    /// and the explicit per-slot `coefficients`, unscaled (`cost_scale_factor:
+    /// Some(1.0)`). No entity manifest: the loader's identity check
+    /// short-circuits with a warning (`right_boundary_pricing.rs`'s pattern).
+    fn write_synthetic_boundary(
+        dir: &Path,
+        state_dimension: u32,
+        intercept: f64,
+        coefficients: &[f64],
+    ) {
+        let cuts = vec![PolicyCutRecord {
+            cut_id: 0,
+            slot_index: 0,
+            iteration: 0,
+            forward_pass_index: 0,
+            intercept,
+            coefficients,
+            is_active: true,
+        }];
+        let payload = StageCutsPayload {
+            stage_id: 0,
+            state_dimension,
+            capacity: 1,
+            warm_start_count: 0,
+            cuts: &cuts,
+            active_cut_indices: &[0],
+            populated_count: 1,
+            entity_manifest: &[],
+        };
+        let metadata = PolicyCheckpointMetadata {
+            format_version: FORMAT_VERSION,
+            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: "2026-08-12T00:00:00Z".to_string(),
+            num_stages: 1,
+            graph_manifest: GraphManifest {
+                n_pools: 1,
+                nodes: vec![ManifestNode {
+                    id: 100,
+                    stage_id: 0,
+                    pool_id: 0,
+                }],
+                edges: vec![],
+            },
+            producer: ProducerBlock {
+                completed_iterations: 0,
+                final_lower_bound: 0.0,
+                best_upper_bound: None,
+                max_iterations: 0,
+                forward_passes: 0,
+                warm_start_cuts: 0,
+                warm_start_counts: vec![],
+                rng_seed: 0,
+                total_visited_states: 0,
+                training_block_mode: "parallel".to_string(),
+                training_block_mode_per_stage: vec![],
+                cost_scale_factor: Some(1.0),
+            },
+        };
+        write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
+    }
+
+    /// Load a bucket-only boundary (`BETA` on `bucket_col`, zero elsewhere,
+    /// intercept `ALPHA`) and inject it into `setup`'s terminal pool.
+    fn inject_bucket_boundary(setup: &mut StudySetup, dir: &Path, bucket_col: usize) {
+        let state_dimension = setup.fcf.state_dimension as u32;
+        let mut coefficients = vec![0.0_f64; state_dimension as usize];
+        coefficients[bucket_col] = BETA;
+        write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
+
+        let boundary_cuts =
+            load_boundary_cuts(dir, 0, state_dimension, &[], &[], None, 1.0, &mut |_msg| {})
+                .expect("boundary cut must load");
+        inject_boundary_cuts(setup, &boundary_cuts);
+    }
+
+    /// Build the terminal pool's FROZEN LP template: the base structural
+    /// template plus one literal row per active cut, exactly as production
+    /// freezes a pool once per iteration.
+    fn freeze_terminal_template(setup: &StudySetup, pool_id: usize) -> StageTemplate {
+        let state = setup.stage_state();
+        let terminal_stage = setup.num_stages() - 1;
+        let ctx = setup.stage_ctx();
+        let base = &ctx.templates[terminal_stage];
+
+        let cut_state = CutStateProjection::new(
+            state,
+            StageStateConfig {
+                storage: true,
+                inflow_lags: true,
+            },
+        );
+
+        let mut batch = RowBatch {
+            num_rows: 0,
+            row_starts: Vec::new(),
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
+        build_cut_row_batch_into(
+            &mut batch,
+            &setup.fcf,
+            pool_id,
+            state,
+            &cut_state,
+            &base.col_scale,
+        );
+
+        let mut frozen = StageTemplate::empty();
+        let mut scratch = FreezeScratch::new();
+        freeze_rows_into_template(base, &batch, &mut frozen, &mut scratch);
+        frozen
+    }
+
+    /// Solve the terminal stage's frozen `template` against `pool` with the
+    /// state vector pinned to `pinned_state`, returning `(theta, priced_col)`'s
+    /// primal values — `priced_col` is read back from the SOLVED outgoing
+    /// column (never assumed equal to a pin), since the ring's shift-row
+    /// definition (`b_d^out = b_{d+1}^in + k_d * D`) makes the outgoing value
+    /// an affine, not identity, function of whichever incoming slot is
+    /// pinned. `raw_noise` is sized from `ctx`'s own hydro/load-bus/
+    /// stochastic-NCS counts (never hand-picked), so an all-zero draw is
+    /// always the correct shape regardless of which fixture calls this.
+    fn terminal_theta(
+        setup: &StudySetup,
+        template: &StageTemplate,
+        pool: &CutPool,
+        node_id: NodeId,
+        pinned_state: &[f64],
+        priced_col: usize,
+    ) -> (f64, f64) {
+        let comm = StubComm;
+        let mut workspace_pool = setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("create_workspace_pool");
+        let ws: &mut SolverWorkspace<ActiveSolver> = &mut workspace_pool.workspaces[0];
+        let ctx = setup.stage_ctx();
+        let training_ctx = setup.training_ctx();
+        let theta_col = setup.stage_state().theta;
+        let terminal_stage = setup.num_stages() - 1;
+
+        let raw_noise =
+            vec![0.0_f64; ctx.n_hydros + ctx.n_load_buses + ctx.ncs_stochastic_dense_col.len()];
+
+        ws.solver.reset_solver_state();
+        ws.solver.load_model(template);
+        patch_backward_opening_for_probe(
+            ws,
+            &ctx,
+            &training_ctx,
+            StageIdx(terminal_stage),
+            pinned_state,
+            &raw_noise,
+        )
+        .expect("StageSolvePrep::run must not error on the d45 fixture");
+
+        let view =
+            solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)
+                .expect("terminal stage solve must not error");
+        (view.primal[theta_col], view.primal[priced_col])
+    }
+
+    /// Pin the state vector with `x` on `bucket_col` and `0.0` elsewhere.
+    fn bucket_pin(setup: &StudySetup, bucket_col: usize, x: f64) -> Vec<f64> {
+        let mut pin = vec![0.0_f64; setup.stage_state().n_state];
+        pin[bucket_col] = x;
+        pin
+    }
+
+    /// The gated-off build reproduces today's capped mask (structural
+    /// byte-neutrality anchor), the boundary-present build un-caps the
+    /// terminal stage's own reach, sizing (`n_state`, bucket region ranges)
+    /// stays identical across the gate, and the newly-live terminal row
+    /// carries real nonzero coupling (not an empty shell).
+    #[test]
+    fn terminal_deep_lag_rows_and_columns_are_live_only_with_boundary_present() {
+        let uncapped_terminal_reach = terminal_uncapped_reach();
+        assert!(
+            uncapped_terminal_reach >= 1,
+            "gate has no power unless the terminal's own reach is nonzero (got \
+             {uncapped_terminal_reach})"
+        );
+
+        let setup_off = fresh_setup_with(case_dir(), |_cfg| {});
+        let setup_on = fresh_setup_with(case_dir(), |cfg| {
+            cfg.policy.boundary = Some(boundary_policy());
+        });
+
+        let state_off = setup_off.stage_state();
+        let state_on = setup_on.stage_state();
+        assert_eq!(
+            state_off.n_state, state_on.n_state,
+            "n_state must be gate-invariant"
+        );
+        assert_eq!(state_off.n_buckets, state_on.n_buckets);
+        assert_eq!(
+            state_off.transit_bucket_column_order,
+            state_on.transit_bucket_column_order
+        );
+        assert_eq!(state_off.transit_buckets_out, state_on.transit_buckets_out);
+        assert_eq!(state_off.transit_buckets_in, state_on.transit_buckets_in);
+
+        let terminal_stage = setup_off.num_stages() - 1;
+        let template_off = &setup_off.stage_ctx().templates[terminal_stage];
+        let template_on = &setup_on.stage_ctx().templates[terminal_stage];
+
+        assert_eq!(
+            template_on.num_rows,
+            template_off.num_rows + uncapped_terminal_reach,
+            "boundary-present must emit exactly the un-masked bucket-definition rows"
+        );
+
+        // The lag-1 slot's outgoing column follows row_pos automatically
+        // (frozen [0,0] off, live [0, inf) on) with no separate column edit.
+        let lag1_col = bucket_state_index(&setup_off, 1);
+        assert_eq!(template_off.col_lower[lag1_col], 0.0);
+        assert_eq!(template_off.col_upper[lag1_col], 0.0);
+        assert_eq!(template_on.col_lower[lag1_col], 0.0);
+        assert_eq!(template_on.col_upper[lag1_col], f64::INFINITY);
+
+        // Off, the masked column defines no row at all; on, it defines
+        // exactly one — a genuine equality carrying real coupling (the
+        // shift-row identity, plus the release column whenever the arc
+        // deposits at this lag/stage) — never an empty shell.
+        assert!(
+            col_entries(template_off, lag1_col).is_empty(),
+            "a masked bucket outgoing column must define no row"
+        );
+        let on_entries = col_entries(template_on, lag1_col);
+        assert_eq!(
+            on_entries.len(),
+            1,
+            "a live bucket outgoing column must define exactly its own row"
+        );
+        let new_row = on_entries[0] as usize;
+        assert_eq!(template_on.row_lower[new_row], 0.0);
+        assert_eq!(template_on.row_upper[new_row], 0.0);
+        assert!(
+            row_nnz(template_on, new_row) >= 2,
+            "a live bucket-definition row must carry at least its own shift-row identity"
+        );
+    }
+
+    /// With no `policy.boundary`, `final_lb` reproduces its pre-boundary-gate
+    /// value bit-for-bit — the gate's sole divergence is `config.policy.
+    /// boundary` presence. The `to_bits` literal is HiGHS-only (`#[cfg]`-gated):
+    /// bit-exactness is backend-specific, and CLP legitimately reaches a
+    /// different-but-valid vertex; the cross-backend byte-neutrality guarantee
+    /// is covered by the parity-hash reproduction in `parity.rs`.
+    #[cfg(feature = "highs")]
+    #[test]
+    fn gated_off_final_lb_is_byte_stable() {
+        let mut setup = fresh_setup_with(case_dir(), |_cfg| {});
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must return Ok");
+        assert!(outcome.error.is_none(), "expected no training error");
+        assert_eq!(
+            outcome.result.final_lb.to_bits(),
+            GATED_OFF_FINAL_LB_BITS,
+            "gated-off final_lb must stay bit-identical to the pre-boundary-gate tree; a \
+             mismatch means the boundary_present gate perturbed the no-boundary path"
+        );
+    }
+
+    /// The gated-off `final_lb` on this exact case (seed 42, 1 thread,
+    /// `StubComm`, `ActiveSolver`) — the HiGHS regression sentinel for
+    /// `gated_off_final_lb_is_byte_stable`.
+    #[cfg(feature = "highs")]
+    const GATED_OFF_FINAL_LB_BITS: u64 = 0x40c4_0000_0000_0000;
+
+    /// A terminal boundary cut carrying a known coefficient `BETA` on the
+    /// terminal lag-1 bucket slot prices theta by exactly `BETA * x`
+    /// (closed-form), mirroring `right_boundary_pricing.rs`'s thermal
+    /// `beta * x` pin on the bucket family.
+    ///
+    /// The probe pins lag **2**'s incoming column, not lag 1's: the ring's
+    /// shift-row definition is `b_d^out = b_{d+1}^in + k_d * D` (never an
+    /// identity), so lag 1's outgoing value — what the cut and theta actually
+    /// price — is controlled by lag 2's incoming, one hop deeper. The arc's
+    /// own release `D` adds a constant, cost-optimal offset independent of
+    /// this pin, so it cancels in the delta between the two solves below.
+    #[test]
+    fn boundary_cut_prices_the_terminal_bucket_state_by_beta_times_x() {
+        let mut setup = fresh_setup_with(case_dir(), |cfg| {
+            cfg.policy.boundary = Some(boundary_policy());
+            cfg.modeling.cost_scale_factor = Some(1.0);
+        });
+        let bucket_col = bucket_state_index(&setup, 1);
+        let pin_col = bucket_state_index(&setup, 2);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        inject_bucket_boundary(&mut setup, &tmp.path().join("boundary"), bucket_col);
+
+        let terminal_pool_id = setup.fcf.pools.len() - 1;
+        let template = freeze_terminal_template(&setup, terminal_pool_id);
+        let pool = &setup.fcf.pools[terminal_pool_id];
+        let terminal_node = NodeId(i32::try_from(setup.num_stages() - 1).expect("fits i32"));
+
+        let x0 = 0.0;
+        let x1 = 2.0;
+        let (theta0, outgoing0) = terminal_theta(
+            &setup,
+            &template,
+            pool,
+            terminal_node,
+            &bucket_pin(&setup, pin_col, x0),
+            bucket_col,
+        );
+        let (theta1, outgoing1) = terminal_theta(
+            &setup,
+            &template,
+            pool,
+            terminal_node,
+            &bucket_pin(&setup, pin_col, x1),
+            bucket_col,
+        );
+
+        assert!(
+            theta0 > 0.0 && theta1 > 0.0,
+            "both solves must land on the injected cut's binding regime \
+             (theta0={theta0}, theta1={theta1})"
+        );
+        assert!(
+            (outgoing1 - outgoing0 - (x1 - x0)).abs() < TOL,
+            "the deeper pin must move the priced outgoing lag 1:1 through the \
+             shift-row identity (b_1^out = b_2^in + k_1*D, D cost-optimal and \
+             pin-independent): outgoing0={outgoing0}, outgoing1={outgoing1}"
+        );
+
+        // Closed form: theta = alpha + beta * outgoing, using the SOLVED
+        // outgoing value (never the pin) — exact regardless of the arc's own
+        // cost-optimal release D, which the pin does not determine.
+        assert!(
+            (theta0 - (ALPHA + BETA * outgoing0)).abs() < TOL
+                && (theta1 - (ALPHA + BETA * outgoing1)).abs() < TOL,
+            "theta must equal alpha + beta*outgoing: theta0={theta0} \
+             (expected {}), theta1={theta1} (expected {})",
+            ALPHA + BETA * outgoing0,
+            ALPHA + BETA * outgoing1
+        );
+
+        let expected_delta = BETA * (outgoing1 - outgoing0);
+        let actual_delta = theta1 - theta0;
+        assert!(
+            (actual_delta - expected_delta).abs() < TOL,
+            "theta must respond to the in-transit volume by beta*x: expected \
+             delta {expected_delta}, got {actual_delta}"
+        );
+    }
+
+    /// The backward pass propagates the boundary coefficient inward —
+    /// after one training iteration, pool 0's (the earliest stage's)
+    /// generated cut carries a nonzero coefficient on the terminal bucket
+    /// state, reached through the shift-row chain connecting every stage's
+    /// outgoing column to the next stage's incoming column at the same
+    /// global index.
+    #[test]
+    fn backward_pass_propagates_boundary_coefficient_to_pool_zero() {
+        let mut setup = fresh_setup_with(case_dir(), |cfg| {
+            cfg.policy.boundary = Some(boundary_policy());
+        });
+        let bucket_col = bucket_state_index(&setup, 1);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        inject_bucket_boundary(&mut setup, &tmp.path().join("boundary"), bucket_col);
+
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error must be None; got {:?}",
+            outcome.error
+        );
+
+        let (_slot, _intercept, coefficients) = setup
+            .fcf
+            .active_cuts(0)
+            .next()
+            .expect("pool 0 must carry a generated cut after training");
+        assert!(
+            coefficients[bucket_col].abs() > TOL,
+            "pool 0's cut must carry a nonzero coefficient on the terminal bucket \
+             state; got {}",
+            coefficients[bucket_col]
         );
     }
 }

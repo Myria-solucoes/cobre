@@ -1,10 +1,17 @@
-//! Cycle-generic season-period-window arithmetic (`Monthly`/`Weekly`/`Custom`).
+//! Cycle-generic season-period-window arithmetic (`Monthly`/`Weekly`/`Custom`)
+//! and the [`StageCalendar`] Layer-2 resolver built on top of it.
 //!
 //! Resolves the concrete calendar `[start, end)` window and total duration for
 //! a stage's season-period occurrence, and the next chronological occurrence.
+//! [`StageCalendar`] consolidates this module's forward date-window coverage
+//! and both backward pre-study projections behind one resolver.
 
 use chrono::{Datelike, NaiveDate, TimeDelta, Weekday};
-use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap, Stage};
+use cobre_core::PostStudyStage;
+use cobre_core::temporal::{
+    Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
+    SeasonMap, Stage, StageRiskConfig, StageStateConfig, window_period_overlaps,
+};
 
 /// Compute the exclusive end date of the calendar month identified by
 /// `month` (1–12) and `year`.
@@ -448,13 +455,230 @@ pub fn merge_layered_windows(
     merged
 }
 
+/// A dated window's `[start_date, end_date)` extent, with no attached value —
+/// the forward-coverage counterpart to [`RealizedWindow`].
+pub struct DatedWindow {
+    /// Inclusive window start.
+    pub start_date: NaiveDate,
+    /// Exclusive window end (`end_date > start_date`).
+    pub end_date: NaiveDate,
+}
+
+/// Hours of wall clock between `later` and `earlier` (`later − earlier`),
+/// negative when `earlier` follows `later`.
+// Rationale: calendar spans are on the order of centuries at most, far under
+// f64's exact-integer range; a checked conversion buys nothing.
+#[allow(clippy::cast_precision_loss)]
+fn hours_between(later: NaiveDate, earlier: NaiveDate) -> f64 {
+    (later - earlier).num_hours() as f64
+}
+
+/// Convert a post-study calendar segment (`PostStudyStages::stages`) into
+/// [`Stage`]s a [`StageCalendar`] can resolve against.
+///
+/// `end_date = start_date + round(duration_hours / 24)` days — the whole-day
+/// rounding the `cobre-io` semantic validator applies when it builds the same
+/// segment, so this resolver and that validator agree on exactly which
+/// post-study stage a window covers. Only `start_date`/`end_date`/`blocks` are
+/// load-bearing (the fields [`StageCalendar`] reads); the rest are inert
+/// placeholders.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)] // a validated finite positive duration yields a small non-negative day count
+pub fn post_study_calendar_stages(stages: &[PostStudyStage]) -> Vec<Stage> {
+    stages
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| {
+            let days = (stage.duration_hours / 24.0).round() as i64;
+            let end_date = stage.start_date + TimeDelta::days(days);
+            Stage {
+                index,
+                id: i32::try_from(index).unwrap_or(i32::MAX),
+                start_date: stage.start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "post_study".to_string(),
+                    duration_hours: stage.duration_hours,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
+        })
+        .collect()
+}
+
+/// Layer-2 resolver over the study's ordered, non-overlapping
+/// `[start_date, end_date)` stage calendar: forward date-window coverage for
+/// windowed inputs, and the two backward pre-study projections that season-
+/// anchored and hour-anchored seeding each need. Consolidates this module's
+/// `cast`/`nth_previous_occurrence`/[`window_period_overlaps`] call sites
+/// behind one resolver.
+pub struct StageCalendar<'a> {
+    stages: &'a [Stage],
+    stage_hours: Vec<f64>,
+}
+
+impl<'a> StageCalendar<'a> {
+    /// Build a resolver over `stages`, the study's own chronologically
+    /// ordered, non-overlapping calendar.
+    #[must_use]
+    pub fn new(stages: &'a [Stage]) -> Self {
+        debug_assert!(
+            stages.iter().all(|s| s.start_date < s.end_date),
+            "every StageCalendar stage must have end_date after start_date"
+        );
+        debug_assert!(
+            stages
+                .windows(2)
+                .all(|pair| pair[0].end_date <= pair[1].start_date),
+            "StageCalendar stages must be chronologically ordered and non-overlapping"
+        );
+        let stage_hours = stages
+            .iter()
+            .map(|s| s.blocks.iter().map(|b| b.duration_hours).sum())
+            .collect();
+        Self {
+            stages,
+            stage_hours,
+        }
+    }
+
+    /// Forward per-study-stage overlap fraction of `window`: index `i` is the
+    /// fraction of stage `i`'s own real `[start_date, end_date)` calendar span
+    /// that `window` covers, `0.0` where `window` does not reach. Length
+    /// always equals the calendar's stage count, padded with trailing zeros
+    /// past `window`'s last overlapped stage. The basis is each stage's real
+    /// date span, not its declared `duration_hours` — the two diverge on a
+    /// nominal-month (730 h) calendar, where a whole-day window can never
+    /// exactly tile a stage on the declared-hours clock.
+    #[must_use]
+    pub fn coverage(&self, window: &DatedWindow) -> Vec<f64> {
+        debug_assert!(
+            window.end_date > window.start_date,
+            "DatedWindow end_date must be strictly after start_date"
+        );
+        let window_width_hours = hours_between(window.end_date, window.start_date);
+        self.stages
+            .iter()
+            .map(|stage| {
+                let stage_span_hours = hours_between(stage.end_date, stage.start_date);
+                let window_start_hours = hours_between(window.start_date, stage.start_date);
+                let overlap = window_period_overlaps(
+                    window_start_hours,
+                    window_width_hours,
+                    &[stage_span_hours],
+                )
+                .first()
+                .copied()
+                .unwrap_or(0.0);
+                overlap / stage_span_hours
+            })
+            .collect()
+    }
+
+    /// Whether `windows`, summed per stage, cover the leading `k` study
+    /// stages at exactly `1.0` — no gap, no double-covered overlap. `k` must
+    /// not exceed the calendar's stage count.
+    #[must_use]
+    #[allow(clippy::float_cmp)] // coverage's whole-day-hours arithmetic keeps a full-coverage ratio bit-exact
+    pub fn covers_exactly(&self, windows: &[DatedWindow], k: usize) -> bool {
+        debug_assert!(
+            k <= self.stages.len(),
+            "covers_exactly: k must not exceed the calendar's stage count"
+        );
+        let mut total = vec![0.0_f64; self.stages.len()];
+        for window in windows {
+            for (stage_total, fraction) in total.iter_mut().zip(self.coverage(window)) {
+                *stage_total += fraction;
+            }
+        }
+        total.iter().take(k).all(|&fraction| fraction == 1.0)
+    }
+
+    /// Backward season-occurrence projection: [`cast`]-projects `windows`
+    /// onto the `k`-th previous occurrence of `season_def` before this
+    /// calendar's own first stage (`k == 0` is that stage's in-progress
+    /// occurrence). Wraps [`season_period_window`], [`nth_previous_occurrence`],
+    /// and [`cast`]. `None` when the calendar has no stages or the walk
+    /// cannot resolve occurrence `k`.
+    #[must_use]
+    pub fn season_occurrence(
+        &self,
+        season_map: &SeasonMap,
+        season_def: &SeasonDefinition,
+        windows: &[RealizedWindow],
+        k: usize,
+    ) -> Option<Projection> {
+        let anchor_stage = self.stages.first()?;
+        let in_progress = season_period_window(season_map, season_def, anchor_stage);
+        let occurrence = nth_previous_occurrence(season_map, season_def, &in_progress, k)?;
+        Some(cast(windows, &occurrence))
+    }
+
+    /// Backward hour-window projection: the per-study-stage share of a
+    /// `period_duration`-hour, fixed-rate pre-study window landing in each
+    /// stage, where the window ends `cumulative_before` hours before an
+    /// anchor `t_v` hours in the future — the window is
+    /// `[t_v − cumulative_before − period_duration, t_v − cumulative_before)`.
+    /// Shares are normalized by the WINDOW's own duration, not each stage's:
+    /// they sum to `1.0` when the window falls entirely inside the calendar,
+    /// less otherwise.
+    #[must_use]
+    pub fn hour_window_shares(
+        &self,
+        t_v: f64,
+        cumulative_before: f64,
+        period_duration: f64,
+    ) -> Vec<f64> {
+        let window_start = t_v - cumulative_before - period_duration;
+        window_period_overlaps(window_start, period_duration, &self.stage_hours)
+            .into_iter()
+            .map(|overlap| overlap / period_duration)
+            .collect()
+    }
+
+    /// Resolve `window`'s covering stage index: the one stage [`Self::coverage`]
+    /// reports at fraction `1.0`, with every other stage at `0.0` — i.e.
+    /// `window` aligns exactly to one calendar stage's boundaries. `None` when
+    /// no stage covers it exactly (straddles stages, a partial-day
+    /// misalignment, or falls off the segment).
+    #[must_use]
+    #[allow(clippy::float_cmp)] // coverage's whole-day-hours arithmetic keeps a full-coverage fraction bit-exact
+    pub fn resolve_window(&self, window: &DatedWindow) -> Option<usize> {
+        let mut resolved = None;
+        for (idx, fraction) in self.coverage(window).into_iter().enumerate() {
+            if fraction == 1.0 {
+                if resolved.is_some() {
+                    return None;
+                }
+                resolved = Some(idx);
+            } else if fraction != 0.0 {
+                return None;
+            }
+        }
+        resolved
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        RealizedWindow, SeasonCycleType, SeasonDefinition, SeasonMap, SeasonPeriodWindow, Stage,
-        cast, merge_layered_windows, nth_previous_occurrence, season_period_window,
+        DatedWindow, RealizedWindow, SeasonCycleType, SeasonDefinition, SeasonMap,
+        SeasonPeriodWindow, Stage, StageCalendar, cast, merge_layered_windows, month_exclusive_end,
+        nth_previous_occurrence, post_study_calendar_stages, season_period_window,
     };
     use chrono::NaiveDate;
+    use cobre_core::PostStudyStage;
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
@@ -808,6 +1032,280 @@ mod tests {
 
         assert_eq!(projection.value, (500.0 * 72.0 + 480.0 * 648.0) / 720.0);
         assert_eq!(projection.coverage, 1.0);
+    }
+
+    fn stage_with_width(index: usize, start: NaiveDate, width_days: i64) -> Stage {
+        let end = start + chrono::TimeDelta::days(width_days);
+        Stage {
+            index,
+            id: i32::try_from(index).unwrap(),
+            start_date: start,
+            end_date: end,
+            season_id: None,
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: f64::from(u32::try_from(width_days).unwrap()) * 24.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// Six non-uniform stages (10, 20, 5, 15, 30, 10 days), chained
+    /// contiguously from `2026-01-01`.
+    fn six_stage_calendar() -> Vec<Stage> {
+        let widths_days = [10, 20, 5, 15, 30, 10];
+        let mut cursor = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        widths_days
+            .iter()
+            .enumerate()
+            .map(|(i, &width_days)| {
+                let stage = stage_with_width(i, cursor, width_days);
+                cursor = stage.end_date;
+                stage
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_coverage_full_leading_two_stages() {
+        let stages = six_stage_calendar();
+        let calendar = StageCalendar::new(&stages);
+        let window = DatedWindow {
+            start_date: stages[0].start_date,
+            end_date: stages[1].end_date,
+        };
+
+        let fractions = calendar.coverage(&window);
+
+        assert_eq!(fractions, vec![1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(calendar.covers_exactly(&[window], 2));
+    }
+
+    #[test]
+    fn test_covers_exactly_false_on_gap() {
+        let stages = six_stage_calendar();
+        let calendar = StageCalendar::new(&stages);
+        let stage_0_window = DatedWindow {
+            start_date: stages[0].start_date,
+            end_date: stages[0].end_date,
+        };
+        let stage_2_window = DatedWindow {
+            start_date: stages[2].start_date,
+            end_date: stages[2].end_date,
+        };
+
+        assert!(!calendar.covers_exactly(&[stage_0_window, stage_2_window], 3));
+    }
+
+    /// A 730 h nominal-month `Stage`: real span is `year`-`month`'s actual
+    /// calendar length (28-31 days), while the declared block carries the
+    /// repository's flat 730 h nominal-month convention — the two diverge on
+    /// every month except a hypothetical 730 h/24 = 30.4166... day month.
+    fn nominal_month_stage(index: usize, year: i32, month: u32) -> Stage {
+        let start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        let end = month_exclusive_end(year, month);
+        Stage {
+            index,
+            id: i32::try_from(index).unwrap(),
+            start_date: start,
+            end_date: end,
+            season_id: None,
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 730.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// Three chained 730 h nominal-month stages, Jan/Feb/Mar 2024: real spans
+    /// 744 h / 696 h / 744 h, none equal to the flat 730 h declaration — the
+    /// case the declared-hours coverage basis could never tile exactly.
+    fn nominal_month_calendar() -> Vec<Stage> {
+        vec![
+            nominal_month_stage(0, 2024, 1),
+            nominal_month_stage(1, 2024, 2),
+            nominal_month_stage(2, 2024, 3),
+        ]
+    }
+
+    #[test]
+    fn test_coverage_nominal_month_tiles_by_real_date_span() {
+        let stages = nominal_month_calendar();
+        let calendar = StageCalendar::new(&stages);
+        let jan_window = || DatedWindow {
+            start_date: stages[0].start_date,
+            end_date: stages[0].end_date,
+        };
+        let feb_window = || DatedWindow {
+            start_date: stages[1].start_date,
+            end_date: stages[1].end_date,
+        };
+        let mar_window = || DatedWindow {
+            start_date: stages[2].start_date,
+            end_date: stages[2].end_date,
+        };
+
+        assert_eq!(
+            calendar.coverage(&jan_window()),
+            vec![1.0, 0.0, 0.0],
+            "a 730h-declared stage tiled by its own real date range resolves \
+             to 1.0, not the declared-hours fraction"
+        );
+        assert!(calendar.covers_exactly(&[jan_window(), feb_window()], 2));
+
+        assert!(
+            !calendar.covers_exactly(&[jan_window()], 2),
+            "gap: February left uncovered"
+        );
+        assert!(
+            !calendar.covers_exactly(&[jan_window(), jan_window()], 2),
+            "overlap: January double-covered, February left uncovered"
+        );
+        assert!(
+            !calendar.covers_exactly(&[jan_window(), mar_window()], 2),
+            "beyond-K_i: the second window targets March (index 2) instead of \
+             February, leaving the leading stage uncovered"
+        );
+    }
+
+    fn two_post_study_stages() -> Vec<PostStudyStage> {
+        vec![
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+                duration_hours: 720.0,
+            },
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
+                duration_hours: 744.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_post_study_calendar_stages_end_date_rounds_duration_to_days() {
+        let stages = post_study_calendar_stages(&two_post_study_stages());
+
+        assert_eq!(stages.len(), 2);
+        assert_eq!(
+            stages[0].start_date,
+            NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+        );
+        assert_eq!(
+            stages[0].end_date,
+            NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()
+        );
+        assert_eq!(
+            stages[1].start_date,
+            NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()
+        );
+        assert_eq!(
+            stages[1].end_date,
+            NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+        );
+
+        // A duration that is not an exact day multiple (700h = 29.1(6) days)
+        // rounds to the nearest whole day, mirroring the `cobre-io` validator's
+        // own `post_study_end_date` convention.
+        let odd = vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+            duration_hours: 700.0,
+        }];
+        let odd_stages = post_study_calendar_stages(&odd);
+        assert_eq!(
+            odd_stages[0].end_date,
+            NaiveDate::from_ymd_opt(2026, 11, 30).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_window_spanning_a_stage_resolves_to_it() {
+        let stages = post_study_calendar_stages(&two_post_study_stages());
+        let calendar = StageCalendar::new(&stages);
+
+        let stage_1_window = DatedWindow {
+            start_date: NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+        };
+        assert_eq!(calendar.resolve_window(&stage_1_window), Some(1));
+
+        let straddling = DatedWindow {
+            start_date: NaiveDate::from_ymd_opt(2026, 11, 15).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 12, 15).unwrap(),
+        };
+        assert_eq!(calendar.resolve_window(&straddling), None);
+
+        let partial = DatedWindow {
+            start_date: NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 11, 15).unwrap(),
+        };
+        assert_eq!(calendar.resolve_window(&partial), None);
+    }
+
+    /// [`StageCalendar::season_occurrence`] must reproduce the pre-refactor
+    /// helper sequence (`season_period_window` + `nth_previous_occurrence` +
+    /// `cast`) bit-for-bit, for both the in-progress (`k == 0`) and a lagged
+    /// occurrence.
+    #[test]
+    #[allow(clippy::float_cmp)] // both paths run the identical arithmetic; the comparison must be bit-exact
+    fn test_season_occurrence_matches_pre_refactor_helper_sequence() {
+        let seasons: Vec<SeasonDefinition> = (0..12u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("Month{}", i + 1),
+                month_start: i + 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        let season_map = SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
+        };
+        let season_def = &season_map.seasons[3];
+        let first_stage = stage_with_width(0, NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(), 28);
+        let stages = [first_stage];
+        let windows = [RealizedWindow {
+            start_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+            value_m3s: 250.0,
+        }];
+        let calendar = StageCalendar::new(&stages);
+
+        for k in 0..=3 {
+            let expected_in_progress = season_period_window(&season_map, season_def, &stages[0]);
+            let expected_occurrence =
+                nth_previous_occurrence(&season_map, season_def, &expected_in_progress, k).unwrap();
+            let expected = cast(&windows, &expected_occurrence);
+
+            let actual = calendar
+                .season_occurrence(&season_map, season_def, &windows, k)
+                .unwrap();
+
+            assert_eq!(actual.value, expected.value);
+            assert_eq!(actual.coverage, expected.coverage);
+        }
     }
 
     mod cast_proptests {

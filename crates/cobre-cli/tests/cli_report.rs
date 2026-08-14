@@ -61,7 +61,7 @@ const TRAINING_METADATA_JSON: &str = r#"{
         "backend": "local",
         "world_size": 1,
         "ranks_participated": 1,
-        "num_nodes": 1,
+        "num_hosts": 1,
         "threads_per_rank": 1
     }
 }"#;
@@ -79,7 +79,7 @@ const SIMULATION_METADATA_JSON: &str = r#"{
         "backend": "local",
         "world_size": 1,
         "ranks_participated": 1,
-        "num_nodes": 1,
+        "num_hosts": 1,
         "threads_per_rank": 1
     }
 }"#;
@@ -129,7 +129,7 @@ const TRAINING_METADATA_WITH_BOUNDS_JSON: &str = r#"{
         "backend": "local",
         "world_size": 1,
         "ranks_participated": 1,
-        "num_nodes": 1,
+        "num_hosts": 1,
         "threads_per_rank": 1
     }
 }"#;
@@ -145,15 +145,13 @@ const SIMULATION_METADATA_WITH_COST_JSON: &str = r#"{
     "scenarios": { "total": 100, "completed": 100, "failed": 0 },
     "cost": {
         "mean_cost": 789012.0,
-        "std_cost": 4321.0,
-        "cvar": 800000.0,
-        "cvar_alpha": 0.95
+        "std_cost": 4321.0
     },
     "distribution": {
         "backend": "local",
         "world_size": 1,
         "ranks_participated": 1,
-        "num_nodes": 1,
+        "num_hosts": 1,
         "threads_per_rank": 1
     }
 }"#;

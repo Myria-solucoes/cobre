@@ -11,6 +11,7 @@
 
 use cobre_sddp::cut::CutPool;
 use cobre_sddp::cut_selection::{CutMetadata, CutSelectionStrategy};
+use cobre_sddp::setup::NodeId;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -40,7 +41,7 @@ fn make_pool(k: usize, d: usize, seed: u64) -> CutPool {
         let intercept = f64::from_bits((1023u64 << 52) | bits) - 1.5;
         let mut coeffs = vec![0.0_f64; d];
         fill_f64(&mut coeffs, state.wrapping_add(slot as u64));
-        pool.add_cut(0, slot as u32, intercept, &coeffs);
+        pool.add_cut(NodeId(0), 0, slot as u32, intercept, &coeffs);
     }
     let metadata: Vec<CutMetadata> = (0..k)
         .map(|slot| {

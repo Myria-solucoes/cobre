@@ -15,7 +15,7 @@ use super::parquet_config::ParquetWriterConfig;
 use super::training_writer::TrainingParquetWriter;
 use super::{SimulationOutput, TrainingOutput};
 use crate::Config;
-use crate::config::StoppingRuleConfig;
+use crate::config::{ForwardPassesResolution, StoppingRuleConfig};
 
 /// Write all training artifacts to the output directory.
 ///
@@ -64,8 +64,11 @@ pub fn write_training_results(
         configuration: MetadataConfiguration {
             seed: config.training.tree_seed,
             max_iterations,
-            forward_passes: config.training.forward_passes,
-            stopping_mode: config.training.stopping_mode.clone(),
+            forward_passes: match config.resolve_forward_passes() {
+                Some(ForwardPassesResolution::Sampled(n)) => Some(n),
+                Some(ForwardPassesResolution::Enumerated) | None => None,
+            },
+            stopping_mode: config.training.stopping_mode.to_string(),
             policy_mode: config.policy.mode.to_string(),
         },
         problem_dimensions: MetadataProblemDimensions {
@@ -92,11 +95,13 @@ pub fn write_training_results(
             rows_in_lp_total: training_output.cut_stats.rows_in_lp_total,
             rows_in_lp_solve_count: training_output.cut_stats.rows_in_lp_solve_count,
             rows_in_lp_max: training_output.cut_stats.rows_in_lp_max,
+            total_loaded: training_output.cut_stats.total_loaded,
         },
         bounds: MetadataBounds {
             final_lower_bound: training_output.final_lower_bound,
             final_upper_bound: training_output.final_upper_bound,
             final_upper_bound_std: training_output.final_upper_bound_std,
+            final_upper_bound_kind: training_output.final_upper_bound_kind.clone(),
         },
         solve_stats: training_output.training_solve_stats.clone(),
         setup: ctx.setup.clone(),
@@ -202,7 +207,7 @@ mod tests {
         IterationRecord {
             iteration,
             lower_bound: 1.0,
-            upper_bound_mean: 2.0,
+            upper_bound: 2.0,
             upper_bound_std: 0.1,
             gap_percent: Some(50.0),
             cuts_added: 10,
@@ -241,6 +246,7 @@ mod tests {
             final_upper_bound: Some(101.0),
             final_gap_percent: Some(1.51),
             final_upper_bound_std: Some(0.5),
+            final_upper_bound_kind: "statistical".to_string(),
             iterations_completed: n_records as u32,
             converged: true,
             termination_reason: "gap tolerance reached".to_string(),
@@ -253,6 +259,7 @@ mod tests {
                 rows_in_lp_total: 0,
                 rows_in_lp_solve_count: 0,
                 rows_in_lp_max: 0,
+                total_loaded: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
@@ -270,11 +277,12 @@ mod tests {
         use crate::config::{
             CheckpointingConfig, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
             ModelingConfig, ParallelismConfig, PolicyConfig, PolicyMode, RowSelectionConfig,
-            SimulationConfig, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
-            UpperBoundEvaluationConfig,
+            SimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
+            TrainingSolverConfig, UpperBoundEvaluationConfig,
         };
         crate::Config {
             schema: None,
+            state_space: crate::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig::default(),
                 cost_scale_factor: None,
@@ -282,13 +290,13 @@ mod tests {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: None,
-                forward_passes: Some(4),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 4 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig {
@@ -299,10 +307,10 @@ mod tests {
             },
             simulation: SimulationConfig {
                 enabled: false,
-                num_scenarios: 0,
                 io_channel_capacity: 64,
                 scenario_source: None,
                 solver: None,
+                selection: None,
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
@@ -333,7 +341,7 @@ mod tests {
                 backend: "local".to_string(),
                 world_size: 1,
                 ranks_participated: 1,
-                num_nodes: 1,
+                num_hosts: 1,
                 threads_per_rank: 1,
                 mpi_library: None,
                 mpi_standard: None,
@@ -471,6 +479,33 @@ mod tests {
     }
 
     #[test]
+    fn write_results_metadata_row_pool_reports_loaded_boundary_cuts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut training = make_training_output(0);
+        training.cut_stats.total_generated = 10_009;
+        training.cut_stats.total_active = 10_009;
+        training.cut_stats.total_loaded = 10_000;
+
+        write_results(
+            tmp.path(),
+            &training,
+            None,
+            &make_system(),
+            &make_config(),
+            &make_output_context(),
+        )
+        .expect("write_results must succeed");
+
+        let path = tmp.path().join("training/metadata.json");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&content).expect("metadata.json must contain valid JSON");
+
+        assert_eq!(value["row_pool"]["total_generated"].as_u64(), Some(10_009));
+        assert_eq!(value["row_pool"]["total_loaded"].as_u64(), Some(10_000));
+    }
+
+    #[test]
     fn write_results_creates_convergence_parquet() {
         let tmp = tempfile::tempdir().unwrap();
         let training = make_training_output(3);
@@ -552,8 +587,8 @@ mod tests {
         assert_eq!(total_rows, 0, "empty training must produce 0 rows");
         assert_eq!(
             schema.fields().len(),
-            14,
-            "convergence schema must have 14 columns"
+            15,
+            "convergence schema must have 15 columns"
         );
 
         assert!(
@@ -819,6 +854,98 @@ mod tests {
         );
     }
 
+    /// Read the sole `upper_bound_kind` value and the `upper_bound_std` null-count
+    /// from a written `training/convergence.parquet`.
+    fn read_convergence_kind_and_std_nulls(dir: &std::path::Path) -> (String, usize) {
+        use arrow::array::{Array, Float64Array, StringArray};
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let path = dir.join("training/convergence.parquet");
+        let file = std::fs::File::open(&path).unwrap();
+        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        let kind = batch
+            .column_by_name("upper_bound_kind")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .to_string();
+        let std_nulls = batch
+            .column_by_name("upper_bound_std")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .null_count();
+        (kind, std_nulls)
+    }
+
+    #[test]
+    fn exact_bound_writes_exact_kind_and_null_std_in_both_artifacts() {
+        use crate::output::manifest::read_training_metadata;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut training = make_training_output(3);
+        training.final_upper_bound_kind = "exact".to_string();
+        training.final_upper_bound_std = None;
+
+        write_training_results(
+            tmp.path(),
+            &training,
+            &make_system(),
+            &make_config(),
+            &make_output_context(),
+        )
+        .expect("write must succeed");
+
+        // convergence.parquet: kind "exact", std all-NULL.
+        let (kind, std_nulls) = read_convergence_kind_and_std_nulls(tmp.path());
+        assert_eq!(kind, "exact", "convergence upper_bound_kind must be exact");
+        assert_eq!(
+            std_nulls, 3,
+            "every upper_bound_std must be NULL under exact"
+        );
+
+        // metadata.json.bounds: same kind, std None.
+        let metadata = read_training_metadata(&tmp.path().join("training/metadata.json")).unwrap();
+        assert_eq!(metadata.bounds.final_upper_bound_kind, "exact");
+        assert_eq!(metadata.bounds.final_upper_bound_std, None);
+    }
+
+    #[test]
+    fn statistical_bound_writes_statistical_kind_and_populated_std_in_both_artifacts() {
+        use crate::output::manifest::read_training_metadata;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut training = make_training_output(3);
+        training.final_upper_bound_kind = "statistical".to_string();
+        training.final_upper_bound_std = Some(0.5);
+
+        write_training_results(
+            tmp.path(),
+            &training,
+            &make_system(),
+            &make_config(),
+            &make_output_context(),
+        )
+        .expect("write must succeed");
+
+        // convergence.parquet: kind "statistical", std populated (no NULLs).
+        let (kind, std_nulls) = read_convergence_kind_and_std_nulls(tmp.path());
+        assert_eq!(kind, "statistical");
+        assert_eq!(
+            std_nulls, 0,
+            "upper_bound_std must be populated under statistical"
+        );
+
+        // metadata.json.bounds: same kind, std Some.
+        let metadata = read_training_metadata(&tmp.path().join("training/metadata.json")).unwrap();
+        assert_eq!(metadata.bounds.final_upper_bound_kind, "statistical");
+        assert_eq!(metadata.bounds.final_upper_bound_std, Some(0.5));
+    }
+
     #[test]
     fn training_results_persist_bounds_and_solve_stats() {
         use crate::output::manifest::read_training_metadata;
@@ -869,8 +996,6 @@ mod tests {
         sim.cost = Some(crate::MetadataCost {
             mean_cost: 12_345.6,
             std_cost: 678.9,
-            cvar: 15_000.0,
-            cvar_alpha: 0.95,
         });
         sim.solve_stats = MetadataSimulationSolveStats {
             total_lp_solves: Some(200),

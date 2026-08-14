@@ -7,7 +7,7 @@ vertical is SDDP-based hydrothermal dispatch.
 
 - **Language**: Rust 2024 edition, MSRV 1.88
 - **License**: Apache-2.0
-- **Workspace**: 13 workspace members (`cobre-mcp`, `cobre-tui`, `cobre-flow`, `cobre-uc`, `cobre-emt` are member stubs) + the maturin-built `cobre-python` (excluded from the workspace so `cargo test --workspace` does not require a Python interpreter)
+- **Workspace**: Cargo workspace members (`cobre-mcp`, `cobre-tui`, `cobre-flow`, `cobre-uc`, `cobre-emt` are reserved stubs) plus the maturin-built `cobre-python` (excluded from the workspace so `cargo test --workspace` does not require a Python interpreter); `ARCHITECTURE.md` owns the full crate map
 - **Build**: `cargo build --workspace`
 - **Test**: `cargo test --workspace --features "mpi numa shared-memory serde schema slow-tests flatc-conformance test-support"`
 - **Format**: `cargo fmt --all` (CI enforces `--check`)
@@ -32,8 +32,8 @@ These are non-negotiable. Violations must be fixed before committing.
   (`crates/cobre-solver/tests/clp_determinism.rs` is the reference harness)
 - **Unwired config is reserved, not dead** — several config sections are
   loaded, validated, and schema-exported without yet being consumed (e.g.
-  the hydro storage-violation / filling-target penalties: storage bounds
-  are HARD in the LP today, so those output columns are always 0). They
+  the vertex-based upper-bound-evaluation config `LipschitzConfig.mode`, a
+  one-valued enum with no LP consumer). They
   reserve seams for planned features — do not remove unconsumed config in
   a dead-code sweep without owner sign-off
 - **Infrastructure crate genericity** — `cobre-core`, `cobre-io`, `cobre-solver`,
@@ -85,18 +85,10 @@ read:
 → `.claude/architecture-rules.md`
 
 When applying a stored basis at any call site, read:
-→ `crates/cobre-sddp/src/cut/basis_reconstruct.rs` module docs.
-Two public entry points exist — use the correct one for the path:
-
-- `reconstruct_basis` — the **frozen hot path** (forward pass, simulation, frozen
-  backward). Slot-identity-based: matches stored cut-row statuses to the current
-  LP by `CutPool` slot, assigns `BASIC` to new cuts, then calls
-  `enforce_basic_count_invariant`. **Never bypass this on the frozen path.**
-- `reconstruct_basis_uniform_basic` — the **DCS path** (`dcs.rs`). Slot-identity-
-  free: copies the column block and template rows, then assigns every resident cut
-  row `BASIC` unconditionally. DCS adds its cut rows fresh each solve and does not
-  track which will bind, so slot alignment is unnecessary. The caller pairs it with
-  `enforce_basic_count_invariant` to restore the invariant.
+→ `crates/cobre-sddp/src/cut/basis_reconstruct.rs` module docs — the authoritative
+statement of the two entry points and when each applies (`reconstruct_basis` on the
+frozen hot path; `reconstruct_basis_uniform_basic` on the DCS path). Use the correct
+one for the path; never bypass `reconstruct_basis` on the frozen path.
 
 When changing the MPI basis-cache wire format, read:
 → `crates/cobre-sddp/src/workspace/workspace.rs` —
@@ -134,4 +126,4 @@ CI's `schemas` job diffs `schemas/` against the live export and fails on drift:
 | Unified docs site     | `https://docs.cobre-rs.dev/`                     | User-facing documentation (methodology + software) |
 | Methodology reference | `~/git/cobre-docs/` | Specs, theory, math                          |
 | CHANGELOG             | `CHANGELOG.md`      | Per-release feature list                     |
-| Design docs           | `docs/design/`      | Design proposals & performance investigations (not all implemented) |
+| Design docs           | `docs/design/`      | Live specs, decision records & proposals — `docs/design/README.md` is the status index |

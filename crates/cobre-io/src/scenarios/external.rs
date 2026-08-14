@@ -28,12 +28,12 @@
 //!
 //! ### `external_ncs_scenarios.parquet`
 //!
-//! | Column        | Type   | Required | Description                      |
-//! | ------------- | ------ | -------- | -------------------------------- |
-//! | `stage_id`    | INT32  | Yes      | Stage ID                         |
-//! | `scenario_id` | INT32  | Yes      | Scenario index (0-based)         |
-//! | `ncs_id`      | INT32  | Yes      | NCS source ID                    |
-//! | `value`       | DOUBLE | Yes      | Dimensionless availability factor|
+//! | Column                | Type   | Required | Description                      |
+//! | --------------------- | ------ | -------- | -------------------------------- |
+//! | `stage_id`            | INT32  | Yes      | Stage ID                         |
+//! | `scenario_id`         | INT32  | Yes      | Scenario index (0-based)         |
+//! | `ncs_id`              | INT32  | Yes      | NCS source ID                    |
+//! | `availability_factor` | DOUBLE | Yes      | Dimensionless availability factor |
 //!
 //! ## Output ordering
 //!
@@ -345,7 +345,7 @@ pub fn parse_external_ncs_scenarios(path: &Path) -> Result<Vec<ExternalNcsRow>, 
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
         let scenario_id_col = extract_required_int32(&batch, "scenario_id", path)?;
         let ncs_id_col = extract_required_int32(&batch, "ncs_id", path)?;
-        let value_col = extract_required_float64(&batch, "value", path)?;
+        let value_col = extract_required_float64(&batch, "availability_factor", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -502,7 +502,7 @@ mod tests {
             Field::new("stage_id", DataType::Int32, false),
             Field::new("scenario_id", DataType::Int32, false),
             Field::new("ncs_id", DataType::Int32, false),
-            Field::new("value", DataType::Float64, false),
+            Field::new("availability_factor", DataType::Float64, false),
         ]))
     }
 
@@ -777,5 +777,36 @@ mod tests {
     fn test_load_external_ncs_scenarios_none_returns_empty() {
         let result = super::super::load_external_ncs_scenarios(None).unwrap();
         assert!(result.is_empty(), "expected empty vec for None path");
+    }
+
+    /// Missing value column -> error names the `availability_factor` spelling.
+    #[test]
+    fn test_parse_external_ncs_missing_value_column_errors_new_spelling() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("scenario_id", DataType::Int32, false),
+            Field::new("ncs_id", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Int32Array::from(vec![1_i32])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let err = parse_external_ncs_scenarios(tmp.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "availability_factor", "field: {field}");
+                assert!(
+                    message.contains("availability_factor"),
+                    "message: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 }

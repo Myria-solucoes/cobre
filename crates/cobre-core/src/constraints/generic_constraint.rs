@@ -33,7 +33,7 @@
 //!
 //! ```
 //! use cobre_core::{
-//!     EntityId, GenericConstraint, ConstraintExpression, ConstraintSense,
+//!     EntityId, GenericConstraint, ConstraintExpression,
 //!     LinearTerm, SlackConfig, VariableRef,
 //! };
 //!
@@ -60,8 +60,9 @@
 //!     name: "min_southeast_hydro".to_string(),
 //!     description: Some("Minimum hydro generation in Southeast region".to_string()),
 //!     expression: expr,
-//!     sense: ConstraintSense::GreaterEqual,
 //!     slack: SlackConfig { enabled: true, penalty: Some(5_000.0) },
+//!     bound_lower_affine: None,
+//!     bound_upper_affine: None,
 //! };
 //!
 //! assert_eq!(gc.expression.terms.len(), 2);
@@ -345,16 +346,173 @@ pub struct ConstraintExpression {
     pub terms: Vec<LinearTerm>,
 }
 
-/// Comparison sense for a generic constraint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl ConstraintExpression {
+    /// Sort `terms` into the content-derived canonical order ([`canonical_term_key`]),
+    /// so the flattened order is a pure function of the terms — independent of how the
+    /// expression was authored or the order references were substituted in. Upholds the
+    /// declaration-order-invariance contract: two expressions with the same terms in
+    /// different orders converge to the same term sequence.
+    pub fn canonicalize(&mut self) {
+        self.terms.sort_by_key(canonical_term_key);
+    }
+}
+
+/// Sort key over a [`VariableRef`], as `(variant_tag, entity_id, block_sentinel,
+/// bus_sentinel)`. The tag numbers variants in declaration order; keep it an explicit
+/// match, never a derived `Ord` — the tail variants are appended out of catalog order
+/// to pin their wire discriminants, and a derive would couple this order to that
+/// convention.
+fn canonical_variable_key(v: &VariableRef) -> (u8, i32, i64, i64) {
+    match *v {
+        VariableRef::HydroStorage { hydro_id } => (0, hydro_id.0, -1, -1),
+        VariableRef::HydroTurbined {
+            hydro_id,
+            block_id,
+            bus_id,
+        } => (
+            1,
+            hydro_id.0,
+            block_sentinel(block_id),
+            bus_sentinel(bus_id),
+        ),
+        VariableRef::HydroSpillage { hydro_id, block_id } => {
+            (2, hydro_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::HydroDiversion { hydro_id, block_id } => {
+            (3, hydro_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::HydroOutflow { hydro_id, block_id } => {
+            (4, hydro_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::HydroGeneration {
+            hydro_id,
+            block_id,
+            bus_id,
+        } => (
+            5,
+            hydro_id.0,
+            block_sentinel(block_id),
+            bus_sentinel(bus_id),
+        ),
+        VariableRef::HydroEvaporation { hydro_id, block_id } => {
+            (6, hydro_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::HydroWithdrawal { hydro_id } => (7, hydro_id.0, -1, -1),
+        VariableRef::ThermalGeneration {
+            thermal_id,
+            block_id,
+        } => (8, thermal_id.0, block_sentinel(block_id), -1),
+        VariableRef::LineDirect { line_id, block_id } => {
+            (9, line_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::LineReverse { line_id, block_id } => {
+            (10, line_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::LineExchange { line_id, block_id } => {
+            (11, line_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::BusDeficit { bus_id, block_id } => {
+            (12, bus_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::BusExcess { bus_id, block_id } => (13, bus_id.0, block_sentinel(block_id), -1),
+        VariableRef::PumpingFlow {
+            station_id,
+            block_id,
+        } => (14, station_id.0, block_sentinel(block_id), -1),
+        VariableRef::PumpingPower {
+            station_id,
+            block_id,
+        } => (15, station_id.0, block_sentinel(block_id), -1),
+        VariableRef::ContractImport {
+            contract_id,
+            block_id,
+        } => (16, contract_id.0, block_sentinel(block_id), -1),
+        VariableRef::ContractExport {
+            contract_id,
+            block_id,
+        } => (17, contract_id.0, block_sentinel(block_id), -1),
+        VariableRef::NonControllableGeneration {
+            source_id,
+            block_id,
+        } => (18, source_id.0, block_sentinel(block_id), -1),
+        VariableRef::NonControllableCurtailment {
+            source_id,
+            block_id,
+        } => (19, source_id.0, block_sentinel(block_id), -1),
+        VariableRef::AnticipatedDecision { thermal_id } => (20, thermal_id.0, -1, -1),
+        VariableRef::HydroInflow { hydro_id, block_id } => {
+            (21, hydro_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::HydroStorageInitial { hydro_id, block_id } => {
+            (22, hydro_id.0, block_sentinel(block_id), -1)
+        }
+        VariableRef::HydroStorageFinal { hydro_id, block_id } => {
+            (23, hydro_id.0, block_sentinel(block_id), -1)
+        }
+    }
+}
+
+/// `None` maps to `-1` (a block-independent reference orders before block 0).
+// Rationale (cast_possible_wrap): block indices are small stage-local counts far
+// below i64::MAX; the widening signed cast never wraps.
+#[allow(clippy::cast_possible_wrap)]
+fn block_sentinel(block_id: Option<usize>) -> i64 {
+    block_id.map_or(-1, |b| b as i64)
+}
+
+/// `None` maps to `-1` (a bus-independent reference orders before bus 0).
+fn bus_sentinel(bus_id: Option<EntityId>) -> i64 {
+    bus_id.map_or(-1, |b| i64::from(b.0))
+}
+
+/// Total-order sort key over a [`LinearTerm`], a pure function of content: variable
+/// key, then coefficient kind (`Literal` = 0 before `Parameter` = 1) and its payload
+/// (`to_bits` / entity id), then `scale.to_bits`. `to_bits` gives exact float
+/// ordering; ties occur only between fully-identical terms, where the order is
+/// immaterial to the emitted bytes.
+fn canonical_term_key(term: &LinearTerm) -> ((u8, i32, i64, i64), u8, u64, u64) {
+    let (coef_kind, coef_payload) = match term.coefficient {
+        CoefficientRef::Literal(v) => (0, v.to_bits()),
+        CoefficientRef::Parameter(id) => (1, u64::from(id.0.cast_unsigned())),
+    };
+    (
+        canonical_variable_key(&term.variable),
+        coef_kind,
+        coef_payload,
+        term.scale.to_bits(),
+    )
+}
+
+/// A generic constraint's symbolic bound endpoint: `constant + Σ coefᵢ·@paramᵢ`.
+///
+/// Each `(coef, param_id)` term resolves through `param_id`'s `(stage, block)`
+/// axis and is summed with `constant`. [`AffineBound::single`] is the
+/// single-`@name`-ref special case: `constant = 0.0` and one term at
+/// coefficient `1.0`, which resolves to exactly the named parameter's value
+/// (`0.0 + 1.0 * x == x` in `f64`).
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum ConstraintSense {
-    /// The expression must be greater than or equal to the bound (`>=`).
-    GreaterEqual,
-    /// The expression must be less than or equal to the bound (`<=`).
-    LessEqual,
-    /// The expression must be exactly equal to the bound (`==`).
-    Equal,
+pub struct AffineBound {
+    /// The constant term of the affine remainder.
+    pub constant: f64,
+    /// Ordered `(coefficient, parameter_id)` terms summed onto `constant`.
+    pub terms: Vec<(f64, EntityId)>,
+}
+
+impl AffineBound {
+    /// A single named-parameter reference: `constant = 0.0`, one term at coefficient `1.0`.
+    #[must_use]
+    pub fn single(id: EntityId) -> Self {
+        Self {
+            constant: 0.0,
+            terms: vec![(1.0, id)],
+        }
+    }
+
+    /// Iterate over the parameter ids referenced by this bound's terms.
+    pub fn params(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.terms.iter().map(|&(_, id)| id)
+    }
 }
 
 /// Slack variable configuration for a generic constraint.
@@ -386,10 +544,16 @@ pub struct GenericConstraint {
     pub description: Option<String>,
     /// Parsed left-hand-side expression of the constraint.
     pub expression: ConstraintExpression,
-    /// Comparison sense (`>=`, `<=`, or `==`).
-    pub sense: ConstraintSense,
     /// Slack variable configuration.
     pub slack: SlackConfig,
+    /// Lower RHS bound as an affine remainder, composed with any numeric
+    /// parquet base on the same endpoint: the LP builder's `fold_endpoint`
+    /// resolves the endpoint to `base + bound` when both are present, or
+    /// either alone when only one is.
+    pub bound_lower_affine: Option<AffineBound>,
+    /// Upper RHS bound as an affine remainder; upper counterpart of
+    /// `bound_lower_affine`.
+    pub bound_upper_affine: Option<AffineBound>,
 }
 
 #[cfg(test)]
@@ -661,20 +825,162 @@ mod tests {
             name: "min_southeast_hydro".to_string(),
             description: Some("Minimum hydro generation in Southeast region".to_string()),
             expression: expr,
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: true,
                 penalty: Some(5_000.0),
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
 
         assert_eq!(gc.expression.terms.len(), 2);
         assert_eq!(gc.id, EntityId(0));
         assert_eq!(gc.name, "min_southeast_hydro");
         assert!(gc.description.is_some());
-        assert_eq!(gc.sense, ConstraintSense::GreaterEqual);
         assert!(gc.slack.enabled);
         assert_eq!(gc.slack.penalty, Some(5_000.0));
+    }
+
+    #[test]
+    fn canonicalize_orders_by_content_not_authoring_order() {
+        let a = LinearTerm::literal(
+            1.0,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(1),
+                block_id: None,
+                bus_id: None,
+            },
+        );
+        let b = LinearTerm::literal(
+            1.0,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(0),
+                block_id: None,
+                bus_id: None,
+            },
+        );
+        let mut forward = ConstraintExpression {
+            terms: vec![a.clone(), b.clone()],
+        };
+        let mut reversed = ConstraintExpression { terms: vec![b, a] };
+        forward.canonicalize();
+        reversed.canonicalize();
+        assert_eq!(forward.terms, reversed.terms);
+        assert_eq!(
+            forward.terms[0].variable,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(0),
+                block_id: None,
+                bus_id: None,
+            }
+        );
+        assert_eq!(
+            forward.terms[1].variable,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(1),
+                block_id: None,
+                bus_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn canonicalize_is_idempotent() {
+        let mut expr = ConstraintExpression {
+            terms: vec![
+                LinearTerm::literal(
+                    2.0,
+                    VariableRef::ThermalGeneration {
+                        thermal_id: EntityId(5),
+                        block_id: None,
+                    },
+                ),
+                LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroGeneration {
+                        hydro_id: EntityId(3),
+                        block_id: None,
+                        bus_id: None,
+                    },
+                ),
+                LinearTerm::parameter(
+                    EntityId(7),
+                    -1.0,
+                    VariableRef::HydroStorage {
+                        hydro_id: EntityId(2),
+                    },
+                ),
+            ],
+        };
+        expr.canonicalize();
+        let once = expr.terms.clone();
+        expr.canonicalize();
+        assert_eq!(expr.terms, once);
+    }
+
+    #[test]
+    fn canonical_key_orders_literal_before_parameter() {
+        let var = VariableRef::HydroGeneration {
+            hydro_id: EntityId(4),
+            block_id: None,
+            bus_id: None,
+        };
+        let mut expr = ConstraintExpression {
+            terms: vec![
+                LinearTerm::parameter(EntityId(7), 1.0, var),
+                LinearTerm::literal(1.0, var),
+            ],
+        };
+        expr.canonicalize();
+        assert_eq!(expr.terms[0].coefficient, CoefficientRef::Literal(1.0));
+        assert!(matches!(
+            expr.terms[1].coefficient,
+            CoefficientRef::Parameter(_)
+        ));
+    }
+
+    #[test]
+    fn canonical_variable_key_is_injective_over_distinct_variants() {
+        let vars = [
+            VariableRef::HydroStorage {
+                hydro_id: EntityId(0),
+            },
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(0),
+                block_id: None,
+                bus_id: None,
+            },
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(0),
+                block_id: Some(0),
+                bus_id: None,
+            },
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(0),
+                block_id: None,
+                bus_id: Some(EntityId(0)),
+            },
+            VariableRef::ThermalGeneration {
+                thermal_id: EntityId(0),
+                block_id: None,
+            },
+            VariableRef::AnticipatedDecision {
+                thermal_id: EntityId(0),
+            },
+            VariableRef::HydroStorageFinal {
+                hydro_id: EntityId(0),
+                block_id: None,
+            },
+        ];
+        let mut keys: Vec<_> = vars.iter().map(canonical_variable_key).collect();
+        let n = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(
+            keys.len(),
+            n,
+            "distinct variables must map to distinct canonical keys"
+        );
     }
 
     #[test]
@@ -685,13 +991,6 @@ mod tests {
         };
         assert!(!slack.enabled);
         assert!(slack.penalty.is_none());
-    }
-
-    #[test]
-    fn test_constraint_sense_variants() {
-        assert_ne!(ConstraintSense::GreaterEqual, ConstraintSense::LessEqual);
-        assert_ne!(ConstraintSense::GreaterEqual, ConstraintSense::Equal);
-        assert_ne!(ConstraintSense::LessEqual, ConstraintSense::Equal);
     }
 
     fn lit(term: &LinearTerm) -> f64 {
@@ -886,16 +1185,54 @@ mod tests {
                     ),
                 ],
             },
-            sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
                 enabled: true,
                 penalty: Some(5_000.0),
             },
+            bound_lower_affine: None,
+            bound_upper_affine: Some(AffineBound::single(EntityId(42))),
         };
 
         let json = serde_json::to_string(&gc).unwrap();
         let deserialized: GenericConstraint = serde_json::from_str(&json).unwrap();
         assert_eq!(gc, deserialized);
         assert_eq!(deserialized.expression.terms.len(), 2);
+        assert_eq!(
+            deserialized.bound_upper_affine,
+            Some(AffineBound::single(EntityId(42)))
+        );
+    }
+
+    #[test]
+    fn affine_bound_single_is_zero_constant_plus_one_term() {
+        let bound = AffineBound::single(EntityId(7));
+        assert_eq!(bound.constant, 0.0);
+        assert_eq!(bound.terms, vec![(1.0, EntityId(7))]);
+    }
+
+    #[test]
+    fn affine_bound_params_iterates_term_ids() {
+        let bound = AffineBound {
+            constant: 12.0,
+            terms: vec![(0.5, EntityId(7)), (-2.0, EntityId(9))],
+        };
+        assert_eq!(
+            bound.params().collect::<Vec<_>>(),
+            vec![EntityId(7), EntityId(9)]
+        );
+    }
+
+    /// The byte-neutral load-bearing identity for `AffineBound::single`: any
+    /// resolved parameter value `x` passed through `single`'s
+    /// `constant + coef * x` shape returns `x` unchanged in `f64` — the
+    /// arithmetic fact that lets a single-ref remainder stand in for the
+    /// bare parameter reference it replaces.
+    #[test]
+    fn affine_bound_single_resolves_to_the_bare_value() {
+        for x in [0.0_f64, 1.0, -3.5, 42.75, f64::MIN_POSITIVE, 1e300] {
+            let bound = AffineBound::single(EntityId(1));
+            let (coef, _) = bound.terms[0];
+            assert_eq!(bound.constant + coef * x, x);
+        }
     }
 }

@@ -14,6 +14,9 @@ use cobre_io::ParquetWriterConfig;
 use cobre_io::SimulationOutput;
 use cobre_io::SolverStatsRow;
 use cobre_io::TrainingOutput;
+use cobre_io::output::simulation_writer::{
+    SimulationPathRecord, write_paths, write_scenario_summary,
+};
 use cobre_io::write_evaporation_models;
 use cobre_io::write_fpha_deviation_points;
 use cobre_io::write_fpha_hyperplanes;
@@ -28,6 +31,7 @@ use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::build_evaporation_model_rows;
 use cobre_sddp::build_fpha_deviation_point_rows;
+use cobre_sddp::build_generic_constraint_echo_rows;
 use cobre_sddp::delta_to_stats_row;
 use cobre_sddp::orchestration::CheckpointParams;
 use cobre_sddp::orchestration::write_checkpoint;
@@ -117,6 +121,19 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
         }
     }
 
+    // No generic constraint writes no file, so a default run stays byte-identical;
+    // mirror on the Python side: `write_generic_constraint_echo_if_any`. The writer
+    // is called fully qualified, not imported, so the Python-parity checker's
+    // `cobre_io::write_*` match sees it.
+    if !args.system.generic_constraints().is_empty() {
+        let rows = build_generic_constraint_echo_rows(args.setup, args.system);
+        let echo_path = args
+            .output_dir
+            .join("generic_constraints")
+            .join("resolved_echo.parquet");
+        cobre_io::write_generic_constraint_echo(&echo_path, &rows).map_err(CliError::from)?;
+    }
+
     if !args.training_result.solver_stats_log.is_empty() {
         let rows = solver_stats_log_to_rows(&args.training_result.solver_stats_log);
         write_solver_stats(args.output_dir, &rows).map_err(CliError::from)?;
@@ -145,6 +162,10 @@ pub(super) struct WriteSimulationArgs<'a> {
     pub(super) output_dir: &'a Path,
     pub(super) sim_output: &'a SimulationOutput,
     pub(super) sim_solver_stats: &'a [(u32, SolverStatsDelta)],
+    pub(super) sim_path_rows: &'a [SimulationPathRecord],
+    /// Gathered per-scenario `(scenario_id, discounted_immediate_cost, probability)`
+    /// in canonical scenario-id order; `probability` is `Some` only under a census.
+    pub(super) sim_scenario_costs: &'a [(u32, f64, Option<f64>)],
     pub(super) output_ctx: &'a OutputContext,
     pub(super) quiet: bool,
     pub(super) stderr: &'a Term,
@@ -162,17 +183,39 @@ pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result
     write_simulation_results(args.output_dir, args.sim_output, args.output_ctx)
         .map_err(CliError::from)?;
 
-    // Simulation has no opening/rank/worker dimension; those fields are all None.
+    // Simulation fills scenario_id (not iteration) and has no stage/opening/rank/
+    // worker dimension; those axes are all None.
     if !args.sim_solver_stats.is_empty() {
         let rows: Vec<SolverStatsRow> = args
             .sim_solver_stats
             .iter()
             .map(|(scenario_id, delta)| {
-                delta_to_stats_row(*scenario_id, "simulation", -1, None, None, None, delta)
+                #[allow(clippy::cast_possible_wrap)]
+                delta_to_stats_row(
+                    None,
+                    Some(*scenario_id as i32),
+                    "simulation",
+                    None,
+                    None,
+                    None,
+                    None,
+                    delta,
+                )
             })
             .collect();
         write_simulation_solver_stats(args.output_dir, &rows).map_err(CliError::from)?;
     }
+
+    write_paths(args.output_dir, args.sim_path_rows.to_vec()).map_err(CliError::from)?;
+
+    let scenario_summary_rows: Vec<(u32, Option<f64>, f64)> = args
+        .sim_scenario_costs
+        .iter()
+        .map(|&(scenario_id, discounted_immediate_cost, probability)| {
+            (scenario_id, probability, discounted_immediate_cost)
+        })
+        .collect();
+    write_scenario_summary(args.output_dir, &scenario_summary_rows).map_err(CliError::from)?;
 
     if !args.quiet {
         let write_secs = write_start.elapsed().as_secs_f64();

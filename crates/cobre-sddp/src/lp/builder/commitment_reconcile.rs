@@ -11,8 +11,8 @@
 //! hair past the cap renders the LP infeasible over a physically meaningless
 //! quantity.
 //!
-//! This cannot be fixed by construction. `col_scale = 1.0` on the ring columns
-//! (`apply_anticipated_col_scale_unscale`) removes the *carry* drift and is
+//! This cannot be fixed by construction. `col_scale = 1.0` on the hold columns
+//! (`apply_commitment_hold_col_scale_unscale`) removes the *carry* drift and is
 //! retained, but the deposit `slot_out − decision = 0` produces `slot_out` through
 //! the basis factorization: exactness is the solver's to give, and it does not give
 //! it. Deleting this reconciliation on the premise that unscaling made it redundant
@@ -156,9 +156,10 @@ impl BoundRelaxations {
 
 /// The delivery-stage inputs [`fill_bound_relaxations`] reconciles.
 pub(crate) struct DeliveryPins<'a> {
-    /// Owns `anticipated_slots_out` and the per-plant resolution gate.
+    /// Owns `commit_out` and the per-plant resolution gate.
     pub state_layout: &'a StateSpace,
-    /// State this solve pins; its slot-0 entries are the commitments.
+    /// State this solve pins; the maturing commitment sits at this stage's
+    /// modular hold slot ([`StateSpace::commitment_hold_in_study_offset`]).
     pub pinned_state: &'a [f64],
     /// This stage's template: the source of `col_scale` and the scaled bounds.
     pub template: &'a StageTemplate,
@@ -205,7 +206,7 @@ pub(crate) fn fill_bound_relaxations(
         expected = pins.state_layout.n_state,
     );
 
-    let slot0_base = pins.state_layout.anticipated_slots_out.start;
+    let commit_out_start = pins.state_layout.commit_out.start;
     let col_scale = &pins.template.col_scale;
 
     for (local, &thermal_idx) in pins.anticipated_thermal_indices.iter().enumerate() {
@@ -218,7 +219,10 @@ pub(crate) fn fill_bound_relaxations(
         {
             continue;
         }
-        let commitment = pins.pinned_state[slot0_base + local];
+        let hold_offset = pins
+            .state_layout
+            .commitment_hold_in_study_offset(local, pins.stage_idx);
+        let commitment = pins.pinned_state[commit_out_start + hold_offset];
         for blk in 0..pins.n_blks {
             let gen_col = pins.geometry.thermal.start + thermal_idx * pins.n_blks + blk;
             let scale = if col_scale.is_empty() {

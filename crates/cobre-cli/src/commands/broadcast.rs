@@ -10,6 +10,10 @@ use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
 use cobre_sddp::{
     CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
     StoppingRule, StoppingRuleSet, StudyParams,
+    setup::{
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        SimulationEnumeratedRequest, StageIdx, TypedVec,
+    },
 };
 
 use crate::error::CliError;
@@ -17,12 +21,27 @@ use crate::error::CliError;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Postcard-serializable stopping rule.
+/// Postcard-serializable stopping rule. Mirrors [`StoppingRule`], which
+/// derives neither `Serialize` nor `Deserialize`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BroadcastStoppingRule {
-    IterationLimit { limit: u64 },
-    TimeLimit { seconds: f64 },
-    BoundStalling { iterations: u64, tolerance: f64 },
+    IterationLimit {
+        limit: u64,
+    },
+    TimeLimit {
+        seconds: f64,
+    },
+    BoundStalling {
+        iterations: u64,
+        tolerance: f64,
+    },
+    /// Mirrors [`StoppingRule::Gap`].
+    Gap {
+        /// Absolute gap tolerance, canonical R$.
+        tolerance: Option<f64>,
+        /// Relative gap tolerance (fraction).
+        relative_tolerance: Option<f64>,
+    },
 }
 
 /// Postcard-serializable stopping mode.
@@ -37,15 +56,15 @@ pub(crate) enum BroadcastStoppingMode {
 /// postcard (non-self-describing) refuses to deserialize (`WontImplement`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BroadcastBackwardScheduler {
-    TrialPoint,
-    OpeningBlock { block_size: Option<NonZeroUsize> },
+    ByScenario,
+    ByNode { block_size: Option<NonZeroUsize> },
 }
 
 impl From<BackwardScheduler> for BroadcastBackwardScheduler {
     fn from(value: BackwardScheduler) -> Self {
         match value {
-            BackwardScheduler::TrialPoint {} => Self::TrialPoint,
-            BackwardScheduler::OpeningBlock { block_size } => Self::OpeningBlock { block_size },
+            BackwardScheduler::ByScenario {} => Self::ByScenario,
+            BackwardScheduler::ByNode { block_size } => Self::ByNode { block_size },
         }
     }
 }
@@ -53,22 +72,34 @@ impl From<BackwardScheduler> for BroadcastBackwardScheduler {
 impl From<BroadcastBackwardScheduler> for BackwardScheduler {
     fn from(value: BroadcastBackwardScheduler) -> Self {
         match value {
-            BroadcastBackwardScheduler::TrialPoint => Self::TrialPoint {},
-            BroadcastBackwardScheduler::OpeningBlock { block_size } => {
-                Self::OpeningBlock { block_size }
-            }
+            BroadcastBackwardScheduler::ByScenario => Self::ByScenario {},
+            BroadcastBackwardScheduler::ByNode { block_size } => Self::ByNode { block_size },
         }
     }
 }
 
 /// Configuration snapshot broadcast from rank 0 to all ranks.
+// Rationale (struct_excessive_bools): each bool is an independent config
+// flag `StudyParams::from_config` resolves from a DIFFERENT `Config` section
+// (training selection, training enable, exports, policy.boundary); grouping
+// them into an enum or a state machine would invent a joint state no config
+// section actually declares.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct BroadcastConfig {
     pub(crate) seed: u64,
     pub(crate) forward_passes: u32,
+    /// `true` when `training.selection = enumerated` is declared; every rank
+    /// re-resolves `forward_passes` from the (identically-broadcast-derived)
+    /// node graph once it exists.
+    pub(crate) training_enumerated: bool,
     pub(crate) stopping_rules: Vec<BroadcastStoppingRule>,
     pub(crate) stopping_mode: BroadcastStoppingMode,
     pub(crate) n_scenarios: u32,
+    /// `simulation.selection`'s resolution; every rank re-resolves
+    /// `n_scenarios` from the node graph once it exists when this is
+    /// [`SimulationEnumeratedRequest::Enumerated`].
+    pub(crate) simulation_enumerated: SimulationEnumeratedRequest,
     pub(crate) io_channel_capacity: u32,
     pub(crate) policy_path: String,
     pub(crate) inflow_method: InflowNonNegativityMethod,
@@ -97,12 +128,21 @@ pub(crate) struct BroadcastConfig {
     /// Simulation solver profile override (`simulation.solver`).
     pub(crate) simulation_solver: Option<PhaseSolverProfileConfig>,
     /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
-    /// carrying the opening-block size when the `opening_block` method is
+    /// carrying the opening-block size when the `by_node` method is
     /// selected.
     pub(crate) backward_scheduler: BroadcastBackwardScheduler,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
     /// resolved identically on every rank by [`StudyParams::from_config`].
     pub(crate) cost_scale_factor: f64,
+    /// Effective inflow-lag state depth (`state_space.inflow_lag_depth`, already
+    /// widened on rank 0 to a loaded boundary policy's required depth); `None`
+    /// when neither is declared. Rebuilt into `ConstructionConfig` on every rank,
+    /// widening `L_state` in `resolve_state_layout`.
+    pub(crate) inflow_lag_depth: Option<u32>,
+    /// `policy.boundary.is_some()`, resolved identically on every rank by
+    /// `StudyParams::from_config`. Gates the water-bucket terminal mask
+    /// (`build_transit_bucket_topology`) before `inject_boundary_cuts` runs.
+    pub(crate) boundary_present: bool,
 }
 
 impl BroadcastConfig {
@@ -136,9 +176,16 @@ impl BroadcastConfig {
                     iterations: *iterations,
                     tolerance: *tolerance,
                 },
-                // SimulationBased and GracefulShutdown evaluate on rank 0 only and are
-                // not broadcastable; non-root ranks fall back to an iteration limit.
-                StoppingRule::SimulationBased { .. } | StoppingRule::GracefulShutdown => {
+                StoppingRule::Gap {
+                    tolerance,
+                    relative_tolerance,
+                } => BroadcastStoppingRule::Gap {
+                    tolerance: *tolerance,
+                    relative_tolerance: *relative_tolerance,
+                },
+                // GracefulShutdown evaluates on rank 0 only and is not
+                // broadcastable; non-root ranks fall back to an iteration limit.
+                StoppingRule::GracefulShutdown => {
                     tracing::warn!(
                         "stopping rule not broadcastable, \
                          substituting IterationLimit({DEFAULT_MAX_ITERATIONS})"
@@ -158,9 +205,11 @@ impl BroadcastConfig {
         Ok(Self {
             seed: params.seed,
             forward_passes: params.forward_passes,
+            training_enumerated: params.training_enumerated,
             stopping_rules,
             stopping_mode,
             n_scenarios: params.n_scenarios,
+            simulation_enumerated: params.simulation_enumerated,
             io_channel_capacity: u32::try_from(params.io_channel_capacity).unwrap_or(64),
             policy_path: params.policy_path,
             inflow_method: params.inflow_method,
@@ -177,6 +226,8 @@ impl BroadcastConfig {
             simulation_solver: params.simulation_solver,
             backward_scheduler: params.backward_scheduler.into(),
             cost_scale_factor: params.cost_scale_factor,
+            inflow_lag_depth: params.inflow_lag_depth,
+            boundary_present: params.boundary_present,
         })
     }
 }
@@ -189,6 +240,134 @@ pub(crate) struct BroadcastOpeningTree {
     pub(crate) data: Vec<f64>,
     pub(crate) openings_per_stage: Vec<usize>,
     pub(crate) dim: usize,
+}
+
+/// Postcard-serializable wrapper for [`NodeGraph`] broadcast — plain
+/// struct-of-`Vec`s (no tagged enum on the wire), mirroring
+/// [`BroadcastOpeningTree`]'s shape. `NodeOpenings::source` becomes the
+/// `is_external` flag; successor lists flatten to a CSR triple
+/// (`successor_offsets`/`successor_child`/`successor_probability`).
+///
+/// Not currently wired into the live MPI broadcast: [`NodeGraph`] is a pure,
+/// deterministic function of already-broadcast inputs (`System::policy_graph`
+/// — carried whole by the existing `System` broadcast — and the standardized
+/// scenario libraries, themselves rebuilt identically on every rank inside
+/// `StudySetup::from_broadcast_params`), so every rank constructs a
+/// bitwise-identical graph without a wire hop — the same guarantee
+/// `cut_state_layouts`/`stage_templates`/`scenario_libraries` already rely on.
+/// This type exists so a future caller can transport the graph explicitly
+/// (e.g. to cross-check the deterministic-construction guarantee, the way
+/// [`BroadcastOpeningTree`] transports a user-supplied tree) without
+/// inventing a second wire shape.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BroadcastNodeGraph {
+    pub(crate) node_ids: Vec<i32>,
+    pub(crate) stage: Vec<usize>,
+    pub(crate) pool_id: Vec<usize>,
+    pub(crate) is_external: Vec<bool>,
+    pub(crate) offset: Vec<usize>,
+    pub(crate) len: Vec<usize>,
+    pub(crate) q: Vec<f64>,
+    pub(crate) n_pools: usize,
+    /// CSR row-pointer over `successor_child`/`successor_probability`,
+    /// length `node_ids.len() + 1`; node `i`'s successors are
+    /// `successor_offsets[i]..successor_offsets[i + 1]`.
+    pub(crate) successor_offsets: Vec<usize>,
+    pub(crate) successor_child: Vec<usize>,
+    pub(crate) successor_probability: Vec<f64>,
+}
+
+impl From<&NodeGraph> for BroadcastNodeGraph {
+    fn from(ng: &NodeGraph) -> Self {
+        let n = ng.nodes.len();
+        let mut stage = Vec::with_capacity(n);
+        let mut pool_id = Vec::with_capacity(n);
+        let mut is_external = Vec::with_capacity(n);
+        let mut offset = Vec::with_capacity(n);
+        let mut len = Vec::with_capacity(n);
+        let mut q = Vec::with_capacity(n);
+        for node in &ng.nodes {
+            stage.push(node.stage.0);
+            pool_id.push(node.pool_id);
+            is_external.push(node.openings.source == OpeningSource::External);
+            offset.push(node.openings.offset);
+            len.push(node.openings.len);
+            q.push(node.openings.q);
+        }
+
+        let mut successor_offsets = Vec::with_capacity(n + 1);
+        let mut successor_child = Vec::new();
+        let mut successor_probability = Vec::new();
+        successor_offsets.push(0);
+        for succs in &ng.successors {
+            for s in succs {
+                successor_child.push(s.child.0);
+                successor_probability.push(s.probability);
+            }
+            successor_offsets.push(successor_child.len());
+        }
+
+        Self {
+            node_ids: ng.node_ids.iter().map(|id| id.0).collect(),
+            stage,
+            pool_id,
+            is_external,
+            offset,
+            len,
+            q,
+            n_pools: ng.n_pools,
+            successor_offsets,
+            successor_child,
+            successor_probability,
+        }
+    }
+}
+
+impl From<BroadcastNodeGraph> for NodeGraph {
+    fn from(b: BroadcastNodeGraph) -> Self {
+        let n = b.node_ids.len();
+        let nodes: TypedVec<NodePos, NodeRuntime> = (0..n)
+            .map(|i| NodeRuntime {
+                stage: StageIdx(b.stage[i]),
+                pool_id: b.pool_id[i],
+                openings: NodeOpenings {
+                    source: if b.is_external[i] {
+                        OpeningSource::External
+                    } else {
+                        OpeningSource::Generated
+                    },
+                    offset: b.offset[i],
+                    len: b.len[i],
+                    q: b.q[i],
+                },
+            })
+            .collect();
+        // Derived, not transported: pool -> stage is a pure function of the
+        // nodes, so re-deriving here keeps the wire format minimal and drift-free.
+        let mut pool_stage = vec![StageIdx(0); b.n_pools];
+        for node in &nodes {
+            pool_stage[node.pool_id] = node.stage;
+        }
+        let successors = (0..n)
+            .map(|i| {
+                let start = b.successor_offsets[i];
+                let end = b.successor_offsets[i + 1];
+                (start..end)
+                    .map(|j| NodeSuccessor {
+                        child: NodePos(b.successor_child[j]),
+                        probability: b.successor_probability[j],
+                    })
+                    .collect()
+            })
+            .collect();
+        NodeGraph {
+            node_ids: b.node_ids.into_iter().map(NodeId).collect(),
+            nodes,
+            successors,
+            n_pools: b.n_pools,
+            pool_stage,
+        }
+    }
 }
 
 pub(crate) fn stopping_rules_from_broadcast(cfg: &BroadcastConfig) -> StoppingRuleSet {
@@ -208,6 +387,13 @@ pub(crate) fn stopping_rules_from_broadcast(cfg: &BroadcastConfig) -> StoppingRu
             } => StoppingRule::BoundStalling {
                 iterations: *iterations,
                 tolerance: *tolerance,
+            },
+            BroadcastStoppingRule::Gap {
+                tolerance,
+                relative_tolerance,
+            } => StoppingRule::Gap {
+                tolerance: *tolerance,
+                relative_tolerance: *relative_tolerance,
             },
         })
         .collect();
@@ -283,8 +469,12 @@ where
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
-    use super::{BroadcastOpeningTree, broadcast_value};
+    use super::{BroadcastNodeGraph, BroadcastOpeningTree, BroadcastStoppingRule, broadcast_value};
     use crate::error::CliError;
+    use cobre_sddp::setup::{
+        NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
+        StageIdx,
+    };
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct Simple {
@@ -372,6 +562,159 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // BroadcastNodeGraph tests
+    // ------------------------------------------------------------------
+
+    /// A 3-node fixture (one root fanning into a `Generated` and an
+    /// `External` child) exercising both `OpeningSource` variants and a
+    /// non-trivial successor CSR.
+    fn sample_node_graph() -> NodeGraph {
+        NodeGraph {
+            node_ids: vec![NodeId(0), NodeId(1), NodeId(2)].into(),
+            nodes: vec![
+                NodeRuntime {
+                    stage: StageIdx(0),
+                    pool_id: 0,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 3,
+                        q: 1.0 / 3.0,
+                    },
+                },
+                NodeRuntime {
+                    stage: StageIdx(1),
+                    pool_id: 1,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 4,
+                        q: 0.25,
+                    },
+                },
+                NodeRuntime {
+                    stage: StageIdx(1),
+                    pool_id: 2,
+                    openings: NodeOpenings {
+                        source: OpeningSource::External,
+                        offset: 7,
+                        len: 1,
+                        q: 1.0,
+                    },
+                },
+            ]
+            .into(),
+            successors: vec![
+                vec![
+                    NodeSuccessor {
+                        child: NodePos(1),
+                        probability: 0.5,
+                    },
+                    NodeSuccessor {
+                        child: NodePos(2),
+                        probability: 0.5,
+                    },
+                ],
+                Vec::new(),
+                Vec::new(),
+            ]
+            .into(),
+            n_pools: 3,
+            pool_stage: vec![StageIdx(0), StageIdx(1), StageIdx(1)],
+        }
+    }
+
+    #[test]
+    fn broadcast_node_graph_round_trips_via_postcard() {
+        let original = sample_node_graph();
+        let bcast = BroadcastNodeGraph::from(&original);
+        let bytes = postcard::to_allocvec(&bcast).unwrap();
+        let decoded_bcast: BroadcastNodeGraph = postcard::from_bytes(&bytes).unwrap();
+        let decoded: NodeGraph = decoded_bcast.into();
+
+        assert_eq!(decoded.node_ids, original.node_ids);
+        assert_eq!(decoded.n_pools, original.n_pools);
+        assert_eq!(
+            decoded.pool_stage, original.pool_stage,
+            "pool_stage must be re-derived identically after the wire hop"
+        );
+        assert_eq!(decoded.nodes.len(), original.nodes.len());
+        for (d, o) in decoded.nodes.iter().zip(original.nodes.iter()) {
+            assert_eq!(d.stage, o.stage);
+            assert_eq!(d.pool_id, o.pool_id);
+            assert_eq!(d.openings.source, o.openings.source);
+            assert_eq!(d.openings.offset, o.openings.offset);
+            assert_eq!(d.openings.len, o.openings.len);
+            assert_eq!(
+                d.openings.q.to_bits(),
+                o.openings.q.to_bits(),
+                "q must survive the wire hop bit-exact"
+            );
+        }
+        assert_eq!(decoded.successors.len(), original.successors.len());
+        for (d, o) in decoded.successors.iter().zip(original.successors.iter()) {
+            assert_eq!(d.len(), o.len());
+            for (de, oe) in d.iter().zip(o.iter()) {
+                assert_eq!(de.child, oe.child);
+                assert_eq!(de.probability.to_bits(), oe.probability.to_bits());
+            }
+        }
+    }
+
+    /// Guardrail mirroring `broadcast_config_wire_excludes_deleted_fields`:
+    /// the wire type is a plain struct-of-`Vec`s, never a tagged enum — a
+    /// serde-internally-tagged `OpeningSource` on the wire would inject a
+    /// `"Generated"`/`"External"` string tag into the postcard bytes, which
+    /// this test would catch.
+    #[test]
+    fn broadcast_node_graph_wire_carries_no_variant_tag_strings() {
+        let bcast = BroadcastNodeGraph::from(&sample_node_graph());
+        let bytes = postcard::to_allocvec(&bcast).unwrap();
+        let as_string = String::from_utf8_lossy(&bytes);
+        for tag in ["Generated", "External"] {
+            assert!(
+                !as_string.contains(tag),
+                "BroadcastNodeGraph postcard bytes must not contain the enum variant tag '{tag}' \
+                 — is_external must stay a plain bool field, not a tagged enum on the wire"
+            );
+        }
+    }
+
+    #[test]
+    fn broadcast_optional_node_graph_local_round_trips() {
+        let comm = cobre_comm::LocalBackend;
+        let original = sample_node_graph();
+        let bcast = Some(BroadcastNodeGraph::from(&original));
+        let result = broadcast_value(Some(bcast), &comm).unwrap();
+        let decoded: NodeGraph = result.unwrap().into();
+        assert_eq!(decoded.node_ids, original.node_ids);
+        assert_eq!(decoded.n_pools, original.n_pools);
+    }
+
+    // ------------------------------------------------------------------
+    // BroadcastStoppingRule tests
+    // ------------------------------------------------------------------
+
+    /// Postcard round-trip for the `BroadcastStoppingRule::Gap` arm — the
+    /// mirror `BroadcastStoppingRule`'s doc comment exists for.
+    #[test]
+    fn broadcast_stopping_rule_gap_round_trips_via_postcard() {
+        let original = BroadcastStoppingRule::Gap {
+            tolerance: Some(1000.0),
+            relative_tolerance: Some(0.01),
+        };
+        let bytes = postcard::to_allocvec(&original).unwrap();
+        let decoded: BroadcastStoppingRule = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(
+            decoded,
+            BroadcastStoppingRule::Gap {
+                tolerance: Some(t),
+                relative_tolerance: Some(rt)
+            } if (t - 1000.0).abs() < f64::EPSILON && (rt - 0.01).abs() < f64::EPSILON
+        ));
+    }
+
+    // ------------------------------------------------------------------
     // BroadcastConfig tests
     // ------------------------------------------------------------------
 
@@ -397,6 +740,52 @@ mod tests {
         );
     }
 
+    /// A present `state_space.inflow_lag_depth` reaches `BroadcastConfig` and
+    /// survives the postcard wire hop.
+    #[test]
+    fn broadcast_config_carries_inflow_lag_depth() {
+        use super::BroadcastConfig;
+
+        let json = r#"{
+            "training": {
+                "selection": { "method": "sampled", "forward_passes": 4 },
+                "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }]
+            },
+            "state_space": { "inflow_lag_depth": 12 }
+        }"#;
+        let config: cobre_io::Config = serde_json::from_str(json).unwrap();
+        let original = BroadcastConfig::from_config(&config).unwrap();
+        assert_eq!(original.inflow_lag_depth, Some(12));
+
+        let bytes = postcard::to_allocvec(&original).expect("postcard serialization must succeed");
+        let decoded: BroadcastConfig =
+            postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
+        assert_eq!(decoded.inflow_lag_depth, Some(12));
+    }
+
+    /// A present `policy.boundary` reaches `BroadcastConfig` as `boundary_present
+    /// = true` and survives the postcard wire hop.
+    #[test]
+    fn broadcast_config_carries_boundary_present() {
+        use super::BroadcastConfig;
+
+        let json = r#"{
+            "training": {
+                "selection": { "method": "sampled", "forward_passes": 4 },
+                "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }]
+            },
+            "policy": { "boundary": { "path": "unused" } }
+        }"#;
+        let config: cobre_io::Config = serde_json::from_str(json).unwrap();
+        let original = BroadcastConfig::from_config(&config).unwrap();
+        assert!(original.boundary_present);
+
+        let bytes = postcard::to_allocvec(&original).expect("postcard serialization must succeed");
+        let decoded: BroadcastConfig =
+            postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
+        assert!(decoded.boundary_present);
+    }
+
     /// Postcard serialization round-trip for `BroadcastConfig`.
     #[test]
     fn broadcast_config_roundtrips_via_postcard() {
@@ -406,7 +795,7 @@ mod tests {
 
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 }
                 ]
@@ -457,9 +846,9 @@ mod tests {
 
     /// Postcard round-trip for the scheduler field at its non-default value —
     /// `broadcast_config_roundtrips_via_postcard` above only exercises the
-    /// `TrialPoint` default.
+    /// `ByScenario` default.
     #[test]
-    fn broadcast_config_roundtrips_via_postcard_with_opening_block_scheduler() {
+    fn broadcast_config_roundtrips_via_postcard_with_by_node_scheduler() {
         use std::num::NonZeroUsize;
 
         use super::{BroadcastBackwardScheduler, BroadcastConfig};
@@ -467,7 +856,7 @@ mod tests {
         let json = r#"{
             "training": {
                 "parallelism": {
-                    "backward_scheduler": { "method": "opening_block", "block_size": 4 }
+                    "backward_scheduler": { "method": "by_node", "block_size": 4 }
                 }
             }
         }"#;
@@ -482,7 +871,7 @@ mod tests {
         assert_eq!(decoded.backward_scheduler, original.backward_scheduler);
         assert_eq!(
             decoded.backward_scheduler,
-            BroadcastBackwardScheduler::OpeningBlock {
+            BroadcastBackwardScheduler::ByNode {
                 block_size: NonZeroUsize::new(4)
             }
         );
@@ -497,7 +886,7 @@ mod tests {
 
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 }
                 ],
@@ -581,7 +970,7 @@ mod tests {
 
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 }
                 ],
@@ -634,7 +1023,7 @@ mod tests {
 
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 }
                 ]

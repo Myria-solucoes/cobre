@@ -46,14 +46,14 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
             "start_date": "2024-02-01",
             "end_date": "2024-03-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 672.0 }],
-            "num_scenarios": 10
+            "num_openings": 10
         },
         {
             "id": 0,
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 10
+            "num_openings": 10
         }
     ]
 }"#,

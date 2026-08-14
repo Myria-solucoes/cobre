@@ -9,6 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use cobre_core::AffineBound;
+
 use super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 // ── validate_referential_integrity ───────────────────────────────────────────
@@ -766,9 +768,24 @@ fn check_generic_constraint_expression_references(
     }
 }
 
-/// `GenericConstraintBoundsRow` `block_id` validity and duplicate key detection.
+/// A generic-constraint endpoint's fold, resolved to one scalar only when it is
+/// static: `literal` alone with no affine remainder, or
+/// `literal.unwrap_or(0.0) + affine.constant` when the remainder carries no
+/// `@param` terms. A `@param`-bearing remainder makes the endpoint
+/// stage-varying — `None` here, deferring its value (and any inversion
+/// against the other endpoint) to the LP builder's `fold_endpoint`.
+fn static_fold(literal: Option<f64>, affine: Option<&AffineBound>) -> Option<f64> {
+    match affine {
+        None => literal,
+        Some(bound) if bound.terms.is_empty() => Some(literal.unwrap_or(0.0) + bound.constant),
+        Some(_) => None,
+    }
+}
+
+/// `GenericConstraintBoundsRow` `block_id` validity, per-row endpoint-interval
+/// checks, and duplicate key detection.
 fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut ValidationContext) {
-    let stage_block_counts: std::collections::HashMap<i32, usize> = data
+    let stage_block_counts: HashMap<i32, usize> = data
         .stages
         .stages
         .iter()
@@ -796,6 +813,73 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
         }
     }
 
+    // Which affine remainder (if any) each constraint assigns to each endpoint,
+    // keyed by constraint id. A parquet numeric endpoint and an affine remainder
+    // on the same endpoint compose (`base + R`, `fold_endpoint` in the LP
+    // builder) rather than conflict — any remainder shape, constant-only or
+    // `@param`-bearing, is a legal fold.
+    let constraint_affines: HashMap<i32, (Option<&AffineBound>, Option<&AffineBound>)> = data
+        .generic_constraints
+        .iter()
+        .map(|gc| {
+            (
+                gc.id.0,
+                (
+                    gc.bound_lower_affine.as_ref(),
+                    gc.bound_upper_affine.as_ref(),
+                ),
+            )
+        })
+        .collect();
+
+    // The interval IS the constraint: shape derives from which endpoints a row
+    // carries — a numeric column here or an affine remainder on the constraint.
+    // A dangling `constraint_id` is reported separately by `check_bounds_references`.
+    for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
+        let (lower_affine, upper_affine) = constraint_affines
+            .get(&row.constraint_id)
+            .copied()
+            .unwrap_or((None, None));
+
+        if row.bound_lower.is_none()
+            && row.bound_upper.is_none()
+            && lower_affine.is_none()
+            && upper_affine.is_none()
+        {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "constraints/generic_constraint_bounds.parquet",
+                Some(format!("GenericConstraintBoundsRow[{i}]")),
+                format!(
+                    "GenericConstraintBoundsRow[{i}] on constraint {} has neither bound_lower nor bound_upper: at least one endpoint is required",
+                    row.constraint_id
+                ),
+            );
+        }
+
+        // Only a same-row STATIC fold is checked here (an affine remainder with
+        // no `@param` terms resolves to one scalar regardless of stage/block); a
+        // `@param`-bearing remainder makes the endpoint stage-varying, so its
+        // inversion is left to LP infeasibility rather than a combinatorial
+        // pre-solve check — matching how a cross-source bound is validated only
+        // for its same-row static interval elsewhere in this module.
+        let static_lower = static_fold(row.bound_lower, lower_affine);
+        let static_upper = static_fold(row.bound_upper, upper_affine);
+        if let (Some(bound_lower), Some(bound_upper)) = (static_lower, static_upper)
+            && bound_upper < bound_lower
+        {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "constraints/generic_constraint_bounds.parquet",
+                Some(format!("GenericConstraintBoundsRow[{i}]")),
+                format!(
+                    "GenericConstraintBoundsRow[{i}] on constraint {} has bound_upper={bound_upper} less than bound_lower={bound_lower}: an inverted interval is not allowed",
+                    row.constraint_id
+                ),
+            );
+        }
+    }
+
     let mut seen_keys: HashSet<(i32, i32, Option<i32>)> = HashSet::new();
     for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
         let key = (row.constraint_id, row.stage_id, row.block_id);
@@ -807,6 +891,30 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
                 format!(
                     "Duplicate key (constraint_id={}, stage_id={}, block_id={:?}) in generic constraint bounds",
                     row.constraint_id, row.stage_id, row.block_id
+                ),
+            );
+        }
+    }
+
+    // The parquet is the activation grid: a symbolic bound supplies a value, but the
+    // constraint's applicable (stage, block) cells still come from its parquet rows.
+    // A reference with no rows would apply to nothing and be silently inert.
+    let constraints_with_rows: HashSet<i32> = data
+        .generic_constraint_bounds
+        .iter()
+        .map(|row| row.constraint_id)
+        .collect();
+    for gc in &data.generic_constraints {
+        if (gc.bound_lower_affine.is_some() || gc.bound_upper_affine.is_some())
+            && !constraints_with_rows.contains(&gc.id.0)
+        {
+            ctx.add_error(
+                ErrorKind::InvalidReference,
+                "constraints/generic_constraints.json",
+                Some(format!("GenericConstraint {}", gc.id.0)),
+                format!(
+                    "GenericConstraint {} declares a bound reference but has no activation rows in generic_constraint_bounds.parquet: the reference would apply to nothing",
+                    gc.id.0
                 ),
             );
         }
@@ -1082,7 +1190,7 @@ mod tests {
 
     const VALID_CONFIG_JSON: &str = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ]
@@ -1126,7 +1234,7 @@ mod tests {
                 "start_date": "2024-01-01",
                 "end_date": "2024-02-01",
                 "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-                "num_scenarios": 50
+                "num_openings": 50
             }
         ]
     }"#;
@@ -1900,18 +2008,7 @@ mod tests {
         data.hydro_bounds = vec![HydroBoundsRow {
             hydro_id: EntityId::from(555),
             stage_id: 0,
-            min_turbined_m3s: None,
-            max_turbined_m3s: None,
-            min_storage_hm3: None,
-            max_storage_hm3: None,
-            min_outflow_m3s: None,
-            max_outflow_m3s: None,
-            min_generation_mw: None,
-            max_generation_mw: None,
-            max_diversion_m3s: None,
-            filling_min_rate_m3s: None,
-            water_withdrawal_m3s: None,
-            block_id: None,
+            ..Default::default()
         }];
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
@@ -2119,7 +2216,8 @@ mod tests {
             constraint_id: 888,
             stage_id: 0,
             block_id: None,
-            bound: 1000.0,
+            bound_lower: Some(1000.0),
+            bound_upper: None,
         }];
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
@@ -2132,6 +2230,396 @@ mod tests {
         assert_eq!(inv.len(), 1);
         assert!(inv[0].message.contains("888"));
         assert!(inv[0].message.contains("constraint_id"));
+    }
+
+    /// A bounds row with neither endpoint present emits exactly one finding
+    /// naming the constraint id — no constraint-registry lookup is needed, the
+    /// check is per-row.
+    #[test]
+    fn test_generic_constraint_bounds_rejects_both_absent() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: None,
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidValue, got: {inv:?}"
+        );
+        assert!(inv[0].message.contains("constraint 1"));
+    }
+
+    fn symbolic_constraint(
+        id: i32,
+        lower_ref: Option<i32>,
+        upper_ref: Option<i32>,
+    ) -> cobre_core::GenericConstraint {
+        use cobre_core::{AffineBound, ConstraintExpression, GenericConstraint, SlackConfig};
+
+        GenericConstraint {
+            id: EntityId(id),
+            name: format!("sym{id}"),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: lower_ref.map(|id| AffineBound::single(EntityId(id))),
+            bound_upper_affine: upper_ref.map(|id| AffineBound::single(EntityId(id))),
+        }
+    }
+
+    /// A numeric parquet endpoint composed with a constant-only affine remainder
+    /// on the same endpoint folds (`base + R`) rather than conflicts: zero errors.
+    #[test]
+    fn test_generic_constraint_bounds_literal_and_constant_affine_fold_adds_no_error() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let mut constraint = symbolic_constraint(5, None, None);
+        constraint.bound_upper_affine = Some(AffineBound {
+            constant: -5.0,
+            terms: vec![],
+        });
+        data.generic_constraints = vec![constraint];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: Some(100.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a literal base composed with a constant-only remainder is a legal fold, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A numeric parquet endpoint composed with a `@param`-bearing affine
+    /// remainder on the same endpoint also folds — the fold does not
+    /// distinguish a constant remainder from a symbolic one: zero errors.
+    #[test]
+    fn test_generic_constraint_bounds_literal_and_param_affine_fold_adds_no_error() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraints = vec![symbolic_constraint(5, None, Some(99))];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: Some(100.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a literal base composed with a @param-bearing remainder is a legal fold, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A constant-only affine remainder can fold an endpoint below the other
+    /// side even when the raw parquet columns alone are not inverted: here
+    /// `bound_lower=50`, `bound_upper=60` compare fine on their own, but the
+    /// upper endpoint's `-30` remainder folds it to `30`, which IS below the
+    /// lower endpoint — the inversion check must catch this static fold.
+    #[test]
+    fn test_generic_constraint_bounds_constant_fold_reveals_inversion() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let mut constraint = symbolic_constraint(5, None, None);
+        constraint.bound_upper_affine = Some(AffineBound {
+            constant: -30.0,
+            terms: vec![],
+        });
+        data.generic_constraints = vec![constraint];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(50.0),
+            bound_upper: Some(60.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "the folded upper (60 + -30 = 30) is below the lower (50); expected exactly 1 InvalidValue, got: {inv:?}"
+        );
+        assert!(inv[0].message.contains("constraint 5"));
+        assert!(inv[0].message.contains("bound_upper"));
+    }
+
+    /// A `@param`-bearing remainder that COULD invert its endpoint is not
+    /// statically resolvable, so the inversion check must defer to the LP
+    /// rather than false-reject: same shape as the constant-fold case above,
+    /// but the upper remainder carries a parameter term.
+    #[test]
+    fn test_generic_constraint_bounds_param_fold_defers_inversion_check() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraints = vec![symbolic_constraint(5, None, Some(99))];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(50.0),
+            bound_upper: Some(60.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a @param-bearing remainder is stage-varying; its inversion is left to LP infeasibility, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A both-numeric-null row is valid when the constraint supplies a reference for
+    /// a side (the reference fills it): no InvalidValue.
+    #[test]
+    fn test_generic_constraint_bounds_ref_fills_side_allows_both_null() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraints = vec![symbolic_constraint(5, None, Some(99))];
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 5,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: None,
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a reference fills the endpoint, so a both-null row is valid, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A constraint declaring a reference but with no rows in the bounds parquet is an
+    /// InvalidReference naming the constraint id — the reference would apply to nothing.
+    #[test]
+    fn test_generic_constraint_bounds_ref_with_no_rows_is_invalid_reference() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraints = vec![symbolic_constraint(5, None, Some(99))];
+        data.generic_constraint_bounds = vec![];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {inv:?}"
+        );
+        assert!(inv[0].message.contains("GenericConstraint 5"));
+    }
+
+    /// A bounds row with `bound_upper < bound_lower` (an inverted interval)
+    /// emits exactly one finding naming the constraint id.
+    #[test]
+    fn test_generic_constraint_bounds_rejects_inverted_interval() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(20.0),
+            bound_upper: Some(5.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidValue, got: {inv:?}"
+        );
+        assert!(inv[0].message.contains("constraint 1"));
+        assert!(inv[0].message.contains("bound_upper"));
+    }
+
+    /// A bounds row with `bound_upper == bound_lower` (a degenerate equal band)
+    /// is accepted — it is an equality, not an authoring error.
+    #[test]
+    fn test_generic_constraint_bounds_accepts_degenerate_equal_band() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(10.0),
+            bound_upper: Some(10.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "a degenerate equal band must not be rejected, got: {inv:?}"
+        );
+    }
+
+    /// A lower-only row (one-sided) is accepted.
+    #[test]
+    fn test_generic_constraint_bounds_accepts_lower_only_row() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(5.0),
+            bound_upper: None,
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "a lower-only row must not be rejected, got: {inv:?}"
+        );
+    }
+
+    /// An upper-only row (one-sided) is accepted.
+    #[test]
+    fn test_generic_constraint_bounds_accepts_upper_only_row() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: None,
+            bound_upper: Some(20.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "an upper-only row must not be rejected, got: {inv:?}"
+        );
+    }
+
+    /// A well-formed two-sided band (`bound_upper > bound_lower`) produces no
+    /// `InvalidValue` finding.
+    #[test]
+    fn test_generic_constraint_bounds_accepts_two_sided_band() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        data.generic_constraint_bounds = vec![GenericConstraintBoundsRow {
+            constraint_id: 1,
+            stage_id: 0,
+            block_id: None,
+            bound_lower: Some(5.0),
+            bound_upper: Some(20.0),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "a well-formed two-sided band must not be rejected, got: {inv:?}"
+        );
     }
 
     /// `BusPenaltyOverrideRow` referencing a non-existent bus produces 1 error.
@@ -2488,8 +2976,7 @@ mod tests {
     #[test]
     fn test_anticipated_decision_unknown_thermal_ref() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2509,11 +2996,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2546,8 +3034,7 @@ mod tests {
     #[test]
     fn test_hydro_inflow_unknown_hydro_ref() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2568,11 +3055,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2603,8 +3091,7 @@ mod tests {
     #[test]
     fn test_hydro_inflow_with_block_unknown_hydro_ref() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2624,11 +3111,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2659,8 +3147,7 @@ mod tests {
     #[test]
     fn test_hydro_storage_initial_unknown_hydro_ref() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2680,11 +3167,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2752,8 +3240,7 @@ mod tests {
     #[test]
     fn test_generic_constraint_unknown_bus_selector_rejected() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2774,11 +3261,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2822,8 +3310,7 @@ mod tests {
     #[test]
     fn test_generic_constraint_valid_bus_selector_and_none_accepted() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2844,11 +3331,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         let gc_generation = GenericConstraint {
             id: EntityId::from(2),
@@ -2864,11 +3352,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc_turbined, gc_generation];
 
@@ -2894,8 +3383,7 @@ mod tests {
     #[test]
     fn test_generic_constraint_unknown_hydro_with_selector_emits_one_finding() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2916,11 +3404,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 
@@ -2957,8 +3446,7 @@ mod tests {
     #[test]
     fn test_generic_constraint_nonexistent_bus_selector_emits_one_finding() {
         use cobre_core::{
-            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
-            VariableRef,
+            ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
         };
 
         let dir = TempDir::new().unwrap();
@@ -2979,11 +3467,12 @@ mod tests {
                     },
                 )],
             },
-            sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
                 enabled: false,
                 penalty: None,
             },
+            bound_lower_affine: None,
+            bound_upper_affine: None,
         };
         data.generic_constraints = vec![gc];
 

@@ -50,11 +50,11 @@
 //!
 //! ### `penalty_overrides_ncs`
 //!
-//! | Column              | Type   | Required | Description                            |
-//! | ------------------- | ------ | -------- | -------------------------------------- |
-//! | `source_id`         | INT32  | Yes      | Non-controllable source ID             |
-//! | `stage_id`          | INT32  | Yes      | Stage ID                               |
-//! | `curtailment_cost`  | DOUBLE | No       | Curtailment penalty (USD/`MWh`)        |
+//! | Column              | Type   | Required | Description                                       |
+//! | ------------------- | ------ | -------- | ------------------------------------------------- |
+//! | `ncs_id`            | INT32  | Yes      | Non-controllable source ID                        |
+//! | `stage_id`          | INT32  | Yes      | Stage ID                                          |
+//! | `curtailment_cost`  | DOUBLE | No       | Curtailment penalty (USD/`MWh`)                   |
 //!
 //! ## Output ordering
 //!
@@ -787,7 +787,7 @@ pub fn parse_penalty_overrides_ncs(path: &Path) -> Result<Vec<NcsPenaltyOverride
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        let source_id_col = extract_required_int32(&batch, "source_id", path)?;
+        let source_id_col = extract_required_int32(&batch, "ncs_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
         let curtailment_cost_col = extract_optional_float64(&batch, "curtailment_cost", path)?;
@@ -1570,7 +1570,7 @@ mod tests {
 
     fn ncs_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("source_id", DataType::Int32, false),
+            Field::new("ncs_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
             Field::new("curtailment_cost", DataType::Float64, true),
         ]))
@@ -1612,9 +1612,9 @@ mod tests {
         assert!((rows[2].curtailment_cost.unwrap() - 300.0).abs() < f64::EPSILON);
     }
 
-    /// AC: missing required `source_id` column -> SchemaError with field "source_id".
+    /// Missing id column -> error names the `ncs_id` spelling.
     #[test]
-    fn test_ncs_missing_source_id() {
+    fn test_ncs_missing_id_column_errors_new_spelling() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("stage_id", DataType::Int32, false),
             Field::new("curtailment_cost", DataType::Float64, true),
@@ -1632,10 +1632,7 @@ mod tests {
 
         match &err {
             LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("source_id"),
-                    "field should contain 'source_id', got: {field}"
-                );
+                assert_eq!(field, "ncs_id", "field should be 'ncs_id', got: {field}");
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }

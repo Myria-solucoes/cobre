@@ -10,7 +10,7 @@ use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::System;
-use cobre_core::scenario::{SamplingScheme, ScenarioSource};
+use cobre_core::scenario::SamplingScheme;
 use cobre_io::Config;
 use cobre_sddp::{
     SimulationScenarioResult, StudySetup,
@@ -132,9 +132,13 @@ impl Communicator for Rank0Of2 {
 /// Build a [`StudySetup`] for a case directory.
 ///
 /// The caller's `prepare_hydro_models` has already folded the productivity
-/// override into `hydro_models`; this helper does no parquet I/O.
+/// override into `hydro_models`. This helper re-loads `case_dir`'s
+/// `CaseArtifacts` (a second full parse) for `scalar_parameters`, because
+/// `StudyParams::into_construction_config` never carries them — every setup
+/// caller must patch them in itself (cobre-cli via MPI broadcast,
+/// cobre-python directly).
 pub fn build_setup_for_case(
-    _case_dir: &Path,
+    case_dir: &Path,
     config: &Config,
     system: &System,
     stochastic: StochasticContext,
@@ -149,7 +153,11 @@ pub fn build_setup_for_case(
         .expect("simulation_scenario_source must parse");
 
     let params = StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
-    let construction = params.into_construction_config();
+    let mut construction = params.into_construction_config();
+    construction.scalar_parameters = cobre_io::load_case_with_artifacts(case_dir)
+        .expect("load_case_with_artifacts must succeed")
+        .artifacts
+        .scalar_parameters;
 
     StudySetup::from_broadcast_params(
         system,
@@ -162,20 +170,20 @@ pub fn build_setup_for_case(
     .expect("StudySetup::from_broadcast_params must build")
 }
 
-/// Build a fresh [`StudySetup`] from `case_dir`'s config: parse, apply
-/// `mutate` to the config, load the case, prepare the stochastic context
-/// (seed `42`, [`ScenarioSource::default`]), prepare hydro models, then
-/// build via [`build_setup_for_case`] — the pipeline shared by every
-/// `mpi_wire.rs` determinism gate's `fresh_setup`.
+/// Build a fresh [`StudySetup`] from `case_dir`'s config: applies `mutate`,
+/// then derives the training scenario source from the mutated config — the
+/// pipeline shared by every `mpi_wire.rs` determinism gate's `fresh_setup`.
 pub fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut Config)) -> StudySetup {
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
     mutate(&mut config);
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let training_source = config
+        .training_scenario_source(&config_path)
+        .expect("training_scenario_source must parse");
+    let prepare_result = prepare_stochastic(system, case_dir, &config, 42, &training_source)
+        .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 
@@ -209,6 +217,34 @@ pub fn build_setup_in_code(system: System, config: &Config) -> StudySetup {
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 
     StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new")
+}
+
+/// Fallible sibling of [`build_setup_in_code`]: returns `StudySetup::new`'s
+/// `Result` so a test can assert a setup-time rejection (e.g. the admission
+/// gate) instead of panicking.
+#[allow(clippy::needless_pass_by_value)]
+pub fn try_build_setup_in_code(
+    system: System,
+    config: &Config,
+) -> Result<StudySetup, cobre_sddp::SddpError> {
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("build_stochastic_context");
+
+    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+
+    StudySetup::new(&system, config, stochastic, hydro_models)
 }
 
 /// Train `iterations`, then run the one-scenario simulation and return the drained

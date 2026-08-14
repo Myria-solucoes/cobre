@@ -10,7 +10,8 @@
 //!
 //! The following fields have no defaults and must be present in `config.json`:
 //!
-//! - `training.forward_passes` — number of scenario trajectories per iteration
+//! - `training.selection` — the scenario-selection method (carries the
+//!   forward-pass count in its `sampled` arm)
 //! - `training.stopping_rules` — at least one rule entry (must include `iteration_limit`)
 //!
 //! # Examples
@@ -20,7 +21,7 @@
 //! use std::path::Path;
 //!
 //! let cfg = parse_config(Path::new("case/config.json")).unwrap();
-//! println!("forward_passes = {:?}", cfg.training.forward_passes);
+//! println!("forward passes = {:?}", cfg.resolve_forward_passes());
 //! ```
 
 use serde_json::{Map, Value};
@@ -30,6 +31,7 @@ pub mod modeling;
 pub mod policy;
 pub mod scenario_source;
 pub mod simulation;
+pub mod state_space;
 pub mod training;
 
 pub use estimation::{EstimationConfig, OrderSelectionMethod};
@@ -37,15 +39,19 @@ pub use exports::ExportsConfig;
 pub use modeling::{InflowNonNegativityConfig, InflowNonNegativityMethod, ModelingConfig};
 pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
 pub use scenario_source::{
-    HistoricalYearRange, RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig,
+    HistoricalYearRange, Openings, RawClassConfigEntry, RawHistoricalYearsConfig,
+    RawSamplingScheme, RawScenarioSourceConfig,
 };
-pub use simulation::SimulationConfig;
+pub use simulation::{NumScenariosResolution, SimulationConfig, SimulationSelection};
+pub use state_space::StateSpaceConfig;
 pub use training::{
-    BackwardScheduler, DualEdgeWeight, LipschitzConfig, ParallelismConfig,
+    BackwardScheduler, DualEdgeWeight, ForwardPassesResolution, LipschitzConfig, ParallelismConfig,
     PhaseSolverProfileConfig, PresolveMode, PriceStrategy, RowSelectionConfig, ScaleStrategy,
-    SelectionMethod, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
-    UpperBoundEvaluationConfig,
+    SelectionMethod, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
+    TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
+
+use simulation::DEFAULT_NUM_SCENARIOS;
 
 use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};
 
@@ -68,6 +74,10 @@ pub struct Config {
     /// Modeling options (inflow non-negativity treatment).
     #[serde(default)]
     pub modeling: ModelingConfig,
+
+    /// State-space options (inflow-lag state depth).
+    #[serde(default)]
+    pub state_space: StateSpaceConfig,
 
     /// Training parameters — contains mandatory fields.
     pub training: TrainingConfig,
@@ -105,7 +115,7 @@ pub struct Config {
 /// | --------------------------------- | ----------------------------- |
 /// | File not found / read failure     | [`LoadError::IoError`]        |
 /// | Invalid JSON syntax               | [`LoadError::ParseError`]     |
-/// | `training.forward_passes` missing | [`LoadError::SchemaError`]    |
+/// | `training.selection` missing      | [`LoadError::SchemaError`]    |
 /// | `training.stopping_rules` missing | [`LoadError::SchemaError`]    |
 /// | Unknown stopping rule `"type"`    | [`LoadError::SchemaError`]    |
 ///
@@ -116,7 +126,7 @@ pub struct Config {
 /// use std::path::Path;
 ///
 /// let cfg = parse_config(Path::new("case/config.json")).unwrap();
-/// assert!(cfg.training.forward_passes.unwrap_or(0) > 0);
+/// assert!(cfg.resolve_forward_passes().is_some());
 /// ```
 pub fn parse_config(path: &Path) -> Result<Config, LoadError> {
     let raw = std::fs::read_to_string(path).map_err(|e| LoadError::io(path, e))?;
@@ -151,13 +161,14 @@ fn extract_field_from_serde_msg(msg: &str) -> String {
 }
 
 /// Post-deserialization validation that the mandatory `forward_passes` and
-/// `stopping_rules` fields are present.
+/// `stopping_rules` fields are present, and that the scenario-selection axis is
+/// well-formed on both phases.
 pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadError> {
-    if config.training.forward_passes.is_none() {
+    if config.resolve_forward_passes().is_none() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
-            field: "training.forward_passes".to_string(),
-            message: "required field is missing".to_string(),
+            field: "training.selection".to_string(),
+            message: "a forward-pass count is required via training.selection".to_string(),
         });
     }
 
@@ -174,44 +185,16 @@ pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadEr
 
 // ── ScenarioSource helpers ───────────────────────────────────────────────────
 
-/// Convert a `scheme` string from `config.json` to [`SamplingScheme`].
-///
-/// `field` is the dot-separated JSON path to the scheme key (e.g.
-/// `"training.scenario_source.inflow.scheme"`), used verbatim in the error
-/// message so the caller can identify which field has the invalid value.
-fn convert_sampling_scheme_cfg(
-    s: &str,
-    field: &str,
-    path: &Path,
-) -> Result<SamplingScheme, LoadError> {
-    match s {
-        "in_sample" => Ok(SamplingScheme::InSample),
-        "out_of_sample" => Ok(SamplingScheme::OutOfSample),
-        "external" => Ok(SamplingScheme::External),
-        "historical" => Ok(SamplingScheme::Historical),
-        other => Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: field.to_string(),
-            message: format!(
-                "unknown scheme '{other}', expected one of: in_sample, out_of_sample, external, historical"
-            ),
-        }),
+/// Map a per-class config entry to its [`SamplingScheme`], defaulting to
+/// `InSample` when the entry is absent. Infallible: an unknown scheme is
+/// rejected at parse by [`RawSamplingScheme`]'s `Deserialize`.
+fn convert_class_scheme_cfg(class: Option<&RawClassConfigEntry>) -> SamplingScheme {
+    match class.map(|c| c.scheme) {
+        None | Some(RawSamplingScheme::InSample) => SamplingScheme::InSample,
+        Some(RawSamplingScheme::OutOfSample) => SamplingScheme::OutOfSample,
+        Some(RawSamplingScheme::External) => SamplingScheme::External,
+        Some(RawSamplingScheme::Historical) => SamplingScheme::Historical,
     }
-}
-
-/// Convert a per-class config entry to its [`SamplingScheme`], defaulting to
-/// `in_sample` when the entry is absent.
-fn convert_class_scheme_cfg(
-    class: Option<&RawClassConfigEntry>,
-    section: &str,
-    class_name: &str,
-    path: &Path,
-) -> Result<SamplingScheme, LoadError> {
-    convert_sampling_scheme_cfg(
-        class.map_or("in_sample", |c| c.scheme.as_str()),
-        &format!("{section}.scenario_source.{class_name}.scheme"),
-        path,
-    )
 }
 
 /// Convert `Option<RawScenarioSourceConfig>` into a [`ScenarioSource`].
@@ -230,9 +213,9 @@ fn convert_scenario_source_config(
         return Ok(ScenarioSource::default());
     };
 
-    let inflow_scheme = convert_class_scheme_cfg(r.inflow.as_ref(), section, "inflow", path)?;
-    let load_scheme = convert_class_scheme_cfg(r.load.as_ref(), section, "load", path)?;
-    let ncs_scheme = convert_class_scheme_cfg(r.ncs.as_ref(), section, "ncs", path)?;
+    let inflow_scheme = convert_class_scheme_cfg(r.inflow.as_ref());
+    let load_scheme = convert_class_scheme_cfg(r.load.as_ref());
+    let ncs_scheme = convert_class_scheme_cfg(r.ncs.as_ref());
 
     let source = ScenarioSource {
         inflow_scheme,
@@ -249,8 +232,35 @@ fn convert_scenario_source_config(
     };
 
     validate_scenario_source_cfg(&source, section, path)?;
+    validate_openings_cfg(r.openings.as_ref(), section, path)?;
 
     Ok(source)
+}
+
+/// Validate a declared `openings` source from `config.json`: `generated` and
+/// `file` are both admitted under `training`; any declaration outside the
+/// `training` section is rejected.
+fn validate_openings_cfg(
+    openings: Option<&Openings>,
+    section: &str,
+    path: &Path,
+) -> Result<(), LoadError> {
+    if openings.is_none() {
+        return Ok(());
+    }
+
+    if section != "training" {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("{section}.scenario_source.openings"),
+            message: format!(
+                "openings is only valid under training.scenario_source, not \
+                 {section}.scenario_source"
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Tier-1 structural validation of a parsed [`ScenarioSource`] from `config.json`.
@@ -367,6 +377,53 @@ impl Config {
             )
         } else {
             self.training_scenario_source(path)
+        }
+    }
+
+    /// The training-phase `openings` source declaration, or `None` when absent
+    /// (equivalent to `generated`). Single owner of the training `openings`
+    /// lookup that downstream opening-tree selection reads.
+    #[must_use]
+    pub fn training_openings(&self) -> Option<&Openings> {
+        self.training
+            .scenario_source
+            .as_ref()
+            .and_then(|s| s.openings.as_ref())
+    }
+
+    /// Resolve the effective training forward-pass method from
+    /// `training.selection`.
+    ///
+    /// Returns `None` when `selection` is absent, leaving the mandatory-count
+    /// rejection to [`validate_config`]. An `enumerated` selection resolves to
+    /// [`ForwardPassesResolution::Enumerated`] — config load holds no policy
+    /// graph, so the count itself is derived downstream.
+    #[must_use]
+    pub fn resolve_forward_passes(&self) -> Option<ForwardPassesResolution> {
+        match &self.training.selection {
+            Some(TrainingSelection::Enumerated {}) => Some(ForwardPassesResolution::Enumerated),
+            Some(TrainingSelection::Sampled { forward_passes }) => {
+                Some(ForwardPassesResolution::Sampled(*forward_passes))
+            }
+            None => None,
+        }
+    }
+
+    /// Resolve the effective simulation scenario-count method from
+    /// `simulation.selection`, defaulting to [`DEFAULT_NUM_SCENARIOS`] when
+    /// absent.
+    ///
+    /// An `enumerated` selection resolves to
+    /// [`NumScenariosResolution::Enumerated`] — config load holds no policy
+    /// graph, so the derived count happens downstream.
+    #[must_use]
+    pub fn resolve_num_scenarios(&self) -> NumScenariosResolution {
+        match &self.simulation.selection {
+            Some(SimulationSelection::Enumerated {}) => NumScenariosResolution::Enumerated,
+            Some(SimulationSelection::Sampled { num_scenarios }) => {
+                NumScenariosResolution::Sampled(*num_scenarios)
+            }
+            None => NumScenariosResolution::Sampled(DEFAULT_NUM_SCENARIOS),
         }
     }
 
@@ -497,25 +554,54 @@ mod tests {
     #[test]
     fn test_parse_minimal_config() {
         let f = write_config(
-            r#"{"training": {"tree_seed": 42, "forward_passes": 192, "stopping_rules": [{"type": "iteration_limit", "limit": 50}]}}"#,
+            r#"{"training": {"tree_seed": 42, "selection": {"method": "sampled", "forward_passes": 192}, "stopping_rules": [{"type": "iteration_limit", "limit": 50}]}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
 
-        assert_eq!(cfg.training.forward_passes, Some(192));
+        assert_eq!(
+            cfg.resolve_forward_passes(),
+            Some(ForwardPassesResolution::Sampled(192))
+        );
         assert_eq!(cfg.training.tree_seed, Some(42));
-        assert_eq!(cfg.training.stopping_mode, "any");
+        assert_eq!(cfg.training.stopping_mode, StoppingMode::Any);
         assert!(cfg.training.enabled);
         assert_eq!(
             cfg.modeling.inflow_non_negativity.method,
             InflowNonNegativityMethod::Penalty
         );
         assert!(!cfg.simulation.enabled);
-        assert_eq!(cfg.simulation.num_scenarios, 2000);
+        assert_eq!(
+            cfg.resolve_num_scenarios(),
+            NumScenariosResolution::Sampled(2000),
+            "absent simulation selection resolves to the default sampled count"
+        );
         assert_eq!(cfg.policy.mode, PolicyMode::Fresh);
         assert_eq!(cfg.policy.path, "./policy");
     }
 
-    /// AC-2: missing `training.forward_passes` → SchemaError with field name.
+    /// C1 input-compatibility: a `config.json` written before `state_space`
+    /// existed loads with `state_space.inflow_lag_depth` defaulted to `None`.
+    #[test]
+    fn test_config_without_state_space_defaults_to_none() {
+        let f = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert_eq!(cfg.state_space.inflow_lag_depth, None);
+    }
+
+    /// A present `state_space.inflow_lag_depth` survives `parse_config`.
+    #[test]
+    fn test_config_state_space_inflow_lag_depth_present() {
+        let f = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}, "state_space": {"inflow_lag_depth": 12}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert_eq!(cfg.state_space.inflow_lag_depth, Some(12));
+    }
+
+    /// AC-2: missing `training.selection` (no forward-pass count) → SchemaError
+    /// with field name.
     #[test]
     fn test_missing_forward_passes() {
         let f = write_config(
@@ -525,8 +611,8 @@ mod tests {
         match &err {
             LoadError::SchemaError { field, .. } => {
                 assert!(
-                    field.contains("forward_passes"),
-                    "field should contain 'forward_passes', got: {field}"
+                    field.contains("selection"),
+                    "field should name training.selection, got: {field}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -536,7 +622,9 @@ mod tests {
     /// AC-2 variant: missing `training.stopping_rules` → SchemaError.
     #[test]
     fn test_missing_stopping_rules() {
-        let f = write_config(r#"{"training": {"tree_seed": 1, "forward_passes": 100}}"#);
+        let f = write_config(
+            r#"{"training": {"tree_seed": 1, "selection": {"method": "sampled", "forward_passes": 100}}}"#,
+        );
         let err = parse_config(f.path()).unwrap_err();
         match &err {
             LoadError::SchemaError { field, .. } => {
@@ -574,7 +662,7 @@ mod tests {
           },
           "training": {
             "tree_seed": 42,
-            "forward_passes": 192,
+            "selection": {"method": "sampled", "forward_passes": 192},
             "stopping_rules": [
               {"type": "iteration_limit", "limit": 50},
               {"type": "bound_stalling", "iterations": 10, "tolerance": 0.0001}
@@ -605,7 +693,7 @@ mod tests {
           },
           "simulation": {
             "enabled": true,
-            "num_scenarios": 2000
+            "selection": {"method": "sampled", "num_scenarios": 2000}
           },
           "exports": {
             "states": true,
@@ -621,8 +709,11 @@ mod tests {
             InflowNonNegativityMethod::Penalty
         );
 
-        assert_eq!(cfg.training.forward_passes, Some(192));
-        assert_eq!(cfg.training.stopping_mode, "any");
+        assert_eq!(
+            cfg.resolve_forward_passes(),
+            Some(ForwardPassesResolution::Sampled(192))
+        );
+        assert_eq!(cfg.training.stopping_mode, StoppingMode::Any);
         let rules = cfg.training.stopping_rules.as_ref().unwrap();
         assert_eq!(rules.len(), 2);
         let cut_sel = &cfg.training.cut_selection;
@@ -644,7 +735,10 @@ mod tests {
         assert_eq!(cfg.policy.checkpointing.enabled, Some(true));
 
         assert!(cfg.simulation.enabled);
-        assert_eq!(cfg.simulation.num_scenarios, 2000);
+        assert_eq!(
+            cfg.resolve_num_scenarios(),
+            NumScenariosResolution::Sampled(2000)
+        );
 
         assert!(cfg.exports.states);
         assert!(cfg.exports.stochastic);
@@ -669,18 +763,14 @@ mod tests {
     fn test_stopping_rule_variants() {
         let json = r#"{
           "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
               {"type": "iteration_limit", "limit": 100},
               {"type": "time_limit", "seconds": 3600.0},
               {"type": "bound_stalling", "iterations": 10, "tolerance": 0.0001},
               {
-                "type": "simulation",
-                "replications": 100,
-                "period": 20,
-                "bound_window": 5,
-                "distance_tol": 0.01,
-                "bound_tol": 0.0001
+                "type": "gap",
+                "tolerance": 1000.0
               }
             ]
           }
@@ -704,11 +794,10 @@ mod tests {
         ));
         assert!(matches!(
             rules[3],
-            StoppingRuleConfig::Simulation {
-                replications: 100,
-                period: 20,
+            StoppingRuleConfig::Gap {
+                tolerance: Some(t),
                 ..
-            }
+            } if (t - 1000.0).abs() < f64::EPSILON
         ));
     }
 
@@ -716,7 +805,7 @@ mod tests {
     #[test]
     fn test_unknown_stopping_rule_type() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 10, "stopping_rules": [{"type": "nonexistent_rule"}]}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "nonexistent_rule"}]}}"#,
         );
         let err = parse_config(f.path()).unwrap_err();
         assert!(
@@ -725,12 +814,29 @@ mod tests {
         );
     }
 
+    /// The retired `simulation` stopping-rule type (replaced by `gap`) is
+    /// rejected as an unknown variant, not a recognized-but-invalid one.
+    #[test]
+    fn old_simulation_stopping_rule_type_is_unknown_variant() {
+        let f = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [
+                {"type": "simulation", "replications": 100, "period": 20,
+                 "bound_window": 5, "distance_tol": 0.01, "bound_tol": 0.0001}
+            ]}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        assert!(
+            matches!(err, LoadError::SchemaError { .. }),
+            "expected SchemaError for the retired simulation rule type, got: {err:?}"
+        );
+    }
+
     /// `Config` has no `version` field — the struct does not
     /// expose `.version` and the field is not present after deserialization.
     #[test]
     fn test_config_has_no_version_field() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 1, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
         assert!(cfg.schema.is_none(), "schema should be None when absent");
@@ -744,7 +850,7 @@ mod tests {
             r#"{
             "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/config.schema.json",
             "training": {
-                "forward_passes": 1,
+                "selection": {"method": "sampled", "forward_passes": 1},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
             }
         }"#,
@@ -763,7 +869,7 @@ mod tests {
     #[test]
     fn test_invalid_policy_mode_rejected() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 1, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}, "policy": {"mode": "warmstart"}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}, "policy": {"mode": "warmstart"}}"#,
         );
         let err = parse_config(f.path()).unwrap_err();
         assert!(
@@ -781,7 +887,7 @@ mod tests {
             r#"{
             "version": "1.0.0",
             "training": {
-                "forward_passes": 1,
+                "selection": {"method": "sampled", "forward_passes": 1},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
             }
         }"#,
@@ -804,7 +910,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 1,
+                "selection": {"method": "sampled", "forward_passes": 1},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
             },
             "policy": {
@@ -832,7 +938,7 @@ mod tests {
                 }
             },
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             }
         }"#,
@@ -856,7 +962,7 @@ mod tests {
                 }
             },
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             }
         }"#,
@@ -875,7 +981,7 @@ mod tests {
     #[test]
     fn test_estimation_config_defaults() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
         assert_eq!(cfg.estimation.max_order, 6);
@@ -891,7 +997,7 @@ mod tests {
     fn test_estimation_config_order_selection_fixed_rejected() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "estimation": {"max_order": 3, "order_selection": "fixed", "min_observations_per_season": 20}
         }"#,
         );
@@ -907,7 +1013,7 @@ mod tests {
     fn test_estimation_config_order_selection_pacf() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "estimation": {"max_order": 4, "order_selection": "pacf", "min_observations_per_season": 15}
         }"#,
         );
@@ -926,7 +1032,7 @@ mod tests {
     fn test_estimation_config_unknown_order_selection() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "estimation": {"order_selection": "bogus"}
         }"#,
         );
@@ -947,7 +1053,7 @@ mod tests {
     fn test_exports_stochastic_explicit_true() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "exports": {"stochastic": true}
         }"#,
         );
@@ -963,7 +1069,7 @@ mod tests {
     fn test_exports_stochastic_defaults_to_false() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
         }"#,
         );
         let cfg = parse_config(f.path()).unwrap();
@@ -978,7 +1084,7 @@ mod tests {
     fn test_exports_fpha_deviation_points_explicit_true() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "exports": {"fpha_deviation_points": true}
         }"#,
         );
@@ -995,7 +1101,7 @@ mod tests {
     fn test_exports_fpha_deviation_points_defaults_to_false() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
         }"#,
         );
         let cfg = parse_config(f.path()).unwrap();
@@ -1007,12 +1113,11 @@ mod tests {
 
     // ── ScenarioSource parsing tests ──────────────────────────────────────────
 
-    const MINIMAL_TRAINING: &str =
-        r#"{"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}"#;
+    const MINIMAL_TRAINING: &str = r#"{"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}"#;
 
     fn write_with_training_scenario_source(scenario_source_json: &str) -> NamedTempFile {
         write_config(&format!(
-            r#"{{"training": {{"forward_passes": 10, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "scenario_source": {scenario_source_json}}}}}"#
+            r#"{{"training": {{"selection": {{"method": "sampled", "forward_passes": 10}}, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "scenario_source": {scenario_source_json}}}}}"#
         ))
     }
 
@@ -1021,7 +1126,7 @@ mod tests {
         simulation_json: &str,
     ) -> NamedTempFile {
         write_config(&format!(
-            r#"{{"training": {{"forward_passes": 10, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "scenario_source": {training_json}}}, "simulation": {{"scenario_source": {simulation_json}}}}}"#
+            r#"{{"training": {{"selection": {{"method": "sampled", "forward_passes": 10}}, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "scenario_source": {training_json}}}, "simulation": {{"scenario_source": {simulation_json}}}}}"#
         ))
     }
 
@@ -1138,6 +1243,58 @@ mod tests {
         }
     }
 
+    /// An unknown per-class `scheme` is rejected during parse, and the error
+    /// names the accepted set.
+    #[test]
+    fn unknown_scheme_is_rejected_naming_accepted_set() {
+        let f = write_with_training_scenario_source(r#"{"inflow": {"scheme": "antithetic"}}"#);
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("in_sample")
+                        && message.contains("out_of_sample")
+                        && message.contains("external")
+                        && message.contains("historical"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// `stopping_mode = "any"` / `"all"` both parse into the enum — the accepted
+    /// set is unchanged by the representation promotion.
+    #[test]
+    fn stopping_mode_any_and_all_parse() {
+        for (value, expected) in [("any", StoppingMode::Any), ("all", StoppingMode::All)] {
+            let f = write_config(&format!(
+                r#"{{"training": {{"selection": {{"method": "sampled", "forward_passes": 10}}, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "stopping_mode": "{value}"}}}}"#
+            ));
+            let cfg = parse_config(f.path()).unwrap();
+            assert_eq!(cfg.training.stopping_mode, expected);
+        }
+    }
+
+    /// An unknown `stopping_mode` is rejected during parse (the tightening: no
+    /// silent fallback to `any`), and the error names the accepted set.
+    #[test]
+    fn unknown_stopping_mode_is_rejected_naming_accepted_set() {
+        let f = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}], "stopping_mode": "either"}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("any") && message.contains("all"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
     /// OutOfSample without seed → SchemaError.
     #[test]
     fn test_scenario_source_seed_required_for_oos() {
@@ -1194,6 +1351,94 @@ mod tests {
         }
     }
 
+    // ── openings source tests ─────────────────────────────────────────────────
+
+    /// A declared `generated` openings source under training is admitted, and
+    /// the resolved `ScenarioSource` is unchanged (openings lives on the raw
+    /// config, not `ScenarioSource`).
+    #[test]
+    fn openings_generated_accepted_under_training() {
+        let f = write_with_training_scenario_source(r#"{"openings": {"source": "generated"}}"#);
+        let cfg = parse_config(f.path()).unwrap();
+        let source = cfg.training_scenario_source(f.path()).unwrap();
+        assert_eq!(source, ScenarioSource::default());
+    }
+
+    /// The dropped `external` openings source is now an unknown-variant parse
+    /// error — the arm no longer exists (`generated` and `file` remain).
+    #[test]
+    fn openings_external_is_unknown_variant_parse_error() {
+        let f = write_with_training_scenario_source(r#"{"openings": {"source": "external"}}"#);
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("unknown variant"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected SchemaError (unknown variant), got: {other:?}"),
+        }
+    }
+
+    /// A `file` openings source under training is admitted, and
+    /// `training_openings()` surfaces the declared `File` arm.
+    #[test]
+    fn openings_file_accepted_under_training() {
+        let f = write_with_training_scenario_source(r#"{"openings": {"source": "file"}}"#);
+        let cfg = parse_config(f.path()).unwrap();
+        cfg.training_scenario_source(f.path())
+            .expect("file openings source must load under training");
+        assert_eq!(cfg.training_openings(), Some(&Openings::File {}));
+    }
+
+    /// The dropped `path` field on the `file` openings source is now an
+    /// unknown-field parse error — the arm is convention-located, no user path.
+    #[test]
+    fn openings_file_path_field_rejected() {
+        let f = write_with_training_scenario_source(
+            r#"{"openings": {"source": "file", "path": "scenarios/openings.parquet"}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LoadError::SchemaError { .. } | LoadError::ParseError { .. }
+            ),
+            "a path field on the file arm must be rejected, got: {err:?}"
+        );
+    }
+
+    /// `openings` under `simulation.scenario_source` is rejected naming the
+    /// field — a declared openings source is valid only for training.
+    #[test]
+    fn openings_under_simulation_rejected() {
+        let f = write_with_both_scenario_sources(
+            r#"{"inflow": {"scheme": "in_sample"}}"#,
+            r#"{"openings": {"source": "generated"}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        let err = cfg.simulation_scenario_source(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "simulation.scenario_source.openings");
+                assert!(
+                    message.contains("only valid under training.scenario_source"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A `file` openings source round-trips through serde into the `File`
+    /// variant (no path field).
+    #[test]
+    fn openings_file_variant_round_trips() {
+        let parsed: Openings = serde_json::from_str(r#"{"source": "file"}"#).unwrap();
+        assert_eq!(parsed, Openings::File {});
+    }
+
     /// `simulation.sampling_scheme` (dead field) is now rejected because
     /// `SimulationConfig` uses `deny_unknown_fields`. Old case dirs must remove
     /// this key before loading.
@@ -1201,7 +1446,7 @@ mod tests {
     fn test_dead_sampling_scheme_field_rejected() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "simulation": {"enabled": true, "sampling_scheme": {"type": "in_sample"}}
         }"#,
         );
@@ -1249,7 +1494,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}],
                 "cut_selection": {"selection": {"method": "level1"}}
             }
@@ -1269,7 +1514,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             },
             "policy": {
@@ -1284,7 +1529,47 @@ mod tests {
         let cfg = parse_config(f.path()).unwrap();
         let boundary = cfg.policy.boundary.unwrap();
         assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, 2);
+        assert_eq!(boundary.source_stage, Some(2));
+    }
+
+    /// `policy.boundary` with `path` but no `source_stage` deserializes to
+    /// `Some(BoundaryPolicy { source_stage: None, .. })`; an unknown key
+    /// under `boundary` is still rejected by `deny_unknown_fields`.
+    #[test]
+    fn test_boundary_policy_source_stage_absent_is_none() {
+        let f = write_config(
+            r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": {
+                    "path": "../monthly/policy"
+                }
+            }
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        let boundary = cfg.policy.boundary.unwrap();
+        assert_eq!(boundary.path, "../monthly/policy");
+        assert_eq!(boundary.source_stage, None);
+
+        let unknown_key_json = r#"{
+            "training": {
+                "selection": {"method": "sampled", "forward_passes": 10},
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            },
+            "policy": {
+                "mode": "fresh",
+                "boundary": { "path": "../monthly/policy", "unexpected": true }
+            }
+        }"#;
+        assert!(
+            serde_json::from_str::<Config>(unknown_key_json).is_err(),
+            "an unknown key under policy.boundary must still be rejected"
+        );
     }
 
     /// `policy` without a `boundary` key deserializes to `None`.
@@ -1293,7 +1578,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             },
             "policy": {}
@@ -1312,7 +1597,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             },
             "policy": { "boundary": null }
@@ -1344,14 +1629,14 @@ mod tests {
             checkpointing: CheckpointingConfig::default(),
             boundary: Some(BoundaryPolicy {
                 path: "../monthly/policy".to_string(),
-                source_stage: 5,
+                source_stage: Some(5),
             }),
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: PolicyConfig = serde_json::from_str(&json).unwrap();
         let boundary = restored.boundary.unwrap();
         assert_eq!(boundary.path, "../monthly/policy");
-        assert_eq!(boundary.source_stage, 5);
+        assert_eq!(boundary.source_stage, Some(5));
     }
 
     /// Stale `exports` keys (`training`, `cuts`, `vertices`, `simulation`,
@@ -1361,7 +1646,7 @@ mod tests {
     #[test]
     fn parse_config_rejects_removed_exports_fields() {
         let json = r#"{
-            "training": { "forward_passes": 4, "stopping_rules": [] },
+            "training": { "selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [] },
             "exports": {
                 "training": true,
                 "cuts": false,
@@ -1436,7 +1721,7 @@ mod tests {
     const OVERRIDE_BASE_CONFIG: &str = r#"{
       "training": {
         "tree_seed": 42,
-        "forward_passes": 192,
+        "selection": {"method": "sampled", "forward_passes": 192},
         "stopping_rules": [{"type": "iteration_limit", "limit": 50}],
         "stopping_mode": "any"
       },
@@ -1468,8 +1753,11 @@ mod tests {
 
         assert_eq!(cfg.training.tree_seed, Some(7));
         // Siblings unchanged from base.
-        assert_eq!(cfg.training.forward_passes, Some(192));
-        assert_eq!(cfg.training.stopping_mode, "any");
+        assert_eq!(
+            cfg.resolve_forward_passes(),
+            Some(ForwardPassesResolution::Sampled(192))
+        );
+        assert_eq!(cfg.training.stopping_mode, StoppingMode::Any);
         let rules = cfg.training.stopping_rules.as_deref().unwrap();
         assert!(matches!(
             rules,
@@ -1532,14 +1820,14 @@ mod tests {
     #[test]
     fn with_overrides_invalid_value_fails_validation() {
         let base = base_value(OVERRIDE_BASE_CONFIG);
-        let overrides = override_map(&[("training.forward_passes", serde_json::Value::Null)]);
+        let overrides = override_map(&[("training.selection", serde_json::Value::Null)]);
 
         let err = Config::with_overrides(&base, &overrides).unwrap_err();
         match &err {
             LoadError::SchemaError { field, .. } => {
                 assert!(
-                    field.contains("training.forward_passes"),
-                    "field should name training.forward_passes, got: {field}"
+                    field.contains("training.selection"),
+                    "field should name training.selection, got: {field}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -1600,7 +1888,7 @@ mod tests {
     fn historical_years_range_stray_key_is_deserialize_error() {
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": {"method": "sampled", "forward_passes": 4},
                 "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
                 "scenario_source": {
                     "seed": 7,
@@ -1625,7 +1913,7 @@ mod tests {
     /// family (both scheduler methods, a `level1` and a `dynamic` selection,
     /// all four stopping-rule types, both `historical_years` forms).
     fn injection_sweep_base_configs() -> Vec<serde_json::Value> {
-        let trial_point_flavored = serde_json::json!({
+        let by_scenario_flavored = serde_json::json!({
             "modeling": {
                 "inflow_non_negativity": { "method": "penalty" },
                 "cost_scale_factor": 1_000_000.0
@@ -1633,13 +1921,12 @@ mod tests {
             "training": {
                 "enabled": true,
                 "tree_seed": 42,
-                "forward_passes": 4,
+                "selection": {"method": "sampled", "forward_passes": 4},
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 },
                     { "type": "time_limit", "seconds": 60.0 },
                     { "type": "bound_stalling", "iterations": 5, "tolerance": 0.001 },
-                    { "type": "simulation", "replications": 10, "period": 5,
-                      "bound_window": 5, "distance_tol": 0.05, "bound_tol": 0.01 }
+                    { "type": "gap", "tolerance": 1000.0, "relative_tolerance": 0.01 }
                 ],
                 "stopping_mode": "any",
                 "cut_selection": {
@@ -1669,7 +1956,7 @@ mod tests {
                     "forward": { "price": "row_hyper_sparse" }
                 },
                 "parallelism": {
-                    "backward_scheduler": { "method": "trial_point" }
+                    "backward_scheduler": { "method": "by_scenario" }
                 },
                 "scenario_source": {
                     "seed": 7,
@@ -1696,14 +1983,15 @@ mod tests {
             },
             "simulation": {
                 "enabled": true,
-                "num_scenarios": 100,
+                "selection": {"method": "sampled", "num_scenarios": 100},
                 "io_channel_capacity": 64,
                 "scenario_source": {
                     "seed": 9,
                     "historical_years": [1940, 1953],
                     "inflow": { "scheme": "historical" }
                 },
-                "solver": { "price": "row" }
+                "solver": { "price": "row" },
+                "selection": { "method": "sampled", "num_scenarios": 100 }
             },
             "exports": { "states": true, "stochastic": true, "fpha_deviation_points": true },
             "estimation": {
@@ -1713,9 +2001,9 @@ mod tests {
                 "max_coefficient_magnitude": 2.0
             }
         });
-        let opening_block_flavored = serde_json::json!({
+        let by_node_flavored = serde_json::json!({
             "training": {
-                "forward_passes": 4,
+                "selection": {"method": "sampled", "forward_passes": 4},
                 "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }],
                 "cut_selection": {
                     "selection": {
@@ -1728,11 +2016,12 @@ mod tests {
                     }
                 },
                 "parallelism": {
-                    "backward_scheduler": { "method": "opening_block", "block_size": 4 }
-                }
+                    "backward_scheduler": { "method": "by_node", "block_size": 4 }
+                },
+                "selection": { "method": "sampled", "forward_passes": 4 }
             }
         });
-        vec![trial_point_flavored, opening_block_flavored]
+        vec![by_scenario_flavored, by_node_flavored]
     }
 
     /// Collect the JSON Pointer of every object node in `value`.
@@ -1788,5 +2077,98 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Scenario-selection count resolution ───────────────────────────────────
+
+    /// A `sampled` training selection resolves the forward-pass count.
+    #[test]
+    fn training_sampled_selection_resolves_count() {
+        let via_selection = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 8}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+        );
+        let cfg_sel = parse_config(via_selection.path()).unwrap();
+        assert_eq!(
+            cfg_sel.resolve_forward_passes(),
+            Some(ForwardPassesResolution::Sampled(8))
+        );
+    }
+
+    /// A config setting the removed root `training.forward_passes` alias fails
+    /// to load under `deny_unknown_fields`, the error naming the unknown field;
+    /// a flat `simulation.num_scenarios` alias likewise. The count lives solely
+    /// in the `selection.sampled` arm.
+    #[test]
+    fn removed_selection_aliases_fail_to_load() {
+        let root_fp = write_config(
+            r#"{"training": {"forward_passes": 8, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+        );
+        let err = parse_config(root_fp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("forward_passes"),
+            "root training.forward_passes must be an unknown-field load error naming it, got: {err}"
+        );
+
+        let flat_ns = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "num_scenarios": 500}}"#,
+        );
+        let err = parse_config(flat_ns.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("num_scenarios"),
+            "flat simulation.num_scenarios must be an unknown-field load error naming it, got: {err}"
+        );
+    }
+
+    /// A `training.selection` of `enumerated` loads and resolves to
+    /// [`ForwardPassesResolution::Enumerated`] — the count itself is a
+    /// setup-layer concern (the graph-derived count), not config load's.
+    #[test]
+    fn training_enumerated_selection_resolves() {
+        let f = write_config(
+            r#"{"training": {"selection": {"method": "enumerated"}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert_eq!(
+            cfg.resolve_forward_passes(),
+            Some(ForwardPassesResolution::Enumerated)
+        );
+    }
+
+    /// The simulation mirror of `enumerated` loads and resolves to
+    /// [`NumScenariosResolution::Enumerated`]; the census count is graph-derived
+    /// downstream, carried with no config-side count.
+    #[test]
+    fn simulation_enumerated_selection_resolves() {
+        let f = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "selection": {"method": "enumerated"}}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert_eq!(
+            cfg.resolve_num_scenarios(),
+            NumScenariosResolution::Enumerated
+        );
+    }
+
+    /// A `sampled` simulation selection resolves its scenario count; an absent
+    /// selection resolves to the default sampled count.
+    #[test]
+    fn simulation_sampled_and_default_num_scenarios_resolve() {
+        let via_selection = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "selection": {"method": "sampled", "num_scenarios": 500}}}"#,
+        );
+        let cfg_sel = parse_config(via_selection.path()).unwrap();
+        assert_eq!(
+            cfg_sel.resolve_num_scenarios(),
+            NumScenariosResolution::Sampled(500)
+        );
+
+        let via_default = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true}}"#,
+        );
+        let cfg_default = parse_config(via_default.path()).unwrap();
+        assert_eq!(
+            cfg_default.resolve_num_scenarios(),
+            NumScenariosResolution::Sampled(2000)
+        );
     }
 }

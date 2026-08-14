@@ -31,7 +31,7 @@
 //! let (stop, results) = monitor.update(100.0, &sync);
 //! assert!(!stop);
 //! assert_eq!(monitor.iteration_count(), 1);
-//! assert!((monitor.gap() - 10.0 / 110.0).abs() < 1e-10);
+//! assert!((monitor.gap() - 10.0 / 100.0).abs() < 1e-10);
 //! ```
 
 use std::time::Instant;
@@ -40,7 +40,7 @@ use cobre_core::StoppingRuleResult;
 
 use crate::{
     forward::SyncResult,
-    stopping_rule::{MonitorState, StoppingRuleSet},
+    stopping_rule::{MonitorState, StoppingRuleSet, relative_gap_denominator},
 };
 
 /// Tracks bound statistics and evaluates stopping rules across training
@@ -61,7 +61,6 @@ pub struct ConvergenceMonitor {
     iteration_count: u64,
     start_time: Instant,
     shutdown_requested: bool,
-    simulation_costs: Option<Vec<f64>>,
 }
 
 impl ConvergenceMonitor {
@@ -79,42 +78,39 @@ impl ConvergenceMonitor {
             iteration_count: 0,
             start_time: Instant::now(),
             shutdown_requested: false,
-            simulation_costs: None,
         }
     }
 
     /// Update bound statistics and evaluate stopping rules.
     ///
     /// Returns `(should_stop, results)`: the combined termination decision and
-    /// the per-rule evaluation results. Gap uses a `max(1.0, |UB|)` denominator
-    /// to guard against division by zero.
+    /// the per-rule evaluation results. Gap is normalized by the LOWER bound
+    /// (`max(1.0, |LB|)` denominator, shared with the `Gap` stopping rule) to
+    /// guard against division by zero.
     pub fn update(&mut self, lb: f64, sync_result: &SyncResult) -> (bool, Vec<StoppingRuleResult>) {
         self.lower_bound = lb;
         self.upper_bound = sync_result.global_ub_mean;
         self.upper_bound_std = sync_result.global_ub_std;
         self.ci_95_half_width = sync_result.ci_95_half_width;
 
-        let denominator = self.upper_bound.abs().max(1.0_f64);
-        self.gap = (self.upper_bound - lb) / denominator;
+        self.gap = (self.upper_bound - lb) / relative_gap_denominator(lb);
 
         self.iteration_count += 1;
         self.lower_bound_history.push(lb);
 
-        // Move the vecs into MonitorState without cloning, then restore them.
+        // Move the vec into MonitorState without cloning, then restore it.
         let history = std::mem::take(&mut self.lower_bound_history);
-        let sim_costs = std::mem::take(&mut self.simulation_costs);
         let state = MonitorState {
             iteration: self.iteration_count,
             wall_time_seconds: self.start_time.elapsed().as_secs_f64(),
             lower_bound: self.lower_bound,
+            upper_bound: self.upper_bound,
             lower_bound_history: history,
             shutdown_requested: self.shutdown_requested,
-            simulation_costs: sim_costs,
         };
 
         let result = self.rule_set.evaluate(&state);
         self.lower_bound_history = state.lower_bound_history;
-        self.simulation_costs = state.simulation_costs;
         result
     }
 
@@ -122,13 +118,6 @@ impl ConvergenceMonitor {
     /// returns `(true, _)` with the `GracefulShutdown` rule triggered.
     pub fn set_shutdown(&mut self) {
         self.shutdown_requested = true;
-    }
-
-    /// Provide simulation costs for the [`crate::stopping_rule::StoppingRule::SimulationBased`]
-    /// rule; forwarded into [`MonitorState::simulation_costs`] on the next
-    /// [`ConvergenceMonitor::update`].
-    pub fn set_simulation_costs(&mut self, costs: Vec<f64>) {
-        self.simulation_costs = Some(costs);
     }
 
     /// Current lower bound.
@@ -155,7 +144,7 @@ impl ConvergenceMonitor {
         self.ci_95_half_width
     }
 
-    /// Current convergence gap: `(UB - LB) / max(1.0, |UB|)`.
+    /// Current convergence gap: `(UB - LB) / max(1.0, |LB|)`.
     #[must_use]
     pub fn gap(&self) -> f64 {
         self.gap
@@ -241,31 +230,31 @@ mod tests {
 
     #[test]
     fn gap_formula_uses_max_guard() {
-        // UB = 0.5 → denominator = max(1.0, 0.5) = 1.0
-        // gap = (0.5 - 100.0) / 1.0 = -99.5
+        // LB = 0.5 → denominator = max(1.0, |0.5|) = 1.0 (the lower-bound floor)
+        // gap = (100.5 - 0.5) / 1.0 = 100.0
         let mut monitor =
             ConvergenceMonitor::new(make_rule_set(StoppingRule::IterationLimit { limit: 100 }));
-        let sync = make_sync(0.5);
-        monitor.update(100.0, &sync);
-        let expected = (0.5_f64 - 100.0) / 1.0_f64;
+        let sync = make_sync(100.5);
+        monitor.update(0.5, &sync);
+        let expected = (100.5_f64 - 0.5) / 1.0_f64;
         assert!(
             (monitor.gap() - expected).abs() < 1e-10,
-            "gap with UB=0.5 must use max guard of 1.0, got {}",
+            "gap with LB=0.5 must use max guard of 1.0, got {}",
             monitor.gap()
         );
     }
 
     #[test]
     fn gap_formula_normal_case() {
-        // UB = 110, LB = 100 → gap = (110 - 100) / max(1.0, 110.0) = 10/110
+        // UB = 110, LB = 100 → gap = (110 - 100) / max(1.0, 100.0) = 10/100
         let mut monitor =
             ConvergenceMonitor::new(make_rule_set(StoppingRule::IterationLimit { limit: 100 }));
         let sync = make_sync(110.0);
         monitor.update(100.0, &sync);
-        let expected = 10.0_f64 / 110.0_f64;
+        let expected = 10.0_f64 / 100.0_f64;
         assert!(
             (monitor.gap() - expected).abs() < 1e-10,
-            "gap must be 10/110, got {}",
+            "gap must be 10/100, got {}",
             monitor.gap()
         );
     }
@@ -302,33 +291,37 @@ mod tests {
     }
 
     #[test]
-    fn set_simulation_costs_populates_monitor_state() {
-        // Use a SimulationBased rule evaluated at period=1.
-        // Provide simulation costs and verify the rule reaches evaluation
-        // (i.e., costs pass through to MonitorState).
+    fn gap_rule_evaluates_exact_gap_through_update() {
         let rule_set = StoppingRuleSet {
-            rules: vec![StoppingRule::SimulationBased {
-                period: 1,
-                distance_tolerance: 1e6, // always trigger if costs present
-                replications: 10,
-                bound_stability_window: 1,
+            rules: vec![StoppingRule::Gap {
+                tolerance: Some(1000.0),
+                relative_tolerance: None,
             }],
             mode: StoppingMode::Any,
         };
         let mut monitor = ConvergenceMonitor::new(rule_set);
-        monitor.set_simulation_costs(vec![100.0, 200.0, 300.0]);
-        let (_stop, results) = monitor.update(80.0, &default_sync());
-        // The SimulationBased rule must have received the costs (it evaluates at
-        // iteration 1 which is divisible by period=1) and reached the distance check.
-        assert_eq!(results[0].rule_name, "simulation_based");
-        // costs are present → detail must NOT contain "no simulation results available"
-        assert!(
-            !results[0]
-                .detail
-                .contains("no simulation results available"),
-            "detail should not indicate missing costs: {}",
-            results[0].detail
-        );
+        // update threads sync_result.global_ub_mean (110) as the upper bound;
+        // gap = 110 - 80 = 30 <= 1000 → stop.
+        let (stop, results) = monitor.update(80.0, &default_sync());
+        assert!(stop, "gap 30 within tolerance 1000 must stop");
+        assert_eq!(results[0].rule_name, "gap");
+        assert!(results[0].triggered);
+    }
+
+    #[test]
+    fn gap_rule_does_not_stop_when_gap_exceeds_tolerance() {
+        let rule_set = StoppingRuleSet {
+            rules: vec![StoppingRule::Gap {
+                tolerance: Some(10.0),
+                relative_tolerance: None,
+            }],
+            mode: StoppingMode::Any,
+        };
+        let mut monitor = ConvergenceMonitor::new(rule_set);
+        // gap = 110 - 80 = 30 > 10 → no stop.
+        let (stop, results) = monitor.update(80.0, &default_sync());
+        assert!(!stop, "gap 30 exceeds tolerance 10; must not stop");
+        assert!(!results[0].triggered);
     }
 
     #[test]
@@ -348,10 +341,6 @@ mod tests {
 
     #[test]
     fn bound_stalling_triggers_when_stable() {
-        let monitor = ConvergenceMonitor::new(make_rule_set(StoppingRule::BoundStalling {
-            tolerance: 0.01,
-            iterations: 3,
-        }));
         let sync = default_sync();
         // 4 updates: history after each is [90], [90,99], [90,99,99.5], [90,99,99.5,100]
         // After 4th update: lb_window_start = history[4-3] = history[1] = 99.0
@@ -373,13 +362,12 @@ mod tests {
             stop,
             "BoundStalling should trigger when improvement is < 0.011"
         );
-        // Also verify gap on the last iteration: (110 - 100) / 110 = 10/110
+        // Also verify gap on the last iteration: (110 - 100) / 100 = 10/100
         assert!(
-            (monitor2.gap() - 10.0 / 110.0).abs() < 1e-10,
-            "gap after 4th update must equal 10/110, got {}",
+            (monitor2.gap() - 10.0 / 100.0).abs() < 1e-10,
+            "gap after 4th update must equal 10/100, got {}",
             monitor2.gap()
         );
-        let _ = monitor; // suppress unused warning
     }
 
     /// AC: IterationLimit(3) in Any mode triggers at the third update.
@@ -404,7 +392,7 @@ mod tests {
         assert_eq!(results[0].rule_name, "iteration_limit");
     }
 
-    /// AC: gap formula uses |UB| denominator; with UB=110, LB=100 → gap=10/110.
+    /// AC: gap formula uses |LB| denominator; with UB=110, LB=100 → gap=10/100.
     #[test]
     fn ac_gap_formula_with_ub_110_lb_100() {
         let mut monitor =
@@ -420,7 +408,7 @@ mod tests {
         monitor.update(99.0, &sync);
         monitor.update(99.5, &sync);
         monitor.update(100.0, &sync);
-        let expected = 10.0_f64 / 110.0_f64;
+        let expected = 10.0_f64 / 100.0_f64;
         assert!(
             (monitor.gap() - expected).abs() < 1e-10,
             "gap must equal {expected}, got {}",

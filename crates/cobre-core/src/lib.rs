@@ -24,6 +24,10 @@
 //!
 //! See the [repository](https://github.com/cobre-rs/cobre) for the current status.
 
+// Internal (unpublished) workspace crate: public items intra-doc-link their
+// pub(crate) collaborators as a maintainer aid (docs read with
+// --document-private-items); the public-only doc gate flags these intentional links.
+#![allow(rustdoc::private_intra_doc_links)]
 #![cfg_attr(
     test,
     allow(
@@ -52,11 +56,11 @@ pub use model::{parameters, penalty, resolved, scenario, temporal};
 pub use constraints::{generic_constraint, initial_conditions, training_event};
 
 pub use constraints::generic_constraint::{
-    ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+    AffineBound, ConstraintExpression, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
 };
 pub use constraints::initial_conditions::{
-    AnticipatedCommitmentHistory, HydroPastDefluence, HydroStorage, InitialConditions,
-    RecentObservation,
+    AnticipatedCommitmentHistory, FutureAnticipatedDelivery, HydroPastDefluence, HydroStorage,
+    InitialConditions, RecentObservation,
 };
 pub use constraints::training_event::{
     StageRowSelectionRecord, StoppingRuleResult, TrainingEvent, WORKER_TIMING_SLOT_BWD_SETUP,
@@ -71,12 +75,14 @@ pub use entities::{
 };
 pub use entity_id::EntityId;
 pub use error::ValidationError;
+pub use model::horizon::HorizonGraph;
 pub use model::parameters::{CoefficientRef, ComputedParameter, ParameterKind, ScalarParameter};
 pub use model::penalty::{
     GlobalPenaltyDefaults, HydroPenaltyOverrides, resolve_bus_deficit_segments,
     resolve_bus_excess_cost, resolve_hydro_penalties, resolve_line_exchange_cost,
     resolve_ncs_curtailment_cost,
 };
+pub use model::post_study::{PostStudyStage, PostStudyStages, PostStudyThermalBound};
 pub use model::resolved::{
     BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
     ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroBlockOverride,
@@ -94,9 +100,9 @@ pub use model::scenario::{
     ScenarioSource,
 };
 pub use model::temporal::{
-    Block, BlockMode, CalendarMonth, NoiseMethod, PolicyGraph, PolicyGraphType,
-    ScenarioSourceConfig, SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageId,
-    StageRiskConfig, StageStateConfig, StudyPos, Transition, month_of, window_period_overlaps,
+    Block, BlockMode, CalendarMonth, Node, NoiseMethod, PolicyGraphType, ScenarioSourceConfig,
+    SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageId, StageRiskConfig,
+    StageStateConfig, StudyPos, Transition, month_of, window_period_overlaps,
 };
 pub use stats::welford::WelfordAccumulator;
 pub use system::{System, SystemBuilder};

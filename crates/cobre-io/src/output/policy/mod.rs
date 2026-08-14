@@ -4,7 +4,7 @@
 //! from algorithm-specific types is the calling crate's responsibility.
 //!
 //! The canonical wire-format description is `schemas/policy.fbs` in this crate
-//! (namespace `Cobre.IO.Policy`, tables `StageCuts`, `Cut`, `StageBasis`,
+//! (namespace `Cobre.IO.Policy`, tables `StageCuts`, `AffinePiece`, `StageBasis`,
 //! `StageStates`); the build hand-writes both the builder calls and the safe
 //! raw-byte parser rather than consuming the schema. The `*_FIELD_*: u16` slot
 //! constants in `codec` mirror the schema's `(id: N)` attributes via
@@ -20,13 +20,20 @@ pub use checkpoint::{read_policy_checkpoint, write_policy_checkpoint};
 pub use codec::{deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states};
 pub use codec::{serialize_stage_basis, serialize_stage_cuts, serialize_stage_states};
 pub use records::{
-    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord,
-    StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
+    ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
+    PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
+    STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
+    StageStatesReadResult,
 };
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::unreadable_literal
+)]
 mod tests {
     use super::super::error::OutputError;
     use super::*;
@@ -199,89 +206,59 @@ mod tests {
 
     #[test]
     fn policy_checkpoint_metadata_serializes_to_json() {
-        let meta = PolicyCheckpointMetadata {
-            cobre_version: "0.0.1".to_string(),
-            created_at: "2026-03-08T00:00:00Z".to_string(),
-            completed_iterations: 50,
-            final_lower_bound: 1234.56,
-            best_upper_bound: Some(1300.0),
-            state_dimension: 160,
-            num_stages: 60,
-            max_iterations: 200,
-            forward_passes: 4,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 42,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        };
+        let mut meta = make_metadata(60, 160);
+        meta.producer.completed_iterations = 50;
+        meta.producer.final_lower_bound = 1234.56;
+        meta.producer.best_upper_bound = Some(1300.0);
+        meta.producer.max_iterations = 200;
+        meta.producer.warm_start_counts = vec![];
 
         let json = serde_json::to_string_pretty(&meta)
             .expect("PolicyCheckpointMetadata must serialize to JSON without error");
 
+        assert!(json.contains("producer"), "JSON must contain 'producer'");
+        assert!(
+            json.contains("format_version"),
+            "JSON must contain 'format_version'"
+        );
         assert!(
             json.contains("completed_iterations"),
             "JSON must contain 'completed_iterations'"
         );
         assert!(
-            json.contains("50"),
-            "JSON must contain the completed_iterations value"
-        );
-        assert!(
             json.contains("final_lower_bound"),
             "JSON must contain 'final_lower_bound'"
-        );
-        assert!(
-            json.contains("state_dimension"),
-            "JSON must contain 'state_dimension'"
         );
         assert!(json.contains("rng_seed"), "JSON must contain 'rng_seed'");
         assert!(
             json.contains("best_upper_bound"),
             "JSON must contain 'best_upper_bound'"
         );
-        assert!(
-            json.contains("1300"),
-            "JSON must contain the best_upper_bound value"
-        );
 
-        // Verify it round-trips through serde_json::Value.
+        // Verify it round-trips through serde_json::Value; producer keys nest.
         let value: serde_json::Value =
             serde_json::from_str(&json).expect("JSON output must be parseable");
         assert_eq!(
-            value["completed_iterations"].as_u64(),
-            Some(50),
-            "completed_iterations must deserialize correctly"
+            value["format_version"].as_u64(),
+            Some(u64::from(FORMAT_VERSION)),
+            "format_version must be the current marker"
         );
         assert_eq!(
-            value["rng_seed"].as_u64(),
+            value["producer"]["completed_iterations"].as_u64(),
+            Some(50),
+            "completed_iterations must deserialize correctly under producer"
+        );
+        assert_eq!(
+            value["producer"]["rng_seed"].as_u64(),
             Some(42),
-            "rng_seed must deserialize correctly"
+            "rng_seed must deserialize correctly under producer"
         );
     }
 
     #[test]
     fn policy_checkpoint_metadata_none_upper_bound_serializes_to_null() {
-        let meta = PolicyCheckpointMetadata {
-            cobre_version: "0.0.1".to_string(),
-            created_at: "2026-03-08T00:00:00Z".to_string(),
-            completed_iterations: 10,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
-            state_dimension: 1,
-            num_stages: 1,
-            max_iterations: 10,
-            forward_passes: 1,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        };
+        let mut meta = make_metadata(1, 1);
+        meta.producer.best_upper_bound = None;
 
         let json = serde_json::to_string_pretty(&meta)
             .expect("PolicyCheckpointMetadata must serialize to JSON");
@@ -289,32 +266,61 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&json).expect("JSON output must be parseable");
         assert!(
-            value["best_upper_bound"].is_null(),
+            value["producer"]["best_upper_bound"].is_null(),
             "best_upper_bound must serialize to null when None"
         );
     }
 
     // ── write_policy_checkpoint tests ─────────────────────────────────────────
 
-    /// Build a minimal [`PolicyCheckpointMetadata`] for use in checkpoint tests.
-    fn make_metadata(num_stages: u32, state_dimension: u32) -> PolicyCheckpointMetadata {
+    /// A trivial 1:1 chain graph manifest over `num_stages` nodes (node id ==
+    /// stage id == pool id) — the shape a chain-degenerate study writes.
+    fn chain_manifest(num_stages: u32) -> GraphManifest {
+        let nodes = (0..num_stages)
+            .map(|t| ManifestNode {
+                id: i32::try_from(t).unwrap(),
+                stage_id: i32::try_from(t).unwrap(),
+                pool_id: t,
+            })
+            .collect();
+        let edges = (0..num_stages.saturating_sub(1))
+            .map(|t| ManifestEdge {
+                source_id: i32::try_from(t).unwrap(),
+                target_id: i32::try_from(t + 1).unwrap(),
+                probability: 1.0,
+            })
+            .collect();
+        GraphManifest {
+            n_pools: num_stages,
+            nodes,
+            edges,
+        }
+    }
+
+    /// Build a minimal [`PolicyCheckpointMetadata`] for use in artifact tests.
+    /// `state_dimension` is retained for call-site clarity; it now lives per-pool
+    /// on the payloads, not in the metadata core.
+    fn make_metadata(num_stages: u32, _state_dimension: u32) -> PolicyCheckpointMetadata {
         PolicyCheckpointMetadata {
+            format_version: FORMAT_VERSION,
             cobre_version: "0.0.1".to_string(),
             created_at: "2026-03-08T00:00:00Z".to_string(),
-            completed_iterations: 10,
-            final_lower_bound: 999.0,
-            best_upper_bound: Some(1050.0),
-            state_dimension,
             num_stages,
-            max_iterations: 100,
-            forward_passes: 4,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![0; num_stages as usize],
-            rng_seed: 42,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
+            graph_manifest: chain_manifest(num_stages),
+            producer: ProducerBlock {
+                completed_iterations: 10,
+                final_lower_bound: 999.0,
+                best_upper_bound: Some(1050.0),
+                max_iterations: 100,
+                forward_passes: 4,
+                warm_start_cuts: 0,
+                warm_start_counts: vec![0; num_stages as usize],
+                rng_seed: 42,
+                total_visited_states: 0,
+                training_block_mode: "parallel".to_string(),
+                training_block_mode_per_stage: vec![],
+                cost_scale_factor: None,
+            },
         }
     }
 
@@ -374,23 +380,19 @@ mod tests {
         write_policy_checkpoint(tmp.path(), &stage_cuts, &basis_records, &metadata, &[])
             .expect("write_policy_checkpoint must succeed");
 
-        // Directories must exist.
         assert!(tmp.path().join("cuts").is_dir(), "cuts/ must exist");
         assert!(tmp.path().join("basis").is_dir(), "basis/ must exist");
 
-        // All cut files must exist.
         for i in 0..3u32 {
-            let p = tmp.path().join(format!("cuts/stage_{i:03}.bin"));
-            assert!(p.is_file(), "cuts/stage_{i:03}.bin must exist");
+            let p = tmp.path().join(format!("cuts/{i:03}.bin"));
+            assert!(p.is_file(), "cuts/{i:03}.bin must exist");
         }
 
-        // All basis files must exist.
         for i in 0..3u32 {
-            let p = tmp.path().join(format!("basis/stage_{i:03}.bin"));
-            assert!(p.is_file(), "basis/stage_{i:03}.bin must exist");
+            let p = tmp.path().join(format!("basis/{i:03}.bin"));
+            assert!(p.is_file(), "basis/{i:03}.bin must exist");
         }
 
-        // metadata.json must exist.
         assert!(
             tmp.path().join("metadata.json").is_file(),
             "metadata.json must exist"
@@ -414,12 +416,12 @@ mod tests {
             serde_json::from_str(&content).expect("metadata.json must be valid JSON");
 
         for key in &[
+            "format_version",
             "cobre_version",
             "created_at",
-            "completed_iterations",
-            "final_lower_bound",
-            "state_dimension",
             "num_stages",
+            "graph_manifest",
+            "producer",
         ] {
             assert!(
                 value.get(key).is_some(),
@@ -428,19 +430,14 @@ mod tests {
         }
 
         assert_eq!(
-            value["completed_iterations"].as_u64(),
+            value["producer"]["completed_iterations"].as_u64(),
             Some(10),
-            "completed_iterations must match"
+            "completed_iterations must match under producer"
         );
         assert_eq!(
             value["num_stages"].as_u64(),
             Some(1),
             "num_stages must match"
-        );
-        assert_eq!(
-            value["state_dimension"].as_u64(),
-            Some(3),
-            "state_dimension must match"
         );
     }
 
@@ -465,17 +462,14 @@ mod tests {
             .expect("write_policy_checkpoint must succeed");
 
         for i in 0..3u32 {
-            let p = tmp.path().join(format!("cuts/stage_{i:03}.bin"));
+            let p = tmp.path().join(format!("cuts/{i:03}.bin"));
             let bytes = std::fs::read(&p).unwrap();
-            assert!(!bytes.is_empty(), "cuts/stage_{i:03}.bin must not be empty");
-            assert!(
-                bytes.len() >= 4,
-                "cuts/stage_{i:03}.bin must have >= 4 bytes"
-            );
+            assert!(!bytes.is_empty(), "cuts/{i:03}.bin must not be empty");
+            assert!(bytes.len() >= 4, "cuts/{i:03}.bin must have >= 4 bytes");
             let root_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
             assert!(
                 root_offset < bytes.len(),
-                "cuts/stage_{i:03}.bin root offset must be in-range"
+                "cuts/{i:03}.bin root offset must be in-range"
             );
         }
     }
@@ -493,14 +487,14 @@ mod tests {
         write_policy_checkpoint(tmp.path(), &stage_cuts, &basis_records, &metadata, &[])
             .expect("write_policy_checkpoint must succeed");
 
-        let p = tmp.path().join("basis/stage_000.bin");
+        let p = tmp.path().join("basis/000.bin");
         let bytes = std::fs::read(&p).unwrap();
-        assert!(!bytes.is_empty(), "basis/stage_000.bin must not be empty");
-        assert!(bytes.len() >= 4, "basis/stage_000.bin must have >= 4 bytes");
+        assert!(!bytes.is_empty(), "basis/000.bin must not be empty");
+        assert!(bytes.len() >= 4, "basis/000.bin must have >= 4 bytes");
         let root_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
         assert!(
             root_offset < bytes.len(),
-            "basis/stage_000.bin root offset must be in-range"
+            "basis/000.bin root offset must be in-range"
         );
     }
 
@@ -520,13 +514,11 @@ mod tests {
             "write_policy_checkpoint must return Ok(()) with empty stage_bases"
         );
 
-        // basis/ directory must exist.
         assert!(
             tmp.path().join("basis").is_dir(),
             "basis/ directory must exist even with empty stage_bases"
         );
 
-        // No .bin files inside basis/.
         let entries: Vec<_> = std::fs::read_dir(tmp.path().join("basis"))
             .unwrap()
             .filter_map(std::result::Result::ok)
@@ -633,28 +625,28 @@ mod tests {
             .expect("write_policy_checkpoint must succeed");
 
         assert!(
-            tmp.path().join("cuts/stage_000.bin").is_file(),
-            "cuts/stage_000.bin must exist"
+            tmp.path().join("cuts/000.bin").is_file(),
+            "cuts/000.bin must exist"
         );
         assert!(
-            tmp.path().join("cuts/stage_001.bin").is_file(),
-            "cuts/stage_001.bin must exist"
+            tmp.path().join("cuts/001.bin").is_file(),
+            "cuts/001.bin must exist"
         );
         assert!(
-            tmp.path().join("cuts/stage_059.bin").is_file(),
-            "cuts/stage_059.bin must exist"
+            tmp.path().join("cuts/059.bin").is_file(),
+            "cuts/059.bin must exist"
         );
         assert!(
-            tmp.path().join("basis/stage_000.bin").is_file(),
-            "basis/stage_000.bin must exist"
+            tmp.path().join("basis/000.bin").is_file(),
+            "basis/000.bin must exist"
         );
         assert!(
-            tmp.path().join("basis/stage_001.bin").is_file(),
-            "basis/stage_001.bin must exist"
+            tmp.path().join("basis/001.bin").is_file(),
+            "basis/001.bin must exist"
         );
         assert!(
-            tmp.path().join("basis/stage_059.bin").is_file(),
-            "basis/stage_059.bin must exist"
+            tmp.path().join("basis/059.bin").is_file(),
+            "basis/059.bin must exist"
         );
     }
 
@@ -848,21 +840,21 @@ mod tests {
                 entity_id: 12,
                 subindex: 0,
                 was_active: true,
-                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             },
             EntitySlot {
                 entity_type: 1,
                 entity_id: -1,
                 subindex: 3,
                 was_active: false,
-                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             },
             EntitySlot {
                 entity_type: 2,
                 entity_id: 7,
                 subindex: 1,
                 was_active: true,
-                delivery_anchor: 2024 * 12 + 5,
+                delivery_date: 20240501,
             },
         ]
     }
@@ -874,10 +866,7 @@ mod tests {
             assert_eq!(a.entity_id, e.entity_id, "slot {i} entity_id");
             assert_eq!(a.subindex, e.subindex, "slot {i} subindex");
             assert_eq!(a.was_active, e.was_active, "slot {i} was_active");
-            assert_eq!(
-                a.delivery_anchor, e.delivery_anchor,
-                "slot {i} delivery_anchor"
-            );
+            assert_eq!(a.delivery_date, e.delivery_date, "slot {i} delivery_date");
         }
     }
 
@@ -900,6 +889,7 @@ mod tests {
         let manifest = sample_manifest();
         let payload = StageStatesPayload {
             stage_id: 2,
+            node_id: 9,
             state_dimension: 3,
             count: 2,
             data: &data,
@@ -910,6 +900,7 @@ mod tests {
         let result = deserialize_stage_states(&buf).expect("manifest round-trip must succeed");
 
         assert_eq!(result.data, data.to_vec(), "data must still round-trip");
+        assert_eq!(result.node_id, 9, "node_id must round-trip");
         assert_manifest_eq(&result.entity_manifest, &manifest);
     }
 
@@ -1021,68 +1012,50 @@ mod tests {
 
     #[test]
     fn policy_checkpoint_metadata_deserializes_from_json() {
-        let meta = PolicyCheckpointMetadata {
-            cobre_version: "0.0.1".to_string(),
-            created_at: "2026-03-08T00:00:00Z".to_string(),
-            completed_iterations: 42,
-            final_lower_bound: 9999.0,
-            best_upper_bound: Some(10100.0),
-            state_dimension: 5,
-            num_stages: 3,
-            max_iterations: 100,
-            forward_passes: 4,
-            warm_start_cuts: 10,
-            warm_start_counts: vec![10, 10, 10],
-            rng_seed: 12345,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        };
+        let mut meta = make_metadata(3, 5);
+        meta.producer.completed_iterations = 42;
+        meta.producer.final_lower_bound = 9999.0;
+        meta.producer.best_upper_bound = Some(10100.0);
+        meta.producer.warm_start_cuts = 10;
+        meta.producer.warm_start_counts = vec![10, 10, 10];
+        meta.producer.rng_seed = 12345;
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
         let back: PolicyCheckpointMetadata =
             serde_json::from_str(&json).expect("deserialize must succeed");
 
+        assert_eq!(back.format_version, meta.format_version);
         assert_eq!(back.cobre_version, meta.cobre_version);
-        assert_eq!(back.completed_iterations, meta.completed_iterations);
-        assert_eq!(back.final_lower_bound, meta.final_lower_bound);
-        assert_eq!(back.best_upper_bound, meta.best_upper_bound);
-        assert_eq!(back.state_dimension, meta.state_dimension);
+        assert_eq!(
+            back.producer.completed_iterations,
+            meta.producer.completed_iterations
+        );
+        assert_eq!(
+            back.producer.final_lower_bound,
+            meta.producer.final_lower_bound
+        );
+        assert_eq!(
+            back.producer.best_upper_bound,
+            meta.producer.best_upper_bound
+        );
         assert_eq!(back.num_stages, meta.num_stages);
-        assert_eq!(back.max_iterations, meta.max_iterations);
-        assert_eq!(back.forward_passes, meta.forward_passes);
-        assert_eq!(back.warm_start_cuts, meta.warm_start_cuts);
-        assert_eq!(back.rng_seed, meta.rng_seed);
+        assert_eq!(back.producer.max_iterations, meta.producer.max_iterations);
+        assert_eq!(back.producer.forward_passes, meta.producer.forward_passes);
+        assert_eq!(back.producer.warm_start_cuts, meta.producer.warm_start_cuts);
+        assert_eq!(back.producer.rng_seed, meta.producer.rng_seed);
     }
 
     #[test]
     fn policy_checkpoint_metadata_deserializes_none_upper_bound() {
-        let meta = PolicyCheckpointMetadata {
-            cobre_version: "0.0.1".to_string(),
-            created_at: "2026-03-08T00:00:00Z".to_string(),
-            completed_iterations: 1,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
-            state_dimension: 1,
-            num_stages: 1,
-            max_iterations: 10,
-            forward_passes: 1,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        };
+        let mut meta = make_metadata(1, 1);
+        meta.producer.best_upper_bound = None;
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
         let back: PolicyCheckpointMetadata =
             serde_json::from_str(&json).expect("deserialize must succeed");
 
         assert!(
-            back.best_upper_bound.is_none(),
+            back.producer.best_upper_bound.is_none(),
             "None upper bound must round-trip"
         );
     }
@@ -1118,13 +1091,10 @@ mod tests {
 
         let checkpoint = read_policy_checkpoint(tmp.path()).expect("read must succeed");
 
-        // Metadata fields.
-        assert_eq!(checkpoint.metadata.completed_iterations, 10);
+        assert_eq!(checkpoint.metadata.producer.completed_iterations, 10);
         assert_eq!(checkpoint.metadata.num_stages, 2);
-        assert_eq!(checkpoint.metadata.state_dimension, 3);
-        assert_eq!(checkpoint.metadata.rng_seed, 42);
+        assert_eq!(checkpoint.metadata.producer.rng_seed, 42);
 
-        // Cuts: two stages, sorted by stage_id.
         assert_eq!(
             checkpoint.stage_cuts.len(),
             2,
@@ -1135,7 +1105,6 @@ mod tests {
         assert_eq!(checkpoint.stage_cuts[0].cuts.len(), 2);
         assert_eq!(checkpoint.stage_cuts[1].cuts.len(), 1);
 
-        // Stage 0 cut fields.
         let cut00 = &checkpoint.stage_cuts[0].cuts[0];
         assert_eq!(cut00.cut_id, 1);
         assert_eq!(cut00.coefficients, &[1.0f64, 2.0, 3.0]);
@@ -1146,12 +1115,10 @@ mod tests {
         assert_eq!(cut01.cut_id, 2);
         assert_eq!(cut01.coefficients, &[4.0f64, 5.0, 6.0]);
 
-        // Stage 1 cut fields.
         let cut10 = &checkpoint.stage_cuts[1].cuts[0];
         assert_eq!(cut10.cut_id, 3);
         assert_eq!(cut10.coefficients, &[7.0f64, 8.0, 9.0]);
 
-        // Bases: two stages, sorted by stage_id.
         assert_eq!(checkpoint.stage_bases.len(), 2, "must have two stage bases");
         assert_eq!(checkpoint.stage_bases[0].stage_id, 0);
         assert_eq!(checkpoint.stage_bases[1].stage_id, 1);
@@ -1237,24 +1204,16 @@ mod tests {
     fn read_policy_checkpoint_metadata_json_field_by_field() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let meta_in = PolicyCheckpointMetadata {
-            cobre_version: "0.0.1".to_string(),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            completed_iterations: 77,
-            final_lower_bound: 12345.678,
-            best_upper_bound: Some(13000.0),
-            state_dimension: 8,
-            num_stages: 4,
-            max_iterations: 500,
-            forward_passes: 8,
-            warm_start_cuts: 20,
-            warm_start_counts: vec![20; 4],
-            rng_seed: 99999,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        };
+        let mut meta_in = make_metadata(4, 8);
+        meta_in.created_at = "2026-01-01T00:00:00Z".to_string();
+        meta_in.producer.completed_iterations = 77;
+        meta_in.producer.final_lower_bound = 12345.678;
+        meta_in.producer.best_upper_bound = Some(13000.0);
+        meta_in.producer.max_iterations = 500;
+        meta_in.producer.forward_passes = 8;
+        meta_in.producer.warm_start_cuts = 20;
+        meta_in.producer.warm_start_counts = vec![20; 4];
+        meta_in.producer.rng_seed = 99999;
 
         let stage_cuts_payloads: [StageCutsPayload<'_>; 0] = [];
         write_policy_checkpoint(tmp.path(), &stage_cuts_payloads, &[], &meta_in, &[])
@@ -1263,178 +1222,119 @@ mod tests {
         let checkpoint = read_policy_checkpoint(tmp.path()).expect("read must succeed");
         let m = &checkpoint.metadata;
 
-        assert_eq!(m.completed_iterations, 77);
-        assert_eq!(m.final_lower_bound, 12345.678);
-        assert_eq!(m.best_upper_bound, Some(13000.0));
-        assert_eq!(m.state_dimension, 8);
+        assert_eq!(m.format_version, FORMAT_VERSION);
+        assert_eq!(m.producer.completed_iterations, 77);
+        assert_eq!(m.producer.final_lower_bound, 12345.678);
+        assert_eq!(m.producer.best_upper_bound, Some(13000.0));
         assert_eq!(m.num_stages, 4);
-        assert_eq!(m.max_iterations, 500);
-        assert_eq!(m.forward_passes, 8);
-        assert_eq!(m.warm_start_cuts, 20);
-        assert_eq!(m.warm_start_counts, vec![20u32; 4]);
-        assert_eq!(m.rng_seed, 99999);
+        assert_eq!(m.producer.max_iterations, 500);
+        assert_eq!(m.producer.forward_passes, 8);
+        assert_eq!(m.producer.warm_start_cuts, 20);
+        assert_eq!(m.producer.warm_start_counts, vec![20u32; 4]);
+        assert_eq!(m.producer.rng_seed, 99999);
     }
 
-    // ── warm_start_counts JSON serialization tests ────────────────────────────
+    // ── producer-block JSON serialization tests ───────────────────────────────
 
     #[test]
     fn policy_checkpoint_metadata_warm_start_counts_round_trips() {
-        let meta = PolicyCheckpointMetadata {
-            cobre_version: "0.0.1".to_string(),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            completed_iterations: 5,
-            final_lower_bound: 0.0,
-            best_upper_bound: None,
-            state_dimension: 2,
-            num_stages: 3,
-            max_iterations: 10,
-            forward_passes: 1,
-            warm_start_cuts: 8,
-            warm_start_counts: vec![10, 8, 6],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        };
+        let mut meta = make_metadata(3, 2);
+        meta.producer.warm_start_cuts = 8;
+        meta.producer.warm_start_counts = vec![10, 8, 6];
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
         let back: PolicyCheckpointMetadata =
             serde_json::from_str(&json).expect("deserialize must succeed");
 
         assert_eq!(
-            back.warm_start_counts,
+            back.producer.warm_start_counts,
             vec![10u32, 8, 6],
-            "warm_start_counts must round-trip"
+            "warm_start_counts must round-trip under producer"
         );
     }
 
+    /// The optional producer sub-fields default when absent from the JSON: a
+    /// metadata carrying a `producer` block without `warm_start_counts` /
+    /// `training_block_mode` / `cost_scale_factor` reads them as empty / None.
     #[test]
-    fn policy_checkpoint_metadata_warm_start_counts_absent_defaults_to_empty() {
+    fn policy_checkpoint_metadata_absent_producer_optionals_default() {
         let json = r#"{
+            "format_version": 1,
             "cobre_version": "0.0.1",
             "created_at": "2026-01-01T00:00:00Z",
-            "completed_iterations": 5,
-            "final_lower_bound": 0.0,
-            "best_upper_bound": null,
-            "state_dimension": 2,
             "num_stages": 3,
-            "max_iterations": 10,
-            "forward_passes": 1,
-            "warm_start_cuts": 5,
-            "rng_seed": 0,
-            "total_visited_states": 0
+            "producer": {
+                "completed_iterations": 5,
+                "final_lower_bound": 0.0,
+                "best_upper_bound": null,
+                "max_iterations": 10,
+                "forward_passes": 1,
+                "warm_start_cuts": 5,
+                "rng_seed": 0
+            }
         }"#;
 
         let meta: PolicyCheckpointMetadata =
-            serde_json::from_str(json).expect("old-format JSON must deserialize");
+            serde_json::from_str(json).expect("minimal-producer JSON must deserialize");
 
         assert!(
-            meta.warm_start_counts.is_empty(),
+            meta.producer.warm_start_counts.is_empty(),
             "absent warm_start_counts must default to empty vec"
         );
         assert_eq!(
-            meta.warm_start_cuts, 5,
+            meta.producer.warm_start_cuts, 5,
             "warm_start_cuts scalar must still be read"
         );
-    }
-
-    #[test]
-    fn policy_checkpoint_metadata_training_block_mode_absent_defaults_to_empty() {
-        let json = r#"{
-            "cobre_version": "0.0.1",
-            "created_at": "2026-01-01T00:00:00Z",
-            "completed_iterations": 5,
-            "final_lower_bound": 0.0,
-            "best_upper_bound": null,
-            "state_dimension": 2,
-            "num_stages": 3,
-            "max_iterations": 10,
-            "forward_passes": 1,
-            "warm_start_cuts": 5,
-            "rng_seed": 0,
-            "total_visited_states": 0
-        }"#;
-
-        let meta: PolicyCheckpointMetadata =
-            serde_json::from_str(json).expect("pre-field JSON must deserialize");
-
         assert!(
-            meta.training_block_mode.is_empty(),
+            meta.producer.training_block_mode.is_empty(),
             "absent training_block_mode must default to empty string"
         );
         assert!(
-            meta.training_block_mode_per_stage.is_empty(),
+            meta.producer.training_block_mode_per_stage.is_empty(),
             "absent training_block_mode_per_stage must default to empty vec"
+        );
+        assert!(
+            meta.producer.cost_scale_factor.is_none(),
+            "absent cost_scale_factor must default to None (legacy interpretation)"
+        );
+        assert!(
+            meta.graph_manifest.nodes.is_empty(),
+            "absent graph_manifest must default to empty"
         );
     }
 
     #[test]
     fn policy_checkpoint_metadata_training_block_mode_round_trips_mixed() {
-        let meta = make_metadata(3, 2);
-        let meta = PolicyCheckpointMetadata {
-            training_block_mode: "mixed".to_string(),
-            training_block_mode_per_stage: vec![
-                "parallel".to_string(),
-                "chronological".to_string(),
-                "parallel".to_string(),
-            ],
-            ..meta
-        };
+        let mut meta = make_metadata(3, 2);
+        meta.producer.training_block_mode = "mixed".to_string();
+        meta.producer.training_block_mode_per_stage = vec![
+            "parallel".to_string(),
+            "chronological".to_string(),
+            "parallel".to_string(),
+        ];
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
         let back: PolicyCheckpointMetadata =
             serde_json::from_str(&json).expect("deserialize must succeed");
 
-        assert_eq!(back.training_block_mode, "mixed");
+        assert_eq!(back.producer.training_block_mode, "mixed");
         assert_eq!(
-            back.training_block_mode_per_stage,
+            back.producer.training_block_mode_per_stage,
             vec!["parallel", "chronological", "parallel"]
-        );
-    }
-
-    /// Legacy-migration contract: a checkpoint written before
-    /// `cost_scale_factor` provenance existed (JSON with no such key)
-    /// deserializes to `None` — the "interpreted as scaled-at-1e6" marker.
-    #[test]
-    fn policy_checkpoint_metadata_cost_scale_factor_absent_defaults_to_none() {
-        let json = r#"{
-            "cobre_version": "0.0.1",
-            "created_at": "2026-01-01T00:00:00Z",
-            "completed_iterations": 5,
-            "final_lower_bound": 0.0,
-            "best_upper_bound": null,
-            "state_dimension": 2,
-            "num_stages": 3,
-            "max_iterations": 10,
-            "forward_passes": 1,
-            "warm_start_cuts": 5,
-            "rng_seed": 0,
-            "total_visited_states": 0
-        }"#;
-
-        let meta: PolicyCheckpointMetadata =
-            serde_json::from_str(json).expect("pre-field JSON must deserialize");
-
-        assert!(
-            meta.cost_scale_factor.is_none(),
-            "absent cost_scale_factor must default to None (legacy interpretation)"
         );
     }
 
     /// A written (marked) `cost_scale_factor` round-trips through JSON exactly.
     #[test]
     fn policy_checkpoint_metadata_cost_scale_factor_round_trips() {
-        let meta = PolicyCheckpointMetadata {
-            cost_scale_factor: Some(2_500_000.0),
-            ..make_metadata(3, 2)
-        };
+        let mut meta = make_metadata(3, 2);
+        meta.producer.cost_scale_factor = Some(2_500_000.0);
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
         let back: PolicyCheckpointMetadata =
             serde_json::from_str(&json).expect("deserialize must succeed");
 
-        assert_eq!(back.cost_scale_factor, Some(2_500_000.0));
+        assert_eq!(back.producer.cost_scale_factor, Some(2_500_000.0));
     }
 
     #[test]
@@ -1490,24 +1390,8 @@ mod tests {
             },
         ];
 
-        let metadata = PolicyCheckpointMetadata {
-            cobre_version: "0.0.1".to_string(),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            completed_iterations: 10,
-            final_lower_bound: 100.0,
-            best_upper_bound: None,
-            state_dimension: 2,
-            num_stages: 3,
-            max_iterations: 50,
-            forward_passes: 1,
-            warm_start_cuts: 10,
-            warm_start_counts: vec![10, 8, 6],
-            rng_seed: 0,
-            total_visited_states: 0,
-            training_block_mode: "parallel".to_string(),
-            training_block_mode_per_stage: vec![],
-            cost_scale_factor: None,
-        };
+        let mut metadata = make_metadata(3, 2);
+        metadata.producer.warm_start_counts = vec![10, 8, 6];
 
         write_policy_checkpoint(tmp.path(), &stage_cuts_payloads, &[], &metadata, &[])
             .expect("write must succeed");
@@ -1515,9 +1399,194 @@ mod tests {
         let checkpoint = read_policy_checkpoint(tmp.path()).expect("read must succeed");
 
         assert_eq!(
-            checkpoint.metadata.warm_start_counts,
+            checkpoint.metadata.producer.warm_start_counts,
             vec![10u32, 8, 6],
             "warm_start_counts [10, 8, 6] must round-trip through metadata.json"
+        );
+    }
+
+    // ── 0.14 format-wave markers ──────────────────────────────────────────────
+
+    /// A 0.13-era artifact (metadata.json without a `format_version` key) is
+    /// rejected on the version marker BEFORE any payload is parsed: the reader
+    /// names `format_version`, not the deliberately-corrupt `cuts/000.bin`.
+    #[test]
+    fn read_policy_checkpoint_rejects_absent_format_version_before_parsing_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c0 = [1.0_f64];
+        let cuts_s0 = [make_cut_record(1, 0, 1, &c0)];
+        let stage_cuts = [make_stage_cuts_payload(0, &cuts_s0, &[0], 1)];
+        write_policy_checkpoint(tmp.path(), &stage_cuts, &[], &make_metadata(1, 1), &[])
+            .expect("write must succeed");
+
+        // Strip the format_version key (a pre-marker artifact) and corrupt the payload.
+        let meta_path = tmp.path().join("metadata.json");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        let mut obj = value.as_object().unwrap().clone();
+        obj.remove("format_version");
+        std::fs::write(
+            &meta_path,
+            serde_json::to_vec(&serde_json::Value::Object(obj)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("cuts/000.bin"), b"garbage").unwrap();
+
+        let err =
+            read_policy_checkpoint(tmp.path()).expect_err("absent format_version must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("format_version"),
+            "must reject on the version marker, not the corrupt payload: {msg}"
+        );
+    }
+
+    /// A genuine 0.13-era metadata.json — flat, no `producer`, no
+    /// `format_version` — is rejected by the marker (naming `format_version`),
+    /// not by an opaque missing-`producer` parse error: the marker check runs
+    /// off a minimal probe before full deserialization.
+    #[test]
+    fn read_policy_checkpoint_rejects_flat_legacy_metadata_on_the_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = r#"{
+            "cobre_version": "0.13.0",
+            "created_at": "2026-01-01T00:00:00Z",
+            "completed_iterations": 5,
+            "final_lower_bound": 0.0,
+            "state_dimension": 2,
+            "num_stages": 3
+        }"#;
+        std::fs::write(tmp.path().join("metadata.json"), legacy).unwrap();
+
+        let err = read_policy_checkpoint(tmp.path()).expect_err("a flat 0.13 artifact must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("format_version"),
+            "must reject on the version marker, not a missing-field error: {msg}"
+        );
+    }
+
+    /// Every top-level metadata key outside the namespaced `producer` block is a
+    /// neutral-core key (format marker, provenance, or graph/stage descriptor).
+    #[test]
+    fn metadata_neutral_core_keys_are_format_provenance_and_graph_only() {
+        let value = serde_json::to_value(make_metadata(2, 3)).expect("serialize must succeed");
+        let obj = value.as_object().expect("metadata serializes to an object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "cobre_version",
+                "created_at",
+                "format_version",
+                "graph_manifest",
+                "num_stages",
+                "producer",
+            ],
+            "every top-level key outside `producer` must be a neutral-core key"
+        );
+    }
+
+    /// The positional `stage_NNN` filename convention is gone: no
+    /// `format!("stage_{...}.bin", ...)` writer literal survives, and the reader
+    /// derives identity from inside each buffer via `read_sorted_bin_files`, not
+    /// from a filename. A surviving positional reader is the exact path that
+    /// would read a 0.13 file as pool 0.
+    #[test]
+    fn no_stage_positional_filename_convention_remains() {
+        let checkpoint_src = include_str!("checkpoint.rs");
+        assert!(
+            !checkpoint_src.contains("stage_{"),
+            "no `format!(\"stage_{{...}}.bin\", ...)` writer literal may remain"
+        );
+        assert!(
+            checkpoint_src.contains("read_sorted_bin_files"),
+            "the reader must stay filename-agnostic (sorts by the in-buffer id)"
+        );
+    }
+
+    /// K-fan (K = 4) whose leaves share one pool: the writer emits ONE payload
+    /// for the shared leaf pool (not K), and the graph manifest maps all K leaf
+    /// node ids to that one pool id.
+    #[test]
+    fn k_fan_shared_leaf_pool_serialized_once_and_manifest_maps_leaves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let k = 4u32;
+
+        // One payload per pool: pool 0 (root, stage 0) and pool 1 (shared leaf pool).
+        let c = [1.0_f64];
+        let cuts_p0 = [make_cut_record(1, 0, 1, &c)];
+        let cuts_p1 = [make_cut_record(2, 0, 1, &c)];
+        let stage_cuts = [
+            make_stage_cuts_payload(0, &cuts_p0, &[0], 1),
+            make_stage_cuts_payload(1, &cuts_p1, &[0], 1),
+        ];
+
+        let mut nodes = vec![ManifestNode {
+            id: 0,
+            stage_id: 0,
+            pool_id: 0,
+        }];
+        for leaf in 1..=k {
+            nodes.push(ManifestNode {
+                id: i32::try_from(leaf).unwrap(),
+                stage_id: 1,
+                pool_id: 1,
+            });
+        }
+        let edges = (1..=k)
+            .map(|leaf| ManifestEdge {
+                source_id: 0,
+                target_id: i32::try_from(leaf).unwrap(),
+                probability: 1.0 / f64::from(k),
+            })
+            .collect();
+        let mut metadata = make_metadata(2, 1);
+        metadata.graph_manifest = GraphManifest {
+            n_pools: 2,
+            nodes,
+            edges,
+        };
+
+        write_policy_checkpoint(tmp.path(), &stage_cuts, &[], &metadata, &[])
+            .expect("write must succeed");
+
+        let bin_count = std::fs::read_dir(tmp.path().join("cuts"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "bin"))
+            .count();
+        assert_eq!(
+            bin_count, 2,
+            "the shared leaf pool is serialized once (2 pool files), not K times"
+        );
+
+        let checkpoint = read_policy_checkpoint(tmp.path()).expect("read must succeed");
+        let leaf_pools: std::collections::BTreeSet<u32> = checkpoint
+            .metadata
+            .graph_manifest
+            .nodes
+            .iter()
+            .filter(|n| n.stage_id == 1)
+            .map(|n| n.pool_id)
+            .collect();
+        assert_eq!(
+            leaf_pools.len(),
+            1,
+            "all K leaf node ids must map to one pool id: {leaf_pools:?}"
+        );
+        assert_eq!(*leaf_pools.iter().next().unwrap(), 1);
+        assert_eq!(
+            checkpoint
+                .metadata
+                .graph_manifest
+                .nodes
+                .iter()
+                .filter(|n| n.stage_id == 1)
+                .count(),
+            k as usize,
+            "all K leaf nodes must be present in the manifest"
         );
     }
 }

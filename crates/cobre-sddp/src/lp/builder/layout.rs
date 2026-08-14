@@ -3,10 +3,10 @@ use std::ops::Range;
 
 use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{
-    BlockMode, Bus, CascadeTopology, ConstraintSense, EnergyContract, EntityId, GenericConstraint,
-    Hydro, Line, LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal,
+    AffineBound, BlockMode, Bus, CascadeTopology, CoefficientRef, ConstraintExpression,
+    EnergyContract, EntityId, GenericConstraint, Hydro, Line, LoadModel, NonControllableSource,
+    PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+    ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -21,6 +21,7 @@ use crate::indexer::{
     is_anticipated_decision_active_for_delivery,
 };
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
+use crate::setup::PostStudyResolved;
 
 use super::template::StageGeometry;
 use super::{
@@ -44,7 +45,7 @@ pub(crate) struct ResolvedTables<'a> {
     pub(crate) resolved_ncs_bounds: &'a ResolvedNcsBounds,
     /// Per-block NCS generation scaling factors.
     pub(crate) resolved_ncs_factors: &'a ResolvedNcsFactors,
-    /// `(parameter_id, stage_idx)` → resolved `f64`, queried for a
+    /// `(parameter_id, stage_idx, block_idx)` → resolved `f64`, queried for a
     /// [`cobre_core::CoefficientRef::Parameter`] term.
     pub(crate) resolved_parameters: &'a ResolvedParameters,
 }
@@ -78,7 +79,7 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) production_models: &'a ProductionModelSet,
     /// Resolved evaporation models for all hydro plants.
     pub(crate) evaporation_models: &'a EvaporationModelSet,
-    /// Generic constraint definitions (expression, sense, slack config).
+    /// Generic constraint definitions (expression, slack config).
     pub(crate) generic_constraints: &'a [GenericConstraint],
     /// Non-controllable source entities, id-sorted.
     pub(crate) non_controllable_sources: &'a [NonControllableSource],
@@ -176,17 +177,31 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// Gates which bucket-definition rows [`StageLayout::new`] emits; see
     /// [`crate::setup::bucket_topology::TransitBucketTopology::per_stage_mask`].
     pub(crate) per_stage_mask: Vec<Vec<usize>>,
+    /// Resolved post-study boundary artifacts
+    /// ([`crate::setup::resolve_post_study_artifacts`]) — the fuel cost/bounds
+    /// and discount continuation [`super::columns::fill_commitment_decision_columns`]
+    /// books onto each post-horizon decision column. The sole owner, computed once
+    /// per template build from this function's `system` parameter (see
+    /// [`super::template::build_template_build_ctx`]); `PostStudyResolved::default()`
+    /// (empty) without a declared post-horizon commitment.
+    pub(crate) post_study_resolved: PostStudyResolved,
 }
 
-/// Column/row offsets for one stage's anticipated-thermal layout.
+/// Column/row offsets for one stage's unified commitment-hold layout: the
+/// in-study anticipated-ring family (latch/carry/fish, modular-slot-addressed)
+/// and the terminal post-horizon lane family (latch/carry only, no fish),
+/// both carved from the same [`StateSpace::commit_out`]/[`StateSpace::commit_in`]
+/// region. There is no separate block-layout struct — [`StageLayout::new`]
+/// allocates both families' columns and rows in one pass.
 pub(crate) struct AnticipatedLayout {
     /// Start of the anticipated-decision column block: `n_anticipated`
     /// columns (`col_anticipated_decision_start + local_idx`). Equals
     /// `col_thermal_end`.
     pub(crate) col_anticipated_decision_start: usize,
-    /// Start of the `anticipated_slots_out` column block (`A * k_max` columns,
-    /// slot-major, plant-minor). Sourced from
-    /// `StateSpace::anticipated_slots_out.start`, so the offset is
+    /// Start of the merged [`StateSpace::commit_out`]/[`StateSpace::commit_in`]
+    /// column block (the leading `A * k_max` in-study slots, slot-major/
+    /// plant-minor, followed by the trailing `n_commitment` post-horizon
+    /// lanes). Sourced from `StateSpace::commit_out.start`, so the offset is
     /// stage-invariant — keeping the global stage-0 cut map on the correct
     /// column at every stage regardless of this stage's block count.
     pub(crate) col_anticipated_slots_out_start: usize,
@@ -194,8 +209,8 @@ pub(crate) struct AnticipatedLayout {
     /// per plant with a genuine, ACTIVE decision this stage
     /// (`PointResolution::genuine_decisions_at(stage_idx).next()`, AND the
     /// delivery stage's commissioning window), pinning that decision's ring
-    /// slot to its decision column. Immediately after
-    /// `row_anticipated_fishing_start`.
+    /// slot (`delivery_stage mod k_max`) to its decision column. Immediately
+    /// after `row_anticipated_fishing_start`.
     pub(crate) row_anticipated_state_out_def_start: usize,
     /// Count of genuine, active decisions this stage (`Some` count of
     /// `anticipated_decision_row_pos`); drives the active-row iteration.
@@ -208,41 +223,60 @@ pub(crate) struct AnticipatedLayout {
     /// genuine decision this stage (`PointResolution::genuine_decisions_at`)
     /// or the delivery is commissioning-inactive. Length `n_anticipated`.
     pub(crate) anticipated_decision_row_pos: Vec<Option<usize>>,
-    /// Start of anticipated-fishing rows (one per GENUINELY anticipated plant
-    /// this stage — `PointResolution::is_anticipated_at`, `false` exactly at a
-    /// `K = 0` self-delivery): `row_anticipated_fishing_start + pos`.
-    /// After operational-violation rows.
+    /// Start of the commitment-MATURITY rows: one per anticipated plant
+    /// whose delivery matures THIS stage (`PointResolution::is_anticipated_at`,
+    /// `false` at a `K = 0` self-delivery). Every such plant gets exactly one
+    /// row here regardless of commissioning activeness — the row renders
+    /// EITHER the fish coupling or a same-slot carry, decided by
+    /// [`super::entries::fill_anticipated_fishing_entries`]'s `if`/`else` on
+    /// `is_anticipated_decision_active_for_delivery` — the single governing
+    /// branch. After operational-violation rows.
     pub(crate) row_anticipated_fishing_start: usize,
-    /// Anticipated-fishing row count this stage (`Some` count of
-    /// `anticipated_fishing_row_pos`); `n_anticipated` unless a `K = 0`
-    /// self-delivery excludes a plant this stage.
+    /// Commitment-maturity row count this stage (`Some` count of
+    /// `anticipated_fishing_row_pos`).
     pub(crate) n_anticipated_fishing_rows: usize,
     /// For each anticipated plant (local order), this stage's compact row
-    /// position within the fishing-row family, or `None` when the delivery
-    /// maturing this stage is a `K = 0` self-delivery — no anticipation binds,
-    /// so the plant's ordinary thermal generation is unconstrained by any
-    /// fishing coupling. Length `n_anticipated`.
+    /// position within the maturity-row family, or `None` when no delivery
+    /// matures this stage (including a `K = 0` self-delivery, which never
+    /// matures through the ring at all). Length `n_anticipated`.
     pub(crate) anticipated_fishing_row_pos: Vec<Option<usize>>,
-    /// Start of the anticipated-ring interior-slot definition equality rows
-    /// (`slot_k^out − slot_{k+1}^in = 0`, the plain-shift rows for every slot
-    /// strictly before this stage's fresh-deposit slots). Immediately after
-    /// `row_anticipated_state_out_def_start`. Mirrors
-    /// [`Self::col_anticipated_slots_out_start`]'s pairing with
-    /// `transit_bucket_definition` in spirit — the anticipated ring's own
-    /// per-slot definition-row family.
+    /// Start of the future-window commitment-carry equality rows (same-slot
+    /// hold, `slot^out − slot^in = 0`,
+    /// [`super::delivery_ring::DeliveryRing::emit_carry_rows`]): every
+    /// STRICTLY FUTURE, not-yet-due in-study slot, modular-addressed
+    /// (`delivery_target mod k_max`). The commitment maturing THIS stage is
+    /// never here even when the single governing branch selects carry over
+    /// fish — that carry renders through the maturity row above instead, so
+    /// this family and `row_anticipated_fishing_start` never double-book the
+    /// same delivery. Immediately after `row_anticipated_state_out_def_start`.
     pub(crate) row_anticipated_slot_definition_start: usize,
-    /// Count of reachable interior-slot definition rows this stage
+    /// Count of future-window carrying slots this stage
     /// (`anticipated_slot_row_pos`'s `Some` count).
     pub(crate) n_anticipated_slot_definition_rows: usize,
-    /// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
-    /// slot-major, matching [`crate::indexer::StateSpace::anticipated_slots_out`]'s
-    /// own layout), this stage's compact row position within the interior-slot
-    /// definition-row family, or `None` when the slot's delivery target is a
-    /// genuine fresh decision this stage (`PointResolution::genuine_decisions_at`,
-    /// handled by `row_anticipated_state_out_def_start` instead), beyond the
-    /// study horizon, or not yet ready (`PointResolution::is_ready_at`,
-    /// stage-invariant padding). Length `n_anticipated * k_max`.
+    /// For each GLOBAL in-study commitment-hold slot (`(m mod k_max) *
+    /// n_anticipated + plant`, modular slot-major/plant-minor —
+    /// [`StateSpace::commitment_hold_in_study_offset`]'s own addressing), this
+    /// stage's compact row position within the future-window carry-row
+    /// family, or `None` when the slot's target is this stage's own latch
+    /// (`row_anticipated_state_out_def_start` owns it), matures THIS stage
+    /// (`row_anticipated_fishing_start` owns it, fish-or-carry), is beyond
+    /// the study horizon, or is not yet ready
+    /// (`PointResolution::is_ready_at`). Length `n_anticipated * k_max`.
     pub(crate) anticipated_slot_row_pos: Vec<Option<usize>>,
+    /// Row index of post-horizon window `w`'s per-stage row:
+    /// `row_commitment_start + w`. Dense — every declared window gets exactly
+    /// one row every stage (latch at its own
+    /// [`StateSpace::commitment_decider_stage`], carry-by-identity
+    /// otherwise); no fish arm exists for a post-horizon lane.
+    pub(crate) row_commitment_start: usize,
+    /// Start of this stage's post-horizon decision-column family (sparse: one
+    /// column per window whose decider is this stage,
+    /// `col_commitment_decision_start + local_idx`).
+    pub(crate) col_commitment_decision_start: usize,
+    /// Global post-horizon window indices deciding at this stage, ascending —
+    /// parallel to the decision columns above; the [`Self::row_commitment_start`]
+    /// row for window `w` is a latch iff `w` appears here, else a carry.
+    pub(crate) commitment_decision_windows: Vec<usize>,
 }
 
 /// Equipment column ranges and their block-start cursors: every dispatchable
@@ -347,7 +381,7 @@ pub(crate) struct EquipmentColumns {
 /// `n_cells * n_blks` (non-empty only when `n_cells > 0`) — a cell's own
 /// min-turbine/min-generation floor is the sum of ITS OWN member groups, never
 /// the plant's aggregate, so each cell gets its own row and its own slack
-/// column. See the min-floor contract in `.claude/rules/sddp.md`. Slack
+/// column. See the min-floor contract. Slack
 /// columns follow the withdrawal slacks; constraint rows follow the
 /// evaporation rows. Kept as one nested struct (not destructured) because the
 /// column and row halves are allocated as two back-to-back `RangeCursor` runs
@@ -435,21 +469,21 @@ pub(crate) struct ConstraintRows {
     /// − deposit_d = 0`, one row per (plant, lag) bucket REACHABLE at this
     /// stage (`state.transit_bucket_column_order[slot]`'s lag within this stage's
     /// `per_stage_mask` cap for that plant — see [`Self::transit_bucket_row_pos`]);
-    /// unlike `anticipated_state`'s active-plant sparseness, a lag beyond the
-    /// cap targets a stage outside `[0, n_stages)` and gets no row at ANY
-    /// stage from here to the horizon (the cap only shrinks). Placed
-    /// immediately after [`Self::water_balance`], so `load_balance` and every
-    /// row cursor after it shift by this stage's reachable count (`<=
-    /// state.n_buckets`, `== state.n_buckets` only while every lag is still
-    /// within-horizon). Empty `start..start` when `state.n_buckets == 0` (the
-    /// B==0 byte-identity anchor: `load_balance` collapses back onto
-    /// `water_balance.end`).
+    /// unlike `commit_in`'s active-plant sparseness, a lag beyond the cap gets
+    /// no row at this stage — absent a boundary FCF the cap only shrinks toward
+    /// the horizon end (Terminal credit deferred); with one present the
+    /// terminal cap un-caps instead (Delivery-family right-boundary pricing).
+    /// Placed immediately after
+    /// [`Self::water_balance`], so `load_balance` and every row cursor after it
+    /// shift by this stage's reachable count (`<= state.n_buckets`). Empty
+    /// `start..start` when `state.n_buckets == 0` (the B==0 byte-identity
+    /// anchor: `load_balance` collapses back onto `water_balance.end`).
     pub(crate) transit_bucket_definition: Range<usize>,
     /// For each GLOBAL bucket index (`state.transit_bucket_column_order`'s index),
     /// this stage's compact row position within [`Self::transit_bucket_definition`], or
     /// `None` when its lag is beyond this stage's reachable cap (no row; the
-    /// matching deposit in [`super::entries`]'s arc-release fill is dropped,
-    /// not misdirected to another row). Length `state.n_buckets`.
+    /// matching deposit in [`super::entries`]'s arc-release fill is dropped
+    /// there, not misdirected to another row). Length `state.n_buckets`.
     pub(crate) transit_bucket_row_pos: Vec<Option<usize>>,
     /// Row range for load balance constraints (one per bus per block).
     pub(crate) load_balance: Range<usize>,
@@ -540,7 +574,8 @@ pub(crate) struct StageLayout<'a> {
     // `n_anticipated * k_max` inline, so dead_code fires on the production side.
     #[allow(dead_code)]
     pub(crate) n_ant_state: usize,
-    /// Anticipated-thermal column/row offsets (see [`AnticipatedLayout`]).
+    /// Unified commitment-hold column/row offsets — in-study anticipated ring
+    /// plus terminal post-horizon lanes (see [`AnticipatedLayout`]).
     pub(crate) anticipated: AnticipatedLayout,
     /// Equipment column ranges (see [`EquipmentColumns`]).
     pub(crate) equipment: EquipmentColumns,
@@ -634,19 +669,20 @@ fn build_transit_bucket_row_pos(
     (transit_bucket_row_pos, n_reachable)
 }
 
-/// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
-/// slot-major, mirroring [`build_transit_bucket_row_pos`]'s role for buckets),
-/// this stage's compact row position within the interior-slot definition-row
-/// family, or `None` when the slot's delivery target `m = stage_idx + slot + 1`
-/// is a genuine fresh decision this stage (`decider[m] == Some(stage_idx)`,
-/// the deposit-row family `row_anticipated_state_out_def_start` owns it
-/// instead), beyond the study horizon (`m >= n_stages`), or not yet ready
-/// (`decider[m] > Some(stage_idx)`, structural padding). Ready
-/// (`PointResolution::is_ready_at`) is checked PER SLOT directly — never via
-/// a `depth`-derived boundary, which under-counts whenever pre-study (`None`)
-/// occupancy coexists with an in-study decision at the same stage (the
-/// fold-blindness class this per-slot check rules out). Returns the mapping
-/// and the reachable count.
+/// For each GLOBAL in-study commitment-hold slot (`(m mod k_max) *
+/// n_anticipated + plant`, modular slot-major/plant-minor — mirroring
+/// [`build_transit_bucket_row_pos`]'s role for buckets), this stage's compact
+/// row position within the future-window carry-row family, or `None` when
+/// the slot's delivery target `m = stage_idx + depth + 1` is a genuine fresh
+/// decision this stage (`decider[m] == Some(stage_idx)`, the deposit-row
+/// family `row_anticipated_state_out_def_start` owns it instead), beyond the
+/// study horizon (`m >= n_stages`), or not yet ready
+/// (`PointResolution::is_ready_at`, structural padding). This covers only
+/// STRICTLY FUTURE, not-yet-due deliveries; the commitment maturing EXACTLY
+/// this stage (`m == stage_idx`) is the single governing branch's fish-or-
+/// carry decision, owned by [`build_anticipated_fishing_row_pos`] and its
+/// entries-side `if`/`else` — never duplicated here. Returns the mapping and
+/// the reachable count.
 fn build_anticipated_slot_row_pos(
     state: &StateSpace,
     n_stages: usize,
@@ -663,11 +699,16 @@ fn build_anticipated_slot_row_pos(
 
     let mut row_pos = vec![None; n_anticipated * k_max];
     let mut n_reachable = 0_usize;
-    for slot in 0..k_max {
-        let m = stage_idx + slot + 1;
+    for depth in 0..k_max {
+        let m = stage_idx + depth + 1;
         if m >= n_stages {
             continue;
         }
+        // Modular addressing (`m % k_max`) in place of the pre-migration
+        // distance-based `depth`; `depth in 0..k_max` still enumerates
+        // exactly `k_max` consecutive `m` values, so every residue is
+        // visited exactly once — no self-collision within this sweep.
+        let slot = m % k_max;
         for (plant, point) in points.iter().enumerate() {
             let is_deposit = point.decider[m] == Some(stage_idx);
             let is_interior = !is_deposit && point.is_ready_at(m, stage_idx);
@@ -726,12 +767,18 @@ fn build_anticipated_decision_row_pos(
 }
 
 /// For each anticipated plant (local order), this stage's compact row
-/// position within the fishing-row family, or `None` when the delivery
-/// maturing this stage is a `K = 0` self-delivery
+/// position within the commitment-MATURITY family, or `None` when the
+/// delivery maturing this stage is a `K = 0` self-delivery
 /// (`PointResolution::is_anticipated_at`, exclude-with-advisory) — no
 /// anticipation binds, so the plant's ordinary thermal generation is
-/// unconstrained by any fishing coupling. Returns the mapping and the active
-/// count.
+/// unconstrained by any fishing coupling. A `Some` position means this plant
+/// fishes this stage: every plant with a delivery maturing this stage gets
+/// exactly one row regardless of commissioning activeness, and
+/// [`super::entries::fill_anticipated_fishing_entries`] ALWAYS renders the
+/// must-generate fish coupling for it (reading `commit_in`, never writing
+/// `commit_out`) — a commissioning-inactive delivery's dormant `commit_in`
+/// simply carries 0, pinning that stage's generation to 0. Returns the
+/// mapping and the active count.
 fn build_anticipated_fishing_row_pos(
     state: &StateSpace,
     n_stages: usize,
@@ -900,19 +947,28 @@ fn identify_filled_min_storage_floor_hydros(
 }
 
 /// Allocate the slack column index/indices for one generic-constraint row,
-/// advancing `n_slack_cols`: zero columns when slack is disabled, one for
-/// inequality, two (plus then minus) for equality.
+/// advancing `n_slack_cols`: zero columns when slack is disabled, one for a
+/// one-sided row, two (plus then minus) for a two-sided row — a two-sided
+/// bound pair needs both directions of slack to relax either endpoint
+/// independently.
+///
+/// The two-sided test derives from the row's OWN endpoint pair
+/// (`bound_lower.is_some() && bound_upper.is_some()`), not the constraint —
+/// shape is a per-row property of the resolved bound entry, never a
+/// constraint-level label.
 fn allocate_generic_slack_cols(
-    constraint: &GenericConstraint,
+    slack: &SlackConfig,
+    bound_lower: Option<f64>,
+    bound_upper: Option<f64>,
     col_generic_slack_start: usize,
     n_slack_cols: &mut usize,
 ) -> (Option<usize>, Option<usize>) {
-    if !constraint.slack.enabled {
+    if !slack.enabled {
         return (None, None);
     }
     let plus_col = col_generic_slack_start + *n_slack_cols;
     *n_slack_cols += 1;
-    let minus_col = if constraint.sense == ConstraintSense::Equal {
+    let minus_col = if bound_lower.is_some() && bound_upper.is_some() {
         let mc = col_generic_slack_start + *n_slack_cols;
         *n_slack_cols += 1;
         Some(mc)
@@ -920,6 +976,79 @@ fn allocate_generic_slack_cols(
         None
     };
     (Some(plus_col), minus_col)
+}
+
+/// Whether a `block_id = None` bound over `expression` collapses to a single
+/// stage-level row: only when every term is block-independent in BOTH its variable
+/// ([`expression_is_block_independent`]) AND its coefficient. A term whose
+/// coefficient references a block-varying (`PerStageBlock`) parameter makes the
+/// expression block-dependent, so the collapsed single row cannot stand in for one
+/// arbitrary block's coefficient — it stays a per-block row set.
+fn expression_collapses_to_stage_level(
+    expression: &ConstraintExpression,
+    resolved: &ResolvedParameters,
+) -> bool {
+    expression_is_block_independent(expression)
+        && !expression.terms.iter().any(|term| match term.coefficient {
+            CoefficientRef::Parameter(id) => resolved.is_block_varying(id),
+            CoefficientRef::Literal(_) => false,
+        })
+}
+
+/// Resolve an affine bound remainder to `f64`: `bound.constant` plus the sum of
+/// each term's coefficient times its parameter's resolved value at
+/// `(stage_idx, block_idx)`. `AffineBound::single(id)` resolves to exactly
+/// `resolved.get(id, stage_idx, block_idx)` (`0.0 + 1.0 * x == x` in `f64`).
+fn resolve_affine(
+    bound: &AffineBound,
+    resolved: &ResolvedParameters,
+    stage_idx: usize,
+    block_idx: usize,
+) -> f64 {
+    bound.terms.iter().fold(bound.constant, |acc, &(coef, id)| {
+        acc + coef * resolved.get(id, stage_idx, block_idx)
+    })
+}
+
+/// Fold a generic-constraint endpoint's parquet base with its affine remainder:
+/// a present remainder SHIFTS the base by `resolve_affine`'s value rather than
+/// replacing it, so `(Some(base), Some(bound))` folds to `base +
+/// resolve_affine(bound, ...)`, never `resolve_affine(bound, ...)` alone. A
+/// `(None, None)` endpoint is untargeted and stays `None` (the open LP
+/// direction), never shifted.
+fn fold_endpoint(
+    parquet: Option<f64>,
+    affine: Option<&AffineBound>,
+    resolved: &ResolvedParameters,
+    stage_idx: usize,
+    block_idx: usize,
+) -> Option<f64> {
+    match (parquet, affine) {
+        (None, None) => None,
+        (Some(base), None) => Some(base),
+        (None, Some(bound)) => Some(resolve_affine(bound, resolved, stage_idx, block_idx)),
+        (Some(base), Some(bound)) => {
+            Some(base + resolve_affine(bound, resolved, stage_idx, block_idx))
+        }
+    }
+}
+
+/// Whether either affine bound on `constraint` references a block-varying
+/// (`PerStageBlock`) parameter. When true, the stage-level collapse is suppressed:
+/// a single collapsed row would resolve one arbitrary block's bound value, losing
+/// the per-block variation.
+fn bound_affine_is_block_varying(
+    constraint: &GenericConstraint,
+    resolved: &ResolvedParameters,
+) -> bool {
+    [
+        &constraint.bound_lower_affine,
+        &constraint.bound_upper_affine,
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(AffineBound::params)
+    .any(|id| resolved.is_block_varying(id))
 }
 
 /// Enumerate active generic constraint rows and assign their slack column indices.
@@ -930,12 +1059,14 @@ fn allocate_generic_slack_cols(
 fn enumerate_generic_constraint_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
+    stage_idx: usize,
     n_blks: usize,
     col_generic_slack_start: usize,
 ) -> GenericConstraintLayout {
     let mut n_generic_rows: usize = 0;
     let mut n_generic_slack_cols: usize = 0;
     let mut generic_constraint_rows: Vec<GenericConstraintRowEntry> = Vec::new();
+    let resolved_parameters = ctx.resolved.resolved_parameters;
 
     for (constraint_idx, constraint) in ctx.generic_constraints.iter().enumerate() {
         if !ctx
@@ -951,20 +1082,40 @@ fn enumerate_generic_constraint_rows(
             .resolved_generic_bounds
             .bounds_for_stage(constraint_idx, stage.id);
 
-        let collapse_stage_level = expression_is_block_independent(&constraint.expression);
+        let collapse_stage_level =
+            expression_collapses_to_stage_level(&constraint.expression, resolved_parameters)
+                && !bound_affine_is_block_varying(constraint, resolved_parameters);
 
-        for &(block_id, bound) in bound_entries {
-            // block_id is a non-negative 0-indexed block position (upstream
+        for entry in bound_entries {
+            // entry.block_id is a non-negative 0-indexed block position (upstream
             // validation), so the cast_sign_loss is safe.
             #[allow(clippy::cast_sign_loss)]
-            let (block_start, block_count, is_stage_level) = match block_id {
+            let (block_start, block_count, is_stage_level) = match entry.block_id {
                 None if collapse_stage_level => (0, 1, true),
                 None => (0, n_blks, false),
                 Some(blk_id) => (blk_id as usize, 1, false),
             };
             for block_idx in block_start..block_start + block_count {
+                // The folded pair drives both the row bound and, below, the
+                // two-sided slack shape.
+                let effective_lower = fold_endpoint(
+                    entry.bound_lower,
+                    constraint.bound_lower_affine.as_ref(),
+                    resolved_parameters,
+                    stage_idx,
+                    block_idx,
+                );
+                let effective_upper = fold_endpoint(
+                    entry.bound_upper,
+                    constraint.bound_upper_affine.as_ref(),
+                    resolved_parameters,
+                    stage_idx,
+                    block_idx,
+                );
                 let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
-                    constraint,
+                    &constraint.slack,
+                    effective_lower,
+                    effective_upper,
                     col_generic_slack_start,
                     &mut n_generic_slack_cols,
                 );
@@ -974,8 +1125,8 @@ fn enumerate_generic_constraint_rows(
                     entity_id: constraint.id.0,
                     block_idx,
                     is_stage_level,
-                    bound,
-                    sense: constraint.sense,
+                    bound_lower: effective_lower,
+                    bound_upper: effective_upper,
                     slack_enabled: constraint.slack.enabled,
                     slack_penalty: constraint.slack.penalty.unwrap_or(0.0),
                     slack_plus_col,
@@ -990,6 +1141,26 @@ fn enumerate_generic_constraint_rows(
         n_generic_slack_cols,
         generic_constraint_rows,
     }
+}
+
+/// One hydro's resolved LP production role at one stage — the single
+/// classifier [`StageLayout::stage_production_role`] resolves, so
+/// `fill_load_balance_entries` and `fill_operational_violation_entries` can
+/// no longer disagree about a plant's role the way two independent
+/// `ProductionModelSet::model()` re-queries once did.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum StageProductionRole {
+    /// Prices through the plant's FPHA generation column(s), at this
+    /// FPHA-local index.
+    Fpha(FphaLocal),
+    /// Prices through the plant's turbine column at this shared productivity.
+    Constant(f64),
+    /// A commissioning-dormant (`PreFilling`/`Filling`) `Fpha`-resolved plant:
+    /// gated out of `fpha_local_index` by `identify_fpha_hydros`, so it has no
+    /// generation column, and its turbine column is frozen `[0, 0]`. It
+    /// contributes nothing to either consumer's row — never priced as
+    /// `ConstantProductivity`, which it has no productivity for.
+    Dormant,
 }
 
 impl<'a> StageLayout<'a> {
@@ -1051,6 +1222,11 @@ impl<'a> StageLayout<'a> {
             BlockMode::Chronological => n_blks.saturating_sub(1),
             BlockMode::Parallel => 0,
         };
+        // Global post-horizon window indices deciding at this stage, ascending
+        // — the sparse decision-column family below sizes from this.
+        let commitment_decision_windows: Vec<usize> = (0..state.n_commitment)
+            .filter(|&w| state.commitment_decider_stage[w] == stage_idx)
+            .collect();
         let mut col = RangeCursor::new(state.control_region_start());
         let storage_internal = col.alloc(n_h * n_interior);
         let storage_internal_start = storage_internal.start;
@@ -1061,6 +1237,7 @@ impl<'a> StageLayout<'a> {
         let thermal = col.alloc(ctx.n_thermals * n_blks);
         let thermal_end = thermal.end;
         col.alloc(ctx.n_anticipated);
+        let col_commitment_decision_start = col.alloc(commitment_decision_windows.len()).start;
         let line_fwd = col.alloc(ctx.n_lines * n_blks);
         let line_rev = col.alloc(ctx.n_lines * n_blks);
         let deficit = col.alloc(ctx.n_buses * max_deficit_segments * n_blks);
@@ -1099,7 +1276,8 @@ impl<'a> StageLayout<'a> {
         // Sized from this stage's reachable count, not the stage-invariant
         // `state.n_buckets`: `build_transit_bucket_row_pos` masks a lag beyond
         // `ctx.per_stage_mask[stage_idx]`'s per-plant cap out of the row range
-        // entirely (`horizon_cap_active`'s "dropped by construction").
+        // entirely — the cap itself is `build_transit_bucket_topology`'s, gated
+        // on `boundary_present`.
         let (transit_bucket_row_pos, n_transit_bucket_rows) = build_transit_bucket_row_pos(
             &state.transit_bucket_column_order,
             &ctx.per_stage_mask,
@@ -1155,16 +1333,18 @@ impl<'a> StageLayout<'a> {
         let n_filled_min_storage_floor_rows = filled_min_storage_floor_hydro_indices.len();
         let row_filled_min_storage_floor_start = row.alloc(n_filled_min_storage_floor_rows).start;
 
-        // Fishing rows: one per GENUINELY anticipated plant this stage
-        // (`build_anticipated_fishing_row_pos`) — a `K = 0` self-delivery
-        // excludes a plant's fishing row this stage, so the row family is sparse
-        // like the deposit family below, not the dense `ctx.n_anticipated` count.
+        // Commitment-MATURITY rows: one per GENUINELY anticipated plant whose
+        // delivery matures this stage (`build_anticipated_fishing_row_pos`) —
+        // a `K = 0` self-delivery excludes a plant's row this stage, so the
+        // row family is sparse like the deposit family below, not the dense
+        // `ctx.n_anticipated` count. Content (fish vs carry) is decided by
+        // `entries.rs`'s `if`/`else`, not here.
         let n_stages = ctx.resolved.bounds.n_stages();
         let (anticipated_fishing_row_pos, n_anticipated_fishing_rows) =
             build_anticipated_fishing_row_pos(state, n_stages, stage_idx);
         let row_anticipated_fishing_start = row.alloc(n_anticipated_fishing_rows).start;
 
-        // Anticipated-state-out (deposit) definition rows
+        // Anticipated-state-out (latch/deposit) definition rows
         // (`build_anticipated_decision_row_pos`).
         let (anticipated_decision_row_pos, n_anticipated_state_out_def_rows) =
             build_anticipated_decision_row_pos(
@@ -1176,12 +1356,20 @@ impl<'a> StageLayout<'a> {
             );
         let row_anticipated_state_out_def_start = row.alloc(n_anticipated_state_out_def_rows).start;
 
-        // Anticipated-ring interior-slot definition rows
-        // (`build_anticipated_slot_row_pos`).
+        // Future-window commitment-carry rows, modular-addressed
+        // (`build_anticipated_slot_row_pos`) — strictly future, not-yet-due
+        // deliveries only; the maturing-this-stage carry (when the single
+        // governing branch selects it) is rendered by the maturity row above.
         let (anticipated_slot_row_pos, n_anticipated_slot_definition_rows) =
             build_anticipated_slot_row_pos(state, n_stages, stage_idx);
         let row_anticipated_slot_definition_start =
             row.alloc(n_anticipated_slot_definition_rows).start;
+
+        // Terminal post-horizon lane rows: dense, one per declared window
+        // every stage (latch at its own decider, carry-by-identity otherwise
+        // — no fish arm exists for a post-horizon lane).
+        let row_commitment_start = row.alloc(state.n_commitment).start;
+
         // Peeked before `generic` below is computed: the generic row block's
         // length depends on `col_generic_slack_start` (the column axis), but its
         // own start does not depend on that length.
@@ -1198,8 +1386,13 @@ impl<'a> StageLayout<'a> {
         let contract_export = col.alloc(n_contract_export * n_blks);
 
         let col_generic_slack_start = col.pos();
-        let generic =
-            enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
+        let generic = enumerate_generic_constraint_rows(
+            ctx,
+            stage,
+            stage_idx,
+            n_blks,
+            col_generic_slack_start,
+        );
         col.alloc(generic.n_generic_slack_cols);
 
         // σ_fill then σ^{v-} are the last two per-stage column families; σ^{v-}
@@ -1213,14 +1406,18 @@ impl<'a> StageLayout<'a> {
         let num_rows = row.pos();
         let zeta = stage.blocks.iter().map(|b| b.duration_hours).sum::<f64>() * M3S_TO_HM3;
 
-        // The ring's outgoing columns are sourced from their stage-invariant
-        // state-region position (`state.anticipated_slots_out.start`), NOT
-        // `thermal_end + n_anticipated`, so the global stage-0 cut map lands on the
-        // correct column even when this stage's block count differs from stage 0's.
-        let col_anticipated_slots_out_start = if ctx.n_anticipated > 0 {
-            state.anticipated_slots_out.start
-        } else {
+        // The commitment-hold outgoing columns are sourced from their
+        // stage-invariant state-region position (`state.commit_out.start`),
+        // NOT `thermal_end + n_anticipated`, so the global stage-0 cut map
+        // lands on the correct column even when this stage's block count
+        // differs from stage 0's. `commit_out` collapses to the literal
+        // `0..0` only when BOTH the in-study ring and the post-horizon lanes
+        // are empty, mirroring the same `0..0`-vs-cursor-position fallback
+        // every other optional-block start already needs.
+        let col_anticipated_slots_out_start = if state.commit_out.is_empty() {
             thermal_end
+        } else {
+            state.commit_out.start
         };
         let anticipated = AnticipatedLayout {
             col_anticipated_decision_start: thermal_end,
@@ -1234,6 +1431,9 @@ impl<'a> StageLayout<'a> {
             row_anticipated_slot_definition_start,
             n_anticipated_slot_definition_rows,
             anticipated_slot_row_pos,
+            row_commitment_start,
+            col_commitment_decision_start,
+            commitment_decision_windows,
         };
 
         let anticipated_local_by_sys_pos = ctx
@@ -1373,6 +1573,35 @@ impl<'a> StageLayout<'a> {
     #[inline]
     pub(crate) fn fpha_local_first_cell(&self, local_idx: FphaLocal) -> FphaCellLocal {
         FphaCellLocal::new(self.fpha_cell_local_start[local_idx.get()])
+    }
+
+    /// Hydro `h_idx`'s [`StageProductionRole`] at `stage_idx`: `Fpha` when
+    /// `identify_fpha_hydros` admitted it into `fpha_local_index`, else the
+    /// resolved model's `Constant` productivity or, for an `Fpha`-resolved
+    /// model excluded by the phase gate, `Dormant`.
+    #[inline]
+    pub(super) fn stage_production_role(
+        &self,
+        production_models: &ProductionModelSet,
+        h_idx: usize,
+        stage_idx: usize,
+    ) -> StageProductionRole {
+        if let Some(local_idx) = self.fpha_local_index[h_idx] {
+            debug_assert!(
+                matches!(
+                    production_models.model(h_idx, stage_idx),
+                    ResolvedProductionModel::Fpha { .. }
+                ),
+                "FPHA local-index table inconsistent with production model for hydro {h_idx}"
+            );
+            return StageProductionRole::Fpha(local_idx);
+        }
+        match production_models.model(h_idx, stage_idx) {
+            ResolvedProductionModel::ConstantProductivity { productivity } => {
+                StageProductionRole::Constant(*productivity)
+            }
+            ResolvedProductionModel::Fpha { .. } => StageProductionRole::Dormant,
+        }
     }
 
     /// Forward line-flow column for line `l`, block `blk`.
@@ -1518,11 +1747,16 @@ impl<'a> StageLayout<'a> {
         self.state.z_inflow.start
     }
 
-    /// First anticipated-state column; reads `self.state.anticipated_state.start`.
+    /// First commitment-hold incoming column (in-study + post-horizon);
+    /// reads `self.state.commit_in.start`.
+    // Rationale: mirrors the sibling col_*_start accessors above for
+    // test-fixture symmetry; no production call site reads through it yet
+    // (unlike its siblings, which production code does call).
+    #[allow(dead_code)]
     #[inline]
     #[must_use]
     pub(crate) fn col_anticipated_state_start(&self) -> usize {
-        self.state.anticipated_state.start
+        self.state.commit_in.start
     }
 
     /// Column-side state dimension; reads `self.state.n_state`.
@@ -1615,6 +1849,22 @@ impl<'a> StageLayout<'a> {
         }
     }
 
+    /// Post-horizon commitment-decision column range: one column per window
+    /// deciding this stage, `col_commitment_decision_start .. + len`. `0..0`
+    /// (never `start..start`, same convention as [`Self::anticipated_decision`])
+    /// when no window decides this stage.
+    #[inline]
+    #[must_use]
+    pub(crate) fn commitment_decision(&self) -> Range<usize> {
+        let n = self.anticipated.commitment_decision_windows.len();
+        if n > 0 {
+            let s = self.anticipated.col_commitment_decision_start;
+            s..s + n
+        } else {
+            0..0
+        }
+    }
+
     /// Owned per-stage equipment-geometry snapshot: every field is a clone or
     /// range accessor of `self`, so `StageLayout` alone owns each family's
     /// start/end arithmetic. Must stay OWNED — the result is cloned into
@@ -1629,6 +1879,8 @@ impl<'a> StageLayout<'a> {
             diversion: self.equipment.diversion.clone(),
             thermal: self.equipment.thermal.clone(),
             anticipated_decision: self.anticipated_decision(),
+            commitment_decision: self.commitment_decision(),
+            commitment_decision_windows: self.anticipated.commitment_decision_windows.clone(),
             line_fwd: self.equipment.line_fwd.clone(),
             line_rev: self.equipment.line_rev.clone(),
             deficit: self.equipment.deficit.clone(),
@@ -1705,3 +1957,130 @@ impl<'a> StageLayout<'a> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod collapse_stage_level_tests {
+    use super::*;
+    use cobre_core::{LinearTerm, VariableRef};
+
+    fn expr(term: LinearTerm) -> ConstraintExpression {
+        ConstraintExpression { terms: vec![term] }
+    }
+
+    fn hydro_storage() -> VariableRef {
+        VariableRef::HydroStorage {
+            hydro_id: EntityId(1),
+        }
+    }
+
+    /// Slot 42 stores two block values at stage 0 (block-varying); slot 43 stores a
+    /// length-1 inner (block-invariant broadcast).
+    fn resolved() -> ResolvedParameters {
+        ResolvedParameters {
+            per_param: vec![vec![vec![1.0, 2.0]], vec![vec![5.0]]],
+            id_to_slot: vec![(42, 0), (43, 1)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn block_varying_coefficient_suppresses_collapse() {
+        let e = expr(LinearTerm::parameter(EntityId(42), 1.0, hydro_storage()));
+        assert!(
+            !expression_collapses_to_stage_level(&e, &resolved()),
+            "a block-varying coefficient over a block-independent variable must not collapse"
+        );
+    }
+
+    #[test]
+    fn block_invariant_coefficient_still_collapses() {
+        let param = expr(LinearTerm::parameter(EntityId(43), 1.0, hydro_storage()));
+        let literal = expr(LinearTerm::literal(1.0, hydro_storage()));
+        let r = resolved();
+        assert!(expression_collapses_to_stage_level(&param, &r));
+        assert!(expression_collapses_to_stage_level(&literal, &r));
+    }
+
+    #[test]
+    fn block_dependent_variable_never_collapses() {
+        let e = expr(LinearTerm::literal(
+            1.0,
+            VariableRef::ThermalGeneration {
+                thermal_id: EntityId(0),
+                block_id: None,
+            },
+        ));
+        assert!(!expression_collapses_to_stage_level(&e, &resolved()));
+    }
+
+    fn constraint_with_refs(
+        lower_ref: Option<EntityId>,
+        upper_ref: Option<EntityId>,
+    ) -> GenericConstraint {
+        GenericConstraint {
+            id: EntityId(0),
+            name: "c".to_string(),
+            description: None,
+            expression: expr(LinearTerm::literal(1.0, hydro_storage())),
+            slack: cobre_core::SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: lower_ref.map(AffineBound::single),
+            bound_upper_affine: upper_ref.map(AffineBound::single),
+        }
+    }
+
+    #[test]
+    fn bound_affine_block_varying_truth_table() {
+        let r = resolved();
+        // Slot 42 is block-varying, slot 43 broadcasts.
+        assert!(bound_affine_is_block_varying(
+            &constraint_with_refs(None, Some(EntityId(42))),
+            &r
+        ));
+        assert!(bound_affine_is_block_varying(
+            &constraint_with_refs(Some(EntityId(42)), None),
+            &r
+        ));
+        assert!(!bound_affine_is_block_varying(
+            &constraint_with_refs(None, Some(EntityId(43))),
+            &r
+        ));
+        assert!(!bound_affine_is_block_varying(
+            &constraint_with_refs(None, None),
+            &r
+        ));
+    }
+
+    /// A block-varying parameter reached through a multi-term affine bound (not
+    /// just the `single` special case) still suppresses the collapse.
+    #[test]
+    fn bound_affine_block_varying_detects_multi_term_reference() {
+        let r = resolved();
+        let mut constraint = constraint_with_refs(None, None);
+        constraint.bound_upper_affine = Some(AffineBound {
+            constant: 10.0,
+            terms: vec![(2.0, EntityId(43)), (0.5, EntityId(42))],
+        });
+        assert!(bound_affine_is_block_varying(&constraint, &r));
+    }
+
+    #[test]
+    fn resolve_affine_of_single_equals_get() {
+        let r = resolved();
+        let bound = AffineBound::single(EntityId(42));
+        assert_eq!(resolve_affine(&bound, &r, 0, 1), r.get(EntityId(42), 0, 1));
+    }
+
+    #[test]
+    fn resolve_affine_of_two_term_remainder_sums_constant_and_terms() {
+        let r = resolved();
+        let bound = AffineBound {
+            constant: 100.0,
+            terms: vec![(2.0, EntityId(42)), (-1.0, EntityId(43))],
+        };
+        let expected = 100.0 + 2.0 * r.get(EntityId(42), 0, 1) - 1.0 * r.get(EntityId(43), 0, 1);
+        assert_eq!(resolve_affine(&bound, &r, 0, 1), expected);
+    }
+}

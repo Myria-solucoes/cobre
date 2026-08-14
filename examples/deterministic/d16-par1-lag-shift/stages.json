@@ -29,7 +29,7 @@
         "storage": true,
         "inflow_lags": true
       },
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 1,
@@ -47,7 +47,7 @@
         "storage": true,
         "inflow_lags": true
       },
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 2,
@@ -65,7 +65,7 @@
         "storage": true,
         "inflow_lags": true
       },
-      "num_scenarios": 1
+      "num_openings": 1
     }
   ],
   "season_definitions": {

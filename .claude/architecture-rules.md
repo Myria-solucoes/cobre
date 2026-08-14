@@ -17,7 +17,7 @@ Available context structs:
 | Struct                | File                                             | Purpose                                                                                                                            | Mutability              |
 | --------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
 | `StageContext`        | `cobre-sddp/src/workspace/context.rs`            | Per-stage templates, base rows, layout                                                                                             | Immutable (`&`)         |
-| `TrainingContext`     | `cobre-sddp/src/workspace/context.rs`            | Horizon, indexer, stochastic, initial state                                                                                        | Immutable (`&`)         |
+| `TrainingContext`     | `cobre-sddp/src/workspace/context.rs`            | Horizon, indexer, stochastic, initial state, the runtime node graph                                                                | Immutable (`&`)         |
 | `ScratchBuffers`      | `cobre-sddp/src/workspace/workspace.rs`          | Per-worker noise/patch scratch space                                                                                               | Mutable (`&mut`)        |
 | `SolverWorkspace`     | `cobre-sddp/src/workspace/workspace.rs`          | Solver + scratch + patch buffer                                                                                                    | Mutable (`&mut`)        |
 | `TrainingConfig`      | `cobre-sddp/src/config.rs`                       | Forward passes, iteration limit, seed                                                                                              | Owned (moved in)        |
@@ -33,9 +33,9 @@ Available context structs:
 | `ForwardWorkerParams` | `cobre-sddp/src/training/forward_pass_state.rs`  | Read-only captures for rayon workers                                                                                               | Immutable bundle (`&`)  |
 | `ForwardWorkerResult` | `cobre-sddp/src/training/forward_pass_state.rs`  | Return bundle from per-worker forward execution                                                                                    | Owned (moved out)       |
 | `OpeningTreeInputs`   | `cobre-stochastic/src/tree/generate.rs`          | Optional inputs to `generate_opening_tree`                                                                                         | Immutable bundle (`&`)  |
-| `LbEvalScratch`       | `cobre-sddp/src/training/lower_bound.rs`         | Rank-0 risk-measure aggregation scratch (`objectives_buf`, `uniform_prob_buf`) with no `ScratchBuffers` counterpart                | Mutable (`&mut`)        |
+| `LbEvalScratch`       | `cobre-sddp/src/training/lower_bound.rs`         | Rank-0 risk-measure aggregation scratch (`objectives_buf`, `weights_buf`) with no `ScratchBuffers` counterpart                     | Mutable (`&mut`)        |
 | `LbEvalScratchBundle` | `cobre-sddp/src/training/lower_bound.rs`         | Bundles `patch_buf`, `lb_cut_batch`, `lb_cut_row_map`, `noise_scratch` (`ScratchBuffers`), `lb_scratch` for `evaluate_lower_bound` | Mutable bundle (`&mut`) |
-| `RiskMeasureScratch`  | `cobre-sddp/src/risk_measure.rs`                 | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`)                                                                    | Mutable (`&mut`)        |
+| `RiskMeasureScratch`  | `cobre-sddp/src/convergence/risk_measure.rs`     | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`)                                                                    | Mutable (`&mut`)        |
 
 **Decision tree when adding new data to the hot path:**
 
@@ -49,6 +49,31 @@ Available context structs:
 8. Per-call input to backward/forward/simulate → field on the matching `*Inputs` bundle.
 9. Lower-bound-specific aggregation scratch (no `ScratchBuffers` counterpart) → `LbEvalScratch`.
 10. None of the above → create a new spec or bundle struct. Do NOT add a bare parameter.
+
+### F7 — the runtime node graph's named home
+
+The node-native engine's runtime node graph (node identity/canonical order,
+the `node → pool` map, per-node Ω views/out-edges — `NodeGraph` in
+`cobre-sddp/src/setup/node_graph.rs`) is **study-level, read-only** data
+(rule 2 above), so it is a field on `TrainingContext`
+(`node_graph: &'a NodeGraph`) rather than a new dedicated context struct — the
+same shape as `stochastic`, `study_dims`, and `cut_state_layouts`, which are
+already single struct-typed `TrainingContext` fields for cohesive,
+study-level data. A new `NodeContext` struct was the other option the
+decision tree offered; it was not taken because it would add a second
+top-level context type threaded through every hot-path signature budget for a
+single field, when `TrainingContext` already carries exactly this shape of
+data. `StudySetup` owns the graph as `pub node_graph: NodeGraph` (built in
+`from_broadcast_params`, immediately after `build_scenario_libraries` — an
+`External`-bound node's Ω addresses the standardized library's raw scenario
+axis, so binding earlier would race the library's own standardization);
+`stage_ctx`/`training_ctx`/`simulation_ctx` borrow it exactly like every other
+sub-struct. Downstream tickets (backward cut aggregation, the lower bound,
+forward traversal, simulation, the exact upper bound) consume
+`training_ctx().node_graph` unchanged — no second access route, no loose
+parameter threading. Discount is deliberately **not** part of `NodeGraph`; it
+stays per-stage on `StageContext::cumulative_discount_factors`, reached
+through a node's own `stage` field.
 
 ---
 
@@ -66,6 +91,7 @@ plus a small number of bare residuals. Context constructors (`stage_ctx`,
 | `ScenarioLibraries`   | `cobre-sddp/src/setup/scenario_library_set.rs` | Training + simulation `PhaseLibraries` pair                                                                              | `pub`        | Aggregated sub-struct       |
 | `PhaseLibraries`      | `cobre-sddp/src/setup/scenario_library_set.rs` | Sampling schemes and optional libraries for one phase                                                                    | `pub`        | Aggregated sub-struct       |
 | `MethodologyConfig`   | `cobre-sddp/src/setup/methodology_config.rs`   | `horizon` + `inflow_method` — stochastic numerical methodology                                                           | `pub(crate)` | Aggregated sub-struct       |
+| `NodeGraph`           | `cobre-sddp/src/setup/node_graph.rs`           | Runtime node graph (F7): node identity/order, `node → pool` map, per-node Ω views/out-edges                              | `pub`        | Aggregated sub-struct       |
 | `LoopParams`          | `cobre-sddp/src/config.rs`                     | Pure-data projection of `LoopConfig` (excludes runtime-derived fields)                                                   | `pub`        | Projection of `LoopConfig`  |
 | `SimulationConfig`    | `cobre-sddp/src/simulation/config.rs`          | `n_scenarios`, `io_channel_capacity`                                                                                     | `pub`        | Literal reuse               |
 | `CutManagementConfig` | `cobre-sddp/src/config.rs`                     | Cut selection, budget cap, activity tolerance, warm-start cuts, per-stage risk measures                                  | `pub(crate)` | Literal reuse               |
@@ -82,7 +108,7 @@ plus a small number of bare residuals. Context constructors (`stage_ctx`,
   `LoopParams` drops `n_fwd_threads`; `EventParams` drops runtime handles).
 - **New sub-struct**: introduce a dedicated type when no existing type
   cohesively covers the grouping (example: `StageData`, `ScenarioLibraries`,
-  `MethodologyConfig`).
+  `MethodologyConfig`, `NodeGraph`).
 
 ### Accessor policy
 
@@ -202,11 +228,14 @@ shape).
 
 ## Python Parity Checklist
 
-When adding a new output file in the CLI (`write_outputs` in `run.rs`):
+Every output file the CLI writes must also be written by the Python bindings —
+the invariant CLAUDE.md's Python-parity hard rule owns (state the rule, not a
+"currently none missing" snapshot). When adding a new output:
 
-1. Does `run_inner()` in `cobre-python/src/run.rs` write the same file?
-2. If not, add it. The Python path should call the same `cobre_io` write function.
-
-Current gaps (to be fixed):
-
-- None — all CLI output writes are mirrored in Python.
+1. The CLI writes it via `write_training_outputs` / `write_simulation_outputs`
+   in `crates/cobre-cli/src/commands/run/outputs.rs`.
+2. Wire the same `cobre_io` write into the Python path — `run_via_study` /
+   `run_training_phase_py` in `crates/cobre-python/src/run.rs` — so both surfaces
+   emit the file. `cobre-python` is excluded from the Cargo workspace, so
+   `cargo test --workspace` does not catch a missing mirror; check both paths by
+   hand.

@@ -10,11 +10,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use cobre_core::{
-    Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractBlockBounds,
-    EntityId, FillingConfig, Hydro, HydroBlockBounds, HydroGenerationModel, HydroStageBounds,
-    LineBlockBounds, NoiseMethod, PumpingBlockBounds, PumpingStation, ResolvedBounds,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+    AffineBound, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology,
+    ConstraintExpression, ContractBlockBounds, EntityId, FillingConfig, GenericConstraint, Hydro,
+    HydroBlockBounds, HydroGenerationModel, HydroStageBounds, LineBlockBounds, NoiseMethod,
+    PumpingBlockBounds, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+    ScenarioSourceConfig, SlackConfig, Stage, StageRiskConfig, StageStateConfig,
     ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -26,12 +27,13 @@ use crate::indexer::{
 };
 use crate::lead_time::AnticipatedResolution;
 use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::PostStudyResolved;
 use crate::test_support::{make_unit_group, state_layout};
 
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, RangeCursor,
-    ResolvedTables, StageLayout, TemplateBuildCtx, build_transit_bucket_row_pos,
+    ResolvedTables, StageLayout, TemplateBuildCtx, build_transit_bucket_row_pos, fold_endpoint,
 };
 
 // ── RangeCursor ──────────────────────────────────────────────────────────
@@ -78,6 +80,7 @@ struct ZeroEntityFixtures {
     resolved_parameters: ResolvedParameters,
     production_models: ProductionModelSet,
     evaporation_models: EvaporationModelSet,
+    generic_constraints: Vec<GenericConstraint>,
 }
 
 impl ZeroEntityFixtures {
@@ -99,7 +102,74 @@ impl ZeroEntityFixtures {
             },
             production_models: ProductionModelSet::new(vec![], 0, 1),
             evaporation_models: EvaporationModelSet::new(vec![]),
+            generic_constraints: Vec::new(),
         }
+    }
+
+    /// Install one generic constraint (id 5, slack enabled) whose UPPER bound is a
+    /// symbolic reference to a `PerStageBlock` parameter (id 42) carrying two
+    /// distinct values `[100.0, 200.0]` at stage 0, and whose LOWER bound is a
+    /// numeric parquet endpoint `5.0`. The activation row is `block_id = None`, both
+    /// numeric columns null on the upper side. Exercises the effective-endpoint
+    /// resolution, the block-varying collapse suppression, and the two-sided slack
+    /// shape in one fixture.
+    fn install_symbolic_upper_bound(&mut self) {
+        self.generic_constraints = vec![GenericConstraint {
+            id: EntityId(5),
+            name: "demand_cap".to_string(),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: true,
+                penalty: Some(10.0),
+            },
+            bound_lower_affine: None,
+            bound_upper_affine: Some(AffineBound::single(EntityId(42))),
+        }];
+        let id_map: HashMap<i32, usize> = [(5, 0)].into_iter().collect();
+        self.resolved_generic_bounds = ResolvedGenericConstraintBounds::new(
+            &id_map,
+            std::iter::once((5i32, 0i32, None::<i32>, Some(5.0f64), None::<f64>)),
+        );
+        self.resolved_parameters = ResolvedParameters {
+            per_param: vec![vec![vec![100.0, 200.0]]],
+            id_to_slot: vec![(42, 0)],
+            cost_scale_factor: 1_000_000.0,
+        };
+    }
+
+    /// Install one generic constraint (id 5, no slack) whose UPPER bound carries
+    /// BOTH a numeric parquet base (`100.0`) and a constant-only affine remainder
+    /// (`-5.0`): the fold arm `fold_endpoint` newly reaches, `base + R`.
+    fn install_folded_upper_bound_constant(&mut self) {
+        self.generic_constraints = vec![GenericConstraint {
+            id: EntityId(5),
+            name: "folded_cap".to_string(),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+            bound_lower_affine: None,
+            bound_upper_affine: Some(AffineBound {
+                constant: -5.0,
+                terms: vec![],
+            }),
+        }];
+        let id_map: HashMap<i32, usize> = [(5, 0)].into_iter().collect();
+        self.resolved_generic_bounds = ResolvedGenericConstraintBounds::new(
+            &id_map,
+            std::iter::once((5i32, 0i32, None::<i32>, None::<f64>, Some(100.0f64))),
+        );
+    }
+
+    /// A zero-anticipated `TemplateBuildCtx` that carries the fixture's own
+    /// generic constraints (rather than the empty slice `make_ctx` installs).
+    fn make_ctx_generic(&self) -> TemplateBuildCtx<'_> {
+        let mut ctx = self.make_ctx(0, 0, vec![], vec![]);
+        ctx.generic_constraints = &self.generic_constraints;
+        ctx
     }
 
     /// Build a zero-entity `TemplateBuildCtx` with the supplied
@@ -152,6 +222,7 @@ impl ZeroEntityFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 0,
             n_thermals: 0,
             n_lines: 0,
@@ -293,6 +364,178 @@ fn stage_layout_zero_anticipated_matches_pre_anticipated_offsets() {
     );
 }
 
+/// A symbolic upper bound resolves per `(stage, block)` through the referenced
+/// `PerStageBlock` parameter, and the block-varying reference suppresses the
+/// stage-level collapse: one row per block, each carrying the parameter's own
+/// block value, distinct between blocks.
+#[test]
+fn symbolic_upper_bound_resolves_per_block_and_suppresses_collapse() {
+    let mut fixtures = ZeroEntityFixtures::new();
+    fixtures.install_symbolic_upper_bound();
+    let ctx = fixtures.make_ctx_generic();
+    let state = state_layout_for(&ctx);
+    let stage = stage_with_blocks(BlockMode::Parallel, 2);
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    assert_eq!(
+        layout.generic_constraint_rows.len(),
+        2,
+        "a block-varying bound reference must not collapse to a single stage-level row"
+    );
+    let b0 = &layout.generic_constraint_rows[0];
+    let b1 = &layout.generic_constraint_rows[1];
+    assert_eq!((b0.block_idx, b1.block_idx), (0, 1));
+    assert!(!b0.is_stage_level && !b1.is_stage_level);
+
+    assert_eq!(
+        b0.bound_upper.expect("upper present").to_bits(),
+        100.0_f64.to_bits(),
+        "block 0 upper must equal get(42, 0, 0)"
+    );
+    assert_eq!(
+        b1.bound_upper.expect("upper present").to_bits(),
+        200.0_f64.to_bits(),
+        "block 1 upper must equal get(42, 0, 1)"
+    );
+    assert_ne!(
+        b0.bound_upper.expect("upper present").to_bits(),
+        b1.bound_upper.expect("upper present").to_bits(),
+        "distinct per-block parameter values must produce distinct row_upper"
+    );
+
+    // The numeric parquet lower endpoint flows through unchanged on both rows.
+    assert_eq!(b0.bound_lower, Some(5.0));
+    assert_eq!(b1.bound_lower, Some(5.0));
+}
+
+/// A symbolic endpoint counts as present when shaping the slack: the fixture's
+/// numeric lower and symbolic upper make each row two-sided, so an enabled slack
+/// gets both a plus and a minus column.
+#[test]
+fn symbolic_endpoint_makes_row_two_sided_for_slack() {
+    let mut fixtures = ZeroEntityFixtures::new();
+    fixtures.install_symbolic_upper_bound();
+    let ctx = fixtures.make_ctx_generic();
+    let state = state_layout_for(&ctx);
+    let stage = stage_with_blocks(BlockMode::Parallel, 2);
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    for row in &layout.generic_constraint_rows {
+        assert!(
+            row.slack_plus_col.is_some() && row.slack_minus_col.is_some(),
+            "a numeric-lower + symbolic-upper row is two-sided, so slack needs both columns"
+        );
+    }
+}
+
+/// A parquet upper base composed with a constant-only affine remainder folds
+/// (`base + R`) into one row bound, byte-identical to a hand-flattened literal.
+#[test]
+fn folded_upper_bound_constant_shifts_parquet_base() {
+    let mut fixtures = ZeroEntityFixtures::new();
+    fixtures.install_folded_upper_bound_constant();
+    let ctx = fixtures.make_ctx_generic();
+    let state = state_layout_for(&ctx);
+    let stage = minimal_stage();
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    assert_eq!(layout.generic_constraint_rows.len(), 1);
+    let row = &layout.generic_constraint_rows[0];
+    assert_eq!(row.bound_lower, None);
+    assert_eq!(
+        row.bound_upper.expect("upper present").to_bits(),
+        95.0_f64.to_bits(),
+        "row_upper = 100 + (-5) = 95, to_bits() equality"
+    );
+}
+
+// ── fold_endpoint ─────────────────────────────────────────────────────────
+
+/// A `ResolvedParameters` fixture with one `PerStageBlock` parameter at the
+/// given id, one stage of per-block values.
+fn resolved_with_param(id: i32, values: Vec<f64>) -> ResolvedParameters {
+    ResolvedParameters {
+        per_param: vec![vec![values]],
+        id_to_slot: vec![(id, 0)],
+        ..ResolvedParameters::default()
+    }
+}
+
+/// `(None, None)`: an endpoint neither side targets stays untargeted.
+#[test]
+fn fold_endpoint_both_absent_stays_none() {
+    let resolved = ResolvedParameters::default();
+    assert_eq!(fold_endpoint(None, None, &resolved, 0, 0), None);
+}
+
+/// `(Some(base), None)`: a pure literal passes through unchanged.
+#[test]
+fn fold_endpoint_pure_literal_is_unchanged() {
+    let resolved = ResolvedParameters::default();
+    assert_eq!(fold_endpoint(Some(95.0), None, &resolved, 0, 0), Some(95.0));
+}
+
+/// `(None, Some(bound))`: with no parquet base, the remainder alone
+/// establishes the endpoint.
+#[test]
+fn fold_endpoint_pure_affine_establishes_endpoint() {
+    let resolved = resolved_with_param(42, vec![7.0]);
+    let bound = AffineBound::single(EntityId(42));
+    assert_eq!(
+        fold_endpoint(None, Some(&bound), &resolved, 0, 0),
+        Some(7.0)
+    );
+}
+
+/// `(Some(base), Some(bound))` with a constant-only remainder shifts the base
+/// by the constant — the fold is `base + R`, never `R` replacing `base`.
+#[test]
+fn fold_endpoint_literal_and_constant_affine_composes() {
+    let resolved = ResolvedParameters::default();
+    let bound = AffineBound {
+        constant: -5.0,
+        terms: vec![],
+    };
+    assert_eq!(
+        fold_endpoint(Some(100.0), Some(&bound), &resolved, 0, 0),
+        Some(95.0)
+    );
+}
+
+/// `(Some(base), Some(bound))` with a `@param`-bearing remainder folds the base
+/// with the resolved parameter value at `(stage_idx, block_idx)`, exactly as a
+/// constant-only remainder does — the fold does not distinguish the shape.
+#[test]
+fn fold_endpoint_literal_and_param_affine_composes() {
+    let resolved = resolved_with_param(42, vec![3.0, 4.0]);
+    let bound = AffineBound::single(EntityId(42));
+    assert_eq!(
+        fold_endpoint(Some(100.0), Some(&bound), &resolved, 0, 1),
+        Some(104.0)
+    );
+}
+
+/// An `==`-normalized remainder assigned to both endpoints folds each
+/// independently against its own parquet base.
+#[test]
+fn fold_endpoint_equals_normalized_folds_both_endpoints() {
+    let resolved = ResolvedParameters::default();
+    let bound = AffineBound {
+        constant: 2.0,
+        terms: vec![],
+    };
+    assert_eq!(
+        fold_endpoint(Some(10.0), Some(&bound), &resolved, 0, 0),
+        Some(12.0),
+        "lower endpoint folds against its own base"
+    );
+    assert_eq!(
+        fold_endpoint(Some(50.0), Some(&bound), &resolved, 0, 0),
+        Some(52.0),
+        "upper endpoint folds against its own base"
+    );
+}
+
 // ── storage_internal interior-boundary sizing ────────────────────────────
 
 /// Owns a two-hydro, constant-productivity `TemplateBuildCtx` for the
@@ -389,6 +632,7 @@ impl TwoHydroFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 2,
             n_thermals: 0,
             n_lines: 0,
@@ -720,6 +964,7 @@ impl FphaMixFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 3,
             n_thermals: 0,
             n_lines: 0,
@@ -896,6 +1141,7 @@ impl FillingMembershipFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 2,
             n_thermals: 0,
             n_lines: 0,
@@ -1433,8 +1679,8 @@ fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
 /// max_par_order=0` has `col_turbine_start == 0*(3+0) + 2*6 + 1 == 13`.
 ///
 /// `n_ant_state = n_anticipated * k_max = 2 * 3 = 6` and the in-LP ring's TWO
-/// `n_ant_state`-wide blocks (`anticipated_slots_out` outgoing +
-/// `anticipated_state` incoming) together shift `theta` from the legacy
+/// `n_ant_state`-wide blocks (`commit_out` outgoing +
+/// `commit_in` incoming) together shift `theta` from the legacy
 /// `N*(3+L) = 0` to `0 + 2*6 = 12`, so decisions begin at 13.
 ///
 /// The general formula (any N, L, B) is
@@ -1679,6 +1925,7 @@ impl AntFixturesWithNStages {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 0,
             n_thermals: 0,
             n_lines: 0,
@@ -1812,15 +2059,7 @@ fn bounds_with_pumping(n_pumping: usize, n_stages: usize) -> ResolvedBounds {
                 filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
-            hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
-                max_turbined_m3s: 0.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
-                max_generation_mw: 0.0,
-                max_diversion_m3s: None,
-            },
+            hydro_block: HydroBlockBounds::default(),
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
@@ -1946,6 +2185,7 @@ impl PumpingFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 0,
             n_thermals: 0,
             n_lines: 0,
@@ -2668,6 +2908,7 @@ impl TwoHydroMultiBusFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 2,
             n_thermals: 0,
             n_lines: 0,
@@ -2915,6 +3156,7 @@ impl FphaMultiBusFixtures {
             arc_spread_chrono: HashMap::new(),
             arc_arrival_density: HashMap::new(),
             per_stage_mask: Vec::new(),
+            post_study_resolved: PostStudyResolved::default(),
             n_hydros: 3,
             n_thermals: 0,
             n_lines: 0,

@@ -129,7 +129,10 @@ def _read_thermal_rows(parquet: pathlib.Path) -> list[dict[str, object]]:
         block_key = -1 if block is None else block
         return (row[_SORT_FIELDS[0]], block_key, row[_SORT_FIELDS[2]])
 
-    rows = pq.read_table(parquet).to_pylist()
+    # Read the single file directly: scenario_id is both the Hive partition key
+    # and an in-file column, so pq.read_table's dataset path would try to merge
+    # the two same-named fields and error. ParquetFile reads only the file.
+    rows = pq.ParquetFile(parquet).read().to_pylist()
     return sorted(rows, key=sort_key)
 
 

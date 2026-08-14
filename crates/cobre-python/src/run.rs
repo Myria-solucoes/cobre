@@ -53,7 +53,9 @@ use cobre_io::TrainingOutput;
 use cobre_io::get_hostname;
 use cobre_io::now_iso8601;
 use cobre_io::output::policy::read_policy_checkpoint;
-use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
+use cobre_io::output::simulation_writer::{
+    ScenarioWritePayload, SimulationParquetWriter, write_paths, write_scenario_summary,
+};
 use cobre_io::output::write_evaporation_models;
 use cobre_io::output::write_fpha_deviation_points;
 use cobre_io::output::write_fpha_hyperplanes;
@@ -73,12 +75,14 @@ use cobre_sddp::FutureCostFunction;
 use cobre_sddp::PolicyLoadProof;
 use cobre_sddp::PolicyStageManifest;
 use cobre_sddp::SddpError;
+use cobre_sddp::SimulationWeighting;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::aggregate_simulation;
 use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::build_deviation_summary;
 use cobre_sddp::build_evaporation_model_rows;
 use cobre_sddp::build_fpha_deviation_point_rows;
+use cobre_sddp::build_generic_constraint_echo_rows;
 use cobre_sddp::delta_to_stats_row;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::inject_boundary_cuts;
@@ -87,6 +91,8 @@ use cobre_sddp::orchestration::CheckpointParams;
 use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
+use cobre_sddp::resolve_boundary_source_stage;
+use cobre_sddp::resolve_effective_inflow_lag_depth;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
@@ -435,9 +441,7 @@ fn drain_training_events(
                 let mut request_stop = |err: Option<PyErr>| {
                     shutdown_flag.store(true, Ordering::Relaxed);
                     if let Some(err) = err {
-                        if captured_pyerr.is_none() {
-                            captured_pyerr = Some(err);
-                        }
+                        captured_pyerr.get_or_insert(err);
                     }
                 };
 
@@ -519,7 +523,7 @@ pub(crate) fn write_training_artifacts(
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: u32::try_from(n_threads).unwrap_or(u32::MAX),
             mpi_library: None,
             mpi_standard: None,
@@ -579,6 +583,30 @@ pub(crate) fn write_evaporation_models_if_any(
             .join("evaporation_models.parquet");
         write_evaporation_models(&evaporation_path, &rows)
             .map_err(|e| format!("output write error: failed to write evaporation_models: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Write the resolved generic-constraint echo sidecar, when the case declares at
+/// least one generic constraint.
+///
+/// Both Python write sites ([`run_via_study`] and `Study::train`) must emit this
+/// to match the CLI's `write_generic_constraint_echo` output (the Python-parity
+/// hard rule). The write is fully qualified, not imported, so the parity checker's
+/// `cobre_io::write_*` match sees both sides.
+pub(crate) fn write_generic_constraint_echo_if_any(
+    output_dir: &Path,
+    setup: &StudySetup,
+    system: &System,
+) -> Result<(), String> {
+    if !system.generic_constraints().is_empty() {
+        let rows = build_generic_constraint_echo_rows(setup, system);
+        let echo_path = output_dir
+            .join("generic_constraints")
+            .join("resolved_echo.parquet");
+        cobre_io::write_generic_constraint_echo(&echo_path, &rows).map_err(|e| {
+            format!("output write error: failed to write generic_constraint_echo: {e}")
+        })?;
     }
     Ok(())
 }
@@ -675,6 +703,12 @@ pub(crate) fn run_simulation_phase_py(
     #[allow(clippy::cast_possible_truncation)]
     let sim_time_ms = sim_start.elapsed().as_millis() as u64;
 
+    // Single-process: the writer already holds every scenario's node-path rows,
+    // so no cross-rank gather (unlike the CLI). Written before `finalize`
+    // consumes the writer.
+    write_paths(output_dir, sim_writer.path_rows().to_vec())
+        .map_err(|e| format!("output write error: simulation paths output: {e}"))?;
+
     let mut sim_out = sim_writer.finalize(sim_time_ms);
     sim_out.failed = write_failures;
 
@@ -685,19 +719,36 @@ pub(crate) fn run_simulation_phase_py(
         SolverStatsDelta::accumulate_into(&mut agg, delta);
     }
 
-    let cost_summary = aggregate_simulation(
+    // The weighting rides out on the run result, resolved once from the
+    // simulation Traversal inside `simulate()` (matching the CLI path in
+    // `cobre-cli`'s `run/simulation.rs`): `Census` (exact leaf-path expectation)
+    // when `census_weights` is `Some`, the uniform Monte-Carlo sample mean when
+    // `None`.
+    let weighting = match sim_run_result.census_weights.as_deref() {
+        Some(weights) => SimulationWeighting::Census { weights },
+        None => SimulationWeighting::Uniform,
+    };
+    let (cost_summary, gathered_scenario_costs) = aggregate_simulation(
         &sim_run_result.costs,
         setup.simulation_config(),
         &LocalBackend,
+        weighting,
     )
     .map_err(|e| format!("simulation error: cost aggregation: {e}"))?;
+
+    let scenario_summary_rows: Vec<(u32, Option<f64>, f64)> = gathered_scenario_costs
+        .iter()
+        .map(|&(scenario_id, discounted_immediate_cost, probability)| {
+            (scenario_id, probability, discounted_immediate_cost)
+        })
+        .collect();
+    write_scenario_summary(output_dir, &scenario_summary_rows)
+        .map_err(|e| format!("output write error: simulation scenario summary output: {e}"))?;
 
     let parallelism = u32::try_from(n_threads).unwrap_or(u32::MAX);
     sim_out.cost = Some(MetadataCost {
         mean_cost: cost_summary.mean_cost,
         std_cost: cost_summary.std_cost,
-        cvar: cost_summary.cvar,
-        cvar_alpha: cost_summary.cvar_alpha,
     });
     sim_out.solve_stats = MetadataSimulationSolveStats {
         total_lp_solves: Some(agg.lp_solves),
@@ -708,13 +759,24 @@ pub(crate) fn run_simulation_phase_py(
         parallelism: Some(parallelism),
     };
 
-    // Single-process: opening, rank, and worker_id are all None.
+    // Single-process: simulation fills scenario_id (not iteration); stage/opening/
+    // rank/worker_id are all None.
     if !sim_run_result.solver_stats.is_empty() {
         let rows: Vec<SolverStatsRow> = sim_run_result
             .solver_stats
             .iter()
             .map(|(scenario_id, _opening, delta)| {
-                delta_to_stats_row(*scenario_id, "simulation", -1, None, None, None, delta)
+                #[allow(clippy::cast_possible_wrap)]
+                delta_to_stats_row(
+                    None,
+                    Some(*scenario_id as i32),
+                    "simulation",
+                    None,
+                    None,
+                    None,
+                    None,
+                    delta,
+                )
             })
             .collect();
         write_simulation_solver_stats(output_dir, &rows)
@@ -735,7 +797,7 @@ pub(crate) fn run_simulation_phase_py(
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
-            num_nodes: 1,
+            num_hosts: 1,
             threads_per_rank: u32::try_from(n_threads).unwrap_or(u32::MAX),
             mpi_library: None,
             mpi_standard: None,
@@ -836,7 +898,20 @@ pub(crate) fn build_study_setup(
     let LoadedCase { system, artifacts } = loaded;
     let warnings = report.warnings;
 
-    let config = load_effective_config(&case_dir.join("config.json"), overrides)?;
+    let mut config = load_effective_config(&case_dir.join("config.json"), overrides)?;
+
+    // Size the inflow-lag state block to a loaded boundary policy — its cuts fix
+    // the required depth, so `state_space.inflow_lag_depth` is an optional
+    // override. Folded before setup so both the layout and the boundary-load
+    // reject see the effective depth; mirrors the CLI run path.
+    if let Some(boundary_rel) = config.policy.boundary.as_ref().map(|bp| bp.path.clone()) {
+        let boundary_path = case_dir.join(&boundary_rel);
+        config.state_space.inflow_lag_depth = resolve_effective_inflow_lag_depth(
+            config.state_space.inflow_lag_depth,
+            Some(&boundary_path),
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     let seed = config
         .training
@@ -961,7 +1036,7 @@ fn validate_loaded_policy(
 ) -> Result<PolicyLoadProof<FullFcf>, String> {
     rescale_checkpoint_cuts_for_load(
         &mut checkpoint.stage_cuts,
-        checkpoint.metadata.cost_scale_factor,
+        checkpoint.metadata.producer.cost_scale_factor,
         setup.stage_data.stage_templates.cost_scale_factor,
     );
 
@@ -975,16 +1050,26 @@ fn validate_loaded_policy(
         .stage_cuts
         .last()
         .map_or(&[], |s| s.entity_manifest.as_slice());
+    let source_state_dim = checkpoint
+        .stage_cuts
+        .last()
+        .map_or(0, |s| s.state_dimension);
+    let source_graph = &checkpoint.metadata.graph_manifest;
+    let current_graph = setup.build_graph_manifest();
 
     let source = PolicyStageManifest {
-        state_dimension: checkpoint.metadata.state_dimension,
+        state_dimension: source_state_dim,
         num_stages: checkpoint.metadata.num_stages,
+        n_pools: source_graph.n_pools,
         slots: checkpoint_terminal_manifest,
+        graph: source_graph,
     };
     let current = PolicyStageManifest {
         state_dimension: state_dim,
         num_stages: n_stages,
+        n_pools: current_graph.n_pools,
         slots: &current_manifest,
+        graph: &current_graph,
     };
     let proof = validate_policy_load::<FullFcf>(&source, &current)
         .map_err(|e| format!("policy validation error: {e}"))?;
@@ -1016,6 +1101,7 @@ pub(crate) fn apply_training_policy_mode(
     system: &System,
     config: &Config,
     output_dir: &Path,
+    case_dir: &Path,
 ) -> Result<(), String> {
     if config.policy.mode == WarmStart {
         let policy_dir = output_dir.join(&setup.policy_path);
@@ -1031,10 +1117,23 @@ pub(crate) fn apply_training_policy_mode(
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
         let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
+        // The pre-replacement (cold-path) FCF already carries the per-pool
+        // arrays `new_per_pool` derived for this study; the resume path
+        // reuses them verbatim rather than substituting a scalar.
+        let pool_state_dimensions: Vec<usize> =
+            setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+        let visit_bounds: Vec<u64> = setup
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
             setup.loop_params.forward_passes,
             setup.loop_params.max_iterations.saturating_add(1),
         )
@@ -1045,9 +1144,10 @@ pub(crate) fn apply_training_policy_mode(
         // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
             let basis_cache = build_basis_cache_from_checkpoint(
-                setup.stage_data.stage_templates.templates.len(),
                 &checkpoint.stage_bases,
                 &checkpoint.stage_cuts,
+                &setup.node_graph.node_ids,
+                &setup.node_graph.node_pool_ids(),
             );
             setup.set_warm_start_basis_cache(basis_cache);
         }
@@ -1065,12 +1165,25 @@ pub(crate) fn apply_training_policy_mode(
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
         let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
-        let completed = u64::from(checkpoint.metadata.completed_iterations);
+        let completed = u64::from(checkpoint.metadata.producer.completed_iterations);
 
+        // The pre-replacement (cold-path) FCF already carries the per-pool
+        // arrays `new_per_pool` derived for this study; the resume path
+        // reuses them verbatim rather than substituting a scalar.
+        let pool_state_dimensions: Vec<usize> =
+            setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+        let visit_bounds: Vec<u64> = setup
+            .fcf
+            .pools
+            .iter()
+            .map(|p| u64::from(p.visit_stride))
+            .collect();
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
+            &pool_state_dimensions,
+            &visit_bounds,
             setup.loop_params.forward_passes,
             setup.loop_params.max_iterations.saturating_add(1),
         )
@@ -1082,9 +1195,10 @@ pub(crate) fn apply_training_policy_mode(
         // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
             let basis_cache = build_basis_cache_from_checkpoint(
-                setup.stage_data.stage_templates.templates.len(),
                 &checkpoint.stage_bases,
                 &checkpoint.stage_cuts,
+                &setup.node_graph.node_ids,
+                &setup.node_graph.node_pool_ids(),
             );
             setup.set_warm_start_basis_cache(basis_cache);
         }
@@ -1094,21 +1208,39 @@ pub(crate) fn apply_training_policy_mode(
     // replaces the entire FCF first, then boundary cuts overwrite only the
     // terminal pool.
     if let Some(ref bp) = config.policy.boundary {
-        let boundary_path = output_dir.join(&bp.path);
+        // Resolve against the CASE dir (an external source checkpoint), never the
+        // current run's output dir; an absolute `bp.path` passes through unchanged.
+        let boundary_path = case_dir.join(&bp.path);
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
+        let target_delivery_intervals = setup.build_terminal_anticipated_delivery_intervals(system);
+        let source_stage = if let Some(idx) = bp.source_stage {
+            idx
+        } else {
+            let resolved =
+                resolve_boundary_source_stage(&boundary_path, &target_delivery_intervals)
+                    .map_err(|e| format!("boundary cut error: {e}"))?;
+            eprintln!(
+                "cobre-python: boundary source_stage resolved to {resolved} (no explicit \
+                 policy.boundary.source_stage configured)"
+            );
+            resolved
+        };
         let mut on_warning = |msg: &str| eprintln!("cobre-python: boundary cut warning: {msg}");
         let boundary_records = load_boundary_cuts(
             &boundary_path,
-            bp.source_stage,
+            source_stage,
             state_dim,
             &current_manifest,
+            &target_delivery_intervals,
+            config.state_space.inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,
         )
         .map_err(|e| format!("boundary cut error: {e}"))?;
         inject_boundary_cuts(setup, &boundary_records);
+        eprintln!("cobre-python: {}", boundary_records.report().summary_line());
     }
 
     Ok(())
@@ -1155,24 +1287,32 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
     let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
-    let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
-        .map_err(|e| format!("FCF reconstruction error: {e}"))?;
+    let pool_state_dimensions: Vec<usize> =
+        setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
+    let loaded_fcf = FutureCostFunction::from_deserialized(
+        &proof,
+        &checkpoint.stage_cuts,
+        &pool_state_dimensions,
+    )
+    .map_err(|e| format!("FCF reconstruction error: {e}"))?;
 
     let basis_cache = build_basis_cache_from_checkpoint(
-        setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
         &checkpoint.stage_cuts,
+        &setup.node_graph.node_ids,
+        &setup.node_graph.node_pool_ids(),
     );
 
     let training_result = TrainingResult::new(
-        checkpoint.metadata.final_lower_bound,
+        checkpoint.metadata.producer.final_lower_bound,
         checkpoint
             .metadata
+            .producer
             .best_upper_bound
             .unwrap_or(f64::INFINITY),
         0.0,
         0.0,
-        checkpoint.metadata.completed_iterations.into(),
+        checkpoint.metadata.producer.completed_iterations.into(),
         "loaded from checkpoint".to_string(),
         0,
         basis_cache,
@@ -1223,13 +1363,11 @@ pub(crate) fn run_via_study(
     } = build_study_setup(case_dir, &output_dir, overrides.as_ref())?;
 
     let should_simulate =
-        !skip_simulation && config.simulation.enabled && config.simulation.num_scenarios > 0;
+        !skip_simulation && config.simulation.enabled && setup.simulation_config.n_scenarios > 0;
     let hydro_models_summary = Some(hydro_models_summary);
 
-    let training_enabled = config.training.enabled;
-
-    if training_enabled {
-        apply_training_policy_mode(&mut setup, &system, &config, &output_dir)?;
+    if config.training.enabled {
+        apply_training_policy_mode(&mut setup, &system, &config, &output_dir, case_dir)?;
 
         // Streaming drain thread only when a callback is provided; otherwise the
         // no-callback path stays bit-identical to the golden parity test.
@@ -1251,6 +1389,7 @@ pub(crate) fn run_via_study(
         write_fpha_hyperplanes_if_any(&output_dir, &setup)?;
         write_evaporation_models_if_any(&output_dir, &setup, &system)?;
         write_fpha_deviation_points_if_any(&output_dir, &setup, &config)?;
+        write_generic_constraint_echo_if_any(&output_dir, &setup, &system)?;
 
         // Propagate a captured callback exception only AFTER all training
         // artifacts are written, so a raising or Ctrl-C-stopped run still persists
@@ -1713,6 +1852,7 @@ mod tests {
             &loaded.system,
             &loaded.config,
             &output_dir,
+            &case_dir,
         )
         .expect("default-mode policy application must be a no-op");
 
@@ -1854,8 +1994,8 @@ mod tests {
         };
 
         let stats_log = vec![
-            SolverStatsLogEntry::from_raw(0, "forward", 0, -1, 0, -1, forward_delta),
-            SolverStatsLogEntry::from_raw(0, "backward", 0, 0, 0, 0, backward_delta),
+            SolverStatsLogEntry::from_raw(0, "forward", Some(0), -1, 0, -1, forward_delta),
+            SolverStatsLogEntry::from_raw(0, "backward", Some(0), 0, 0, 0, backward_delta),
         ];
 
         // The helper returns the 5 phase-derived counts only. `total_lp_solves`
@@ -2172,7 +2312,7 @@ mod tests {
 
         // The completed-iteration count recorded in the on-disk checkpoint.
         let checkpoint = read_policy_checkpoint(&policy_dir).expect("read policy checkpoint");
-        let expected_iterations: u64 = checkpoint.metadata.completed_iterations.into();
+        let expected_iterations: u64 = checkpoint.metadata.producer.completed_iterations.into();
 
         let (fcf, training_result) =
             reconstruct_policy_from_checkpoint(&loaded.setup, &loaded.system, &policy_dir)
@@ -2287,5 +2427,48 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    /// The Python bindings derive their simulation weighting from the resolved
+    /// `Traversal`, exactly as the training-and-simulate path does — under a
+    /// sampled selection this can only ever resolve to `Uniform`, never
+    /// `Census`, regardless of what a caller might otherwise assemble beside it.
+    /// Python-free (no GIL token), mirroring the CLI's own test.
+    #[test]
+    fn simulation_weighting_census_underivable_from_sampled_traversal() {
+        use cobre_sddp::SimulationWeighting;
+        use cobre_sddp::setup::{
+            NodeGraph, NodeId, NodeOpenings, NodeRuntime, OpeningSource, StageIdx, Traversal,
+        };
+
+        let ng = NodeGraph {
+            node_ids: vec![NodeId(0)].into(),
+            nodes: vec![NodeRuntime {
+                stage: StageIdx(0),
+                pool_id: 0,
+                openings: NodeOpenings {
+                    source: OpeningSource::Generated,
+                    offset: 0,
+                    len: 1,
+                    q: 1.0,
+                },
+            }]
+            .into(),
+            successors: vec![Vec::new()].into(),
+            n_pools: 1,
+            pool_stage: vec![StageIdx(0)],
+        };
+
+        let sampled = Traversal::resolve(&ng, false, 10);
+        assert!(matches!(
+            sampled.simulation_weighting(),
+            SimulationWeighting::Uniform
+        ));
+
+        let enumerated = Traversal::resolve(&ng, true, 1);
+        assert!(matches!(
+            enumerated.simulation_weighting(),
+            SimulationWeighting::Census { .. }
+        ));
     }
 }

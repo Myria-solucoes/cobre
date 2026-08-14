@@ -309,15 +309,15 @@ mod tests {
     use std::collections::BTreeMap;
 
     use cobre_core::{
-        EntityId,
+        EntityId, HorizonGraph,
         entities::{Bus, HydroGenerationModel, HydroPenalties},
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
             CorrelationScheduleEntry,
         },
         temporal::{
-            Block, BlockMode, NoiseMethod, PolicyGraph, ScenarioSourceConfig, Stage,
-            StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+            StageStateConfig,
         },
     };
 
@@ -505,8 +505,9 @@ mod tests {
         use crate::{
             config::{
                 Config, EstimationConfig, ExportsConfig, ModelingConfig, ParallelismConfig,
-                PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingRuleConfig,
-                TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+                PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingMode,
+                StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
+                UpperBoundEvaluationConfig,
             },
             stages::StagesData,
         };
@@ -517,17 +518,18 @@ mod tests {
 
         let config = Config {
             schema: None,
+            state_space: crate::config::StateSpaceConfig::default(),
             modeling: ModelingConfig::default(),
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: None,
-                forward_passes: Some(10),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 100 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: ParallelismConfig::default(),
                 scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 10 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -566,8 +568,9 @@ mod tests {
                 ncs_curtailment_cost: 1.0,
             },
             stages: StagesData {
+                openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage(0), make_stage(1)],
-                policy_graph: PolicyGraph::default(),
+                policy_graph: HorizonGraph::default(),
             },
             initial_conditions: InitialConditions {
                 storage: vec![],
@@ -575,7 +578,9 @@ mod tests {
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
+                future_anticipated_deliveries: vec![],
             },
+            post_study_stages: None,
             buses: vec![],
             thermals: vec![],
             hydros: vec![],
@@ -919,8 +924,9 @@ mod tests {
         let mut data = base_parsed_data();
         // Include one pre-study stage (id = -1) alongside the study stages.
         data.stages = StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages: vec![make_pre_study_stage(-1), make_stage(0), make_stage(1)],
-            policy_graph: PolicyGraph::default(),
+            policy_graph: HorizonGraph::default(),
         };
 
         data.hydros = vec![make_hydro(

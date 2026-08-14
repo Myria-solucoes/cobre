@@ -1,5 +1,15 @@
 {
   "$defs": {
+    "CorrelationMethod": {
+      "description": "Correlation-matrix decomposition method (`scenarios/correlation.json`\n`method`).",
+      "oneOf": [
+        {
+          "const": "spectral",
+          "description": "Spectral (eigenvalue) decomposition.",
+          "type": "string"
+        }
+      ]
+    },
     "RawCorrelationGroup": {
       "additionalProperties": false,
       "description": "A named group of correlated entities with an associated correlation matrix.\n\nAll entities in a group must share the same `type` (same-type constraint).\nMixing entity types (e.g. inflow and load in the same group) produces a\nruntime validation error.\n\nThe `matrix` must be square, symmetric, have 1.0 on every diagonal, and\nhave all off-diagonal entries in [-1.0, 1.0]. The number of rows (and\ncolumns) must equal the number of `entities`.",
@@ -104,8 +114,8 @@
       ]
     },
     "method": {
-      "description": "Decomposition method for the correlation matrix. Must not be empty.\nDefaults to `\"spectral\"`. `\"cholesky\"` is also accepted for backward\ncompatibility with existing case files. Unrecognized values produce a\nwarning but are not rejected.",
-      "type": "string"
+      "$ref": "#/$defs/CorrelationMethod",
+      "description": "Decomposition method for the correlation matrix. Accepts `spectral`."
     },
     "profiles": {
       "additionalProperties": {

@@ -31,10 +31,13 @@
 //! | `max_outflow_m3s`     | DOUBLE | No       | Max total outflow (m3/s)           |
 //! | `min_generation_mw`   | DOUBLE | No       | Min generation (MW)                |
 //! | `max_generation_mw`   | DOUBLE | No       | Max generation (MW)                |
+//! | `min_diversion_m3s`   | DOUBLE | No       | Min diversion flow (m3/s)          |
 //! | `max_diversion_m3s`   | DOUBLE | No       | Max diversion flow (m3/s)          |
+//! | `min_spillage_m3s`    | DOUBLE | No       | Min spillage flow (m3/s)           |
+//! | `max_spillage_m3s`    | DOUBLE | No       | Max spillage flow (m3/s)           |
 //! | `filling_min_rate_m3s`| DOUBLE | No       | Filling min-rate override (m3/s)   |
 //! | `water_withdrawal_m3s`| DOUBLE | No       | Water withdrawal (m3/s)            |
-//! | `block_id`            | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's turbined/outflow/generation/diversion override; a value outside `[0, n_blocks)` for the referenced stage is rejected at validation; a non-null storage, filling-rate, or withdrawal value on the same row is rejected at validation (stage-level only, no per-block variant) |
+//! | `block_id`            | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's turbined/outflow/generation/diversion/spillage override; a value outside `[0, n_blocks)` for the referenced stage is rejected at validation; a non-null storage, filling-rate, or withdrawal value on the same row is rejected at validation (stage-level only, no per-block variant) |
 //!
 //! ### `line_bounds`
 //!
@@ -48,13 +51,13 @@
 //!
 //! ### `pumping_bounds`
 //!
-//! | Column       | Type   | Required | Description                        |
-//! | ------------ | ------ | -------- | ---------------------------------- |
-//! | `station_id` | INT32  | Yes      | Pumping station ID                 |
-//! | `stage_id`   | INT32  | Yes      | Stage ID                           |
-//! | `min_m3s`    | DOUBLE | No       | Minimum pumping flow (m3/s)        |
-//! | `max_m3s`    | DOUBLE | No       | Maximum pumping flow (m3/s)        |
-//! | `block_id`   | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_m3s`/`max_m3s` override; a value outside `[0, n_blocks)` for the referenced stage is rejected at validation |
+//! | Column               | Type   | Required | Description                        |
+//! | -------------------- | ------ | -------- | ---------------------------------- |
+//! | `pumping_station_id` | INT32  | Yes      | Pumping station ID                               |
+//! | `stage_id`           | INT32  | Yes      | Stage ID                           |
+//! | `min_m3s`            | DOUBLE | No       | Minimum pumping flow (m3/s)        |
+//! | `max_m3s`            | DOUBLE | No       | Maximum pumping flow (m3/s)        |
+//! | `block_id`           | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_m3s`/`max_m3s` override; a value outside `[0, n_blocks)` for the referenced stage is rejected at validation |
 //!
 //! ### `contract_bounds`
 //!
@@ -86,7 +89,10 @@
 //! | hydro    | `max_outflow_m3s`      | yes            | —                                                                                                |
 //! | hydro    | `min_generation_mw`    | yes            | —                                                                                                |
 //! | hydro    | `max_generation_mw`    | yes            | —                                                                                                |
+//! | hydro    | `min_diversion_m3s`    | yes            | —                                                                                                |
 //! | hydro    | `max_diversion_m3s`    | yes            | —                                                                                                |
+//! | hydro    | `min_spillage_m3s`     | yes            | —                                                                                                |
+//! | hydro    | `max_spillage_m3s`     | yes            | —                                                                                                |
 //! | hydro    | `min_storage_hm3`      | no             | storage bound; stage-level only                                                                 |
 //! | hydro    | `max_storage_hm3`      | no             | storage bound; stage-level only                                                                 |
 //! | hydro    | `filling_min_rate_m3s` | no             | filling schedule; stage-level only                                                              |
@@ -117,7 +123,9 @@
 //! - Some parsers additionally enforce domain constraints on their own values:
 //!   `pumping_bounds` rejects negative flows and `min_m3s > max_m3s` (matching the
 //!   `pumping_stations.json` entity-reader checks); `thermal_bounds` rejects a
-//!   negative `cost_per_mwh`.
+//!   negative `cost_per_mwh`; `hydro_bounds` rejects negative `min_diversion_m3s`,
+//!   `min_spillage_m3s`, and `max_spillage_m3s`, and a same-row
+//!   `min_spillage_m3s > max_spillage_m3s`.
 //!
 //! Deferred validations (not performed here):
 //!
@@ -198,8 +206,8 @@ pub struct ThermalBoundsRow {
 
 /// A single row from `constraints/hydro_bounds.parquet`.
 ///
-/// Carries stage-varying bound overrides for a hydro plant. All eleven bound
-/// columns are optional; absent or null means "use base value".
+/// Carries stage-varying bound overrides for a hydro plant. Every bound
+/// column is optional; absent or null means "use base value".
 ///
 /// # Examples
 ///
@@ -218,7 +226,10 @@ pub struct ThermalBoundsRow {
 ///     max_outflow_m3s: None,
 ///     min_generation_mw: None,
 ///     max_generation_mw: None,
+///     min_diversion_m3s: None,
 ///     max_diversion_m3s: None,
+///     min_spillage_m3s: None,
+///     max_spillage_m3s: None,
 ///     filling_min_rate_m3s: None,
 ///     water_withdrawal_m3s: None,
 ///     block_id: None,
@@ -249,18 +260,51 @@ pub struct HydroBoundsRow {
     pub min_generation_mw: Option<f64>,
     /// Maximum generation override (MW).
     pub max_generation_mw: Option<f64>,
+    /// Minimum diversion override (m³/s).
+    pub min_diversion_m3s: Option<f64>,
     /// Maximum diversion override (m³/s).
     pub max_diversion_m3s: Option<f64>,
+    /// Minimum spillage override (m³/s).
+    pub min_spillage_m3s: Option<f64>,
+    /// Maximum spillage override (m³/s).
+    pub max_spillage_m3s: Option<f64>,
     /// Filling minimum accumulation rate override (m³/s).
     pub filling_min_rate_m3s: Option<f64>,
     /// Water withdrawal override (m³/s).
     pub water_withdrawal_m3s: Option<f64>,
     /// `None` applies at the stage level; `Some(b)` applies to block `b` only and is
-    /// valid on the turbined/outflow/generation/diversion columns. A row combining
-    /// `Some(b)` with a non-null `min_storage_hm3`/`max_storage_hm3`/
+    /// valid on the turbined/outflow/generation/diversion/spillage columns. A row
+    /// combining `Some(b)` with a non-null `min_storage_hm3`/`max_storage_hm3`/
     /// `filling_min_rate_m3s`/`water_withdrawal_m3s` is rejected at validation —
     /// those four are stage-level with no per-block variant.
     pub block_id: Option<i32>,
+}
+
+/// Neutral test scaffold — every optional column `None`, `hydro_id`/`stage_id`
+/// zeroed — never a bound source; production sites construct `HydroBoundsRow`
+/// exhaustively.
+impl Default for HydroBoundsRow {
+    fn default() -> Self {
+        Self {
+            hydro_id: EntityId::from(0),
+            stage_id: 0,
+            min_turbined_m3s: None,
+            max_turbined_m3s: None,
+            min_storage_hm3: None,
+            max_storage_hm3: None,
+            min_outflow_m3s: None,
+            max_outflow_m3s: None,
+            min_generation_mw: None,
+            max_generation_mw: None,
+            min_diversion_m3s: None,
+            max_diversion_m3s: None,
+            min_spillage_m3s: None,
+            max_spillage_m3s: None,
+            filling_min_rate_m3s: None,
+            water_withdrawal_m3s: None,
+            block_id: None,
+        }
+    }
 }
 
 /// A single row from `constraints/line_bounds.parquet`.
@@ -288,7 +332,7 @@ pub struct HydroBoundsRow {
 pub struct LineBoundsRow {
     /// Transmission line this override applies to.
     pub line_id: EntityId,
-    /// Stage (0-based) this override applies to.
+    /// Declared study-stage id this override applies to (not a 0-based index).
     pub stage_id: i32,
     /// Override for direct-flow capacity (MW). `None` means use base value.
     pub direct_mw: Option<f64>,
@@ -324,7 +368,7 @@ pub struct LineBoundsRow {
 pub struct PumpingBoundsRow {
     /// Pumping station this override applies to.
     pub station_id: EntityId,
-    /// Stage (0-based) this override applies to.
+    /// Declared study-stage id this override applies to (not a 0-based index).
     pub stage_id: i32,
     /// Override for minimum pumping flow (m³/s). `None` means use base value.
     pub min_m3s: Option<f64>,
@@ -361,7 +405,7 @@ pub struct PumpingBoundsRow {
 pub struct ContractBoundsRow {
     /// Energy contract this override applies to.
     pub contract_id: EntityId,
-    /// Stage (0-based) this override applies to.
+    /// Declared study-stage id this override applies to (not a 0-based index).
     pub stage_id: i32,
     /// Override for minimum power (MW). `None` means use base value.
     pub min_mw: Option<f64>,
@@ -503,7 +547,7 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
 /// Parse `constraints/hydro_bounds.parquet`, returning rows sorted by
 /// `(hydro_id, stage_id, block_id)` ascending (`None` before `Some(i)`).
 ///
-/// The file may contain any subset of the eleven optional bound columns; columns
+/// The file may contain any subset of the optional bound columns; columns
 /// absent from the file schema produce `None` in all rows (the sparse-override design,
 /// not a schema error).
 ///
@@ -555,7 +599,10 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
         let max_outflow_col = extract_optional_float64(&batch, "max_outflow_m3s", path)?;
         let min_gen_col = extract_optional_float64(&batch, "min_generation_mw", path)?;
         let max_gen_col = extract_optional_float64(&batch, "max_generation_mw", path)?;
+        let min_diversion_col = extract_optional_float64(&batch, "min_diversion_m3s", path)?;
         let max_diversion_col = extract_optional_float64(&batch, "max_diversion_m3s", path)?;
+        let min_spillage_col = extract_optional_float64(&batch, "min_spillage_m3s", path)?;
+        let max_spillage_col = extract_optional_float64(&batch, "max_spillage_m3s", path)?;
         let filling_min_rate_col = extract_optional_float64(&batch, "filling_min_rate_m3s", path)?;
         let water_withdrawal_col = extract_optional_float64(&batch, "water_withdrawal_m3s", path)?;
         let block_id_col = extract_optional_int32(&batch, "block_id", path)?;
@@ -578,7 +625,10 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
             let max_outflow_m3s = optional_f64(max_outflow_col, i);
             let min_generation_mw = optional_f64(min_gen_col, i);
             let max_generation_mw = optional_f64(max_gen_col, i);
+            let min_diversion_m3s = optional_f64(min_diversion_col, i);
             let max_diversion_m3s = optional_f64(max_diversion_col, i);
+            let min_spillage_m3s = optional_f64(min_spillage_col, i);
+            let max_spillage_m3s = optional_f64(max_spillage_col, i);
             let filling_min_rate_m3s = optional_f64(filling_min_rate_col, i);
             let water_withdrawal_m3s = optional_f64(water_withdrawal_col, i);
             let block_id = optional_i32(block_id_col, i);
@@ -592,7 +642,10 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 (max_outflow_m3s, "max_outflow_m3s"),
                 (min_generation_mw, "min_generation_mw"),
                 (max_generation_mw, "max_generation_mw"),
+                (min_diversion_m3s, "min_diversion_m3s"),
                 (max_diversion_m3s, "max_diversion_m3s"),
+                (min_spillage_m3s, "min_spillage_m3s"),
+                (max_spillage_m3s, "max_spillage_m3s"),
                 (filling_min_rate_m3s, "filling_min_rate_m3s"),
                 (water_withdrawal_m3s, "water_withdrawal_m3s"),
             ] {
@@ -612,6 +665,49 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 });
             }
 
+            // A diversion/spillage override is non-negative and, for spillage,
+            // `min <= max`; a negative or inverted row otherwise yields an
+            // infeasible per-stage bound (the finiteness gate above catches
+            // neither sign nor ordering).
+            if let Some(v) = min_diversion_m3s
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("hydro_bounds[{row_idx}].min_diversion_m3s"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
+            }
+            if let Some(v) = min_spillage_m3s
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("hydro_bounds[{row_idx}].min_spillage_m3s"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
+            }
+            if let Some(v) = max_spillage_m3s
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("hydro_bounds[{row_idx}].max_spillage_m3s"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
+            }
+            if let (Some(min), Some(max)) = (min_spillage_m3s, max_spillage_m3s)
+                && min > max
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("hydro_bounds[{row_idx}].max_spillage_m3s"),
+                    message: format!(
+                        "max_spillage_m3s ({max}) must be >= min_spillage_m3s ({min})"
+                    ),
+                });
+            }
+
             rows.push(HydroBoundsRow {
                 hydro_id,
                 stage_id,
@@ -623,7 +719,10 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 max_outflow_m3s,
                 min_generation_mw,
                 max_generation_mw,
+                min_diversion_m3s,
                 max_diversion_m3s,
+                min_spillage_m3s,
+                max_spillage_m3s,
                 filling_min_rate_m3s,
                 water_withdrawal_m3s,
                 block_id,
@@ -749,7 +848,7 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        let station_id_col = extract_required_int32(&batch, "station_id", path)?;
+        let station_id_col = extract_required_int32(&batch, "pumping_station_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
         let min_col = extract_optional_float64(&batch, "min_m3s", path)?;
@@ -1272,15 +1371,18 @@ mod tests {
             Field::new("max_outflow_m3s", DataType::Float64, true),
             Field::new("min_generation_mw", DataType::Float64, true),
             Field::new("max_generation_mw", DataType::Float64, true),
+            Field::new("min_diversion_m3s", DataType::Float64, true),
             Field::new("max_diversion_m3s", DataType::Float64, true),
+            Field::new("min_spillage_m3s", DataType::Float64, true),
+            Field::new("max_spillage_m3s", DataType::Float64, true),
             Field::new("filling_min_rate_m3s", DataType::Float64, true),
             Field::new("water_withdrawal_m3s", DataType::Float64, true),
         ]))
     }
 
-    /// AC: valid file with all 11 optional columns, some null and some filled.
+    /// AC: valid file with all 14 optional columns, some null and some filled.
     #[test]
-    fn test_hydro_all_11_columns_mixed_null() {
+    fn test_hydro_all_14_columns_mixed_null() {
         let batch = RecordBatch::try_new(
             hydro_full_schema(),
             vec![
@@ -1294,7 +1396,10 @@ mod tests {
                 Arc::new(Float64Array::from(vec![Some(200.0_f64)])), // max_outflow
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // min_gen: null
                 Arc::new(Float64Array::from(vec![Some(80.0_f64)])), // max_gen
+                Arc::new(Float64Array::from(vec![Some(2.0_f64)])),  // min_diversion
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // max_diversion: null
+                Arc::new(Float64Array::from(vec![Some(3.0_f64)])),  // min_spillage
+                Arc::new(Float64Array::from(vec![Some(9.0_f64)])),  // max_spillage
                 Arc::new(Float64Array::from(vec![Some(10.0_f64)])), // filling_min_rate
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // water_withdrawal: null
             ],
@@ -1315,7 +1420,10 @@ mod tests {
         assert!((r.max_outflow_m3s.unwrap() - 200.0).abs() < f64::EPSILON);
         assert!(r.min_generation_mw.is_none());
         assert!((r.max_generation_mw.unwrap() - 80.0).abs() < f64::EPSILON);
+        assert!((r.min_diversion_m3s.unwrap() - 2.0).abs() < f64::EPSILON);
         assert!(r.max_diversion_m3s.is_none());
+        assert!((r.min_spillage_m3s.unwrap() - 3.0).abs() < f64::EPSILON);
+        assert!((r.max_spillage_m3s.unwrap() - 9.0).abs() < f64::EPSILON);
         assert!((r.filling_min_rate_m3s.unwrap() - 10.0).abs() < f64::EPSILON);
         assert!(r.water_withdrawal_m3s.is_none());
     }
@@ -1354,7 +1462,10 @@ mod tests {
         assert!(r.max_outflow_m3s.is_none());
         assert!(r.min_generation_mw.is_none());
         assert!((r.max_generation_mw.unwrap() - 150.0).abs() < f64::EPSILON);
+        assert!(r.min_diversion_m3s.is_none());
         assert!(r.max_diversion_m3s.is_none());
+        assert!(r.min_spillage_m3s.is_none());
+        assert!(r.max_spillage_m3s.is_none());
         assert!(r.filling_min_rate_m3s.is_none());
         assert!(r.water_withdrawal_m3s.is_none());
     }
@@ -1457,6 +1568,146 @@ mod tests {
         }
     }
 
+    /// AC: negative `min_diversion_m3s` -> SchemaError mentioning the column and ">= 0.0".
+    #[test]
+    fn test_hydro_negative_min_diversion() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("min_diversion_m3s", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Float64Array::from(vec![Some(-1.0_f64)])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let err = parse_hydro_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("min_diversion_m3s"),
+                    "field should contain 'min_diversion_m3s', got: {field}"
+                );
+                assert!(
+                    message.contains(">= 0.0"),
+                    "message should contain '>= 0.0', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError for negative min_diversion_m3s, got: {other:?}"),
+        }
+    }
+
+    /// AC: negative `min_spillage_m3s` -> SchemaError mentioning the column and ">= 0.0".
+    #[test]
+    fn test_hydro_negative_min_spillage() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("min_spillage_m3s", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Float64Array::from(vec![Some(-2.0_f64)])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let err = parse_hydro_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("min_spillage_m3s"),
+                    "field should contain 'min_spillage_m3s', got: {field}"
+                );
+                assert!(
+                    message.contains(">= 0.0"),
+                    "message should contain '>= 0.0', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError for negative min_spillage_m3s, got: {other:?}"),
+        }
+    }
+
+    /// AC: negative `max_spillage_m3s` -> SchemaError mentioning the column and ">= 0.0".
+    #[test]
+    fn test_hydro_negative_max_spillage() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("max_spillage_m3s", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Float64Array::from(vec![Some(-3.0_f64)])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let err = parse_hydro_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("max_spillage_m3s"),
+                    "field should contain 'max_spillage_m3s', got: {field}"
+                );
+                assert!(
+                    message.contains(">= 0.0"),
+                    "message should contain '>= 0.0', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError for negative max_spillage_m3s, got: {other:?}"),
+        }
+    }
+
+    /// AC: `min_spillage_m3s > max_spillage_m3s` (both present, same row) -> SchemaError
+    /// whose `field` is `hydro_bounds[0].max_spillage_m3s`.
+    #[test]
+    fn test_hydro_min_spillage_exceeds_max_spillage() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("min_spillage_m3s", DataType::Float64, true),
+            Field::new("max_spillage_m3s", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Float64Array::from(vec![Some(9.0_f64)])),
+                Arc::new(Float64Array::from(vec![Some(3.0_f64)])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let err = parse_hydro_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "hydro_bounds[0].max_spillage_m3s");
+                assert!(
+                    message.contains("must be >= min_spillage_m3s"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError for inverted spillage bounds, got: {other:?}"),
+        }
+    }
+
     /// AC: empty file -> Ok(Vec::new()).
     #[test]
     fn test_hydro_empty_parquet() {
@@ -1527,7 +1778,7 @@ mod tests {
     }
 
     /// AC: no `block_id` column in the file — every row's `block_id` is `None`
-    /// and all eleven bound columns parse unchanged.
+    /// and every present bound column parses unchanged.
     #[test]
     fn test_hydro_bounds_missing_block_id_column_is_none() {
         let batch = RecordBatch::try_new(
@@ -1543,7 +1794,10 @@ mod tests {
                 Arc::new(Float64Array::from(vec![Some(200.0_f64)])), // max_outflow
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // min_gen: null
                 Arc::new(Float64Array::from(vec![Some(80.0_f64)])), // max_gen
+                Arc::new(Float64Array::from(vec![Some(2.0_f64)])),  // min_diversion
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // max_diversion: null
+                Arc::new(Float64Array::from(vec![Some(3.0_f64)])),  // min_spillage
+                Arc::new(Float64Array::from(vec![Some(9.0_f64)])),  // max_spillage
                 Arc::new(Float64Array::from(vec![Some(10.0_f64)])), // filling_min_rate
                 Arc::new(Float64Array::from(vec![None::<f64>])),    // water_withdrawal: null
             ],
@@ -1563,7 +1817,10 @@ mod tests {
         assert!((r.max_outflow_m3s.unwrap() - 200.0).abs() < f64::EPSILON);
         assert!(r.min_generation_mw.is_none());
         assert!((r.max_generation_mw.unwrap() - 80.0).abs() < f64::EPSILON);
+        assert!((r.min_diversion_m3s.unwrap() - 2.0).abs() < f64::EPSILON);
         assert!(r.max_diversion_m3s.is_none());
+        assert!((r.min_spillage_m3s.unwrap() - 3.0).abs() < f64::EPSILON);
+        assert!((r.max_spillage_m3s.unwrap() - 9.0).abs() < f64::EPSILON);
         assert!((r.filling_min_rate_m3s.unwrap() - 10.0).abs() < f64::EPSILON);
         assert!(r.water_withdrawal_m3s.is_none());
     }
@@ -1745,7 +2002,7 @@ mod tests {
 
     fn pumping_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("station_id", DataType::Int32, false),
+            Field::new("pumping_station_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
             Field::new("min_m3s", DataType::Float64, true),
             Field::new("max_m3s", DataType::Float64, true),
@@ -1792,11 +2049,40 @@ mod tests {
         assert_eq!(rows[2].station_id, EntityId::from(3));
     }
 
+    /// Missing id column -> error names the `pumping_station_id` spelling.
+    #[test]
+    fn test_pumping_missing_id_column_errors_new_spelling() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("min_m3s", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Float64Array::from(vec![Some(5.0_f64)])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let err = parse_pumping_bounds(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, .. } => {
+                assert_eq!(
+                    field, "pumping_station_id",
+                    "field should be 'pumping_station_id', got: {field}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
     /// AC: missing `stage_id` -> SchemaError.
     #[test]
     fn test_pumping_missing_stage_id() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("station_id", DataType::Int32, false),
+            Field::new("pumping_station_id", DataType::Int32, false),
             Field::new("min_m3s", DataType::Float64, true),
         ]));
         let batch = RecordBatch::try_new(
@@ -2164,7 +2450,7 @@ mod tests {
         assert_eq!(contract_rows[1].block_id, Some(2));
 
         let pumping_schema = Arc::new(Schema::new(vec![
-            Field::new("station_id", DataType::Int32, false),
+            Field::new("pumping_station_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
             Field::new("max_m3s", DataType::Float64, true),
             Field::new("block_id", DataType::Int32, true),

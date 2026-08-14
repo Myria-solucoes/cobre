@@ -367,6 +367,8 @@ fn sample_forward_returns_valid_output() {
                     scenario,
                     stage_domain_id,
                     stage_idx,
+                    0,
+                    view.n_openings(stage_idx),
                 );
 
                 assert!(

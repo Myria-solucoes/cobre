@@ -29,15 +29,33 @@ pub struct ResolvedGenericConstraintBounds {
     /// Maps `(constraint_idx, stage_id)` to a contiguous range in `entries`.
     /// `stage_id` is `i32` to match domain-level stage IDs, which may be negative.
     index: HashMap<(usize, i32), Range<usize>>,
-    /// Flat `(block_id, bound)` pairs; each key's entries occupy the range `index` records.
-    entries: Vec<(Option<i32>, f64)>,
+    /// Flat entries; each key's entries occupy the range `index` records.
+    entries: Vec<GenericConstraintBoundEntry>,
+}
+
+/// One resolved `(block_id, bound_lower, bound_upper)` entry for a `(constraint, stage)`
+/// key. Shape is derived from which endpoints are present: lower-only, upper-only, or
+/// both (a band, degenerate to an equality when the two are equal).
+///
+/// A named record rather than a tuple: `bound_lower` and `bound_upper` are both
+/// `Option<f64>`-shaped, so a bare positional tuple invites a silent field swap at a
+/// construction site.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct GenericConstraintBoundEntry {
+    /// Block index (`None` = all blocks).
+    pub block_id: Option<i32>,
+    /// Lower RHS bound; `None` when the row is upper-only.
+    pub bound_lower: Option<f64>,
+    /// Upper RHS bound; `None` when the row is lower-only.
+    pub bound_upper: Option<f64>,
 }
 
 #[cfg(feature = "serde")]
 mod serde_generic_bounds {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    use super::ResolvedGenericConstraintBounds;
+    use super::{GenericConstraintBoundEntry, ResolvedGenericConstraintBounds};
 
     /// Wire format for serde: a list of `(constraint_idx, stage_id, pairs)` groups,
     /// because `HashMap<(usize, i32), Range<usize>>` cannot serialize directly
@@ -46,7 +64,7 @@ mod serde_generic_bounds {
     struct WireEntry {
         constraint_idx: usize,
         stage_id: i32,
-        pairs: Vec<(Option<i32>, f64)>,
+        pairs: Vec<GenericConstraintBoundEntry>,
     }
 
     impl Serialize for ResolvedGenericConstraintBounds {
@@ -133,12 +151,13 @@ impl ResolvedGenericConstraintBounds {
     /// // Two constraints with IDs 10 and 20, mapped to positions 0 and 1.
     /// let id_map: HashMap<i32, usize> = [(10, 0), (20, 1)].into_iter().collect();
     ///
-    /// // One bound row: constraint 10 at stage 3, block_id = None, bound = 500.0.
-    /// let rows = vec![(10i32, 3i32, None::<i32>, 500.0f64)];
+    /// // One bound row: constraint 10 at stage 3, block_id = None, bound_lower = 500.0,
+    /// // bound_upper = None.
+    /// let rows = vec![(10i32, 3i32, None::<i32>, Some(500.0f64), None::<f64>)];
     ///
     /// let table = ResolvedGenericConstraintBounds::new(
     ///     &id_map,
-    ///     rows.iter().map(|(cid, sid, bid, b)| (*cid, *sid, *bid, *b)),
+    ///     rows.iter().map(|(cid, sid, bid, bl, bu)| (*cid, *sid, *bid, *bl, *bu)),
     /// );
     ///
     /// assert!(table.is_active(0, 3));
@@ -146,20 +165,22 @@ impl ResolvedGenericConstraintBounds {
     ///
     /// let slice = table.bounds_for_stage(0, 3);
     /// assert_eq!(slice.len(), 1);
-    /// assert_eq!(slice[0], (None, 500.0));
+    /// assert_eq!(slice[0].block_id, None);
+    /// assert_eq!(slice[0].bound_lower, Some(500.0));
+    /// assert_eq!(slice[0].bound_upper, None);
     /// ```
     #[must_use]
     pub fn new<I>(constraint_id_to_idx: &HashMap<i32, usize>, raw_bounds: I) -> Self
     where
-        I: Iterator<Item = (i32, i32, Option<i32>, f64)>,
+        I: Iterator<Item = (i32, i32, Option<i32>, Option<f64>, Option<f64>)>,
     {
         let mut index: HashMap<(usize, i32), Range<usize>> = HashMap::new();
-        let mut entries: Vec<(Option<i32>, f64)> = Vec::new();
+        let mut entries: Vec<GenericConstraintBoundEntry> = Vec::new();
 
         let mut current_key: Option<(usize, i32)> = None;
         let mut range_start: usize = 0;
 
-        for (constraint_id, stage_id, block_id, bound) in raw_bounds {
+        for (constraint_id, stage_id, block_id, bound_lower, bound_upper) in raw_bounds {
             let Some(&constraint_idx) = constraint_id_to_idx.get(&constraint_id) else {
                 continue;
             };
@@ -177,7 +198,11 @@ impl ResolvedGenericConstraintBounds {
                 current_key = Some(key);
             }
 
-            entries.push((block_id, bound));
+            entries.push(GenericConstraintBoundEntry {
+                block_id,
+                bound_lower,
+                bound_upper,
+            });
         }
 
         if let Some(last_key) = current_key {
@@ -208,7 +233,7 @@ impl ResolvedGenericConstraintBounds {
         self.index.contains_key(&(constraint_idx, stage_id))
     }
 
-    /// Return the `(block_id, bound)` pairs for a constraint at the given stage.
+    /// Return the bound entries for a constraint at the given stage.
     ///
     /// Returns an empty slice when no bounds exist for the `(constraint_idx, stage_id)` pair.
     ///
@@ -222,7 +247,11 @@ impl ResolvedGenericConstraintBounds {
     /// ```
     #[inline]
     #[must_use]
-    pub fn bounds_for_stage(&self, constraint_idx: usize, stage_id: i32) -> &[(Option<i32>, f64)] {
+    pub fn bounds_for_stage(
+        &self,
+        constraint_idx: usize,
+        stage_id: i32,
+    ) -> &[GenericConstraintBoundEntry] {
         match self.index.get(&(constraint_idx, stage_id)) {
             Some(range) => &self.entries[range.clone()],
             None => &[],
@@ -252,7 +281,7 @@ mod tests {
     fn test_generic_bounds_sparse_active() {
         let id_map: HashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
 
-        let rows = vec![(0i32, 0i32, None::<i32>, 100.0f64)];
+        let rows = vec![(0i32, 0i32, None::<i32>, Some(100.0f64), None::<f64>)];
         let t = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
         assert!(t.is_active(0, 0), "constraint 0 at stage 0 must be active");
@@ -270,38 +299,116 @@ mod tests {
     #[test]
     fn test_generic_bounds_single_block_none() {
         let id_map: HashMap<i32, usize> = [(0, 0)].into_iter().collect();
-        let rows = vec![(0i32, 0i32, None::<i32>, 100.0f64)];
+        let rows = vec![(0i32, 0i32, None::<i32>, Some(100.0f64), None::<f64>)];
         let t = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
         let slice = t.bounds_for_stage(0, 0);
         assert_eq!(slice.len(), 1);
-        assert_eq!(slice[0], (None, 100.0));
+        assert_eq!(
+            slice[0],
+            GenericConstraintBoundEntry {
+                block_id: None,
+                bound_lower: Some(100.0),
+                bound_upper: None,
+            }
+        );
     }
 
-    /// Multiple (`block_id`, bound) pairs for the same (constraint, stage).
+    /// Multiple (`block_id`, `bound_lower`) pairs for the same (constraint, stage).
     #[test]
     fn test_generic_bounds_multiple_blocks() {
         let id_map: HashMap<i32, usize> = [(0, 0)].into_iter().collect();
         let rows = vec![
-            (0i32, 2i32, None::<i32>, 50.0f64),
-            (0i32, 2i32, Some(0i32), 60.0f64),
-            (0i32, 2i32, Some(1i32), 70.0f64),
+            (0i32, 2i32, None::<i32>, Some(50.0f64), None::<f64>),
+            (0i32, 2i32, Some(0i32), Some(60.0f64), None::<f64>),
+            (0i32, 2i32, Some(1i32), Some(70.0f64), None::<f64>),
         ];
         let t = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
         assert!(t.is_active(0, 2));
         let slice = t.bounds_for_stage(0, 2);
         assert_eq!(slice.len(), 3);
-        assert_eq!(slice[0], (None, 50.0));
-        assert_eq!(slice[1], (Some(0), 60.0));
-        assert_eq!(slice[2], (Some(1), 70.0));
+        assert_eq!(
+            slice[0],
+            GenericConstraintBoundEntry {
+                block_id: None,
+                bound_lower: Some(50.0),
+                bound_upper: None,
+            }
+        );
+        assert_eq!(
+            slice[1],
+            GenericConstraintBoundEntry {
+                block_id: Some(0),
+                bound_lower: Some(60.0),
+                bound_upper: None,
+            }
+        );
+        assert_eq!(
+            slice[2],
+            GenericConstraintBoundEntry {
+                block_id: Some(1),
+                bound_lower: Some(70.0),
+                bound_upper: None,
+            }
+        );
+    }
+
+    /// `bound_upper`, when supplied, round-trips through `new()` into
+    /// `bounds_for_stage()` alongside `bound_lower` — the actual widened-pipe contract.
+    #[test]
+    fn test_generic_bounds_bound_upper_round_trips() {
+        let id_map: HashMap<i32, usize> = [(0, 0)].into_iter().collect();
+        let rows = vec![
+            (0i32, 0i32, None::<i32>, Some(50.0f64), Some(90.0f64)),
+            (0i32, 0i32, Some(0i32), Some(60.0f64), None::<f64>),
+        ];
+        let t = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+        let slice = t.bounds_for_stage(0, 0);
+        assert_eq!(slice.len(), 2);
+        assert_eq!(
+            slice[0],
+            GenericConstraintBoundEntry {
+                block_id: None,
+                bound_lower: Some(50.0),
+                bound_upper: Some(90.0),
+            }
+        );
+        assert_eq!(
+            slice[1],
+            GenericConstraintBoundEntry {
+                block_id: Some(0),
+                bound_lower: Some(60.0),
+                bound_upper: None,
+            }
+        );
+    }
+
+    /// A lower-`None`, upper-only row round-trips through `new()`.
+    #[test]
+    fn test_generic_bounds_upper_only_round_trips() {
+        let id_map: HashMap<i32, usize> = [(0, 0)].into_iter().collect();
+        let rows = vec![(0i32, 0i32, None::<i32>, None::<f64>, Some(10.0f64))];
+        let t = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+        let slice = t.bounds_for_stage(0, 0);
+        assert_eq!(slice.len(), 1);
+        assert_eq!(
+            slice[0],
+            GenericConstraintBoundEntry {
+                block_id: None,
+                bound_lower: None,
+                bound_upper: Some(10.0),
+            }
+        );
     }
 
     /// Rows with unknown `constraint_id` are silently skipped.
     #[test]
     fn test_generic_bounds_unknown_constraint_id_skipped() {
         let id_map: HashMap<i32, usize> = [(0, 0)].into_iter().collect();
-        let rows = vec![(99i32, 0i32, None::<i32>, 1000.0f64)];
+        let rows = vec![(99i32, 0i32, None::<i32>, Some(1000.0f64), None::<f64>)];
         let t = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
         assert!(!t.is_active(0, 0), "unknown constraint_id must be skipped");
@@ -324,8 +431,8 @@ mod tests {
     fn test_generic_bounds_two_stages_one_constraint() {
         let id_map: HashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
         let rows = vec![
-            (0i32, 0i32, None::<i32>, 100.0f64),
-            (0i32, 1i32, None::<i32>, 200.0f64),
+            (0i32, 0i32, None::<i32>, Some(100.0f64), None::<f64>),
+            (0i32, 1i32, None::<i32>, Some(200.0f64), None::<f64>),
         ];
         let t = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
@@ -336,11 +443,11 @@ mod tests {
 
         let s0 = t.bounds_for_stage(0, 0);
         assert_eq!(s0.len(), 1);
-        assert!((s0[0].1 - 100.0).abs() < f64::EPSILON);
+        assert!((s0[0].bound_lower.expect("lower present") - 100.0).abs() < f64::EPSILON);
 
         let s1 = t.bounds_for_stage(0, 1);
         assert_eq!(s1.len(), 1);
-        assert!((s1[0].1 - 200.0).abs() < f64::EPSILON);
+        assert!((s1[0].bound_lower.expect("lower present") - 200.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -348,9 +455,9 @@ mod tests {
     fn test_generic_bounds_serde_roundtrip() {
         let id_map: HashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
         let rows = vec![
-            (0i32, 0i32, None::<i32>, 100.0f64),
-            (0i32, 0i32, Some(1i32), 150.0f64),
-            (1i32, 2i32, None::<i32>, 300.0f64),
+            (0i32, 0i32, None::<i32>, Some(100.0f64), None::<f64>),
+            (0i32, 0i32, Some(1i32), Some(150.0f64), Some(175.0f64)),
+            (1i32, 2i32, None::<i32>, Some(300.0f64), None::<f64>),
         ];
         let original = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
         let json = serde_json::to_string(&original).expect("serialize");

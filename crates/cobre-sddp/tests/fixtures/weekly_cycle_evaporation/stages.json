@@ -32,7 +32,7 @@
           "hours": 730
         }
       ],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 1,
@@ -46,7 +46,7 @@
           "hours": 730
         }
       ],
-      "num_scenarios": 1
+      "num_openings": 1
     }
   ]
 }

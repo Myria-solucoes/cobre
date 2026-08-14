@@ -51,6 +51,7 @@ use cobre_sddp::{
     inflow_method::InflowNonNegativityMethod,
     lp_builder::{PatchBuffer, StageGeometry, build_stage_templates_resolving_layout},
     risk_measure::RiskMeasure,
+    setup::node_graph::Traversal,
     simulate,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
     train,
@@ -65,10 +66,6 @@ use cobre_stochastic::{
 mod common;
 use common::StubComm;
 use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
-
-// ===========================================================================
-// Communicator stub
-// ===========================================================================
 
 /// Build the role-(a) [`StateSpace`] via the public [`StateSpace::new`] (full
 /// `max_par_order` lag stride per hydro). This external test crate cannot see the
@@ -272,13 +269,9 @@ fn build_system() -> cobre_core::System {
         water_withdrawal_m3s: 0.0,
     };
     let hydro_bounds_default_block = HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 50.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 50.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     };
     let resolved_bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -537,6 +530,7 @@ fn train_fixture(
         TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: 1,
+                training_enumerated: false,
                 max_iterations: 10,
                 start_iteration: 0,
                 n_fwd_threads: 1,
@@ -563,6 +557,7 @@ fn train_fixture(
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, n_stages),
@@ -607,7 +602,16 @@ fn simulate_fixture(
         0,
         0,
         ActiveSolver::new().expect("ActiveSolver::new must succeed"),
-        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
+        PatchBuffer::new(
+            fx.state.hydro_count,
+            fx.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ),
         fx.state.n_state,
         WorkspaceSizing {
             hydro_count: fx.state.hydro_count,
@@ -644,6 +648,7 @@ fn simulate_fixture(
         &base_stage_context(fx, &block_counts_sim),
         fcf,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(
@@ -692,10 +697,15 @@ fn simulate_fixture(
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0; N_HYDROS],
             event_sender: None,
+            commitment_window_delivery_dates: &[],
+            transit_seed_arcs: &[],
+            past_defluences: &[],
+            study_stage_dates: &[],
         },
         None,
         &[],
         &comm,
+        &Traversal::default(),
     )?;
 
     drop(result_tx);

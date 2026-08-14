@@ -2,10 +2,10 @@
 
 Verifies that ``cobre.run.run()`` and the ``cobre`` CLI binary produce
 identical ``simulation/buses.parquet`` output for a case that uses
-``system/scalar_parameters.json``.
+``constraints/generic_parameters.json``.
 
 The test fabricates a minimal fixture by copying D13 (``d13-generic-constraint``)
-into a pytest tmp dir, adding a ``system/scalar_parameters.json`` that defines a
+into a pytest tmp dir, adding a ``constraints/generic_parameters.json`` that defines a
 single ``constant`` parameter named ``demand_scale``, and rewriting the existing
 generic constraint to reference ``@demand_scale`` in its expression.
 
@@ -65,7 +65,7 @@ def _run_cli(case_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
 
 
 def _seed_case(src: pathlib.Path, dst: pathlib.Path) -> None:
-    """Copy D13 to ``dst``, inject a scalar_parameters.json, and patch the constraint.
+    """Copy D13 to ``dst``, inject a generic_parameters.json, and patch the constraint.
 
     Also enables the simulation pass so ``simulation/buses/`` is written.
     """
@@ -81,8 +81,8 @@ def _seed_case(src: pathlib.Path, dst: pathlib.Path) -> None:
     config.setdefault("simulation", {})["enabled"] = True
     (dst / "config.json").write_text(json.dumps(config))
 
-    # Add scalar_parameters.json with a single constant parameter.
-    (dst / "system" / "scalar_parameters.json").write_text(
+    # Add constraints/generic_parameters.json with a single constant parameter.
+    (dst / "constraints" / "generic_parameters.json").write_text(
         json.dumps(
             {
                 "scalar_parameters": [
@@ -119,7 +119,9 @@ def _collect_buses_parquet(output_dir: pathlib.Path) -> list[pathlib.Path]:
 def _read_buses(output_dir: pathlib.Path) -> pa.Table:
     """Concatenate all buses parquet partitions into a single Arrow table."""
     parquets = _collect_buses_parquet(output_dir)
-    tables = [pq.read_table(p) for p in parquets]
+    # ParquetFile (not read_table): scenario_id is both the Hive partition key and
+    # an in-file column, so read_table's dataset path would try to merge them.
+    tables = [pq.ParquetFile(p).read() for p in parquets]
     return pa.concat_tables(tables)
 
 
@@ -130,7 +132,7 @@ def _read_buses(output_dir: pathlib.Path) -> pa.Table:
 
 @pytest.fixture(scope="module")
 def d13_scalar_case_dir(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
-    """Return a temp copy of D13 with scalar_parameters.json injected."""
+    """Return a temp copy of D13 with generic_parameters.json injected."""
     repo_root = pathlib.Path(__file__).parents[3]
     src = repo_root / D13_CASE
     dest = tmp_path_factory.mktemp("d13_scalar_case")

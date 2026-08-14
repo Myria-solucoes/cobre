@@ -279,8 +279,12 @@ if missing_from_test or missing_from_baseline:
 
 for rel_path in non_exempt:
     rule = classified[rel_path]
-    baseline_table = pq.read_table(os.path.join(baseline_dir, rel_path))
-    test_table = pq.read_table(os.path.join(test_dir, rel_path))
+    # ParquetFile(path).read() reads the file's own columns only; pq.read_table()
+    # would add a dictionary<int32> scenario_id partition column from the
+    # scenario_id=NNNN/ Hive path that collides with the in-file int32 column
+    # (the same read contract cobre's Python tests and native loader follow).
+    baseline_table = pq.ParquetFile(os.path.join(baseline_dir, rel_path)).read()
+    test_table = pq.ParquetFile(os.path.join(test_dir, rel_path)).read()
 
     baseline_cols = set(baseline_table.column_names)
     test_cols = set(test_table.column_names)

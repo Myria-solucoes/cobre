@@ -14,7 +14,9 @@ use cobre_io::SimulationOutput;
 use cobre_io::now_iso8601;
 use cobre_io::output::simulation_writer::ScenarioWritePayload;
 use cobre_io::output::simulation_writer::SimulationParquetWriter;
+use cobre_io::output::simulation_writer::SimulationPathRecord;
 use cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS;
+use cobre_sddp::SimulationWeighting;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
@@ -73,8 +75,7 @@ pub(super) fn run_simulation_phase(
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity.max(1));
 
     let parquet_config = ParquetWriterConfig::default();
-    let mut sim_writer = SimulationParquetWriter::new(&ctx.output_dir, system, &parquet_config)
-        .map_err(CliError::from)?;
+    let mut sim_writer = SimulationParquetWriter::new(&ctx.output_dir, system, &parquet_config)?;
 
     // Drain straight to Parquet rather than collecting into a Vec and gathering
     // on rank 0 via MPI, which overflows i32 on large cases.
@@ -137,6 +138,11 @@ pub(super) fn run_simulation_phase(
     #[allow(clippy::cast_possible_truncation)]
     let sim_time_ms = sim_start.elapsed().as_millis() as u64;
 
+    // Grab the node-path rows before `finalize` consumes the writer; they are
+    // gathered across ranks below (paths.parquet is one unpartitioned run-level
+    // file, so it needs every rank's scenarios).
+    let local_path_rows: Vec<SimulationPathRecord> = sim_writer.path_rows().to_vec();
+
     let mut local_sim_output = sim_writer.finalize(sim_time_ms);
     local_sim_output.failed = write_failures;
 
@@ -149,14 +155,23 @@ pub(super) fn run_simulation_phase(
     let (global_agg, global_scenario_stats) =
         aggregate_simulation_solver_stats(&ctx.comm, &sim_run_result.solver_stats)?;
 
+    let global_path_rows = aggregate_simulation_paths(&ctx.comm, &local_path_rows)?;
+
     // Aggregate across all ranks so the printed mean/std/CI95 reflect every
-    // scenario, not just rank 0's.
-    let cost_summary =
-        aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm).map_err(|e| {
-            CliError::Internal {
+    // scenario, not just rank 0's. The weighting rides out on the run result,
+    // resolved once from the simulation Traversal inside `simulate()` — `Census`
+    // (exact leaf-path expectation) when `census_weights` is `Some`, the uniform
+    // Monte-Carlo sample mean when `None`.
+    let weighting = match sim_run_result.census_weights.as_deref() {
+        Some(weights) => SimulationWeighting::Census { weights },
+        None => SimulationWeighting::Uniform,
+    };
+    let (cost_summary, gathered_scenario_costs) =
+        aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm, weighting).map_err(
+            |e| CliError::Internal {
                 message: format!("simulation cost aggregation error: {e}"),
-            }
-        })?;
+            },
+        )?;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
@@ -164,8 +179,6 @@ pub(super) fn run_simulation_phase(
     merged_sim_output.cost = Some(MetadataCost {
         mean_cost: cost_summary.mean_cost,
         std_cost: cost_summary.std_cost,
-        cvar: cost_summary.cvar,
-        cvar_alpha: cost_summary.cvar_alpha,
     });
     merged_sim_output.solve_stats = MetadataSimulationSolveStats {
         total_lp_solves: Some(global_agg.lp_solves),
@@ -198,6 +211,8 @@ pub(super) fn run_simulation_phase(
             sim_started_at,
             &merged_sim_output,
             &global_scenario_stats,
+            &global_path_rows,
+            &gathered_scenario_costs,
         )?;
     }
 
@@ -211,6 +226,8 @@ fn write_sim_outputs_on_root(
     sim_started_at: String,
     merged_sim_output: &SimulationOutput,
     global_scenario_stats: &[(u32, SolverStatsDelta)],
+    global_path_rows: &[SimulationPathRecord],
+    gathered_scenario_costs: &[(u32, f64, Option<f64>)],
 ) -> Result<(), CliError> {
     let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
     let sim_ctx = OutputContext {
@@ -227,6 +244,8 @@ fn write_sim_outputs_on_root(
         output_dir: &ctx.output_dir,
         sim_output: merged_sim_output,
         sim_solver_stats: global_scenario_stats,
+        sim_path_rows: global_path_rows,
+        sim_scenario_costs: gathered_scenario_costs,
         output_ctx: &sim_ctx,
         quiet: ctx.quiet,
         stderr: &ctx.stderr,
@@ -341,6 +360,61 @@ fn merge_simulation_metadata<C: Communicator>(
     })
 }
 
+/// Gather every rank's `(scenario_id, stage_id, node_id)` path rows for the
+/// run-level, unpartitioned `paths.parquet`.
+///
+/// Rows serialize to three `i32`s each and ride the same allgatherv-of-lengths-
+/// then-payload pattern the other per-scenario gathers use. Order is irrelevant:
+/// `write_paths` fixes the canonical `(scenario_id, stage_id)` order, so the file
+/// is identical across rank shapes (the rank-invariance contract).
+#[allow(clippy::cast_possible_truncation)]
+fn aggregate_simulation_paths<C: Communicator>(
+    comm: &C,
+    local: &[SimulationPathRecord],
+) -> Result<Vec<SimulationPathRecord>, CliError> {
+    let mut local_buf: Vec<i32> = Vec::with_capacity(local.len() * 3);
+    for r in local {
+        local_buf.push(r.scenario_id);
+        local_buf.push(r.stage_id);
+        local_buf.push(r.node_id);
+    }
+
+    let n_ranks = comm.size();
+    let send_len = [local_buf.len() as u64];
+    let mut all_lens = vec![0u64; n_ranks];
+    let len_counts: Vec<usize> = vec![1; n_ranks];
+    let len_displs: Vec<usize> = (0..n_ranks).collect();
+    comm.allgatherv(&send_len, &mut all_lens, &len_counts, &len_displs)
+        .map_err(|e| CliError::Internal {
+            message: format!("simulation path length exchange error: {e}"),
+        })?;
+
+    let recv_counts: Vec<usize> = all_lens.iter().map(|&l| l as usize).collect();
+    let recv_displs: Vec<usize> = recv_counts
+        .iter()
+        .scan(0usize, |acc, &c| {
+            let d = *acc;
+            *acc += c;
+            Some(d)
+        })
+        .collect();
+    let total: usize = recv_counts.iter().sum();
+    let mut all_buf = vec![0i32; total];
+    comm.allgatherv(&local_buf, &mut all_buf, &recv_counts, &recv_displs)
+        .map_err(|e| CliError::Internal {
+            message: format!("simulation path gather error: {e}"),
+        })?;
+
+    Ok(all_buf
+        .chunks_exact(3)
+        .map(|c| SimulationPathRecord {
+            scenario_id: c[0],
+            stage_id: c[1],
+            node_id: c[2],
+        })
+        .collect())
+}
+
 /// Aggregate simulation solver statistics across all MPI ranks.
 ///
 /// Returns the global [`cobre_sddp::SolverStatsDelta`] (sum over all ranks, for
@@ -399,4 +473,55 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
     global_scenario_stats.sort_by_key(|(id, _)| *id);
 
     Ok((global_agg, global_scenario_stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use cobre_sddp::SimulationWeighting;
+    use cobre_sddp::setup::{
+        NodeGraph, NodeId, NodeOpenings, NodeRuntime, OpeningSource, StageIdx, Traversal,
+    };
+
+    /// A single-node, single-leaf graph — enough to resolve a `Traversal` in
+    /// either axis without a full `StudySetup`.
+    fn one_node_graph() -> NodeGraph {
+        NodeGraph {
+            node_ids: vec![NodeId(0)].into(),
+            nodes: vec![NodeRuntime {
+                stage: StageIdx(0),
+                pool_id: 0,
+                openings: NodeOpenings {
+                    source: OpeningSource::Generated,
+                    offset: 0,
+                    len: 1,
+                    q: 1.0,
+                },
+            }]
+            .into(),
+            successors: vec![Vec::new()].into(),
+            n_pools: 1,
+            pool_stage: vec![StageIdx(0)],
+        }
+    }
+
+    /// The CLI derives its simulation weighting from the resolved `Traversal`,
+    /// exactly as `run_simulation_phase` does — under a sampled selection this
+    /// can only ever resolve to `Uniform`, never `Census`, regardless of what a
+    /// caller might otherwise assemble beside it.
+    #[test]
+    fn simulation_weighting_census_underivable_from_sampled_traversal() {
+        let ng = one_node_graph();
+
+        let sampled = Traversal::resolve(&ng, false, 10);
+        assert!(matches!(
+            sampled.simulation_weighting(),
+            SimulationWeighting::Uniform
+        ));
+
+        let enumerated = Traversal::resolve(&ng, true, 1);
+        assert!(matches!(
+            enumerated.simulation_weighting(),
+            SimulationWeighting::Census { .. }
+        ));
+    }
 }

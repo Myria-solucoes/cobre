@@ -3,7 +3,8 @@
     clippy::unwrap_used,
     clippy::panic,
     clippy::too_many_lines,
-    clippy::doc_markdown
+    clippy::doc_markdown,
+    clippy::cast_possible_wrap
 )]
 
 mod helpers;
@@ -19,7 +20,7 @@ use cobre_core::System;
 use cobre_io::constraints::ThermalBoundsRow;
 use cobre_io::output::simulation_writer::{
     HydroBusWriteRecord, HydroWriteRecord, ScenarioWritePayload, SimulationParquetWriter,
-    StageWritePayload,
+    StageWritePayload, write_paths,
 };
 use cobre_io::{ParquetWriterConfig, deserialize_system, load_case, serialize_system};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -32,12 +33,8 @@ fn test_minimal_valid_case() {
     let dir = TempDir::new().unwrap();
     helpers::make_minimal_case(&dir);
 
-    let result = load_case(dir.path());
-
-    let system = match result {
-        Ok(s) => s,
-        Err(e) => panic!("expected Ok(System) for minimal case, got Err: {e}"),
-    };
+    let system = load_case(dir.path())
+        .unwrap_or_else(|e| panic!("expected Ok(System) for minimal case, got Err: {e}"));
 
     assert_eq!(
         system.n_buses(),
@@ -69,12 +66,8 @@ fn test_multi_entity_case() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
-    let result = load_case(dir.path());
-
-    let system = match result {
-        Ok(s) => s,
-        Err(e) => panic!("expected Ok(System) for multi-entity case, got Err: {e}"),
-    };
+    let system = load_case(dir.path())
+        .unwrap_or_else(|e| panic!("expected Ok(System) for multi-entity case, got Err: {e}"));
 
     assert_eq!(
         system.n_buses(),
@@ -120,9 +113,7 @@ fn test_missing_required_file() {
 
     std::fs::remove_file(dir.path().join("system/buses.json")).unwrap();
 
-    let result = load_case(dir.path());
-
-    match result {
+    match load_case(dir.path()) {
         Err(err) => {
             let display = err.to_string();
             assert!(
@@ -147,9 +138,7 @@ fn test_malformed_json() {
         "{ this is not valid json }",
     );
 
-    let result = load_case(dir.path());
-
-    match result {
+    match load_case(dir.path()) {
         Err(err) => {
             // Variant is implementation-defined (ParseError or ConstraintError wrapping the parse); assert only Err.
             let display = err.to_string();
@@ -169,9 +158,7 @@ fn test_referential_integrity_violation() {
     let dir = TempDir::new().unwrap();
     helpers::make_referential_violation_case(&dir);
 
-    let result = load_case(dir.path());
-
-    match result {
+    match load_case(dir.path()) {
         Err(err) => {
             let display = err.to_string();
             assert!(
@@ -238,14 +225,14 @@ fn test_inflow_history_wired_into_system() {
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 10
+            "num_openings": 10
         },
         {
             "id": 1,
             "start_date": "2024-02-01",
             "end_date": "2024-03-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 672.0 }],
-            "num_scenarios": 10
+            "num_openings": 10
         }
     ]
 }"#,
@@ -696,7 +683,7 @@ fn test_external_ncs_scenarios_wired_into_system() {
         Field::new("stage_id", DataType::Int32, false),
         Field::new("scenario_id", DataType::Int32, false),
         Field::new("ncs_id", DataType::Int32, false),
-        Field::new("value", DataType::Float64, false),
+        Field::new("availability_factor", DataType::Float64, false),
     ]));
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
@@ -770,21 +757,21 @@ fn test_lead_time_single_decider_on_disk_load() {
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
-            "num_scenarios": 1
+            "num_openings": 1
         },
         {
             "id": 1,
             "start_date": "2024-02-01",
             "end_date": "2024-03-01",
             "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
-            "num_scenarios": 1
+            "num_openings": 1
         },
         {
             "id": 2,
             "start_date": "2024-03-01",
             "end_date": "2024-04-01",
             "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
-            "num_scenarios": 1
+            "num_openings": 1
         }
     ]
 }"#,
@@ -796,7 +783,7 @@ fn test_lead_time_single_decider_on_disk_load() {
     "storage": [],
     "filling_storage": [],
     "past_anticipated_commitments": [
-        { "thermal_id": 2, "values_mw": [0.0] }
+        { "thermal_id": 2, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 }
     ]
 }"#,
     );
@@ -937,6 +924,7 @@ fn make_hydro_write_record(
 ) -> HydroWriteRecord {
     HydroWriteRecord {
         stage_id,
+        node_id: stage_id as i32,
         block_id,
         hydro_id,
         turbined_m3s,
@@ -979,6 +967,7 @@ fn empty_stage_write_payload(
 ) -> StageWritePayload {
     StageWritePayload {
         stage_id,
+        node_id: stage_id as i32,
         costs: vec![],
         hydros,
         hydro_bus_generation,
@@ -991,6 +980,7 @@ fn empty_stage_write_payload(
         inflow_lags: vec![],
         transit_buckets: vec![],
         generic_violations: vec![],
+        anticipated_lanes: vec![],
     }
 }
 
@@ -1023,6 +1013,7 @@ fn write_and_read_hydro_batches(
         .write_scenario(ScenarioWritePayload {
             scenario_id: 0,
             stages,
+            transit_seed: vec![],
         })
         .unwrap_or_else(|e| panic!("write_scenario must succeed: {e}"));
 
@@ -1112,6 +1103,7 @@ fn test_split_plant_hydro_bus_generation_output_shape() {
             ));
             hydro_bus_generation.push(HydroBusWriteRecord {
                 stage_id,
+                node_id: stage_id as i32,
                 block_id: Some(block_id),
                 hydro_id: 0,
                 bus_id: 0,
@@ -1120,6 +1112,7 @@ fn test_split_plant_hydro_bus_generation_output_shape() {
             });
             hydro_bus_generation.push(HydroBusWriteRecord {
                 stage_id,
+                node_id: stage_id as i32,
                 block_id: Some(block_id),
                 hydro_id: 0,
                 bus_id: 1,
@@ -1171,6 +1164,103 @@ fn test_split_plant_hydro_bus_generation_output_shape() {
     );
 }
 
+/// A fan run (two scenarios visiting distinct node ids per stage) writes entity
+/// files carrying `scenario_id`/`node_id` columns and a run-level `paths.parquet`;
+/// joining `paths` to an entity file on `(scenario_id, stage_id)` returns every
+/// row matched on both sides — the join that is impossible when `scenario_id`
+/// lives only in the Hive path. (The `scenario_summary` leg of the three-way join
+/// is deferred until the run-level `scenario_summary.parquet` output exists.)
+#[test]
+fn test_paths_join_to_entity_file_on_scenario_and_stage() {
+    let case_dir = Path::new("../../examples/deterministic/d02-single-hydro");
+    let system = load_case(case_dir).unwrap_or_else(|e| panic!("d02 load_case must succeed: {e}"));
+
+    let tmp = TempDir::new().unwrap();
+    let config = ParquetWriterConfig::default();
+    let mut writer = SimulationParquetWriter::new(tmp.path(), &system, &config)
+        .unwrap_or_else(|e| panic!("SimulationParquetWriter::new must succeed: {e}"));
+
+    // Two scenarios; the node id visited at stage 1 differs across scenarios (a
+    // fan), and differs from the stage index — so a value that merely echoed
+    // stage_id would not pass the node_id join check below.
+    let node_ids: [[i32; 2]; 2] = [[10, 21], [10, 32]];
+    for (scenario_id, nodes) in node_ids.iter().enumerate() {
+        let stages: Vec<StageWritePayload> = (0..2u32)
+            .map(|stage_id| {
+                let mut stage = empty_stage_write_payload(
+                    stage_id,
+                    vec![make_hydro_write_record(stage_id, Some(0), 0, 40.0, 20.0)],
+                    vec![],
+                );
+                stage.node_id = nodes[stage_id as usize];
+                stage.hydros[0].node_id = nodes[stage_id as usize];
+                stage
+            })
+            .collect();
+        #[allow(clippy::cast_possible_truncation)]
+        writer
+            .write_scenario(ScenarioWritePayload {
+                scenario_id: scenario_id as u32,
+                stages,
+                transit_seed: vec![],
+            })
+            .unwrap_or_else(|e| panic!("write_scenario must succeed: {e}"));
+    }
+    let path_rows = writer.path_rows().to_vec();
+    write_paths(tmp.path(), path_rows).unwrap_or_else(|e| panic!("write_paths must succeed: {e}"));
+
+    // paths.parquet: run-level, unpartitioned, exactly (scenario_id, stage_id, node_id).
+    let paths = read_single_batch(&tmp.path().join("simulation/paths.parquet"));
+    let paths_schema = paths.schema();
+    let paths_names: Vec<&str> = paths_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    assert_eq!(paths_names, vec!["scenario_id", "stage_id", "node_id"]);
+    assert_eq!(paths.num_rows(), 4, "2 scenarios × 2 stages");
+
+    // (scenario_id, stage_id) -> node_id from paths.parquet.
+    let p_scenario = i32_column(&paths, "scenario_id");
+    let p_stage = i32_column(&paths, "stage_id");
+    let p_node = i32_column(&paths, "node_id");
+    let mut paths_map: std::collections::HashMap<(i32, i32), i32> =
+        std::collections::HashMap::new();
+    for i in 0..paths.num_rows() {
+        paths_map.insert((p_scenario.value(i), p_stage.value(i)), p_node.value(i));
+    }
+
+    // Join each scenario's entity file to paths on (scenario_id, stage_id).
+    let mut matched_paths_keys: HashSet<(i32, i32)> = HashSet::new();
+    for scenario_id in 0..2 {
+        let entity = read_single_batch(&tmp.path().join(format!(
+            "simulation/hydros/scenario_id={scenario_id:04}/data.parquet"
+        )));
+        let e_scenario = i32_column(&entity, "scenario_id");
+        let e_stage = i32_column(&entity, "stage_id");
+        let e_node = i32_column(&entity, "node_id");
+        for i in 0..entity.num_rows() {
+            let key = (e_scenario.value(i), e_stage.value(i));
+            let paths_node = paths_map
+                .get(&key)
+                .unwrap_or_else(|| panic!("entity row {key:?} has no matching paths.parquet row"));
+            assert_eq!(
+                *paths_node,
+                e_node.value(i),
+                "entity node_id must equal the paths node_id for {key:?}"
+            );
+            matched_paths_keys.insert(key);
+        }
+    }
+    // No unmatched paths rows: every (scenario, stage) in paths appears in the
+    // entity data (d02 has one hydro at every stage).
+    assert_eq!(
+        matched_paths_keys.len(),
+        paths.num_rows(),
+        "every paths.parquet row must match an entity row"
+    );
+}
+
 /// Single-bus control (recruiting `d02-single-hydro` rather than
 /// authoring a new case): a single-group plant's `hydro_bus_generation`
 /// still emits exactly one row per `(stage, block, hydro)`, with a non-null
@@ -1189,6 +1279,7 @@ fn test_single_bus_hydro_bus_generation_output_shape() {
         let hydros = vec![make_hydro_write_record(stage_id, Some(0), 0, 40.0, 20.0)];
         let hydro_bus_generation = vec![HydroBusWriteRecord {
             stage_id,
+            node_id: stage_id as i32,
             block_id: Some(0),
             hydro_id: 0,
             bus_id: 0,

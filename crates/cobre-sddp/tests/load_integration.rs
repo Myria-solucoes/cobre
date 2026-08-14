@@ -388,6 +388,7 @@ fn test_stochastic_load_training_completes() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -446,6 +447,7 @@ fn test_stochastic_load_training_completes() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -558,6 +560,7 @@ fn test_deterministic_load_training_matches_baseline() {
         TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: 1,
+                training_enumerated: false,
                 max_iterations: 10,
                 start_iteration: 0,
                 n_fwd_threads: 1,
@@ -581,6 +584,7 @@ fn test_deterministic_load_training_matches_baseline() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -643,6 +647,7 @@ fn test_stochastic_load_seed_determinism() {
         let config = TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: 1,
+                training_enumerated: false,
                 max_iterations: 10,
                 start_iteration: 0,
                 n_fwd_threads: 1,
@@ -699,6 +704,7 @@ fn test_stochastic_load_seed_determinism() {
             &mut fcf,
             &stage_ctx,
             &TrainingContext {
+                node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
                 horizon: &horizon,
                 state: &state,
                 cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),

@@ -23,7 +23,7 @@ use super::columns::ColumnBufs;
 /// [`StateSpace`](crate::indexer::StateSpace) — never a private copy of the
 /// ranges.
 #[derive(Debug, Clone)]
-pub(crate) struct DeliveryRing {
+pub struct DeliveryRing {
     /// Outgoing (identity-resolved) column block, size `n_lanes * depth`.
     out_block: Range<usize>,
     /// Incoming (pinned) column block, size `n_lanes * depth`.
@@ -42,7 +42,7 @@ impl DeliveryRing {
     /// Panics if `out_block.len()` or `in_block.len()` differs from
     /// `n_lanes * depth`.
     #[must_use]
-    pub(crate) fn new(
+    pub fn new(
         out_block: Range<usize>,
         in_block: Range<usize>,
         n_lanes: usize,
@@ -76,7 +76,7 @@ impl DeliveryRing {
     ///
     /// Panics if `slot >= depth` or `lane >= n_lanes`.
     #[must_use]
-    pub(crate) fn out_col(&self, slot: usize, lane: usize) -> usize {
+    pub fn out_col(&self, slot: usize, lane: usize) -> usize {
         debug_assert!(
             slot < self.depth,
             "slot {slot} must be < depth {}",
@@ -97,7 +97,7 @@ impl DeliveryRing {
     ///
     /// Panics if `slot >= depth` or `lane >= n_lanes`.
     #[must_use]
-    pub(crate) fn in_col(&self, slot: usize, lane: usize) -> usize {
+    pub fn in_col(&self, slot: usize, lane: usize) -> usize {
         debug_assert!(
             slot < self.depth,
             "slot {slot} must be < depth {}",
@@ -138,7 +138,7 @@ impl DeliveryRing {
     /// # Panics (debug builds only)
     ///
     /// Panics if `row_pos.len() != n_lanes * depth`.
-    pub(crate) fn emit_shift_rows(
+    pub fn emit_shift_rows(
         &self,
         row_pos: &[Option<usize>],
         row_start: usize,
@@ -166,6 +166,48 @@ impl DeliveryRing {
             if slot + 1 < self.depth {
                 col_entries[self.in_col(slot + 1, lane)].push((row, -1.0));
             }
+            n_reachable += 1;
+        }
+        n_reachable
+    }
+
+    /// Emits the ring's interior carry-row CSC entries: `out[slot] +1` and
+    /// `in[slot] −1` at the SAME slot — the same-slot hold identity that pins
+    /// `out − in = 0`, unlike [`Self::emit_shift_rows`]'s `slot + 1` target.
+    /// `row_pos[slot * n_lanes + lane]` gives this stage's compact row
+    /// position, `None` when masked — the paired column freeze lives in
+    /// [`Self::freeze_masked_columns`], never here. Returns the count of rows
+    /// emitted.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `row_pos.len() != n_lanes * depth`.
+    pub fn emit_carry_rows(
+        &self,
+        row_pos: &[Option<usize>],
+        row_start: usize,
+        col_entries: &mut [Vec<(usize, f64)>],
+    ) -> usize {
+        if self.n_lanes == 0 || self.depth == 0 {
+            debug_assert!(
+                row_pos.is_empty(),
+                "row_pos must be empty when n_lanes or depth is 0"
+            );
+            return 0;
+        }
+        debug_assert_eq!(
+            row_pos.len(),
+            self.n_lanes * self.depth,
+            "row_pos must be sized n_lanes * depth (dense, slot-major, lane-minor)"
+        );
+        let mut n_reachable = 0_usize;
+        for (flat, pos) in row_pos.iter().enumerate() {
+            let Some(pos) = *pos else { continue };
+            let slot = flat / self.n_lanes;
+            let lane = flat % self.n_lanes;
+            let row = row_start + pos;
+            col_entries[self.out_col(slot, lane)].push((row, 1.0));
+            col_entries[self.in_col(slot, lane)].push((row, -1.0));
             n_reachable += 1;
         }
         n_reachable
@@ -329,6 +371,80 @@ mod tests {
                 "lane 1 column {col} must stay untouched"
             );
         }
+    }
+
+    /// `emit_carry_rows`' basic shape: `n_lanes = 2`, `depth = 1`, every
+    /// position reachable. Each lane's row carries the same-slot hold
+    /// identity `out(0,l) +1`, `in(0,l) −1`.
+    #[test]
+    fn emit_carry_rows_pins_the_same_slot_hold_identity() {
+        let ring = DeliveryRing::new(100..102, 200..202, 2, 1);
+        let row_pos = vec![Some(0), Some(1)];
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 210];
+        let n = ring.emit_carry_rows(&row_pos, 0, &mut col_entries);
+        assert_eq!(n, 2);
+        // lane 0: out[100] +1, in[200] -1, same slot, row 0.
+        assert_eq!(col_entries[100], vec![(0, 1.0)]);
+        assert_eq!(col_entries[200], vec![(0, -1.0)]);
+        // lane 1: out[101] +1, in[201] -1, same slot, row 1.
+        assert_eq!(col_entries[101], vec![(1, 1.0)]);
+        assert_eq!(col_entries[201], vec![(1, -1.0)]);
+    }
+
+    /// A masked position gets no row at all, and the returned count
+    /// excludes it — the reachable positions on either side are unaffected.
+    #[test]
+    fn emit_carry_rows_masked_position_emits_no_row() {
+        let ring = DeliveryRing::new(300..303, 400..403, 1, 3);
+        let row_pos = vec![Some(0), None, Some(1)];
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 410];
+        let n = ring.emit_carry_rows(&row_pos, 500, &mut col_entries);
+        assert_eq!(n, 2);
+        // slot 0: out[300] +1, in[400] -1, same slot, row 500.
+        assert_eq!(col_entries[300], vec![(500, 1.0)]);
+        assert_eq!(col_entries[400], vec![(500, -1.0)]);
+        // slot 1 is masked: no entries anywhere for it.
+        assert!(col_entries[301].is_empty());
+        assert!(col_entries[401].is_empty());
+        // slot 2: out[302] +1, in[402] -1, same slot, row 501.
+        assert_eq!(col_entries[302], vec![(501, 1.0)]);
+        assert_eq!(col_entries[402], vec![(501, -1.0)]);
+    }
+
+    /// The explicit shift-vs-hold pin: on the same ring and `row_pos`,
+    /// `emit_shift_rows` writes its `-1.0` term on `in_col(slot + 1, lane)`
+    /// (the next slot) while `emit_carry_rows` writes it on
+    /// `in_col(slot, lane)` (the same slot) — the sole semantic difference
+    /// between the two primitives.
+    #[test]
+    fn emit_carry_rows_targets_the_same_slot_where_emit_shift_rows_targets_the_next() {
+        let ring = DeliveryRing::new(600..602, 700..702, 1, 2);
+        let row_pos = vec![Some(0), Some(1)];
+
+        let mut shift_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 710];
+        let n_shift = ring.emit_shift_rows(&row_pos, 0, &mut shift_entries);
+
+        let mut carry_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 710];
+        let n_carry = ring.emit_carry_rows(&row_pos, 0, &mut carry_entries);
+
+        assert_eq!(n_shift, 2);
+        assert_eq!(n_carry, 2);
+
+        // Both agree on the out_col side.
+        assert_eq!(shift_entries[600], vec![(0, 1.0)]);
+        assert_eq!(carry_entries[600], vec![(0, 1.0)]);
+        assert_eq!(shift_entries[601], vec![(1, 1.0)]);
+        assert_eq!(carry_entries[601], vec![(1, 1.0)]);
+
+        // Slot 0's -1.0 term: shift writes it on in_col(1) (next slot);
+        // carry writes it on in_col(0) (same slot).
+        assert!(shift_entries[700].is_empty());
+        assert_eq!(shift_entries[701], vec![(0, -1.0)]);
+        assert_eq!(carry_entries[700], vec![(0, -1.0)]);
+
+        // Slot 1's -1.0 term: shift drops it (no deeper neighbor); carry
+        // still writes it, on in_col(1) (same slot).
+        assert_eq!(carry_entries[701], vec![(1, -1.0)]);
     }
 
     /// A masked position freezes to `[0, 0]` with no dependence on the

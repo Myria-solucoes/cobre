@@ -307,7 +307,7 @@ pub struct InflowModel {
     /// Hydro plant this model belongs to.
     pub hydro_id: EntityId,
 
-    /// Stage (0-based index within `System::stages`) this model applies to.
+    /// Declared study-stage id this model applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Seasonal mean inflow μ in m³/s.
@@ -369,7 +369,7 @@ pub struct LoadModel {
     /// Bus this load model belongs to.
     pub bus_id: EntityId,
 
-    /// Stage (0-based index within `System::stages`) this model applies to.
+    /// Declared study-stage id this model applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Seasonal mean load demand in MW.
@@ -377,6 +377,17 @@ pub struct LoadModel {
 
     /// Seasonal standard deviation of load demand in MW.
     pub std_mw: f64,
+}
+
+impl LoadModel {
+    /// The single authority for load-bus noise-vector membership: a bus
+    /// occupies a slot iff it carries load noise or its class is sampled
+    /// externally (a deterministic external value still needs a slot to
+    /// standardize into).
+    #[must_use]
+    pub fn is_noise_member(&self, load_scheme: SamplingScheme) -> bool {
+        self.std_mw > 0.0 || load_scheme == SamplingScheme::External
+    }
 }
 
 /// Per-stage normal noise model parameters for a non-controllable source.
@@ -411,7 +422,7 @@ pub struct NcsModel {
     /// NCS entity identifier matching `NonControllableSource.id`.
     pub ncs_id: EntityId,
 
-    /// Stage (0-based index within `System::stages`) this model applies to.
+    /// Declared study-stage id this model applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Mean availability factor [dimensionless, in `[0, 1]`].
@@ -478,7 +489,7 @@ pub struct InflowHistoryRow {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExternalScenarioRow {
-    /// Stage index (0-based within `System::stages`).
+    /// Declared study-stage id this row applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Scenario index (0-based). Must be >= 0.
@@ -513,7 +524,7 @@ pub struct ExternalScenarioRow {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExternalLoadRow {
-    /// Stage index (0-based within `System::stages`).
+    /// Declared study-stage id this row applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Scenario index (0-based). Must be >= 0.
@@ -549,7 +560,7 @@ pub struct ExternalLoadRow {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExternalNcsRow {
-    /// Stage index (0-based within `System::stages`).
+    /// Declared study-stage id this row applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Scenario index (0-based). Must be >= 0.
@@ -673,7 +684,7 @@ pub struct CorrelationProfile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CorrelationScheduleEntry {
-    /// Stage index (0-based within `System::stages`) this entry applies to.
+    /// Declared study-stage id this entry applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Name of the correlation profile active for this stage.
@@ -725,7 +736,7 @@ pub struct CorrelationScheduleEntry {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CorrelationModel {
-    /// Decomposition method (`"spectral"` default, `"cholesky"` accepted).
+    /// Decomposition method (`"spectral"`).
     /// `String`, not an enum, to keep old case files forward-compatible.
     pub method: String,
 
@@ -765,7 +776,7 @@ mod tests {
 
     use super::{
         AnnualComponent, CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
-        CorrelationScheduleEntry, InflowModel, NcsModel, SamplingScheme, ScenarioSource,
+        CorrelationScheduleEntry, InflowModel, LoadModel, NcsModel, SamplingScheme, ScenarioSource,
     };
     use crate::EntityId;
 
@@ -814,6 +825,21 @@ mod tests {
             annual: None,
         };
         assert_eq!(par2.ar_order(), 2);
+    }
+
+    #[test]
+    fn load_model_is_noise_member_truth_table() {
+        let make = |std_mw: f64| LoadModel {
+            bus_id: EntityId(1),
+            stage_id: 0,
+            mean_mw: 100.0,
+            std_mw,
+        };
+
+        assert!(make(45.0).is_noise_member(SamplingScheme::InSample));
+        assert!(!make(0.0).is_noise_member(SamplingScheme::InSample));
+        assert!(make(0.0).is_noise_member(SamplingScheme::External));
+        assert!(make(45.0).is_noise_member(SamplingScheme::External));
     }
 
     #[test]

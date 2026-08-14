@@ -20,6 +20,7 @@ use cobre_sddp::cut::{CutPool, CutRowMap};
 use cobre_sddp::cut_selection::CutMetadata;
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
 use cobre_sddp::indexer::{CutStateProjection, StateDim, StateSpace};
+use cobre_sddp::setup::NodeId;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -163,7 +164,7 @@ fn make_candidate_pool(k: usize, n_state: usize, seed: u64) -> CutPool {
     for slot in 0..k {
         let intercept = draw_f64(&mut state);
         fill_f64(&mut coeffs, state.wrapping_add(0xABCD_0000 + slot as u64));
-        pool.add_cut(0, slot as u32, intercept, &coeffs);
+        pool.add_cut(NodeId(0), 0, slot as u32, intercept, &coeffs);
     }
     let metadata: Vec<CutMetadata> = (0..k)
         .map(|slot| {

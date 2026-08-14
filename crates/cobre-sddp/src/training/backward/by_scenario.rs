@@ -1,7 +1,7 @@
-//! Per-trial-point opening-solve dispatch and the deterministic trial-point kernel.
+//! Per-trial-point opening-solve dispatch and the deterministic by-scenario kernel.
 //!
 //! [`StageOpeningSolver`] is the closed two-variant per-opening solve strategy
-//! (frozen all-cuts vs lazy resident-set DCS), and `process_trial_point_backward`
+//! (frozen all-cuts vs lazy resident-set DCS), and `process_by_scenario_backward`
 //! drives it: it solves a trial point's openings in a run-constant, rank-invariant
 //! `solve_order` permutation but writes and aggregates outcomes by canonical ω, so
 //! the generated cut is bit-identical regardless of solve order.
@@ -13,15 +13,18 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     risk_measure::RiskMeasure,
+    setup::node_graph::{OpeningSource, StageIdx},
     stage_solve::{StageInputs, run_stage_solve},
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, SolverWorkspace},
 };
 
 use super::{
-    StagedCut, SuccessorSpec,
+    StagedCut, SuccessorChild, SuccessorOutcomes, SuccessorSpec,
     duals_extraction::{extract_duals_from_view, extract_state_duals_only},
-    lp_setup::{load_backward_lp, patch_opening_bounds, resolve_backward_basis},
+    lp_setup::{
+        fill_external_opening_noise, load_backward_lp, patch_opening_bounds, resolve_backward_basis,
+    },
     outcome_aggregation::{
         accumulate_dcs_binding_counts, accumulate_opening_outcome, save_basis_at_omega_zero,
         write_opening_outcome,
@@ -59,30 +62,32 @@ impl StageOpeningSolver {
         }
     }
 
-    /// Per-trial-point LP load, issued once after `reset_solver_state()` and before
-    /// any opening solve; each variant owns its own load.
+    /// Per-CHILD LP load, issued once after `reset_solver_state()` and before that
+    /// child's opening solves; each variant owns its own load. Each child loads ITS
+    /// OWN pool's LP, so a fan's blocks never reuse child 0's LP (the child-0
+    /// collapse). One child ⟹ one load per trial point ⟹ chain byte-parity.
     ///
-    /// - [`StageOpeningSolver::Frozen`]: load the frozen all-cuts LP via
+    /// - [`StageOpeningSolver::Frozen`]: load the child's frozen all-cuts LP via
     ///   [`load_backward_lp`].
     /// - [`StageOpeningSolver::Lazy`]: load the cut-free core and build the metadata
-    ///   seed ONCE here, then reuse the loaded LP across this trial point's
-    ///   openings. This core load also serves as the per-trial-point reset that
-    ///   keeps state from carrying across trial points (rank-invariance).
+    ///   seed from the child's pool, then reuse the loaded LP across that child's
+    ///   openings.
     pub(crate) fn prepare<S: SolverInterface + Send>(
         &self,
         ws: &mut SolverWorkspace<S>,
         ctx: &StageContext<'_>,
         succ: &SuccessorSpec<'_>,
+        child: &SuccessorChild<'_>,
         iteration: u64,
     ) {
         match self {
             StageOpeningSolver::Frozen => {
-                load_backward_lp(ws, succ);
+                load_backward_lp(ws, child);
             }
             StageOpeningSolver::Lazy(params) => {
-                ws.solver.load_model(&ctx.templates[succ.successor]);
+                ws.solver.load_model(ctx.template(succ.successor));
                 build_initial_resident_set(
-                    succ.successor_pool,
+                    child.successor_pool,
                     iteration,
                     params.k2,
                     &mut ws.backward_accum.dcs_initial_resident,
@@ -111,10 +116,11 @@ impl StageOpeningSolver {
         ctx: &StageContext<'_>,
         training_ctx: &TrainingContext<'_>,
         succ: &SuccessorSpec<'_>,
+        child: &SuccessorChild<'_>,
         basis_slice: &mut BasisStoreSliceMut<'_>,
         raw_noise: &[f64],
         x_hat: &[f64],
-        s: usize,
+        s: StageIdx,
         scenario: usize,
         iteration: u64,
         m: usize,
@@ -127,6 +133,7 @@ impl StageOpeningSolver {
                 ctx,
                 training_ctx,
                 succ,
+                child,
                 basis_slice,
                 raw_noise,
                 x_hat,
@@ -142,6 +149,7 @@ impl StageOpeningSolver {
                 ctx,
                 training_ctx,
                 succ,
+                child,
                 *params,
                 raw_noise,
                 x_hat,
@@ -165,10 +173,11 @@ impl StageOpeningSolver {
         ctx: &StageContext<'_>,
         training_ctx: &TrainingContext<'_>,
         succ: &SuccessorSpec<'_>,
+        child: &SuccessorChild<'_>,
         basis_slice: &mut BasisStoreSliceMut<'_>,
         raw_noise: &[f64],
         x_hat: &[f64],
-        s: usize,
+        s: StageIdx,
         scenario: usize,
         iteration: u64,
         m: usize,
@@ -185,18 +194,21 @@ impl StageOpeningSolver {
         let mut stats_before_omega = std::mem::take(&mut ws.backward_accum.stats_before_buf);
         ws.solver.statistics_into(&mut stats_before_omega);
 
+        // First-solved opening of THIS child warms from and captures its own
+        // `(m, child node)` basis; the successor pool and node id are the child's.
         let stored_basis = if is_first {
-            resolve_backward_basis(basis_slice, m, s)
+            resolve_backward_basis(basis_slice, m, child.successor_node)
         } else {
             None
         };
         let inputs = StageInputs {
             stage_context: ctx,
-            pool: succ.successor_pool,
+            pool: child.successor_pool,
             stored_basis,
             stage_index: s,
             scenario_index: scenario,
             iteration: Some(iteration),
+            node_id: child.successor_node_id,
         };
 
         let view = run_stage_solve(ws, &inputs)?;
@@ -206,8 +218,8 @@ impl StageOpeningSolver {
         let objective = extract_duals_from_view(
             &view,
             succ.cut_state,
-            &ctx.templates[s].col_scale,
-            succ,
+            &ctx.template(s).col_scale,
+            child,
             &mut state_duals,
             &mut cut_duals,
         );
@@ -221,7 +233,7 @@ impl StageOpeningSolver {
 
         accumulate_opening_outcome(
             ws,
-            succ,
+            child,
             omega,
             objective,
             x_hat,
@@ -233,7 +245,7 @@ impl StageOpeningSolver {
         ws.backward_accum.stats_after_buf = stats_after_omega;
 
         if is_first {
-            save_basis_at_omega_zero(ws, succ, basis_slice, m, x_hat);
+            save_basis_at_omega_zero(ws, child, basis_slice, m, x_hat);
         }
 
         Ok(())
@@ -270,10 +282,11 @@ impl StageOpeningSolver {
         ctx: &StageContext<'_>,
         training_ctx: &TrainingContext<'_>,
         succ: &SuccessorSpec<'_>,
+        child: &SuccessorChild<'_>,
         params: DcsParams,
         raw_noise: &[f64],
         x_hat: &[f64],
-        s: usize,
+        s: StageIdx,
         scenario: usize,
         iteration: u64,
         omega: usize,
@@ -281,12 +294,12 @@ impl StageOpeningSolver {
     ) -> Result<(), SddpError> {
         let state = training_ctx.state;
         // The DCS LP must start from the cut-free base template (`ctx.templates[s]`),
-        // NOT `succ.frozen_template`: the frozen template already carries the active
-        // cut rows, and loading it would make the lazy loop's fresh CutRowMap treat
-        // those slots as non-resident and append them again (duplicate rows, broken
-        // laziness).
-        let core = &ctx.templates[s];
-        let col_scale = &ctx.templates[s].col_scale;
+        // NOT the child's frozen template: the frozen template already carries the
+        // active cut rows, and loading it would make the lazy loop's fresh CutRowMap
+        // treat those slots as non-resident and append them again (duplicate rows,
+        // broken laziness).
+        let core = ctx.template(s);
+        let col_scale = &ctx.template(s).col_scale;
 
         patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
 
@@ -302,15 +315,18 @@ impl StageOpeningSolver {
             scenario_index: scenario,
             iteration: Some(iteration),
             continue_carry,
+            node_id: child.successor_node_id,
         };
-        // The DCS LP renders `successor_pool`'s cuts into stage `s` (== successor);
-        // its projection is pool `successor`'s, NOT `succ.cut_state` (pool `t`'s,
-        // used only for the incoming extraction below).
-        let successor_cut_layout = &training_ctx.cut_state_layouts[succ.successor];
+        // The DCS LP renders the CHILD's pool's cuts into stage `s` (== successor);
+        // its projection is the child's pool's, resolved by the child's node POSITION
+        // (`child.pool_id`) — never `nodes[stage]`, which mis-indexes the node array
+        // with a stage on a branching graph. `succ.cut_state` (the generating node's
+        // projection) is used only for the incoming extraction below.
+        let successor_cut_layout = &training_ctx.cut_state_layouts[child.pool_id];
         lazy_solve_preloaded(
             &mut ws.solver,
             core,
-            succ.successor_pool,
+            child.successor_pool,
             state,
             successor_cut_layout,
             col_scale,
@@ -326,13 +342,15 @@ impl StageOpeningSolver {
             extract_state_duals_only(&view, succ.cut_state, col_scale, &mut state_duals);
 
         // `view` and `dcs_solve.row_map` both borrow `dcs_solve` immutably (so they
-        // coexist); `slot_increments` is a distinct field borrowed mutably.
+        // coexist); `slot_increments` is a distinct field borrowed mutably. The
+        // child's own pool region (`metadata_offset..`) keeps a fan's sibling pools
+        // from colliding on a shared slot index.
         accumulate_dcs_binding_counts(
             view.dual,
             &ws.backward_accum.dcs_solve.row_map,
-            succ.successor_pool,
-            succ.cut_activity_tolerance,
-            &mut ws.backward_accum.slot_increments,
+            child.successor_pool,
+            child.cut_activity_tolerance,
+            &mut ws.backward_accum.slot_increments[child.metadata_offset..],
         );
         let _ = view;
 
@@ -357,28 +375,39 @@ impl StageOpeningSolver {
     }
 }
 
-/// Process one trial point `m` in the backward pass, iterating over all openings.
+/// Process one trial point `m` in the backward pass, iterating over the node's
+/// successor outcome set child-by-child.
 ///
-/// On the frozen path the post-solve basis is written into `basis_slice` only at the
-/// first-solved opening; later writes are forbidden (retained-LU corruption). The
-/// DCS arm skips capture (see [`StageOpeningSolver::solve_lazy`]).
-// RATIONALE: 12 args required — each is a disjoint borrow (ws, ctx, training_ctx, exchange,
-// succ, basis_slice, opening_solver) or a plain scalar (fwd_offset, iteration, m, arena_offset)
-// or a risk slice. Merging into a struct would add indirection without reducing the caller's
-// borrow count.
+/// Each child loads ITS OWN LP (frozen template, delta cut batch, pool, basis key,
+/// External column) and solves its own openings, so pricing every child against
+/// child 0's LP — the child-0 collapse, which silently misprices a non-interchangeable
+/// fan — is unrepresentable. A chain is the one-element case: one child, one LP load
+/// per trial point, byte-identical. The single joint `aggregate_cut_into` over the
+/// flattened outcome arena is unchanged (joint risk applied once, not nested).
+///
+/// On the frozen path the post-solve basis is written into `basis_slice` only at each
+/// child's first-solved opening; later writes are forbidden (retained-LU corruption).
+/// The DCS arm skips capture (see [`StageOpeningSolver::solve_lazy`]).
+// RATIONALE: 13 args required — each is a disjoint borrow (ws, ctx, training_ctx, exchange,
+// succ, outcomes, basis_slice, opening_solver) or a plain scalar (fwd_offset, iteration, m,
+// arena_offset) or a risk slice. Merging into a struct would add indirection without reducing
+// the caller's borrow count.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
+pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
     exchange: &ExchangeBuffers,
     fwd_offset: usize,
+    node_visit_offset: usize,
     iteration: u64,
     risk_measures: &[RiskMeasure],
     succ: &SuccessorSpec<'_>,
+    outcomes: &SuccessorOutcomes<'_>,
     basis_slice: &mut BasisStoreSliceMut<'_>,
     opening_solver: &StageOpeningSolver,
     m: usize,
+    compacted: usize,
     arena_offset: usize,
 ) -> Result<StagedCut, SddpError> {
     let tree_view = training_ctx.stochastic.tree_view();
@@ -391,52 +420,107 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         succ.probabilities.len(),
         "per_opening_stats must be initialised to n_openings before each stage's trial-point loop"
     );
-
-    // Openings are SOLVED in `solve_order(s)` (a run-constant, rank-invariant
-    // permutation) but written and aggregated by CANONICAL ω below, so the generated
-    // cut is bit-identical regardless of solve order: the reorder changes only the
-    // warm-start chain, never which cuts are produced. Defaults to the identity
-    // permutation when no order is installed.
-    let solve_order = tree_view.solve_order_data(s);
     debug_assert_eq!(
-        solve_order.len(),
+        outcomes.total_outcomes(),
         succ.probabilities.len(),
-        "solve_order(s) must be a permutation of 0..n_openings"
+        "the reified outcome set's total outcomes must equal the flattened weight vector length"
     );
-    // First-solved opening: it owns the per-(m, s) basis load/capture and the fresh
-    // (non-warm-carry) solve.
-    let first = solve_order[0] as usize;
 
-    let mut omega_position = 0usize;
-    while omega_position < succ.probabilities.len() {
-        let omega = solve_order[omega_position] as usize;
-        omega_position += 1;
+    // Openings within a child are SOLVED in `solve_order(s)` (a run-constant,
+    // rank-invariant permutation) but WRITTEN and AGGREGATED by CANONICAL ω (the
+    // child's `outcome_range` offset plus the local ω), so the generated cut is
+    // bit-identical regardless of solve order: the reorder changes only the
+    // warm-start chain, never which cuts are produced.
+    let solve_order = tree_view.solve_order_data(s.0);
 
-        let raw_noise = tree_view.opening(s, omega);
-        let is_first = omega == first;
+    for ci in 0..outcomes.n_children() {
+        let child = outcomes.child(ci);
+        // Fresh cold head per child: each child loads a different LP, so its
+        // warm-start chain across its own openings starts clean (CLP determinism).
+        // One child ⟹ once per trial point ⟹ chain byte-parity.
+        ws.solver.reset_solver_state();
+        opening_solver.prepare(ws, ctx, succ, &child, iteration);
 
-        opening_solver.solve_opening(
-            ws,
-            ctx,
-            training_ctx,
-            succ,
-            basis_slice,
-            raw_noise,
-            x_hat,
-            s,
-            scenario,
-            iteration,
-            m,
-            omega,
-            is_first,
-        )?;
+        // An External child reads its declared column `eta_slice(s, offset)`
+        // (assembled once per child — invariant across that child's ω); a Generated
+        // child keeps `tree_view.opening` byte-for-byte. The assembly is per-child,
+        // never once-from-child-0.
+        let mut external_noise: Option<Vec<f64>> = None;
+        if child.openings.source == OpeningSource::External {
+            let mut buf = std::mem::take(&mut ws.backward_accum.external_noise_buf);
+            fill_external_opening_noise(
+                training_ctx,
+                ctx,
+                s,
+                child.openings.offset,
+                child.successor_node_id,
+                &mut buf,
+            )?;
+            external_noise = Some(buf);
+        }
+
+        if let Some(buf) = &external_noise {
+            // External child: a single realization (`len == 1`), no within-child order.
+            debug_assert_eq!(child.openings.len, 1, "an External child has one opening");
+            let omega = child.outcome_range.start;
+            opening_solver.solve_opening(
+                ws,
+                ctx,
+                training_ctx,
+                succ,
+                &child,
+                basis_slice,
+                buf,
+                x_hat,
+                s,
+                scenario,
+                iteration,
+                m,
+                omega,
+                true,
+            )?;
+        } else {
+            debug_assert_eq!(
+                solve_order.len(),
+                child.openings.len,
+                "a Generated child's opening count must equal stage {s}'s own opening count"
+            );
+            for (solve_pos, &local_omega_u32) in solve_order.iter().enumerate() {
+                let local_omega = local_omega_u32 as usize;
+                let raw_noise = tree_view.opening(s.0, local_omega);
+                let omega = child.outcome_range.start + local_omega;
+                // First-solved opening of THIS child: owns the per-(m, child node)
+                // basis load/capture and the fresh (non-warm-carry) solve.
+                let is_first = solve_pos == 0;
+                opening_solver.solve_opening(
+                    ws,
+                    ctx,
+                    training_ctx,
+                    succ,
+                    &child,
+                    basis_slice,
+                    raw_noise,
+                    x_hat,
+                    s,
+                    scenario,
+                    iteration,
+                    m,
+                    omega,
+                    is_first,
+                )?;
+            }
+        }
+
+        if let Some(buf) = external_noise {
+            ws.backward_accum.external_noise_buf = buf;
+        }
     }
 
     // Aggregate into `agg_coefficients`, then copy into this trial point's arena
     // slot so the bytes outlive the parallel closure without a per-cut allocation.
     let n_openings = succ.probabilities.len();
     let mut agg_intercept = 0.0_f64;
-    risk_measures[succ.t].aggregate_cut_into(
+    risk_measures[succ.t.0].aggregate_cut_into(
         &ws.backward_accum.outcomes[..n_openings],
         succ.probabilities,
         &mut agg_intercept,
@@ -451,12 +535,26 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
     );
     ws.backward_accum.agg_arena[coefficients_range.clone()]
         .copy_from_slice(&ws.backward_accum.agg_coefficients[..n_state]);
+    // The cut's `forward_pass_index` addresses `CutPool`'s per-iteration slot
+    // block at stride `visit_bound[pool]` (the node's own routed visit count),
+    // NOT `forward_passes`, so it must be the node-relative position within THIS
+    // node's GLOBAL routed subset: `node_visit_offset + compacted`, where
+    // `node_visit_offset` is the visits to this node from strictly-lower ranks.
+    // On a single rank the offset is `0`, leaving `compacted`; on a single-node
+    // level it is `fwd_offset` and `compacted == m`, reducing to the global
+    // `scenario` (byte-neutral, cross-rank-disjoint on a chain). The GLOBAL
+    // `scenario` (`fwd_offset + m`) is the wrong-but-compiling alternative: it
+    // indexes `[0, forward_passes)`, overshooting the smaller `visit_bound` stride
+    // on a fan; the bare `fwd_offset + compacted` is the OTHER wrong alternative —
+    // `fwd_offset` is the global forward-pass offset, not the node's own lower-rank
+    // visit prefix, so across ranks it overshoots the stride and collides.
+    let node_relative_index = node_visit_offset + compacted;
     debug_assert!(
-        u32::try_from(scenario).is_ok(),
-        "global scenario index overflows u32"
+        u32::try_from(node_relative_index).is_ok(),
+        "node-relative forward-pass index overflows u32"
     );
     #[allow(clippy::cast_possible_truncation)]
-    let forward_pass_index = scenario as u32;
+    let forward_pass_index = node_relative_index as u32;
     let pop = ws.backward_accum.slot_increments.len();
     for slot in 0..pop {
         let count = ws.backward_accum.slot_increments[slot];
@@ -465,7 +563,7 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         }
     }
     Ok(StagedCut {
-        trial_point_idx: m,
+        trial_state_idx: m,
         intercept: agg_intercept,
         coefficients_range,
         forward_pass_index,

@@ -1,4 +1,4 @@
-//! Pre-materialised lookup table: `(parameter_id, stage_idx)` → `f64`.
+//! Pre-materialised lookup table: `(parameter_id, stage_idx, block_idx)` → `f64`.
 //!
 //! ## Basis-cache invariance
 //!
@@ -10,14 +10,12 @@
 //! must rebuild or invalidate the affected `StageTemplate` entries.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use cobre_core::{ComputedParameter, EntityId, Hydro, ParameterKind, ScalarParameter, StageId};
 use thiserror::Error;
 
 use crate::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-use crate::error::SddpError;
-use crate::error::SddpError::Validation;
-use crate::error::SddpError::WireVersionMismatch;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -70,21 +68,57 @@ pub enum ResolvedParametersError {
         /// The hydro entity ID whose `ρ_esp` could not be found.
         hydro_id: EntityId,
     },
+
+    /// A `PerStageBlock` parameter's triples do not tile every `(stage, block)`
+    /// cell of the study grid exactly once.
+    #[error("parameter '{name}': PerStageBlock cell (stage={stage}, block={block}) {issue}")]
+    PerStageBlockCoverage {
+        /// Parameter name from the source record.
+        name: String,
+        /// The offending stage index (raw triple value).
+        stage: i32,
+        /// The offending block index (raw triple value).
+        block: i32,
+        /// Why the cell failed coverage.
+        issue: PerStageBlockCoverageIssue,
+    },
+}
+
+/// Why a [`ParameterKind::PerStageBlock`] cell failed the exact-coverage check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerStageBlockCoverageIssue {
+    /// No triple supplied a value for this cell.
+    Missing,
+    /// More than one triple targeted this in-range cell.
+    Duplicated,
+    /// The triple lies outside `0..n_stages × 0..blocks(stage)`.
+    OutOfRange,
+}
+
+impl fmt::Display for PerStageBlockCoverageIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Missing => "is not covered by any triple",
+            Self::Duplicated => "is covered by more than one triple",
+            Self::OutOfRange => "lies outside the study's (stage, block) grid",
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
 // ResolvedParameters
 // ---------------------------------------------------------------------------
 
-/// Dense lookup table mapping `(parameter_id, stage_idx)` → `f64`.
+/// Dense lookup table mapping `(parameter_id, stage_idx, block_idx)` → `f64`.
 ///
 /// `id_to_slot` is sorted ascending by key — for declaration-order invariance
 /// (a `HashMap` would not be deterministic) and `O(log n)` binary-search lookup.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedParameters {
-    /// Outer index: parameter slot (matches `Vec<ScalarParameter>` order).
-    /// Inner index: `stage_idx` in `0..n_stages`.
-    pub per_param: Vec<Vec<f64>>,
+    /// Jagged storage indexed slot → `stage_idx` → block. A stage-/block-invariant
+    /// parameter stores a length-1 inner vector per stage that broadcasts to every
+    /// block; a `PerStageBlock` parameter stores one entry per block of that stage.
+    pub per_param: Vec<Vec<Vec<f64>>>,
     /// Maps `EntityId.0` of the parameter to its slot in `per_param`.
     pub id_to_slot: Vec<(i32, usize)>,
     /// Resolved `modeling.cost_scale_factor` (default `1_000_000.0`): the
@@ -107,32 +141,56 @@ impl Default for ResolvedParameters {
 }
 
 impl ResolvedParameters {
-    /// Return the resolved `f64` value for `(id, stage_idx)`.
+    /// Return the resolved `f64` value for `(id, stage_idx, block_idx)`.
     ///
-    /// On a miss (unknown `id` or out-of-range `stage_idx`) returns `0.0` —
-    /// mirroring the LP-build site sentinel — and `debug_assert`s in debug builds.
+    /// A length-1 inner block vector broadcasts to every `block_idx`; otherwise
+    /// `block_idx` indexes it. On a miss returns `0.0` — mirroring the LP-build
+    /// site sentinel — and `debug_assert`s in debug builds, with a distinct
+    /// message per miss class (unknown id, out-of-range stage, out-of-range block).
     #[must_use]
-    pub fn get(&self, id: EntityId, stage_idx: usize) -> f64 {
-        if let Ok(pos) = self.id_to_slot.binary_search_by_key(&id.0, |(k, _)| *k) {
-            let slot = self.id_to_slot[pos].1;
-            let row = &self.per_param[slot];
-            if stage_idx < row.len() {
-                row[stage_idx]
-            } else {
-                debug_assert!(
-                    false,
-                    "ResolvedParameters miss: id={id:?}, stage={stage_idx} (row len={})",
-                    row.len()
-                );
-                0.0
-            }
+    pub fn get(&self, id: EntityId, stage_idx: usize, block_idx: usize) -> f64 {
+        let Ok(pos) = self.id_to_slot.binary_search_by_key(&id.0, |(k, _)| *k) else {
+            debug_assert!(
+                false,
+                "ResolvedParameters miss: unknown id={id:?} (stage={stage_idx}, block={block_idx})"
+            );
+            return 0.0;
+        };
+        let slot = self.id_to_slot[pos].1;
+        let Some(blocks) = self.per_param[slot].get(stage_idx) else {
+            debug_assert!(
+                false,
+                "ResolvedParameters miss: id={id:?}, stage={stage_idx} out of range (n_stages={})",
+                self.per_param[slot].len()
+            );
+            return 0.0;
+        };
+        if blocks.len() == 1 {
+            return blocks[0];
+        }
+        if block_idx < blocks.len() {
+            blocks[block_idx]
         } else {
             debug_assert!(
                 false,
-                "ResolvedParameters miss: id={id:?}, stage={stage_idx}"
+                "ResolvedParameters block miss: id={id:?}, stage={stage_idx}, block={block_idx} out of range (n_blocks={})",
+                blocks.len()
             );
             0.0
         }
+    }
+
+    /// Whether parameter `id` resolves to per-block values at any stage — i.e. some
+    /// stage stores more than one block value. A stage-/block-invariant parameter
+    /// (length-1 inner everywhere) and an unknown `id` both return `false`.
+    #[must_use]
+    pub fn is_block_varying(&self, id: EntityId) -> bool {
+        self.id_to_slot
+            .binary_search_by_key(&id.0, |(k, _)| *k)
+            .is_ok_and(|pos| {
+                let slot = self.id_to_slot[pos].1;
+                self.per_param[slot].iter().any(|blocks| blocks.len() > 1)
+            })
     }
 }
 
@@ -177,17 +235,20 @@ impl ResolvedParameters {
 /// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
 ///
 /// let table = build_resolved_parameters(
-///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4, 1_000_000.0,
+///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, &[1, 1, 1, 1], 4,
+///     1_000_000.0,
 /// )
 ///     .unwrap();
 ///
-/// assert!((table.get(EntityId(1), 0) - 3.6).abs() < 1e-12);
-/// assert!((table.get(EntityId(1), 3) - 3.6).abs() < 1e-12);
+/// // A block-invariant kind broadcasts to every block.
+/// assert!((table.get(EntityId(1), 0, 0) - 3.6).abs() < 1e-12);
+/// assert!((table.get(EntityId(1), 3, 0) - 3.6).abs() < 1e-12);
 /// ```
 // Rationale (too_many_arguments): every parameter is a distinct study-resolved
-// input the resolver needs once; a wrapper struct would just move the arity to
-// the literal callers already build (`ResolvedTables`-style bundling happens one
-// layer up, at the LP builder context).
+// input the resolver needs once (`stage_block_counts` carries the per-stage block
+// count the `PerStageBlock` coverage check requires); a wrapper struct would just
+// move the arity to the literal callers already build (`ResolvedTables`-style
+// bundling happens one layer up, at the LP builder context).
 #[allow(clippy::too_many_arguments)]
 pub fn build_resolved_parameters(
     parameters: &[ScalarParameter],
@@ -196,6 +257,7 @@ pub fn build_resolved_parameters(
     hydros: &[Hydro],
     stage_to_season: &[i32],
     stage_ids: &[StageId],
+    stage_block_counts: &[usize],
     n_stages: usize,
     cost_scale_factor: f64,
 ) -> Result<ResolvedParameters, ResolvedParametersError> {
@@ -204,13 +266,18 @@ pub fn build_resolved_parameters(
         n_stages,
         "stage_ids must carry one domain StageId per study stage"
     );
+    debug_assert_eq!(
+        stage_block_counts.len(),
+        n_stages,
+        "stage_block_counts must carry one block count per study stage"
+    );
     let hydro_index: HashMap<EntityId, usize> = hydros
         .iter()
         .enumerate()
         .map(|(idx, h)| (h.id, idx))
         .collect();
 
-    let mut per_param: Vec<Vec<f64>> = Vec::with_capacity(parameters.len());
+    let mut per_param: Vec<Vec<Vec<f64>>> = Vec::with_capacity(parameters.len());
     let mut id_to_slot: Vec<(i32, usize)> = Vec::with_capacity(parameters.len());
 
     for (slot, param) in parameters.iter().enumerate() {
@@ -218,6 +285,7 @@ pub fn build_resolved_parameters(
             &param.kind,
             &param.name,
             n_stages,
+            stage_block_counts,
             stage_to_season,
             stage_ids,
             energy_conversion,
@@ -253,7 +321,11 @@ pub fn build_resolved_parameters(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve a single [`ParameterKind`] into a `Vec<f64>` of length `n_stages`.
+/// Resolve a single [`ParameterKind`] into the jagged `stage → block` storage.
+///
+/// The four stage-/block-invariant kinds each produce a length-1 inner block
+/// vector per stage (it broadcasts to every block in [`ResolvedParameters::get`]);
+/// `PerStageBlock` produces one entry per block of each stage.
 // Rationale: `resolve_computed` mirrors this arity so the two are interchangeable
 // at the dispatch site; a context struct would just move the arity to the literal.
 #[allow(clippy::too_many_arguments)]
@@ -261,15 +333,16 @@ fn resolve_kind(
     kind: &ParameterKind,
     name: &str,
     n_stages: usize,
+    stage_block_counts: &[usize],
     stage_to_season: &[i32],
     stage_ids: &[StageId],
     energy_conversion: &EnergyConversionSet,
     override_table: &HydroEnergyProductivityOverride,
     hydros: &[Hydro],
     hydro_index: &HashMap<EntityId, usize>,
-) -> Result<Vec<f64>, ResolvedParametersError> {
+) -> Result<Vec<Vec<f64>>, ResolvedParametersError> {
     match kind {
-        ParameterKind::Constant { value: c } => Ok(vec![*c; n_stages]),
+        ParameterKind::Constant { value: c } => Ok(vec![vec![*c]; n_stages]),
 
         ParameterKind::PerStage { values: v } => {
             if v.len() != n_stages {
@@ -279,7 +352,7 @@ fn resolve_kind(
                     got: v.len(),
                 });
             }
-            Ok(v.clone())
+            Ok(v.iter().map(|&x| vec![x]).collect())
         }
 
         ParameterKind::Seasonal { values: pairs } => {
@@ -288,7 +361,7 @@ fn resolve_kind(
                 // `pairs` is sorted ascending by season_id (invariant from
                 // `ParameterKind::new_seasonal`).
                 match pairs.binary_search_by_key(&season_id, |(k, _)| *k) {
-                    Ok(pos) => values.push(pairs[pos].1),
+                    Ok(pos) => values.push(vec![pairs[pos].1]),
                     Err(_) => {
                         return Err(ResolvedParametersError::MissingSeason {
                             name: name.to_string(),
@@ -301,18 +374,91 @@ fn resolve_kind(
             Ok(values)
         }
 
-        ParameterKind::Computed { computed_spec: cp } => resolve_computed(
-            *cp,
-            name,
-            n_stages,
-            stage_to_season,
-            stage_ids,
-            energy_conversion,
-            override_table,
-            hydros,
-            hydro_index,
-        ),
+        ParameterKind::Computed { computed_spec: cp } => {
+            let per_stage = resolve_computed(
+                *cp,
+                name,
+                n_stages,
+                stage_to_season,
+                stage_ids,
+                energy_conversion,
+                override_table,
+                hydros,
+                hydro_index,
+            )?;
+            Ok(per_stage.into_iter().map(|x| vec![x]).collect())
+        }
+
+        ParameterKind::PerStageBlock { values } => {
+            resolve_per_stage_block(values, name, n_stages, stage_block_counts)
+        }
     }
+}
+
+/// Resolve a [`ParameterKind::PerStageBlock`] into per-`(stage, block)` values.
+///
+/// The triples must tile `0..n_stages × 0..stage_block_counts[stage]` exactly
+/// once: a gap, a duplicate, or an out-of-range cell (no sensible default for a
+/// missing cell) returns a
+/// [`PerStageBlockCoverage`](ResolvedParametersError::PerStageBlockCoverage)
+/// naming the parameter and the offending cell.
+fn resolve_per_stage_block(
+    values: &[(i32, i32, f64)],
+    name: &str,
+    n_stages: usize,
+    stage_block_counts: &[usize],
+) -> Result<Vec<Vec<f64>>, ResolvedParametersError> {
+    let mut grid: Vec<Vec<Option<f64>>> = (0..n_stages)
+        .map(|s| vec![None; stage_block_counts[s]])
+        .collect();
+
+    for &(stage, block, value) in values {
+        let out_of_range = || ResolvedParametersError::PerStageBlockCoverage {
+            name: name.to_string(),
+            stage,
+            block,
+            issue: PerStageBlockCoverageIssue::OutOfRange,
+        };
+        let Ok(s) = usize::try_from(stage) else {
+            return Err(out_of_range());
+        };
+        if s >= n_stages {
+            return Err(out_of_range());
+        }
+        let Ok(b) = usize::try_from(block) else {
+            return Err(out_of_range());
+        };
+        if b >= stage_block_counts[s] {
+            return Err(out_of_range());
+        }
+        if grid[s][b].is_some() {
+            return Err(ResolvedParametersError::PerStageBlockCoverage {
+                name: name.to_string(),
+                stage,
+                block,
+                issue: PerStageBlockCoverageIssue::Duplicated,
+            });
+        }
+        grid[s][b] = Some(value);
+    }
+
+    let mut resolved: Vec<Vec<f64>> = Vec::with_capacity(n_stages);
+    for (s, row) in grid.into_iter().enumerate() {
+        let mut inner: Vec<f64> = Vec::with_capacity(row.len());
+        for (b, cell) in row.into_iter().enumerate() {
+            let Some(v) = cell else {
+                return Err(ResolvedParametersError::PerStageBlockCoverage {
+                    name: name.to_string(),
+                    stage: i32::try_from(s).unwrap_or(i32::MAX),
+                    block: i32::try_from(b).unwrap_or(i32::MAX),
+                    issue: PerStageBlockCoverageIssue::Missing,
+                });
+            };
+            inner.push(v);
+        }
+        resolved.push(inner);
+    }
+    Ok(resolved)
 }
 
 /// Resolve a [`ComputedParameter`] into a `Vec<f64>` of length `n_stages`.
@@ -414,128 +560,6 @@ fn resolve_computed(
         values.push(value);
     }
     Ok(values)
-}
-
-// ---------------------------------------------------------------------------
-// Postcard broadcast helpers
-// ---------------------------------------------------------------------------
-
-/// Wire format version for the [`ResolvedParameters`] postcard envelope.
-///
-/// Decoding rejects any mismatch so a heterogeneous MPI cluster (new binary on
-/// one rank, old on another) fails fast rather than misinterpreting bytes. Bump
-/// in lockstep with any envelope-layout change.
-pub const RESOLVED_PARAMETERS_WIRE_VERSION: u32 = 2;
-
-/// Version-tagged envelope wrapping a [`ResolvedParameters`] payload for MPI
-/// broadcast; decode rejects a non-matching `version`.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ResolvedParametersWireEnvelope {
-    version: u32,
-    payload: ResolvedParameters,
-}
-
-/// Serialize a [`ResolvedParameters`] table to a versioned postcard envelope for
-/// MPI broadcast. Pure ser/de; the caller owns the broadcast call.
-///
-/// # Errors
-///
-/// Returns [`crate::SddpError::Validation`] if postcard serialization fails (not
-/// reachable with the current struct layout; the path satisfies the
-/// `Result<_, SddpError>` contract shared by other broadcast helpers).
-///
-/// # Examples
-///
-/// ```
-/// use cobre_sddp::resolved_parameters::{
-///     build_resolved_parameters, deserialize_resolved_parameters,
-///     serialize_resolved_parameters,
-/// };
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
-/// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-///
-/// let params = vec![ScalarParameter {
-///     id: EntityId(1),
-///     name: "rho_eq".to_string(),
-///     kind: ParameterKind::Constant { value: 3.6 },
-/// }];
-/// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
-/// let overrides = HydroEnergyProductivityOverride::default();
-/// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
-/// let table = build_resolved_parameters(
-///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4, 1_000_000.0,
-/// )
-///     .unwrap();
-///
-/// let bytes = serialize_resolved_parameters(&table).unwrap();
-/// let restored = deserialize_resolved_parameters(&bytes).unwrap();
-/// assert_eq!(
-///     table.get(EntityId(1), 0).to_bits(),
-///     restored.get(EntityId(1), 0).to_bits()
-/// );
-/// ```
-pub fn serialize_resolved_parameters(table: &ResolvedParameters) -> Result<Vec<u8>, SddpError> {
-    let envelope = ResolvedParametersWireEnvelope {
-        version: RESOLVED_PARAMETERS_WIRE_VERSION,
-        payload: table.clone(),
-    };
-    postcard::to_allocvec(&envelope)
-        .map_err(|e| Validation(format!("postcard resolved_parameters: {e}")))
-}
-
-/// Deserialize a [`ResolvedParameters`] table from a postcard byte buffer
-/// produced by [`serialize_resolved_parameters`].
-///
-/// A version mismatch returns a distinct error from corruption, never silently
-/// accepting stale bytes.
-///
-/// # Errors
-///
-/// - [`crate::SddpError::Validation`] — byte slice is corrupted, truncated, or not a
-///   valid postcard encoding of the versioned envelope.
-/// - [`crate::SddpError::WireVersionMismatch`] — the encoded version does not match
-///   [`RESOLVED_PARAMETERS_WIRE_VERSION`]; a binary mismatch across MPI ranks.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_sddp::resolved_parameters::{
-///     deserialize_resolved_parameters, serialize_resolved_parameters,
-/// };
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
-/// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-/// use cobre_sddp::resolved_parameters::build_resolved_parameters;
-///
-/// let params = vec![ScalarParameter {
-///     id: EntityId(1),
-///     name: "rho_eq".to_string(),
-///     kind: ParameterKind::Constant { value: 3.6 },
-/// }];
-/// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
-/// let overrides = HydroEnergyProductivityOverride::default();
-/// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
-/// let table = build_resolved_parameters(
-///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4, 1_000_000.0,
-/// )
-///     .unwrap();
-///
-/// let bytes = serialize_resolved_parameters(&table).unwrap();
-/// let restored = deserialize_resolved_parameters(&bytes).unwrap();
-/// assert_eq!(
-///     table.get(EntityId(1), 2).to_bits(),
-///     restored.get(EntityId(1), 2).to_bits()
-/// );
-/// ```
-pub fn deserialize_resolved_parameters(bytes: &[u8]) -> Result<ResolvedParameters, SddpError> {
-    let envelope: ResolvedParametersWireEnvelope = postcard::from_bytes(bytes)
-        .map_err(|e| Validation(format!("postcard resolved_parameters: {e}")))?;
-    if envelope.version != RESOLVED_PARAMETERS_WIRE_VERSION {
-        return Err(WireVersionMismatch {
-            encoded: envelope.version,
-            expected: RESOLVED_PARAMETERS_WIRE_VERSION,
-        });
-    }
-    Ok(envelope.payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +676,12 @@ mod tests {
             .collect()
     }
 
+    /// One block per stage: the block counts every block-invariant fixture uses,
+    /// under which `get(id, stage, b)` broadcasts identically for every `b`.
+    fn one_block_per_stage(n_stages: usize) -> Vec<usize> {
+        vec![1; n_stages]
+    }
+
     /// Return `(hydros, energy_conversion, override_table, stage_to_season, stage_ids)`
     /// for tests that need a consistent set of inputs.
     fn make_setup_inputs(
@@ -707,15 +737,16 @@ mod tests {
             &[],
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(4),
             4,
             1_000_000.0,
         )
         .unwrap();
 
-        assert!((table.get(EntityId(0), 0) - 3.6).abs() < 1e-12);
-        assert!((table.get(EntityId(0), 1) - 3.6).abs() < 1e-12);
-        assert!((table.get(EntityId(0), 2) - 3.6).abs() < 1e-12);
-        assert!((table.get(EntityId(0), 3) - 3.6).abs() < 1e-12);
+        assert!((table.get(EntityId(0), 0, 0) - 3.6).abs() < 1e-12);
+        assert!((table.get(EntityId(0), 1, 0) - 3.6).abs() < 1e-12);
+        assert!((table.get(EntityId(0), 2, 0) - 3.6).abs() < 1e-12);
+        assert!((table.get(EntityId(0), 3, 0) - 3.6).abs() < 1e-12);
     }
 
     // -------------------------------------------------------------------------
@@ -742,6 +773,7 @@ mod tests {
             &[],
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(3),
             3,
             1_000_000.0,
         );
@@ -780,14 +812,15 @@ mod tests {
             &[],
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(3),
             3,
             1_000_000.0,
         )
         .unwrap();
 
-        assert!((table.get(EntityId(0), 0) - 0.5).abs() < 1e-12);
-        assert!((table.get(EntityId(0), 1) - 1.5).abs() < 1e-12);
-        assert!((table.get(EntityId(0), 2) - 0.5).abs() < 1e-12);
+        assert!((table.get(EntityId(0), 0, 0) - 0.5).abs() < 1e-12);
+        assert!((table.get(EntityId(0), 1, 0) - 1.5).abs() < 1e-12);
+        assert!((table.get(EntityId(0), 2, 0) - 0.5).abs() < 1e-12);
     }
 
     // -------------------------------------------------------------------------
@@ -816,6 +849,7 @@ mod tests {
             &hydros,
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(n_stages),
             n_stages,
             1_000_000.0,
         )
@@ -824,16 +858,16 @@ mod tests {
         let expected = energy_conversion
             .conversion(0, 0)
             .equivalent_productivity_mw_per_m3s;
-        assert!((table.get(EntityId(0), 0) - expected).abs() < 1e-12);
+        assert!((table.get(EntityId(0), 0, 0) - expected).abs() < 1e-12);
         // Validate all stages
         for t in 0..n_stages {
             let exp_t = energy_conversion
                 .conversion(0, t)
                 .equivalent_productivity_mw_per_m3s;
             assert!(
-                (table.get(EntityId(0), t) - exp_t).abs() < 1e-12,
+                (table.get(EntityId(0), t, 0) - exp_t).abs() < 1e-12,
                 "stage {t}: expected {exp_t}, got {}",
-                table.get(EntityId(0), t)
+                table.get(EntityId(0), t, 0)
             );
         }
     }
@@ -865,6 +899,7 @@ mod tests {
             &hydros,
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(n_stages),
             n_stages,
             1_000_000.0,
         )
@@ -875,7 +910,7 @@ mod tests {
         for t in 0..n_stages {
             let expected = energy_conversion.conversion(1, t).reference_volume_hm3;
             assert_eq!(
-                table.get(EntityId(0), t).to_bits(),
+                table.get(EntityId(0), t, 0).to_bits(),
                 expected.to_bits(),
                 "stage {t}: ReferenceVolume must equal the energy-conversion cell"
             );
@@ -922,6 +957,7 @@ mod tests {
             &hydros,
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(n_stages),
             n_stages,
             1_000_000.0,
         )
@@ -929,7 +965,7 @@ mod tests {
 
         for t in 0..n_stages {
             assert_eq!(
-                table.get(EntityId(0), t).to_bits(),
+                table.get(EntityId(0), t, 0).to_bits(),
                 override_q_ref.to_bits(),
                 "stage {t}: ReferenceTurbine must honor the parquet q_ref override"
             );
@@ -986,18 +1022,19 @@ mod tests {
             &hydros,
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(1),
             1,
             1_000_000.0,
         )
         .unwrap();
 
         assert_eq!(
-            table.get(EntityId(0), 0).to_bits(),
+            table.get(EntityId(0), 0, 0).to_bits(),
             override_q_ref.to_bits(),
             "ReferenceTurbine must resolve the StageId(60) override at position 0"
         );
         assert_eq!(
-            table.get(EntityId(1), 0).to_bits(),
+            table.get(EntityId(1), 0, 0).to_bits(),
             override_esp.to_bits(),
             "SpecificProductivity must resolve the StageId(60) override at position 0"
         );
@@ -1033,6 +1070,7 @@ mod tests {
             &hydros,
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(n_stages),
             n_stages,
             1_000_000.0,
         );
@@ -1082,6 +1120,7 @@ mod tests {
             &hydros,
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(n_stages),
             n_stages,
             1_000_000.0,
         )
@@ -1093,6 +1132,7 @@ mod tests {
             &hydros,
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(n_stages),
             n_stages,
             1_000_000.0,
         )
@@ -1101,8 +1141,8 @@ mod tests {
         for id in [EntityId(10), EntityId(20), EntityId(30)] {
             for t in 0..n_stages {
                 assert_eq!(
-                    table_abc.get(id, t).to_bits(),
-                    table_cab.get(id, t).to_bits(),
+                    table_abc.get(id, t, 0).to_bits(),
+                    table_cab.get(id, t, 0).to_bits(),
                     "bit mismatch for id={id:?}, stage={t}"
                 );
             }
@@ -1136,6 +1176,7 @@ mod tests {
             &hydros,
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(n_stages),
             n_stages,
             1_000_000.0,
         );
@@ -1185,6 +1226,7 @@ mod tests {
             &hydros,
             &stage_to_season,
             &stage_ids,
+            &one_block_per_stage(n_stages),
             n_stages,
             1_000_000.0,
         )
@@ -1193,14 +1235,14 @@ mod tests {
         // hydro 0: min_storage = 50.0
         for t in 0..n_stages {
             assert!(
-                (table.get(EntityId(0), t) - 50.0).abs() < 1e-12,
+                (table.get(EntityId(0), t, 0) - 50.0).abs() < 1e-12,
                 "min_storage mismatch at stage {t}"
             );
         }
         // hydro 1: max_storage = 5000.0
         for t in 0..n_stages {
             assert!(
-                (table.get(EntityId(1), t) - 5000.0).abs() < 1e-12,
+                (table.get(EntityId(1), t, 0) - 5000.0).abs() < 1e-12,
                 "max_storage mismatch at stage {t}"
             );
         }
@@ -1216,169 +1258,209 @@ mod tests {
         let overrides = HydroEnergyProductivityOverride::default();
 
         let table =
-            build_resolved_parameters(&[], &ec, &overrides, &[], &[], &[], 0, 1_000_000.0).unwrap();
+            build_resolved_parameters(&[], &ec, &overrides, &[], &[], &[], &[], 0, 1_000_000.0)
+                .unwrap();
         // Nothing to query — just verify it doesn't panic.
         let _ = table;
     }
 
     // -------------------------------------------------------------------------
-    // Broadcast helper tests
+    // PerStageBlock resolves to distinct per-(stage, block) values
     // -------------------------------------------------------------------------
 
-    /// Build a populated [`ResolvedParameters`] exercising `Constant`,
-    /// `PerStage`, and `Computed(EquivalentProductivity)` resolution paths.
-    fn broadcast_fixture() -> ResolvedParameters {
-        let n_stages = 4;
-        let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
-            make_setup_inputs(n_stages);
+    /// Build a table over `n_stages` stages with `block_counts` blocks per stage,
+    /// carrying only the supplied `params` (no hydros / energy conversion).
+    fn build_block_table(
+        params: &[ScalarParameter],
+        block_counts: &[usize],
+    ) -> Result<ResolvedParameters, ResolvedParametersError> {
+        let n_stages = block_counts.len();
+        let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
+        let overrides = HydroEnergyProductivityOverride::default();
+        let stage_to_season = vec![0i32; n_stages];
+        let stage_ids = stage_ids_0_based(n_stages);
+        build_resolved_parameters(
+            params,
+            &ec,
+            &overrides,
+            &[],
+            &stage_to_season,
+            &stage_ids,
+            block_counts,
+            n_stages,
+            1_000_000.0,
+        )
+    }
 
+    #[test]
+    fn per_stage_block_resolves_to_distinct_block_values() {
+        let params = vec![make_param(
+            0,
+            ParameterKind::PerStageBlock {
+                values: vec![(0, 0, 10.0), (0, 1, 20.0), (1, 0, 30.0), (1, 1, 40.0)],
+            },
+        )];
+
+        let table = build_block_table(&params, &[2, 2]).unwrap();
+
+        assert_eq!(table.get(EntityId(0), 1, 0).to_bits(), 30.0f64.to_bits());
+        assert_eq!(table.get(EntityId(0), 1, 1).to_bits(), 40.0f64.to_bits());
+        assert_ne!(
+            table.get(EntityId(0), 1, 0).to_bits(),
+            table.get(EntityId(0), 1, 1).to_bits(),
+            "stage-1 block-0 and block-1 must resolve distinct values"
+        );
+    }
+
+    #[test]
+    fn block_invariant_kinds_broadcast_to_every_block() {
+        // Each of the four stage-/block-invariant kinds stores a length-1 inner
+        // vector that must resolve identically for any block index.
         let params = vec![
-            make_param(10, ParameterKind::Constant { value: 3.6 }),
+            make_param(0, ParameterKind::Constant { value: 3.6 }),
             make_param(
-                20,
+                1,
                 ParameterKind::PerStage {
-                    values: vec![1.0, 2.0, 3.0, 4.0],
+                    values: vec![1.0, 2.0],
                 },
             ),
             make_param(
-                30,
-                ParameterKind::Computed {
-                    computed_spec: ComputedParameter::EquivalentProductivity {
-                        hydro_id: EntityId(0),
-                    },
+                2,
+                ParameterKind::Seasonal {
+                    values: vec![(0, 0.5)],
                 },
             ),
         ];
 
-        build_resolved_parameters(
-            &params,
-            &energy_conversion,
-            &override_table,
-            &hydros,
-            &stage_to_season,
-            &stage_ids,
-            n_stages,
-            1_000_000.0,
-        )
-        .unwrap()
-    }
+        let table = build_block_table(&params, &[1, 1]).unwrap();
 
-    #[test]
-    fn round_trip_populated_resolved_parameters() {
-        let original = broadcast_fixture();
-        let bytes = super::serialize_resolved_parameters(&original).unwrap();
-        assert!(!bytes.is_empty());
-        let restored = super::deserialize_resolved_parameters(&bytes).unwrap();
-
-        for id in [EntityId(10), EntityId(20), EntityId(30)] {
-            for t in 0..4_usize {
+        for id in [EntityId(0), EntityId(1), EntityId(2)] {
+            for stage in 0..2 {
                 assert_eq!(
-                    original.get(id, t).to_bits(),
-                    restored.get(id, t).to_bits(),
-                    "bit mismatch for id={id:?}, stage={t}"
+                    table.get(id, stage, 0).to_bits(),
+                    table.get(id, stage, 3).to_bits(),
+                    "id={id:?} stage={stage}: length-1 inner must broadcast to every block"
                 );
             }
         }
     }
 
     #[test]
-    fn serialize_resolved_parameters_is_deterministic() {
-        let table = broadcast_fixture();
-        let bytes_a = super::serialize_resolved_parameters(&table).unwrap();
-        let bytes_b = super::serialize_resolved_parameters(&table).unwrap();
-        assert_eq!(bytes_a, bytes_b, "postcard encoding must be deterministic");
-    }
+    fn per_stage_block_missing_cell_is_a_coverage_error() {
+        let params = vec![make_param(
+            0,
+            ParameterKind::PerStageBlock {
+                // stage 0 covers only block 0; the (0, 1) cell is left uncovered.
+                values: vec![(0, 0, 1.0), (1, 0, 2.0), (1, 1, 3.0)],
+            },
+        )];
 
-    #[test]
-    fn deserialize_resolved_parameters_rejects_corrupted_bytes() {
-        let result = super::deserialize_resolved_parameters(&[0xFF, 0xFE, 0xFD, 0xFC]);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+        let result = build_block_table(&params, &[2, 2]);
+
         assert!(
-            msg.contains("postcard resolved_parameters"),
-            "error message must contain 'postcard resolved_parameters', got: {msg}"
+            matches!(
+                &result,
+                Err(ResolvedParametersError::PerStageBlockCoverage {
+                    name,
+                    stage: 0,
+                    block: 1,
+                    issue: PerStageBlockCoverageIssue::Missing,
+                }) if name.as_str() == "param_0"
+            ),
+            "expected a Missing coverage error at (0, 1) naming param_0, got {result:?}"
         );
     }
 
     #[test]
-    fn deserialize_resolved_parameters_rejects_empty_buffer() {
-        let result = super::deserialize_resolved_parameters(&[]);
-        assert!(result.is_err(), "empty buffer must return Err");
-    }
+    fn per_stage_block_duplicate_cell_is_a_coverage_error() {
+        let params = vec![make_param(
+            0,
+            ParameterKind::PerStageBlock {
+                values: vec![(0, 0, 1.0), (0, 0, 9.0), (0, 1, 2.0)],
+            },
+        )];
 
-    #[test]
-    fn round_trip_empty_resolved_parameters() {
-        let table = ResolvedParameters::default();
-        let bytes = super::serialize_resolved_parameters(&table).unwrap();
-        // Postcard encodes empty Vecs as a short varint-prefixed payload.
+        let result = build_block_table(&params, &[2]);
+
         assert!(
-            !bytes.is_empty(),
-            "even an empty table must produce non-empty bytes"
+            matches!(
+                &result,
+                Err(ResolvedParametersError::PerStageBlockCoverage {
+                    stage: 0,
+                    block: 0,
+                    issue: PerStageBlockCoverageIssue::Duplicated,
+                    ..
+                })
+            ),
+            "expected a Duplicated coverage error at (0, 0), got {result:?}"
         );
-        let restored = super::deserialize_resolved_parameters(&bytes).unwrap();
-        // Both tables are empty; any get() on an unknown id returns 0.0 via debug_assert path.
-        let _ = restored;
-    }
-
-    // -------------------------------------------------------------------------
-    // Wire envelope round-trip tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn resolved_parameters_wire_envelope_round_trip() {
-        let original = broadcast_fixture();
-        let bytes = super::serialize_resolved_parameters(&original).unwrap();
-        assert!(!bytes.is_empty(), "encoded envelope must be non-empty");
-        let restored = super::deserialize_resolved_parameters(&bytes).unwrap();
-
-        for id in [EntityId(10), EntityId(20), EntityId(30)] {
-            for t in 0..4_usize {
-                assert_eq!(
-                    original.get(id, t).to_bits(),
-                    restored.get(id, t).to_bits(),
-                    "bit mismatch for id={id:?}, stage={t}"
-                );
-            }
-        }
-    }
-
-    /// Wire-envelope round-trip: `cost_scale_factor` at a non-default value
-    /// survives the postcard wire envelope bit-exactly — the field the wire
-    /// version was bumped to `2` for.
-    #[test]
-    fn resolved_parameters_wire_envelope_round_trips_non_default_cost_scale_factor() {
-        let mut original = broadcast_fixture();
-        original.cost_scale_factor = 2_500_000.0;
-        let bytes = super::serialize_resolved_parameters(&original).unwrap();
-        let restored = super::deserialize_resolved_parameters(&bytes).unwrap();
-
-        assert_eq!(
-            restored.cost_scale_factor.to_bits(),
-            original.cost_scale_factor.to_bits(),
-            "cost_scale_factor must round-trip bit-exactly"
-        );
-        assert_eq!(restored.cost_scale_factor, 2_500_000.0);
     }
 
     #[test]
-    fn resolved_parameters_wire_envelope_rejects_old_version() {
-        // Encode an envelope with a version older than RESOLVED_PARAMETERS_WIRE_VERSION.
-        let old_version: u32 = super::RESOLVED_PARAMETERS_WIRE_VERSION.saturating_sub(1);
-        let envelope = super::ResolvedParametersWireEnvelope {
-            version: old_version,
-            payload: ResolvedParameters::default(),
-        };
-        let bytes = postcard::to_allocvec(&envelope).expect("postcard encoding must not fail");
+    fn per_stage_block_out_of_range_cell_is_a_coverage_error() {
+        let params = vec![make_param(
+            0,
+            ParameterKind::PerStageBlock {
+                values: vec![(0, 0, 1.0), (0, 5, 2.0)],
+            },
+        )];
 
-        let result = super::deserialize_resolved_parameters(&bytes);
+        let result = build_block_table(&params, &[2]);
+
         assert!(
-            result.is_err(),
-            "decoder must reject an old-version envelope"
+            matches!(
+                &result,
+                Err(ResolvedParametersError::PerStageBlockCoverage {
+                    stage: 0,
+                    block: 5,
+                    issue: PerStageBlockCoverageIssue::OutOfRange,
+                    ..
+                })
+            ),
+            "expected an OutOfRange coverage error at (0, 5), got {result:?}"
         );
-        let msg = result.unwrap_err().to_string();
+    }
+
+    #[test]
+    #[should_panic(expected = "block miss")]
+    fn out_of_range_block_query_fires_the_block_specific_assert() {
+        let params = vec![make_param(
+            0,
+            ParameterKind::PerStageBlock {
+                values: vec![(0, 0, 1.0), (0, 1, 2.0)],
+            },
+        )];
+        let table = build_block_table(&params, &[2]).unwrap();
+        // Block 5 is out of range for a stage that stores two blocks; the miss is
+        // a block-index miss, distinct from the unknown-id miss.
+        let _ = table.get(EntityId(0), 0, 5);
+    }
+
+    #[test]
+    fn is_block_varying_truth_table() {
+        let params = vec![
+            make_param(
+                0,
+                ParameterKind::PerStageBlock {
+                    values: vec![(0, 0, 1.0), (0, 1, 2.0)],
+                },
+            ),
+            make_param(1, ParameterKind::Constant { value: 3.6 }),
+        ];
+
+        let table = build_block_table(&params, &[2]).unwrap();
+
         assert!(
-            msg.contains("version"),
-            "error message must contain 'version', got: {msg}"
+            table.is_block_varying(EntityId(0)),
+            "PerStageBlock is block-varying"
+        );
+        assert!(
+            !table.is_block_varying(EntityId(1)),
+            "Constant broadcasts and is not block-varying"
+        );
+        assert!(
+            !table.is_block_varying(EntityId(99)),
+            "an unknown id is not block-varying"
         );
     }
 }

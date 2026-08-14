@@ -45,8 +45,9 @@ pub(crate) fn push_scaled_coefficient(
 ///
 /// The caller pushes this row's `row_starts` offset before calling and the
 /// terminator / `num_rows` / `add_rows` afterward; this helper appends only the
-/// non-zeros and bounds. Shared by [`append_new_cuts_to_lp`] and the DCS
-/// [`append_slots_to_lp`] so the two cannot drift apart.
+/// non-zeros and bounds. Shared by [`build_cut_row_batch_into`],
+/// [`append_new_cuts_to_lp`], and the DCS [`append_slots_to_lp`] so the three
+/// cannot drift apart.
 ///
 /// `coefficients` has length `cut_state.n_slots()` (the pool's enabled cut-state
 /// dimensions); the row places each enabled non-padding coefficient onto the
@@ -85,23 +86,17 @@ pub(crate) fn push_cut_row(
 /// Fill a pre-allocated [`RowBatch`] with Benders cut rows from the FCF.
 ///
 /// Clears `batch` and repopulates it with active cuts from `fcf` at the
-/// given `stage`. The buffers inside `batch` retain their allocated capacity
+/// given `pool` id. The buffers inside `batch` retain their allocated capacity
 /// across calls, eliminating heap allocation on the hot path.
 ///
 /// # Panics
 ///
 /// Panics if the total number of non-zeros exceeds `i32::MAX` (the `HiGHS`
 /// API limit for CSR indices).
-// Rationale: clippy::similar_names flags the role-(a) `state` handle next to the
-// `stage` index. Both names are established — `state` matches `StageData.state` /
-// `TrainingContext.state`, and `stage` is the stage index — so renaming either to
-// satisfy the heuristic would obscure intent (the same exemption `StageLayout::new`
-// takes).
-#[allow(clippy::similar_names)]
 pub fn build_cut_row_batch_into(
     batch: &mut RowBatch,
     fcf: &FutureCostFunction,
-    stage: usize,
+    pool: usize,
     state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
@@ -111,7 +106,7 @@ pub fn build_cut_row_batch_into(
     let n_cut_state = cut_state.n_slots();
     let theta_col = state.theta;
 
-    let num_cuts = fcf.pools[stage].active_count();
+    let num_cuts = fcf.pools[pool].active_count();
 
     if num_cuts == 0 {
         batch.row_starts.push(0_i32);
@@ -123,7 +118,7 @@ pub fn build_cut_row_batch_into(
 
     let mut nz_offset = 0;
 
-    for (_slot, intercept, coefficients) in fcf.active_cuts(stage) {
+    for (_slot, intercept, coefficients) in fcf.active_cuts(pool) {
         debug_assert_eq!(
             coefficients.len(),
             n_cut_state,
@@ -135,30 +130,14 @@ pub fn build_cut_row_batch_into(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch.row_starts.push(nz_offset as i32);
 
-        // render_pairs maps each enabled non-padding reduced index j to its
-        // outgoing LP column: identity for storage; for lag dimensions the
-        // outgoing state after shift_lag_state holds z_inflow at lag 0 and shifted
-        // incoming lags at lag 1+, so the cut references z_inflow and incoming lag
-        // l−1. Padding slots are dropped (no row entry), never zero-filled.
-        for (j, lp_col) in cut_state.render_pairs() {
-            push_scaled_coefficient(batch, lp_col, coefficients[j.get()], col_scale);
-        }
-
-        debug_assert!(
-            i32::try_from(theta_col).is_ok(),
-            "theta_col={theta_col} exceeds i32::MAX"
+        push_cut_row(
+            batch,
+            intercept,
+            coefficients,
+            cut_state,
+            theta_col,
+            col_scale,
         );
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        batch.col_indices.push(theta_col as i32);
-        let d_theta = if col_scale.is_empty() {
-            1.0
-        } else {
-            col_scale[theta_col]
-        };
-        batch.values.push(d_theta);
-
-        batch.row_lower.push(intercept);
-        batch.row_upper.push(f64::INFINITY);
 
         nz_offset += nnz_per_cut;
     }
@@ -176,12 +155,10 @@ pub fn build_cut_row_batch_into(
 /// Convenience wrapper around [`build_cut_row_batch_into`] that allocates a
 /// new `RowBatch`. For allocation-free usage on the hot path, prefer calling
 /// [`build_cut_row_batch_into`] with a pre-allocated batch.
-// `clippy::similar_names`: role-(a) `state` handle next to the `stage` index.
-#[allow(clippy::similar_names)]
 #[must_use]
 pub fn build_cut_row_batch(
     fcf: &FutureCostFunction,
-    stage: usize,
+    pool: usize,
     state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
@@ -194,7 +171,7 @@ pub fn build_cut_row_batch(
         row_lower: Vec::new(),
         row_upper: Vec::new(),
     };
-    build_cut_row_batch_into(&mut batch, fcf, stage, state, cut_state, col_scale);
+    build_cut_row_batch_into(&mut batch, fcf, pool, state, cut_state, col_scale);
     batch
 }
 
@@ -211,20 +188,19 @@ pub fn build_cut_row_batch(
 /// # Arguments
 ///
 /// - `col_scale`: column scaling factors (empty slice if no scaling).
-/// - `row_map`: per-stage [`CutRowMap`] to update.
+/// - `row_map`: per-pool [`CutRowMap`] to update.
 /// - `batch_buf`: reusable [`RowBatch`] buffer for constructing the new cut rows.
 ///
 /// # Panics
 ///
 /// Panics if `total_nnz` exceeds `i32::MAX` (LP exceeds the `HiGHS` API limit).
-/// In debug builds, also panics if `stage >= fcf.pools.len()`.
+/// In debug builds, also panics if `pool >= fcf.pools.len()`.
 ///
 /// [`CutRowMap`]: CutRowMap
-#[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_new_cuts_to_lp<S: SolverInterface>(
     solver: &mut S,
     fcf: &FutureCostFunction,
-    stage: usize,
+    pool: usize,
     state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
@@ -240,7 +216,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
     let mut new_count = 0usize;
     let mut nz_offset = 0usize;
 
-    for (slot, intercept, coefficients) in fcf.active_cuts(stage) {
+    for (slot, intercept, coefficients) in fcf.active_cuts(pool) {
         if row_map.lp_row_for_slot(slot).is_some() {
             continue;
         }
@@ -303,7 +279,6 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 /// limit), matching [`append_new_cuts_to_lp`].
 ///
 /// [`CutPool`]: CutPool
-#[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_slots_to_lp<S: SolverInterface>(
     solver: &mut S,
     pool: &CutPool,
@@ -385,6 +360,7 @@ mod tests {
     use super::{append_new_cuts_to_lp, build_cut_row_batch, build_cut_row_batch_into};
     use crate::cut::FutureCostFunction;
     use crate::indexer::{CutStateProjection, StateSpace};
+    use crate::setup::NodeId;
 
     /// Build a finalized storage+lag [`StateSpace`] (no anticipated thermals)
     /// with the full `max_par_order` lag stride for every hydro — the dense
@@ -435,7 +411,7 @@ mod tests {
     #[test]
     fn build_cut_row_batch_one_cut_correct_structure() {
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 5.0, &[2.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 5.0, &[2.0]);
         let state = state_layout(1, 0);
         let batch = build_cut_row_batch(&fcf, 0, &state, &cut_state(&state), &[]);
 
@@ -450,8 +426,8 @@ mod tests {
     #[test]
     fn build_cut_row_batch_two_cuts_correct_row_starts() {
         let mut fcf = FutureCostFunction::new(2, 2, 1, 10, &[0; 2]);
-        fcf.add_cut(1, 0, 0, 10.0, &[1.0, 3.0]);
-        fcf.add_cut(1, 1, 0, 20.0, &[2.0, 4.0]);
+        fcf.add_cut(NodeId(0), 1, 0, 0, 10.0, &[1.0, 3.0]);
+        fcf.add_cut(NodeId(0), 1, 1, 0, 20.0, &[2.0, 4.0]);
         let state = state_layout(1, 1);
         let batch = build_cut_row_batch(&fcf, 1, &state, &cut_state(&state), &[]);
 
@@ -477,7 +453,7 @@ mod tests {
     #[test]
     fn build_cut_row_batch_zero_coefficient_state_variable() {
         let mut fcf = FutureCostFunction::new(1, 2, 1, 5, &[0; 1]);
-        fcf.add_cut(0, 0, 0, 3.0, &[0.0, 7.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 3.0, &[0.0, 7.0]);
         let state = state_layout(1, 1);
         let batch = build_cut_row_batch(&fcf, 0, &state, &cut_state(&state), &[]);
 
@@ -597,8 +573,8 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
-        fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
+        fcf.add_cut(NodeId(0), 0, 0, 0, 10.0, &[1.0]); // slot 0
+        fcf.add_cut(NodeId(0), 0, 1, 0, 20.0, &[3.0]); // slot 1
 
         let state = state_layout(1, 0);
         let mut row_map = CutRowMap::new(10, 5);
@@ -628,8 +604,8 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
-        fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
+        fcf.add_cut(NodeId(0), 0, 0, 0, 10.0, &[1.0]); // slot 0
+        fcf.add_cut(NodeId(0), 0, 1, 0, 20.0, &[3.0]); // slot 1
 
         let state = state_layout(1, 0);
         let mut row_map = CutRowMap::new(10, 5);
@@ -662,8 +638,8 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
-        fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
+        fcf.add_cut(NodeId(0), 0, 0, 0, 10.0, &[1.0]); // slot 0
+        fcf.add_cut(NodeId(0), 0, 1, 0, 20.0, &[3.0]); // slot 1
 
         let state = state_layout(1, 0);
 
@@ -705,7 +681,7 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.add_cut(0, 0, 0, 10.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 10.0, &[1.0]);
 
         let state = state_layout(1, 0);
         // col_scale must have at least theta+1 = 4 entries.

@@ -4,6 +4,10 @@
 //! convergence monitoring, and policy simulation. Parallelized via rayon (intra-rank)
 //! and ferrompi (inter-rank).
 
+// Internal (unpublished) workspace crate: public items intra-doc-link their
+// pub(crate) collaborators as a maintainer aid (docs read with
+// --document-private-items); the public-only doc gate flags these intentional links.
+#![allow(rustdoc::private_intra_doc_links)]
 #![cfg_attr(
     test,
     allow(
@@ -20,11 +24,13 @@
 // from integration tests in `tests/` (separate crates needing pub visibility);
 // the `pub mod` namespaces are not a semver-stable API — prefer the curated
 // re-exports below. `pub(crate)` modules are crate internals.
+pub(crate) mod claim_scatter;
 pub mod config;
 pub mod convergence;
 pub mod cut;
 pub mod error;
 pub(crate) mod gemm;
+pub(crate) mod generic_constraint_echo;
 pub mod horizon_mode;
 pub(crate) mod hull;
 pub mod lead_time;
@@ -127,6 +133,8 @@ pub use cobre_io::scenarios::estimation::{
 };
 // ── forward ───────────────────────────────────────────────────────────────────
 pub use training::forward::SyncResult;
+// ── generic_constraint_echo ───────────────────────────────────────────────────
+pub use generic_constraint_echo::build_generic_constraint_echo_rows;
 // ── hydro_models ──────────────────────────────────────────────────────────────
 pub use production::hydro_models::{
     FphaFitDeviationEntry, FphaHydroDetail, HydroFitTimings, HydroModelSummary,
@@ -143,10 +151,13 @@ pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
     BoundaryInjection, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind, PolicyLoadProof,
-    PolicyStageManifest, ValidatedBoundaryCuts, build_basis_cache_from_checkpoint,
-    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
-    rescale_checkpoint_cuts_for_load, validate_policy_load,
+    PolicyStageManifest, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
+    build_basis_cache_from_checkpoint, compare_manifest_slot_identity, inject_boundary_cuts,
+    load_boundary_cuts, rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage,
+    resolve_effective_inflow_lag_depth, validate_policy_load,
 };
+// ── policy_load::reconcile (report) ──────────────────────────────────────────
+pub use policy::reconcile::{AnticipatedCoverage, BoundaryReconciliationReport, FamilyTally};
 // ── provenance ────────────────────────────────────────────────────────────────
 pub use policy::provenance::{
     HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
@@ -164,7 +175,7 @@ pub use setup::{
 // ── simulation ────────────────────────────────────────────────────────────────
 pub use simulation::{
     ScenarioCategoryCosts, SimulationError, SimulationHydroResult, SimulationScenarioResult,
-    SimulationStageResult, SimulationSummary, aggregate_simulation, simulate,
+    SimulationStageResult, SimulationSummary, SimulationWeighting, aggregate_simulation, simulate,
 };
 // ── solver_phase ─────────────────────────────────────────────────────────────
 #[cfg(feature = "highs")]
@@ -193,7 +204,6 @@ pub use training::training_output::{
 // ── resolved_parameters ───────────────────────────────────────────────────────
 pub use policy::resolved_parameters::{
     ResolvedParameters, ResolvedParametersError, build_resolved_parameters,
-    deserialize_resolved_parameters, serialize_resolved_parameters,
 };
 // ── state_exchange ────────────────────────────────────────────────────────────
 pub use training::state_exchange::ExchangeBuffers;

@@ -5,22 +5,35 @@
     clippy::cast_precision_loss
 )]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+use chrono::NaiveDate;
 
 use super::{
     EntityCounts, HydroReverseLookup, SolutionView, StageExtractionSpec, accumulate_category_costs,
-    assign_scenarios, extract_contracts, extract_pumping_stations, extract_stage_result,
-    extract_stub_collections,
+    assign_scenarios, extract_contracts, extract_generic_violations, extract_pumping_stations,
+    extract_stage_result, extract_stub_collections,
 };
-use cobre_core::BlockMode;
+use cobre_core::{
+    Block, BlockMode, CascadeTopology, ConstraintExpression, GenericConstraint, NoiseMethod,
+    ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+    ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, SlackConfig, Stage,
+    StageRiskConfig, StageStateConfig,
+};
+use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::energy_conversion::EnergyConversionSet;
+use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
 use crate::indexer::{
     FillingTargetLocal, FloorLocal, FphaLocal, HydroCellIndex, HydroSys, StateSpace,
     StudyDimensions,
 };
 use crate::lead_time::{AnticipatedResolution, PointResolution};
-use crate::lp_builder::StageGeometry;
+use crate::lp_builder::{
+    GenericConstraintRowEntry, ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx,
+};
+use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::PostStudyResolved;
 use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
 use crate::test_support;
 
@@ -1134,8 +1147,8 @@ fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
     let study_dims = test_support::study_dims_for(&eq_counts);
     let state = test_support::state_layout_full(0, 0, 1, 1, vec![1]);
     // With N=0, L=0, A=1, K_max=1:
-    //   anticipated_slots_out = [0, 1)  (outgoing ring, A*K_max = 1 slot)
-    //   anticipated_state     = [1, 2)  (incoming, A*K_max = 1 slot)
+    //   commit_out = [0, 1)  (outgoing ring, A*K_max = 1 slot)
+    //   commit_in     = [1, 2)  (incoming, A*K_max = 1 slot)
     //   theta = N*(3+L) + 2*A*K_max = 0 + 2 = 2
     //   thermal = [theta+1, theta+1+T*K) = [3, 5)  — t0→3, t1→4
     assert_eq!(state.theta, 2);
@@ -1225,8 +1238,8 @@ fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
         result.thermals[1].is_anticipated,
         "thermal 20 should be anticipated"
     );
-    // Always-active fishing: committed_mw reads slot 0 of anticipated_state
-    // (primal[anticipated_state.start + 0] = 0.0 in this zero-initialised fixture).
+    // Always-active fishing: committed_mw reads slot 0 of commit_in
+    // (primal[commit_in.start + 0] = 0.0 in this zero-initialised fixture).
     assert_eq!(result.thermals[1].anticipated_committed_mw, Some(0.0));
     // With stage_index=0, n_stages=2, K_i=1: t+K_i=1 <= n_stages -> decision is active.
     // primal[anticipated_decision.start + 0] defaults to 0.0 in this fixture.
@@ -1908,8 +1921,8 @@ fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
 ///
 /// Layout: `n_ant_state = 1*2 = 2`, doubled for the outgoing+incoming ring
 /// blocks → `theta = 4`.
-///   `anticipated_slots_out` (outgoing) = `[0, 2)`
-///   `anticipated_state` (incoming)     = `[2, 4)`
+///   `commit_out` (outgoing) = `[0, 2)`
+///   `commit_in` (incoming)     = `[2, 4)`
 ///   `thermal` = `[5, 8)`          (1 thermal * 3 blocks)
 ///   `anticipated_decision.start = 8`
 /// The `GeometryDims` both
@@ -1938,11 +1951,11 @@ fn make_anticipated_committed_indexer_k2_3blks() -> StageGeometry {
 
 /// Per-block branch, K=2, `stage_index=2` (delivery stage).
 ///
-/// The committed value is the slot-0 entry of the `anticipated_state` ring
+/// The committed value is the slot-0 entry of the `commit_in` ring
 /// buffer (per-plant, per-stage scalar), NOT the per-block thermal
 /// generation. To guard against the regression where the helper
 /// returned `primal[thermal_col]` (the per-block generation) instead of
-/// `primal[anticipated_state.start + local_idx]`, this fixture uses three
+/// `primal[commit_in.start + local_idx]`, this fixture uses three
 /// distinct per-block generation values (50/60/70 MW) and a distinct
 /// slot-0 value (42.0 MW). The fix must read 42.0 for every block; the
 /// bug would read 50/60/70.
@@ -1958,10 +1971,10 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
     // thermal = [5, 8): col 5 = block 0, col 6 = block 1, col 7 = block 2
     // (theta = N*(3+L) + 2*n_ant_state = 0 + 2*2 = 4, control region starts at 5).
     assert_eq!(indexer.thermal.start, 5);
-    // anticipated_state (the incoming, pinned block) = [2, 4): col 2 = slot 0,
-    // col 3 = slot 1 (the outgoing `anticipated_slots_out` ring occupies [0, 2)
+    // commit_in (the incoming, pinned block) = [2, 4): col 2 = slot 0,
+    // col 3 = slot 1 (the outgoing `commit_out` ring occupies [0, 2)
     // instead; `compute_anticipated_committed_mw` reads the INCOMING slot).
-    assert_eq!(state.anticipated_state.start, 2);
+    assert_eq!(state.commit_in.start, 2);
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
     primal[2] = 42.0; // ant_state slot 0 (the committed scalar)
@@ -2046,21 +2059,24 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
     }
 }
 
-/// Per-block branch, K=2, `stage_index=1` (pre-delivery under
-/// a maturity gate, but the always-active fishing predicate reads
-/// slot 0 of `anticipated_state` regardless of `K_i` vs `stage_index`).
-/// With a zero-initialised `primal[anticipated_state.start + 0]`,
-/// expects every block to read `Some(0.0)`.
+/// Per-block branch, K=2, `stage_index=1`. The always-active fishing extraction
+/// reads the maturing `commit_in` slot for THIS stage — `stage_index mod k_max =
+/// 1 mod 2 = 1` (`commit_in` slot 1), never a fixed slot 0. A decoy in slot 0
+/// (col 2) proves the read is stage-keyed; the maturing slot 1 (col 3) is left
+/// zero-seeded, so every block reads `Some(0.0)`.
 #[test]
-fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
+fn extract_thermals_per_block_committed_reads_stage_maturing_slot_when_seed_zero() {
     let indexer = make_anticipated_committed_indexer_k2_3blks();
     let study_dims = test_support::study_dims_for(&anticipated_committed_counts_k2_3blks());
     let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    // commit_in = [2, 4): slot 0 = col 2, slot 1 = col 3. At stage 1 the maturing
+    // slot is 1 mod 2 = 1 (col 3); slot 0 carries a decoy that must NOT be read.
+    assert_eq!(state.commit_in.start, 2);
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
-    primal[3] = 50.0;
-    primal[4] = 60.0;
-    primal[5] = 70.0;
+    primal[2] = 88.0; // slot 0 decoy — not the maturing slot at stage 1
+    // primal[3] (slot 1, the stage-1 maturing slot) stays 0.0.
+    primal[5] = 70.0; // thermal block 0 (distinct, must not alias committed)
     let obj = vec![0.0_f64; n_cols];
 
     let counts = EntityCounts {
@@ -2122,7 +2138,8 @@ fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
         assert_eq!(
             rec.anticipated_committed_mw,
             Some(0.0),
-            "block {blk}: always-active reads slot 0 = 0.0 regardless of stage"
+            "block {blk}: stage 1 maturing slot is 1 mod 2 = 1 (zero-seeded); the \
+             slot-0 decoy (88.0) must not be read"
         );
     }
 }
@@ -2418,7 +2435,7 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
 
 /// No-block branch, K=1, `stage_index=0`, `n_stages=2`. Pre-delivery
 /// under a maturity gate, but the always-active fishing predicate
-/// reads slot 0 of `anticipated_state` regardless. Expects `Some(0.0)`
+/// reads slot 0 of `commit_in` regardless. Expects `Some(0.0)`
 /// (zero-initialised slot 0).
 #[test]
 fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
@@ -2512,6 +2529,7 @@ fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
 #[test]
 fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
     use super::{HydroReverseLookup, ThermalReverseLookup, extract_stage_result_with_lookups};
+    use crate::setup::NodeId;
 
     let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
@@ -2533,11 +2551,11 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
         .anticipated_decision
         .end
         .max(indexer.thermal.end)
-        .max(state.anticipated_state.end)
+        .max(state.commit_in.end)
         .max(state.theta + 1);
     let mut primal = vec![0.0_f64; n_cols];
-    // Slot 0 of anticipated_state = committed MW scalar.
-    primal[state.anticipated_state.start] = 37.5;
+    // Slot 0 of commit_in = committed MW scalar.
+    primal[state.commit_in.start] = 37.5;
     // Anticipated decision column.
     primal[indexer.anticipated_decision.start] = 80.0;
     // Thermal columns: block 0, block 1.
@@ -2603,8 +2621,14 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
     let thermal_lookup = ThermalReverseLookup::build(&study_dims, counts.thermal_ids.len());
     let hydro_lookup =
         HydroReverseLookup::build(spec.geometry, spec.hydro_cell_index, counts.hydro_ids.len());
-    let result_prebuilt =
-        extract_stage_result_with_lookups(&view, &spec, 2, &hydro_lookup, &thermal_lookup);
+    let result_prebuilt = extract_stage_result_with_lookups(
+        &view,
+        &spec,
+        2,
+        NodeId(2),
+        &hydro_lookup,
+        &thermal_lookup,
+    );
 
     assert_eq!(
         result_standard.thermals.len(),
@@ -6629,4 +6653,365 @@ fn extract_hydro_bus_generation_no_turbine_branch_emits_zero_rows_per_cell() {
         assert_eq!(row.turbined_m3s, 0.0);
         assert_eq!(row.generation_mw, 0.0);
     }
+}
+
+// -------------------------------------------------------------------------
+// extract_generic_violations
+// -------------------------------------------------------------------------
+
+/// Build a [`GenericConstraintRowEntry`] for the two-sided (both `bound_lower`
+/// and `bound_upper` present) net-report arm, plus its matching
+/// `[s_plus, s_minus]` primal pair at columns `[0, 1]`.
+fn two_slack_row_entry(
+    is_stage_level: bool,
+    block_idx: usize,
+    penalty: f64,
+    s_plus: f64,
+    s_minus: f64,
+) -> (GenericConstraintRowEntry, Vec<f64>) {
+    let entry = GenericConstraintRowEntry {
+        constraint_idx: 0,
+        entity_id: 42,
+        block_idx,
+        is_stage_level,
+        bound_lower: Some(0.0),
+        bound_upper: Some(0.0),
+        slack_enabled: true,
+        slack_penalty: penalty,
+        slack_plus_col: Some(0),
+        slack_minus_col: Some(1),
+    };
+    (entry, vec![s_plus, s_minus])
+}
+
+/// Build a `StageExtractionSpec` whose only meaningful fields are
+/// `generic_constraint_entries` and `block_hours` — `extract_generic_violations`
+/// reads nothing else from the spec, mirroring `contract_only_spec`'s /
+/// `pumping_only_spec`'s inert-default pattern.
+fn generic_only_spec<'a>(
+    entries: &'a [GenericConstraintRowEntry],
+    block_hours: &'a [f64],
+) -> StageExtractionSpec<'a> {
+    // Leaked so the borrow outlives this function call, matching the caller's own
+    // `'a` — none of these fields are read by `extract_generic_violations`, only
+    // constructed to satisfy the spec's shape.
+    let study_dims: &'a StudyDimensions = Box::leak(Box::new(test_support::study_dims()));
+    let state: &'a StateSpace = Box::leak(Box::new(test_support::state_layout(0, 0)));
+    let geometry: &'a StageGeometry = Box::leak(Box::new(StageGeometry::default()));
+    let entity_counts: &'a EntityCounts = Box::leak(Box::new(EntityCounts {
+        hydro_ids: vec![],
+        hydro_productivities: vec![],
+        thermal_ids: vec![],
+        line_ids: vec![],
+        bus_ids: vec![],
+        pumping_station_ids: vec![],
+        contract_ids: vec![],
+        non_controllable_ids: vec![],
+    }));
+    let ec: &'a EnergyConversionSet = Box::leak(Box::new(zero_energy_conversion(0, 1)));
+    let diversion: &'a HashMap<cobre_core::EntityId, Vec<usize>> =
+        Box::leak(Box::new(HashMap::new()));
+    let hydro_cell_index: &'a HydroCellIndex =
+        Box::leak(Box::new(test_support::identity_hydro_cell_index(0)));
+
+    StageExtractionSpec {
+        study_dims,
+        geometry,
+        hydro_cell_index,
+        state,
+        n_blks: block_hours.len(),
+        entity_counts,
+        inflow_m3s_per_hydro: &[],
+        block_hours,
+        generic_constraint_entries: entries,
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: diversion,
+        hydro_productivities: &[],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        cost_scale_factor: 1_000_000.0,
+        energy_conversion: ec,
+        hydro_min_storage_hm3: &[],
+        stage_index: 0,
+        n_stages: 1,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    }
+}
+
+/// A two-sided entry with `slack_enabled = true`, `slack_penalty = 100.0`,
+/// `block_hours = 730.0`, `s_plus = 3.0`, `s_minus = 1.0` reports the signed net
+/// (`2.0`) as `slack_value` while charging BOTH slacks
+/// (`4.0 * 100.0 * 730.0`) as `slack_cost`.
+#[test]
+fn two_sided_net_report_reads_signed_net_and_charges_both_slacks() {
+    let (entry, primal) = two_slack_row_entry(false, 0, 100.0, 3.0, 1.0);
+    let block_hours = [730.0_f64];
+    let dual: Vec<f64> = Vec::new();
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &[],
+        row_lower: &[],
+    };
+    let entries = [entry];
+    let spec = generic_only_spec(&entries, &block_hours);
+
+    let (results, total_cost) = extract_generic_violations(&view, &spec, 3);
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].stage_id, 3);
+    assert_eq!(results[0].block_id, Some(0));
+    assert_eq!(results[0].constraint_id, 42);
+    assert_eq!(results[0].slack_value, 2.0);
+    assert_eq!(results[0].slack_cost, 4.0 * 100.0 * 730.0);
+    assert_eq!(total_cost, 4.0 * 100.0 * 730.0);
+}
+
+/// A stage-level two-sided entry (`is_stage_level = true`) over a 2-block
+/// stage with block hours `[400.0, 330.0]` reports `block_id = None` and prices
+/// its slack cost on the SUMMED stage hours (`730.0`), not either individual
+/// block's.
+#[test]
+fn stage_level_two_sided_prices_summed_stage_hours() {
+    let (entry, primal) = two_slack_row_entry(true, 0, 1.0, 1.0, 0.0);
+    let block_hours = [400.0_f64, 330.0_f64];
+    let dual: Vec<f64> = Vec::new();
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &[],
+        row_lower: &[],
+    };
+    let entries = [entry];
+    let spec = generic_only_spec(&entries, &block_hours);
+
+    let (results, _) = extract_generic_violations(&view, &spec, 0);
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].block_id, None);
+    assert_eq!(results[0].slack_cost, 1.0 * 1.0 * 730.0);
+}
+
+/// A per-block two-sided entry (`is_stage_level = false`, `block_idx = 1`) over a
+/// 2-block stage reports `block_id = Some(1)` and prices its slack cost on THAT
+/// block's own duration (`330.0`) — not block 0's `400.0` nor the summed `730.0`.
+#[test]
+fn per_block_two_sided_prices_its_own_block_duration() {
+    let (entry, primal) = two_slack_row_entry(false, 1, 10.0, 2.0, 0.5);
+    let block_hours = [400.0_f64, 330.0_f64];
+    let dual: Vec<f64> = Vec::new();
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &[],
+        row_lower: &[],
+    };
+    let entries = [entry];
+    let spec = generic_only_spec(&entries, &block_hours);
+
+    let (results, _) = extract_generic_violations(&view, &spec, 0);
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].block_id, Some(1));
+    assert_eq!(results[0].slack_value, 1.5);
+    assert_eq!(results[0].slack_cost, 2.5 * 10.0 * 330.0);
+}
+
+/// A two-sided entry with `slack_enabled = false` reports `slack_value ==
+/// 0.0` and `slack_cost == 0.0` and contributes nothing to the returned total
+/// cost — the `map_or(0.0, ...)` fallback path, never reading the (absent)
+/// slack columns.
+#[test]
+fn two_sided_slack_disabled_reports_zero_and_contributes_nothing() {
+    let entry = GenericConstraintRowEntry {
+        constraint_idx: 0,
+        entity_id: 42,
+        block_idx: 0,
+        is_stage_level: false,
+        bound_lower: Some(0.0),
+        bound_upper: Some(0.0),
+        slack_enabled: false,
+        slack_penalty: 0.0,
+        slack_plus_col: None,
+        slack_minus_col: None,
+    };
+    let primal: Vec<f64> = Vec::new();
+    let dual: Vec<f64> = Vec::new();
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &[],
+        row_lower: &[],
+    };
+    let block_hours = [500.0_f64];
+    let entries = [entry];
+    let spec = generic_only_spec(&entries, &block_hours);
+
+    let (results, total_cost) = extract_generic_violations(&view, &spec, 0);
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].slack_value, 0.0);
+    assert_eq!(results[0].slack_cost, 0.0);
+    assert_eq!(total_cost, 0.0);
+}
+
+/// Regression guard for the one-slack-allocation defect: a two-sided entry
+/// produced by the REAL layout path (`allocate_generic_slack_cols`, via
+/// `StageLayout::new`) must carry `slack_minus_col == Some(_)`. Asserts the
+/// CORRECT case, not the broken one, so this fails if
+/// `allocate_generic_slack_cols` ever regresses to allocating a minus column
+/// only for a specific label instead of deriving two-sidedness from the row's
+/// own endpoint pair. Sourced from the real layout rather than hand-built: a
+/// hand-built entry would assert nothing about allocation.
+// Rationale: clippy::similar_names flags `state` next to `stage`; both names are
+// established (mirrors `test_support::geometry`), so renaming either would
+// obscure intent rather than clarify it.
+#[allow(clippy::similar_names)]
+#[test]
+fn two_sided_real_layout_allocates_minus_slack_column() {
+    let constraint = GenericConstraint {
+        id: cobre_core::EntityId(1),
+        name: "gc_range_test".to_string(),
+        description: None,
+        expression: ConstraintExpression { terms: vec![] },
+        slack: SlackConfig {
+            enabled: true,
+            penalty: Some(10.0),
+        },
+        bound_lower_affine: None,
+        bound_upper_affine: None,
+    };
+    let generic_constraints = [constraint];
+
+    let id_map: HashMap<i32, usize> = [(1, 0)].into_iter().collect();
+    let raw_bounds = vec![(1i32, 0i32, Some(0i32), Some(5.0_f64), Some(20.0_f64))];
+    let resolved_generic_bounds =
+        ResolvedGenericConstraintBounds::new(&id_map, raw_bounds.into_iter());
+
+    let bounds = ResolvedBounds::empty();
+    let penalties = ResolvedPenalties::empty();
+    let resolved_load_factors = ResolvedLoadFactors::empty();
+    let resolved_ncs_bounds = ResolvedNcsBounds::empty();
+    let resolved_ncs_factors = ResolvedNcsFactors::empty();
+    let resolved_parameters = ResolvedParameters {
+        per_param: vec![],
+        id_to_slot: vec![],
+        cost_scale_factor: 1_000_000.0,
+    };
+    let cascade = CascadeTopology::build(&[]);
+    let par_lp = PrecomputedPar::default();
+    let hydro_cell_index = test_support::identity_hydro_cell_index(0);
+    let production_models = ProductionModelSet::new(Vec::new(), 0, 1);
+    let evaporation_models = EvaporationModelSet::new(Vec::new());
+
+    let ctx = TemplateBuildCtx {
+        hydros: &[],
+        thermals: &[],
+        lines: &[],
+        buses: &[],
+        load_models: &[],
+        cascade: &cascade,
+        hydro_cell_index: &hydro_cell_index,
+        resolved: ResolvedTables {
+            bounds: &bounds,
+            penalties: &penalties,
+            resolved_generic_bounds: &resolved_generic_bounds,
+            resolved_load_factors: &resolved_load_factors,
+            resolved_ncs_bounds: &resolved_ncs_bounds,
+            resolved_ncs_factors: &resolved_ncs_factors,
+            resolved_parameters: &resolved_parameters,
+        },
+        hydro_pos: BTreeMap::new(),
+        thermal_pos: BTreeMap::new(),
+        line_pos: BTreeMap::new(),
+        bus_pos: BTreeMap::new(),
+        par_lp: &par_lp,
+        production_models: &production_models,
+        evaporation_models: &evaporation_models,
+        generic_constraints: &generic_constraints,
+        non_controllable_sources: &[],
+        pumping_stations: &[],
+        pumping_pos: BTreeMap::new(),
+        n_pumping: 0,
+        contracts: &[],
+        contract_pos: BTreeMap::new(),
+        n_contract_import: 0,
+        n_contract_export: 0,
+        diversion_upstream: HashMap::new(),
+        n_hydros: 0,
+        n_thermals: 0,
+        n_lines: 0,
+        n_buses: 0,
+        max_par_order: 0,
+        n_anticipated: 0,
+        k_max: 0,
+        anticipated_lead_stages: vec![],
+        anticipated_thermal_indices: vec![],
+        anticipated_windows: vec![],
+        anticipated_resolution: AnticipatedResolution::default(),
+        study_stage_ids: Vec::new(),
+        has_penalty: false,
+        cumulative_discount_factors: vec![1.0],
+        total_hours_per_stage: vec![730.0],
+        filling_v_target: BTreeMap::new(),
+        arc_stage_weights: HashMap::new(),
+        arc_spread_chrono: HashMap::new(),
+        arc_arrival_density: HashMap::new(),
+        per_stage_mask: Vec::new(),
+        post_study_resolved: PostStudyResolved::default(),
+    };
+
+    let state = test_support::state_layout(0, 0);
+    let stage = Stage {
+        index: 0,
+        id: 0,
+        start_date: NaiveDate::default(),
+        end_date: NaiveDate::default(),
+        season_id: Some(0),
+        blocks: vec![Block {
+            index: 0,
+            name: "BLK0".to_string(),
+            duration_hours: 730.0,
+        }],
+        block_mode: BlockMode::Parallel,
+        state_config: StageStateConfig {
+            storage: false,
+            inflow_lags: false,
+        },
+        risk_config: StageRiskConfig::Expectation,
+        scenario_config: ScenarioSourceConfig {
+            branching_factor: 1,
+            noise_method: NoiseMethod::Saa,
+        },
+    };
+
+    let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+    assert_eq!(
+        layout.generic_constraint_rows.len(),
+        1,
+        "one active (constraint, block) row"
+    );
+    let entry = &layout.generic_constraint_rows[0];
+    assert_eq!(entry.bound_lower, Some(5.0));
+    assert_eq!(entry.bound_upper, Some(20.0));
+    assert!(entry.slack_plus_col.is_some());
+    assert!(
+        entry.slack_minus_col.is_some(),
+        "a two-sided row with slack enabled must allocate a DISTINCT minus-slack column"
+    );
 }

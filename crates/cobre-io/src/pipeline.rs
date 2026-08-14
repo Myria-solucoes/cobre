@@ -4,14 +4,13 @@
 //! Use [`run_pipeline_with_report`] when the caller needs the warnings collected
 //! during validation (e.g., the `validate` CLI subcommand).
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::NaiveDate;
 use cobre_core::{System, SystemBuilder};
 
 use crate::{
-    CaseArtifacts, LoadError, LoadedCase,
+    CaseArtifacts, LoadError, LoadedCase, StageIdResolver,
     extensions::load_tailrace_curves,
     report::{ValidationReport, generate_report},
     resolution::{
@@ -21,6 +20,7 @@ use crate::{
     },
     scenarios::assembly::{assemble_inflow_models, assemble_load_models},
     scenarios::residual_derivation::{populate_derived_residual_ratios, resolve_stage_seasons},
+    stages::normalize_out_edge_probabilities,
     validation::{
         ValidationContext,
         dimensional::validate_dimensional_consistency,
@@ -98,6 +98,11 @@ pub(crate) fn run_pipeline_with_artifacts(
     let report = generate_report(&ctx);
     ctx.into_result()?;
 
+    // Normalize once here — after the semantic prob-sum gate and before the graph
+    // reaches any bound; ahead of validation a grossly-wrong vector would normalize
+    // silently instead of being rejected.
+    normalize_out_edge_probabilities(&mut data.stages.policy_graph, &path.join("stages.json"))?;
+
     // Every resolver below indexes its output table by position in these slices
     // (`entity_idx`), which must already equal the position `SystemBuilder::build`'s
     // `sort_canonical` assigns; sorting only after validation keeps validation's
@@ -122,11 +127,9 @@ pub(crate) fn run_pipeline_with_artifacts(
         |n| n.id.0,
     );
 
-    let stage_index: HashMap<i32, usize> = study_stages
-        .iter()
-        .enumerate()
-        .map(|(idx, s)| (s.id, idx))
-        .collect();
+    let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
+    let stage_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+    let stage_index = stage_resolver.index_map();
 
     let penalties = resolve_penalties(
         &PenaltiesEntitySlices {
@@ -136,7 +139,7 @@ pub(crate) fn run_pipeline_with_artifacts(
             ncs_sources: &data.non_controllable_sources,
         },
         n_stages,
-        &stage_index,
+        stage_index,
         &PenaltiesOverrides {
             hydro: &data.penalty_overrides_hydro,
             bus: &data.penalty_overrides_bus,
@@ -171,7 +174,7 @@ pub(crate) fn run_pipeline_with_artifacts(
         },
         n_stages,
         k_max,
-        &stage_index,
+        stage_index,
         &BoundsOverrides {
             hydro: &data.hydro_bounds,
             thermal: &data.thermal_bounds,
@@ -184,7 +187,7 @@ pub(crate) fn run_pipeline_with_artifacts(
     bounds.set_group_overlay(resolve_hydro_unit_group_bounds(
         &data.hydros,
         n_stages,
-        &stage_index,
+        stage_index,
         &data.hydro_unit_group_bounds,
         &blocks_per_stage,
     ));
@@ -201,7 +204,7 @@ pub(crate) fn run_pipeline_with_artifacts(
         &data.ncs_bounds,
         &data.non_controllable_sources,
         n_stages,
-        &stage_index,
+        stage_index,
     );
 
     let resolved_ncs_factors = resolve_ncs_factors(
@@ -268,6 +271,7 @@ pub(crate) fn run_pipeline_with_artifacts(
         .external_scenarios(data.external_scenarios)
         .external_load_scenarios(data.external_load_scenarios)
         .external_ncs_scenarios(data.external_ncs_scenarios)
+        .post_study_stages(data.post_study_stages)
         .build()
         .map_err(|errs| LoadError::ConstraintError {
             description: errs

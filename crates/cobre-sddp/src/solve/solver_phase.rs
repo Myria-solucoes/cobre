@@ -60,7 +60,7 @@ pub struct SolverProfiles {
     /// Resolved backward-pass profile.
     pub backward: ActiveProfile,
     /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
-    /// carrying the opening-block size when the `opening_block` method is
+    /// carrying the opening-block size when the `by_node` method is
     /// selected.
     pub backward_scheduler: BackwardScheduler,
     /// Opening-block-scheduler claim order

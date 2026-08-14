@@ -9,6 +9,303 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-13
+
+### Added
+
+- **`cobre.write_policy_checkpoint(...)`** writes a policy checkpoint to disk
+  from plain Python dicts/sequences, mirroring the shape
+  `cobre.results.load_policy` returns so a loaded checkpoint round-trips (load,
+  edit, write). It exposes the existing Rust writer, keeping the on-disk
+  FlatBuffers layout single-sourced, and lets an external producer author a
+  checkpoint from raw cut data. It validates each cut's coefficient count
+  against the stage's `state_dimension` and each stage's state-data length
+  before writing.
+
+- **A study's temporal structure can declare a policy graph directly, rather
+  than only an implicit stage chain.** `stages.json`'s `policy_graph.nodes[]`
+  lists one entry per decision point — `id`, `stage_id` (the study stage the
+  node sits at), an optional `scenario_id` (the column this node selects from
+  a slot-occupying external-scenario class), and an optional `label` — and
+  `policy_graph.transitions[]`'s `source_id`/`target_id` become node ids once
+  `nodes[]` is non-empty (they stay stage ids otherwise, unchanged). A study
+  that declares no `nodes[]` is a stage chain exactly as before, byte-for-byte.
+  `nodes[]` lives in `stages.json` (JSON, not Parquet) because it is
+  structure, not bulk: the declared graph is `O(K)` nodes for a fan of width
+  `K` or `O(T + K)` for a recombining hybrid over a `T`-stage horizon, and a
+  fully-enumerated `K^T` scenario tree is never written out as an explicit
+  `nodes[]` array — enumeration computes the root-to-leaf path count with
+  checked arithmetic, and a `u64` overflow is a hard setup error. A future
+  input whose size scales with entities, stages, blocks, and scenarios still
+  belongs in Parquet; `nodes[]` is the JSON side's one bounded exception.
+  `transitions[].probability` is the only place a transition probability is
+  declared — there is no `scenario_probabilities.parquet`, and none is
+  planned.
+
+- **Declaring a user-supplied opening tree together with a node graph, or
+  under enumerated forward selection, is rejected.** Setting
+  `training.scenario_source.openings` to `{"source": "file"}` (which reads
+  `scenarios/noise_openings.parquet`) conflicts with a declared
+  `policy_graph.nodes[]`, since `nodes[]` already declares the opening set,
+  and conflicts with an enumerated `training.selection.method`, which
+  consumes external columns rather than a generated or file-sourced opening
+  tree. Both combinations fail to load, naming the conflicting declaration;
+  declare one or the other.
+
+- **Three new external-scenario Parquet files carry pre-computed realizations
+  for a node graph's `scenario_id` columns:**
+  `scenarios/external_inflow_scenarios.parquet`,
+  `scenarios/external_load_scenarios.parquet`, and
+  `scenarios/external_ncs_scenarios.parquet`, one row per
+  `(stage_id, scenario_id, entity_id)`. The loader rejects, rather than
+  silently repairs, several malformed shapes:
+  - a `scenario_id` set that is not exactly `{0..raw_c(t)-1}` for a given
+    entity and stage — a 1-based set such as `{1, 2}` would otherwise load,
+    aliasing stage `t+1`'s realization 0 onto the current stage and
+    zero-filling realization 0;
+  - a row whose `stage_id` names no declared study stage — otherwise
+    silently dropped rather than reported;
+  - two slot-occupying external classes disagreeing on their per-stage raw
+    column count — otherwise reconciled by taking the element-wise minimum,
+    silently truncating the wider class's scenario set to the narrower
+    one's.
+
+- **The `gap` stopping rule and the exact upper bound it depends on.**
+  `training.stopping_rules[]` accepts a `"gap"` entry with `tolerance`
+  and/or `relative_tolerance`, stopping once the clamped canonical-R$ gap
+  between the exact upper bound and the lower bound satisfies either
+  tolerance arm. It is admitted only under enumerated forward selection with
+  an expectation risk measure at every stage; declaring it under sampled
+  forward selection fails with a named error stating that a gap rule admits
+  only enumerated forward selection, and declaring it alongside an
+  effectively risk-averse measure at any stage fails with a named error
+  identifying the offending stage and stating that a gap rule admits only an
+  expectation risk measure at every stage. `training/convergence.parquet`
+  gains `upper_bound_kind`: `"exact"` when the enumerated weighted bound is
+  in force, `"statistical"` otherwise.
+
+- **A `by_node` backward-pass scheduler, alongside the default
+  `by_scenario`.** Setting `training.parallelism.backward_scheduler.method`
+  to `"by_node"`, with an optional `block_size`, reassigns backward-pass work
+  from a whole trial point to a `(trial point, opening-block)` tile;
+  `block_size` sizes the tile and defaults to half the stage's opening
+  count, rounded up.
+
+- **`node_id` on every simulation entity row, and a new
+  `simulation/paths.parquet`.** Every `simulation/` entity Parquet file's row
+  now carries `(scenario_id, stage_id, node_id)` instead of `stage_id` alone;
+  `node_id` is the visited node's declared id, and on a stage chain (no
+  declared `nodes[]`) it equals `stage_id` — the degenerate case, so a
+  consumer reads the column the same way regardless of whether the study
+  declared a graph. The new run-level, unpartitioned `paths.parquet` records
+  the node path each simulated scenario visited, one row per
+  `(scenario_id, stage_id)`.
+
+- **Named expressions in generic constraints.** Declare a linear combination
+  once and reference it by `@name` anywhere an expression or a bound is written;
+  references are inlined at load with cycle detection and coefficient
+  distribution, so the solver still sees a flat term list. A net line flow can be
+  addressed by its `(source_bus, target_bus)` pair.
+
+- **An inline relational right-hand side for generic constraints.** A
+  constraint's `expression` may be written as `lhs <op> rhs` (`<=`, `>=`, `==`).
+  At load the two sides are normalized onto the constraint's interval: every
+  variable term folds onto the left, and constants and parameters fold onto the
+  bound. A parenthesised group scaled by a literal coefficient distributes
+  (`0.5 * (a - b)`). The resolved LP is byte-identical to the hand-flattened
+  one-sided form.
+
+- **A per-`(stage, block)` axis for scalar parameters, usable in bound
+  positions.** A parameter may vary by block as well as stage, and a parameter
+  may supply a constraint's bound (resolved per block) — so a value declared once
+  is referenced by `@name` in many bounds instead of being pre-baked into every
+  row.
+
+- **Resolved generic constraints are written to
+  `generic_constraints/resolved_echo.parquet`,** one row per
+  `(constraint, stage, block, term)`, by both the CLI and the Python bindings —
+  the fully desugared flat form the solver receives, for debugging the authoring
+  layer and comparing against an external producer.
+
+- **A minimum-flow floor for hydro diversion and a min/max band for spillage,**
+  authored as per-`(stage, block)` bound columns alongside the existing entity
+  bounds.
+
+- **A terminal boundary future cost function loaded from an external policy
+  checkpoint (a DECOMP-style right boundary).** `config.json`'s `policy.boundary`
+  points at a previously trained checkpoint (`path`, with an optional
+  `source_stage`); its cuts are injected as fixed boundary conditions at the
+  study's terminal stage, so the horizon is priced against an externally supplied
+  continuation value instead of a zero terminal value. When `source_stage` is
+  omitted it is auto-resolved by calendar overlap against the terminal window.
+  A source anticipated-thermal or water travel-time delivery state is reconciled
+  onto the current study's calendar by dated, hour-weighted fan-out (a monthly
+  source delivering onto a weekly/monthly study), and a per-family reconciliation
+  summary is reported at load. The source is addressed by a single leaf pool; a
+  multi-node source is rejected.
+
+### Changed
+
+- **BREAKING — the policy checkpoint format gains a required version marker;
+  a checkpoint written before this release fails to load.** `metadata.json`
+  now carries `format_version`, checked before any cut, basis, or state
+  payload is parsed; each `.bin` payload now carries a FlatBuffers
+  `file_identifier` (`"CBVF"`). A checkpoint written by an earlier release
+  has neither, and loading it now fails with a named error citing
+  `format_version` and reporting the expected value against the value found
+  in the checkpoint — there is no conversion path. Retrain to produce a new
+  checkpoint. The per-slot entity manifest's delivery marker is also
+  retyped: `EntitySlot`'s `delivery_anchor` (a month-level integer, its
+  calendar encoding left to the caller) is replaced by `delivery_date`, a
+  `YYYYMMDD` calendar date owned by the format itself.
+
+- **BREAKING — `initial_conditions.json`'s `past_anticipated_commitments`
+  are windowed, delivery-anchored records, not a per-lead-stage value
+  array.** Each entry is now a `{thermal_id, start_date, end_date, value_mw}`
+  record — the externally-decided MW rate held constant over the window it
+  declares — replacing the previous `{thermal_id, values_mw: [...]}` shape,
+  whose values were implicitly ordered by delivery lead rather than dated. A
+  deck still carrying `values_mw` is rejected by the file's
+  deny-unknown-fields contract; re-emit the commitment history as dated
+  windows.
+
+- **BREAKING — every simulation output file spells each axis with exactly
+  one canonical name, and `stage_id` never carries a `-1` sentinel.** Bare
+  `stage` is rejected in favor of `stage_id`, bare `opening` in favor of
+  `opening_index`, and `upper_bound_mean` in favor of `upper_bound` (a
+  non-nullable float on `training/convergence.parquet`, unchanged in
+  meaning). A not-applicable `stage_id` — a lower-bound-phase row on
+  `training/solver/iterations.parquet`, for instance — is now `NULL` rather
+  than the previous `-1` sentinel; a consumer that filtered on
+  `stage_id != -1` must switch to a null check.
+
+- **The per-transition discount-rate override moves to `stages[]` under a
+  declared node graph.** `transitions[].annual_discount_rate_override` is
+  rejected once `policy_graph.nodes[]` is non-empty — declare
+  `stages[].annual_discount_rate_override` instead, a per-stage quantity
+  rather than a per-edge one. The chain dialect (no declared `nodes[]`) is
+  unaffected and keeps the transition-level override exactly as before.
+
+- **BREAKING — an unrecognized `risk_measure` string is rejected instead of
+  silently training risk-neutral.** `stages[].risk_measure` accepts only the
+  string `"expectation"` or a `{"cvar": {...}}` object; any other string (a
+  typo such as `"cvar"` without the object form) now fails to load, naming
+  the offending value and the accepted set. Previously any string parsed
+  successfully and was treated as `"expectation"` regardless of its content.
+
+- **BREAKING — a `policy_graph.type` of `"cyclic"` is rejected as
+  reserved.** No engine consumer implements the cyclic (infinite-horizon,
+  periodic) mode; a deck declaring it now fails to load naming the
+  reservation, instead of parsing successfully and then silently training
+  as a finite-horizon chain with a zero terminal value — the declared
+  cyclic type was never read by anything downstream.
+
+- **BREAKING — the scalar-parameters input moved from
+  `system/scalar_parameters.json` to `constraints/generic_parameters.json`,**
+  beside the generic constraints that reference its `@name` parameters. The
+  file's contents and schema are unchanged; only its directory and filename
+  changed. A case still carrying `system/scalar_parameters.json` now fails to
+  load with an error naming `constraints/generic_parameters.json` — a clean
+  break with no silent fallback.
+
+- **BREAKING — a generic constraint's shape is derived from its bounds; the
+  authored `sense` field is removed.** `constraints/generic_constraints.json` no
+  longer carries `"sense"` (a constraint is `{id, name, description, expression,
+slack}`). The shape comes from which endpoints
+  `constraints/generic_constraint_bounds.parquet` supplies per `(stage, block)`,
+  now two nullable columns `bound_lower` / `bound_upper` in place of the single
+  required `bound`: lower-only is `>=`, upper-only is `<=`, both-equal is `==`,
+  and both-present-and-differing is a two-sided range. A file still carrying
+  `"sense"`, or a bounds table still carrying a single `bound` column, fails to
+  load. This lets a constraint's active sides vary by period — one side unbounded
+  in some periods and present in others — without a sentinel value.
+
+### Removed
+
+- **BREAKING — three legacy Parquet input-column spellings are rejected;
+  each concept now has exactly one accepted name.**
+  `scenarios/external_ncs_scenarios.parquet` requires `availability_factor`
+  (the legacy `value` is rejected); `constraints/penalty_overrides_ncs.parquet`
+  requires `ncs_id` (the legacy `source_id` is rejected);
+  `constraints/pumping_bounds.parquet` requires `pumping_station_id` (the
+  legacy `station_id` is rejected). A file still carrying the old name fails
+  to load with a named error reporting the required column by name; rename
+  the column, keeping the data in the same cell.
+
+- **BREAKING — the `trial_point` / `opening_block` backward-scheduler
+  spellings are gone, with no alias.**
+  `training.parallelism.backward_scheduler.method` is now `by_scenario`
+  (renamed from `trial_point`, still the default) or `by_node` (renamed
+  from `opening_block`); a config still using either old spelling fails to
+  load as an unknown enum variant.
+
+- **BREAKING — the per-stage `num_scenarios` field is gone; `num_openings`
+  replaces it.** `stages[].num_openings` names the same within-node opening
+  count `num_scenarios` used to; a `stages.json` still carrying
+  `num_scenarios` is rejected as an unknown field.
+
+- **BREAKING — the root `training.forward_passes` and flat
+  `simulation.num_scenarios` count aliases are gone; `selection` is the sole
+  spelling.** `training.selection.forward_passes` (under a sampled method)
+  and `simulation.selection.num_scenarios` (under a sampled method) are the
+  only accepted homes for the count; a config declaring it at the old flat
+  location is rejected as an unknown field.
+
+### Fixed
+
+- **Reservoir evaporation is scaled by the stage's calendar month, not its stage
+  duration.** The mm·km²/month evaporation rate is converted to m³/s by the
+  calendar month's hours, so a stage deposits only its own share of the month's
+  evaporation rather than a full month's worth on every stage.
+
+- **A commissioning-dormant FPHA hydro no longer aborts the LP build.** A plant
+  whose FPHA production model is not yet commissioned at a stage is gated out of
+  the FPHA index and priced as dormant, instead of reaching an unreachable path.
+
+- **The Windows (`x86_64-pc-windows-msvc`) wheel builds.** The qhull convex-hull
+  shim's diagnostic capture used the POSIX-only `open_memstream`, which left an
+  unresolved symbol at link time on MSVC; it now falls back to a temporary file
+  on Windows.
+
+### Migration
+
+Moving a study from 0.13 to 0.14, in order:
+
+1. **Retrain.** A checkpoint from an earlier release fails to load (a
+   `format_version` mismatch); there is no in-place upgrade for a policy
+   artifact.
+2. **Rename the removed config spellings.** `stages[].num_scenarios` becomes
+   `num_openings`; the root `training.forward_passes` alias becomes
+   `training.selection.forward_passes` under a sampled selection; the flat
+   `simulation.num_scenarios` alias becomes
+   `simulation.selection.num_scenarios` under the same shape;
+   `training.parallelism.backward_scheduler.method` values `trial_point` /
+   `opening_block` become `by_scenario` / `by_node`.
+3. **Rename the three legacy Parquet columns**, keeping the data unchanged:
+   `scenarios/external_ncs_scenarios.parquet`'s `value` becomes
+   `availability_factor`; `constraints/penalty_overrides_ncs.parquet`'s
+   `source_id` becomes `ncs_id`; `constraints/pumping_bounds.parquet`'s
+   `station_id` becomes `pumping_station_id`.
+4. **Re-emit `past_anticipated_commitments`** as dated windows (`start_date`,
+   `end_date`, `value_mw`) instead of a `values_mw` array.
+5. **Adjust any deck relying on a shape that now rejects**: a 1-based or
+   gapped external `scenario_id` set, an out-of-range `stage_id` row,
+   disagreeing per-stage external counts across classes, a misspelled
+   `risk_measure` string, a `policy_graph.type` of `"cyclic"`, or
+   `training.scenario_source.openings` set to `{"source": "file"}` declared
+   alongside `policy_graph.nodes[]` or under enumerated forward selection —
+   each of these previously loaded and produced a wrong or ignored result
+   rather than an error.
+6. **Move the scalar-parameters file** into the constraints directory,
+   contents unchanged:
+   `mkdir -p <case>/constraints && git mv <case>/system/scalar_parameters.json <case>/constraints/generic_parameters.json`.
+7. **Convert generic constraints to the bounds-derived shape.** Drop `"sense"`
+   from every `constraints/generic_constraints.json`. In
+   `constraints/generic_constraint_bounds.parquet`, replace the single `bound`
+   column with nullable `bound_lower` / `bound_upper`: put the old value in
+   `bound_upper` for a former `<=`, in `bound_lower` for a former `>=`, and in
+   both for a former `==`.
+
 ## [0.13.0] - 2026-07-30
 
 ### Added
@@ -2892,7 +3189,9 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/cobre-rs/cobre/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/cobre-rs/cobre/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/cobre-rs/cobre/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/cobre-rs/cobre/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/cobre-rs/cobre/compare/v0.10.0...v0.11.0

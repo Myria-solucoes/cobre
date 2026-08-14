@@ -23,7 +23,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use arrow::array::{
-    Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, UInt32Array,
+    Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, StringArray, UInt32Array,
 };
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -211,8 +211,9 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 /// |--------------------|-----------------|-----------------------------------------------------|
 /// | `iteration`        | `int`           | Iteration number (1-based).                         |
 /// | `lower_bound`      | `float`         | Lower bound on the optimal value.                   |
-/// | `upper_bound_mean` | `float`         | Mean upper bound across forward-pass scenarios.     |
-/// | `upper_bound_std`  | `float`         | Std-dev of the upper bound.                         |
+/// | `upper_bound`      | `float`         | Upper bound estimate (mean if sampled, exact if enumerated). |
+/// | `upper_bound_std`  | `float \| None` | Std-dev of the upper bound (None under an exact bound). |
+/// | `upper_bound_kind` | `str`           | Bound regime: `"statistical"` or `"exact"`.         |
 /// | `gap_percent`      | `float \| None` | Relative gap as a percentage (None if ill-defined). |
 /// | `cuts_added`       | `int`           | Cuts added to the pool this iteration.              |
 /// | `cuts_removed`     | `int`           | Cuts removed from the pool this iteration.          |
@@ -238,7 +239,7 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 ///
 /// rows = cobre.results.load_convergence("output/")
 /// for row in rows:
-///     print(row["iteration"], row["lower_bound"], row["upper_bound_mean"])
+///     print(row["iteration"], row["lower_bound"], row["upper_bound"])
 /// ```
 // too_many_lines: a flat one-pass per-column projection into a Python dict;
 // splitting it would only thread the batch/index/dict through extra call frames.
@@ -277,8 +278,9 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 
         let col_iteration = get_column_by_name::<Int32Array>(&batch, "iteration")?;
         let col_lower_bound = get_column_by_name::<Float64Array>(&batch, "lower_bound")?;
-        let col_upper_bound_mean = get_column_by_name::<Float64Array>(&batch, "upper_bound_mean")?;
+        let col_upper_bound = get_column_by_name::<Float64Array>(&batch, "upper_bound")?;
         let col_upper_bound_std = get_column_by_name::<Float64Array>(&batch, "upper_bound_std")?;
+        let col_upper_bound_kind = get_column_by_name::<StringArray>(&batch, "upper_bound_kind")?;
         let col_gap_percent = get_column_by_name::<Float64Array>(&batch, "gap_percent")?;
         let col_cuts_added = get_column_by_name::<Int32Array>(&batch, "cuts_added")?;
         let col_cuts_removed = get_column_by_name::<Int32Array>(&batch, "cuts_removed")?;
@@ -294,8 +296,13 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 
             row.set_item("iteration", col_iteration.value(i))?;
             row.set_item("lower_bound", col_lower_bound.value(i))?;
-            row.set_item("upper_bound_mean", col_upper_bound_mean.value(i))?;
-            row.set_item("upper_bound_std", col_upper_bound_std.value(i))?;
+            row.set_item("upper_bound", col_upper_bound.value(i))?;
+            if col_upper_bound_std.is_null(i) {
+                row.set_item("upper_bound_std", py.None())?;
+            } else {
+                row.set_item("upper_bound_std", col_upper_bound_std.value(i))?;
+            }
+            row.set_item("upper_bound_kind", col_upper_bound_kind.value(i))?;
 
             if col_gap_percent.is_null(i) {
                 row.set_item("gap_percent", py.None())?;
@@ -345,8 +352,9 @@ pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAn
 /// |---------------------|-------------|----------|
 /// | `iteration`         | Int32        | No       |
 /// | `lower_bound`       | Float64      | No       |
-/// | `upper_bound_mean`  | Float64      | No       |
-/// | `upper_bound_std`   | Float64      | No       |
+/// | `upper_bound`       | Float64      | No       |
+/// | `upper_bound_std`   | Float64      | Yes      |
+/// | `upper_bound_kind`  | Utf8         | No       |
 /// | `gap_percent`       | Float64      | Yes      |
 /// | `cuts_added`        | Int32        | No       |
 /// | `cuts_removed`      | Int32        | No       |
@@ -421,10 +429,7 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
         Ok(buf)
     })?;
 
-    let pa_ipc = py.import("pyarrow.ipc")?;
-    let py_bytes = pyo3::types::PyBytes::new(py, &ipc_bytes);
-    let reader = pa_ipc.call_method1("open_stream", (py_bytes,))?;
-    let table = reader.call_method0("read_all")?;
+    let table = ipc_bytes_to_py_table(py, &ipc_bytes)?;
 
     Ok(table.unbind())
 }
@@ -1057,14 +1062,12 @@ fn read_parquet_partition_into(
     Ok(())
 }
 
-/// Load simulation output rows for one entity type directory into a `PyList` of
-/// dicts (with the `scenario_id` field injected), ordered by `scenario_id`.
-///
-/// Returns an empty list if the directory exists but contains no scenario
-/// subdirectories.
-fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py<PyList>> {
-    let result_list = PyList::empty(py);
-
+/// Collect the `scenario_id=NNNN` subdirectories of `entity_dir`, pairing each
+/// parsed id with its `data.parquet` path, sorted ascending by id for
+/// deterministic output order.
+fn collect_sorted_scenario_entries(
+    entity_dir: &std::path::Path,
+) -> PyResult<Vec<(i64, std::path::PathBuf)>> {
     let read_dir = fs::read_dir(entity_dir).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PyFileNotFoundError::new_err(format!(
@@ -1079,7 +1082,6 @@ fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py
         }
     })?;
 
-    // Sorted below by scenario_id for deterministic output order.
     let mut entries: Vec<(i64, std::path::PathBuf)> = Vec::new();
 
     for dir_entry in read_dir {
@@ -1106,6 +1108,18 @@ fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py
     }
 
     entries.sort_by_key(|(id, _)| *id);
+    Ok(entries)
+}
+
+/// Load simulation output rows for one entity type directory into a `PyList` of
+/// dicts (with the `scenario_id` field injected), ordered by `scenario_id`.
+///
+/// Returns an empty list if the directory exists but contains no scenario
+/// subdirectories.
+fn load_entity_type(py: Python<'_>, entity_dir: &std::path::Path) -> PyResult<Py<PyList>> {
+    let result_list = PyList::empty(py);
+
+    let entries = collect_sorted_scenario_entries(entity_dir)?;
 
     for (scenario_id, parquet_path) in &entries {
         read_parquet_partition_into(py, parquet_path, *scenario_id, &result_list)?;
@@ -1249,6 +1263,22 @@ fn read_parquet_partition_as_batches(
             ))
         })?;
 
+        // The file may already carry a `scenario_id` column (written as a real
+        // column alongside the Hive partition). When it does, it is authoritative
+        // — surface it as-is rather than prepending a second, duplicate column.
+        if batch
+            .schema()
+            .fields()
+            .iter()
+            .any(|f| f.name() == "scenario_id")
+        {
+            if out_schema.is_none() {
+                *out_schema = Some(batch.schema());
+            }
+            out_batches.push(batch);
+            continue;
+        }
+
         let n_rows = batch.num_rows();
         let scenario_id_array = std::sync::Arc::new(Int64Array::from(vec![scenario_id_val; n_rows]))
             as std::sync::Arc<dyn arrow::array::Array>;
@@ -1286,50 +1316,11 @@ fn read_parquet_partition_as_batches(
 fn load_entity_type_as_batch(
     entity_dir: &std::path::Path,
 ) -> PyResult<Option<(RecordBatch, std::sync::Arc<Schema>)>> {
-    let read_dir = fs::read_dir(entity_dir).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            PyFileNotFoundError::new_err(format!(
-                "simulation entity directory not found: {}",
-                entity_dir.display()
-            ))
-        } else {
-            PyOSError::new_err(format!(
-                "failed to read directory {}: {e}",
-                entity_dir.display()
-            ))
-        }
-    })?;
-
-    let mut entries: Vec<(i64, std::path::PathBuf)> = Vec::new();
-
-    for dir_entry in read_dir {
-        let dir_entry = dir_entry.map_err(|e| {
-            PyOSError::new_err(format!("failed to enumerate {}: {e}", entity_dir.display()))
-        })?;
-
-        let file_name = dir_entry.file_name();
-        let name = file_name.to_string_lossy();
-
-        if !name.starts_with("scenario_id=") {
-            continue;
-        }
-
-        let scenario_str = &name["scenario_id=".len()..];
-        let scenario_id: i64 = scenario_str.parse().map_err(|_| {
-            PyOSError::new_err(format!(
-                "malformed scenario directory name '{name}': expected scenario_id=<integer>"
-            ))
-        })?;
-
-        let parquet_path = dir_entry.path().join("data.parquet");
-        entries.push((scenario_id, parquet_path));
-    }
+    let entries = collect_sorted_scenario_entries(entity_dir)?;
 
     if entries.is_empty() {
         return Ok(None);
     }
-
-    entries.sort_by_key(|(id, _)| *id);
 
     let mut all_batches: Vec<RecordBatch> = Vec::new();
     let mut schema: Option<std::sync::Arc<Schema>> = None;
@@ -1365,6 +1356,19 @@ fn batch_to_ipc_bytes(batch: &RecordBatch, schema: &Schema) -> PyResult<Vec<u8>>
         .finish()
         .map_err(|e| PyOSError::new_err(format!("failed to finish IPC stream: {e}")))?;
     Ok(buf)
+}
+
+/// Serialize one entity type's concatenated batch to Arrow IPC bytes, falling
+/// back to a `scenario_id`-only empty schema when the directory has no scenarios
+/// (no Parquet file exists to discover the entity schema from).
+fn entity_type_ipc_bytes(entity_dir: &Path) -> PyResult<Vec<u8>> {
+    if let Some((batch, schema)) = load_entity_type_as_batch(entity_dir)? {
+        batch_to_ipc_bytes(&batch, &schema)
+    } else {
+        let empty_schema = Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
+        let empty_batch = RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
+        batch_to_ipc_bytes(&empty_batch, &empty_schema)
+    }
 }
 
 /// Reconstruct a `pyarrow.Table` from a raw Arrow IPC stream buffer.
@@ -1453,18 +1457,7 @@ pub fn load_simulation_arrow(
     if let Some(ref et) = entity_type {
         let entity_dir = simulation_dir.join(et);
 
-        let ipc_bytes = py.detach(|| -> PyResult<Vec<u8>> {
-            if let Some((batch, schema)) = load_entity_type_as_batch(&entity_dir)? {
-                batch_to_ipc_bytes(&batch, &schema)
-            } else {
-                // Empty directory: scenario_id-only schema, since no Parquet file
-                // exists to discover the entity schema from.
-                let empty_schema =
-                    Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
-                let empty_batch = RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
-                batch_to_ipc_bytes(&empty_batch, &empty_schema)
-            }
-        })?;
+        let ipc_bytes = py.detach(|| entity_type_ipc_bytes(&entity_dir))?;
 
         let table = ipc_bytes_to_py_table(py, &ipc_bytes)?;
         Ok(table.unbind())
@@ -1477,17 +1470,7 @@ pub fn load_simulation_arrow(
                 continue;
             }
 
-            let ipc_bytes = py.detach(|| -> PyResult<Vec<u8>> {
-                if let Some((batch, schema)) = load_entity_type_as_batch(&entity_dir)? {
-                    batch_to_ipc_bytes(&batch, &schema)
-                } else {
-                    let empty_schema =
-                        Schema::new(vec![Field::new("scenario_id", DataType::Int64, false)]);
-                    let empty_batch =
-                        RecordBatch::new_empty(std::sync::Arc::new(empty_schema.clone()));
-                    batch_to_ipc_bytes(&empty_batch, &empty_schema)
-                }
-            })?;
+            let ipc_bytes = py.detach(|| entity_type_ipc_bytes(&entity_dir))?;
 
             let table = ipc_bytes_to_py_table(py, &ipc_bytes)?;
             result.set_item(et, table)?;
@@ -1513,10 +1496,14 @@ pub fn load_simulation_arrow(
 /// ```python
 /// {
 ///     "metadata": {
-///         "version": "1.0.0",
-///         "completed_iterations": 128,
-///         "state_dimension": 4,
-///         ...
+///         "format_version": 1,
+///         "cobre_version": "1.0.0",
+///         "num_stages": 60,
+///         "graph_manifest": { "n_pools": 60, "nodes": [ ... ], "edges": [ ... ] },
+///         "producer": {
+///             "completed_iterations": 128,
+///             ...
+///         },
 ///     },
 ///     "stage_cuts": [
 ///         {
@@ -1525,6 +1512,16 @@ pub fn load_simulation_arrow(
 ///             "capacity": 100,
 ///             "warm_start_count": 0,
 ///             "populated_count": 50,
+///             "entity_manifest": [
+///                 {
+///                     "entity_type": 0,
+///                     "entity_id": 0,
+///                     "subindex": 0,
+///                     "was_active": True,
+///                     "delivery_date": -1,
+///                 },
+///                 ...
+///             ],
 ///             "cuts": [
 ///                 {
 ///                     "cut_id": 0,
@@ -1565,7 +1562,7 @@ pub fn load_simulation_arrow(
 /// import cobre.results
 ///
 /// policy = cobre.results.load_policy("output/")
-/// print(policy["metadata"]["completed_iterations"])
+/// print(policy["metadata"]["producer"]["completed_iterations"])
 /// first_stage_cuts = policy["stage_cuts"][0]["cuts"]
 ///
 /// # Non-default policy_path: pass the sub-directory explicitly.
@@ -1605,6 +1602,22 @@ pub fn load_policy(
         sc_dict.set_item("capacity", into_py(py, sc.capacity)?)?;
         sc_dict.set_item("warm_start_count", into_py(py, sc.warm_start_count)?)?;
         sc_dict.set_item("populated_count", into_py(py, sc.populated_count)?)?;
+
+        // Emit the per-slot entity manifest so a loaded checkpoint round-trips
+        // through `write_policy_checkpoint` (whose binding already accepts this
+        // exact shape). Without it the manifest — present on disk and required by
+        // external boundary-cut authoring — is silently dropped on the read side.
+        let manifest_list = PyList::empty(py);
+        for slot in &sc.entity_manifest {
+            let slot_dict = PyDict::new(py);
+            slot_dict.set_item("entity_type", into_py(py, slot.entity_type)?)?;
+            slot_dict.set_item("entity_id", into_py(py, slot.entity_id)?)?;
+            slot_dict.set_item("subindex", into_py(py, slot.subindex)?)?;
+            slot_dict.set_item("was_active", PyBool::new(py, slot.was_active).to_owned())?;
+            slot_dict.set_item("delivery_date", into_py(py, slot.delivery_date)?)?;
+            manifest_list.append(slot_dict)?;
+        }
+        sc_dict.set_item("entity_manifest", manifest_list)?;
 
         let cuts_list = PyList::empty(py);
         for cut in &sc.cuts {
@@ -1718,7 +1731,7 @@ mod tests {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#
@@ -1737,15 +1750,13 @@ mod tests {
             "scenarios": { "total": 100, "completed": 100, "failed": 0 },
             "cost": {
                 "mean_cost": 789012.0,
-                "std_cost": 4321.0,
-                "cvar": 800000.0,
-                "cvar_alpha": 0.95
+                "std_cost": 4321.0
             },
             "distribution": {
                 "backend": "local",
                 "world_size": 1,
                 "ranks_participated": 1,
-                "num_nodes": 1,
+                "num_hosts": 1,
                 "threads_per_rank": 1
             }
         }"#

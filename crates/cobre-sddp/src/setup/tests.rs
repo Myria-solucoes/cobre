@@ -1,8 +1,16 @@
-use super::{StudySetup, build_contract_prices_per_stage};
+use super::{
+    NodeId, NodePos, PhaseLibraries, ScenarioLibraries, StudySetup, assert_external_library_widths,
+    build_contract_prices_per_stage,
+};
+use crate::SddpError;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::StateSpace;
+use crate::lp_builder::M3S_TO_HM3;
 use crate::test_support;
+use cobre_stochastic::ExternalScenarioLibrary;
+use cobre_stochastic::season_cast::StageCalendar;
 
+use chrono::{Duration, NaiveDate};
 use cobre_core::{
     BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
     ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroStageBounds,
@@ -11,7 +19,8 @@ use cobre_core::{
     ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_core::{
-    ContractType, EnergyContract, EntityId, InitialConditions, SystemBuilder,
+    ContractType, EnergyContract, EntityId, FutureAnticipatedDelivery, HorizonGraph,
+    HydroPastDefluence, InitialConditions, PostStudyStage, PostStudyStages, SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
         hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -19,27 +28,37 @@ use cobre_core::{
     },
     scenario::{InflowHistoryRow, InflowModel, LoadModel, SamplingScheme},
     temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
-        SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, SeasonMap, Stage,
+        StageRiskConfig, StageStateConfig,
     },
 };
 use cobre_io::config::{
     Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
     InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
-    RawClassConfigEntry, RawScenarioSourceConfig, RowSelectionConfig,
-    SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
-    TrainingSolverConfig, UpperBoundEvaluationConfig,
+    RawClassConfigEntry, RawSamplingScheme, RawScenarioSourceConfig, RowSelectionConfig,
+    SimulationConfig as IoSimulationConfig, SimulationSelection, StoppingMode, StoppingRuleConfig,
+    TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 /// Bounds and penalties are non-zero defaults so `build_stage_templates` succeeds.
+fn minimal_system(n_stages: usize) -> cobre_core::System {
+    minimal_system_with_policy_graph(n_stages, HorizonGraph::default())
+}
+
+/// [`minimal_system`]'s body, generalized to accept a caller-supplied
+/// `policy_graph` (a node-native or discount-override fixture, e.g.) instead
+/// of always defaulting to a plain chain.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::items_after_statements
 )]
-fn minimal_system(n_stages: usize) -> cobre_core::System {
+fn minimal_system_with_policy_graph(
+    n_stages: usize,
+    policy_graph: HorizonGraph,
+) -> cobre_core::System {
     use chrono::NaiveDate;
 
     let bus = Bus {
@@ -172,13 +191,9 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -264,6 +279,7 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
         .load_models(load_models)
         .bounds(bounds)
         .penalties(penalties)
+        .policy_graph(policy_graph)
         .build()
         .expect("minimal_system: valid")
 }
@@ -416,13 +432,9 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -496,6 +508,7 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
 fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
     Config {
         schema: None,
+        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::Penalty,
@@ -505,15 +518,15 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
         training: TrainingConfig {
             enabled: true,
             tree_seed: Some(42),
-            forward_passes: Some(forward_passes),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                 limit: max_iterations,
             }]),
-            stopping_mode: "any".to_string(),
+            stopping_mode: StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
+            selection: Some(TrainingSelection::Sampled { forward_passes }),
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig::default(),
@@ -523,32 +536,26 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
     }
 }
 
-/// `inflow_scheme`/`load_scheme`/`ncs_scheme` take the JSON schema scheme values
-/// (`"in_sample"`, `"historical"`, `"external"`, `"out_of_sample"`); `None`
+/// `inflow_scheme`/`load_scheme`/`ncs_scheme` select each class's scheme; `None`
 /// leaves the class at `in_sample`.
 fn minimal_config_with_schemes(
     forward_passes: u32,
     max_iterations: u32,
-    inflow_scheme: Option<&str>,
-    load_scheme: Option<&str>,
-    ncs_scheme: Option<&str>,
+    inflow_scheme: Option<RawSamplingScheme>,
+    load_scheme: Option<RawSamplingScheme>,
+    ncs_scheme: Option<RawSamplingScheme>,
 ) -> Config {
     // A seed is required when any class uses a non-in-sample scheme.
-    let needs_seed = inflow_scheme.is_some_and(|s| s != "in_sample")
-        || load_scheme.is_some_and(|s| s != "in_sample")
-        || ncs_scheme.is_some_and(|s| s != "in_sample");
+    let needs_seed = inflow_scheme.is_some_and(|s| s != RawSamplingScheme::InSample)
+        || load_scheme.is_some_and(|s| s != RawSamplingScheme::InSample)
+        || ncs_scheme.is_some_and(|s| s != RawSamplingScheme::InSample);
     let scenario_source = RawScenarioSourceConfig {
         seed: if needs_seed { Some(42) } else { None },
         historical_years: None,
-        inflow: inflow_scheme.map(|s| RawClassConfigEntry {
-            scheme: s.to_string(),
-        }),
-        load: load_scheme.map(|s| RawClassConfigEntry {
-            scheme: s.to_string(),
-        }),
-        ncs: ncs_scheme.map(|s| RawClassConfigEntry {
-            scheme: s.to_string(),
-        }),
+        inflow: inflow_scheme.map(|scheme| RawClassConfigEntry { scheme }),
+        load: load_scheme.map(|scheme| RawClassConfigEntry { scheme }),
+        ncs: ncs_scheme.map(|scheme| RawClassConfigEntry { scheme }),
+        openings: None,
     };
     let mut config = minimal_config(forward_passes, max_iterations);
     config.training.scenario_source = Some(scenario_source);
@@ -698,7 +705,7 @@ fn fcf_mut_allows_cut_insertion() {
 
     let n_state = setup.stage_data.state.n_state;
     let coefficients = vec![1.0_f64; n_state];
-    setup.fcf.add_cut(0, 0, 0, 42.0, &coefficients);
+    setup.fcf.add_cut(NodeId(0), 0, 0, 0, 42.0, &coefficients);
     assert_eq!(setup.fcf.total_active_cuts(), 1);
 }
 
@@ -1024,12 +1031,227 @@ fn train_generates_cuts_in_fcf() {
     );
 }
 
+/// A 3-stage binary tree (root fanning ×2 at stage 0, ×2 again at stage 1 —
+/// the design's own headline node-native shape, DESIGN-node-native-engine.md's
+/// fixture (b)) loads end-to-end through `StudySetup::new` and constructs
+/// the runtime node graph correctly: node identity/count, the `node → pool`
+/// map with leaf sharing, and canonical (ascending child id) successor lists.
+/// All 7 nodes are generated (`scenario_id: None`).
+///
+/// TODO(per-node-backward-traversal): assert end-to-end branching training
+/// here once per-node opening-to-child-node substrate routing and per-node
+/// pools land. The backward pass still routes openings per STAGE
+/// (`tree_view.n_openings(successor_stage)`), so training this graph panics
+/// today: a node with more than one child duplicates or exceeds that stage's
+/// raw opening count, violating `by_scenario.rs`'s "`solve_order(s)` must be a
+/// permutation of `0..n_openings`" invariant. Chain topologies are unaffected
+/// and stay bit-for-bit pinned by the golden parity suite.
+#[test]
+fn node_native_binary_tree_loads_and_constructs_node_graph() {
+    use cobre_core::temporal::{Node, Transition};
+    use std::collections::HashMap;
+
+    let policy_graph = HorizonGraph {
+        graph_type: PolicyGraphType::FiniteHorizon,
+        annual_discount_rate: 0.0,
+        nodes: vec![
+            Node {
+                id: 0,
+                stage_id: 0,
+                scenario_id: None,
+                label: None,
+            },
+            Node {
+                id: 1,
+                stage_id: 1,
+                scenario_id: None,
+                label: None,
+            },
+            Node {
+                id: 2,
+                stage_id: 1,
+                scenario_id: None,
+                label: None,
+            },
+            Node {
+                id: 3,
+                stage_id: 2,
+                scenario_id: None,
+                label: None,
+            },
+            Node {
+                id: 4,
+                stage_id: 2,
+                scenario_id: None,
+                label: None,
+            },
+            Node {
+                id: 5,
+                stage_id: 2,
+                scenario_id: None,
+                label: None,
+            },
+            Node {
+                id: 6,
+                stage_id: 2,
+                scenario_id: None,
+                label: None,
+            },
+        ],
+        transitions: vec![
+            Transition {
+                source_id: 0,
+                target_id: 1,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 0,
+                target_id: 2,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 1,
+                target_id: 3,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 1,
+                target_id: 4,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 2,
+                target_id: 5,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 2,
+                target_id: 6,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+        ],
+        stage_discount_rate_overrides: HashMap::new(),
+        season_map: None,
+    };
+
+    let system = minimal_system_with_policy_graph(3, policy_graph);
+    let config = minimal_config(1, 1);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup: node-native binary tree must load end-to-end");
+
+    // The runtime node graph mirrors the declared 7-node binary tree: nodes
+    // 0/1/2 have successors and own their own pool; nodes 3/4/5/6 are leaves
+    // and share exactly one pool.
+    assert_eq!(setup.node_graph.nodes.len(), 7);
+    assert_eq!(
+        setup.node_graph.n_pools, 4,
+        "3 internal nodes each own a pool, 4 leaves share one"
+    );
+    // The FCF and its paired cut-state layouts are sized to the pool axis
+    // (`n_pools`), NOT the node count or the stage count (3).
+    assert_eq!(
+        setup.fcf.pools.len(),
+        setup.node_graph.n_pools,
+        "FutureCostFunction.pools is sized to n_pools, not node count or stage count"
+    );
+    assert_eq!(
+        setup.stage_data.cut_state_layouts.len(),
+        setup.node_graph.n_pools,
+        "cut_state_layouts is sized to n_pools, paired 1:1 with fcf.pools"
+    );
+
+    // Canonical (ascending child node id) successor structure, matching the
+    // declared transitions: 0->{1,2}, 1->{3,4}, 2->{5,6}; leaves have none.
+    let child_ids = |pos: usize| -> Vec<NodeId> {
+        setup.node_graph.successors[NodePos(pos)]
+            .iter()
+            .map(|s| setup.node_graph.node_ids[s.child])
+            .collect()
+    };
+    assert_eq!(child_ids(0), vec![NodeId(1), NodeId(2)]);
+    assert_eq!(child_ids(1), vec![NodeId(3), NodeId(4)]);
+    assert_eq!(child_ids(2), vec![NodeId(5), NodeId(6)]);
+    for leaf_pos in 3..7 {
+        assert!(setup.node_graph.successors[NodePos(leaf_pos)].is_empty());
+    }
+}
+
+/// Counterpart to [`node_native_binary_tree_loads_and_constructs_node_graph`]:
+/// on the chain degeneracy (`nodes[]` absent), `StudySetup`'s FCF has exactly
+/// `num_stages` pools and every node's `pool_id` is the identity `t`, so the
+/// pool re-key reduces byte-for-byte to the pre-node-native per-stage FCF.
+#[test]
+fn chain_fcf_pools_len_equals_num_stages_with_pool_id_identity() {
+    let n_stages = 4;
+    let system = minimal_system(n_stages);
+    let config = minimal_config(1, 1);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup: chain must load end-to-end");
+
+    assert_eq!(setup.node_graph.n_pools, n_stages);
+    assert_eq!(setup.fcf.pools.len(), n_stages);
+    assert_eq!(setup.stage_data.cut_state_layouts.len(), n_stages);
+    for t in 0..n_stages {
+        assert_eq!(
+            setup.node_graph.nodes[NodePos(t)].pool_id,
+            t,
+            "chain degeneracy: pool_id must equal stage index {t}"
+        );
+    }
+}
+
 #[test]
 fn simulation_config_reflects_setup_fields() {
     let mut config = minimal_config(1, 5);
     config.simulation = IoSimulationConfig {
         enabled: true,
-        num_scenarios: 50,
+        selection: Some(SimulationSelection::Sampled { num_scenarios: 50 }),
         io_channel_capacity: 16,
         ..IoSimulationConfig::default()
     };
@@ -1165,7 +1387,7 @@ fn simulate_after_train_returns_nonempty_costs() {
     let mut config = minimal_config(1, 3);
     config.simulation = IoSimulationConfig {
         enabled: true,
-        num_scenarios: 3,
+        selection: Some(SimulationSelection::Sampled { num_scenarios: 3 }),
         io_channel_capacity: 8,
         ..IoSimulationConfig::default()
     };
@@ -1234,6 +1456,7 @@ fn study_params_from_config_defaults() {
 
     let config = Config {
         schema: None,
+        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::None,
@@ -1243,13 +1466,13 @@ fn study_params_from_config_defaults() {
         training: TrainingConfig {
             enabled: true,
             tree_seed: None,
-            forward_passes: None,
             stopping_rules: None,
-            stopping_mode: "any".to_string(),
+            stopping_mode: cobre_io::config::StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
+            selection: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig::default(),
@@ -1301,6 +1524,7 @@ fn study_params_from_config_explicit() {
 
     let config = Config {
         schema: None,
+        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::Penalty,
@@ -1310,16 +1534,16 @@ fn study_params_from_config_explicit() {
         training: TrainingConfig {
             enabled: true,
             tree_seed: Some(1234),
-            forward_passes: Some(5),
             stopping_rules: Some(vec![
                 StoppingRuleConfig::IterationLimit { limit: 50 },
                 StoppingRuleConfig::TimeLimit { seconds: 60.0 },
             ]),
-            stopping_mode: "all".to_string(),
+            stopping_mode: cobre_io::config::StoppingMode::All,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
+            selection: Some(TrainingSelection::Sampled { forward_passes: 5 }),
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig {
@@ -1328,7 +1552,7 @@ fn study_params_from_config_explicit() {
         },
         simulation: IoSimulationConfig {
             enabled: true,
-            num_scenarios: 200,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 200 }),
             ..IoSimulationConfig::default()
         },
         exports: ExportsConfig::default(),
@@ -1386,6 +1610,7 @@ fn write_minimal_case_dir(root: &std::path::Path) {
 fn minimal_prepare_config() -> cobre_io::Config {
     Config {
         schema: None,
+        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::None,
@@ -1395,13 +1620,13 @@ fn minimal_prepare_config() -> cobre_io::Config {
         training: TrainingConfig {
             enabled: true,
             tree_seed: None,
-            forward_passes: None,
             stopping_rules: None,
-            stopping_mode: "any".to_string(),
+            stopping_mode: StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
+            selection: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig::default(),
@@ -1683,13 +1908,9 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -2105,13 +2326,9 @@ fn minimal_system_2_hydros_with_history(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -2198,10 +2415,12 @@ fn minimal_system_2_hydros_with_history(
         .inflow_history(inflow_history)
         .bounds(bounds)
         .penalties(penalties)
-        .policy_graph(PolicyGraph {
+        .policy_graph(HorizonGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map,
         })
         .initial_conditions(cobre_core::InitialConditions {
@@ -2210,6 +2429,7 @@ fn minimal_system_2_hydros_with_history(
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("minimal_system_2_hydros_with_history: valid")
@@ -2547,13 +2767,9 @@ fn staggered_dates_system_2_hydros(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -2690,6 +2906,7 @@ fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = staggered_dates_system_2_hydros(1, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -2890,13 +3107,9 @@ fn filling_system_2_hydros(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -3009,6 +3222,7 @@ fn build_initial_state_seeds_filling_storage() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3042,6 +3256,7 @@ fn build_initial_state_filling_empty_pit_is_zero() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 1, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3068,6 +3283,7 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let baseline_system = filling_system_2_hydros(1, 0, baseline_ic);
     let baseline = build_initial_state(&baseline_system, &study_dims, &layout, &[0.0; 4]);
@@ -3081,6 +3297,7 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let state = build_initial_state(&system, &study_dims, &layout, &[0.0; 4]);
@@ -3110,6 +3327,7 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
+        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3270,7 +3488,7 @@ fn build_initial_state_no_lags_state_is_storage_only() {
 }
 
 // -----------------------------------------------------------------------
-// build_initial_state — anticipated_state seed
+// build_initial_state — commit_in seed
 // -----------------------------------------------------------------------
 
 /// `GeometryDims` for 1 hydro, 0 lags, and the given anticipated metadata. The
@@ -3292,6 +3510,20 @@ fn counts_with_anticipated(
         anticipated_thermal_indices: thermal_indices.to_vec(),
         ..Default::default()
     }
+}
+
+/// The `i`-th stage's `[start_date, end_date)` window shared by
+/// `system_with_anticipated_thermals` and
+/// `system_with_two_anticipated_thermals_staggered_dates`: a fixed 31-day
+/// block chained from `2024-01-01`. A window's real calendar span must equal
+/// its stage's declared `duration_hours` (744.0) for `StageCalendar::coverage`
+/// to resolve a whole-stage window at fraction 1.0 — a true calendar month
+/// (28-31 days) would drift against the fixed 744-hour declaration.
+fn anticipated_stage_window(i: usize) -> (chrono::NaiveDate, chrono::NaiveDate) {
+    use chrono::{NaiveDate, TimeDelta};
+    let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(31 * i as i64);
+    let end = start + TimeDelta::days(31);
+    (start, end)
 }
 
 /// N anticipated thermals with the given `lead_stages`; IDs are `10 + i` (kept
@@ -3384,29 +3616,32 @@ fn system_with_anticipated_thermals(
     };
     hydro.declare_mirror_unit_group(EntityId(1));
 
-    let n_stages = 2_usize;
+    let n_stages = 3_usize;
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            let (start_date, end_date) = anticipated_stage_window(i);
+            Stage {
+                index: i,
+                id: i as i32,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
         })
         .collect();
 
@@ -3445,13 +3680,9 @@ fn system_with_anticipated_thermals(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -3543,6 +3774,7 @@ fn system_with_anticipated_thermals(
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_anticipated_thermals: valid")
@@ -3654,29 +3886,32 @@ fn system_with_two_anticipated_thermals_staggered_dates(
     };
     hydro.declare_mirror_unit_group(EntityId(1));
 
-    let n_stages = 2_usize;
+    let n_stages = 3_usize;
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            let (start_date, end_date) = anticipated_stage_window(i);
+            Stage {
+                index: i,
+                id: i as i32,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
         })
         .collect();
 
@@ -3712,13 +3947,9 @@ fn system_with_two_anticipated_thermals_staggered_dates(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -3810,6 +4041,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_two_anticipated_thermals_staggered_dates: valid");
@@ -3836,14 +4068,39 @@ fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_da
     use super::build_initial_state;
     use cobre_core::AnticipatedCommitmentHistory;
 
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let (s2_start, s2_end) = anticipated_stage_window(2);
     let past_commits = vec![
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(10),
-            values_mw: vec![10.0, 20.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 10.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 20.0,
         },
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(11),
-            values_mw: vec![100.0, 200.0, 300.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 100.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 200.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s2_start,
+            end_date: s2_end,
+            value_mw: 300.0,
         },
     ];
     let system = system_with_two_anticipated_thermals_staggered_dates(past_commits);
@@ -3859,7 +4116,7 @@ fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_da
         &[],
     );
 
-    let s = layout.anticipated_slots_out.start;
+    let s = layout.commit_out.start;
     // plant 0 = thermal id=11 (canonical position 0, K=3, own values [100,200,300])
     // plant 1 = thermal id=10 (canonical position 1, K=2, own values [10,20])
     assert!(
@@ -3892,6 +4149,15 @@ fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_da
         "thermal id=10 slot 2 (K=2 padding) should be 0.0, got {}",
         state[s + 5]
     );
+
+    // Numeric neutrality: resolving through StageCalendar::coverage lands
+    // bit-identical (`==`, not an epsilon compare) to a positional per-stage
+    // splice for the same values.
+    assert_eq!(
+        state[s..s + 6],
+        [100.0, 10.0, 200.0, 20.0, 300.0, 0.0],
+        "anticipated seed must be bit-identical to a positional splice"
+    );
 }
 
 #[test]
@@ -3902,7 +4168,7 @@ fn build_initial_state_no_anticipated_state_unchanged() {
     let layout = layout_for_lag_test(1, 0);
 
     assert_eq!(layout.n_anticipated, 0);
-    assert!(layout.anticipated_slots_out.is_empty());
+    assert!(layout.commit_out.is_empty());
 
     let state = build_initial_state(&system, &test_support::study_dims(), &layout, &[]);
 
@@ -3918,7 +4184,7 @@ fn build_initial_state_no_anticipated_state_unchanged() {
     );
 }
 
-/// Slot-major layout (`n_ant=1`), `values_mw = [50.0, 75.0]`:
+/// Slot-major layout (`n_ant=1`), per-stage windowed values `[50.0, 75.0]`:
 ///   slot 0 (`ant_start`)   → 50.0
 ///   slot 1 (`ant_start+1`) → 75.0
 #[test]
@@ -3928,10 +4194,22 @@ fn build_initial_state_single_anticipated_thermal_k2() {
 
     // Thermal ID 10 is the first (and only) anticipated plant.
     // The system thermals() sorts by ID, so global_idx == 0 for ID 10.
-    let past_commits = vec![AnticipatedCommitmentHistory {
-        thermal_id: EntityId(10),
-        values_mw: vec![50.0, 75.0],
-    }];
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let past_commits = vec![
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 50.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 75.0,
+        },
+    ];
     let system = system_with_anticipated_thermals(&[2], past_commits);
 
     let layout = layout_with_anticipated(1, &[2]);
@@ -3948,7 +4226,7 @@ fn build_initial_state_single_anticipated_thermal_k2() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let ant_start = layout.anticipated_slots_out.start;
+    let ant_start = layout.commit_out.start;
     assert!(
         (state[ant_start] - 50.0).abs() < 1e-10,
         "slot 0 expected 50.0, got {}",
@@ -3975,14 +4253,39 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
 
     // Thermal IDs 10 (K=2) and 11 (K=3); sorted ascending so global order
     // in system.thermals() is idx 0 → ID 10, idx 1 → ID 11.
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let (s2_start, s2_end) = anticipated_stage_window(2);
     let past_commits = vec![
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(10),
-            values_mw: vec![10.0, 20.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 10.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 20.0,
         },
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(11),
-            values_mw: vec![100.0, 200.0, 300.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 100.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 200.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s2_start,
+            end_date: s2_end,
+            value_mw: 300.0,
         },
     ];
     let system = system_with_anticipated_thermals(&[2, 3], past_commits);
@@ -4002,7 +4305,7 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
         "state length must equal n_state"
     );
     // offset from ant_start = slot * n_ant + plant.
-    let s = layout.anticipated_slots_out.start;
+    let s = layout.commit_out.start;
 
     assert!(
         (state[s] - 10.0).abs() < 1e-10,
@@ -4056,13 +4359,10 @@ fn build_initial_state_empty_past_commitments_leaves_zeros() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let ant_start = layout.anticipated_slots_out.start;
-    let ant_end = layout.anticipated_slots_out.end;
+    let ant_start = layout.commit_out.start;
+    let ant_end = layout.commit_out.end;
     for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
-        assert!(
-            v.abs() < 1e-10,
-            "anticipated_state slot {i} expected 0.0, got {v}"
-        );
+        assert!(v.abs() < 1e-10, "commit_in slot {i} expected 0.0, got {v}");
     }
 }
 
@@ -4071,9 +4371,12 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
     use super::build_initial_state;
     use cobre_core::AnticipatedCommitmentHistory;
 
+    let (s0_start, s0_end) = anticipated_stage_window(0);
     let past_commits = vec![AnticipatedCommitmentHistory {
         thermal_id: EntityId(99999),
-        values_mw: vec![42.0, 43.0],
+        start_date: s0_start,
+        end_date: s0_end,
+        value_mw: 42.0,
     }];
     let system = system_with_anticipated_thermals(&[2], past_commits);
 
@@ -4091,19 +4394,21 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let ant_start = layout.anticipated_slots_out.start;
-    let ant_end = layout.anticipated_slots_out.end;
+    let ant_start = layout.commit_out.start;
+    let ant_end = layout.commit_out.end;
     for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
         assert!(
             v.abs() < 1e-10,
-            "anticipated_state slot {i} expected 0.0 for unknown ID, got {v}"
+            "commit_in slot {i} expected 0.0 for unknown ID, got {v}"
         );
     }
 }
 
-/// `past_anticipated_commitments` carries `[100.0]` for plant 0 (`K_0=1`) and
-/// `[50.0, 75.0]` for plant 1 (`K_1=2`), each of length `K_i` exactly (the
-/// contract cobre-io's validator enforces in production).
+/// `past_anticipated_commitments` carries one window `100.0` for plant 0
+/// (`K_0=1`, tiling its single leading stage) and two windows `[50.0, 75.0]`
+/// for plant 1 (`K_1=2`, one per leading stage) — each plant's windows tile
+/// its leading `K_i` stages exactly (the contract cobre-io's validator
+/// enforces in production).
 ///
 /// Expected layout (`n_ant = 2`, slot-major):
 ///   - `ant_start + 0*2 + 0` (slot 0, plant 0) -> 100.0  (seed)
@@ -4111,21 +4416,33 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
 ///   - `ant_start + 1*2 + 0` (slot 1, plant 0) ->   0.0  (padding; `K_0=1` < `k_max=2`)
 ///   - `ant_start + 1*2 + 1` (slot 1, plant 1) ->  75.0  (seed)
 ///
-/// The padding-slot `debug_assert!` must not fire — the `.min(k_i)` clamp
-/// prevents writing past slot `K_0=1` on plant 0.
+/// The padding-slot `debug_assert!` must not fire — the `.take(k_i)` clamp on
+/// the resolved coverage iterator prevents writing past slot `K_0=1` on plant 0.
 #[test]
 fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
     use super::build_initial_state;
     use cobre_core::AnticipatedCommitmentHistory;
 
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
     let past_commits = vec![
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(10),
-            values_mw: vec![100.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 100.0,
         },
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(11),
-            values_mw: vec![50.0, 75.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 50.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 75.0,
         },
     ];
     let system = system_with_anticipated_thermals(&[1, 2], past_commits);
@@ -4143,7 +4460,7 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
         layout.n_state,
         "state length must equal n_state"
     );
-    let s = layout.anticipated_slots_out.start;
+    let s = layout.commit_out.start;
     let n_ant = layout.n_anticipated;
     assert_eq!(n_ant, 2);
     assert_eq!(layout.k_max, 2);
@@ -4240,13 +4557,9 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -4473,7 +4786,7 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
 #[test]
 fn historical_library_built_when_scheme_is_historical() {
     let system = system_with_historical_inflow(2);
-    let config = minimal_config_with_schemes(1, 5, Some("historical"), None, None);
+    let config = minimal_config_with_schemes(1, 5, Some(RawSamplingScheme::Historical), None, None);
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -4675,13 +4988,9 @@ fn external_inflow_library_built_when_scheme_is_external() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -4751,7 +5060,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
         .build()
         .expect("system with external inflow: valid");
 
-    let config = minimal_config_with_schemes(1, 5, Some("external"), None, None);
+    let config = minimal_config_with_schemes(1, 5, Some(RawSamplingScheme::External), None, None);
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -4948,13 +5257,9 @@ fn external_load_library_built_when_scheme_is_external() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -5024,7 +5329,7 @@ fn external_load_library_built_when_scheme_is_external() {
         .build()
         .expect("system with external load: valid");
 
-    let config = minimal_config_with_schemes(1, 5, None, Some("external"), None);
+    let config = minimal_config_with_schemes(1, 5, None, Some(RawSamplingScheme::External), None);
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -5061,6 +5366,317 @@ fn external_load_library_built_when_scheme_is_external() {
     assert_eq!(lib.n_stages(), 2);
     assert_eq!(lib.n_scenarios(), 3);
     assert_eq!(lib.entity_class(), "load");
+}
+
+/// A `std_mw = 0.0` (deterministic) load bus under the `External` scheme keeps
+/// a noise-vector slot (`noise_entity_order`'s `std_mw > 0.0 || scheme ==
+/// External` membership rule) — `build_external_load_library` must include it
+/// too, or setup rejects the study (`V3.5`/width mismatch) the moment its
+/// external file carries a row for that bus. End-to-end proof: two buses, one
+/// with `std_mw > 0.0` and one with `std_mw == 0.0`, both present in the
+/// external load rows; setup must succeed and the library must carry both.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_lossless
+)]
+fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
+    use chrono::NaiveDate;
+    use cobre_comm::LocalBackend;
+    use cobre_core::scenario::ExternalLoadRow;
+    use cobre_core::scenario::InflowModel as CoreInflowModel;
+    use cobre_solver::ActiveSolver;
+
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+    let deterministic_bus = Bus {
+        id: EntityId(4),
+        name: "B2".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+    let thermal = Thermal {
+        id: EntityId(2),
+        name: "T1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        bus_id: EntityId(1),
+        min_generation_mw: 0.0,
+        max_generation_mw: 100.0,
+        cost_per_mwh: 50.0,
+        anticipated_config: None,
+        entry_stage_id: None,
+        exit_stage_id: None,
+    };
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
+        id: EntityId(3),
+        name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        downstream_id: None,
+        travel_time_hours: None,
+        entry_stage_id: None,
+        exit_stage_id: None,
+        min_storage_hm3: 0.0,
+        max_storage_hm3: 200.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
+        min_generation_mw: 0.0,
+        max_generation_mw: 250.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: None,
+        penalties: HydroPenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        },
+    };
+    hydro.declare_mirror_unit_group(EntityId(1));
+
+    let stages: Vec<Stage> = (0..2usize)
+        .map(|i| Stage {
+            index: i,
+            id: i as i32,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: None,
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        })
+        .collect();
+
+    let inflow_models: Vec<CoreInflowModel> = (0..2usize)
+        .map(|i| CoreInflowModel {
+            hydro_id: EntityId(3),
+            stage_id: i as i32,
+            mean_m3s: 80.0,
+            std_m3s: 20.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        })
+        .collect();
+
+    let mut load_models: Vec<LoadModel> = Vec::new();
+    for i in 0i32..2 {
+        load_models.push(LoadModel {
+            bus_id: EntityId(1),
+            stage_id: i,
+            mean_mw: 100.0,
+            std_mw: 10.0,
+        });
+        load_models.push(LoadModel {
+            bus_id: EntityId(4),
+            stage_id: i,
+            mean_mw: 50.0,
+            std_mw: 0.0,
+        });
+    }
+
+    let mut external_load_rows: Vec<ExternalLoadRow> = Vec::new();
+    for stage_id in 0i32..2 {
+        for scenario_id in 0i32..3 {
+            external_load_rows.push(ExternalLoadRow {
+                stage_id,
+                scenario_id,
+                bus_id: EntityId(1),
+                value_mw: 90.0 + scenario_id as f64 * 10.0,
+            });
+            external_load_rows.push(ExternalLoadRow {
+                stage_id,
+                scenario_id,
+                bus_id: EntityId(4),
+                value_mw: 50.0,
+            });
+        }
+    }
+
+    let bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 1,
+            n_thermals: 1,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: 2,
+            k_max: 0,
+        },
+        &BoundsDefaults {
+            hydro: HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            },
+            hydro_block: HydroBlockBounds {
+                max_turbined_m3s: 100.0,
+                max_generation_mw: 250.0,
+                ..Default::default()
+            },
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+            },
+            line_block: LineBlockBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping_block: PumpingBlockBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract_block: ContractBlockBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 1,
+            n_buses: 2,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages: 2,
+        },
+        &PenaltiesDefaults {
+            hydro: HydroStagePenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 500.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    let system = SystemBuilder::new()
+        .buses(vec![bus, deterministic_bus])
+        .thermals(vec![thermal])
+        .hydros(vec![hydro])
+        .stages(stages)
+        .inflow_models(inflow_models)
+        .load_models(load_models)
+        .external_load_scenarios(external_load_rows)
+        .bounds(bounds)
+        .penalties(penalties)
+        .build()
+        .expect("system with external load incl. a zero-sigma bus: valid");
+
+    let config = minimal_config_with_schemes(1, 5, None, Some(RawSamplingScheme::External), None);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::External),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let mut setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup must accept a sigma=0 External-scheme load bus");
+
+    let lib = setup
+        .scenario_libraries
+        .training
+        .external_load
+        .as_ref()
+        .expect("expected Some(ExternalScenarioLibrary) for External load scheme");
+    assert_eq!(
+        lib.n_entities(),
+        2,
+        "the zero-sigma bus must occupy a noise-vector slot alongside the nonzero-sigma bus"
+    );
+    assert_eq!(lib.n_stages(), 2);
+    assert_eq!(lib.n_scenarios(), 3);
+    assert_eq!(lib.entity_class(), "load");
+
+    // Train-through smoke: the same setup, bounded by minimal_config_with_schemes's
+    // 5-iteration limit. The thermal (100 MW @ 50/MWh) and deficit segment
+    // (500/MWh) keep every stage trivially feasible.
+    let comm = LocalBackend;
+    let mut solver = ActiveSolver::new().expect("solver");
+    setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("train: a sigma=0 External-scheme load bus must not block training");
 }
 
 #[test]
@@ -5246,13 +5862,9 @@ fn external_ncs_library_built_when_scheme_is_external() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -5324,7 +5936,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
         .build()
         .expect("system with external NCS: valid");
 
-    let config = minimal_config_with_schemes(1, 5, None, None, Some("external"));
+    let config = minimal_config_with_schemes(1, 5, None, None, Some(RawSamplingScheme::External));
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -5509,13 +6121,9 @@ fn historical_library_fails_when_no_valid_windows() {
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -5584,7 +6192,7 @@ fn historical_library_fails_when_no_valid_windows() {
         .build()
         .expect("system: valid");
 
-    let config = minimal_config_with_schemes(1, 5, Some("historical"), None, None);
+    let config = minimal_config_with_schemes(1, 5, Some(RawSamplingScheme::Historical), None, None);
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -5624,10 +6232,11 @@ fn test_simulate_uses_simulation_scheme() {
         seed: Some(99),
         historical_years: None,
         inflow: Some(RawClassConfigEntry {
-            scheme: "out_of_sample".to_string(),
+            scheme: RawSamplingScheme::OutOfSample,
         }),
         load: None,
         ncs: None,
+        openings: None,
     });
 
     let stochastic = build_stochastic_context(
@@ -5677,10 +6286,11 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
         seed: Some(42),
         historical_years: None,
         inflow: Some(RawClassConfigEntry {
-            scheme: "historical".to_string(),
+            scheme: RawSamplingScheme::Historical,
         }),
         load: None,
         ncs: None,
+        openings: None,
     });
 
     // The stochastic context is built for the training scheme (InSample).
@@ -5720,6 +6330,9 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
 /// Like [`minimal_system`] but the thermal carries `anticipated_config` and each
 /// stage's block runs for the matching `stage_hours` entry. `k_max_bounds`
 /// widens the thermal stage-bounds axis for delivery-stage padding.
+/// `future_anticipated_deliveries`/`post_study_stages` thread straight onto the
+/// built system for post-horizon commitment-window fixtures; empty/`None`
+/// reproduces the pre-existing thermal-only system every other caller wants.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -5730,6 +6343,8 @@ fn minimal_system_with_anticipated(
     stage_hours: &[f64],
     anticipated_config: AnticipatedConfig,
     k_max_bounds: usize,
+    future_anticipated_deliveries: Vec<FutureAnticipatedDelivery>,
+    post_study_stages: Option<PostStudyStages>,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -5806,28 +6421,40 @@ fn minimal_system_with_anticipated(
     };
     hydro.declare_mirror_unit_group(EntityId(1));
 
+    // Each stage's real calendar span (whole days, `stage_hours[i] / 24`) must
+    // match its own declared `duration_hours` for `StageCalendar::coverage` to
+    // resolve a whole-stage window at fraction 1.0 — a fixed date range shared
+    // by every stage (the pre-StageCalendar fixture) leaves the calendar
+    // overlapping and violates `StageCalendar::new`'s ordering precondition.
+    let mut stage_cursor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: stage_hours[i],
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            let width_days = (stage_hours[i] / 24.0).round() as i64;
+            let start_date = stage_cursor;
+            let end_date = start_date + chrono::TimeDelta::days(width_days);
+            stage_cursor = end_date;
+            Stage {
+                index: i,
+                id: i as i32,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: stage_hours[i],
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
         })
         .collect();
 
@@ -5865,13 +6492,9 @@ fn minimal_system_with_anticipated(
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -5957,6 +6580,11 @@ fn minimal_system_with_anticipated(
         .load_models(load_models)
         .bounds(bounds)
         .penalties(penalties)
+        .initial_conditions(InitialConditions {
+            future_anticipated_deliveries,
+            ..Default::default()
+        })
+        .post_study_stages(post_study_stages)
         .build()
         .expect("minimal_system_with_anticipated: valid")
 }
@@ -5969,6 +6597,8 @@ fn minimal_system_with_anticipated_lead_stages(
         &vec![744.0; n_stages],
         AnticipatedConfig::LeadStages(lead_stages),
         lead_stages as usize,
+        Vec::new(),
+        None,
     )
 }
 
@@ -6082,6 +6712,8 @@ fn test_anticipated_resolve_point_pmo_calendar() {
         &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
         AnticipatedConfig::LeadTime(720.0),
         6,
+        Vec::new(),
+        None,
     );
     let (resolution, _) = super::resolve_anticipated_commitments(&system);
     let point = &resolution.per_plant[0];
@@ -6106,6 +6738,8 @@ fn test_anticipated_resolve_point_fanout_calendar() {
         &[720.0, 168.0, 168.0, 168.0, 168.0, 168.0],
         AnticipatedConfig::LeadTime(720.0),
         6,
+        Vec::new(),
+        None,
     );
     let (resolution, _) = super::resolve_anticipated_commitments(&system);
     let point = &resolution.per_plant[0];
@@ -6152,12 +6786,12 @@ fn assert_state_layout_finalized(state: &StateSpace) {
         "transit_buckets_out range must match"
     );
     assert_eq!(
-        state.anticipated_state, reference.anticipated_state,
-        "anticipated_state range must match"
+        state.commit_in, reference.commit_in,
+        "commit_in range must match"
     );
     assert_eq!(
-        state.anticipated_slots_out, reference.anticipated_slots_out,
-        "anticipated_slots_out range must match"
+        state.commit_out, reference.commit_out,
+        "commit_out range must match"
     );
     assert_eq!(
         state.z_inflow, reference.z_inflow,
@@ -6201,6 +6835,207 @@ fn stage_data_state_matches_indexer_role_a_uniform() {
     .expect("setup");
 
     assert_state_layout_finalized(&setup.stage_data.state);
+}
+
+/// Given `state_space.inflow_lag_depth` (24) greater than the fitted AR order
+/// (2, from `minimal_system_2_hydros_with_history`'s `ar_coefficients: vec![0.5,
+/// 0.3]`), `resolve_state_layout` must widen BOTH the dense stride
+/// (`max_par_order`) AND the per-hydro activeness mask in lockstep: the
+/// `StateRegion::Lag` mask must contain `24 * hydro_count` active entries, not
+/// `2 * hydro_count` — a regression that fails if the mask is left un-widened
+/// while the dense stride grows (the exact wrong-but-compiling outcome this
+/// lockstep widening exists to prevent).
+#[test]
+fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
+    let system = minimal_system_2_hydros_with_history(3, None, vec![]);
+    let mut config = minimal_config(1, 5);
+    config.state_space.inflow_lag_depth = Some(24);
+
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup with a declared depth exceeding the AR order");
+
+    let state = &setup.stage_data.state;
+    assert_eq!(
+        state.max_par_order, 24,
+        "dense stride must widen to the declared depth (AR order is 2)"
+    );
+
+    let lag_active_count = state
+        .nonzero_state_indices
+        .iter()
+        .filter(|d| state.inflow_lags.contains(&d.get()))
+        .count();
+    assert_eq!(
+        lag_active_count,
+        24 * system.hydros().len(),
+        "lag mask must mark all 24 declared slots active per hydro, not just the AR order"
+    );
+}
+
+/// Given `state_space.inflow_lag_depth` (1) LESS than the fitted AR order (2),
+/// `resolve_state_layout` must never shrink below the AR order: `max(AR order,
+/// declared depth)` floors at AR order, both for the dense stride and for every
+/// hydro's activeness-mask entry.
+#[test]
+fn resolve_state_layout_floors_declared_depth_at_ar_order() {
+    let system = minimal_system_2_hydros_with_history(3, None, vec![]);
+    let mut config = minimal_config(1, 5);
+    config.state_space.inflow_lag_depth = Some(1);
+
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup with a declared depth below the AR order");
+
+    let state = &setup.stage_data.state;
+    assert_eq!(
+        state.max_par_order, 2,
+        "a declared depth below the AR order must not shrink the dense stride"
+    );
+
+    let lag_active_count = state
+        .nonzero_state_indices
+        .iter()
+        .filter(|d| state.inflow_lags.contains(&d.get()))
+        .count();
+    assert_eq!(
+        lag_active_count,
+        2 * system.hydros().len(),
+        "a declared depth below the AR order must leave the mask at the unwidened AR order"
+    );
+}
+
+/// Cross-crate coherence: cobre-io's seed lag depth
+/// (`cobre_io::seed_lag_state_depth`, the formula `max_seed_lag_depth` uses) and
+/// cobre-sddp's `resolve_state_layout` dense stride (`state.max_par_order`) must
+/// return the identical `L_state` under the same declared depth — both apply
+/// `max(AR, declared)`. A drift desyncs the load-time seed derivation from the
+/// runtime state layout. The fixture's fitted AR order is 2 with no annual
+/// component.
+#[test]
+fn cobre_io_seed_depth_matches_resolve_state_layout_depth_under_declared() {
+    const FIXTURE_AR_ORDER: usize = 2;
+
+    for declared in [24u32, 1] {
+        let system = minimal_system_2_hydros_with_history(3, None, vec![]);
+        let mut config = minimal_config(1, 5);
+        config.state_space.inflow_lag_depth = Some(declared);
+
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let setup = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect("setup");
+
+        let io_depth = cobre_io::seed_lag_state_depth(FIXTURE_AR_ORDER, false, Some(declared));
+        assert_eq!(
+            setup.stage_data.state.max_par_order, io_depth,
+            "cobre-io seed depth and resolve_state_layout dense stride must agree at \
+             declared depth {declared}"
+        );
+    }
+}
+
+/// Cross-crate coherence: a `StageIdResolver` built (via the cobre-io
+/// constructor) from a `System`'s study stages agrees, in both directions, with
+/// the canonical `study_stage_ids` slice `StudySetup` carries. Fails if the
+/// resolver's index semantics ever diverge from that slice.
+#[test]
+fn stage_id_resolver_agrees_with_study_stage_ids() {
+    let system = minimal_system_2_hydros_with_history(3, None, vec![]);
+    let config = minimal_config(1, 5);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup");
+
+    // Resolver built independently from the System's study stages.
+    let ids: Vec<i32> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let resolver = cobre_io::StageIdResolver::from_study_stage_ids(&ids);
+
+    assert_eq!(resolver.study_stage_ids(), setup.study_stage_ids.as_slice());
+    for (i, &id) in setup.study_stage_ids.iter().enumerate() {
+        assert_eq!(resolver.resolve(id), Some(i));
+        assert_eq!(resolver.id_at(i), Some(id));
+    }
 }
 
 /// 2-hydro cascade: hydro 2 (upstream) declares a travel-time arc into hydro 1
@@ -6289,28 +7124,38 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
             hydro
         };
 
+    // One 31-day calendar month per stage: `StageCalendar::new` (the
+    // travel-time seed's resolver) requires chronologically ordered,
+    // non-overlapping stage dates — a fixed date range shared by every stage
+    // (the pre-StageCalendar fixture) violates that precondition.
+    let mut stage_cursor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            let start_date = stage_cursor;
+            let end_date = start_date + chrono::Duration::days(31);
+            stage_cursor = end_date;
+            Stage {
+                index: i,
+                id: i as i32,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
         })
         .collect();
 
@@ -6350,13 +7195,9 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
 
     fn default_hydro_block_bounds() -> HydroBlockBounds {
         HydroBlockBounds {
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 250.0,
-            max_diversion_m3s: None,
+            ..Default::default()
         }
     }
 
@@ -6451,6 +7292,7 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_travel_time_arc: valid")
@@ -6572,7 +7414,7 @@ fn stage_data_geometry_role_b_matches_reference_build() {
 }
 
 /// `StageData.state` byte-identity with anticipated thermals present (`K_i = 2`),
-/// exercising the `anticipated_slots_out`/`anticipated_state` ranges.
+/// exercising the `commit_out`/`commit_in` ranges.
 #[test]
 fn stage_data_state_matches_indexer_role_a_anticipated() {
     let system = minimal_system_with_anticipated_lead_stages(2, 2);
@@ -6649,7 +7491,7 @@ fn cut_row_from_state_matches_reference_loop() {
     let coefficients: Vec<f64> = (0..n_state)
         .map(|j| 1.0 + f64::from(u32::try_from(j).expect("state index fits u32")))
         .collect();
-    fcf.add_cut(0, 0, 0, 7.5, &coefficients);
+    fcf.add_cut(NodeId(0), 0, 0, 0, 7.5, &coefficients);
 
     let from_production = build_cut_row_batch(
         &fcf,
@@ -6879,13 +7721,9 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 200.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 200.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -7162,6 +8000,8 @@ fn test_anticipated_resolve_point_k0_uniform_calendar() {
         &[744.0, 744.0, 744.0, 744.0],
         AnticipatedConfig::LeadTime(720.0),
         0,
+        Vec::new(),
+        None,
     );
     let (resolution, lead_stages) = super::resolve_anticipated_commitments(&system);
     let point = &resolution.per_plant[0];
@@ -7195,6 +8035,8 @@ fn resolve_anticipated_commitments_warns_on_k0_sub_stage_lead() {
         &[744.0, 744.0, 744.0, 744.0],
         AnticipatedConfig::LeadTime(720.0),
         0,
+        Vec::new(),
+        None,
     );
 
     let (subscriber, messages) = WarnRecorder::new();
@@ -7254,6 +8096,8 @@ fn warn_on_sub_stage_lead_emits_once_per_self_delivered_stage() {
         &[168.0, 168.0, 168.0, 744.0],
         AnticipatedConfig::LeadTime(200.0),
         0,
+        Vec::new(),
+        None,
     );
 
     let (subscriber, messages) = WarnRecorder::new();
@@ -7298,6 +8142,8 @@ fn lead_time_fanout_rejected_at_setup() {
         &[744.0, 168.0, 168.0],
         AnticipatedConfig::LeadTime(900.0),
         2,
+        Vec::new(),
+        None,
     );
 
     // Sanity: the fixture genuinely fans out (guards the guard's own fixture).
@@ -7348,6 +8194,125 @@ fn lead_time_fanout_rejected_at_setup() {
         msg.contains("not yet supported"),
         "message should state fan-out output is not yet supported, got: {msg}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// resolve_commitment_hold_windows — survivor-indexed post-horizon windows
+// ---------------------------------------------------------------------------
+
+/// The coordinate-space regression this resolution exists to prevent: a
+/// `LeadTime` thermal declares TWO post-horizon windows in ascending
+/// `delivery_start` order. The FIRST's decider precedes the study horizon
+/// (dropped, logged as a warning) and the SECOND survives. Survivor index 0
+/// must describe the SECOND window's `(min_mw, max_mw)` and destination
+/// stage — a raw-index-by-survivor-position implementation would instead
+/// report the dropped first window's data at index 0.
+#[test]
+fn commitment_hold_windows_survivor_index_diverges_from_raw_index_on_a_drop() {
+    let dropped = FutureAnticipatedDelivery {
+        thermal_id: EntityId(2),
+        delivery_start: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        delivery_end: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        min_mw: 1.0,
+        max_mw: 2.0,
+    };
+    let survives = FutureAnticipatedDelivery {
+        thermal_id: EntityId(2),
+        delivery_start: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+        delivery_end: NaiveDate::from_ymd_opt(2024, 3, 11).unwrap(),
+        min_mw: 10.0,
+        max_mw: 20.0,
+    };
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            duration_hours: 240.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+
+    let system = minimal_system_with_anticipated(
+        &[744.0],
+        AnticipatedConfig::LeadTime(1500.0),
+        0,
+        vec![dropped, survives],
+        Some(post_study),
+    );
+
+    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
+
+    assert_eq!(windows.n_commitment, 1, "the first window must be dropped");
+    assert_eq!(
+        windows.min_max[0],
+        (10.0, 20.0),
+        "survivor 0 must describe the SECOND (surviving) window, not the dropped first"
+    );
+    assert_eq!(
+        windows.dest_stage[0], 0,
+        "survivor 0 must resolve to the post-study stage the surviving window covers"
+    );
+}
+
+/// Happy path: a single surviving post-horizon window resolves its
+/// `(min_mw, max_mw)` interval and its destination post-study stage `j` — here
+/// `j == 1`, the SECOND declared post-study stage, ruling out a resolver that
+/// always reports stage 0.
+#[test]
+fn commitment_hold_windows_happy_path_min_max_and_dest_stage() {
+    let delivery = FutureAnticipatedDelivery {
+        thermal_id: EntityId(2),
+        delivery_start: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+        delivery_end: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+        min_mw: 30.0,
+        max_mw: 40.0,
+    };
+    let post_study = PostStudyStages {
+        stages: vec![
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                duration_hours: 744.0,
+            },
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+                duration_hours: 720.0,
+            },
+        ],
+        thermal_bounds: Vec::new(),
+    };
+
+    let system = minimal_system_with_anticipated(
+        &[744.0],
+        AnticipatedConfig::LeadTime(2400.0),
+        0,
+        vec![delivery],
+        Some(post_study),
+    );
+
+    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
+
+    assert_eq!(windows.n_commitment, 1);
+    assert_eq!(windows.min_max[0], (30.0, 40.0));
+    assert_eq!(
+        windows.dest_stage[0], 1,
+        "must resolve into the second post-study stage"
+    );
+}
+
+/// Inert: a study with no `future_anticipated_deliveries` resolves both
+/// survivor arrays empty and `n_commitment == 0`.
+#[test]
+fn commitment_hold_windows_inert_without_deliveries() {
+    let system = minimal_system_with_anticipated(
+        &[744.0],
+        AnticipatedConfig::LeadTime(720.0),
+        0,
+        Vec::new(),
+        None,
+    );
+
+    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
+
+    assert_eq!(windows, super::CommitmentHoldWindows::default());
 }
 
 /// Two anticipated thermals: id=20 non-fanning `LeadStages(1)`, id=21
@@ -7455,15 +8420,7 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
                 filling_min_rate_m3s: 0.0,
                 water_withdrawal_m3s: 0.0,
             },
-            hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
-                max_turbined_m3s: 0.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
-                max_generation_mw: 0.0,
-                max_diversion_m3s: None,
-            },
+            hydro_block: HydroBlockBounds::default(),
             thermal: ThermalStageBounds { cost_per_mwh: 50.0 },
             thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
@@ -7542,6 +8499,7 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("two-thermal fan-out system: valid")
@@ -7678,15 +8636,7 @@ fn zero_bounds_defaults(contract_price: f64) -> BoundsDefaults {
             filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
         },
-        hydro_block: HydroBlockBounds {
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 0.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 0.0,
-            max_diversion_m3s: None,
-        },
+        hydro_block: HydroBlockBounds::default(),
         thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
         thermal_block: ThermalBlockBounds {
             min_generation_mw: 0.0,
@@ -7809,4 +8759,1070 @@ fn test_contract_price_table_carries_per_block_override() {
         vec![80.0, 120.0, 80.0, 80.0, 80.0, 80.0],
         "contract 0 carries the block-1 override ([80, 120, 80]); contract 1's three cells are unaffected"
     );
+}
+
+// ── G2 (rule 49): external-library width assertion ───────────────────────────
+
+/// Build a `ScenarioLibraries` whose training phase carries `inflow` as its
+/// external inflow library and no other external libraries.
+fn scenario_libraries_with_inflow(inflow: Option<ExternalScenarioLibrary>) -> ScenarioLibraries {
+    let empty = || PhaseLibraries {
+        inflow_scheme: SamplingScheme::InSample,
+        load_scheme: SamplingScheme::InSample,
+        ncs_scheme: SamplingScheme::InSample,
+        historical: None,
+        external_inflow: None,
+        external_load: None,
+        external_ncs: None,
+    };
+    let mut training = empty();
+    if inflow.is_some() {
+        training.inflow_scheme = SamplingScheme::External;
+    }
+    training.external_inflow = inflow;
+    ScenarioLibraries {
+        training,
+        simulation: empty(),
+    }
+}
+
+/// A standardized external library whose `n_entities()` disagrees with its
+/// `noise_entity_order` block width is rejected naming the class and both widths.
+#[test]
+fn g2_rejects_external_library_width_mismatch() {
+    use cobre_core::scenario::ScenarioSource;
+
+    // minimal_system has one hydro, so the inflow block width is 1.
+    let system = minimal_system(1);
+    let libs = scenario_libraries_with_inflow(Some(ExternalScenarioLibrary::new(
+        1,
+        2,
+        2,
+        "inflow",
+        vec![2],
+    )));
+    match assert_external_library_widths(&system, &libs, &ScenarioSource::default()) {
+        Err(SddpError::Validation(msg)) => assert!(
+            msg.contains("inflow") && msg.contains('2') && msg.contains('1'),
+            "the error names the class and both widths, got: {msg}"
+        ),
+        other => panic!("expected a width-mismatch Validation error, got {other:?}"),
+    }
+}
+
+/// A library whose width matches the `noise_entity_order` block width passes —
+/// the entity order used is `noise_entity_order`'s, not a re-derivation.
+#[test]
+fn g2_accepts_matching_external_library_width() {
+    use cobre_core::scenario::ScenarioSource;
+
+    let system = minimal_system(1);
+    let libs = scenario_libraries_with_inflow(Some(ExternalScenarioLibrary::new(
+        1,
+        2,
+        1,
+        "inflow",
+        vec![2],
+    )));
+    assert!(
+        assert_external_library_widths(&system, &libs, &ScenarioSource::default()).is_ok(),
+        "a library width matching noise_entity_order's block width must pass"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Admission gate: risk-measure arm, census substrate, enumeration cross-check
+// ---------------------------------------------------------------------------
+
+/// A generated-source runtime node with an `openings.len` of `len`. `pool_id`,
+/// `offset`, and `q` are irrelevant to `enumerated_scenario_count`, which reads
+/// only `stage`, `successors`, and `openings.len`.
+fn ng_node(stage: usize, len: usize) -> super::NodeRuntime {
+    super::NodeRuntime {
+        stage: super::node_graph::StageIdx(stage),
+        pool_id: 0,
+        openings: super::NodeOpenings {
+            source: super::OpeningSource::Generated,
+            offset: 0,
+            len,
+            q: 0.0,
+        },
+    }
+}
+
+fn ng_edge(child: usize) -> super::NodeSuccessor {
+    super::NodeSuccessor {
+        child: NodePos(child),
+        probability: 0.5,
+    }
+}
+
+/// Root (stage 0, |Ω|=2) fans to child A (stage 1, |Ω|=3) → leaf grandchild
+/// (stage 2, |Ω|=5), and directly to leaf B (stage 1, |Ω|=7): the root→leaf
+/// path-product-sum is 2·3·5 + 2·7 = 44. Asymmetric so the test cannot pass a
+/// uniform-fan tautology.
+fn asymmetric_fan_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)].into(),
+        nodes: vec![ng_node(0, 2), ng_node(1, 3), ng_node(2, 5), ng_node(1, 7)].into(),
+        successors: vec![
+            vec![ng_edge(1), ng_edge(3)],
+            vec![ng_edge(2)],
+            vec![],
+            vec![],
+        ]
+        .into(),
+        n_pools: 1,
+        pool_stage: vec![super::node_graph::StageIdx(0)],
+    }
+}
+
+/// A 3-node chain whose per-node |Ω| = 6·10⁹ makes the path product overflow
+/// `u64` (`u64::MAX ≈ 1.8·10¹⁹`, so the first multiply already overflows).
+fn overflowing_chain_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2)].into(),
+        nodes: vec![
+            ng_node(0, 6_000_000_000),
+            ng_node(1, 6_000_000_000),
+            ng_node(2, 6_000_000_000),
+        ]
+        .into(),
+        successors: vec![vec![ng_edge(1)], vec![ng_edge(2)], vec![]].into(),
+        n_pools: 1,
+        pool_stage: vec![super::node_graph::StageIdx(0)],
+    }
+}
+
+fn rules_with_gap() -> crate::stopping_rule::StoppingRuleSet {
+    use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
+    StoppingRuleSet {
+        rules: vec![
+            StoppingRule::IterationLimit { limit: 100 },
+            StoppingRule::Gap {
+                tolerance: Some(1000.0),
+                relative_tolerance: None,
+            },
+        ],
+        mode: StoppingMode::Any,
+    }
+}
+
+fn rules_without_gap() -> crate::stopping_rule::StoppingRuleSet {
+    use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
+    StoppingRuleSet {
+        rules: vec![StoppingRule::IterationLimit { limit: 100 }],
+        mode: StoppingMode::Any,
+    }
+}
+
+/// A `gap` rule under a stage carrying an effective `CVaR` (`lambda > 0`) is
+/// rejected, the message naming the rule, the measure, the offending stage, and
+/// the admitting (expectation) condition.
+#[test]
+fn admission_gate_rejects_gap_under_effective_cvar() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![
+        RiskMeasure::Expectation,
+        RiskMeasure::CVaR {
+            alpha: 0.1,
+            lambda: 0.5,
+        },
+    ];
+    match super::admission_gate(&measures, &rules_with_gap(), true) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("gap"), "names the rule: {msg}");
+            assert!(msg.contains("CVaR"), "names the measure: {msg}");
+            assert!(msg.contains("stage 1"), "names the offending stage: {msg}");
+            assert!(
+                msg.contains("expectation"),
+                "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a Validation reject, got {other:?}"),
+    }
+}
+
+/// `CVaR { lambda: 0 }` is documented-equivalent to `Expectation`, so a `gap`
+/// rule under it is admitted — the effective-measure predicate must not trip.
+#[test]
+fn admission_gate_accepts_gap_under_cvar_lambda_zero() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::CVaR {
+        alpha: 0.1,
+        lambda: 0.0,
+    }];
+    assert!(
+        super::admission_gate(&measures, &rules_with_gap(), true).is_ok(),
+        "CVaR with lambda == 0 is effectively expectation and must admit a gap rule"
+    );
+}
+
+/// A `gap` rule with an expectation measure at every stage is admitted.
+#[test]
+fn admission_gate_accepts_gap_under_all_expectation() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
+    assert!(super::admission_gate(&measures, &rules_with_gap(), true).is_ok());
+}
+
+/// An effective `CVaR` measure with no `gap` rule present is admitted — the arm
+/// gates the pairing, not risk aversion alone.
+#[test]
+fn admission_gate_accepts_cvar_without_gap() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::CVaR {
+        alpha: 0.1,
+        lambda: 0.9,
+    }];
+    assert!(super::admission_gate(&measures, &rules_without_gap(), true).is_ok());
+}
+
+/// The default study shape (expectation everywhere, an iteration-limit rule)
+/// returns `Ok(())` unconditionally — the byte-neutral path.
+#[test]
+fn admission_gate_accepts_default_shape() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::Expectation; 4];
+    assert!(super::admission_gate(&measures, &rules_without_gap(), true).is_ok());
+}
+
+/// A `gap` rule under sampled forward selection (`training_enumerated == false`)
+/// is rejected even with an expectation measure at every stage — the exact upper
+/// bound the gap needs is produced only by the enumerated engine.
+#[test]
+fn admission_gate_rejects_gap_under_sampled_selection() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
+    match super::admission_gate(&measures, &rules_with_gap(), false) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("gap"), "names the rule: {msg}");
+            assert!(
+                msg.contains("sampled"),
+                "names the offending selection: {msg}"
+            );
+            assert!(
+                msg.contains("enumerated"),
+                "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a Validation reject, got {other:?}"),
+    }
+}
+
+/// A `gap` rule under enumerated selection with an expectation measure at every
+/// stage is admitted — the sampled arm gates selection, not the presence of a
+/// gap rule alone.
+#[test]
+fn admission_gate_accepts_gap_under_enumerated_expectation() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
+    assert!(super::admission_gate(&measures, &rules_with_gap(), true).is_ok());
+}
+
+/// `enumerated_scenario_count` returns Σ over root→leaf paths of Π |Ω|: for the
+/// asymmetric fan that is 2·3·5 + 2·7 = 44.
+#[test]
+fn enumerated_scenario_count_returns_path_product_sum() {
+    let ng = asymmetric_fan_node_graph();
+    assert_eq!(
+        super::node_graph::enumerated_scenario_count(&ng).unwrap(),
+        44
+    );
+}
+
+/// `enumerated_scenario_count` returns an overflow `Err` (never a wrapped
+/// count) when the path product exceeds `u64`.
+#[test]
+fn enumerated_scenario_count_errors_on_overflow() {
+    let ng = overflowing_chain_node_graph();
+    match super::node_graph::enumerated_scenario_count(&ng) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("overflow"), "names the overflow: {msg}");
+        }
+        other => panic!("expected an overflow Validation error, got {other:?}"),
+    }
+}
+
+/// Exactly one phase declaring `enumerated` emits an advisory naming both
+/// phases and the specific unavailable capability — never a generic message.
+/// Both asymmetric directions are exercised.
+#[test]
+fn enumeration_asymmetry_warns_naming_both_phases_and_capability() {
+    // Training enumerated, simulation sampled: the weighted simulation
+    // statistics are the missing capability.
+    {
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            super::warn_on_enumeration_asymmetry(true, false);
+        });
+        let recorded = messages.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "exactly one advisory, got: {recorded:?}");
+        let msg = &recorded[0];
+        assert!(
+            msg.contains("training") && msg.contains("simulation"),
+            "names both phases: {msg}"
+        );
+        assert!(
+            msg.contains("simulation statistics"),
+            "names the weighted simulation statistics as unavailable: {msg}"
+        );
+    }
+    // Simulation enumerated, training sampled: the exact lower bound is the
+    // missing capability.
+    {
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            super::warn_on_enumeration_asymmetry(false, true);
+        });
+        let recorded = messages.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "exactly one advisory, got: {recorded:?}");
+        let msg = &recorded[0];
+        assert!(
+            msg.contains("training") && msg.contains("simulation"),
+            "names both phases: {msg}"
+        );
+        assert!(
+            msg.contains("exact lower bound"),
+            "names the exact lower bound as unavailable: {msg}"
+        );
+    }
+}
+
+/// Symmetric declarations (both enumerated, or neither) emit no advisory.
+#[test]
+fn enumeration_asymmetry_symmetric_declarations_do_not_warn() {
+    for (t, s) in [(true, true), (false, false)] {
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            super::warn_on_enumeration_asymmetry(t, s);
+        });
+        let recorded = messages.lock().unwrap();
+        assert!(
+            recorded.is_empty(),
+            "symmetric declaration ({t}, {s}) must not warn, got: {recorded:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// enumerated_admissible_count: the shared guard both enumerated axes call
+// ---------------------------------------------------------------------------
+
+/// Root (stage 0, `|Ω| = 1`) branches structurally to three stage-1 leaves
+/// (each `|Ω| = 1`): a single-predecessor tree with no within-node opening and
+/// no recombination, whose derived scenario count is the leaf count,
+/// `K = 3` — the shape both `resolve_enumerated_training_count` and
+/// `resolve_enumerated_simulation_count` must admit now that the derived-≥-1
+/// census gate is open.
+fn terminal_fan_tree_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)].into(),
+        nodes: vec![ng_node(0, 1), ng_node(1, 1), ng_node(1, 1), ng_node(1, 1)].into(),
+        successors: vec![
+            vec![ng_edge(1), ng_edge(2), ng_edge(3)],
+            vec![],
+            vec![],
+            vec![],
+        ]
+        .into(),
+        n_pools: 1,
+        pool_stage: vec![super::node_graph::StageIdx(0)],
+    }
+}
+
+/// A `K = 3` branching tree is admitted for TRAINING through the shared
+/// guard — unchanged behavior, pinning the R1/R2 refactor byte-neutral.
+#[test]
+fn resolve_enumerated_training_count_admits_branching_tree() {
+    let ng = terminal_fan_tree_node_graph();
+    assert_eq!(super::resolve_enumerated_training_count(&ng).unwrap(), 3);
+}
+
+/// The SAME `K = 3` branching tree is admitted for SIMULATION — the
+/// derived-≥-1 census gate is open, so a non-degenerate leaf-path count
+/// resolves rather than rejects.
+#[test]
+fn resolve_enumerated_simulation_count_admits_branching_tree() {
+    let ng = terminal_fan_tree_node_graph();
+    assert_eq!(super::resolve_enumerated_simulation_count(&ng).unwrap(), 3);
+}
+
+/// A `K^T` overflow propagates unchanged from `enumerated_scenario_count`
+/// through the shared guard — the derived count is unrepresentable, never
+/// silently admitted.
+#[test]
+fn resolve_enumerated_simulation_count_propagates_kt_overflow_guard() {
+    let ng = overflowing_chain_node_graph();
+    match super::resolve_enumerated_simulation_count(&ng) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("overflow"), "names the overflow: {msg}");
+        }
+        other => panic!("expected an overflow Validation error, got {other:?}"),
+    }
+}
+
+/// A 2-node chain whose root carries `|Ω| = 2` (a within-node opening set) and
+/// a singleton-opening leaf: no recombination (the root is the sole
+/// predecessor of its one child), so `reject_within_node_opening_enumeration`
+/// is the guard that fires, not `reject_recombining_node_enumeration`.
+fn within_node_multi_opening_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![NodeId(0), NodeId(1)].into(),
+        nodes: vec![ng_node(0, 2), ng_node(1, 1)].into(),
+        successors: vec![vec![ng_edge(1)], vec![]].into(),
+        n_pools: 1,
+        pool_stage: vec![super::node_graph::StageIdx(0)],
+    }
+}
+
+/// A within-node multi-opening node (`|Ω| > 1`) under enumerated SIMULATION is
+/// a named `Validation` rejection — the sibling requirement to the
+/// recombination guard tested below, both preconditions the exact node-dedup
+/// traversal needs.
+#[test]
+fn resolve_enumerated_simulation_count_rejects_within_node_multi_opening() {
+    let ng = within_node_multi_opening_node_graph();
+    match super::resolve_enumerated_simulation_count(&ng) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("node id 0"), "names the offending node: {msg}");
+            assert!(msg.contains("stage 0"), "names its stage: {msg}");
+            assert!(msg.contains("2 openings"), "names the opening count: {msg}");
+        }
+        other => panic!("expected a within-node-opening Validation error, got {other:?}"),
+    }
+}
+
+/// Root (stage 0) fans to two stage-1 nodes that both point at one stage-2 leaf
+/// (node id 3): that leaf is reached from two distinct parents, so its
+/// in-degree is 2 — a recombination join. Every node carries a singleton
+/// opening set, so the within-node-opening rejection passes and the
+/// recombination guard is what fires.
+fn recombining_tree_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)].into(),
+        nodes: vec![ng_node(0, 1), ng_node(1, 1), ng_node(1, 1), ng_node(2, 1)].into(),
+        successors: vec![
+            vec![ng_edge(1), ng_edge(2)],
+            vec![ng_edge(3)],
+            vec![ng_edge(3)],
+            vec![],
+        ]
+        .into(),
+        n_pools: 1,
+        pool_stage: vec![super::node_graph::StageIdx(0)],
+    }
+}
+
+/// A recombining node (in-degree ≥ 2) under enumerated TRAINING is a named
+/// `Validation` rejection — the release-active guard that stands in for
+/// `build_parent_map`'s single-predecessor `debug_assert`, so the enumerated
+/// engine never reconstructs a multi-parent node's incoming state from one
+/// arbitrary parent.
+#[test]
+fn resolve_enumerated_training_count_rejects_recombining_node() {
+    let ng = recombining_tree_node_graph();
+
+    // Confirm the fixture genuinely recombines before asserting: node id 3 must
+    // be reached by two distinct parents, or the rejection assertion is vacuous.
+    let leaf_in_degree = ng
+        .successors
+        .iter()
+        .flatten()
+        .filter(|s| s.child == NodePos(3))
+        .count();
+    assert_eq!(leaf_in_degree, 2, "fixture must recombine at node id 3");
+
+    match super::resolve_enumerated_training_count(&ng) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("node id 3"), "names the offending node: {msg}");
+            assert!(msg.contains("stage 2"), "names its stage: {msg}");
+            assert!(
+                msg.contains("recombination"),
+                "names the recombination cause: {msg}"
+            );
+        }
+        other => panic!("expected a recombination Validation error, got {other:?}"),
+    }
+}
+
+/// The SAME recombining graph is rejected under enumerated SIMULATION too —
+/// the guard is shared (`enumerated_admissible_count`), so the two axes
+/// cannot admit different graph shapes.
+#[test]
+fn resolve_enumerated_simulation_count_rejects_recombining_node() {
+    let ng = recombining_tree_node_graph();
+    match super::resolve_enumerated_simulation_count(&ng) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("node id 3"), "names the offending node: {msg}");
+            assert!(msg.contains("stage 2"), "names its stage: {msg}");
+            assert!(
+                msg.contains("recombination"),
+                "names the recombination cause: {msg}"
+            );
+        }
+        other => panic!("expected a recombination Validation error, got {other:?}"),
+    }
+}
+
+/// The SAME recombining graph is admitted by the sampled forward's setup-time
+/// consumer (`pool_cut_stride`): sampled carries per-trajectory state and
+/// needs no single-predecessor assumption, so the recombination guard is
+/// enumerated-only.
+#[test]
+fn sampled_admits_the_recombining_node_graph() {
+    let ng = recombining_tree_node_graph();
+    let bound = ng.pool_cut_stride(8);
+    assert_eq!(
+        bound.len(),
+        ng.n_pools,
+        "the sampled visit-bound path consumes the recombining graph without rejection"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// reject_scenario_id_under_sampled_selection: the footgun-close guard
+// ---------------------------------------------------------------------------
+
+/// A runtime node whose `openings.source` is `External` with scenario column
+/// `offset` — the shape a declared node `scenario_id` produces.
+fn ng_external_node(stage: usize, offset: usize) -> super::NodeRuntime {
+    super::NodeRuntime {
+        stage: super::node_graph::StageIdx(stage),
+        pool_id: 0,
+        openings: super::NodeOpenings {
+            source: super::OpeningSource::External,
+            offset,
+            len: 1,
+            q: 1.0,
+        },
+    }
+}
+
+/// Root (stage 0, Generated, node id 7) → child (stage 1, External scenario
+/// column 2, node id 9): the child's `scenario_id` surfaces as an `External`
+/// opening, the shape the sampled-selection guard rejects.
+fn external_pointer_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![NodeId(7), NodeId(9)].into(),
+        nodes: vec![ng_node(0, 3), ng_external_node(1, 2)].into(),
+        successors: vec![vec![ng_edge(1)], vec![]].into(),
+        n_pools: 2,
+        pool_stage: vec![
+            super::node_graph::StageIdx(0),
+            super::node_graph::StageIdx(1),
+        ],
+    }
+}
+
+/// A node carrying a scenario pointer (`External` opening) under sampled forward
+/// selection is a named `Validation` rejection — closing the footgun where a
+/// `scenario_id` under sampled would be validated at load and silently ignored
+/// at solve.
+#[test]
+fn scenario_id_under_sampled_selection_is_rejected_naming_node_and_stage() {
+    let ng = external_pointer_node_graph();
+
+    // Confirm the fixture genuinely carries an external pointer before asserting.
+    assert!(
+        ng.nodes
+            .iter()
+            .any(|n| n.openings.source == super::OpeningSource::External),
+        "fixture must carry an external-bound node"
+    );
+
+    match super::reject_scenario_id_under_sampled_selection(&ng, false) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("node 9"), "names the offending node: {msg}");
+            assert!(msg.contains("stage 1"), "names its stage: {msg}");
+            assert!(
+                msg.contains("enumerated selection"),
+                "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a sampled-selection Validation error, got {other:?}"),
+    }
+}
+
+/// The SAME external-pointer graph is admitted under enumerated selection — the
+/// pointer is legal there (its count resolution is a separate concern).
+#[test]
+fn scenario_id_under_enumerated_selection_is_admitted() {
+    let ng = external_pointer_node_graph();
+    super::reject_scenario_id_under_sampled_selection(&ng, true)
+        .expect("enumerated selection admits a node scenario_id");
+}
+
+// ---------------------------------------------------------------------------
+// reject_insample_class_under_external_nodes: the unsupported-mixed-config guard
+// ---------------------------------------------------------------------------
+
+/// A non-empty in-sample class alongside an external-column node graph is a named
+/// `Validation` rejection: the in-sample class would sample a wrong opening at the
+/// external column offset, so the mixed config is refused at setup rather than
+/// silently mis-sampled.
+#[test]
+fn insample_class_under_external_nodes_is_rejected_naming_class() {
+    let ng = external_pointer_node_graph();
+
+    // Confirm the fixture genuinely carries an external-column node before asserting.
+    assert!(
+        ng.nodes
+            .iter()
+            .any(|n| n.openings.source == super::OpeningSource::External),
+        "fixture must carry an external-column node"
+    );
+
+    match super::reject_insample_class_under_external_nodes(
+        &ng,
+        (Some(SamplingScheme::External), 1),
+        (Some(SamplingScheme::InSample), 1),
+        (Some(SamplingScheme::InSample), 0),
+    ) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("load"), "names the offending class: {msg}");
+            assert!(
+                msg.contains("external"),
+                "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a mixed-config Validation error, got {other:?}"),
+    }
+}
+
+/// The all-external config whose only in-sample class is zero-entity (the
+/// degenerate NCS an all-external study still carries) is admitted — a class that
+/// draws nothing never trips the guard.
+#[test]
+fn all_external_with_empty_insample_ncs_is_admitted() {
+    let ng = external_pointer_node_graph();
+    super::reject_insample_class_under_external_nodes(
+        &ng,
+        (Some(SamplingScheme::External), 1),
+        (Some(SamplingScheme::External), 1),
+        (Some(SamplingScheme::InSample), 0),
+    )
+    .expect("all-external with an empty in-sample NCS class is admitted");
+}
+
+/// A graph with no external-column node admits non-empty in-sample classes: the
+/// guard is gated on external-node presence, so an ordinary generated graph is
+/// never touched.
+#[test]
+fn insample_classes_without_external_nodes_are_admitted() {
+    let ng = asymmetric_fan_node_graph();
+    assert!(
+        ng.nodes
+            .iter()
+            .all(|n| n.openings.source == super::OpeningSource::Generated),
+        "fixture must be all-generated"
+    );
+    super::reject_insample_class_under_external_nodes(
+        &ng,
+        (Some(SamplingScheme::InSample), 1),
+        (Some(SamplingScheme::InSample), 1),
+        (Some(SamplingScheme::InSample), 0),
+    )
+    .expect("a generated-only graph admits in-sample classes");
+}
+
+/// Documented exhaustive-destructure guard (a compile-fail proxy; trybuild is
+/// not wired in this workspace). `is_effective_non_expectation` destructures
+/// `RiskMeasure` and `rule_is_gap` destructures `StoppingRule` with every field
+/// and variant named — no `..` on the gated variants, no `_ =>` arm — so adding
+/// a field to `RiskMeasure::CVaR` / `StoppingRule::Gap`, or a new variant to
+/// either enum, fails to compile until it is dispositioned in those matches.
+/// This test exercises every current arm so the totality is executed, not only
+/// asserted in prose.
+#[test]
+fn admission_gate_predicates_destructure_exhaustively() {
+    use crate::risk_measure::RiskMeasure;
+    use crate::stopping_rule::StoppingRule;
+
+    assert!(!super::is_effective_non_expectation(
+        &RiskMeasure::Expectation
+    ));
+    assert!(!super::is_effective_non_expectation(&RiskMeasure::CVaR {
+        alpha: 0.1,
+        lambda: 0.0,
+    }));
+    assert!(super::is_effective_non_expectation(&RiskMeasure::CVaR {
+        alpha: 0.1,
+        lambda: 0.5,
+    }));
+
+    assert!(super::rule_is_gap(&StoppingRule::Gap {
+        tolerance: Some(1.0),
+        relative_tolerance: None,
+    }));
+    assert!(!super::rule_is_gap(&StoppingRule::IterationLimit {
+        limit: 1
+    }));
+    assert!(!super::rule_is_gap(&StoppingRule::TimeLimit {
+        seconds: 1.0
+    }));
+    assert!(!super::rule_is_gap(&StoppingRule::BoundStalling {
+        tolerance: 0.1,
+        iterations: 1,
+    }));
+    assert!(!super::rule_is_gap(&StoppingRule::GracefulShutdown));
+}
+
+// ---------------------------------------------------------------------------
+// Travel-time bucket seed (`build_initial_transit_bucket_state`)
+// ---------------------------------------------------------------------------
+
+fn bucket_seed_zero_penalties() -> HydroPenalties {
+    HydroPenalties {
+        spillage_cost: 0.0,
+        diversion_cost: 0.0,
+        turbined_cost: 0.0,
+        storage_violation_below_cost: 0.0,
+        filling_target_violation_cost: 0.0,
+        turbined_violation_below_cost: 0.0,
+        outflow_violation_below_cost: 0.0,
+        outflow_violation_above_cost: 0.0,
+        generation_violation_below_cost: 0.0,
+        evaporation_violation_cost: 0.0,
+        water_withdrawal_violation_cost: 0.0,
+        water_withdrawal_violation_pos_cost: 0.0,
+        water_withdrawal_violation_neg_cost: 0.0,
+        evaporation_violation_pos_cost: 0.0,
+        evaporation_violation_neg_cost: 0.0,
+        inflow_nonnegativity_cost: 0.0,
+    }
+}
+
+fn bucket_seed_date(y: i32, m: u32, d: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(y, m, d).unwrap()
+}
+
+fn bucket_seed_hydro(id: i32, downstream_id: Option<i32>, travel_time_hours: Option<f64>) -> Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
+        id: EntityId(id),
+        name: format!("H{id}"),
+        operational_start_date: bucket_seed_date(2024, 1, 1),
+        downstream_id: downstream_id.map(EntityId),
+        travel_time_hours,
+        entry_stage_id: None,
+        exit_stage_id: None,
+        min_storage_hm3: 0.0,
+        max_storage_hm3: 100.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
+        min_generation_mw: 0.0,
+        max_generation_mw: 100.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: None,
+        penalties: bucket_seed_zero_penalties(),
+    };
+    hydro.declare_mirror_unit_group(EntityId(1));
+    hydro
+}
+
+/// `n` study stages (`id = 0..n`), each carrying a single `hours`-long block,
+/// all anchored at `start_0 = 2024-01-01`.
+/// One whole calendar day per stage, independent of `hours`: `NaiveDate` has
+/// no sub-day resolution, and `StageCalendar::hour_window_shares` (the seed's
+/// resolver) reads only each `Stage`'s `duration_hours`, never its calendar
+/// dates — the nominal one-day-per-stage span exists solely to satisfy
+/// `StageCalendar::new`'s chronological-ordering precondition.
+fn bucket_seed_study_stages(n: i32, hours: f64) -> Vec<Stage> {
+    (0..n)
+        .map(|id| {
+            let start_date = bucket_seed_date(2024, 1, 1) + Duration::days(i64::from(id));
+            let end_date = start_date + Duration::days(1);
+            Stage {
+                index: usize::try_from(id).unwrap_or(0),
+                id,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "FLAT".to_string(),
+                    duration_hours: hours,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
+        })
+        .collect()
+}
+
+fn bucket_seed_build_system(
+    hydros: Vec<Hydro>,
+    stages: Vec<Stage>,
+    past_defluences: Vec<HydroPastDefluence>,
+) -> cobre_core::System {
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: bucket_seed_date(2024, 1, 1),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(hydros)
+        .stages(stages)
+        .initial_conditions(InitialConditions {
+            past_defluences,
+            ..InitialConditions::default()
+        })
+        .build()
+        .expect("valid system")
+}
+
+/// `start_0 = 2024-01-01`. A single `past_defluences` window ending
+/// `start_0_minus_hours` before `start_0` and spanning `width_hours`, at rate
+/// `value` m³/s.
+fn bucket_seed_defluence_window(
+    hydro_id: i32,
+    start_0_minus_hours: f64,
+    width_hours: f64,
+    value: f64,
+) -> HydroPastDefluence {
+    let start_0 = bucket_seed_date(2024, 1, 1);
+    let end_date = start_0 - Duration::hours(start_0_minus_hours as i64);
+    let start_date = end_date - Duration::hours(width_hours as i64);
+    HydroPastDefluence {
+        hydro_id: EntityId(hydro_id),
+        start_date,
+        end_date,
+        value_m3s: value,
+    }
+}
+
+/// Single arc, `k = [1/2, 1/2]`, one window `[start_0 − 24h, start_0)` at
+/// 100 m³/s ⇒ `b_1 = k_1 · D = 1/2 · D` (`D` the width-scaled volume,
+/// mirroring how an in-study release is already volume-scaled by `τ`).
+#[test]
+fn test_single_arc_unroll_matches_ac1() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream = bucket_seed_hydro(2, Some(1), Some(24.0));
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream],
+        bucket_seed_study_stages(4, 12.0),
+        vec![bucket_seed_defluence_window(2, 0.0, 24.0, 100.0)],
+    );
+
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system, false);
+    assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
+
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+    assert_eq!(seed.len(), topology.n_buckets);
+
+    let volume = 24.0 * M3S_TO_HM3 * 100.0;
+    assert!(
+        (seed[0] - 0.5 * volume).abs() < 1e-9,
+        "b_1 must equal 1/2 * volume, got {} vs expected {}",
+        seed[0],
+        0.5 * volume
+    );
+}
+
+/// A mid-horizon upstream entrant (`entry_stage_id`
+/// mid-study) supplies a zero-valued `past_defluences` window -- the
+/// physically correct value, since the plant did not exist pre-study --
+/// and every stage-0 bucket the arc feeds comes out zero.
+/// [`super::build_initial_transit_bucket_state`] never reads `entry_stage_id`;
+/// conservation is forced by the input data, not a code branch.
+#[test]
+fn test_mid_horizon_entrant_zero_history_zero_seeds_stage_0_transit_buckets() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let mut upstream = bucket_seed_hydro(2, Some(1), Some(24.0));
+    upstream.entry_stage_id = Some(2);
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream],
+        bucket_seed_study_stages(4, 12.0),
+        vec![bucket_seed_defluence_window(2, 0.0, 24.0, 0.0)],
+    );
+
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system, false);
+    assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
+
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+
+    assert!(
+        seed.iter().all(|&v| v.abs() < 1e-9),
+        "a mid-horizon entrant's zero-valued pre-study history must zero-seed \
+         every stage-0 bucket, got {seed:?}"
+    );
+}
+
+/// Confluence: two upstreams with different `t_v` feeding one downstream
+/// plant sum their unrolled shares into the SAME per-plant bucket block.
+#[test]
+fn test_confluence_aggregates_two_upstreams_into_shared_transit_buckets() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream_a = bucket_seed_hydro(2, Some(1), Some(24.0));
+    let upstream_b = bucket_seed_hydro(3, Some(1), Some(12.0));
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream_a, upstream_b],
+        bucket_seed_study_stages(4, 12.0),
+        vec![
+            bucket_seed_defluence_window(2, 0.0, 24.0, 100.0),
+            bucket_seed_defluence_window(3, 0.0, 24.0, 50.0),
+        ],
+    );
+
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system, false);
+    assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
+
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+
+    let vol_a = 24.0 * M3S_TO_HM3 * 100.0;
+    let vol_b = 24.0 * M3S_TO_HM3 * 50.0;
+    let expected_b1 = 0.5 * vol_a + 0.5 * vol_b;
+    let expected_b2 = 0.5 * vol_a;
+
+    assert!(
+        (seed[0] - expected_b1).abs() < 1e-9,
+        "b_1 must sum both arcs' shares, got {} vs expected {expected_b1}",
+        seed[0]
+    );
+    assert!(
+        (seed[1] - expected_b2).abs() < 1e-9,
+        "b_2 must carry only the deeper arc's share, got {} vs expected {expected_b2}",
+        seed[1]
+    );
+}
+
+/// Declaration-order invariance: swapping the hydro input order must not
+/// change the seed (canonical sort in `SystemBuilder::build` plus the
+/// canonical-index-driven aggregation loop).
+#[test]
+fn test_seed_is_declaration_order_invariant() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream_a = bucket_seed_hydro(2, Some(1), Some(24.0));
+    let upstream_b = bucket_seed_hydro(3, Some(1), Some(12.0));
+    let defluences = vec![
+        bucket_seed_defluence_window(2, 0.0, 24.0, 100.0),
+        bucket_seed_defluence_window(3, 0.0, 24.0, 50.0),
+    ];
+
+    let system_a = bucket_seed_build_system(
+        vec![downstream.clone(), upstream_a.clone(), upstream_b.clone()],
+        bucket_seed_study_stages(4, 12.0),
+        defluences.clone(),
+    );
+    let system_b = bucket_seed_build_system(
+        vec![upstream_b, upstream_a, downstream],
+        bucket_seed_study_stages(4, 12.0),
+        defluences,
+    );
+
+    let topology_a = super::bucket_topology::build_transit_bucket_topology(&system_a, false);
+    let topology_b = super::bucket_topology::build_transit_bucket_topology(&system_b, false);
+    let seed_a = super::build_initial_transit_bucket_state(&system_a, &topology_a);
+    let seed_b = super::build_initial_transit_bucket_state(&system_b, &topology_b);
+
+    assert_eq!(
+        seed_a, seed_b,
+        "seed must be bit-identical across input order"
+    );
+}
+
+/// `seed.len() == B` for every declared topology, including when no arc
+/// is declared at all (`B == 0`).
+#[test]
+fn test_seed_len_matches_n_buckets() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream = bucket_seed_hydro(2, Some(1), Some(24.0));
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream],
+        bucket_seed_study_stages(4, 12.0),
+        vec![bucket_seed_defluence_window(2, 0.0, 24.0, 100.0)],
+    );
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system, false);
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+    assert_eq!(seed.len(), topology.n_buckets);
+
+    let no_arc_downstream = bucket_seed_hydro(1, None, None);
+    let no_arc_system = bucket_seed_build_system(
+        vec![no_arc_downstream],
+        bucket_seed_study_stages(3, 24.0),
+        vec![],
+    );
+    let no_arc_topology =
+        super::bucket_topology::build_transit_bucket_topology(&no_arc_system, false);
+    assert_eq!(no_arc_topology.n_buckets, 0);
+    let no_arc_seed = super::build_initial_transit_bucket_state(&no_arc_system, &no_arc_topology);
+    assert_eq!(no_arc_seed.len(), 0);
+}
+
+/// Two gapped (non-contiguous) windows for the same 72h arc land in
+/// DISJOINT bucket pairs: the recent window `[start_0 − 24h, start_0)`
+/// arrives at buckets 4-5 (`k = [0, 0, 0, 0, 1/2, 1/2]`), the older
+/// window `[start_0 − 72h, start_0 − 48h)` arrives at buckets 0-1
+/// (`k = [1/2, 1/2]`) -- a genuine 24h gap (`[start_0 − 48h,
+/// start_0 − 24h)`) separates the two release windows. Because the
+/// windows land in disjoint buckets, dropping the older one (the bug a
+/// `.find()` in place of `.filter()` would introduce) zeroes buckets 0-1
+/// and fails the assertion below.
+#[test]
+fn test_gapped_windows_contribute_additively() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream = bucket_seed_hydro(2, Some(1), Some(72.0));
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream],
+        bucket_seed_study_stages(6, 12.0),
+        vec![
+            bucket_seed_defluence_window(2, 0.0, 24.0, 100.0),
+            bucket_seed_defluence_window(2, 48.0, 24.0, 40.0),
+        ],
+    );
+
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system, false);
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+
+    let vol_recent = 24.0 * M3S_TO_HM3 * 100.0;
+    let vol_older = 24.0 * M3S_TO_HM3 * 40.0;
+    let study_stages: Vec<Stage> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .cloned()
+        .collect();
+    let calendar = StageCalendar::new(&study_stages);
+    let k_recent = calendar.hour_window_shares(72.0, 0.0, 24.0);
+    let k_older = calendar.hour_window_shares(72.0, 48.0, 24.0);
+
+    let mut expected = vec![0.0_f64; topology.n_buckets];
+    for (d, &k_val) in k_recent.iter().enumerate() {
+        expected[d] += k_val * vol_recent;
+    }
+    for (d, &k_val) in k_older.iter().enumerate() {
+        expected[d] += k_val * vol_older;
+    }
+
+    assert_eq!(seed.len(), expected.len());
+    for (idx, (&got, &want)) in seed.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-9,
+            "bucket {idx}: gapped windows must contribute additively, got {got} vs expected {want}"
+        );
+    }
 }

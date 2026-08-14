@@ -13,8 +13,9 @@
 //! is needed. Buffers pre-allocated in [`CutSyncBuffers::new`] are reused so the
 //! per-stage exchange is allocation-free.
 //!
-//! Serialization/version handling is delegated to [`cut::wire`] (wire version 1);
-//! the version-reject contract lives there, not here.
+//! Serialization/version handling is delegated to [`cut::wire`]; the
+//! version-reject contract (and the per-record generating-node key) lives
+//! there, not here.
 //!
 //! [`cut::wire`]: crate::cut::wire
 
@@ -22,7 +23,11 @@ use cobre_comm::Communicator;
 
 use crate::{
     FutureCostFunction, SddpError,
-    cut::wire::{CutWireHeader, cut_wire_size, deserialize_cuts_from_buffer_into, serialize_cut},
+    cut::wire::{
+        CutWireHeader, CutWireTuple, cut_wire_size, deserialize_cuts_from_buffer_into,
+        serialize_cut,
+    },
+    setup::NodeId,
 };
 
 /// Pre-allocated byte buffers for gathering cut wire records across all MPI
@@ -43,6 +48,7 @@ use crate::{
 /// use cobre_comm::LocalBackend;
 /// use cobre_sddp::cut_sync::CutSyncBuffers;
 /// use cobre_sddp::cut::fcf::FutureCostFunction;
+/// use cobre_sddp::cut::wire::CutWireTuple;
 ///
 /// // Single rank, 2 state dimensions, 2 cuts per rank.
 /// // max_cuts_per_rank must equal the number of cuts actually passed to
@@ -52,9 +58,9 @@ use crate::{
 /// let mut fcf = FutureCostFunction::new(2, 2, 2, 10, &[0; 2]);
 /// let comm = LocalBackend;
 ///
-/// let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[
-///     (0, 1, 0, 10.0, &[1.0, 2.0]),
-///     (0, 1, 1, 20.0, &[3.0, 4.0]),
+/// let local_cuts: &[CutWireTuple<'_>] = &[
+///     (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+///     (0, 0, 1, 1, 20.0, &[3.0, 4.0]),
 /// ];
 ///
 /// let remote_count = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
@@ -78,18 +84,17 @@ pub struct CutSyncBuffers {
     /// `counts[0..r]`.
     displs: Vec<usize>,
 
-    /// Maximum cut-coefficient count across all stages (the global
+    /// Maximum cut-coefficient count across all pools (the global
     /// `StateSpace::n_state`); sizes buffer capacity only.
     ///
-    /// The wire stride for a stage's exchange is
-    /// `cut_wire_size(fcf.pools[stage].state_dimension)` — the pool's own
-    /// per-stage dimension — never this value. A reduced stage carries fewer
+    /// The wire stride for a pool's exchange is
+    /// `cut_wire_size(fcf.pools[pool].state_dimension)` — the pool's own
+    /// dimension — never this value. A reduced pool carries fewer
     /// coefficients than this max, so packing at `max_record_size` while reading
-    /// per-stage coefficient slices would mis-stride every record and corrupt
+    /// per-pool coefficient slices would mis-stride every record and corrupt
     /// remote ranks' deserialized cuts.
     max_n_state: usize,
 
-    /// Total number of MPI ranks.
     num_ranks: usize,
 
     /// Maximum wire record size `cut_wire_size(max_n_state)`; the buffer-capacity
@@ -106,6 +111,25 @@ pub struct CutSyncBuffers {
     /// Deserialization scratch for coefficients (flat layout); grown lazily,
     /// never shrunk.
     deserialize_coefficients_buf: Vec<f64>,
+
+    /// Per-pool `(pool, record_size, n_local)` packing plan built by
+    /// [`Self::sync_level_records`], reused across calls via
+    /// [`std::mem::take`] (never a fresh `Vec::new` per call) so the
+    /// level-batched cut exchange stays allocation-free.
+    level_plan_scratch: Vec<(usize, usize, usize)>,
+
+    /// Gathered per-`(rank, pool)` local cut counts for the current level,
+    /// `num_ranks * pools.len()` entries in rank-major/pool-minor order. Sizing
+    /// each peer's per-pool segment by ITS OWN count is what lets a multi-node
+    /// level spread across >1 rank; a single pool collapses it to the uniform
+    /// per-rank plan, keeping the chain path byte-identical. Counts ride the wire
+    /// as `u64` (`usize` is not an `MpiDatatype`). Grown lazily inside
+    /// [`Self::sync_level_records`], reused across calls (never a hot-path alloc).
+    per_pool_rank_counts: Vec<u64>,
+
+    /// This rank's own per-pool counts, the send buffer for the per-`(rank, pool)`
+    /// count `allgatherv` (length `pools.len()`); reused across calls.
+    pool_count_send_scratch: Vec<u64>,
 }
 
 impl CutSyncBuffers {
@@ -179,20 +203,24 @@ impl CutSyncBuffers {
             per_rank_cuts,
             deserialize_headers_buf: Vec::new(),
             deserialize_coefficients_buf: Vec::new(),
+            level_plan_scratch: Vec::new(),
+            per_pool_rank_counts: Vec::new(),
+            pool_count_send_scratch: Vec::new(),
         }
     }
 
-    /// Synchronize locally generated cuts across all MPI ranks for one stage,
+    /// Synchronize locally generated cuts across all MPI ranks for one pool,
     /// inserting only remote cuts into the FCF (local cuts already inserted by
     /// the backward pass are skipped).
     ///
     /// # Arguments
     ///
-    /// - `stage` — 0-based stage index for which cuts are being synchronized.
-    /// - `local_cuts` — locally generated cuts as `(slot_index, iteration,
-    ///   forward_pass_index, intercept, coefficients)` tuples. The backward
-    ///   pass has already inserted these cuts into the FCF; they are serialized
-    ///   here to send to remote ranks, but are **not** re-inserted locally.
+    /// - `pool` — 0-based pool id for which cuts are being synchronized.
+    /// - `local_cuts` — locally generated cuts as `(slot_index, node_id,
+    ///   iteration, forward_pass_index, intercept, coefficients)` tuples, where
+    ///   `node_id` is the generating node. The backward pass has already
+    ///   inserted these cuts into the FCF; they are serialized here to send to
+    ///   remote ranks, but are **not** re-inserted locally.
     /// - `fcf` — Future Cost Function to receive remote cuts.
     /// - `comm` — communicator for the `allgatherv` call.
     ///
@@ -217,12 +245,12 @@ impl CutSyncBuffers {
     /// # Panics (debug builds only)
     ///
     /// - Panics if `local_cuts.len() * record_size > send_buf.len()`.
-    /// - Panics if any cut's coefficient slice length does not equal the stage's
-    ///   per-stage dimension `fcf.pools[stage].state_dimension`.
+    /// - Panics if any cut's coefficient slice length does not equal the pool's
+    ///   own dimension `fcf.pools[pool].state_dimension`.
     pub fn sync_cuts<C: Communicator>(
         &mut self,
-        stage: usize,
-        local_cuts: &[(u32, u32, u32, f64, &[f64])],
+        pool: usize,
+        local_cuts: &[CutWireTuple<'_>],
         fcf: &mut FutureCostFunction,
         comm: &C,
     ) -> Result<usize, SddpError> {
@@ -231,7 +259,7 @@ impl CutSyncBuffers {
         let expected_for_me = self.per_rank_cuts[my_rank];
         if n_local != expected_for_me {
             return Err(SddpError::Validation(format!(
-                "sync_cuts invariant violated at stage {stage}: rank \
+                "sync_cuts invariant violated at pool {pool}: rank \
                  {my_rank} produced {n_local} cuts, expected \
                  {expected_for_me} per the cut-distribution plan. \
                  Releasing this divergence to allgatherv would corrupt \
@@ -239,13 +267,13 @@ impl CutSyncBuffers {
             )));
         }
 
-        let stage_n_state = fcf.pools[stage].state_dimension;
+        let pool_n_state = fcf.pools[pool].state_dimension;
         debug_assert!(
-            stage_n_state <= self.max_n_state,
-            "stage {stage} dimension {stage_n_state} exceeds buffer-capacity max {}",
+            pool_n_state <= self.max_n_state,
+            "pool {pool} dimension {pool_n_state} exceeds buffer-capacity max {}",
             self.max_n_state
         );
-        let record_size = cut_wire_size(stage_n_state);
+        let record_size = cut_wire_size(pool_n_state);
 
         let send_len = n_local * record_size;
 
@@ -255,18 +283,19 @@ impl CutSyncBuffers {
             self.send_buf.len()
         );
 
-        for (i, &(slot_index, iteration, forward_pass_index, intercept, coefficients)) in
+        for (i, &(slot_index, node_id, iteration, forward_pass_index, intercept, coefficients)) in
             local_cuts.iter().enumerate()
         {
             debug_assert!(
-                coefficients.len() == stage_n_state,
-                "cut {i} coefficient length {} != stage dimension {stage_n_state}",
+                coefficients.len() == pool_n_state,
+                "cut {i} coefficient length {} != pool dimension {pool_n_state}",
                 coefficients.len(),
             );
             let start = i * record_size;
             serialize_cut(
                 &mut self.send_buf[start..start + record_size],
                 slot_index,
+                node_id,
                 iteration,
                 forward_pass_index,
                 intercept,
@@ -274,6 +303,33 @@ impl CutSyncBuffers {
             );
         }
 
+        self.exchange_and_insert_remote_cuts(
+            pool,
+            pool_n_state,
+            record_size,
+            n_local,
+            my_rank,
+            fcf,
+            comm,
+        )
+    }
+
+    /// Exchange one pool's cut records via a single `allgatherv` and insert
+    /// every remote rank's deserialized cuts into `fcf` — the shared tail of
+    /// [`Self::sync_cuts`] and [`Self::sync_packed_records`]: build the
+    /// per-rank counts/displacements, exchange, then deserialize and
+    /// [`FutureCostFunction::add_cut`] every slice but the caller's own rank's.
+    /// Returns the inserted remote-cut count.
+    fn exchange_and_insert_remote_cuts<C: Communicator>(
+        &mut self,
+        pool: usize,
+        pool_n_state: usize,
+        record_size: usize,
+        n_local: usize,
+        my_rank: usize,
+        fcf: &mut FutureCostFunction,
+        comm: &C,
+    ) -> Result<usize, SddpError> {
         for r in 0..self.num_ranks {
             let cuts_for_r = if r == my_rank {
                 n_local
@@ -294,6 +350,7 @@ impl CutSyncBuffers {
             self.recv_buf.len()
         );
 
+        let send_len = n_local * record_size;
         comm.allgatherv(
             &self.send_buf[..send_len],
             &mut self.recv_buf[..recv_len],
@@ -313,18 +370,19 @@ impl CutSyncBuffers {
             let slice = &self.recv_buf[start..end];
             deserialize_cuts_from_buffer_into(
                 slice,
-                stage_n_state,
+                pool_n_state,
                 &mut self.deserialize_headers_buf,
                 &mut self.deserialize_coefficients_buf,
             )?;
             for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
-                let coeff_start = i * stage_n_state;
+                let coeff_start = i * pool_n_state;
                 fcf.add_cut(
-                    stage,
+                    NodeId(header.node_id),
+                    pool,
                     u64::from(header.iteration),
                     header.forward_pass_index,
                     header.intercept,
-                    &self.deserialize_coefficients_buf[coeff_start..coeff_start + stage_n_state],
+                    &self.deserialize_coefficients_buf[coeff_start..coeff_start + pool_n_state],
                 );
                 remote_count += 1;
             }
@@ -346,51 +404,68 @@ impl CutSyncBuffers {
     ///
     /// Panics in debug builds if the number of eligible cuts exceeds the send
     /// buffer capacity.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn pack_local_records(
         &mut self,
         fcf: &FutureCostFunction,
-        stage: usize,
+        pool: usize,
         iteration: u64,
     ) -> usize {
-        let pool = &fcf.pools[stage];
+        let record_size = cut_wire_size(fcf.pools[pool].state_dimension);
+        self.pack_pool_into(fcf, pool, iteration, record_size, 0)
+    }
 
-        // Wire stride is the pool's own per-stage dimension, never the cached
+    /// Serialize `pool`'s active cuts generated at `iteration` into
+    /// `send_buf[send_offset..]` at the pool's own wire stride, returning the
+    /// count packed. Shared by [`Self::pack_local_records`] (offset `0`) and the
+    /// level-batched packing in [`Self::sync_level_records`] (contiguous
+    /// per-pool offsets).
+    #[allow(clippy::cast_possible_truncation)]
+    fn pack_pool_into(
+        &mut self,
+        fcf: &FutureCostFunction,
+        pool: usize,
+        iteration: u64,
+        record_size: usize,
+        send_offset: usize,
+    ) -> usize {
+        let cut_pool = &fcf.pools[pool];
+
+        // Wire stride is the pool's own dimension, never the cached
         // `max_record_size` (see the `max_n_state` field doc): packing at the global
-        // max while the slice below reads `pool.state_dimension` coefficients
-        // mis-strides every record once a stage is reduced.
-        let record_size = cut_wire_size(pool.state_dimension);
+        // max while the slice below reads `cut_pool.state_dimension` coefficients
+        // mis-strides every record once a pool is reduced.
         debug_assert!(
             record_size <= self.max_record_size,
-            "stage {stage} record size {record_size} exceeds buffer-capacity max {}",
+            "record size {record_size} exceeds buffer-capacity max {}",
             self.max_record_size
         );
 
         let mut n_cuts = 0usize;
-        for slot in 0..pool.populated() {
-            if !pool.is_active(slot) {
+        for slot in 0..cut_pool.populated() {
+            if !cut_pool.is_active(slot) {
                 continue;
             }
-            let meta = pool.metadata(slot);
+            let meta = cut_pool.metadata(slot);
             if meta.iteration_generated != iteration {
                 continue;
             }
 
-            let required = (n_cuts + 1) * record_size;
+            let start = send_offset + n_cuts * record_size;
             debug_assert!(
-                required <= self.send_buf.len(),
-                "pack_local_records: {required} bytes required, exceeds send_buf capacity {}",
+                start + record_size <= self.send_buf.len(),
+                "pack_pool_into: {} bytes required, exceeds send_buf capacity {}",
+                start + record_size,
                 self.send_buf.len()
             );
 
-            let start = n_cuts * record_size;
-            let coeffs = pool.coefficient_row(slot);
+            let coeffs = cut_pool.coefficient_row(slot);
             serialize_cut(
                 &mut self.send_buf[start..start + record_size],
                 slot as u32,
+                meta.node.0,
                 iteration as u32,
                 meta.forward_pass_index,
-                pool.intercept(slot),
+                cut_pool.intercept(slot),
                 coeffs,
             );
             n_cuts += 1;
@@ -405,7 +480,7 @@ impl CutSyncBuffers {
     ///
     /// # Arguments
     ///
-    /// - `stage` — 0-based stage index for which cuts are being synchronized.
+    /// - `pool` — 0-based pool id for which cuts are being synchronized.
     /// - `n_local` — number of cuts packed into the send buffer.
     /// - `fcf` — Future Cost Function to receive remote cuts.
     /// - `comm` — communicator for the `allgatherv` call.
@@ -426,7 +501,7 @@ impl CutSyncBuffers {
     /// `allgatherv` call fails.
     pub fn sync_packed_records<C: Communicator>(
         &mut self,
-        stage: usize,
+        pool: usize,
         n_local: usize,
         fcf: &mut FutureCostFunction,
         comm: &C,
@@ -435,7 +510,7 @@ impl CutSyncBuffers {
         let expected_for_me = self.per_rank_cuts[my_rank];
         if n_local != expected_for_me {
             return Err(SddpError::Validation(format!(
-                "sync_cuts invariant violated at stage {stage}: rank \
+                "sync_cuts invariant violated at pool {pool}: rank \
                  {my_rank} produced {n_local} cuts, expected \
                  {expected_for_me} per the cut-distribution plan. \
                  Releasing this divergence to allgatherv would corrupt \
@@ -443,15 +518,15 @@ impl CutSyncBuffers {
             )));
         }
 
-        // Per-stage wire stride, matching what `pack_local_records` packed at (see
+        // Per-pool wire stride, matching what `pack_local_records` packed at (see
         // the `max_n_state` field doc).
-        let stage_n_state = fcf.pools[stage].state_dimension;
+        let pool_n_state = fcf.pools[pool].state_dimension;
         debug_assert!(
-            stage_n_state <= self.max_n_state,
-            "stage {stage} dimension {stage_n_state} exceeds buffer-capacity max {}",
+            pool_n_state <= self.max_n_state,
+            "pool {pool} dimension {pool_n_state} exceeds buffer-capacity max {}",
             self.max_n_state
         );
-        let record_size = cut_wire_size(stage_n_state);
+        let record_size = cut_wire_size(pool_n_state);
 
         let send_len = n_local * record_size;
 
@@ -461,24 +536,199 @@ impl CutSyncBuffers {
             self.send_buf.len()
         );
 
+        self.exchange_and_insert_remote_cuts(
+            pool,
+            pool_n_state,
+            record_size,
+            n_local,
+            my_rank,
+            fcf,
+            comm,
+        )
+    }
+
+    /// Exchange every pool of one reverse-topological cut-sharing level in a
+    /// SINGLE `allgatherv`, inserting only remote cuts (each pool's local cuts
+    /// were already inserted by the node's backward compute). Batching per level
+    /// — never one collective per node — keeps the collective count scaling with
+    /// level count, not node count. Returns `(local_total, remote_total)` cut
+    /// counts summed over the level's pools.
+    ///
+    /// A small integer `allgatherv` first exchanges every rank's per-pool local
+    /// count, so each rank sizes each peer's per-pool segment by ITS OWN count —
+    /// per-pool routing lets a pool's local count differ from the uniform
+    /// per-rank plan (a sibling pool at a multi-node level takes only its own
+    /// visitors). With a single pool the gathered counts collapse to that plan
+    /// and this is byte-for-byte the `pack_local_records` + `sync_packed_records`
+    /// path (identical send bytes, counts, displacements, and remote inserts) —
+    /// the generalization is reached by the counts, never by a shape branch.
+    ///
+    /// `replicated_pools` names the pools whose backward cut was aggregated by
+    /// the replicated per-node solve (`training::backward::replicated`): every
+    /// rank already appended the bit-identical cut locally, so re-distributing it
+    /// here would insert it once per rank — the cut multiplied by rank count, a
+    /// silent wrong bound. Such a pool is EXCLUDED structurally, by aggregation
+    /// kind and never by a cut count (a count heuristic would drop a legitimately
+    /// exchanged cut on a non-replicated pool): it is not packed, not counted in
+    /// the per-`(rank, pool)` exchange, and not deserialized from any peer —
+    /// generalizing the local-rank-segment skip (a replicated pool's segment is
+    /// skipped for EVERY rank, not only the local one). The sampled level driver
+    /// passes `&[]` (its pools are all trial-point-distributed), so the exchange
+    /// is byte-for-byte unchanged there.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SddpError::Validation(_))` only for a MALFORMED count
+    /// exchange — a gathered per-`(rank, pool)` count that overruns the grown
+    /// receive buffer, or a local total disagreeing with the packed total — so a
+    /// corrupt exchange fails loudly rather than deserializing at the wrong
+    /// stride. A well-formed multi-node level whose pools carry differing
+    /// per-`(rank, pool)` counts is exchanged correctly. Returns
+    /// `Err(SddpError::Communication(_))` if either underlying `allgatherv` fails.
+    pub fn sync_level_records<C: Communicator>(
+        &mut self,
+        pools: &[usize],
+        replicated_pools: &[usize],
+        fcf: &mut FutureCostFunction,
+        iteration: u64,
+        comm: &C,
+    ) -> Result<(usize, usize), SddpError> {
+        let my_rank = comm.rank();
+        let expected_for_me = self.per_rank_cuts[my_rank];
+        let is_replicated = |pool: usize| replicated_pools.contains(&pool);
+
+        // Grow the send/recv buffers to the level's total across its pools when a
+        // multi-pool level exceeds the per-pool capacity the constructor sized —
+        // a no-op on the single-pool levels the shipped shape produces, so the
+        // chain path never resizes and stays byte-identical. `expected_for_me`
+        // and `total_cuts_all_ranks` are safe UPPER bounds: a rank's per-pool
+        // counts sum to at most its own total, so the actual send/recv lengths
+        // never exceed these.
+        let total_cuts_all_ranks: usize = self.per_rank_cuts.iter().sum();
+        let mut needed_send = 0usize;
+        let mut needed_recv = 0usize;
+        for &pool in pools {
+            if is_replicated(pool) {
+                continue;
+            }
+            let record_size = cut_wire_size(fcf.pools[pool].state_dimension);
+            needed_send += expected_for_me * record_size;
+            needed_recv += total_cuts_all_ranks * record_size;
+        }
+        if self.send_buf.len() < needed_send {
+            self.send_buf.resize(needed_send, 0);
+        }
+        if self.recv_buf.len() < needed_recv {
+            self.recv_buf.resize(needed_recv, 0);
+        }
+
+        // Pack every non-replicated pool's local records contiguously
+        // (pool-major), recording each pool's (record_size, n_local) for the
+        // count/deserialize passes. Taken out of `level_plan_scratch` (never a
+        // fresh `Vec::new`) so `pack_pool_into` can borrow `self` mutably below;
+        // restored just before returning `Ok`. `n_pools` is the packed
+        // (non-replicated) count — the width every downstream pass indexes by.
+        let mut plan = std::mem::take(&mut self.level_plan_scratch);
+        plan.clear();
+        let mut send_len = 0usize;
+        let mut local_total = 0usize;
+        for &pool in pools {
+            if is_replicated(pool) {
+                continue;
+            }
+            let pool_n_state = fcf.pools[pool].state_dimension;
+            debug_assert!(
+                pool_n_state <= self.max_n_state,
+                "pool {pool} dimension {pool_n_state} exceeds buffer-capacity max {}",
+                self.max_n_state
+            );
+            let record_size = cut_wire_size(pool_n_state);
+            let n_local = self.pack_pool_into(fcf, pool, iteration, record_size, send_len);
+            send_len += n_local * record_size;
+            local_total += n_local;
+            plan.push((pool, record_size, n_local));
+        }
+        let n_pools = plan.len();
+
+        // Exchange every rank's per-pool local count (a small uniform integer
+        // `allgatherv`, `n_pools` per rank) so each peer's per-pool byte segment
+        // below is sized by ITS OWN count. Counts ride the wire as `u64`; the
+        // per-rank byte `counts`/`displs` are reused as the uniform integer
+        // layout here, then recomputed for the byte `allgatherv`.
+        self.pool_count_send_scratch.clear();
+        self.pool_count_send_scratch
+            .extend(plan.iter().map(|&(_, _, n_local)| n_local as u64));
+        let gathered = self.num_ranks * n_pools;
+        if self.per_pool_rank_counts.len() < gathered {
+            self.per_pool_rank_counts.resize(gathered, 0);
+        }
         for r in 0..self.num_ranks {
-            let cuts_for_r = if r == my_rank {
-                n_local
-            } else {
-                self.per_rank_cuts[r]
-            };
-            self.counts[r] = cuts_for_r * record_size;
+            self.counts[r] = n_pools;
+            self.displs[r] = r * n_pools;
+        }
+        comm.allgatherv(
+            &self.pool_count_send_scratch,
+            &mut self.per_pool_rank_counts[..gathered],
+            &self.counts,
+            &self.displs,
+        )?;
+
+        // A corrupt exchange must fail loudly, never deserialize at the wrong
+        // stride: this rank's own gathered segment must echo what it packed.
+        let mut my_gathered_total = 0usize;
+        for pool_idx in 0..n_pools {
+            my_gathered_total +=
+                usize::try_from(self.per_pool_rank_counts[my_rank * n_pools + pool_idx]).map_err(
+                    |_| malformed_count_exchange(&format!("rank {my_rank} count exceeds usize")),
+                )?;
+        }
+        if my_gathered_total != local_total {
+            return Err(malformed_count_exchange(&format!(
+                "rank {my_rank} gathered total {my_gathered_total} disagrees with packed local total {local_total}"
+            )));
+        }
+
+        // Size the byte `allgatherv` per `(rank, pool)` from the gathered counts,
+        // rejecting a malformed count (overflow, or a total that overruns the
+        // grown receive buffer). A single pool collapses this to
+        // `per_rank_cuts[r] * record_size` — byte-identical to the chain path.
+        for r in 0..self.num_ranks {
+            let mut bytes = 0usize;
+            for (pool_idx, &(_, record_size, _)) in plan.iter().enumerate() {
+                let cuts_for_r = usize::try_from(self.per_pool_rank_counts[r * n_pools + pool_idx])
+                    .map_err(|_| {
+                        malformed_count_exchange(&format!("rank {r} count exceeds usize"))
+                    })?;
+                let seg = cuts_for_r.checked_mul(record_size).ok_or_else(|| {
+                    malformed_count_exchange(&format!("rank {r} per-pool byte count overflows"))
+                })?;
+                bytes = bytes.checked_add(seg).ok_or_else(|| {
+                    malformed_count_exchange(&format!("rank {r} byte total overflows"))
+                })?;
+            }
+            self.counts[r] = bytes;
         }
         self.displs[0] = 0;
         for r in 1..self.num_ranks {
             self.displs[r] = self.displs[r - 1] + self.counts[r - 1];
         }
 
-        let recv_len: usize = self.counts.iter().sum();
+        let mut recv_len = 0usize;
+        for r in 0..self.num_ranks {
+            recv_len = recv_len.checked_add(self.counts[r]).ok_or_else(|| {
+                malformed_count_exchange(&format!("receive total overflows at rank {r}"))
+            })?;
+        }
+        if recv_len > self.recv_buf.len() {
+            return Err(malformed_count_exchange(&format!(
+                "gathered counts need {recv_len} bytes, exceeding receive buffer capacity {}",
+                self.recv_buf.len()
+            )));
+        }
         debug_assert!(
-            recv_len <= self.recv_buf.len(),
-            "recv_len {recv_len} exceeds recv_buf capacity {}",
-            self.recv_buf.len()
+            send_len <= self.send_buf.len(),
+            "send_len {send_len} exceeds send_buf capacity {}",
+            self.send_buf.len()
         );
 
         comm.allgatherv(
@@ -488,38 +738,49 @@ impl CutSyncBuffers {
             &self.displs,
         )?;
 
-        let mut remote_cut_count = 0usize;
-
+        // Remote inserts are rank-major over ascending peer rank, pool-major
+        // within each peer, wire order within a segment. Each pool is a distinct
+        // append target, so for a given pool the inserts arrive in ascending peer
+        // rank regardless of this loop nesting — the rank-count-invariant order
+        // the append-only slot identity needs.
+        let mut remote_total = 0usize;
         for r in 0..self.num_ranks {
             if r == my_rank {
                 continue;
             }
-
-            let start = self.displs[r];
-            let end = start + self.counts[r];
-            let slice = &self.recv_buf[start..end];
-
-            deserialize_cuts_from_buffer_into(
-                slice,
-                stage_n_state,
-                &mut self.deserialize_headers_buf,
-                &mut self.deserialize_coefficients_buf,
-            )?;
-
-            for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
-                let coeff_start = i * stage_n_state;
-                fcf.add_cut(
-                    stage,
-                    u64::from(header.iteration),
-                    header.forward_pass_index,
-                    header.intercept,
-                    &self.deserialize_coefficients_buf[coeff_start..coeff_start + stage_n_state],
-                );
-                remote_cut_count += 1;
+            let mut cursor = self.displs[r];
+            for (pool_idx, &(pool, record_size, _)) in plan.iter().enumerate() {
+                let pool_n_state = fcf.pools[pool].state_dimension;
+                let seg_cuts = usize::try_from(self.per_pool_rank_counts[r * n_pools + pool_idx])
+                    .map_err(|_| {
+                    malformed_count_exchange(&format!("rank {r} count exceeds usize"))
+                })?;
+                let seg_len = seg_cuts * record_size;
+                let slice = &self.recv_buf[cursor..cursor + seg_len];
+                deserialize_cuts_from_buffer_into(
+                    slice,
+                    pool_n_state,
+                    &mut self.deserialize_headers_buf,
+                    &mut self.deserialize_coefficients_buf,
+                )?;
+                for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
+                    let coeff_start = i * pool_n_state;
+                    fcf.add_cut(
+                        NodeId(header.node_id),
+                        pool,
+                        u64::from(header.iteration),
+                        header.forward_pass_index,
+                        header.intercept,
+                        &self.deserialize_coefficients_buf[coeff_start..coeff_start + pool_n_state],
+                    );
+                    remote_total += 1;
+                }
+                cursor += seg_len;
             }
         }
 
-        Ok(remote_cut_count)
+        self.level_plan_scratch = plan;
+        Ok((local_total, remote_total))
     }
 
     /// Return the send buffer capacity in bytes.
@@ -532,6 +793,92 @@ impl CutSyncBuffers {
     #[must_use]
     pub fn recv_capacity(&self) -> usize {
         self.recv_buf.len()
+    }
+}
+
+/// Build the `SddpError::Validation` for a malformed per-`(rank, pool)` count
+/// exchange in [`CutSyncBuffers::sync_level_records`]. Only reached on the error
+/// return, so its `format!` never allocates on the hot path.
+fn malformed_count_exchange(detail: &str) -> SddpError {
+    SddpError::Validation(format!(
+        "sync_level_records: malformed per-(rank, pool) count exchange: {detail}"
+    ))
+}
+
+/// Reusable buffers for the replicated-aggregation outcome `allgatherv` at a
+/// singleton-trial-state group, where ranks split the successor outcome set and
+/// every rank must reassemble the whole set to run the identical flat
+/// aggregation. Grown lazily; never on the trial-point-distributed path.
+#[derive(Debug, Default, Clone)]
+pub struct OutcomeExchangeScratch {
+    send: Vec<f64>,
+    recv: Vec<f64>,
+    counts: Vec<usize>,
+    displs: Vec<usize>,
+}
+
+impl OutcomeExchangeScratch {
+    /// `allgatherv` every rank's canonical outcome slice into the full outcome
+    /// set, in rank order — which equals canonical `(m, ψ)` order because
+    /// `partition` assigns each rank a contiguous canonical range. Each outcome
+    /// is `1 + n_state` doubles (objective, then subgradient). Returns the
+    /// reassembled full set; the caller runs the identical `aggregate_cut_into`
+    /// over it on every rank.
+    ///
+    /// Mirrors the cut `allgatherv` buffer discipline: per-rank counts/displs
+    /// and a per-rank-count mismatch guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SddpError::Validation(_))` when `local`'s length is not
+    /// `outcome_counts[my_rank] * (1 + n_state)` (a divergence that would
+    /// corrupt the reassembly); returns `Err(SddpError::Communication(_))` if
+    /// the `allgatherv` fails.
+    pub fn allgather_outcomes<C: Communicator>(
+        &mut self,
+        local: &[f64],
+        n_state: usize,
+        outcome_counts: &[usize],
+        comm: &C,
+    ) -> Result<&[f64], SddpError> {
+        let my_rank = comm.rank();
+        let stride = 1 + n_state;
+        let expected = outcome_counts[my_rank] * stride;
+        if local.len() != expected {
+            return Err(SddpError::Validation(format!(
+                "allgather_outcomes invariant violated: rank {my_rank} produced \
+                 {} doubles, expected {expected} ({} outcomes * {stride}) per the \
+                 outcome partition. Releasing this divergence to allgatherv would \
+                 corrupt remote ranks' reassembled outcome set.",
+                local.len(),
+                outcome_counts[my_rank],
+            )));
+        }
+
+        self.counts.clear();
+        self.counts
+            .extend(outcome_counts.iter().map(|&c| c * stride));
+        self.displs.clear();
+        let mut acc = 0usize;
+        for &c in &self.counts {
+            self.displs.push(acc);
+            acc += c;
+        }
+        let total = acc;
+
+        self.send.clear();
+        self.send.extend_from_slice(local);
+        if self.recv.len() < total {
+            self.recv.resize(total, 0.0);
+        }
+
+        comm.allgatherv(
+            &self.send,
+            &mut self.recv[..total],
+            &self.counts,
+            &self.displs,
+        )?;
+        Ok(&self.recv[..total])
     }
 }
 
@@ -551,8 +898,9 @@ mod tests {
         SddpError,
         cut::{
             fcf::FutureCostFunction,
-            wire::{cut_wire_size, deserialize_cuts_from_buffer, serialize_cut},
+            wire::{CutWireTuple, cut_wire_size, deserialize_cuts_from_buffer, serialize_cut},
         },
+        setup::NodeId,
     };
 
     // ── Unit tests ────────────────────────────────────────────────────────────
@@ -583,11 +931,11 @@ mod tests {
 
     #[test]
     fn new_recv_buf_capacity_is_max_cuts_times_num_ranks_times_record_size() {
-        // 10 * 4 * cut_wire_size(3) = 40 * 49 = 1960
+        // 10 * 4 * cut_wire_size(3) = 40 * 53 = 2120
         let bufs = CutSyncBuffers::new(3, 10, 4);
         let expected = 10 * 4 * cut_wire_size(3);
         assert_eq!(bufs.recv_capacity(), expected);
-        assert_eq!(expected, 1960);
+        assert_eq!(expected, 2120);
     }
 
     #[test]
@@ -614,31 +962,34 @@ mod tests {
     }
 
     #[test]
-    fn new_n_state_zero_record_size_is_25() {
-        // Edge case: n_state = 0, record_size = 25.
+    fn new_n_state_zero_record_size_is_29() {
+        // Edge case: n_state = 0, record_size = 29.
         let bufs = CutSyncBuffers::new(0, 5, 1);
-        assert_eq!(bufs.send_capacity(), 5 * 25);
-        assert_eq!(bufs.recv_capacity(), 5 * 25);
+        assert_eq!(bufs.send_capacity(), 5 * 29);
+        assert_eq!(bufs.recv_capacity(), 5 * 29);
     }
 
     #[test]
     fn send_buf_serialization_round_trip_two_cuts() {
         let mut bufs = CutSyncBuffers::new(2, 2, 1);
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 10.0, &[1.0, 2.0]), (1, 1, 1, 20.0, &[3.0, 4.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (1, 0, 1, 1, 20.0, &[3.0, 4.0]),
+        ];
 
         let record_size = cut_wire_size(2);
         let send_len = local_cuts.len() * record_size;
-        assert_eq!(send_len, 82);
+        assert_eq!(send_len, 90);
 
         // Serialize manually into send_buf using the same logic as sync_cuts.
-        for (i, &(slot_index, iteration, forward_pass_index, intercept, coefficients)) in
+        for (i, &(slot_index, node_id, iteration, forward_pass_index, intercept, coefficients)) in
             local_cuts.iter().enumerate()
         {
             let start = i * record_size;
             serialize_cut(
                 &mut bufs.send_buf[start..start + record_size],
                 slot_index,
+                node_id,
                 iteration,
                 forward_pass_index,
                 intercept,
@@ -666,13 +1017,13 @@ mod tests {
 
     #[test]
     fn counts_and_displs_computation_for_various_cut_counts() {
-        // 2 local cuts, n_state=2: per_rank_bytes = 2 * 41 = 82; 3 ranks →
-        // counts = [82, 82, 82], displs = [0, 82, 164].
+        // 2 local cuts, n_state=2: per_rank_bytes = 2 * 45 = 90; 3 ranks →
+        // counts = [90, 90, 90], displs = [0, 90, 180].
         let mut bufs = CutSyncBuffers::new(2, 5, 3);
 
         let n_local = 2usize;
-        let record_size = cut_wire_size(2); // 41
-        let per_rank = n_local * record_size; // 82
+        let record_size = cut_wire_size(2); // 45
+        let per_rank = n_local * record_size; // 90
 
         // Simulate what sync_cuts does to counts and displs.
         for r in 0..3 {
@@ -680,8 +1031,8 @@ mod tests {
             bufs.displs[r] = r * per_rank;
         }
 
-        assert_eq!(bufs.counts, vec![82, 82, 82]);
-        assert_eq!(bufs.displs, vec![0, 82, 164]);
+        assert_eq!(bufs.counts, vec![90, 90, 90]);
+        assert_eq!(bufs.displs, vec![0, 90, 180]);
     }
 
     // ── Integration tests (round-trip with LocalBackend) ──────────────────────
@@ -697,8 +1048,10 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 2, 2, 10, &[0; 2]);
         let comm = LocalBackend;
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 10.0, &[1.0, 2.0]), (0, 1, 1, 20.0, &[3.0, 4.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (0, 0, 1, 1, 20.0, &[3.0, 4.0]),
+        ];
 
         let result = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
         assert_eq!(result, 0, "expected zero remote cuts in single-rank mode");
@@ -710,12 +1063,13 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 2, 2, 10, &[0; 2]);
         let comm = LocalBackend;
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 10.0, &[1.0, 2.0]), (0, 1, 1, 20.0, &[3.0, 4.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (0, 0, 1, 1, 20.0, &[3.0, 4.0]),
+        ];
 
         bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
 
-        // FCF must remain empty — local cuts are intentionally NOT inserted.
         assert_eq!(
             fcf.total_active_cuts(),
             0,
@@ -731,9 +1085,9 @@ mod tests {
         let comm = LocalBackend;
 
         // The backward pass inserts this rank's own cut before sync_cuts runs.
-        fcf.add_cut(0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[(0, 1, 0, 10.0, &[1.0, 2.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[(0, 0, 1, 0, 10.0, &[1.0, 2.0])];
 
         let remote_inserted = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
 
@@ -809,7 +1163,7 @@ mod tests {
         let mut bufs = CutSyncBuffers::new(2, 1, 1);
         let mut fcf = FutureCostFunction::new(2, 2, 1, 10, &[0; 2]);
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[(0, 1, 0, 5.0, &[1.0, 2.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[(0, 0, 1, 0, 5.0, &[1.0, 2.0])];
 
         let result = bufs.sync_cuts(0, local_cuts, &mut fcf, &FailingComm);
         assert!(
@@ -876,9 +1230,9 @@ mod tests {
         }
 
         let n_state = 2;
-        let record_size = cut_wire_size(n_state); // 41
+        let record_size = cut_wire_size(n_state); // 45
         let n_local = 2;
-        let per_rank_bytes = n_local * record_size; // 82
+        let per_rank_bytes = n_local * record_size; // 90
 
         // FCF: 1 stage, n_state=2, forward_passes=6, max_iterations=10,
         // warm_start=0 → capacity = 0 + 10*6 = 60 slots.
@@ -886,11 +1240,12 @@ mod tests {
         let mut bufs = CutSyncBuffers::new(n_state, n_local, 3);
 
         // Pre-populate recv_buf with remote rank data at the exact offsets
-        // that sync_cuts will compute (displs[1] = 82, displs[2] = 164).
-        let r1_start = per_rank_bytes; // 82
+        // that sync_cuts will compute (displs[1] = 90, displs[2] = 180).
+        let r1_start = per_rank_bytes; // 90
         serialize_cut(
             &mut bufs.recv_buf[r1_start..r1_start + record_size],
             10,
+            0,
             1,
             10,
             100.0,
@@ -899,16 +1254,18 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[r1_start + record_size..r1_start + 2 * record_size],
             11,
+            0,
             1,
             11,
             200.0,
             &[3.0, 4.0],
         );
 
-        let r2_start = 2 * per_rank_bytes; // 164
+        let r2_start = 2 * per_rank_bytes; // 180
         serialize_cut(
             &mut bufs.recv_buf[r2_start..r2_start + record_size],
             20,
+            0,
             1,
             20,
             300.0,
@@ -917,14 +1274,17 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[r2_start + record_size..r2_start + 2 * record_size],
             21,
+            0,
             1,
             21,
             400.0,
             &[7.0, 8.0],
         );
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 50.0, &[0.1, 0.2]), (1, 1, 1, 60.0, &[0.3, 0.4])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 50.0, &[0.1, 0.2]),
+            (1, 0, 1, 1, 60.0, &[0.3, 0.4]),
+        ];
 
         let remote_inserted = bufs
             .sync_cuts(0, local_cuts, &mut fcf, &ThreeRankComm)
@@ -933,19 +1293,19 @@ mod tests {
         assert_eq!(fcf.total_active_cuts(), 4);
     }
 
-    /// Two stages of differing per-stage dimension exchanged via the production
-    /// `pack_local_records` + `sync_packed_records` path: stage 0 carries
-    /// `pools[0].state_dimension == 2`, stage 1 carries
-    /// `pools[1].state_dimension == 5`. Each stage's wire stride is its pool's own
+    /// Two pools of differing dimension exchanged via the production
+    /// `pack_local_records` + `sync_packed_records` path: pool 0 carries
+    /// `pools[0].state_dimension == 2`, pool 1 carries
+    /// `pools[1].state_dimension == 5`. Each pool's wire stride is its own
     /// dimension; the cached global max (5) sizes buffers only. Asserts each
-    /// stage's remote cuts deserialize with the correct per-stage coefficient
+    /// pool's remote cuts deserialize with the correct per-pool coefficient
     /// count and exact bit-for-bit intercepts/coefficients.
     #[test]
-    // RATIONALE: one test drives two stages of differing dimension through the
-    // shared recv_buf so the per-stage-stride contract is exercised end-to-end;
-    // splitting per stage would not share the buffer and so would not test it.
+    // RATIONALE: one test drives two pools of differing dimension through the
+    // shared recv_buf so the per-pool-stride contract is exercised end-to-end;
+    // splitting per pool would not share the buffer and so would not test it.
     #[allow(clippy::too_many_lines)]
-    fn sync_packed_records_two_stages_differing_dimension_per_stage_stride() {
+    fn sync_packed_records_two_pools_differing_dimension_per_pool_stride() {
         /// 3-rank mock; rank 0 is local. `allgatherv` copies only the rank-0
         /// segment, relying on remote segments pre-populated in `recv_buf`.
         struct ThreeRankComm;
@@ -999,32 +1359,34 @@ mod tests {
 
         // Global max dimension = 5 (pool[1]); pool[0] is reduced to 2. Buffer
         // capacity is sized by the max via CutSyncBuffers::new(5, ...); the
-        // per-stage stride is each pool's own dimension.
+        // per-pool stride is each pool's own dimension.
         let global_n_state = 5;
         let dims = [2usize, 5usize];
         let n_local = 2;
-        let mut fcf = FutureCostFunction::new_per_stage(&dims, global_n_state, 6, 10, &[0; 2]);
+        let mut fcf =
+            FutureCostFunction::new_per_pool(&dims, global_n_state, 6, 10, &[0; 2], &[6; 2]);
         let mut bufs = CutSyncBuffers::new(global_n_state, n_local, 3);
 
-        // Drive each stage through the production path. Each iteration: insert
+        // Drive each pool through the production path. Each iteration: insert
         // this rank's own cuts (the backward pass does this before sync), pack
-        // them, pre-populate the remote segments at the per-stage stride, then
-        // sync and assert per-stage recovery.
+        // them, pre-populate the remote segments at the per-pool stride, then
+        // sync and assert per-pool recovery.
         let remote_iteration = 1u64;
 
-        // Stage 0 (dimension 2).
-        let s0_record_size = cut_wire_size(dims[0]); // 41
-        fcf.add_cut(0, remote_iteration, 0, 50.0, &[0.1, 0.2]);
-        fcf.add_cut(0, remote_iteration, 1, 60.0, &[0.3, 0.4]);
+        // Pool 0 (dimension 2).
+        let s0_record_size = cut_wire_size(dims[0]); // 45
+        fcf.add_cut(NodeId(0), 0, remote_iteration, 0, 50.0, &[0.1, 0.2]);
+        fcf.add_cut(NodeId(0), 0, remote_iteration, 1, 60.0, &[0.3, 0.4]);
         let s0_packed = bufs.pack_local_records(&fcf, 0, remote_iteration);
-        assert_eq!(s0_packed, 2, "stage 0 should pack both local cuts");
+        assert_eq!(s0_packed, 2, "pool 0 should pack both local cuts");
 
-        // Remote ranks at the per-stage stride (per_rank_bytes = 2 * 41 = 82).
+        // Remote ranks at the per-pool stride (per_rank_bytes = 2 * 45 = 90).
         let s0_per_rank_bytes = n_local * s0_record_size;
         let s0_r1 = s0_per_rank_bytes;
         serialize_cut(
             &mut bufs.recv_buf[s0_r1..s0_r1 + s0_record_size],
             10,
+            0,
             remote_iteration as u32,
             10,
             100.0,
@@ -1033,6 +1395,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s0_r1 + s0_record_size..s0_r1 + 2 * s0_record_size],
             11,
+            0,
             remote_iteration as u32,
             11,
             200.0,
@@ -1042,6 +1405,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s0_r2..s0_r2 + s0_record_size],
             20,
+            0,
             remote_iteration as u32,
             20,
             300.0,
@@ -1050,6 +1414,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s0_r2 + s0_record_size..s0_r2 + 2 * s0_record_size],
             21,
+            0,
             remote_iteration as u32,
             21,
             400.0,
@@ -1059,16 +1424,16 @@ mod tests {
         let s0_remote = bufs
             .sync_packed_records(0, s0_packed, &mut fcf, &ThreeRankComm)
             .unwrap();
-        assert_eq!(s0_remote, 4, "stage 0: 4 remote cuts inserted");
+        assert_eq!(s0_remote, 4, "pool 0: 4 remote cuts inserted");
 
-        // Verify stage 0's recv_buf recovery NOW, before stage 1 reuses the
+        // Verify pool 0's recv_buf recovery NOW, before pool 1 reuses the
         // shared buffer at its (larger) stride. Remote rank-1 cut deserializes at
-        // the per-stage dimension (2) with exact intercept/coefficients.
+        // the per-pool dimension (2) with exact intercept/coefficients.
         let s0_recovered_r1 =
             deserialize_cuts_from_buffer(&bufs.recv_buf[s0_r1..s0_r1 + s0_record_size], dims[0])
                 .unwrap();
         assert_eq!(s0_recovered_r1.len(), 1);
-        assert_eq!(s0_recovered_r1[0].1.len(), 2, "stage 0 coeff count is 2");
+        assert_eq!(s0_recovered_r1[0].1.len(), 2, "pool 0 coeff count is 2");
         assert_eq!(
             s0_recovered_r1[0].0.intercept.to_bits(),
             100.0_f64.to_bits()
@@ -1076,12 +1441,26 @@ mod tests {
         assert_eq!(s0_recovered_r1[0].1[0].to_bits(), 1.0_f64.to_bits());
         assert_eq!(s0_recovered_r1[0].1[1].to_bits(), 2.0_f64.to_bits());
 
-        // Stage 1 (dimension 5).
-        let s1_record_size = cut_wire_size(dims[1]); // 65
-        fcf.add_cut(1, remote_iteration, 0, 70.0, &[1.1, 1.2, 1.3, 1.4, 1.5]);
-        fcf.add_cut(1, remote_iteration, 1, 80.0, &[2.1, 2.2, 2.3, 2.4, 2.5]);
+        // Pool 1 (dimension 5).
+        let s1_record_size = cut_wire_size(dims[1]); // 69
+        fcf.add_cut(
+            NodeId(0),
+            1,
+            remote_iteration,
+            0,
+            70.0,
+            &[1.1, 1.2, 1.3, 1.4, 1.5],
+        );
+        fcf.add_cut(
+            NodeId(0),
+            1,
+            remote_iteration,
+            1,
+            80.0,
+            &[2.1, 2.2, 2.3, 2.4, 2.5],
+        );
         let s1_packed = bufs.pack_local_records(&fcf, 1, remote_iteration);
-        assert_eq!(s1_packed, 2, "stage 1 should pack both local cuts");
+        assert_eq!(s1_packed, 2, "pool 1 should pack both local cuts");
 
         let s1_per_rank_bytes = n_local * s1_record_size;
         let s1_r1_coeffs0 = [10.0, 11.0, 12.0, 13.0, 14.0];
@@ -1090,6 +1469,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s1_r1..s1_r1 + s1_record_size],
             30,
+            0,
             remote_iteration as u32,
             30,
             500.0,
@@ -1098,6 +1478,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s1_r1 + s1_record_size..s1_r1 + 2 * s1_record_size],
             31,
+            0,
             remote_iteration as u32,
             31,
             600.0,
@@ -1109,6 +1490,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s1_r2..s1_r2 + s1_record_size],
             40,
+            0,
             remote_iteration as u32,
             40,
             700.0,
@@ -1117,6 +1499,7 @@ mod tests {
         serialize_cut(
             &mut bufs.recv_buf[s1_r2 + s1_record_size..s1_r2 + 2 * s1_record_size],
             41,
+            0,
             remote_iteration as u32,
             41,
             800.0,
@@ -1126,15 +1509,15 @@ mod tests {
         let s1_remote = bufs
             .sync_packed_records(1, s1_packed, &mut fcf, &ThreeRankComm)
             .unwrap();
-        assert_eq!(s1_remote, 4, "stage 1: 4 remote cuts inserted");
+        assert_eq!(s1_remote, 4, "pool 1: 4 remote cuts inserted");
 
-        // Stage 1's recv_buf recovery at its own per-stage dimension (5): the
+        // Pool 1's recv_buf recovery at its own per-pool dimension (5): the
         // remote rank-2 cut deserializes with 5 coefficients, bit-for-bit.
         let s1_recovered_r2 =
             deserialize_cuts_from_buffer(&bufs.recv_buf[s1_r2..s1_r2 + s1_record_size], dims[1])
                 .unwrap();
         assert_eq!(s1_recovered_r2.len(), 1);
-        assert_eq!(s1_recovered_r2[0].1.len(), 5, "stage 1 coeff count is 5");
+        assert_eq!(s1_recovered_r2[0].1.len(), 5, "pool 1 coeff count is 5");
         assert_eq!(
             s1_recovered_r2[0].0.intercept.to_bits(),
             700.0_f64.to_bits()
@@ -1143,16 +1526,16 @@ mod tests {
             assert_eq!(got.to_bits(), want.to_bits());
         }
 
-        // Each pool's cuts carry its own per-stage coefficient count.
+        // Each pool's cuts carry its own coefficient count.
         assert_eq!(fcf.pools[0].state_dimension, 2);
         assert_eq!(fcf.pools[1].state_dimension, 5);
-        // 2 local (skipped on insert) + 4 remote per stage = 6 active cuts each.
+        // 2 local (skipped on insert) + 4 remote per pool = 6 active cuts each.
         assert_eq!(fcf.pools[0].active_count(), 6);
         assert_eq!(fcf.pools[1].active_count(), 6);
 
-        // The inserted FCF cuts evaluate to the per-stage coefficient·state dot
+        // The inserted FCF cuts evaluate to the per-pool coefficient·state dot
         // product — proving the remote coefficients landed in the right pool with
-        // the right length. The max over stage-1 cuts at unit state is the
+        // the right length. The max over pool-1 cuts at unit state is the
         // rank-2 cut with the largest intercept: 800 + sum(s1_r2_coeffs1).
         let s1_state = [1.0, 1.0, 1.0, 1.0, 1.0];
         let expected_max = 800.0 + s1_r2_coeffs1.iter().sum::<f64>();
@@ -1160,7 +1543,7 @@ mod tests {
     }
 
     /// All-enabled regression: every pool's `state_dimension` equals the global
-    /// `n_state`, so the per-stage stride equals the cached max and the serialized
+    /// `n_state`, so the per-pool stride equals the cached max and the serialized
     /// bytes are bit-identical to the pre-change path. Packs through the
     /// production path and compares the send buffer against an independent
     /// `serialize_cut` reference.
@@ -1173,8 +1556,8 @@ mod tests {
 
         let c0 = [1.0, 2.0, 3.0, 4.0];
         let c1 = [5.0, 6.0, 7.0, 8.0];
-        fcf.add_cut(0, 1, 0, 10.0, &c0);
-        fcf.add_cut(0, 1, 1, 20.0, &c1);
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &c0);
+        fcf.add_cut(NodeId(0), 0, 1, 1, 20.0, &c1);
 
         let packed = bufs.pack_local_records(&fcf, 0, 1);
         assert_eq!(packed, 2);
@@ -1183,10 +1566,11 @@ mod tests {
         // each cut's deterministic pool slot as slot_index: with forward_passes=2
         // and iteration=1, slots are 1*2+0=2 and 1*2+1=3.
         let mut reference = vec![0u8; 2 * record_size];
-        serialize_cut(&mut reference[0..record_size], 2, 1, 0, 10.0, &c0);
+        serialize_cut(&mut reference[0..record_size], 2, 0, 1, 0, 10.0, &c0);
         serialize_cut(
             &mut reference[record_size..2 * record_size],
             3,
+            0,
             1,
             1,
             20.0,
@@ -1210,7 +1594,7 @@ mod tests {
         let comm = LocalBackend;
 
         let coeffs = [7.5_f64, -3.25_f64];
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[(5, 3, 2, 99.0, &coeffs)];
+        let local_cuts: &[CutWireTuple<'_>] = &[(5, 0, 3, 2, 99.0, &coeffs)];
 
         bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
 
@@ -1230,6 +1614,51 @@ mod tests {
         assert_eq!(rec_coeffs[1].to_bits(), coeffs[1].to_bits());
     }
 
+    /// K-fan shared-leaf pool: two cuts inserted into ONE pool but generated at
+    /// DISTINCT nodes (7 and 9) must each carry their own generating node on the
+    /// wire — never the shared pool id. Packs through the production
+    /// `pack_local_records` path (reads `CutMetadata::node`) and asserts the
+    /// deserialized records recover the distinct generating nodes. The pool is
+    /// still append-only and slot-addressed exactly as before — `node_id` is
+    /// provenance only.
+    #[test]
+    fn shared_leaf_pool_cuts_carry_distinct_generating_node_ids() {
+        let n_state = 2usize;
+        // One pool (the shared leaf), forward_passes = 2.
+        let mut fcf = FutureCostFunction::new(1, n_state, 2, 10, &[0; 1]);
+        // Both cuts land in pool 0 but are generated at distinct nodes.
+        fcf.add_cut(NodeId(7), 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(9), 0, 1, 1, 20.0, &[3.0, 4.0]);
+        // Append-only: two distinct slots, both active.
+        assert_eq!(fcf.pools[0].populated(), 4);
+        assert_eq!(fcf.pools[0].active_count(), 2);
+
+        let mut bufs = CutSyncBuffers::new(n_state, 2, 1);
+        let packed = bufs.pack_local_records(&fcf, 0, 1);
+        assert_eq!(packed, 2);
+
+        let record_size = cut_wire_size(n_state);
+        let recovered =
+            deserialize_cuts_from_buffer(&bufs.send_buf[..packed * record_size], n_state).unwrap();
+        assert_eq!(recovered.len(), 2);
+
+        // Packed in ascending slot order: slot 2 (node 7), slot 3 (node 9).
+        assert_eq!(recovered[0].0.slot_index, 2);
+        assert_eq!(
+            recovered[0].0.node_id, 7,
+            "cut at slot 2 carries generating node 7"
+        );
+        assert_eq!(recovered[1].0.slot_index, 3);
+        assert_eq!(
+            recovered[1].0.node_id, 9,
+            "cut at slot 3 carries generating node 9"
+        );
+        assert_ne!(
+            recovered[0].0.node_id, recovered[1].0.node_id,
+            "distinct generating nodes sharing one pool keep distinct wire node_ids"
+        );
+    }
+
     // ── Invariant check tests ─────────────────────────────────────────────────
 
     #[test]
@@ -1239,10 +1668,10 @@ mod tests {
         let mut fcf = FutureCostFunction::new(1, 2, 3, 10, &[0; 1]);
         let comm = LocalBackend;
 
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] = &[
-            (0, 1, 0, 10.0, &[1.0, 2.0]),
-            (1, 1, 1, 20.0, &[3.0, 4.0]),
-            (2, 1, 2, 30.0, &[5.0, 6.0]),
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (1, 0, 1, 1, 20.0, &[3.0, 4.0]),
+            (2, 0, 1, 2, 30.0, &[5.0, 6.0]),
         ];
 
         let result = bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
@@ -1304,8 +1733,10 @@ mod tests {
         let mut fcf = FutureCostFunction::new(1, 2, 6, 10, &[0; 1]);
 
         // Only 2 cuts; expected 3 per per_rank_cuts[0].
-        let local_cuts: &[(u32, u32, u32, f64, &[f64])] =
-            &[(0, 1, 0, 10.0, &[1.0, 2.0]), (1, 1, 1, 20.0, &[3.0, 4.0])];
+        let local_cuts: &[CutWireTuple<'_>] = &[
+            (0, 0, 1, 0, 10.0, &[1.0, 2.0]),
+            (1, 0, 1, 1, 20.0, &[3.0, 4.0]),
+        ];
 
         let result = bufs.sync_cuts(0, local_cuts, &mut fcf, &TwoRankStubComm);
         match result {
@@ -1391,5 +1822,434 @@ mod tests {
             }
             other => panic!("expected SddpError::Validation, got: {other:?}"),
         }
+    }
+
+    // ── replicated aggregation (outcome allgather + skip) ─────────────────
+
+    /// A singleton-trial-state group's successor outcome set, split across two
+    /// rank slices, allgathered in canonical `(m, ψ)` order and aggregated on
+    /// each slice, yields a cut bitwise identical (`to_bits`) to the single-rank
+    /// aggregation over the whole set — and the replicated group's cut exchange
+    /// is skipped (an empty pool list exchanges nothing; a naive exchange would
+    /// multiply the cut by the rank count). `CVaR` makes the aggregation
+    /// index-order-sensitive, so a reassembly that lost canonical order would
+    /// fail the bitwise check.
+    #[test]
+    fn d2_replicated_split_equals_single_rank_and_skips_exchange() {
+        use super::OutcomeExchangeScratch;
+        use crate::risk_measure::{BackwardOutcome, RiskMeasure, RiskMeasureScratch};
+
+        /// Rank 0 of a 2-rank world; `allgatherv` writes only rank 0's own slice
+        /// (`displs[0] = 0`), leaving rank 1's pre-populated segment intact.
+        struct Rank0Of2Outcome;
+        impl Communicator for Rank0Of2Outcome {
+            fn allgatherv<T: CommData>(
+                &self,
+                send: &[T],
+                recv: &mut [T],
+                counts: &[usize],
+                _displs: &[usize],
+            ) -> Result<(), CommError> {
+                recv[..counts[0]].clone_from_slice(&send[..counts[0]]);
+                Ok(())
+            }
+            fn allreduce<T: CommData>(
+                &self,
+                _s: &[T],
+                _r: &mut [T],
+                _o: ReduceOp,
+            ) -> Result<(), CommError> {
+                unreachable!()
+            }
+            fn broadcast<T: CommData>(&self, _b: &mut [T], _root: usize) -> Result<(), CommError> {
+                unreachable!()
+            }
+            fn barrier(&self) -> Result<(), CommError> {
+                unreachable!()
+            }
+            fn rank(&self) -> usize {
+                0
+            }
+            fn size(&self) -> usize {
+                2
+            }
+            fn abort(&self, code: i32) -> ! {
+                std::process::exit(code)
+            }
+        }
+
+        let n_state = 2usize;
+        let stride = 1 + n_state;
+        let x_hat = [1.0_f64, 2.0_f64];
+        // Four distinct outcomes (objective, subgradient); intercept =
+        // objective − subgradient·x_hat, matching the replicated reconstruct.
+        let raw: [(f64, [f64; 2]); 4] = [
+            (30.0, [1.0, 0.5]),
+            (10.0, [0.2, -0.3]),
+            (50.0, [-1.0, 2.0]),
+            (20.0, [0.7, 0.1]),
+        ];
+        let probabilities = [0.25_f64, 0.25, 0.25, 0.25];
+        let risk = RiskMeasure::CVaR {
+            alpha: 0.5,
+            lambda: 1.0,
+        };
+
+        let build = |sub: &[(f64, [f64; 2])]| -> Vec<BackwardOutcome> {
+            sub.iter()
+                .map(|&(obj, g)| {
+                    let intercept = obj - (g[0] * x_hat[0] + g[1] * x_hat[1]);
+                    BackwardOutcome {
+                        intercept,
+                        coefficients: g.to_vec(),
+                        objective_value: obj,
+                    }
+                })
+                .collect()
+        };
+
+        // Single-rank aggregation over the whole canonical set.
+        let whole = build(&raw);
+        let mut int_a = 0.0_f64;
+        let mut coeffs_a = vec![0.0_f64; n_state];
+        let mut scratch_a = RiskMeasureScratch::default();
+        risk.aggregate_cut_into(
+            &whole,
+            &probabilities,
+            &mut int_a,
+            &mut coeffs_a,
+            &mut scratch_a,
+        );
+
+        // Split: rank 0 owns outcomes [0, 2), rank 1 owns [2, 4). Each rank's
+        // local flat buffer is `objective ‖ subgradient` per outcome.
+        let flat = |sub: &[(f64, [f64; 2])]| -> Vec<f64> {
+            let mut v = Vec::new();
+            for &(obj, g) in sub {
+                v.push(obj);
+                v.extend_from_slice(&g);
+            }
+            v
+        };
+        let rank0_local = flat(&raw[..2]);
+        let rank1_local = flat(&raw[2..]);
+        let total = raw.len() * stride;
+
+        let mut ex = OutcomeExchangeScratch::default();
+        // Pre-populate rank 1's segment; `allgather_outcomes` preserves it (its
+        // resize only grows) and the stub overwrites only rank 0's prefix.
+        ex.recv.resize(total, 0.0);
+        ex.recv[2 * stride..total].copy_from_slice(&rank1_local);
+
+        let full = ex
+            .allgather_outcomes(&rank0_local, n_state, &[2, 2], &Rank0Of2Outcome)
+            .unwrap();
+
+        // Canonical order preserved: reassembled == rank0 ‖ rank1 == whole.
+        let expected_full = flat(&raw);
+        assert_eq!(
+            full,
+            &expected_full[..],
+            "allgather must reassemble in canonical (m, ψ) order"
+        );
+
+        // Reconstruct and aggregate on the reassembled full set.
+        let mut reassembled = Vec::new();
+        for o in 0..raw.len() {
+            let base = o * stride;
+            let objective = full[base];
+            let coefficients = full[base + 1..base + 1 + n_state].to_vec();
+            let intercept = objective - (coefficients[0] * x_hat[0] + coefficients[1] * x_hat[1]);
+            reassembled.push(BackwardOutcome {
+                intercept,
+                coefficients,
+                objective_value: objective,
+            });
+        }
+        let mut int_b = 0.0_f64;
+        let mut coeffs_b = vec![0.0_f64; n_state];
+        let mut scratch_b = RiskMeasureScratch::default();
+        risk.aggregate_cut_into(
+            &reassembled,
+            &probabilities,
+            &mut int_b,
+            &mut coeffs_b,
+            &mut scratch_b,
+        );
+
+        assert_eq!(
+            int_a.to_bits(),
+            int_b.to_bits(),
+            "split replicated aggregation intercept must be bitwise identical to single-rank"
+        );
+        for (a, b) in coeffs_a.iter().zip(&coeffs_b) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "split replicated aggregation coefficient must be bitwise identical to single-rank"
+            );
+        }
+
+        // Cut-exchange skip: a replicated group contributes no pool, so the
+        // level's batched exchange runs over an empty pool list — nothing sent,
+        // nothing inserted.
+        let mut fcf = FutureCostFunction::new(1, n_state, 1, 10, &[0; 1]);
+        let mut bufs = CutSyncBuffers::new(n_state, 1, 1);
+        let (local, remote) = bufs
+            .sync_level_records(&[], &[], &mut fcf, 1, &LocalBackend)
+            .unwrap();
+        assert_eq!((local, remote), (0, 0));
+        assert_eq!(fcf.total_active_cuts(), 0);
+    }
+
+    /// A level's two differing-dimension pools exchanged in ONE `sync_level_records`
+    /// call (not one collective per node): both pools' local cuts pack and pass
+    /// the per-pool guard; single-rank inserts no remote and never double-inserts
+    /// the local cuts.
+    #[test]
+    fn sync_level_records_batches_two_pools_in_one_exchange() {
+        let dims = [2usize, 3usize];
+        let mut fcf = FutureCostFunction::new_per_pool(&dims, 3, 1, 10, &[0; 2], &[6; 2]);
+        let mut bufs = CutSyncBuffers::new(3, 1, 1);
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(0), 1, 1, 0, 20.0, &[3.0, 4.0, 5.0]);
+
+        let (local, remote) = bufs
+            .sync_level_records(&[0, 1], &[], &mut fcf, 1, &LocalBackend)
+            .unwrap();
+        assert_eq!(
+            local, 2,
+            "both pools' single local cut packed in one exchange"
+        );
+        assert_eq!(remote, 0, "single-rank: no remote cuts");
+        assert_eq!(
+            fcf.total_active_cuts(),
+            2,
+            "local cuts must not be re-inserted"
+        );
+    }
+
+    /// Rank 0 of 2; `allgatherv` writes only rank 0's own segment
+    /// (`recv[displs[0]..displs[0] + counts[0]]`), leaving each peer's
+    /// pre-populated segment intact — the faithful single-invocation view of the
+    /// per-`(rank, pool)` count exchange and the byte exchange from rank 0.
+    struct Rank0Of2Preserve;
+
+    impl Communicator for Rank0Of2Preserve {
+        fn allgatherv<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            counts: &[usize],
+            displs: &[usize],
+        ) -> Result<(), CommError> {
+            let start = displs[0];
+            recv[start..start + counts[0]].clone_from_slice(&send[..counts[0]]);
+            Ok(())
+        }
+
+        fn allreduce<T: CommData>(
+            &self,
+            _send: &[T],
+            _recv: &mut [T],
+            _op: ReduceOp,
+        ) -> Result<(), CommError> {
+            unreachable!()
+        }
+
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            unreachable!()
+        }
+
+        fn barrier(&self) -> Result<(), CommError> {
+            unreachable!()
+        }
+
+        fn rank(&self) -> usize {
+            0
+        }
+
+        fn size(&self) -> usize {
+            2
+        }
+
+        fn abort(&self, error_code: i32) -> ! {
+            std::process::exit(error_code)
+        }
+    }
+
+    /// A genuinely multi-node level whose two pools carry differing
+    /// per-`(rank, pool)` counts (pool 0 visited only by rank 0, pool 1 only by
+    /// rank 1) is exchanged at each peer's OWN per-pool stride: rank 1's pool-1
+    /// cuts land in pool 1, and rank 0's pool-0 local cuts are never re-inserted.
+    #[test]
+    fn sync_level_records_per_rank_pool_divergence_inserts_remote() {
+        let n_state = 2usize;
+        let record_size = cut_wire_size(n_state); // 45
+        let dims = [n_state, n_state];
+        let mut fcf = FutureCostFunction::new_per_pool(&dims, n_state, 2, 10, &[0; 2], &[4; 2]);
+        let mut bufs = CutSyncBuffers::with_distribution(n_state, 2, 2, 4);
+
+        // Rank 0's own pool-0 cuts (the backward pass inserted these before sync);
+        // pool 1 has no local cut on rank 0.
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 1, 20.0, &[3.0, 4.0]);
+
+        // Pre-seed the gathered counts rank-major/pool-minor: rank 0 = [2, 0]
+        // (overwritten by the stub's echo), rank 1 = [0, 2] (preserved). The lazy
+        // resize to num_ranks * n_pools = 4 is a no-op at this length.
+        bufs.per_pool_rank_counts = vec![0, 0, 0, 2];
+
+        // Rank 1's pool-1 cuts at its byte segment (displs[1] = counts[0] = 90;
+        // pool 0 contributes 0 bytes, so pool 1's two records fill [90, 180)).
+        let r1 = 2 * record_size; // 90
+        serialize_cut(
+            &mut bufs.recv_buf[r1..r1 + record_size],
+            50,
+            0,
+            1,
+            0,
+            100.0,
+            &[5.0, 6.0],
+        );
+        serialize_cut(
+            &mut bufs.recv_buf[r1 + record_size..r1 + 2 * record_size],
+            51,
+            0,
+            1,
+            1,
+            200.0,
+            &[7.0, 8.0],
+        );
+
+        let (local, remote) = bufs
+            .sync_level_records(&[0, 1], &[], &mut fcf, 1, &Rank0Of2Preserve)
+            .unwrap();
+
+        assert_eq!(local, 2, "rank 0 packs its two pool-0 cuts");
+        assert_eq!(remote, 2, "rank 1's two pool-1 cuts insert remotely");
+        assert_eq!(
+            fcf.pools[0].active_count(),
+            2,
+            "pool 0: rank 0's own cuts, not re-inserted"
+        );
+        assert_eq!(
+            fcf.pools[1].active_count(),
+            2,
+            "pool 1: rank 1's remote cuts inserted at pool 1's own stride"
+        );
+        // The larger pool-1 cut evaluates to 200 + 7 + 8 at the unit state.
+        assert_eq!(fcf.evaluate_at_state(1, &[1.0, 1.0]), 215.0);
+    }
+
+    /// A fault-injected per-`(rank, pool)` count that overruns the grown receive
+    /// buffer fails loudly (`SddpError::Validation`) rather than deserializing at
+    /// the wrong stride. Rank 0 of 2; rank 1's count segment is pre-seeded with an
+    /// oversized value the stub's rank-0-only echo preserves.
+    #[test]
+    fn sync_level_records_rejects_malformed_count_exchange_overrun() {
+        let n_state = 2usize;
+        let mut fcf = FutureCostFunction::new(1, n_state, 2, 10, &[0; 1]);
+        let mut bufs = CutSyncBuffers::with_distribution(n_state, 1, 2, 2);
+        // Rank 0's own single pool-0 cut.
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
+
+        // num_ranks * n_pools = 2: rank 0 = [<echoed>], rank 1 = [u32::MAX] — a
+        // count whose byte total overruns the grown receive buffer.
+        bufs.per_pool_rank_counts = vec![0, u64::from(u32::MAX)];
+
+        let result = bufs.sync_level_records(&[0], &[], &mut fcf, 1, &Rank0Of2Preserve);
+        match result {
+            Err(SddpError::Validation(ref msg)) => {
+                assert!(
+                    msg.contains("malformed per-(rank, pool) count exchange"),
+                    "message missing the malformed-exchange marker: {msg}"
+                );
+            }
+            other => panic!("expected SddpError::Validation for the overrun, got: {other:?}"),
+        }
+    }
+
+    /// A replicated-aggregation pool is EXCLUDED from the batched exchange: it is
+    /// not packed, so `local_total` counts only the non-replicated pool. The
+    /// `replicated_pools = &[]` contrast packs both pools, so the skip is
+    /// selective (by aggregation kind), never a blanket effect.
+    #[test]
+    fn sync_level_records_excludes_replicated_pool_from_packing() {
+        let n_state = 2usize;
+        let dims = [n_state, n_state];
+        let mut fcf = FutureCostFunction::new_per_pool(&dims, n_state, 1, 10, &[0; 2], &[1; 2]);
+        let mut bufs = CutSyncBuffers::with_distribution(n_state, 2, 1, 1);
+        let it = 1u64;
+
+        // The backward compute inserted each pool's own local cut before the sync.
+        fcf.add_cut(NodeId(0), 0, it, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(1), 1, it, 0, 20.0, &[3.0, 4.0]);
+
+        // Pool 1 replicated -> excluded: only the non-replicated pool 0 is packed.
+        let (local, remote) = bufs
+            .sync_level_records(&[0, 1], &[1], &mut fcf, it, &LocalBackend)
+            .unwrap();
+        assert_eq!(local, 1, "only the non-replicated pool 0 is packed");
+        assert_eq!(remote, 0, "single rank inserts no remote cuts");
+
+        // No replicated pools -> both packed.
+        let (local_all, _) = bufs
+            .sync_level_records(&[0, 1], &[], &mut fcf, it, &LocalBackend)
+            .unwrap();
+        assert_eq!(local_all, 2, "both pools packed when none is replicated");
+    }
+
+    /// World >= 2: a replicated-aggregation pool is skipped even while a
+    /// non-replicated sibling pool IS exchanged. Rank 1's pool-0 cut inserts
+    /// remotely (the legitimate exchange), while the replicated pool 1 — already
+    /// held identically on every rank — is never re-inserted, so it keeps its one
+    /// local cut: `cuts_added` stays the world=1 count, no rank-multiplication.
+    #[test]
+    fn sync_level_records_skips_replicated_pool_under_two_ranks() {
+        let n_state = 2usize;
+        let record_size = cut_wire_size(n_state); // 45
+        let dims = [n_state, n_state];
+        let mut fcf = FutureCostFunction::new_per_pool(&dims, n_state, 2, 10, &[0; 2], &[4; 2]);
+        let mut bufs = CutSyncBuffers::with_distribution(n_state, 2, 2, 4);
+
+        // Rank 0's own local cuts (inserted by the backward compute before sync):
+        // one trial-point-distributed cut in pool 0, one replicated cut in pool 1.
+        fcf.add_cut(NodeId(0), 0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(NodeId(1), 1, 1, 0, 20.0, &[3.0, 4.0]);
+
+        // Pool 1 is skipped, so the filtered plan holds only pool 0; the gathered
+        // per-(rank, pool) counts are num_ranks * 1 = 2: rank 0 = [<echoed 1>],
+        // rank 1 = [1] (preserved by the rank-0-only stub).
+        bufs.per_pool_rank_counts = vec![0, 1];
+
+        // Rank 1's distinct pool-0 cut at its byte segment (displs[1] = counts[0] =
+        // 45, pool 0 the only packed pool). fp=1 gives it a distinct slot.
+        serialize_cut(
+            &mut bufs.recv_buf[record_size..2 * record_size],
+            50,
+            0,
+            1,
+            1,
+            100.0,
+            &[5.0, 6.0],
+        );
+
+        let (local, remote) = bufs
+            .sync_level_records(&[0, 1], &[1], &mut fcf, 1, &Rank0Of2Preserve)
+            .unwrap();
+
+        assert_eq!(local, 1, "only the non-replicated pool 0 is packed");
+        assert_eq!(remote, 1, "rank 1's pool-0 cut inserts remotely");
+        assert_eq!(
+            fcf.pools[0].active_count(),
+            2,
+            "pool 0: rank 0's own cut plus rank 1's remote cut"
+        );
+        assert_eq!(
+            fcf.pools[1].active_count(),
+            1,
+            "pool 1 (replicated) keeps its single local cut — no rank-multiplication"
+        );
     }
 }

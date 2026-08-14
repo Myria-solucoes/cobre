@@ -13,7 +13,7 @@ use cobre_io::{
     TrainingOutput,
 };
 
-use crate::stopping_rule::{RULE_BOUND_STALLING, RULE_SIMULATION_BASED};
+use crate::stopping_rule::RULE_BOUND_STALLING;
 use crate::{FutureCostFunction, TrainingResult};
 
 /// Per-iteration accumulator filled by [`accumulate_partial_records`] from
@@ -212,7 +212,7 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
     IterationRecord {
         iteration: iteration_u32,
         lower_bound: partial.lower_bound,
-        upper_bound_mean: partial.upper_bound_mean,
+        upper_bound: partial.upper_bound_mean,
         upper_bound_std: partial.upper_bound_std,
         gap_percent,
         cuts_added: partial.cuts_added,
@@ -287,7 +287,7 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
 /// }];
 ///
 /// let fcf = FutureCostFunction::new(2, 1, 4, 1, &[0; 2]);
-/// let output = build_training_output(&result, &events, &fcf);
+/// let output = build_training_output(&result, &events, &fcf, false);
 ///
 /// assert_eq!(output.convergence_records.len(), 1);
 /// assert!(!output.converged);
@@ -297,6 +297,7 @@ pub fn build_training_output(
     result: &TrainingResult,
     events: &[TrainingEvent],
     fcf: &FutureCostFunction,
+    upper_bound_exact: bool,
 ) -> TrainingOutput {
     let (partials, peak_active) = accumulate_partial_records(events);
 
@@ -336,9 +337,10 @@ pub fn build_training_output(
         rows_in_lp_total,
         rows_in_lp_solve_count,
         rows_in_lp_max,
+        total_loaded: fcf.total_warm_start_cuts() as u64,
     };
 
-    let converged = result.reason == RULE_BOUND_STALLING || result.reason == RULE_SIMULATION_BASED;
+    let converged = result.reason == RULE_BOUND_STALLING;
 
     // None for non-positive lower bound: the gap percentage is undefined
     // (final_lb == 0) or sign-inverted (final_lb < 0).
@@ -382,12 +384,23 @@ pub fn build_training_output(
 
     let worker_timing_records = build_worker_timing_records(events, &convergence_records);
 
+    // The bound regime is set by the forward variant `ForwardPassesResolution`
+    // selects: an enumerated forward is exact (no sampling distribution, so std
+    // is NULL), a sampled forward is statistical. This site WRITES the kind; it
+    // does not decide the bound semantics.
+    let (final_upper_bound_kind, final_upper_bound_std) = if upper_bound_exact {
+        ("exact".to_string(), None)
+    } else {
+        ("statistical".to_string(), Some(result.final_ub_std))
+    };
+
     TrainingOutput {
         convergence_records,
         final_lower_bound: result.final_lb,
         final_upper_bound: Some(result.final_ub),
         final_gap_percent,
-        final_upper_bound_std: Some(result.final_ub_std),
+        final_upper_bound_std,
+        final_upper_bound_kind,
         iterations_completed,
         converged,
         termination_reason: result.reason.clone(),
@@ -542,6 +555,7 @@ mod tests {
     use cobre_io::IterationRecord;
 
     use super::{PhaseTimingTotals, build_training_output, sum_phase_timing_ms};
+    use crate::setup::NodeId;
     use crate::{FutureCostFunction, TrainingResult};
 
     fn make_result(reason: &str, lb: f64, ub: f64, gap: f64, iterations: u64) -> TrainingResult {
@@ -596,7 +610,7 @@ mod tests {
         ];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert_eq!(output.convergence_records.len(), 3);
     }
@@ -607,18 +621,7 @@ mod tests {
         let events = vec![make_iteration_summary(1, 100.0, 101.0, 0.01)];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
-
-        assert!(output.converged);
-    }
-
-    #[test]
-    fn converged_true_for_simulation_based() {
-        let result = make_result("simulation_based", 100.0, 101.0, 0.01, 5);
-        let events = vec![make_iteration_summary(1, 100.0, 101.0, 0.01)];
-        let fcf = make_empty_fcf();
-
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert!(output.converged);
     }
@@ -629,7 +632,7 @@ mod tests {
         let events = vec![make_iteration_summary(1, 90.0, 110.0, 0.2)];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert!(!output.converged);
     }
@@ -641,13 +644,13 @@ mod tests {
 
         let mut fcf = FutureCostFunction::new(2, 1, 4, 10, &[0; 2]);
 
-        fcf.add_cut(0, 0, 0, 1.0, &[1.0]);
-        fcf.add_cut(0, 0, 1, 2.0, &[0.5]);
-        fcf.add_cut(0, 0, 2, 3.0, &[0.25]);
-        fcf.add_cut(1, 0, 0, 4.0, &[1.0]);
-        fcf.add_cut(1, 0, 1, 5.0, &[0.5]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 1.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 0, 0, 1, 2.0, &[0.5]);
+        fcf.add_cut(NodeId(0), 0, 0, 2, 3.0, &[0.25]);
+        fcf.add_cut(NodeId(0), 1, 0, 0, 4.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 1, 0, 1, 5.0, &[0.5]);
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert_eq!(
             output.cut_stats.total_generated, 5,
@@ -670,10 +673,10 @@ mod tests {
 
         let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
         // iteration 1, forward_passes 2 -> slots 2,3 (block [0,2) stays empty).
-        fcf.add_cut(0, 1, 0, 1.0, &[1.0]);
-        fcf.add_cut(0, 1, 1, 2.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 0, 1.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 0, 1, 1, 2.0, &[1.0]);
         // stage 1: one cut at iteration 1 -> slot 2.
-        fcf.add_cut(1, 1, 0, 3.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 1, 1, 0, 3.0, &[1.0]);
 
         let populated: u64 = fcf.pools.iter().map(|p| p.populated() as u64).sum();
         assert_eq!(
@@ -681,7 +684,7 @@ mod tests {
             "high-water mark includes the empty leading block"
         );
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
         assert_eq!(
             output.cut_stats.total_generated, 3,
             "total_generated must count the 3 cuts actually added"
@@ -698,7 +701,7 @@ mod tests {
         let events = vec![make_iteration_summary(1, 0.0, 10.0, 1.0)];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert!(
             output.final_gap_percent.is_none(),
@@ -717,7 +720,7 @@ mod tests {
         let fcf = make_empty_fcf();
         for reason in reasons {
             let result = make_result(reason, 100.0, 110.0, 0.1, 1);
-            let output = build_training_output(&result, &[], &fcf);
+            let output = build_training_output(&result, &[], &fcf, false);
             assert!(
                 !output.converged,
                 "converged must be false for reason = {reason}"
@@ -730,7 +733,7 @@ mod tests {
         let result = make_result("iteration_limit", 50.0, 60.0, 0.2, 0);
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &[], &fcf);
+        let output = build_training_output(&result, &[], &fcf, false);
 
         assert_eq!(output.convergence_records.len(), 0);
         assert_eq!(output.final_lower_bound, 50.0);
@@ -744,7 +747,7 @@ mod tests {
         let result = make_result("bound_stalling", 100.0, 102.0, 0.02, 3);
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &[], &fcf);
+        let output = build_training_output(&result, &[], &fcf, false);
 
         assert_eq!(output.final_gap_percent, Some(2.0));
     }
@@ -755,7 +758,7 @@ mod tests {
         let events = vec![make_iteration_summary(1, 0.0, 10.0, 1.0)];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert!(output.convergence_records[0].gap_percent.is_none());
     }
@@ -774,7 +777,7 @@ mod tests {
         ];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert_eq!(output.convergence_records[0].upper_bound_std, 3.5);
     }
@@ -794,7 +797,7 @@ mod tests {
         ];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert_eq!(output.convergence_records[0].forward_passes, 8);
     }
@@ -825,7 +828,7 @@ mod tests {
         ];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         let rec = &output.convergence_records[0];
         assert_eq!(rec.cuts_added, 12);
@@ -864,7 +867,7 @@ mod tests {
         ];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert_eq!(output.cut_stats.peak_active, 20);
     }
@@ -874,7 +877,7 @@ mod tests {
         let result = make_result("iteration_limit", 80.0, 100.0, 0.2, 42);
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &[], &fcf);
+        let output = build_training_output(&result, &[], &fcf, false);
 
         assert_eq!(output.iterations_completed, 42);
     }
@@ -884,7 +887,7 @@ mod tests {
         let result = make_result("time_limit", 70.0, 100.0, 0.3, 20);
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &[], &fcf);
+        let output = build_training_output(&result, &[], &fcf, false);
 
         assert_eq!(output.termination_reason, "time_limit");
     }
@@ -936,7 +939,7 @@ mod tests {
         ];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
         let rec = &output.convergence_records[0];
 
         assert_eq!(
@@ -1013,7 +1016,7 @@ mod tests {
         ];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
         let rec = &output.convergence_records[0];
 
         assert_eq!(
@@ -1046,7 +1049,7 @@ mod tests {
         }];
         let fcf = make_empty_fcf();
 
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
         let rec = &output.convergence_records[0];
 
         assert_eq!(
@@ -1099,7 +1102,7 @@ mod tests {
             },
         ];
         let fcf = make_empty_fcf();
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert_eq!(output.cut_selection_records.len(), 2);
         assert_eq!(output.cut_selection_records[0].iteration, 2);
@@ -1115,7 +1118,7 @@ mod tests {
         let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 1);
         let events = vec![make_iteration_summary(1, 100.0, 110.0, 0.1)];
         let fcf = make_empty_fcf();
-        let output = build_training_output(&result, &events, &fcf);
+        let output = build_training_output(&result, &events, &fcf, false);
 
         assert!(output.cut_selection_records.is_empty());
     }
@@ -1124,7 +1127,7 @@ mod tests {
         IterationRecord {
             iteration: 1,
             lower_bound: 0.0,
-            upper_bound_mean: 0.0,
+            upper_bound: 0.0,
             upper_bound_std: 0.0,
             gap_percent: None,
             cuts_added: 0,

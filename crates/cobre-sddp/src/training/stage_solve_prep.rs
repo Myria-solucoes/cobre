@@ -20,6 +20,7 @@ use crate::{
         NcsNoiseOffsets, apply_ncs_col_bounds, transform_inflow_noise, transform_load_noise,
         transform_ncs_noise,
     },
+    setup::node_graph::StageIdx,
     workspace::ScratchBuffers,
 };
 
@@ -28,16 +29,6 @@ use crate::{
 /// `initial_state`, simulation `current_state`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StateSource<'a>(pub &'a [f64]);
-
-/// Whether the caller drives one realized stage solve (forward pass,
-/// simulation) or a per-opening loop (backward pass, lower bound).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OpeningMode {
-    /// One realized noise draw per stage.
-    SingleRealized,
-    /// One [`StageSolvePrep::run`] call per opening in the caller's loop.
-    PerOpening,
-}
 
 /// Whether this stage solve patches stochastic load-bus bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,12 +59,6 @@ pub(crate) enum InflowNoise {
 pub(crate) struct StageSolvePrepParams<'a> {
     /// Which slice this solve pins as incoming state.
     pub state_source: StateSource<'a>,
-    /// One realized solve vs. a per-opening loop; see [`OpeningMode`].
-    // Rationale: caller-declared intent only — `run` always prepares exactly
-    // one solve regardless of the caller's loop shape, so the field is never
-    // read internally.
-    #[allow(dead_code)]
-    pub opening_mode: OpeningMode,
     /// Whether to patch stochastic load-bus bounds.
     pub load_noise: LoadNoise,
     /// How the inflow-noise buffers are populated.
@@ -103,7 +88,7 @@ impl StageSolvePrep {
         scratch: &mut ScratchBuffers,
         ctx: &StageContext<'_>,
         training_ctx: &TrainingContext<'_>,
-        stage: usize,
+        stage: StageIdx,
         params: &StageSolvePrepParams<'_>,
     ) -> Result<(), SddpError>
     where
@@ -123,7 +108,7 @@ impl StageSolvePrep {
         }
 
         let load_blocks = if ctx.n_load_buses > 0 {
-            ctx.block_counts_per_stage[stage]
+            ctx.block_count(stage)
         } else {
             0
         };
@@ -142,33 +127,30 @@ impl StageSolvePrep {
         patch_buf.fill_col_state_patches(
             training_ctx.state,
             pinned_state,
-            &ctx.templates[stage].col_scale,
+            &ctx.template(stage).col_scale,
         );
         patch_buf.fill_forward_patches(
             training_ctx.state,
             pinned_state,
             &scratch.noise_buf,
-            ctx.base_rows[stage],
-            &ctx.templates[stage].row_scale,
+            ctx.base_row(stage),
+            &ctx.template(stage).row_scale,
         );
         if params.load_noise == LoadNoise::Present && ctx.n_load_buses > 0 {
             let grid = BlockGrid::new(load_blocks, training_ctx.study_dims.max_deficit_segments);
             patch_buf.fill_load_patches(
-                ctx.load_balance_row_starts[stage],
+                ctx.load_balance_row_start(stage),
                 grid,
                 &scratch.load_rhs_buf,
                 ctx.load_bus_indices,
-                &ctx.templates[stage].row_scale,
+                &ctx.template(stage).row_scale,
             );
         }
-        let z_inflow_row_start = ctx
-            .geometry_per_stage
-            .get(stage)
-            .map_or(0, |g| g.z_inflow_row_start);
+        let z_inflow_row_start = ctx.geometry(stage).map_or(0, |g| g.z_inflow_row_start);
         patch_buf.fill_z_inflow_patches(
             z_inflow_row_start,
             &scratch.z_inflow_rhs_buf,
-            &ctx.templates[stage].row_scale,
+            &ctx.template(stage).row_scale,
         );
 
         let cp = patch_buf.state_col_patch_count();
@@ -195,7 +177,7 @@ impl StageSolvePrep {
                 },
                 training_ctx.stochastic,
                 stage,
-                ctx.block_counts_per_stage[stage],
+                ctx.block_count(stage),
                 ctx.ncs_max_gen,
                 ctx.ncs_allow_curtailment,
                 &mut scratch.ncs_col_lower_buf,
@@ -207,16 +189,16 @@ impl StageSolvePrep {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                 let stage_id = training_ctx
                     .stages
-                    .get(stage)
-                    .map_or(stage as i32, |s| s.id);
+                    .get(stage.0)
+                    .map_or(stage.0 as i32, |s| s.id);
                 apply_ncs_col_bounds(
                     solver,
                     scratch,
-                    ctx.ncs_col_starts[stage],
+                    ctx.ncs_col_start(stage),
                     ctx.ncs_stochastic_dense_col,
                     ctx.ncs_stochastic_windows,
                     stage_id,
-                    ctx.block_counts_per_stage[stage],
+                    ctx.block_count(stage),
                 );
             }
         }
@@ -232,7 +214,7 @@ impl StageSolvePrep {
         patch_buf: &mut PatchBuffer,
         ctx: &StageContext<'_>,
         training_ctx: &TrainingContext<'_>,
-        stage: usize,
+        stage: StageIdx,
         pinned_state: &[f64],
     ) -> Result<(), SddpError>
     where
@@ -241,7 +223,7 @@ impl StageSolvePrep {
         if training_ctx.state.n_anticipated == 0 {
             return Ok(());
         }
-        let Some(geometry) = ctx.geometry_per_stage.get(stage) else {
+        let Some(geometry) = ctx.geometry(stage) else {
             return Ok(());
         };
 
@@ -249,11 +231,11 @@ impl StageSolvePrep {
             &DeliveryPins {
                 state_layout: training_ctx.state,
                 pinned_state,
-                template: &ctx.templates[stage],
+                template: ctx.template(stage),
                 geometry,
                 anticipated_thermal_indices: &training_ctx.study_dims.anticipated_thermal_indices,
-                n_blks: ctx.block_counts_per_stage[stage],
-                stage_idx: stage,
+                n_blks: ctx.block_count(stage),
+                stage_idx: stage.0,
                 n_stages: training_ctx.horizon.num_stages(),
             },
             &mut patch_buf.commitment_relax,

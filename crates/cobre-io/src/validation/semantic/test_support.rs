@@ -14,7 +14,7 @@
 
 use chrono::NaiveDate;
 use cobre_core::{
-    CorrelationGroup, CorrelationModel, EntityId, SeasonMap,
+    CorrelationGroup, CorrelationModel, EntityId, HorizonGraph, SeasonMap,
     entities::{
         Bus, DeficitSegment, Hydro, HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line,
         Thermal,
@@ -22,7 +22,7 @@ use cobre_core::{
     initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
     temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     },
 };
@@ -188,11 +188,14 @@ pub(super) fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
 /// Build a minimal valid `StagesData` with the given stage IDs.
 pub(super) fn make_stages(ids: Vec<i32>) -> StagesData {
     StagesData {
+        openings_declared: std::collections::HashSet::new(),
         stages: ids.into_iter().map(make_stage).collect(),
-        policy_graph: PolicyGraph {
+        policy_graph: HorizonGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: None,
         },
     }
@@ -212,7 +215,9 @@ fn base_parsed_data(stages: StagesData) -> ParsedData {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
+            future_anticipated_deliveries: vec![],
         },
+        post_study_stages: None,
         buses: vec![Bus {
             id: EntityId::from(1),
             name: "BUS_1".to_string(),
@@ -439,26 +444,32 @@ pub(super) fn make_correlation(group: CorrelationGroup) -> CorrelationModel {
 
 // ── Config helpers ────────────────────────────────────────────────────────────
 
+/// Parse `json` into a `Config` via a scratch temp file — the shared
+/// write-then-parse path every fixture builder below uses.
+fn config_from_json(json: &str) -> Config {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), json).unwrap();
+    parse_config(tmp.path()).unwrap()
+}
+
 /// Minimal `Config` required to fill `ParsedData`.
 pub(super) fn minimal_config() -> Config {
     let json = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ]
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
 }
 
 /// Build a `Config` with `training.scenario_source.inflow.scheme = "external"`.
 pub(super) fn config_with_training_external_inflow() -> Config {
     let json = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ],
@@ -468,16 +479,108 @@ pub(super) fn config_with_training_external_inflow() -> Config {
             }
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
+}
+
+/// Build a `Config` with `training.selection = enumerated` and
+/// `training.scenario_source.inflow.scheme = "external"` — the enumerated
+/// external-openings case rule 36/37 governs.
+pub(super) fn config_enumerated_external_inflow() -> Config {
+    let json = r#"{
+        "training": {
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "selection": { "method": "enumerated" },
+            "scenario_source": {
+                "seed": 42,
+                "inflow": { "scheme": "external" }
+            }
+        }
+    }"#;
+    config_from_json(json)
+}
+
+/// Build a `Config` with `training.selection = enumerated` and every class at
+/// its default (in-sample) scheme — an enumerated study carrying no external
+/// class, where a node `scenario_id` is meaningless.
+pub(super) fn config_enumerated() -> Config {
+    let json = r#"{
+        "training": {
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "selection": { "method": "enumerated" }
+        }
+    }"#;
+    config_from_json(json)
+}
+
+/// Build a `Config` whose training scenario source sets the `external` scheme for
+/// each requested class, leaving the rest at their default (in-sample) scheme.
+pub(super) fn config_with_training_external(inflow: bool, load: bool, ncs: bool) -> Config {
+    let mut classes: Vec<&str> = Vec::new();
+    if inflow {
+        classes.push(r#""inflow": { "scheme": "external" }"#);
+    }
+    if load {
+        classes.push(r#""load": { "scheme": "external" }"#);
+    }
+    if ncs {
+        classes.push(r#""ncs": { "scheme": "external" }"#);
+    }
+    let json = format!(
+        r#"{{
+            "training": {{
+                "selection": {{"method": "sampled", "forward_passes": 10}},
+                "stopping_rules": [{{ "type": "iteration_limit", "limit": 100 }}],
+                "scenario_source": {{ "seed": 42, {} }}
+            }}
+        }}"#,
+        classes.join(", ")
+    );
+    config_from_json(&json)
+}
+
+/// Build a sampled `Config` declaring `training.scenario_source.openings =
+/// {source: file}` — the user-supplied opening-tree file arm.
+pub(super) fn config_sampled_file_openings() -> Config {
+    let json = r#"{
+        "training": {
+            "selection": {"method": "sampled", "forward_passes": 10},
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "scenario_source": {
+                "openings": { "source": "file" }
+            }
+        }
+    }"#;
+    config_from_json(json)
+}
+
+/// Build an enumerated `Config` declaring `training.scenario_source.openings =
+/// {source: file}` — the file arm is rejected under enumerated selection.
+pub(super) fn config_enumerated_file_openings() -> Config {
+    let json = r#"{
+        "training": {
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "selection": { "method": "enumerated" },
+            "scenario_source": {
+                "openings": { "source": "file" }
+            }
+        }
+    }"#;
+    config_from_json(json)
 }
 
 /// Build a `Config` with `simulation.scenario_source.load.scheme = "external"`.
 pub(super) fn config_with_simulation_external_load() -> Config {
     let json = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ]
@@ -489,9 +592,7 @@ pub(super) fn config_with_simulation_external_load() -> Config {
             }
         }
     }"#;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+    config_from_json(json)
 }
 
 // ── Season / estimation data builders ────────────────────────────────────────
@@ -554,11 +655,14 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
         stages.push(stage);
     }
     StagesData {
+        openings_declared: std::collections::HashSet::new(),
         stages,
-        policy_graph: PolicyGraph {
+        policy_graph: HorizonGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: with_season_map.then(make_monthly_season_map),
         },
     }

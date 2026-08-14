@@ -75,8 +75,9 @@ def test_convergence_parquet_schema(run_output: pathlib.Path) -> None:
     required = {
         "iteration",
         "lower_bound",
-        "upper_bound_mean",
+        "upper_bound",
         "upper_bound_std",
+        "upper_bound_kind",
         "gap_percent",
         "cuts_added",
         "cuts_active",
@@ -173,8 +174,10 @@ def test_hydro_slack_values_nonzero_on_violations(d20_output: pathlib.Path) -> N
     parquets = sorted(hydros_dir.rglob("*.parquet"))
     assert len(parquets) > 0
 
-    # Concatenate all scenario files into a single table.
-    tables = [pq.read_table(p) for p in parquets]
+    # Read each file directly (ParquetFile, not read_table): scenario_id is both
+    # the Hive partition key and an in-file column, so the dataset path would try
+    # to merge the two same-named fields and error.
+    tables = [pq.ParquetFile(p).read() for p in parquets]
     table: pa.Table = pa.concat_tables(tables)
 
     outflow_below = table.column("outflow_slack_below_m3s").to_pylist()

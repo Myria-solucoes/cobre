@@ -37,6 +37,11 @@
 //!
 //! See the [repository](https://github.com/cobre-rs/cobre) for the current status.
 
+// Internal (unpublished) workspace crate: public items intra-doc-link their
+// pub(crate) collaborators as a maintainer aid (docs read with
+// --document-private-items); the public-only doc gate flags these intentional links.
+#![allow(rustdoc::private_intra_doc_links)]
+
 #[cfg(feature = "schema")]
 pub mod schema;
 
@@ -50,12 +55,15 @@ pub mod output;
 pub(crate) mod parquet_helpers;
 pub mod penalties;
 pub(crate) mod pipeline;
+pub mod post_study_stages;
 pub mod report;
 pub mod resolution;
 pub mod scenarios;
+pub mod stage_resolve;
 pub mod stages;
 pub mod system;
 pub mod validation;
+pub(crate) mod windowed_history;
 
 pub use broadcast::{
     BroadcastComputedParameter, BroadcastParameterKind, BroadcastScalarParameter,
@@ -66,15 +74,15 @@ pub use config::{
 };
 pub use constraints::{
     BusPenaltyOverrideRow, ContractBoundsRow, GenericConstraintBoundsRow, HydroBoundsRow,
-    HydroPenaltyOverrideRow, LineBoundsRow, LinePenaltyOverrideRow, NcsPenaltyOverrideRow,
-    PumpingBoundsRow, ThermalBoundsRow, load_contract_bounds, load_generic_constraint_bounds,
-    load_generic_constraints, load_hydro_bounds, load_line_bounds, load_penalty_overrides_bus,
-    load_penalty_overrides_hydro, load_penalty_overrides_line, load_penalty_overrides_ncs,
-    load_pumping_bounds, load_thermal_bounds, parse_contract_bounds,
-    parse_generic_constraint_bounds, parse_generic_constraints, parse_hydro_bounds,
-    parse_line_bounds, parse_penalty_overrides_bus, parse_penalty_overrides_hydro,
-    parse_penalty_overrides_line, parse_penalty_overrides_ncs, parse_pumping_bounds,
-    parse_thermal_bounds,
+    HydroPenaltyOverrideRow, LineBoundsRow, LineBusPairIndex, LinePenaltyOverrideRow,
+    NcsPenaltyOverrideRow, PumpingBoundsRow, ThermalBoundsRow, build_line_bus_pair_index,
+    load_contract_bounds, load_generic_constraint_bounds, load_generic_constraints,
+    load_hydro_bounds, load_line_bounds, load_penalty_overrides_bus, load_penalty_overrides_hydro,
+    load_penalty_overrides_line, load_penalty_overrides_ncs, load_pumping_bounds,
+    load_thermal_bounds, parse_contract_bounds, parse_generic_constraint_bounds,
+    parse_generic_constraints, parse_hydro_bounds, parse_line_bounds, parse_penalty_overrides_bus,
+    parse_penalty_overrides_hydro, parse_penalty_overrides_line, parse_penalty_overrides_ncs,
+    parse_pumping_bounds, parse_thermal_bounds,
 };
 pub use error::LoadError;
 pub use extensions::{
@@ -89,29 +97,32 @@ pub use extensions::{
 };
 pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::{
-    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord,
-    StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
-    deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states,
-    read_policy_checkpoint, serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
-    write_policy_checkpoint,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
+    ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
+    PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
+    STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
+    StageStatesReadResult, deserialize_stage_basis, deserialize_stage_cuts,
+    deserialize_stage_states, read_policy_checkpoint, serialize_stage_basis, serialize_stage_cuts,
+    serialize_stage_states, write_policy_checkpoint,
 };
 pub use output::{
-    ConvergenceSummary, DeviationSummary, DeviationWorstEntry, DistributionInfo, HostLayout,
-    IterationRecord, MetadataBounds, MetadataConfiguration, MetadataConvergence, MetadataCost,
-    MetadataIterations, MetadataProblemDimensions, MetadataRowPool, MetadataScenarios,
-    MetadataSimulationSolveStats, MetadataTrainingSolveStats, OutputContext, OutputError,
-    ParquetWriterConfig, RowPoolStatistics, RowSelectionRecord, SetupTimings, SimulationMetadata,
-    SimulationOutput, SolverStatsRow, TrainingMetadata, TrainingOutput, TrainingParquetWriter,
-    WorkerTimingRecord, get_hostname, now_iso8601, read_convergence_summary,
-    read_hydro_model_summary, read_provenance_report, read_simulation_metadata,
-    read_training_metadata, write_dictionaries, write_evaporation_models,
-    write_fpha_deviation_points, write_fpha_hyperplanes, write_hydro_model_summary,
-    write_provenance_report, write_results, write_row_selection_records, write_scaling_report,
-    write_simulation_metadata, write_simulation_results, write_simulation_solver_stats,
-    write_solver_stats, write_training_metadata, write_training_results,
+    ConvergenceSummary, DeviationSummary, DeviationWorstEntry, DistributionInfo,
+    GenericConstraintEchoRow, HostLayout, IterationRecord, MetadataBounds, MetadataConfiguration,
+    MetadataConvergence, MetadataCost, MetadataIterations, MetadataProblemDimensions,
+    MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats, MetadataTrainingSolveStats,
+    OutputContext, OutputError, ParquetWriterConfig, RowPoolStatistics, RowSelectionRecord,
+    SetupTimings, SimulationMetadata, SimulationOutput, SolverStatsRow, TrainingMetadata,
+    TrainingOutput, TrainingParquetWriter, WorkerTimingRecord, get_hostname, now_iso8601,
+    read_convergence_summary, read_hydro_model_summary, read_provenance_report,
+    read_simulation_metadata, read_training_metadata, write_dictionaries, write_evaporation_models,
+    write_fpha_deviation_points, write_fpha_hyperplanes, write_generic_constraint_echo,
+    write_hydro_model_summary, write_provenance_report, write_results, write_row_selection_records,
+    write_scaling_report, write_simulation_metadata, write_simulation_results,
+    write_simulation_solver_stats, write_solver_stats, write_training_metadata,
+    write_training_results,
 };
 pub use penalties::parse_penalties;
+pub use post_study_stages::parse_post_study_stages;
 pub use report::{ReportEntry, ValidationReport, generate_report};
 pub use resolution::{resolve_bounds, resolve_penalties};
 pub use scenarios::{
@@ -125,6 +136,7 @@ pub use scenarios::{
     parse_external_ncs_scenarios, parse_inflow_ar_coefficients, parse_inflow_history,
     parse_inflow_seasonal_stats, parse_load_factors, parse_load_seasonal_stats,
 };
+pub use stage_resolve::StageIdResolver;
 pub use stages::{StagesData, build_season_stage_map, parse_stages};
 pub use system::{
     load_energy_contracts, load_non_controllable_sources, load_pumping_stations, parse_buses,
@@ -132,6 +144,7 @@ pub use system::{
     parse_pumping_stations, parse_thermals,
 };
 pub use validation::scalar_parameters::validate_scalar_parameters;
+pub use validation::semantic::seed_lag_state_depth;
 pub use validation::structural::{FileManifest, validate_structure};
 pub use validation::{ErrorKind, Severity, ValidationContext, ValidationEntry};
 
@@ -171,7 +184,7 @@ pub struct CaseArtifacts {
     /// Rows from `system/fpha_hyperplanes.parquet`.
     pub fpha_hyperplanes: Vec<extensions::FphaHyperplaneRow>,
 
-    /// Assembled scalar parameters from `system/scalar_parameters.json`.
+    /// Assembled scalar parameters from `constraints/generic_parameters.json`.
     pub scalar_parameters: Vec<ScalarParameter>,
 
     /// Rows from `system/tailrace_curves.parquet`.

@@ -23,6 +23,7 @@ use crate::cut_selection::CutSelectionStrategy;
 use crate::error::SddpError;
 use crate::gemm::gemm_block;
 use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
+use crate::setup::{NodeId, StageIdx};
 use crate::workspace::CapturedBasis;
 
 /// Dynamic Cut Selection hyperparameters.
@@ -140,26 +141,32 @@ impl DcsScoringScratch {
     ///
     /// `cand_coef_block` is reserved to `pool_capacity * n_state` (the
     /// all-eligible worst case); the other buffers to `pool_capacity` each.
+    ///
+    /// `Vec::reserve(additional)` grows to `len() + additional`, not to a target
+    /// capacity, so `additional` is computed from `len()` here — subtracting
+    /// `capacity()` instead under-reserves the moment this runs a second time
+    /// from a nonzero (but still-short-of-target) capacity, e.g. a pool that
+    /// grew twice.
     pub fn reserve(&mut self, n_state: usize, pool_capacity: usize) {
         if self.unscaled_state.capacity() < n_state {
             self.unscaled_state
-                .reserve(n_state - self.unscaled_state.capacity());
+                .reserve(n_state - self.unscaled_state.len());
         }
         let coef_capacity = pool_capacity * n_state;
         if self.cand_coef_block.capacity() < coef_capacity {
             self.cand_coef_block
-                .reserve(coef_capacity - self.cand_coef_block.capacity());
+                .reserve(coef_capacity - self.cand_coef_block.len());
         }
         if self.alpha.capacity() < pool_capacity {
-            self.alpha.reserve(pool_capacity - self.alpha.capacity());
+            self.alpha.reserve(pool_capacity - self.alpha.len());
         }
         if self.cand_slots.capacity() < pool_capacity {
             self.cand_slots
-                .reserve(pool_capacity - self.cand_slots.capacity());
+                .reserve(pool_capacity - self.cand_slots.len());
         }
         if self.violations.capacity() < pool_capacity {
             self.violations
-                .reserve(pool_capacity - self.violations.capacity());
+                .reserve(pool_capacity - self.violations.len());
         }
     }
 }
@@ -340,7 +347,7 @@ pub fn score_violated_candidates(
 #[derive(Clone, Copy, Debug)]
 pub struct DcsSolveContext {
     /// Stage index `t`.
-    pub stage_index: usize,
+    pub stage_index: StageIdx,
     /// Scenario index `m`.
     pub scenario_index: usize,
     /// Training iteration (1-based) feeding the `k1` recency window, or `None`
@@ -359,6 +366,10 @@ pub struct DcsSolveContext {
     /// Skip the reset / `initial_resident` append / reload — warm-`solve(None)`,
     /// then run the lazy loop. `initial_resident` and `stored_basis` are ignored.
     pub continue_carry: bool,
+
+    /// Declared id of the node being solved (`NodeGraph::node_ids[node]`); a
+    /// `stored_basis` whose `node_id` differs is treated as cold.
+    pub node_id: NodeId,
 }
 
 // ---------------------------------------------------------------------------
@@ -446,11 +457,18 @@ impl Default for DcsSolveScratch {
 impl DcsSolveScratch {
     /// Grow the inner buffers to fit `n_state` state entries and a pool of
     /// `pool_capacity` cuts, without shrinking (growth-only).
+    ///
+    /// Safe to call repeatedly with a growing `pool_capacity` (e.g. once per
+    /// training iteration, tracking `CutPool::grow`): every branch below
+    /// reserves from `len()`, not `capacity()`, so a second call from an
+    /// already-nonzero (but still short of the new target) capacity still
+    /// reaches it — see [`DcsScoringScratch::reserve`]'s doc for why
+    /// subtracting `capacity()` would under-reserve here.
     pub fn reserve(&mut self, n_state: usize, pool_capacity: usize) {
         self.scoring.reserve(n_state, pool_capacity);
         if self.out_selected.capacity() < pool_capacity {
             self.out_selected
-                .reserve(pool_capacity - self.out_selected.capacity());
+                .reserve(pool_capacity - self.out_selected.len());
         }
         // base_row_offset 0 is a placeholder; each fresh solve resets it to the
         // loaded core's row count in `lazy_solve_preloaded`.
@@ -463,7 +481,7 @@ impl DcsSolveScratch {
             &mut self.res_reduced_costs,
         ] {
             if buf.capacity() < pool_capacity {
-                buf.reserve(pool_capacity - buf.capacity());
+                buf.reserve(pool_capacity - buf.len());
             }
         }
     }
@@ -518,7 +536,7 @@ impl DcsSolveScratch {
 fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
     match e {
         SolverError::Infeasible => SddpError::Infeasible {
-            stage: ctx.stage_index,
+            stage: ctx.stage_index.0,
             iteration: ctx.iteration.unwrap_or(0),
             scenario: ctx.scenario_index,
         },
@@ -605,7 +623,11 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
         );
 
         let cut_rows = scratch.row_map.total_cut_rows();
-        if let Some(stored) = stored_basis {
+        // A stored basis whose node_id differs from the node being solved is
+        // treated as cold — the same cross-node-reuse rejection
+        // run_stage_solve applies on the frozen path, mirrored here because
+        // CLP accepts a shape-mismatched basis silently.
+        if let Some(stored) = stored_basis.filter(|s| s.node_id == ctx.node_id) {
             let target = ReconstructionTarget {
                 base_row_count: core.num_rows,
                 num_cols: core.num_cols,
@@ -755,8 +777,9 @@ mod tests {
     };
 
     use super::{
-        DcsParams, DcsScoringScratch, DcsSolveContext, DcsSolveScratch, build_initial_resident_set,
-        lazy_solve_preloaded, score_violated_candidates,
+        DcsParams, DcsScoringScratch, DcsSolveContext, DcsSolveScratch, ReconstructionTarget,
+        build_initial_resident_set, lazy_solve_preloaded, reconstruct_basis_uniform_basic,
+        score_violated_candidates,
     };
     use cobre_core::temporal::StageStateConfig;
 
@@ -764,6 +787,8 @@ mod tests {
     use crate::cut::{CutPool, CutRowMap};
     use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
     use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
+    use crate::setup::{NodeId, StageIdx};
+    use crate::workspace::CapturedBasis;
 
     /// All-enabled per-pool projection of `idx`: every scoring/append test uses a
     /// full-dimension pool, so this reproduces the global outgoing render.
@@ -894,7 +919,7 @@ mod tests {
     /// Insert a cut at `slot` with `intercept` and `coeffs`, and set its
     /// `iteration_generated`. Returns nothing; mutates `pool`.
     fn add(pool: &mut CutPool, slot: u32, intercept: f64, coeffs: &[f64], iter_generated: u64) {
-        pool.add_cut(0, slot, intercept, coeffs);
+        pool.add_cut(NodeId(0), 0, slot, intercept, coeffs);
         pool.set_iteration_generated_for_test(slot as usize, iter_generated);
     }
 
@@ -1333,7 +1358,7 @@ mod tests {
         for slot in 0..cap {
             let intercept = draw_f64(&mut state);
             let coeffs = [draw_f64(&mut state), draw_f64(&mut state)];
-            pool.add_cut(0, slot as u32, intercept, &coeffs);
+            pool.add_cut(NodeId(0), 0, slot as u32, intercept, &coeffs);
             // iteration_generated in [1, 12].
             let gen_iter = 1 + (splitmix64(&mut state) % 12);
             pool.set_iteration_generated_for_test(slot, gen_iter);
@@ -1650,6 +1675,62 @@ mod tests {
         }
     }
 
+    /// `DcsSolveScratch::reserve` tracks a GROWN per-pool capacity (the
+    /// `grow_pools_for_next_iteration` seam `CutPool::grow` feeds), the same
+    /// growth-only discipline `rows_in_lp_max` already follows, extended to the
+    /// scratch buffers themselves. Reserving at a larger capacity enlarges the
+    /// buffers; reserving again at the SAME (already-sufficient) capacity
+    /// performs no further allocation.
+    #[test]
+    fn dcs_solve_scratch_reserve_tracks_grown_pool_capacity() {
+        let mut scratch = DcsSolveScratch::default();
+        let small_cap = 8;
+        let grown_cap = 64;
+
+        scratch.reserve(N_STATE, small_cap);
+        assert!(scratch.scoring.cand_slots.capacity() >= small_cap);
+        assert!(scratch.out_selected.capacity() >= small_cap);
+
+        // Simulate `CutPool::grow`: the pool's capacity increases between
+        // iterations, so the scratch must be reserved again at the new value.
+        scratch.reserve(N_STATE, grown_cap);
+        assert!(
+            scratch.scoring.cand_slots.capacity() >= grown_cap,
+            "reserve must grow the scoring scratch to the new (larger) pool capacity"
+        );
+        assert!(
+            scratch.out_selected.capacity() >= grown_cap,
+            "reserve must grow out_selected to the new (larger) pool capacity"
+        );
+
+        let coef_cap = scratch.scoring.cand_coef_block.capacity();
+        let alpha_cap = scratch.scoring.alpha.capacity();
+        let slots_cap = scratch.scoring.cand_slots.capacity();
+        let out_selected_cap = scratch.out_selected.capacity();
+
+        // Reserving again at the SAME (already-sufficient) capacity is a no-op.
+        scratch.reserve(N_STATE, grown_cap);
+        assert_eq!(
+            scratch.scoring.cand_coef_block.capacity(),
+            coef_cap,
+            "no allocation once the buffer already covers the requested capacity"
+        );
+        assert_eq!(scratch.scoring.alpha.capacity(), alpha_cap);
+        assert_eq!(scratch.scoring.cand_slots.capacity(), slots_cap);
+        assert_eq!(scratch.out_selected.capacity(), out_selected_cap);
+    }
+
+    /// `reconstruct_basis_uniform_basic` takes no node/pool-tag argument — node
+    /// identity reaches DCS through the pool it renders
+    /// (`successor_pool`/`pool_id`), never a parameter here (the node-tag
+    /// mismatch check on the stored basis is a separate call site's concern). A
+    /// compile-time pin: adding such a parameter breaks this coercion.
+    #[test]
+    fn reconstruct_basis_uniform_basic_signature_has_no_node_argument() {
+        fn assert_signature(_f: fn(&CapturedBasis, ReconstructionTarget, usize, &mut Basis)) {}
+        assert_signature(reconstruct_basis_uniform_basic);
+    }
+
     // -----------------------------------------------------------------------
     // lazy_solve fixtures
     // -----------------------------------------------------------------------
@@ -1698,9 +1779,9 @@ mod tests {
     /// All-cuts optimum: theta = 5.0, objective = 5.0; binding slot = 2.
     fn make_three_cut_pool() -> CutPool {
         let mut pool = CutPool::new(16, 1, 16, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(0, 1, 0.0, &[1.0]);
-        pool.add_cut(0, 2, 5.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 0, 1.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 1, 0.0, &[1.0]);
+        pool.add_cut(NodeId(0), 0, 2, 5.0, &[0.0]);
         for slot in 0..3 {
             pool.set_iteration_generated_for_test(slot, 1);
         }
@@ -1716,10 +1797,10 @@ mod tests {
     /// (floor 20). Used to exercise the opening-reuse continue path.
     fn make_four_cut_pool() -> CutPool {
         let mut pool = CutPool::new(16, 1, 16, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(0, 1, 0.0, &[1.0]);
-        pool.add_cut(0, 2, 5.0, &[0.0]);
-        pool.add_cut(0, 3, 0.0, &[2.0]);
+        pool.add_cut(NodeId(0), 0, 0, 1.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 1, 0.0, &[1.0]);
+        pool.add_cut(NodeId(0), 0, 2, 5.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 3, 0.0, &[2.0]);
         for slot in 0..4 {
             pool.set_iteration_generated_for_test(slot, 1);
         }
@@ -1732,10 +1813,11 @@ mod tests {
 
     fn ctx() -> DcsSolveContext {
         DcsSolveContext {
-            stage_index: 0,
+            stage_index: StageIdx(0),
             scenario_index: 0,
             iteration: Some(10),
             continue_carry: false,
+            node_id: NodeId(0),
         }
     }
 
@@ -1776,6 +1858,120 @@ mod tests {
         );
         let view = solver.solve(None).expect("all-cuts solve must succeed");
         (view.objective, view.primal[LAZY_THETA_COL])
+    }
+
+    // -----------------------------------------------------------------------
+    // Node-tag mismatch: cross-node reuse is treated as cold
+    // -----------------------------------------------------------------------
+
+    /// `core_template()` with one structural row (`x0 = STATE_X0`, redundant with
+    /// the column bound) so `target.base_row_count == 1` — the uniform-BASIC
+    /// reconstruction can then produce a genuine basic-count deficit (with
+    /// `base_row_count == 0` every cut row is forced BASIC, so `total_basic` can
+    /// never fall short of `num_row`; see `reconstruct_basis_uniform_basic`).
+    fn core_template_with_row() -> StageTemplate {
+        let mut t = core_template();
+        t.num_rows = 1;
+        t.num_nz = 1;
+        t.col_starts = vec![0_i32, 1, 1, 1, 1];
+        t.row_indices = vec![0_i32];
+        t.values = vec![1.0];
+        t.row_lower = vec![STATE_X0];
+        t.row_upper = vec![STATE_X0];
+        t
+    }
+
+    /// A `CapturedBasis` shaped to deficit against `core_template_with_row()`
+    /// with an empty cut pool: `Basis::new`'s zero-fill default leaves every
+    /// column and the one template row `LOWER` (`col_basic = row_basic = 0`
+    /// against `num_row = 1`), so the uniform-BASIC reconstruction's
+    /// `enforce_basic_count_invariant` surfaces `SddpError::BasisShapeMismatch`
+    /// if it is ever attempted.
+    fn make_deficit_basis(node_id: NodeId) -> CapturedBasis {
+        CapturedBasis::new(4, 1, 1, 0, 0, node_id)
+    }
+
+    /// A node-id mismatch on `stored_basis` must drop to the cold path before
+    /// `reconstruct_basis_uniform_basic`/`enforce_basic_count_invariant` ever
+    /// see the deficit-shaped stored basis — the solve succeeds instead of
+    /// erroring.
+    #[test]
+    fn lazy_solve_stored_basis_mismatched_node_is_treated_as_cold() {
+        let indexer = lazy_indexer();
+        let pool = CutPool::new(16, 1, 16, 0); // empty — no cuts
+        let core = core_template_with_row();
+        let mut solver = active_profiled();
+        let mut scratch = DcsSolveScratch::default();
+        let params = lazy_params(10, 50);
+        solver.load_model(&core);
+
+        let stored = make_deficit_basis(NodeId(1)); // node A
+
+        let result = lazy_solve_preloaded(
+            &mut solver,
+            &core,
+            &pool,
+            &indexer,
+            &cut_state(&indexer),
+            &[],
+            Some(&stored),
+            &[],
+            &params,
+            &mut scratch,
+            DcsSolveContext {
+                node_id: NodeId(2),
+                ..ctx()
+            }, // node B — mismatches stored's node A
+        );
+
+        assert!(
+            result.is_ok(),
+            "a node-id mismatch must drop to the cold path, never attempting the \
+             deficit-shaped stored basis: {result:?}"
+        );
+    }
+
+    /// The same deficit-shaped `CapturedBasis`, but tagged with a node id that
+    /// MATCHES the solve context: the warm path is attempted, and
+    /// `enforce_basic_count_invariant` surfaces the deficit as
+    /// `SddpError::BasisShapeMismatch` — proving the match case actually reaches
+    /// the reconstruction, not merely that it does not error.
+    #[test]
+    fn lazy_solve_stored_basis_matching_node_is_applied_warm() {
+        use crate::error::SddpError;
+
+        let indexer = lazy_indexer();
+        let pool = CutPool::new(16, 1, 16, 0); // empty — no cuts
+        let core = core_template_with_row();
+        let mut solver = active_profiled();
+        let mut scratch = DcsSolveScratch::default();
+        let params = lazy_params(10, 50);
+        solver.load_model(&core);
+
+        let stored = make_deficit_basis(NodeId(1)); // node A
+
+        let result = lazy_solve_preloaded(
+            &mut solver,
+            &core,
+            &pool,
+            &indexer,
+            &cut_state(&indexer),
+            &[],
+            Some(&stored),
+            &[],
+            &params,
+            &mut scratch,
+            DcsSolveContext {
+                node_id: NodeId(1),
+                ..ctx()
+            }, // node A — matches stored
+        );
+
+        assert!(
+            matches!(result, Err(SddpError::BasisShapeMismatch { .. })),
+            "a matching node id must attempt the warm reconstruction, surfacing the \
+             deficit-shaped stored basis as BasisShapeMismatch, got {result:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2420,7 +2616,7 @@ mod tests {
         let indexer = lazy_indexer();
         // One cut: intercept 5, coeff [0] → floor 5.0 at x0 = 2.
         let mut pool = CutPool::new(16, 1, 16, 0);
-        pool.add_cut(0, 0, 5.0, &[0.0]);
+        pool.add_cut(NodeId(0), 0, 0, 5.0, &[0.0]);
         pool.set_iteration_generated_for_test(0, 1);
 
         // Primal layout: [x0, c1, c2, theta]. First solve reports theta = 0
@@ -2470,10 +2666,11 @@ mod tests {
         let mut metadata = Vec::with_capacity(n);
         let mut active = Vec::with_capacity(n);
         for (i, &(is_active, iteration_generated, last_active_iter)) in specs.iter().enumerate() {
-            pool.add_cut(0, i as u32, 0.0, &[0.0]);
+            pool.add_cut(NodeId(0), 0, i as u32, 0.0, &[0.0]);
             metadata.push(CutMetadata {
                 iteration_generated,
                 forward_pass_index: i as u32,
+                node: NodeId(0),
                 active_count: 0,
                 last_active_iter,
             });

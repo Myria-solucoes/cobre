@@ -43,6 +43,7 @@
     clippy::single_match_else
 )]
 
+use cobre_io::config::TrainingSelection;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,9 @@ use cobre_sddp::context::StageContext;
 use cobre_sddp::cut::pool::CutPool;
 use cobre_sddp::forward::{ForwardPassBatch, run_forward_pass};
 use cobre_sddp::indexer::{StateDim, StateSpace};
+use cobre_sddp::setup::NodeId;
+use cobre_sddp::setup::NodePos;
+use cobre_sddp::setup::StageIdx;
 use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
 use cobre_sddp::workspace::{BasisStore, CapturedBasis, SolverWorkspace};
 use cobre_sddp::{PrepareHydroModelsResult, StudySetup, TrajectoryRecord};
@@ -398,7 +402,7 @@ fn fresh_setup(
 ) -> StudySetup {
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config.json must parse");
-    config.training.forward_passes = Some(forward_passes);
+    config.training.selection = Some(TrainingSelection::Sampled { forward_passes });
     config.training.stopping_rules =
         Some(vec![cobre_io::config::StoppingRuleConfig::IterationLimit {
             limit: iteration_limit,
@@ -496,6 +500,7 @@ fn run_extra_forward_pass(
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: NodeId(0),
             state: Vec::new(),
         })
         .collect();
@@ -783,7 +788,7 @@ fn lag_fold_check_stage(
         let x_hat: &[f64] = &forward_probe.records[m * num_stages + (stage - 1)].state;
         let forward_basis: &CapturedBasis = forward_probe
             .basis_store
-            .get(m, stage)
+            .get(m, NodePos(stage))
             .unwrap_or_else(|| panic!("no forward-captured basis at (trial {m}, stage {stage})"));
 
         ws.solver.reset_solver_state();
@@ -792,12 +797,27 @@ fn lag_fold_check_stage(
         for omega_position in 0..n_openings {
             let omega = solve_order[omega_position] as usize;
             let raw_noise = opening_tree.opening(stage, omega);
-            patch_backward_opening_for_probe(ws, &ctx, &training_ctx, stage, x_hat, raw_noise)
-                .expect("StageSolvePrep::run must not error on cobre_rodada");
+            patch_backward_opening_for_probe(
+                ws,
+                &ctx,
+                &training_ctx,
+                StageIdx(stage),
+                x_hat,
+                raw_noise,
+            )
+            .expect("StageSolvePrep::run must not error on cobre_rodada");
 
             let stored_basis = (omega_position == 0).then_some(forward_basis);
-            let view = solve_stage_for_probe(ws, &ctx, pool_ref, stored_basis, stage, m)
-                .expect("stage solve must not error on cobre_rodada");
+            let view = solve_stage_for_probe(
+                ws,
+                &ctx,
+                pool_ref,
+                stored_basis,
+                StageIdx(stage),
+                m,
+                NodeId(stage as i32),
+            )
+            .expect("stage solve must not error on cobre_rodada");
             let rc = view.reduced_costs;
             let y = view.dual;
             solves += 1;
@@ -1057,7 +1077,7 @@ fn run_lag_fold_ab_stage(
         let x_hat: &[f64] = &forward_probe.records[m * num_stages + (stage - 1)].state;
         let forward_basis: &CapturedBasis = forward_probe
             .basis_store
-            .get(m, stage)
+            .get(m, NodePos(stage))
             .unwrap_or_else(|| panic!("no forward-captured basis at (trial {m}, stage {stage})"));
 
         // Pinned scaled lag values: the pin writes `v_orig / col_scale` (the
@@ -1081,12 +1101,27 @@ fn run_lag_fold_ab_stage(
             for omega_position in 0..n_openings {
                 let omega = solve_order[omega_position] as usize;
                 let raw_noise = opening_tree.opening(stage, omega);
-                patch_backward_opening_for_probe(ws, &ctx, &training_ctx, stage, x_hat, raw_noise)
-                    .expect("StageSolvePrep::run must not error on cobre_rodada");
+                patch_backward_opening_for_probe(
+                    ws,
+                    &ctx,
+                    &training_ctx,
+                    StageIdx(stage),
+                    x_hat,
+                    raw_noise,
+                )
+                .expect("StageSolvePrep::run must not error on cobre_rodada");
 
                 let stored_basis = (omega_position == 0).then_some(forward_basis);
-                let view = solve_stage_for_probe(ws, &ctx, pool_ref, stored_basis, stage, m)
-                    .expect("stage solve must not error on cobre_rodada");
+                let view = solve_stage_for_probe(
+                    ws,
+                    &ctx,
+                    pool_ref,
+                    stored_basis,
+                    StageIdx(stage),
+                    m,
+                    NodeId(stage as i32),
+                )
+                .expect("stage solve must not error on cobre_rodada");
                 let wall_ms = view.solve_time_seconds * 1_000.0;
                 let pivots = view.iterations;
                 let objective = view.objective;

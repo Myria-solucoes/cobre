@@ -22,13 +22,13 @@ fn cobre() -> Command {
 
 const CONFIG_JSON: &str = r#"{
     "training": {
-        "forward_passes": 1,
+        "selection": { "method": "sampled", "forward_passes": 1 },
         "stopping_rules": [
             { "type": "iteration_limit", "limit": 2 }
         ],
         "scenario_source": { "inflow": { "scheme": "in_sample" }, "seed": 42 }
     },
-    "simulation": { "enabled": true, "num_scenarios": 1 }
+    "simulation": { "enabled": true, "selection": { "method": "sampled", "num_scenarios": 1 } }
 }"#;
 
 const PENALTIES_JSON: &str = r#"{
@@ -71,32 +71,38 @@ const STAGES_JSON: &str = r#"{
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 2
+            "num_openings": 2
         },
         {
             "id": 1,
             "start_date": "2024-02-01",
             "end_date": "2024-03-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 672.0 }],
-            "num_scenarios": 2
+            "num_openings": 2
         },
         {
             "id": 2,
             "start_date": "2024-03-01",
             "end_date": "2024-04-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 2
+            "num_openings": 2
         }
     ]
 }"#;
 
-/// Anticipated thermal id=2 has `lead_stages=2`, so `values_mw` must have
-/// exactly two entries — the prior commitments before the study start.
+/// Anticipated thermal id=2 has `lead_stages=2`, so its commitment windows
+/// must tile exactly two leading delivery stages — the prior commitments
+/// before the study start, covering stage 0's `[2024-01-01, 2024-02-01)` and
+/// stage 1's `[2024-02-01, 2024-03-01)`. Coverage (`StageCalendar::coverage`)
+/// is computed on each stage's own real calendar span, not its declared
+/// block-hours, so the windows mirror `STAGES_JSON`'s `start_date`/`end_date`
+/// exactly (stage 1's real span is 29 days despite its 672 declared hours).
 const INITIAL_CONDITIONS_JSON: &str = r#"{
     "storage": [],
     "filling_storage": [],
     "past_anticipated_commitments": [
-        { "thermal_id": 2, "values_mw": [0.0, 0.0] }
+        { "thermal_id": 2, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 },
+        { "thermal_id": 2, "start_date": "2024-02-01", "end_date": "2024-03-01", "value_mw": 0.0 }
     ]
 }"#;
 
@@ -442,10 +448,10 @@ fn cli_run_k2_populates_anticipated_columns_and_manifest() {
     // The per-slot state identity now lives in the embedded entity manifest of
     // each policy cut file, not a separate dictionary sidecar. Read stage 0's
     // manifest and assert it carries the two anticipated ring slots for plant 2.
-    let cuts_path = output.join("policy/cuts/stage_000.bin");
+    let cuts_path = output.join("policy/cuts/000.bin");
     assert!(
         cuts_path.exists(),
-        "policy/cuts/stage_000.bin must exist at {}",
+        "policy/cuts/000.bin must exist at {}",
         cuts_path.display()
     );
 

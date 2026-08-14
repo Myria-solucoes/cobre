@@ -4,9 +4,10 @@
 
 use cobre_core::{Hydro, InflowHistoryRow, RecentObservation, SeasonMap, Stage};
 
-use crate::season_cast::{
-    RealizedWindow, cast, merge_layered_windows, nth_previous_occurrence, season_period_window,
-};
+use crate::season_cast::{RealizedWindow, StageCalendar, merge_layered_windows};
+
+#[cfg(test)]
+use crate::season_cast::{cast, nth_previous_occurrence, season_period_window};
 
 /// Per-hydro PAR lag-slot and accumulator seeds, indexed by canonical hydro
 /// position — the iteration order [`derive_inflow_seeds`] walks `hydros` in.
@@ -39,8 +40,9 @@ impl DerivedInflowSeeds {
 /// index is the returned position; no id-to-position lookup is built).
 ///
 /// `conditioning` shadows `record` day-wise via [`merge_layered_windows`]
-/// before every [`cast`]. Returns [`DerivedInflowSeeds::zero`] when `hydros`
-/// is empty, `first_stage.season_id` is `None`, or that id is absent from
+/// before every [`crate::season_cast::cast`]. Returns
+/// [`DerivedInflowSeeds::zero`] when `hydros` is empty,
+/// `first_stage.season_id` is `None`, or that id is absent from
 /// `season_map.seasons`.
 #[must_use]
 pub fn derive_inflow_seeds(
@@ -64,7 +66,7 @@ pub fn derive_inflow_seeds(
         return DerivedInflowSeeds::zero(n_hydros, l_state);
     };
 
-    let in_progress = season_period_window(season_map, season_def, first_stage);
+    let calendar = StageCalendar::new(std::slice::from_ref(first_stage));
 
     let mut seeds = DerivedInflowSeeds::zero(n_hydros, l_state);
 
@@ -89,16 +91,22 @@ pub fn derive_inflow_seeds(
             .collect();
         let merged = merge_layered_windows(&record_windows, &conditioning_windows);
 
-        let in_progress_projection = cast(&merged, &in_progress);
+        let in_progress_projection = calendar
+            .season_occurrence(season_map, season_def, &merged, 0)
+            .unwrap_or_else(|| {
+                unreachable!(
+                    "k=0 always resolves the in-progress occurrence for a non-empty calendar"
+                )
+            });
         seeds.accum[pos] = in_progress_projection.value * in_progress_projection.coverage;
         seeds.weight[pos] = in_progress_projection.coverage;
 
         for k in 1..=l_state {
-            let Some(occurrence) = nth_previous_occurrence(season_map, season_def, &in_progress, k)
+            let Some(projection) = calendar.season_occurrence(season_map, season_def, &merged, k)
             else {
                 continue;
             };
-            seeds.lag_values[pos * l_state + (k - 1)] = cast(&merged, &occurrence).value;
+            seeds.lag_values[pos * l_state + (k - 1)] = projection.value;
         }
     }
 

@@ -14,10 +14,10 @@
 //!     iteration: 10,
 //!     wall_time_seconds: 50.0,
 //!     lower_bound: 100.0,
+//!     upper_bound: 110.0,
 //!     lower_bound_history: vec![90.0, 95.0, 98.0, 99.0, 100.0,
 //!                              100.0, 100.0, 100.0, 100.0, 100.0],
 //!     shutdown_requested: false,
-//!     simulation_costs: None,
 //! };
 //!
 //! let rule = StoppingRule::IterationLimit { limit: 10 };
@@ -36,10 +36,22 @@ pub const RULE_ITERATION_LIMIT: &str = "iteration_limit";
 pub const RULE_TIME_LIMIT: &str = "time_limit";
 /// Rule name for the lower-bound stalling stopping rule.
 pub const RULE_BOUND_STALLING: &str = "bound_stalling";
-/// Rule name for the simulation-based stopping rule.
-pub const RULE_SIMULATION_BASED: &str = "simulation_based";
+/// Rule name for the exact-upper-bound gap stopping rule.
+pub const RULE_GAP: &str = "gap";
 /// Rule name for the graceful-shutdown stopping rule.
 pub const RULE_GRACEFUL_SHUTDOWN: &str = "graceful_shutdown";
+
+/// Guarded denominator for the RELATIVE gap: the LOWER bound's magnitude, floored
+/// at `1.0`. Both the reported gap ([`crate::ConvergenceMonitor::gap`]) and the
+/// [`StoppingRule::Gap`] relative arm divide by this, so the two never disagree on
+/// what "relative gap" means — it is normalized by the lower bound, never the
+/// upper. The `1.0` floor bounds the ratio when the lower bound is near zero
+/// (startup, or a zero-cost study); the canonical-R$ lower bound is far larger
+/// than `1.0` once gap-checking matters, so the floor only guards that degenerate
+/// case.
+pub(crate) fn relative_gap_denominator(lower_bound: f64) -> f64 {
+    lower_bound.abs().max(1.0_f64)
+}
 
 // ---------------------------------------------------------------------------
 // MonitorState
@@ -58,15 +70,15 @@ pub struct MonitorState {
     /// Current lower bound (stage-1 LP objective value).
     pub lower_bound: f64,
 
+    /// Current upper bound, canonical R$; the exact `Σ w·c` bound under
+    /// enumerated forwards that [`StoppingRule::Gap`] compares against.
+    pub upper_bound: f64,
+
     /// Lower bounds from past iterations, chronological: `[i]` is iteration `i + 1`.
     pub lower_bound_history: Vec<f64>,
 
     /// Whether an external shutdown signal (SIGTERM / SIGINT) has been received.
     pub shutdown_requested: bool,
-
-    /// Per-stage mean costs from the most recent simulation, or `None` if no
-    /// [`StoppingRule::SimulationBased`] check has run yet.
-    pub simulation_costs: Option<Vec<f64>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,24 +136,19 @@ pub enum StoppingRule {
         iterations: u64,
     },
 
-    /// Terminate when both the lower bound and simulated policy costs have
-    /// stabilized, evaluated every `period` iterations. Two-stage: a cheap bound
-    /// stability pre-filter, then comparison of per-stage mean simulation costs
-    /// between consecutive evaluations.
-    SimulationBased {
-        /// Evaluate this rule every `period` iterations.
-        period: u64,
+    /// Terminate once the clamped canonical-R$ gap `UB_exact − LB` satisfies the
+    /// disjunction of the configured tolerance arms. Admissible only under
+    /// enumerated forwards + an expectation measure (enforced by the setup
+    /// admission gate); at least one tolerance arm is required (enforced at
+    /// config mapping).
+    Gap {
+        /// Absolute gap tolerance, canonical R$.
+        tolerance: Option<f64>,
 
-        /// Normalized Euclidean distance threshold for simulation cost
-        /// comparison between consecutive evaluations.
-        distance_tolerance: f64,
-
-        /// Number of Monte Carlo forward simulations to run when the bound
-        /// stability pre-filter passes (executed by the convergence monitor).
-        replications: u32,
-
-        /// Number of past iterations for the bound stability pre-check.
-        bound_stability_window: u64,
+        /// Relative gap tolerance in PERCENT: stops when
+        /// `100·gap / max(1, |LB|) ≤ relative_tolerance`. A value of `0.01` means
+        /// 0.01%, directly comparable to the reported `gap_percent`.
+        relative_tolerance: Option<f64>,
     },
 
     /// Terminate when an external shutdown signal (SIGTERM / SIGINT) is received.
@@ -152,8 +159,7 @@ pub enum StoppingRule {
 
 impl StoppingRule {
     /// Evaluate this rule against the current monitor state (pure; reads `state`
-    /// only). For [`StoppingRule::SimulationBased`], the monitor must have stored
-    /// results in `state.simulation_costs` beforehand.
+    /// only).
     #[must_use]
     pub fn evaluate(&self, state: &MonitorState) -> StoppingRuleResult {
         match self {
@@ -183,12 +189,10 @@ impl StoppingRule {
                 iterations,
             } => Self::evaluate_bound_stalling(state, *tolerance, *iterations),
 
-            Self::SimulationBased {
-                period,
-                distance_tolerance,
-                replications: _,
-                bound_stability_window: _,
-            } => Self::evaluate_simulation_based(state, *period, *distance_tolerance),
+            Self::Gap {
+                tolerance,
+                relative_tolerance,
+            } => Self::evaluate_gap(state, *tolerance, *relative_tolerance),
 
             Self::GracefulShutdown => {
                 let triggered = state.shutdown_requested;
@@ -246,54 +250,27 @@ impl StoppingRule {
         }
     }
 
-    /// Evaluate the [`StoppingRule::SimulationBased`] condition.
-    fn evaluate_simulation_based(
+    /// Evaluate the [`StoppingRule::Gap`] condition: the clamped canonical-R$ gap
+    /// `UB_exact − LB` against the disjunction of the configured tolerance arms
+    /// (`gap ≤ tolerance` OR `100·gap / max(1, |LB|) ≤ relative_tolerance`). The
+    /// relative arm normalizes by the LOWER bound
+    /// ([`relative_gap_denominator`]) and is expressed in percent, the same
+    /// convention the reported `gap_percent` uses. A small negative gap (float
+    /// noise at a closed gap) is clamped to `0` before comparing.
+    fn evaluate_gap(
         state: &MonitorState,
-        period: u64,
-        distance_tolerance: f64,
+        tolerance: Option<f64>,
+        relative_tolerance: Option<f64>,
     ) -> StoppingRuleResult {
-        if period == 0 || !state.iteration.is_multiple_of(period) {
-            return StoppingRuleResult {
-                rule_name: RULE_SIMULATION_BASED,
-                triggered: false,
-                detail: Cow::Owned(format!(
-                    "not a check iteration ({}/{})",
-                    state.iteration, period
-                )),
-            };
-        }
-
-        // `simulation_costs` is populated iff the bound-stability pre-filter
-        // passed and simulations were run.
-        let Some(ref current_costs) = state.simulation_costs else {
-            return StoppingRuleResult {
-                rule_name: RULE_SIMULATION_BASED,
-                triggered: false,
-                detail: Cow::Borrowed(
-                    "no simulation results available (bound stability check failed or first check)",
-                ),
-            };
-        };
-
-        // Distance is measured against a zero baseline, not the previous
-        // snapshot: the full two-snapshot comparison is deferred, so this is
-        // deliberately conservative (it cannot trigger on a first evaluation).
-        let distance: f64 = current_costs
-            .iter()
-            .map(|&c| {
-                let denom = c.abs().max(1.0_f64);
-                let normalized = c / denom;
-                normalized * normalized
-            })
-            .sum::<f64>()
-            .sqrt();
-
-        let triggered = distance < distance_tolerance;
+        let gap = (state.upper_bound - state.lower_bound).max(0.0);
+        let absolute_hit = tolerance.is_some_and(|t| gap <= t);
+        let relative_hit = relative_tolerance
+            .is_some_and(|r| 100.0 * gap / relative_gap_denominator(state.lower_bound) <= r);
         StoppingRuleResult {
-            rule_name: RULE_SIMULATION_BASED,
-            triggered,
+            rule_name: RULE_GAP,
+            triggered: absolute_hit || relative_hit,
             detail: Cow::Owned(format!(
-                "simulation distance {distance:.6} / tolerance {distance_tolerance:.6}"
+                "gap {gap:.6} (abs tol {tolerance:?}, rel tol {relative_tolerance:?})"
             )),
         }
     }
@@ -316,9 +293,9 @@ impl StoppingRule {
 ///     iteration: 100,
 ///     wall_time_seconds: 1000.0,
 ///     lower_bound: 100.0,
+///     upper_bound: 110.0,
 ///     lower_bound_history: vec![],
 ///     shutdown_requested: false,
-///     simulation_costs: None,
 /// };
 ///
 /// let rule_set = StoppingRuleSet {
@@ -353,14 +330,12 @@ impl StoppingRuleSet {
     /// [`StoppingMode::All`] stops only if all did.
     #[must_use]
     pub fn evaluate(&self, state: &MonitorState) -> (bool, Vec<StoppingRuleResult>) {
-        if state.shutdown_requested {
-            let results: Vec<StoppingRuleResult> =
-                self.rules.iter().map(|r| r.evaluate(state)).collect();
-            return (true, results);
-        }
-
         let results: Vec<StoppingRuleResult> =
             self.rules.iter().map(|r| r.evaluate(state)).collect();
+
+        if state.shutdown_requested {
+            return (true, results);
+        }
 
         // GracefulShutdown is excluded here — already handled above.
         let non_shutdown_triggered: Vec<bool> = self
@@ -395,9 +370,20 @@ mod tests {
             iteration,
             wall_time_seconds: wall_time,
             lower_bound: lb,
+            upper_bound: 0.0,
             lower_bound_history: history,
             shutdown_requested: false,
-            simulation_costs: None,
+        }
+    }
+
+    fn gap_state(lb: f64, ub: f64) -> MonitorState {
+        MonitorState {
+            iteration: 1,
+            wall_time_seconds: 0.0,
+            lower_bound: lb,
+            upper_bound: ub,
+            lower_bound_history: vec![],
+            shutdown_requested: false,
         }
     }
 
@@ -497,6 +483,73 @@ mod tests {
         let state = make_state(4, 0.0, 0.001, history);
         let result = rule.evaluate(&state);
         assert!(result.triggered);
+    }
+
+    #[test]
+    fn gap_absolute_arm_stops_within_tolerance() {
+        let rule = StoppingRule::Gap {
+            tolerance: Some(10.0),
+            relative_tolerance: None,
+        };
+        // gap = 105 - 100 = 5 <= 10 → stop; 120 - 100 = 20 > 10 → no stop.
+        assert!(rule.evaluate(&gap_state(100.0, 105.0)).triggered);
+        assert!(!rule.evaluate(&gap_state(100.0, 120.0)).triggered);
+        assert_eq!(rule.evaluate(&gap_state(100.0, 105.0)).rule_name, "gap");
+    }
+
+    #[test]
+    fn gap_relative_arm_stops_within_relative_tolerance() {
+        let rule = StoppingRule::Gap {
+            tolerance: None,
+            relative_tolerance: Some(10.0),
+        };
+        // percent gap = 100·5/100 = 5% <= 10% → stop; 100·20/100 = 20% > 10% → no stop.
+        assert!(rule.evaluate(&gap_state(100.0, 105.0)).triggered);
+        assert!(!rule.evaluate(&gap_state(100.0, 120.0)).triggered);
+    }
+
+    #[test]
+    fn gap_disjunction_stops_when_only_relative_arm_holds() {
+        // abs tol 1.0 NOT met (gap 5 > 1); rel tol 10% met (5% <= 10%) → OR stops.
+        let rule = StoppingRule::Gap {
+            tolerance: Some(1.0),
+            relative_tolerance: Some(10.0),
+        };
+        assert!(rule.evaluate(&gap_state(100.0, 105.0)).triggered);
+    }
+
+    #[test]
+    fn gap_disjunction_stops_when_only_absolute_arm_holds() {
+        // Large |LB| starves the relative arm (percent gap 100·50/1e6 = 5e-3% >
+        // 1e-9%); abs tol 100 met (gap 50 <= 100) → OR stops.
+        let rule = StoppingRule::Gap {
+            tolerance: Some(100.0),
+            relative_tolerance: Some(1e-9),
+        };
+        assert!(
+            rule.evaluate(&gap_state(1_000_000.0, 1_000_050.0))
+                .triggered
+        );
+    }
+
+    #[test]
+    fn gap_negative_float_noise_clamps_to_zero_and_converges() {
+        // UB a hair below LB (closed-gap float noise): clamped to 0, reported
+        // non-negative, and counts as converged.
+        let rule = StoppingRule::Gap {
+            tolerance: Some(0.0),
+            relative_tolerance: None,
+        };
+        let result = rule.evaluate(&gap_state(100.0, 100.0 - 1e-9));
+        assert!(
+            result.triggered,
+            "a small negative gap must clamp to 0 and count as converged"
+        );
+        assert!(
+            !result.detail.contains("-0.000000"),
+            "the reported gap must be non-negative after clamping: {}",
+            result.detail
+        );
     }
 
     #[test]

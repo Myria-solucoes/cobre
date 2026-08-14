@@ -18,17 +18,21 @@ use super::schemas::{retry_histogram_schema, solver_iterations_schema};
 /// A single row in the solver statistics Parquet file.
 #[derive(Debug, Clone)]
 pub struct SolverStatsRow {
-    /// Row identifier: iteration number (1-based) for training phases,
-    /// scenario ID (0-based) for the simulation phase.
-    pub iteration: u32,
+    /// Training iteration number (1-based); `None` on a simulation row, which
+    /// fills [`Self::scenario_id`] instead.
+    pub iteration: Option<i32>,
+    /// Simulation trajectory id (0-based); `None` on a training row, which fills
+    /// [`Self::iteration`] instead.
+    pub scenario_id: Option<i32>,
     /// Phase name: `"forward"`, `"backward"`, `"lower_bound"`, or `"simulation"`.
     pub phase: String,
-    /// Stage index for backward phase, `-1` for forward/LB.
-    pub stage: i32,
+    /// Declared study `stage_id` for forward/backward rows; `None` for the
+    /// lower-bound and simulation rows that carry no per-stage attribution.
+    pub stage_id: Option<i32>,
     /// Opening (noise realization) index within the stage. `Some(ω)` for
     /// backward rows, `None` for forward, `lower_bound`, and simulation
     /// rows (which have no opening dimension).
-    pub opening: Option<i32>,
+    pub opening_index: Option<i32>,
     /// MPI rank that produced this row. `None` for rank-aggregated rows.
     pub rank: Option<i32>,
     /// Rayon worker index within the rank's thread pool. `None` for rank-aggregated rows.
@@ -86,15 +90,31 @@ pub fn write_simulation_solver_stats(
 /// Build Arrow column arrays for `iterations.parquet` (scalar metrics only).
 fn build_iterations_columns(rows: &[SolverStatsRow]) -> Vec<Arc<dyn arrow::array::Array>> {
     let n = rows.len();
-    let iteration_arr = UInt32Array::from(rows.iter().map(|r| r.iteration).collect::<Vec<_>>());
+    let iteration_arr = Int32Array::from(
+        rows.iter()
+            .map(|r| r.iteration)
+            .collect::<Vec<Option<i32>>>(),
+    );
+    let scenario_id_arr = Int32Array::from(
+        rows.iter()
+            .map(|r| r.scenario_id)
+            .collect::<Vec<Option<i32>>>(),
+    );
     let mut phase_builder = StringBuilder::with_capacity(n, n * 10);
     for r in rows {
         phase_builder.append_value(&r.phase);
     }
     let phase_arr = phase_builder.finish();
-    let stage_arr = Int32Array::from(rows.iter().map(|r| r.stage).collect::<Vec<_>>());
-    let opening_arr =
-        Int32Array::from(rows.iter().map(|r| r.opening).collect::<Vec<Option<i32>>>());
+    let stage_arr = Int32Array::from(
+        rows.iter()
+            .map(|r| r.stage_id)
+            .collect::<Vec<Option<i32>>>(),
+    );
+    let opening_arr = Int32Array::from(
+        rows.iter()
+            .map(|r| r.opening_index)
+            .collect::<Vec<Option<i32>>>(),
+    );
     let rank_arr = Int32Array::from(rows.iter().map(|r| r.rank).collect::<Vec<Option<i32>>>());
     let worker_id_arr = Int32Array::from(
         rows.iter()
@@ -137,6 +157,7 @@ fn build_iterations_columns(rows: &[SolverStatsRow]) -> Vec<Arc<dyn arrow::array
 
     vec![
         Arc::new(iteration_arr),
+        Arc::new(scenario_id_arr),
         Arc::new(phase_arr),
         Arc::new(stage_arr),
         Arc::new(opening_arr),
@@ -158,16 +179,21 @@ fn build_iterations_columns(rows: &[SolverStatsRow]) -> Vec<Arc<dyn arrow::array
 }
 
 /// Build a `RecordBatch` for `retry_histogram.parquet`: one row per
-/// (iteration, phase, stage, `retry_level`) tuple whose summed `count > 0`.
+/// (iteration, phase, `stage_id`, `retry_level`) tuple whose summed `count > 0`.
+///
+/// The row identity is `iteration` on a training row and `scenario_id` on a
+/// simulation row (exactly one is set); `stage_id` is `None` for the
+/// forward/lower-bound/simulation rows that carry no per-stage attribution.
 fn build_retry_histogram_batch(rows: &[SolverStatsRow]) -> Result<RecordBatch, OutputError> {
-    // Sum per-level counts across every row sharing an (iteration, phase, stage)
-    // key. BTreeMap (never HashMap) emits canonical (iteration, phase, stage,
+    // Sum per-level counts across every row sharing an (id, phase, stage_id)
+    // key. BTreeMap (never HashMap) emits canonical (id, phase, stage_id,
     // level) order, making the file a pure function of the aggregate retry data
     // regardless of rank/worker/opening partitioning — the declaration-order rule.
-    let mut aggregated: BTreeMap<(u32, &str, i32), Vec<u64>> = BTreeMap::new();
+    let mut aggregated: BTreeMap<(i32, &str, Option<i32>), Vec<u64>> = BTreeMap::new();
     for r in rows {
+        let id = r.iteration.or(r.scenario_id).unwrap_or_default();
         let entry = aggregated
-            .entry((r.iteration, r.phase.as_str(), r.stage))
+            .entry((id, r.phase.as_str(), r.stage_id))
             .or_default();
         if entry.len() < r.retry_level_histogram.len() {
             entry.resize(r.retry_level_histogram.len(), 0);
@@ -179,17 +205,17 @@ fn build_retry_histogram_batch(rows: &[SolverStatsRow]) -> Result<RecordBatch, O
 
     let mut iterations = Vec::new();
     let mut phases = Vec::new();
-    let mut stages = Vec::new();
+    let mut stages: Vec<Option<i32>> = Vec::new();
     let mut levels = Vec::new();
     let mut counts = Vec::new();
 
-    for (&(iteration, phase, stage), histogram) in &aggregated {
-        #[allow(clippy::cast_possible_truncation)]
+    for (&(id, phase, stage_id), histogram) in &aggregated {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         for (level, &count) in histogram.iter().enumerate() {
             if count > 0 {
-                iterations.push(iteration);
+                iterations.push(id as u32);
                 phases.push(phase);
-                stages.push(stage);
+                stages.push(stage_id);
                 levels.push(level as u32);
                 counts.push(count);
             }
@@ -241,52 +267,60 @@ fn write_solver_stats_to(dir: &Path, rows: &[SolverStatsRow]) -> Result<(), Outp
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, Float64Array, Int32Array, UInt32Array, UInt64Array};
+    use arrow::array::{Array, Float64Array, Int32Array, StringArray, UInt32Array, UInt64Array};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    /// A zeroed row with all axis columns absent; tests set the axes they exercise.
+    fn base_row(phase: &str) -> SolverStatsRow {
+        SolverStatsRow {
+            iteration: None,
+            scenario_id: None,
+            phase: phase.to_string(),
+            stage_id: None,
+            opening_index: None,
+            rank: None,
+            worker_id: None,
+            lp_solves: 0,
+            lp_successes: 0,
+            lp_retries: 0,
+            lp_failures: 0,
+            retry_attempts: 0,
+            basis_offered: 0,
+            basis_consistency_failures: 0,
+            simplex_iterations: 0,
+            solve_time_ms: 0.0,
+            load_model_time_ms: 0.0,
+            set_bounds_time_ms: 0.0,
+            basis_set_time_ms: 0.0,
+            retry_level_histogram: vec![0; 12],
+        }
+    }
 
     fn make_rows() -> Vec<SolverStatsRow> {
         vec![
             SolverStatsRow {
-                iteration: 1,
-                phase: "forward".to_string(),
-                stage: 0,
-                opening: None,
-                rank: None,
-                worker_id: None,
+                iteration: Some(1),
+                stage_id: Some(0),
                 lp_solves: 100,
                 lp_successes: 98,
                 lp_retries: 2,
-                lp_failures: 0,
-                retry_attempts: 4,
                 basis_offered: 90,
                 basis_consistency_failures: 3,
                 simplex_iterations: 5000,
                 solve_time_ms: 42.5,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
-                retry_level_histogram: vec![0; 12],
+                ..base_row("forward")
             },
             SolverStatsRow {
-                iteration: 1,
-                phase: "backward".to_string(),
-                stage: 2,
-                opening: Some(0),
-                rank: None,
-                worker_id: None,
+                iteration: Some(1),
+                stage_id: Some(2),
+                opening_index: Some(0),
                 lp_solves: 200,
                 lp_successes: 200,
-                lp_retries: 0,
-                lp_failures: 0,
-                retry_attempts: 0,
                 basis_offered: 180,
                 basis_consistency_failures: 1,
                 simplex_iterations: 10000,
                 solve_time_ms: 85.0,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
-                retry_level_histogram: vec![0; 12],
+                ..base_row("backward")
             },
         ]
     }
@@ -310,22 +344,20 @@ mod tests {
         let batch = read_parquet(&iter_path);
 
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 18);
+        assert_eq!(batch.num_columns(), 19);
 
         let iteration_col = batch
-            .column(0)
+            .column_by_name("iteration")
+            .unwrap()
             .as_any()
-            .downcast_ref::<UInt32Array>()
+            .downcast_ref::<Int32Array>()
             .unwrap();
         assert_eq!(iteration_col.value(0), 1);
         assert_eq!(iteration_col.value(1), 1);
 
-        // Column indices:
-        // 0 = iteration, 1 = phase, 2 = stage, 3 = opening, 4 = rank, 5 = worker_id,
-        // 6 = lp_solves, ..., 12 = basis_consistency_failures,
-        // 13 = simplex_iterations, 14 = solve_time_ms, ..., 17 = basis_set_time_ms
         let solve_time_col = batch
-            .column(14)
+            .column_by_name("solve_time_ms")
+            .unwrap()
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
@@ -333,7 +365,8 @@ mod tests {
         assert!((solve_time_col.value(1) - 85.0).abs() < 1e-10);
 
         let simplex_col = batch
-            .column(13)
+            .column_by_name("simplex_iterations")
+            .unwrap()
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -363,7 +396,7 @@ mod tests {
         assert!(iter_path.exists());
         let file = std::fs::File::open(&iter_path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        assert_eq!(builder.schema().fields().len(), 18);
+        assert_eq!(builder.schema().fields().len(), 19);
 
         let hist_path = dir.path().join("training/solver/retry_histogram.parquet");
         assert!(hist_path.exists());
@@ -373,51 +406,119 @@ mod tests {
     }
 
     #[test]
+    fn stage_id_null_for_lower_bound_and_simulation_and_no_minus_one() {
+        // forward/backward rows carry a real (domain) stage_id; lower_bound and
+        // simulation rows carry NULL. No -1 sentinel appears in any output column.
+        let dir = tempfile::TempDir::new().unwrap();
+        let rows = vec![
+            SolverStatsRow {
+                iteration: Some(1),
+                stage_id: Some(3),
+                ..base_row("forward")
+            },
+            SolverStatsRow {
+                iteration: Some(1),
+                stage_id: Some(4),
+                opening_index: Some(0),
+                ..base_row("backward")
+            },
+            SolverStatsRow {
+                iteration: Some(1),
+                stage_id: None,
+                ..base_row("lower_bound")
+            },
+        ];
+        write_solver_stats(dir.path(), &rows).unwrap();
+
+        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
+        let stage = batch
+            .column_by_name("stage_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert!(
+            !stage.is_null(0) && stage.value(0) == 3,
+            "forward keeps stage_id"
+        );
+        assert!(
+            !stage.is_null(1) && stage.value(1) == 4,
+            "backward keeps stage_id"
+        );
+        assert!(stage.is_null(2), "lower_bound stage_id must be NULL");
+
+        // No -1 in stage_id, iteration, scenario_id, or opening_index.
+        for name in ["stage_id", "iteration", "scenario_id", "opening_index"] {
+            let col = batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            for i in 0..col.len() {
+                assert!(
+                    col.is_null(i) || col.value(i) != -1,
+                    "no -1 sentinel allowed in {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn training_row_fills_iteration_simulation_row_fills_scenario_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rows = vec![
+            SolverStatsRow {
+                iteration: Some(7),
+                stage_id: Some(0),
+                ..base_row("forward")
+            },
+            SolverStatsRow {
+                scenario_id: Some(12),
+                ..base_row("simulation")
+            },
+        ];
+        write_solver_stats(dir.path(), &rows).unwrap();
+
+        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
+        let iter_col = batch
+            .column_by_name("iteration")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let scen_col = batch
+            .column_by_name("scenario_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        // Training row: iteration Some, scenario_id NULL.
+        assert!(!iter_col.is_null(0) && iter_col.value(0) == 7);
+        assert!(scen_col.is_null(0), "training row scenario_id must be NULL");
+        // Simulation row: iteration NULL, scenario_id Some.
+        assert!(iter_col.is_null(1), "simulation row iteration must be NULL");
+        assert!(!scen_col.is_null(1) && scen_col.value(1) == 12);
+    }
+
+    #[test]
     fn retry_histogram_sparse_encoding() {
         let dir = tempfile::TempDir::new().unwrap();
         let rows = vec![
             SolverStatsRow {
-                iteration: 1,
-                phase: "forward".to_string(),
-                stage: 0,
-                opening: None,
-                rank: None,
-                worker_id: None,
+                iteration: Some(1),
+                stage_id: Some(0),
                 lp_solves: 50,
-                lp_successes: 48,
-                lp_retries: 2,
-                lp_failures: 0,
-                retry_attempts: 3,
-                basis_offered: 40,
-                basis_consistency_failures: 0,
-                simplex_iterations: 2000,
-                solve_time_ms: 10.0,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
                 // Level 0: 5 recoveries, level 2: 1 recovery
                 retry_level_histogram: vec![5, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                ..base_row("forward")
             },
             SolverStatsRow {
-                iteration: 1,
-                phase: "backward".to_string(),
-                stage: 0,
-                opening: Some(0),
-                rank: None,
-                worker_id: None,
+                iteration: Some(1),
+                stage_id: Some(0),
+                opening_index: Some(0),
                 lp_solves: 100,
-                lp_successes: 100,
-                lp_retries: 0,
-                lp_failures: 0,
-                retry_attempts: 0,
-                basis_offered: 80,
-                basis_consistency_failures: 0,
-                simplex_iterations: 5000,
-                solve_time_ms: 20.0,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
-                retry_level_histogram: vec![0; 12],
+                ..base_row("backward")
             },
         ];
 
@@ -433,7 +534,7 @@ mod tests {
         let phase_col = batch
             .column(1)
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(phase_col.value(0), "forward");
         assert_eq!(phase_col.value(1), "forward");
@@ -457,39 +558,26 @@ mod tests {
 
     #[test]
     fn retry_histogram_aggregates_shared_keys_in_canonical_order() {
-        // Rows sharing (iteration, phase, stage) but differing by opening/rank,
+        // Rows sharing (iteration, phase, stage_id) but differing by opening/rank,
         // fed SHUFFLED, must aggregate to exactly one row per
-        // (iteration, phase, stage, retry_level) with summed counts, emitted in
+        // (iteration, phase, stage_id, retry_level) with summed counts, emitted in
         // canonical order — proving the file is a pure function of the aggregate
         // retry data, independent of input partitioning/order.
         fn make(
-            iteration: u32,
+            iteration: i32,
             phase: &str,
-            stage: i32,
-            opening: Option<i32>,
+            stage_id: i32,
+            opening_index: Option<i32>,
             rank: Option<i32>,
             hist: Vec<u64>,
         ) -> SolverStatsRow {
             SolverStatsRow {
-                iteration,
-                phase: phase.to_string(),
-                stage,
-                opening,
+                iteration: Some(iteration),
+                stage_id: Some(stage_id),
+                opening_index,
                 rank,
-                worker_id: None,
-                lp_solves: 0,
-                lp_successes: 0,
-                lp_retries: 0,
-                lp_failures: 0,
-                retry_attempts: 0,
-                basis_offered: 0,
-                basis_consistency_failures: 0,
-                simplex_iterations: 0,
-                solve_time_ms: 0.0,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
                 retry_level_histogram: hist,
+                ..base_row(phase)
             }
         }
 
@@ -557,7 +645,7 @@ mod tests {
         let phase_col = batch
             .column(1)
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
         let stage_col = batch
             .column(2)
@@ -584,353 +672,184 @@ mod tests {
         for (i, (it, ph, st, lv, ct)) in expected.iter().enumerate() {
             assert_eq!(iter_col.value(i), *it, "iteration row {i}");
             assert_eq!(phase_col.value(i), *ph, "phase row {i}");
-            assert_eq!(stage_col.value(i), *st, "stage row {i}");
+            assert_eq!(stage_col.value(i), *st, "stage_id row {i}");
             assert_eq!(level_col.value(i), *lv, "retry_level row {i}");
             assert_eq!(count_col.value(i), *ct, "count row {i}");
         }
     }
 
     #[test]
-    fn test_solver_stats_row_builds_with_none_opening() {
-        // Verify a row with opening=None can be written and read back without error.
-        // Uses stage=0 (real stage index) consistent with per-stage shape.
+    fn opening_index_none_writes_null() {
         let dir = tempfile::TempDir::new().unwrap();
         let rows = vec![SolverStatsRow {
-            iteration: 1,
-            phase: "forward".to_string(),
-            stage: 0,
-            opening: None,
-            rank: None,
-            worker_id: None,
-            lp_solves: 10,
-            lp_successes: 10,
-            lp_retries: 0,
-            lp_failures: 0,
-            retry_attempts: 0,
-            basis_offered: 8,
-            basis_consistency_failures: 0,
-            simplex_iterations: 500,
-            solve_time_ms: 1.0,
-            load_model_time_ms: 0.0,
-            set_bounds_time_ms: 0.0,
-            basis_set_time_ms: 0.0,
-            retry_level_histogram: vec![0; 12],
+            iteration: Some(1),
+            stage_id: Some(0),
+            ..base_row("forward")
         }];
 
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let iter_path = dir.path().join("training/solver/iterations.parquet");
-        let batch = read_parquet(&iter_path);
-        assert_eq!(batch.num_rows(), 1);
-
-        // opening column is at index 3, must be null for forward rows.
+        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
         let opening_col = batch
-            .column(3)
+            .column_by_name("opening_index")
+            .unwrap()
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
-        assert!(opening_col.is_null(0), "forward row must have NULL opening");
+        assert!(
+            opening_col.is_null(0),
+            "forward row must have NULL opening_index"
+        );
     }
 
     #[test]
-    fn test_solver_stats_row_builds_with_none_rank_and_worker_id() {
-        // Verify a row with rank=None, worker_id=None, opening=Some(3) can be
-        // written and read back without error. Both nullable columns must
-        // appear as NULL in the output parquet when not set.
+    fn rank_and_worker_null_opening_index_present() {
         let dir = tempfile::TempDir::new().unwrap();
         let rows = vec![SolverStatsRow {
-            iteration: 1,
-            phase: "backward".to_string(),
-            stage: 0,
-            opening: Some(3),
-            rank: None,
-            worker_id: None,
-            lp_solves: 1,
-            lp_successes: 1,
-            lp_retries: 0,
-            lp_failures: 0,
-            retry_attempts: 0,
-            basis_offered: 0,
-            basis_consistency_failures: 0,
-            simplex_iterations: 0,
-            solve_time_ms: 0.0,
-            load_model_time_ms: 0.0,
-            set_bounds_time_ms: 0.0,
-            basis_set_time_ms: 0.0,
-            retry_level_histogram: vec![0; 12],
+            iteration: Some(1),
+            stage_id: Some(0),
+            opening_index: Some(3),
+            ..base_row("backward")
         }];
 
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let iter_path = dir.path().join("training/solver/iterations.parquet");
-        let batch = read_parquet(&iter_path);
+        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
+        assert_eq!(batch.num_columns(), 19);
 
-        // Schema must have exactly 18 columns.
-        assert_eq!(batch.num_columns(), 18);
-
-        // rank column is at index 4, must be NULL.
-        let rank_col = batch.column_by_name("rank").unwrap();
         assert_eq!(
-            rank_col.null_count(),
+            batch.column_by_name("rank").unwrap().null_count(),
             1,
             "rank must be NULL for rank-aggregated rows"
         );
-
-        // worker_id column is at index 5, must be NULL.
-        let worker_col = batch.column_by_name("worker_id").unwrap();
         assert_eq!(
-            worker_col.null_count(),
+            batch.column_by_name("worker_id").unwrap().null_count(),
             1,
             "worker_id must be NULL for rank-aggregated rows"
         );
 
-        // opening column must carry the value we set (Some(3) → not NULL).
         let opening_col = batch
-            .column(3)
+            .column_by_name("opening_index")
+            .unwrap()
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
-        assert!(!opening_col.is_null(0), "opening must be non-NULL");
-        assert_eq!(opening_col.value(0), 3, "opening value must be 3");
+        assert!(!opening_col.is_null(0), "opening_index must be non-NULL");
+        assert_eq!(opening_col.value(0), 3, "opening_index value must be 3");
     }
 
-    #[allow(clippy::too_many_lines)]
     #[test]
-    fn test_opening_column_sum_invariant() {
-        // Invariant: SUM(lp_solves) GROUP BY (iteration, phase, stage) in the
-        // new per-opening schema equals what the old collapsed schema would have
-        // reported (i.e., the sum of per-opening rows matches the old total).
-        //
-        // Fixture: iteration 1, backward phase, stage 0, 3 openings.
+    fn opening_column_sum_invariant() {
+        // SUM(lp_solves) GROUP BY (iteration, phase, stage_id) over the per-opening
+        // schema equals what the old collapsed per-stage total reported.
         let dir = tempfile::TempDir::new().unwrap();
-        let rows = vec![
-            // Forward row (opening=None, stage=0): 50 lp_solves
-            // forward rows use real stage index, not -1.
-            SolverStatsRow {
-                iteration: 1,
-                phase: "forward".to_string(),
-                stage: 0,
-                opening: None,
-                rank: None,
-                worker_id: None,
-                lp_solves: 50,
-                lp_successes: 50,
-                lp_retries: 0,
-                lp_failures: 0,
-                retry_attempts: 0,
-                basis_offered: 40,
-                basis_consistency_failures: 0,
-                simplex_iterations: 1000,
-                solve_time_ms: 5.0,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
-                retry_level_histogram: vec![0; 12],
-            },
-            // Backward rows (opening=Some(0..2)): 10, 20, 30 lp_solves → sum=60
-            SolverStatsRow {
-                iteration: 1,
-                phase: "backward".to_string(),
-                stage: 0,
-                opening: Some(0),
-                rank: None,
-                worker_id: None,
-                lp_solves: 10,
-                lp_successes: 10,
-                lp_retries: 0,
-                lp_failures: 0,
-                retry_attempts: 0,
-                basis_offered: 8,
-                basis_consistency_failures: 0,
-                simplex_iterations: 200,
-                solve_time_ms: 2.0,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
-                retry_level_histogram: vec![0; 12],
-            },
-            SolverStatsRow {
-                iteration: 1,
-                phase: "backward".to_string(),
-                stage: 0,
-                opening: Some(1),
-                rank: None,
-                worker_id: None,
-                lp_solves: 20,
-                lp_successes: 20,
-                lp_retries: 0,
-                lp_failures: 0,
-                retry_attempts: 0,
-                basis_offered: 18,
-                basis_consistency_failures: 0,
-                simplex_iterations: 400,
-                solve_time_ms: 4.0,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
-                retry_level_histogram: vec![0; 12],
-            },
-            SolverStatsRow {
-                iteration: 1,
-                phase: "backward".to_string(),
-                stage: 0,
-                opening: Some(2),
-                rank: None,
-                worker_id: None,
-                lp_solves: 30,
-                lp_successes: 30,
-                lp_retries: 0,
-                lp_failures: 0,
-                retry_attempts: 0,
-                basis_offered: 28,
-                basis_consistency_failures: 0,
-                simplex_iterations: 600,
-                solve_time_ms: 6.0,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
-                retry_level_histogram: vec![0; 12],
-            },
-        ];
+        let mut rows = vec![SolverStatsRow {
+            iteration: Some(1),
+            stage_id: Some(0),
+            lp_solves: 50,
+            ..base_row("forward")
+        }];
+        for (opening, lp) in [(0, 10), (1, 20), (2, 30)] {
+            rows.push(SolverStatsRow {
+                iteration: Some(1),
+                stage_id: Some(0),
+                opening_index: Some(opening),
+                lp_solves: lp,
+                ..base_row("backward")
+            });
+        }
 
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let iter_path = dir.path().join("training/solver/iterations.parquet");
-        let batch = read_parquet(&iter_path);
-
-        // 4 rows: 1 forward + 3 backward-opening rows.
+        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
         assert_eq!(batch.num_rows(), 4);
 
-        // lp_solves is at column index 6 (after: iteration, phase, stage, opening, rank, worker_id).
         let lp_col = batch
-            .column(6)
+            .column_by_name("lp_solves")
+            .unwrap()
             .as_any()
             .downcast_ref::<UInt32Array>()
             .unwrap();
-
-        // Group by (iteration=1, phase="backward", stage=0): sum across openings.
+        let phase_col = batch
+            .column_by_name("phase")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         let backward_sum: u32 = (0..4)
-            .filter(|&i| {
-                batch
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-                    .value(i)
-                    == "backward"
-            })
+            .filter(|&i| phase_col.value(i) == "backward")
             .map(|i| lp_col.value(i))
             .sum();
-
-        // The sum of per-opening lp_solves (10+20+30) must equal the old
-        // collapsed per-stage total.
         assert_eq!(
             backward_sum, 60,
             "SUM(lp_solves) for backward stage 0 must equal 60"
         );
 
-        // Forward row: lp_solves=50, opening=NULL.
         let opening_col = batch
-            .column(3)
+            .column_by_name("opening_index")
+            .unwrap()
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
-        assert!(opening_col.is_null(0), "forward row must have NULL opening");
-        assert_eq!(opening_col.value(1), 0, "backward opening[0] must be 0");
-        assert_eq!(opening_col.value(2), 1, "backward opening[1] must be 1");
-        assert_eq!(opening_col.value(3), 2, "backward opening[2] must be 2");
+        assert!(
+            opening_col.is_null(0),
+            "forward row must have NULL opening_index"
+        );
+        assert_eq!(opening_col.value(1), 0);
+        assert_eq!(opening_col.value(2), 1);
+        assert_eq!(opening_col.value(3), 2);
     }
 
-    /// forward rows are per-stage (one row per stage, opening=NULL).
-    ///
-    /// Verifies that 3 forward rows for stages 0, 1, 2 produce a parquet with
-    /// exactly 3 rows, each with opening=NULL and the correct per-stage stage index.
     #[test]
-    fn test_forward_rows_are_per_stage_in_parquet() {
-        // Helper defined first (before any statements) to satisfy
-        // clippy::items_after_statements.
-        fn make_forward_row(stage: i32, lp_solves: u32) -> SolverStatsRow {
-            SolverStatsRow {
-                iteration: 1,
-                phase: "forward".to_string(),
-                stage,
-                opening: None, // forward has no opening dimension
-                rank: None,
-                worker_id: None,
-                lp_solves,
-                lp_successes: lp_solves,
-                lp_retries: 0,
-                lp_failures: 0,
-                retry_attempts: 0,
-                basis_offered: 0,
-                basis_consistency_failures: 0,
-                simplex_iterations: u64::from(lp_solves) * 5,
-                solve_time_ms: f64::from(lp_solves) * 0.5,
-                load_model_time_ms: 0.0,
-                set_bounds_time_ms: 0.0,
-                basis_set_time_ms: 0.0,
-                retry_level_histogram: vec![0; 12],
-            }
-        }
-
-        // Simulate one iteration with 3 stages — one forward row per stage.
+    fn forward_rows_are_per_stage_in_parquet() {
+        // Three forward rows for stages 0,1,2 produce three parquet rows, each with
+        // a real (non-NULL, non -1) stage_id and NULL opening_index.
         let dir = tempfile::TempDir::new().unwrap();
-        let rows = vec![
-            make_forward_row(0, 10), // stage 0: 10 lp_solves
-            make_forward_row(1, 20), // stage 1: 20 lp_solves
-            make_forward_row(2, 30), // stage 2: 30 lp_solves
-        ];
+        let rows: Vec<SolverStatsRow> = [(0, 10), (1, 20), (2, 30)]
+            .into_iter()
+            .map(|(stage, lp)| SolverStatsRow {
+                iteration: Some(1),
+                stage_id: Some(stage),
+                lp_solves: lp,
+                ..base_row("forward")
+            })
+            .collect();
 
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let iter_path = dir.path().join("training/solver/iterations.parquet");
-        let batch = read_parquet(&iter_path);
-
-        // parquet has exactly num_stages rows for the forward phase.
+        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
         assert_eq!(batch.num_rows(), 3, "one forward row per stage");
 
         let opening_col = batch
-            .column(3)
+            .column_by_name("opening_index")
+            .unwrap()
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
         let stage_col = batch
-            .column(2)
+            .column_by_name("stage_id")
+            .unwrap()
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<Int32Array>()
             .unwrap();
         let lp_col = batch
-            .column(6)
+            .column_by_name("lp_solves")
+            .unwrap()
             .as_any()
             .downcast_ref::<UInt32Array>()
             .unwrap();
 
         for row in 0..3 {
-            // AC: every forward row has opening = NULL.
             assert!(
                 opening_col.is_null(row),
-                "forward row {row} must have NULL opening"
+                "forward row {row} NULL opening_index"
             );
-            // AC: stage index equals the loop variable (0, 1, 2).
-            assert_eq!(
-                stage_col.value(row),
-                i32::try_from(row).unwrap(),
-                "forward row {row} must have stage = {row}"
-            );
+            assert!(!stage_col.is_null(row), "forward row {row} keeps stage_id");
+            assert_eq!(stage_col.value(row), i32::try_from(row).unwrap());
+            assert_ne!(stage_col.value(row), -1, "no -1 stage sentinel");
         }
-
-        // AC: no stage = -1 among forward rows.
-        for row in 0..3 {
-            assert_ne!(
-                stage_col.value(row),
-                -1,
-                "forward rows must not use stage = -1"
-            );
-        }
-
-        // AC: per-stage lp_solves are preserved correctly.
-        assert_eq!(lp_col.value(0), 10, "stage 0: 10 lp_solves");
-        assert_eq!(lp_col.value(1), 20, "stage 1: 20 lp_solves");
-        assert_eq!(lp_col.value(2), 30, "stage 2: 30 lp_solves");
+        assert_eq!(lp_col.value(0), 10);
+        assert_eq!(lp_col.value(1), 20);
+        assert_eq!(lp_col.value(2), 30);
     }
 }

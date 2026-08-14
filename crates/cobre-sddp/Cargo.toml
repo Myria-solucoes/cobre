@@ -55,11 +55,11 @@ slow-tests = []
 test-support = ["cobre-core/test-support"]
 
 [dependencies]
-cobre-core = { version = "0.13.0", path = "../cobre-core" }
-cobre-solver = { version = "0.13.0", path = "../cobre-solver", default-features = false }
-cobre-comm = { version = "0.13.0", path = "../cobre-comm" }
-cobre-stochastic = { version = "0.13.0", path = "../cobre-stochastic" }
-cobre-io = { version = "0.13.0", path = "../cobre-io" }
+cobre-core = { version = "0.14.0", path = "../cobre-core" }
+cobre-solver = { version = "0.14.0", path = "../cobre-solver", default-features = false }
+cobre-comm = { version = "0.14.0", path = "../cobre-comm" }
+cobre-stochastic = { version = "0.14.0", path = "../cobre-stochastic" }
+cobre-io = { version = "0.14.0", path = "../cobre-io" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 dhat = { version = "0.3", optional = true }
 matrixmultiply = { workspace = true }
@@ -75,7 +75,7 @@ cc = "1.2"
 [dev-dependencies]
 arrow = { version = "59", default-features = false, features = ["prettyprint"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-cobre-core = { path = "../cobre-core", features = ["test-support"] }
+cobre-core = { version = "0.14.0", path = "../cobre-core", features = ["test-support"] }
 criterion = { version = "0.7", default-features = false }
 # Used only by the `dcs_batched_scoring` bench to reproduce the pre-batching
 # per-candidate `dgemm` baseline (the crate's own `gemm_block` wrapper is

@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
+use cobre_core::scenario::SamplingScheme;
 use cobre_core::{BlockMode, ContractType, EntityId, Hydro, ResolvedBounds, Stage, System};
+use cobre_io::StageIdResolver;
 use cobre_solver::StageTemplate;
 use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -11,6 +13,7 @@ use crate::hydro_models::{EvaporationModelSet, ProductionModelSet, ResolvedProdu
 use crate::inflow_method::InflowNonNegativityMethod;
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::resolve_post_study_artifacts;
 use crate::setup::template_postprocess::{
     compute_cumulative_discount_factors, compute_per_stage_discount_factors,
 };
@@ -218,8 +221,8 @@ impl StageTemplates {
 #[derive(Debug, Clone, Default)]
 pub struct StageGeometry {
     /// Future-cost epigraph (θ) column index — the authoritative value from
-    /// `StageLayout::col_theta`, which accounts for the anticipated ring's
-    /// `anticipated_slots_out`/`anticipated_state` shift when `n_anticipated > 0`.
+    /// `StageLayout::col_theta`, which accounts for the commitment-hold region's
+    /// `commit_out`/`commit_in` column offset when `n_anticipated > 0`.
     /// Single source of truth for code that must address θ outside the builder
     /// (e.g. discount-factor postprocessing); do not re-derive the index from
     /// `n_state`/`n_hydros` by hand.
@@ -238,6 +241,15 @@ pub struct StageGeometry {
     /// stage-level). Starts at `thermal.end`, which is `n_blks`-dependent, so the
     /// cost-breakdown `range_sum` needs the per-stage base.
     pub anticipated_decision: Range<usize>,
+    /// Post-horizon commitment-decision column range (one per declared window
+    /// whose decider stage is this stage — sparse, `0..0` at a stage no window
+    /// decides at).
+    pub commitment_decision: Range<usize>,
+    /// Global window index per `commitment_decision` local position, parallel
+    /// to it (`commitment_decision_windows[i]` is the window whose deposited
+    /// decision lives at `commitment_decision.start + i`). Sparse, empty at a
+    /// stage no window decides at.
+    pub commitment_decision_windows: Vec<usize>,
     /// Forward line-flow column range (one per line per block).
     pub line_fwd: Range<usize>,
     /// Reverse line-flow column range (one per line per block).
@@ -480,14 +492,19 @@ pub(super) fn build_single_stage_template(
     }
 }
 
-/// Bus-slice positions of every bus with `std_mw > 0` in any load model, sorted by
-/// `EntityId` for declaration-order invariance; IDs repeated across stages are
+/// Bus-slice positions of every noise-member load bus (per
+/// `LoadModel::is_noise_member` under `load_scheme`), sorted by `EntityId`
+/// for declaration-order invariance; IDs repeated across stages are
 /// deduplicated.
-fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>) -> Vec<usize> {
+fn collect_load_bus_indices(
+    system: &System,
+    bus_pos: &BTreeMap<EntityId, usize>,
+    load_scheme: SamplingScheme,
+) -> Vec<usize> {
     let mut ids: Vec<EntityId> = system
         .load_models()
         .iter()
-        .filter(|m| m.std_mw > 0.0)
+        .filter(|m| m.is_noise_member(load_scheme))
         .map(|m| m.bus_id)
         .collect();
     ids.sort_unstable_by_key(|id| id.0);
@@ -588,6 +605,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 ///
 /// ```
 /// use chrono::NaiveDate;
+/// use cobre_core::scenario::SamplingScheme;
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
@@ -618,7 +636,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 ///                                    &std::collections::HashMap::new(),
 ///                                    &std::collections::HashMap::new(),
 ///                                    &std::collections::HashMap::new(),
-///                                    &hydro_cell_index)
+///                                    &hydro_cell_index, SamplingScheme::InSample)
 ///     .expect("empty system ok");
 /// assert!(result.templates.is_empty());
 /// ```
@@ -643,6 +661,7 @@ pub fn build_stage_templates(
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
     arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
     hydro_cell_index: &HydroCellIndex,
+    load_scheme: SamplingScheme,
 ) -> Result<StageTemplates, SddpError> {
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_hydros = system.hydros().len();
@@ -669,6 +688,7 @@ pub fn build_stage_templates(
         arc_arrival_density.clone(),
         state_layout.max_par_order,
         hydro_cell_index,
+        load_scheme,
     );
     let n_load_buses = load_bus_indices.len();
     debug_assert!(
@@ -686,15 +706,7 @@ pub fn build_stage_templates(
         "ctx's threaded anticipated_lead_stages must match the state_layout it was built from"
     );
     debug_assert_eq!(
-        ctx.max_par_order,
-        system
-            .inflow_models()
-            .iter()
-            .filter(|m| m.stage_id >= 0)
-            .map(|m| m.ar_coefficients.len())
-            .max()
-            .unwrap_or(0)
-            .max(par_lp.max_order()),
+        ctx.max_par_order, state_layout.max_par_order,
         "ctx's threaded max_par_order must match the state_layout it was built from"
     );
 
@@ -746,8 +758,8 @@ pub fn build_stage_templates_resolving_layout(
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
 ) -> Result<StageTemplates, SddpError> {
-    let topology = build_transit_bucket_topology(system);
-    let (state_layout, _, _) = resolve_state_layout(system, par_lp, &topology)?;
+    let topology = build_transit_bucket_topology(system, false);
+    let (state_layout, _, _) = resolve_state_layout(system, par_lp, &topology, None)?;
     let hydro_cell_index = HydroCellIndex::build(system.hydros());
     build_stage_templates(
         system,
@@ -763,6 +775,7 @@ pub fn build_stage_templates_resolving_layout(
         &topology.arc_spread_chrono,
         &topology.arc_arrival_density,
         &hydro_cell_index,
+        SamplingScheme::InSample,
     )
 }
 
@@ -795,7 +808,7 @@ pub(super) fn build_filling_v_target(
     hydros: &[Hydro],
     bounds: &ResolvedBounds,
     total_hours_per_stage: &[f64],
-    stage_id_to_idx: &BTreeMap<i32, usize>,
+    stage_id_to_idx: &HashMap<i32, usize>,
 ) -> BTreeMap<(usize, i32), f64> {
     let mut v_target: BTreeMap<(usize, i32), f64> = BTreeMap::new();
     for (h_idx, hydro) in hydros.iter().enumerate() {
@@ -867,6 +880,7 @@ fn build_template_build_ctx<'a>(
     arc_arrival_density: HashMap<usize, Vec<Option<Vec<f64>>>>,
     max_par_order: usize,
     hydro_cell_index: &'a HydroCellIndex,
+    load_scheme: SamplingScheme,
 ) -> (
     TemplateBuildCtx<'a>,
     Vec<usize>,
@@ -940,7 +954,7 @@ fn build_template_build_ctx<'a>(
         system.bounds().n_contracts()
     );
 
-    let load_bus_indices = collect_load_bus_indices(system, &bus_pos);
+    let load_bus_indices = collect_load_bus_indices(system, &bus_pos, load_scheme);
 
     // Per anticipated thermal: global index and commissioning window. The window
     // keys the decision gate's operation-window clause on the delivery stage;
@@ -996,24 +1010,25 @@ fn build_template_build_ctx<'a>(
         "total_hours_per_stage length must equal n_study_stages"
     );
 
+    let post_study_resolved = resolve_post_study_artifacts(
+        system.post_study_stages(),
+        system.policy_graph(),
+        cumulative_discount_factors.last().copied().unwrap_or(1.0),
+        per_stage_discount.last().copied().unwrap_or(1.0),
+    );
+
     // Study-stage ids by study stage index: the decision gate keys its
     // operation-window clause on the DELIVERY stage's `stage.id`, mapping the
     // delivery index `t + K_i` to its id through this slice.
     let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
 
-    // Inverse: study `stage.id` → study stage index. The filling-target fold reads
-    // per-stage ζ and bounds at the INDEX but expresses the window in stage IDs.
-    let stage_id_to_idx: BTreeMap<i32, usize> = study_stage_ids
-        .iter()
-        .enumerate()
-        .map(|(idx, &id)| (id, idx))
-        .collect();
+    let stage_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
 
     let filling_v_target = build_filling_v_target(
         hydros,
         system.bounds(),
         &total_hours_per_stage,
-        &stage_id_to_idx,
+        stage_resolver.index_map(),
     );
 
     let ctx = TemplateBuildCtx {
@@ -1070,6 +1085,7 @@ fn build_template_build_ctx<'a>(
         arc_spread_chrono,
         arc_arrival_density,
         per_stage_mask,
+        post_study_resolved,
     };
 
     (ctx, load_bus_indices, diversion_upstream_output)

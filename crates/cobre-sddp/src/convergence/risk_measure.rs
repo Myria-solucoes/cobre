@@ -756,6 +756,63 @@ mod tests {
         );
     }
 
+    /// The backward cut applies the risk measure ONCE over the joint
+    /// successor×opening outcome vector, never per-child-then-averaged. On a
+    /// 2-child × 2-opening pure-CVaR fan the two disagree by a closed-form margin:
+    /// the joint `CVaR₀.₅` over `[10, 20, 30, 40]` (weights `0.25`) concentrates on
+    /// the worst two (`30`, `40`) → `35`; the nested measure (`CVaR` per child, then
+    /// probability-average the two children) gives `max` per child then averages →
+    /// `(20 + 40)/2 = 30`. The engine must produce the joint `35` (`aggregate_cut_into`).
+    #[test]
+    fn joint_cvar_differs_from_nested_per_child_then_average() {
+        use super::RiskMeasureScratch;
+
+        let rm = RiskMeasure::CVaR {
+            alpha: 0.5,
+            lambda: 1.0,
+        };
+
+        // Child A openings [10, 20]; child B openings [30, 40]; intercept == objective.
+        let joint_outcomes = vec![
+            outcome_with_coeffs(10.0, 10.0, vec![0.0]),
+            outcome_with_coeffs(20.0, 20.0, vec![0.0]),
+            outcome_with_coeffs(30.0, 30.0, vec![0.0]),
+            outcome_with_coeffs(40.0, 40.0, vec![0.0]),
+        ];
+        // Joint weights P(child)·q = 0.5·0.5 = 0.25 per outcome, canonical order.
+        let joint_weights = vec![0.25_f64; 4];
+
+        let mut joint_intercept = 0.0_f64;
+        let mut joint_coeffs = vec![0.0_f64; 1];
+        let mut scratch = RiskMeasureScratch::new();
+        rm.aggregate_cut_into(
+            &joint_outcomes,
+            &joint_weights,
+            &mut joint_intercept,
+            &mut joint_coeffs,
+            &mut scratch,
+        );
+        assert!(
+            (joint_intercept - 35.0).abs() < 1e-10,
+            "joint CVaR over the 4-outcome vector must be 35.0, got {joint_intercept}"
+        );
+
+        // Mutation control: the nested measure — CVaR within each child, then the
+        // probability average across children — the semantics the joint contract rejects.
+        let child_weights = vec![0.5_f64; 2];
+        let (cvar_a, _) = rm.aggregate_cut(&joint_outcomes[0..2], &child_weights);
+        let (cvar_b, _) = rm.aggregate_cut(&joint_outcomes[2..4], &child_weights);
+        let nested = 0.5 * cvar_a + 0.5 * cvar_b;
+        assert!(
+            (nested - 30.0).abs() < 1e-10,
+            "nested per-child-then-average CVaR must be 30.0, got {nested}"
+        );
+        assert!(
+            (joint_intercept - nested).abs() > 1.0,
+            "joint ({joint_intercept}) and nested ({nested}) must differ — the pin is vacuous otherwise"
+        );
+    }
+
     #[test]
     fn compute_cvar_weights_into_matches_allocating_variant() {
         use super::{RiskMeasureScratch, compute_cvar_weights_into};

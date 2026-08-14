@@ -37,6 +37,10 @@ use super::{CutSlot, InCol, OutCol, REGION_ORDER, StateDim, StateSpace};
 /// for a structurally-zero coefficient.
 #[derive(Debug, Clone)]
 pub struct CutStateProjection {
+    /// Global state-vector [`StateDim`] per cut slot — the projection's own
+    /// global→projected gather index (identity for an all-enabled pool).
+    global_state_indices: Vec<StateDim>,
+
     /// LP incoming column per cut slot (extraction hot path).
     incoming_columns: Vec<InCol>,
 
@@ -74,6 +78,7 @@ impl CutStateProjection {
     /// ```
     #[must_use]
     pub fn new(global: &StateSpace, state_config: StageStateConfig) -> Self {
+        let mut global_state_indices = Vec::new();
         let mut incoming_columns = Vec::new();
         let mut outgoing_columns = Vec::new();
         let mut render_coeff_indices = Vec::new();
@@ -82,6 +87,7 @@ impl CutStateProjection {
         let mut push_dim = |g: StateDim| {
             let reduced_j = incoming_columns.len();
             let outgoing = global.lp_column_for_state(g);
+            global_state_indices.push(g);
             incoming_columns.push(global.state_to_lp_incoming_column(g));
             outgoing_columns.push(outgoing);
             // Drop padding slots, never zero-fill: keeps the default render
@@ -110,6 +116,7 @@ impl CutStateProjection {
         );
 
         Self {
+            global_state_indices,
             incoming_columns,
             outgoing_columns,
             render_coeff_indices,
@@ -123,6 +130,32 @@ impl CutStateProjection {
     #[must_use]
     pub fn n_slots(&self) -> usize {
         self.incoming_columns.len()
+    }
+
+    /// Map a cut slot `s ∈ [0, n_slots())` to the global [`StateDim`] it
+    /// projects — the gather index for reading a `StateDim`-packed trial-state
+    /// vector into the pool's projected slot space.
+    ///
+    /// Identity for an all-enabled pool (`s == global_state_index(s).get()`); a
+    /// reduced pool selects the enabled dimensions, which are NOT a prefix (a
+    /// `storage:false` pool begins at the first inflow-lag [`StateDim`]). Index a
+    /// `StateDim`-packed archive through this, never [`Self::outgoing_column`],
+    /// which remaps inflow-lag slots off the [`StateDim`] axis (to `z_inflow`,
+    /// outside `[0, n_state)`).
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `s >= n_slots()`.
+    #[inline]
+    #[must_use]
+    pub fn global_state_index(&self, s: CutSlot) -> StateDim {
+        let j = s.get();
+        debug_assert!(
+            j < self.n_slots(),
+            "cut slot {j} out of bounds (n_slots = {})",
+            self.n_slots()
+        );
+        self.global_state_indices[j]
     }
 
     /// Map a cut slot `s ∈ [0, n_slots())` to its LP incoming-state column,
@@ -203,7 +236,10 @@ impl CutStateProjection {
     ///
     /// `cut_slot` indexes a stored cut's `coefficients` slice (length
     /// [`Self::n_slots`]); `outgoing_lp_column` is where the cut-row builder places
-    /// the negated, scaled coefficient. For an all-enabled study this reproduces
+    /// the negated, scaled coefficient — identity for storage; for a lag
+    /// dimension the outgoing state (after `shift_lag_state`) holds `z_inflow`
+    /// at lag 0 and the shifted incoming lags at lag 1+, so the column
+    /// addresses `z_inflow` / incoming lag `l−1`. For an all-enabled study this reproduces
     /// the global `nonzero_state_indices` render — same reduced index, same column.
     #[inline]
     #[must_use]
@@ -227,7 +263,7 @@ impl CutStateProjection {
 #[cfg(test)]
 mod tests {
     use super::{CutSlot, CutStateProjection, InCol, OutCol, StageStateConfig, StateDim};
-    use crate::indexer::StateSpace;
+    use crate::indexer::{StateRegion, StateSpace};
 
     fn finalized(
         hydro_count: usize,
@@ -246,6 +282,35 @@ mod tests {
             k_max,
             anticipated_lead_stages,
             &lag_counts,
+        )
+    }
+
+    /// Like [`finalized`] but with declared terminal commitment-hold
+    /// post-horizon windows.
+    fn finalized_with_commitment_hold_windows(
+        hydro_count: usize,
+        max_par_order: usize,
+        n_anticipated: usize,
+        k_max: usize,
+        anticipated_lead_stages: Vec<usize>,
+        n_commitment: usize,
+        commitment_decider_stage: Vec<usize>,
+    ) -> StateSpace {
+        let lag_counts = vec![max_par_order; hydro_count];
+        StateSpace::new_with_commitment_hold_windows(
+            hydro_count,
+            max_par_order,
+            0,
+            Vec::new(),
+            n_anticipated,
+            k_max,
+            anticipated_lead_stages,
+            &lag_counts,
+            n_commitment,
+            commitment_decider_stage,
+            vec![cobre_core::EntityId(0); n_commitment],
+            vec![(0.0, 0.0); n_commitment],
+            vec![0; n_commitment],
         )
     }
 
@@ -312,6 +377,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn global_state_index_is_identity_for_all_enabled() {
+        let global = finalized(3, 2, 0, 0, vec![]);
+        let cut = CutStateProjection::new(&global, ALL_ENABLED);
+
+        assert_eq!(cut.n_slots(), global.n_state);
+        for j in 0..global.n_state {
+            assert_eq!(cut.global_state_index(CutSlot::new(j)), StateDim::new(j));
+        }
+    }
+
+    /// `storage:false, inflow_lags:true` selects the lag dimensions, which begin
+    /// at `StateDim` `N` — NOT a prefix, and where `outgoing_column` would remap
+    /// off the `StateDim` axis; `global_state_index` selects the raw lag dims.
+    #[test]
+    fn global_state_index_selects_nonprefix_enabled_dims() {
+        let global = finalized(2, 1, 0, 0, vec![]);
+        let cut = CutStateProjection::new(
+            &global,
+            StageStateConfig {
+                storage: false,
+                inflow_lags: true,
+            },
+        );
+
+        assert_eq!(cut.n_slots(), global.hydro_count * global.max_par_order);
+        for i in 0..cut.n_slots() {
+            assert_eq!(
+                cut.global_state_index(CutSlot::new(i)),
+                StateDim::new(global.hydro_count + i),
+                "lag slot {i} projects global StateDim N + {i}, not a prefix index"
+            );
+        }
+    }
+
     /// `inflow_lags` disabled drops the lag dims but keeps anticipated:
     /// `n_slots() = N + A*k_max = 2 + 2 = 4`.
     #[test]
@@ -329,8 +429,8 @@ mod tests {
         for i in 0..2 {
             assert_eq!(
                 cut.incoming_column(CutSlot::new(2 + i)),
-                InCol::new(global.anticipated_state.start + i),
-                "anticipated slot {i} must map to anticipated_state.start + {i}"
+                InCol::new(global.commit_in.start + i),
+                "anticipated slot {i} must map to commit_in.start + {i}"
             );
         }
     }
@@ -471,8 +571,8 @@ mod tests {
         for i in 0..2 {
             assert_eq!(
                 cut.incoming_column(CutSlot::new(4 + i)),
-                InCol::new(global.anticipated_state.start + i),
-                "anticipated slot {i} must map to anticipated_state.start + {i}"
+                InCol::new(global.commit_in.start + i),
+                "anticipated slot {i} must map to commit_in.start + {i}"
             );
         }
     }
@@ -543,6 +643,128 @@ mod tests {
             rendered, global_render,
             "B==0 render must reproduce the global nonzero_state_indices render"
         );
+    }
+
+    /// A bucket region deeper than a terminal stage's horizon cap still projects
+    /// EVERY bucket dim — the deep-lag slots `horizon_cap_active` freezes `[0, 0]`
+    /// at the terminal included. `CutStateProjection::new` keys bucket inclusion on
+    /// `StateRegion::Buckets` being cut-enabled and walks the whole
+    /// `state_dim_range`, with no entity-type or per-stage gate, so the terminal
+    /// bucket-state pricing path (`β·bucket_state`) is already wired at the
+    /// projection level: un-masking a deep-lag slot adds no projection code.
+    #[test]
+    fn every_bucket_dim_projects_including_deep_terminal_lags() {
+        // One downstream plant, depth 4: lags 1..=3 sit beyond the terminal cap
+        // `n_stages − 1 − t` (which reaches 0 at the terminal, keeping only lag 0),
+        // so they are frozen `[0, 0]` in the LP today; the state layout retains
+        // them (sized from the global max over every anchor).
+        let global = finalized_with_transit_buckets(
+            1,
+            1,
+            4,
+            vec![(0, 0), (0, 1), (0, 2), (0, 3)],
+            0,
+            0,
+            vec![],
+        );
+        let cut = CutStateProjection::new(&global, ALL_ENABLED);
+
+        assert!(
+            StateRegion::Buckets.cut_enabled(ALL_ENABLED),
+            "buckets are the always-included region the projection walk keys on"
+        );
+
+        let buckets = global.state_dim_range(StateRegion::Buckets);
+        assert_eq!(buckets.len(), global.n_buckets);
+
+        for g in buckets.clone() {
+            let dim = StateDim::new(g);
+            let offset = g - buckets.start;
+
+            let projecting_slots: Vec<CutSlot> = (0..cut.n_slots())
+                .map(CutSlot::new)
+                .filter(|&s| cut.global_state_index(s) == dim)
+                .collect();
+            assert_eq!(
+                projecting_slots.len(),
+                1,
+                "bucket dim {g} must project to exactly one cut slot"
+            );
+            let slot = projecting_slots[0];
+
+            assert_eq!(
+                cut.incoming_column(slot),
+                InCol::new(global.transit_buckets_in.start + offset),
+                "bucket dim {g}: incoming column is the pinned bucket column (subgradient read site)"
+            );
+            assert_eq!(
+                cut.outgoing_column(slot),
+                OutCol::new(global.transit_buckets_out.start + offset),
+                "bucket dim {g}: outgoing column is the identity bucket column (cut-render site)"
+            );
+
+            let rendered: Vec<OutCol> = cut
+                .render_pairs()
+                .filter(|&(s, _)| s == slot)
+                .map(|(_, col)| col)
+                .collect();
+            assert_eq!(
+                rendered.len(),
+                1,
+                "bucket dim {g} must appear in exactly one render pair"
+            );
+            assert_eq!(
+                rendered[0],
+                OutCol::new(global.transit_buckets_out.start + offset)
+            );
+        }
+    }
+
+    // ── Terminal commitment-hold (post-horizon lanes) tests ────────────────
+
+    /// A declared commitment-hold post-horizon window joins the projection —
+    /// `n_slots()` grows by exactly the window count over the pre-window
+    /// dimension, and every post-horizon lane is present, mirroring the
+    /// always-included bucket and in-study slots.
+    #[test]
+    fn commitment_hold_post_horizon_joins_the_projection() {
+        let pre_block = finalized(2, 1, 1, 2, vec![2]);
+        let with_block = finalized_with_commitment_hold_windows(2, 1, 1, 2, vec![2], 2, vec![0, 1]);
+
+        let cut_pre = CutStateProjection::new(&pre_block, ALL_ENABLED);
+        let cut_with = CutStateProjection::new(&with_block, ALL_ENABLED);
+
+        assert_eq!(
+            cut_with.n_slots(),
+            cut_pre.n_slots() + 2,
+            "n_slots must grow by exactly the window count"
+        );
+        assert_eq!(cut_with.n_slots(), with_block.n_state);
+
+        for window in 0..with_block.n_commitment {
+            let j =
+                with_block.commit_in.start + with_block.commitment_hold_post_horizon_offset(window);
+            assert_eq!(
+                cut_with.incoming_column(CutSlot::new(cut_pre.n_slots() + window)),
+                InCol::new(j),
+                "commitment-hold post-horizon incoming lane {j} must appear in the projection"
+            );
+        }
+    }
+
+    /// Always included, ignoring [`StageStateConfig`]: the post-horizon lanes
+    /// stay in the projection even under `STORAGE_ONLY`, the same "always
+    /// included" contract buckets and the in-study slots already carry.
+    #[test]
+    fn commitment_hold_post_horizon_always_included_regardless_of_state_config() {
+        let global = finalized_with_commitment_hold_windows(2, 1, 0, 0, vec![], 2, vec![0, 1]);
+        let cut = CutStateProjection::new(&global, STORAGE_ONLY);
+
+        // storage (2) + commitment-hold post-horizon lanes (2), lag/in-study/buckets absent.
+        assert_eq!(cut.n_slots(), 4);
+        for (i, j) in global.commit_in.clone().enumerate() {
+            assert_eq!(cut.incoming_column(CutSlot::new(2 + i)), InCol::new(j));
+        }
     }
 }
 
@@ -644,13 +866,13 @@ mod proptests {
             let storage = global.state_dim_storage_range();
             let lag = global.state_dim_lag_range();
             let bucket = global.state_dim_bucket_range();
-            let anticipated = global.state_dim_anticipated_range();
+            let commitment_hold = global.state_dim_commitment_hold_range();
 
             prop_assert_eq!(storage.start, 0);
             prop_assert_eq!(lag.start, storage.end);
             prop_assert_eq!(bucket.start, lag.end);
-            prop_assert_eq!(anticipated.start, bucket.end);
-            prop_assert_eq!(anticipated.end, global.n_state);
+            prop_assert_eq!(commitment_hold.start, bucket.end);
+            prop_assert_eq!(commitment_hold.end, global.n_state);
         }
 
         /// Generalizes `default_projection_is_identity` and
@@ -722,10 +944,7 @@ mod proptests {
                 ));
             }
             for o in 0..global.n_anticipated * global.k_max {
-                expected.push((
-                    global.anticipated_state.start + o,
-                    global.anticipated_slots_out.start + o,
-                ));
+                expected.push((global.commit_in.start + o, global.commit_out.start + o));
             }
 
             prop_assert_eq!(expected.len(), cut.n_slots());

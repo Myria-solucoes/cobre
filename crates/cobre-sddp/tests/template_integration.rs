@@ -91,13 +91,9 @@ fn default_hydro_bounds() -> HydroStageBounds {
 
 fn default_hydro_block_bounds() -> HydroBlockBounds {
     HydroBlockBounds {
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 250.0,
-        max_diversion_m3s: None,
+        ..Default::default()
     }
 }
 
@@ -588,13 +584,9 @@ fn fpha_system_with_turbined_cost(
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 150.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 300.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -1073,13 +1065,9 @@ fn one_fpha_hydro_system(n_planes: usize) -> (cobre_core::System, ProductionMode
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 150.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 300.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -1700,13 +1688,9 @@ fn evap_hydro_system_with_violation_cost(
                 water_withdrawal_m3s: 0.0,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -2043,13 +2027,9 @@ fn one_hydro_system_with_withdrawal(
                 water_withdrawal_m3s,
             },
             hydro_block: HydroBlockBounds {
-                min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -2252,24 +2232,14 @@ fn one_bus_system_n_blks(n_blks: usize) -> cobre_core::System {
 /// `GenericConstraint` with a trivial (no-term) expression. A no-term expression
 /// is vacuously block-independent, so a `block_id = None` bound on it collapses to
 /// a single stage-level row.
-fn make_constraint(
-    id: i32,
-    sense: cobre_core::ConstraintSense,
-    slack_enabled: bool,
-) -> cobre_core::GenericConstraint {
+fn make_constraint(id: i32, slack_enabled: bool) -> cobre_core::GenericConstraint {
     use cobre_core::ConstraintExpression;
-    make_constraint_with_expr(
-        id,
-        sense,
-        slack_enabled,
-        ConstraintExpression { terms: vec![] },
-    )
+    make_constraint_with_expr(id, slack_enabled, ConstraintExpression { terms: vec![] })
 }
 
 /// Make a `GenericConstraint` carrying the given expression.
 fn make_constraint_with_expr(
     id: i32,
-    sense: cobre_core::ConstraintSense,
     slack_enabled: bool,
     expression: cobre_core::ConstraintExpression,
 ) -> cobre_core::GenericConstraint {
@@ -2279,11 +2249,12 @@ fn make_constraint_with_expr(
         name: format!("gc_{id}"),
         description: None,
         expression,
-        sense,
         slack: SlackConfig {
             enabled: slack_enabled,
             penalty: if slack_enabled { Some(5000.0) } else { None },
         },
+        bound_lower_affine: None,
+        bound_upper_affine: None,
     }
 }
 
@@ -2544,7 +2515,6 @@ fn one_bus_one_thermal_system(
         std_mw: 0.0,
     }];
 
-    // Resolved bounds: 0 hydros, 1 thermal, 0 lines, 0 pumping, 0 contracts, 1 stage.
     let resolved_bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 0,
@@ -2772,7 +2742,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
                 max_outflow_m3s: Some(800.0),
                 min_generation_mw: 5.0,
                 max_generation_mw: 250.0,
-                max_diversion_m3s: None,
+                ..Default::default()
             },
             thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
             thermal_block: ThermalBlockBounds {
@@ -3248,8 +3218,8 @@ fn one_anticipated_thermal_system(
 /// Compute `col_anticipated_decision_start` for the minimal geometry used by
 /// the anticipated-decision tests (0 hydros, 1 thermal, 1 anticipated, 1 blk).
 ///
-/// Layout derivation (in-LP anticipated ring, `StateSpace::anticipated_slots_out`
-/// / `anticipated_state`):
+/// Layout derivation (in-LP anticipated ring, `StateSpace::commit_out`
+/// / `commit_in`):
 /// - `n_ant_state = n_anticipated * k_max = 1 * lead_stages`
 /// - the ring contributes `n_ant_state` outgoing columns AND `n_ant_state`
 ///   incoming columns (doubled, unlike the water/lag blocks which are
@@ -3315,7 +3285,6 @@ fn two_thermal_one_anticipated_system(n_stages: usize, lead_stages: u32) -> cobr
             ..Default::default()
         },
     );
-    // Thermal 1: non-anticipated.
     let thermal_non = make_thermal(
         EntityId(3),
         ThermalSpec {
@@ -3869,7 +3838,7 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
 //   n_ant_state = 1 * K = K
 //   n_state = N*(1+L) + n_ant_state = 1 + K
 //   col_anticipated_state_start = N*(1+L) = 1
-//   col_anticipated_state_out_start = 1+K  (state region: = anticipated_state.end, 1 per plant)
+//   col_anticipated_state_out_start = 1+K  (state region: = commit_in.end, 1 per plant)
 //   z_inflow = [2+K, 2+K+N) = [2+K, 3+K)
 //   storage_in = [3+K, 3+K+N) = [3+K, 4+K)
 //   theta = 4+K
@@ -3918,10 +3887,11 @@ fn build_hydro_one_ant_system(
     annual_discount_rate: f64,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
+    use cobre_core::HorizonGraph;
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     };
 
@@ -4117,10 +4087,12 @@ fn build_hydro_one_ant_system(
         },
     );
 
-    let policy_graph = PolicyGraph {
+    let policy_graph = HorizonGraph {
+        stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate,
         transitions: vec![],
+        nodes: Vec::new(),
         season_map: None,
     };
 
@@ -4368,7 +4340,7 @@ fn build_k0_baseline_system() -> cobre_core::System {
 
 // ── Column layout helpers for the roundtrip geometry ─────────────────────────
 
-/// `anticipated_state.start` (incoming ring, the column the always-active
+/// `commit_in.start` (incoming ring, the column the always-active
 /// fishing row couples) for the roundtrip geometry (N=1, L=0, K=k).
 ///
 /// = N*(3+L) + k = 3 + k: the incoming block sits after
@@ -4379,11 +4351,10 @@ fn rt_col_ant_state_incoming_start(k: usize) -> usize {
 
 /// `col_thermal_start` for the roundtrip geometry (N=1, L=0, K=k).
 ///
-/// The anticipated ring contributes `2*k` columns (outgoing `anticipated_slots_out`
-/// AND incoming `anticipated_state`, each width `k`) before `theta`.
-/// = decision_start + 3*N*n_blks = (theta+1) + 6 = (2*k+1) + 6 = 7+2K,
-/// wait: theta = N*(3+L) + 2*k = 3 + 2*k, decision_start = theta+1 = 4+2k,
-/// col_thermal_start = decision_start + 6 = 10+2K.
+/// The anticipated ring contributes `2*k` columns (outgoing `commit_out`
+/// AND incoming `commit_in`, each width `k`) before `theta`.
+/// theta = N*(3+L) + 2*k = 3 + 2*k, decision_start = theta+1 = 4+2k, so
+/// col_thermal_start = decision_start + 3*N*n_blks = decision_start + 6 = 10+2K.
 fn rt_col_thermal_start(k: usize) -> usize {
     10 + 2 * k
 }
@@ -4405,7 +4376,7 @@ fn rt_row_ant_fishing_start(_k: usize) -> usize {
 /// Expected `num_cols` for the roundtrip geometry with anticipation K=k.
 ///
 /// = 27+2K: the anticipated ring contributes `2*n_ant_state = 2*k` columns
-/// (outgoing `anticipated_slots_out` + incoming `anticipated_state`) plus the
+/// (outgoing `commit_out` + incoming `commit_in`) plus the
 /// stage-level `anticipated_decision` column, one more than the pre-ring
 /// no-anticipated baseline's single combined block.
 fn rt_expected_num_cols(k: usize) -> usize {

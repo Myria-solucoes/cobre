@@ -13,7 +13,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Builder, Int32Builder, Int64Builder, RecordBatch};
+use arrow::array::{
+    ArrayRef, Float64Builder, Int32Builder, Int64Builder, RecordBatch, StringBuilder,
+};
 
 use super::{IterationRecord, TrainingOutput, WorkerTimingRecord};
 use crate::output::atomic::write_parquet_atomic;
@@ -41,6 +43,7 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///     final_upper_bound: None,
 ///     final_gap_percent: None,
 ///     final_upper_bound_std: None,
+///     final_upper_bound_kind: "statistical".to_string(),
 ///     iterations_completed: 0,
 ///     converged: false,
 ///     termination_reason: "iteration limit".to_string(),
@@ -53,6 +56,7 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///         rows_in_lp_total: 0,
 ///         rows_in_lp_solve_count: 0,
 ///         rows_in_lp_max: 0,
+///         total_loaded: 0,
 ///     },
 ///     cut_selection_records: Vec::new(),
 ///     worker_timing_records: Vec::new(),
@@ -119,7 +123,8 @@ impl TrainingParquetWriter {
     pub fn write(&self, training_output: &TrainingOutput) -> Result<(), OutputError> {
         let records = &training_output.convergence_records;
 
-        let convergence_batch = build_convergence_batch(records)?;
+        let convergence_batch =
+            build_convergence_batch(records, &training_output.final_upper_bound_kind)?;
         let convergence_path = self.output_dir.join("training/convergence.parquet");
         write_parquet_atomic(&convergence_path, &convergence_batch, &self.config)?;
 
@@ -137,14 +142,21 @@ impl TrainingParquetWriter {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, OutputError> {
+fn build_convergence_batch(
+    records: &[IterationRecord],
+    upper_bound_kind: &str,
+) -> Result<RecordBatch, OutputError> {
     let schema = Arc::new(convergence_schema());
     let n = records.len();
+    // The bound regime is a run-level property: an exact (enumerated) bound
+    // carries no sampling distribution, so its std column is NULL on every row.
+    let is_exact = upper_bound_kind == "exact";
 
     let mut iteration = Int32Builder::with_capacity(n);
     let mut lower_bound = Float64Builder::with_capacity(n);
-    let mut upper_bound_mean = Float64Builder::with_capacity(n);
+    let mut upper_bound = Float64Builder::with_capacity(n);
     let mut upper_bound_std = Float64Builder::with_capacity(n);
+    let mut upper_bound_kind_col = StringBuilder::with_capacity(n, n * 12);
     let mut gap_percent = Float64Builder::with_capacity(n);
     let mut cuts_added = Int32Builder::with_capacity(n);
     let mut cuts_removed = Int32Builder::with_capacity(n);
@@ -159,8 +171,13 @@ fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, O
     for rec in records {
         iteration.append_value(rec.iteration as i32);
         lower_bound.append_value(rec.lower_bound);
-        upper_bound_mean.append_value(rec.upper_bound_mean);
-        upper_bound_std.append_value(rec.upper_bound_std);
+        upper_bound.append_value(rec.upper_bound);
+        if is_exact {
+            upper_bound_std.append_null();
+        } else {
+            upper_bound_std.append_value(rec.upper_bound_std);
+        }
+        upper_bound_kind_col.append_value(upper_bound_kind);
         gap_percent.append_option(rec.gap_percent);
         cuts_added.append_value(rec.cuts_added as i32);
         cuts_removed.append_value(rec.cuts_removed as i32);
@@ -178,8 +195,9 @@ fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, O
         vec![
             Arc::new(iteration.finish()),
             Arc::new(lower_bound.finish()),
-            Arc::new(upper_bound_mean.finish()),
+            Arc::new(upper_bound.finish()),
             Arc::new(upper_bound_std.finish()),
+            Arc::new(upper_bound_kind_col.finish()),
             Arc::new(gap_percent.finish()),
             Arc::new(cuts_added.finish()),
             Arc::new(cuts_removed.finish()),
@@ -355,7 +373,7 @@ mod tests {
         IterationRecord {
             iteration,
             lower_bound: f64::from(iteration) * 10.0,
-            upper_bound_mean: f64::from(iteration) * 11.0,
+            upper_bound: f64::from(iteration) * 11.0,
             upper_bound_std: 0.5,
             gap_percent: gap,
             cuts_added: 5,
@@ -393,6 +411,7 @@ mod tests {
             final_upper_bound: Some(101.0),
             final_gap_percent: Some(1.51),
             final_upper_bound_std: Some(0.5),
+            final_upper_bound_kind: "statistical".to_string(),
             iterations_completed: 0,
             converged: true,
             termination_reason: "gap tolerance reached".to_string(),
@@ -405,6 +424,7 @@ mod tests {
                 rows_in_lp_total: 0,
                 rows_in_lp_solve_count: 0,
                 rows_in_lp_max: 0,
+                total_loaded: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
@@ -427,17 +447,17 @@ mod tests {
 
     #[test]
     fn convergence_batch_from_empty_records() {
-        let batch = build_convergence_batch(&[]).expect("empty batch must succeed");
+        let batch = build_convergence_batch(&[], "statistical").expect("empty batch must succeed");
         assert_eq!(batch.num_rows(), 0, "empty records yield 0 rows");
-        assert_eq!(batch.num_columns(), 14, "convergence schema has 14 columns");
+        assert_eq!(batch.num_columns(), 15, "convergence schema has 15 columns");
     }
 
     #[test]
     fn convergence_batch_field_count_and_types() {
         let records: Vec<IterationRecord> = (1..=3).map(|i| make_record(i, Some(5.0))).collect();
-        let batch = build_convergence_batch(&records).expect("batch must be built");
+        let batch = build_convergence_batch(&records, "statistical").expect("batch must be built");
         assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 14);
+        assert_eq!(batch.num_columns(), 15);
 
         let expected_schema = convergence_schema();
         assert_eq!(
@@ -454,7 +474,7 @@ mod tests {
             make_record(2, Some(5.0)),
             make_record(3, None), // gap_percent is None for record 3 (index 2)
         ];
-        let batch = build_convergence_batch(&records).expect("batch must be built");
+        let batch = build_convergence_batch(&records, "statistical").expect("batch must be built");
 
         let gap_col = batch
             .column_by_name("gap_percent")
@@ -505,7 +525,7 @@ mod tests {
             .map(|i| IterationRecord {
                 iteration: i,
                 lower_bound: f64::from(i) * 10.0,
-                upper_bound_mean: f64::from(i) * 11.0,
+                upper_bound: f64::from(i) * 11.0,
                 upper_bound_std: 0.5,
                 gap_percent: Some(5.0),
                 cuts_added: 5,
@@ -564,7 +584,7 @@ mod tests {
                 ],
             })
             .collect();
-        let mut training = make_training_output(records.clone());
+        let mut training = make_training_output(records);
         training.worker_timing_records = worker_records;
         let writer = TrainingParquetWriter::new(tmp.path(), &config).expect("new must succeed");
         writer.write(&training).expect("write must succeed");
@@ -633,7 +653,7 @@ mod tests {
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let records: Vec<IterationRecord> = (1..=5).map(|i| make_record(i, Some(1.0))).collect();
-        let batch = build_convergence_batch(&records).expect("batch must be built");
+        let batch = build_convergence_batch(&records, "statistical").expect("batch must be built");
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         let path = tmp.path().join("convergence.parquet");
@@ -692,7 +712,7 @@ mod tests {
     #[test]
     fn write_convergence_parquet_atomic_rename() {
         let records: Vec<IterationRecord> = (1..=2).map(|i| make_record(i, None)).collect();
-        let batch = build_convergence_batch(&records).expect("batch must be built");
+        let batch = build_convergence_batch(&records, "statistical").expect("batch must be built");
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         let path = tmp.path().join("convergence.parquet");
@@ -802,7 +822,7 @@ mod tests {
             .expect("reader");
         let batch = reader.next().expect("must have rows").expect("batch Ok");
         assert_eq!(batch.num_rows(), 5);
-        assert_eq!(batch.num_columns(), 14);
+        assert_eq!(batch.num_columns(), 15);
 
         let timing_path = tmp.path().join("training/timing/iterations.parquet");
         let file = std::fs::File::open(&timing_path).expect("file must open");

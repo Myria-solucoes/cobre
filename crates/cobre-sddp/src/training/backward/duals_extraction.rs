@@ -8,7 +8,7 @@ use cobre_solver::SolutionView;
 
 use crate::indexer::{CutSlot, CutStateProjection};
 
-use super::SuccessorSpec;
+use super::SuccessorChild;
 
 fn fill_state_duals(
     view: &SolutionView<'_>,
@@ -46,7 +46,7 @@ pub(crate) fn extract_duals_from_view(
     view: &SolutionView<'_>,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
-    succ: &SuccessorSpec<'_>,
+    succ: &SuccessorChild<'_>,
     state_duals: &mut Vec<f64>,
     cut_duals: &mut Vec<f64>,
 ) -> f64 {

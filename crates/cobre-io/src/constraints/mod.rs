@@ -26,15 +26,17 @@ pub mod bounds;
 pub mod generic;
 pub mod generic_bounds;
 pub mod hydro_unit_group_bounds;
+pub(crate) mod named_expression_inline;
 pub mod ncs_bounds;
 pub mod penalty_overrides;
+pub(crate) mod rhs_normalize;
 
 pub use bounds::{
     ContractBoundsRow, HydroBoundsRow, LineBoundsRow, PumpingBoundsRow, ThermalBoundsRow,
     parse_contract_bounds, parse_hydro_bounds, parse_line_bounds, parse_pumping_bounds,
     parse_thermal_bounds,
 };
-pub use generic::parse_generic_constraints;
+pub use generic::{LineBusPairIndex, build_line_bus_pair_index, parse_generic_constraints};
 pub use generic_bounds::{GenericConstraintBoundsRow, parse_generic_constraint_bounds};
 pub use hydro_unit_group_bounds::{HydroUnitGroupBoundsRow, parse_hydro_unit_group_bounds};
 pub use ncs_bounds::{NcsBoundsRow, parse_ncs_bounds};
@@ -264,6 +266,9 @@ pub fn load_penalty_overrides_ncs(
 /// contain `@name` tokens will then fail with a schema error. The real mapping
 /// is wired in by the caller once the parameter loader output is available.
 ///
+/// `line_index` resolves the `line_exchange(source_bus=X, target_bus=Y)` addressing
+/// form; pass [`LineBusPairIndex::default`] when no line topology is available.
+///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_generic_constraints`] when `path` is `Some`.
@@ -271,20 +276,23 @@ pub fn load_penalty_overrides_ncs(
 /// # Examples
 ///
 /// ```
-/// use cobre_io::constraints::load_generic_constraints;
+/// use cobre_io::constraints::{LineBusPairIndex, load_generic_constraints};
 /// use std::collections::HashMap;
 ///
-/// let constraints = load_generic_constraints(None, &HashMap::new()).expect("no file is fine");
+/// let constraints =
+///     load_generic_constraints(None, &HashMap::new(), &LineBusPairIndex::default())
+///         .expect("no file is fine");
 /// assert!(constraints.is_empty());
 /// ```
 #[allow(clippy::implicit_hasher)]
 pub fn load_generic_constraints(
     path: Option<&Path>,
     name_to_id: &HashMap<String, EntityId>,
+    line_index: &LineBusPairIndex,
 ) -> Result<Vec<GenericConstraint>, LoadError> {
     match path {
         None => Ok(Vec::new()),
-        Some(p) => parse_generic_constraints(p, name_to_id),
+        Some(p) => parse_generic_constraints(p, name_to_id, line_index),
     }
 }
 

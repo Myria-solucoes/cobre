@@ -1,7 +1,7 @@
 //! Parsing for `stages.json` — temporal structure and policy graph.
 //!
 //! [`parse_stages`] reads `stages.json` from the case directory root and returns a
-//! [`StagesData`] struct containing the sorted `Vec<Stage>` and the [`PolicyGraph`].
+//! [`StagesData`] struct containing the sorted `Vec<Stage>` and the [`HorizonGraph`].
 //!
 //! Scenario source configuration has moved to `config.json`
 //! (`training.scenario_source` / `simulation.scenario_source`). If a `stages.json`
@@ -33,7 +33,7 @@
 //!       "block_mode": "parallel",
 //!       "state_variables": { "storage": true, "inflow_lags": false },
 //!       "risk_measure": "expectation",
-//!       "num_scenarios": 50,
+//!       "num_openings": 50,
 //!       "sampling_method": "saa"
 //!     }
 //!   ]
@@ -45,13 +45,13 @@
 //! block hours sum equals stage duration) is deferred to the semantic layer.
 
 use chrono::{Datelike, NaiveDate};
+use cobre_core::HorizonGraph;
 use cobre_core::temporal::{
-    Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
-    SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
-    Transition,
+    Block, BlockMode, Node, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, SeasonCycleType,
+    SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig, Transition,
 };
-use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use crate::LoadError;
@@ -128,14 +128,19 @@ pub(crate) struct RawSeasonEntry {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawPolicyGraph {
-    /// Horizon type: `"finite_horizon"` or `"cyclic"`.
+    /// Horizon type. Only `finite_horizon` is supported; `cyclic` is reserved
+    /// and rejected during conversion (no engine consumer today).
     #[serde(rename = "type")]
-    graph_type: String,
+    graph_type: RawPolicyGraphType,
     /// Global annual discount rate. Must be >= 0.0.
     annual_discount_rate: f64,
     /// Stage transitions.
     #[serde(default)]
     transitions: Vec<RawTransition>,
+    /// Policy-graph nodes. Absent ⇒ the graph is a stage chain and `transitions`
+    /// endpoints are stage ids.
+    #[serde(default)]
+    nodes: Vec<RawNode>,
 }
 
 /// Intermediate type for one policy graph transition.
@@ -143,15 +148,36 @@ pub(crate) struct RawPolicyGraph {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawTransition {
-    /// Source stage ID.
+    /// Source endpoint: a node id when `policy_graph.nodes` is non-empty, a stage id otherwise.
     source_id: i32,
-    /// Target stage ID.
+    /// Target endpoint: a node id when `policy_graph.nodes` is non-empty, a stage id otherwise.
     target_id: i32,
     /// Transition probability.
     probability: f64,
     /// Optional per-transition discount rate override.
     #[serde(default)]
     annual_discount_rate_override: Option<f64>,
+}
+
+/// Intermediate type for one policy-graph node.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct RawNode {
+    /// Unique node id, referenced by `transitions` endpoints when `nodes` is declared.
+    id: i32,
+    /// Declared study-stage id this node sits at; resolved against the study stages, never an array index.
+    stage_id: i32,
+    /// Per-stage external-library realization column this node carries. Required at a
+    /// stage carrying a slot-occupying external class, omitted where none. `scenario_id: k`
+    /// is exactly the degenerate one-element weighted opening set
+    /// `[{ "scenario_id": k, "probability": 1.0 }]` (documented equivalence; the
+    /// weighted-list spelling is not parsed here).
+    #[serde(default)]
+    scenario_id: Option<i32>,
+    /// Optional human-readable label.
+    #[serde(default)]
+    label: Option<String>,
 }
 
 /// Intermediate type for a study stage entry.
@@ -170,20 +196,127 @@ pub(crate) struct RawStage {
     season_id: Option<usize>,
     /// Load blocks within this stage.
     blocks: Vec<RawBlock>,
-    /// Block mode: `"parallel"` (default) or `"chronological"`.
-    #[serde(default = "default_block_mode_str")]
-    block_mode: String,
+    /// Block mode: `parallel` (default) or `chronological`.
+    #[serde(default)]
+    block_mode: RawBlockMode,
     /// State variable flags.
     #[serde(default)]
     state_variables: Option<RawStateVariables>,
     /// Risk measure: `"expectation"` or `{"cvar": {"alpha": ..., "lambda": ...}}`.
     #[serde(default = "default_risk_measure")]
     risk_measure: RawRiskMeasure,
-    /// Number of scenarios (branching factor). Must be > 0.
-    num_scenarios: u32,
-    /// Sampling method for noise generation. Default: `"saa"`.
-    #[serde(default = "default_sampling_method_str")]
-    sampling_method: String,
+    /// Number of within-node openings. Required (and `> 0`) on the chain dialect and
+    /// at a generated-openings stage under `nodes[]`; rejected where a stage carries
+    /// only external openings.
+    #[serde(default)]
+    num_openings: Option<u32>,
+    /// Sampling method for noise generation. Default: `saa`.
+    #[serde(default)]
+    sampling_method: RawNoiseMethod,
+    /// Per-stage annual discount rate override; absent uses `policy_graph.annual_discount_rate`.
+    #[serde(default)]
+    annual_discount_rate_override: Option<f64>,
+}
+
+/// Horizon type discriminator (`stages.json` `policy_graph.type`).
+///
+/// Both variants parse; `cyclic` is rejected as reserved during conversion
+/// (see [`convert_policy_graph_type`]), never at parse, so the reserved message
+/// fires rather than a generic unknown-variant error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum RawPolicyGraphType {
+    /// Acyclic stage chain with a definite end stage.
+    FiniteHorizon,
+    /// Infinite periodic horizon (reserved; not yet supported).
+    Cyclic,
+}
+
+impl<'de> Deserialize<'de> for RawPolicyGraphType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "finite_horizon" => Ok(Self::FiniteHorizon),
+            "cyclic" => Ok(Self::Cyclic),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["finite_horizon", "cyclic"],
+            )),
+        }
+    }
+}
+
+/// Block formulation mode discriminator (`stages.json` `stages[].block_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum RawBlockMode {
+    /// Independent sub-periods solved simultaneously.
+    #[default]
+    Parallel,
+    /// Sequential blocks with intra-stage state transitions.
+    Chronological,
+}
+
+impl<'de> Deserialize<'de> for RawBlockMode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "parallel" => Ok(Self::Parallel),
+            "chronological" => Ok(Self::Chronological),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["parallel", "chronological"],
+            )),
+        }
+    }
+}
+
+/// Opening-tree noise-generation method discriminator (`stages.json`
+/// `stages[].sampling_method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum RawNoiseMethod {
+    /// Sample Average Approximation (pure Monte Carlo).
+    #[default]
+    Saa,
+    /// Latin Hypercube Sampling.
+    Lhs,
+    /// Quasi-Monte Carlo with Sobol sequences.
+    QmcSobol,
+    /// Quasi-Monte Carlo with Halton sequences.
+    QmcHalton,
+    /// Selective/representative sampling.
+    Selective,
+    /// Historical residuals from the historical scenario library.
+    HistoricalResiduals,
+}
+
+impl<'de> Deserialize<'de> for RawNoiseMethod {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "saa" => Ok(Self::Saa),
+            "lhs" => Ok(Self::Lhs),
+            "qmc_sobol" => Ok(Self::QmcSobol),
+            "qmc_halton" => Ok(Self::QmcHalton),
+            "selective" => Ok(Self::Selective),
+            "historical_residuals" => Ok(Self::HistoricalResiduals),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &[
+                    "saa",
+                    "lhs",
+                    "qmc_sobol",
+                    "qmc_halton",
+                    "selective",
+                    "historical_residuals",
+                ],
+            )),
+        }
+    }
 }
 
 /// Intermediate type for a pre-study stage entry (negative IDs).
@@ -268,14 +401,6 @@ pub(crate) struct RawCVarParams {
 
 // ── Default functions ─────────────────────────────────────────────────────────
 
-fn default_block_mode_str() -> String {
-    "parallel".to_string()
-}
-
-fn default_sampling_method_str() -> String {
-    "saa".to_string()
-}
-
 fn default_risk_measure() -> RawRiskMeasure {
     RawRiskMeasure::Expectation("expectation".to_string())
 }
@@ -305,7 +430,11 @@ pub struct StagesData {
     /// Pre-study stages have negative IDs; study stages have non-negative IDs.
     pub stages: Vec<Stage>,
     /// Policy graph with transitions, horizon type, discount rate, and season map.
-    pub policy_graph: PolicyGraph,
+    pub policy_graph: HorizonGraph,
+    /// Study stage ids whose `num_openings` was declared; lets the semantic layer
+    /// distinguish an absent count from a present one after conversion collapses it
+    /// into `ScenarioSourceConfig::branching_factor`.
+    pub openings_declared: HashSet<i32>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -324,7 +453,7 @@ pub struct StagesData {
 /// | Duplicate stage `id` | [`LoadError::SchemaError`] |
 /// | Duplicate pre-study stage `id` | [`LoadError::SchemaError`] |
 /// | Stage `id` collision between study and pre-study | [`LoadError::SchemaError`] |
-/// | `num_scenarios` <= 0 | [`LoadError::SchemaError`] |
+/// | `num_openings` present but <= 0, or absent on the chain dialect | [`LoadError::SchemaError`] |
 /// | `annual_discount_rate` < 0.0 | [`LoadError::SchemaError`] |
 /// | Block `hours` <= 0.0 | [`LoadError::SchemaError`] |
 /// | Block IDs not contiguous (0..n-1) | [`LoadError::SchemaError`] |
@@ -391,8 +520,9 @@ fn validate_raw_stages(raw: &RawStagesFile, path: &Path) -> Result<(), LoadError
     validate_no_duplicate_stage_ids(&raw.stages, path)?;
     validate_no_duplicate_pre_study_stage_ids(&raw.pre_study_stages, path)?;
     validate_no_id_collision_between_sets(&raw.stages, &raw.pre_study_stages, path)?;
+    let nodes_declared = !raw.policy_graph.nodes.is_empty();
     for (i, stage) in raw.stages.iter().enumerate() {
-        validate_num_scenarios(stage.num_scenarios, i, path)?;
+        validate_num_openings(stage.num_openings, nodes_declared, i, path)?;
         for (j, block) in stage.blocks.iter().enumerate() {
             validate_block_hours(block.hours, i, j, path)?;
         }
@@ -465,15 +595,29 @@ fn validate_no_id_collision_between_sets(
     Ok(())
 }
 
-fn validate_num_scenarios(num: u32, stage_index: usize, path: &Path) -> Result<(), LoadError> {
-    if num == 0 {
-        return Err(LoadError::SchemaError {
+/// A present `num_openings` must be `> 0`; on the chain dialect (no `nodes[]`) it is
+/// also required. Under `nodes[]` an absent count is left to the semantic layer's
+/// conditional-requirement rule, which reads whether the stage carries generated
+/// openings.
+fn validate_num_openings(
+    num: Option<u32>,
+    nodes_declared: bool,
+    stage_index: usize,
+    path: &Path,
+) -> Result<(), LoadError> {
+    match num {
+        Some(0) => Err(LoadError::SchemaError {
             path: path.to_path_buf(),
-            field: format!("stages[{stage_index}].num_scenarios"),
-            message: "num_scenarios must be > 0".to_string(),
-        });
+            field: format!("stages[{stage_index}].num_openings"),
+            message: "num_openings must be > 0".to_string(),
+        }),
+        None if !nodes_declared => Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("stages[{stage_index}].num_openings"),
+            message: "num_openings is required".to_string(),
+        }),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn validate_block_hours(
@@ -555,41 +699,58 @@ fn validate_risk_measure(
 /// `id` ascending and assigning `index` after the sort.
 fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadError> {
     let season_map = convert_season_definitions(raw.season_definitions, path)?;
+
+    let nodes_declared = !raw.policy_graph.nodes.is_empty();
+    let openings_declared: HashSet<i32> = raw
+        .stages
+        .iter()
+        .filter(|s| s.num_openings.is_some())
+        .map(|s| s.id)
+        .collect();
+    // Chain dialect: the departing-edge override folds onto its source stage (exactly
+    // one edge per stage); under nodes[] the per-edge spelling is rejected by the
+    // semantic layer, never folded — the stage field is the only source.
+    let stage_discount_rate_overrides: HashMap<i32, f64> = raw
+        .stages
+        .iter()
+        .filter_map(|s| {
+            let rate = s.annual_discount_rate_override.or_else(|| {
+                if nodes_declared {
+                    None
+                } else {
+                    raw.policy_graph
+                        .transitions
+                        .iter()
+                        .find(|tr| tr.source_id == s.id)
+                        .and_then(|tr| tr.annual_discount_rate_override)
+                }
+            });
+            rate.map(|r| (s.id, r))
+        })
+        .collect();
+
     let mut policy_graph = convert_policy_graph(raw.policy_graph, path)?;
     policy_graph.season_map = season_map;
+    policy_graph.stage_discount_rate_overrides = stage_discount_rate_overrides;
 
     let mut all_stages: Vec<Stage> =
         Vec::with_capacity(raw.stages.len() + raw.pre_study_stages.len());
 
     for (i, raw_stage) in raw.stages.into_iter().enumerate() {
-        let start_date = parse_date(
+        let (start_date, end_date) = parse_stage_date_range(
+            "stages",
+            i,
             &raw_stage.start_date,
-            &format!("stages[{i}].start_date"),
+            &raw_stage.end_date,
             path,
         )?;
-        let end_date = parse_date(&raw_stage.end_date, &format!("stages[{i}].end_date"), path)?;
-        if start_date >= end_date {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("stages[{i}].end_date"),
-                message: format!("end_date ({end_date}) must be after start_date ({start_date})"),
-            });
-        }
 
         let blocks = convert_blocks(&raw_stage.blocks);
-        let block_mode = convert_block_mode(
-            &raw_stage.block_mode,
-            &format!("stages[{i}].block_mode"),
-            path,
-        )?;
+        let block_mode = convert_block_mode(raw_stage.block_mode);
         let state_config = convert_state_config(raw_stage.state_variables);
         let risk_config = convert_risk_measure(raw_stage.risk_measure);
-        let noise_method = convert_noise_method(
-            &raw_stage.sampling_method,
-            &format!("stages[{i}].sampling_method"),
-            path,
-        )?;
-        let branching_factor = raw_stage.num_scenarios as usize;
+        let noise_method = convert_noise_method(raw_stage.sampling_method);
+        let branching_factor = raw_stage.num_openings.unwrap_or(1) as usize;
         let season_id = resolve_or_validate_season_id(
             raw_stage.season_id,
             raw_stage.id,
@@ -618,23 +779,13 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
     }
 
     for (i, raw_pss) in raw.pre_study_stages.into_iter().enumerate() {
-        let start_date = parse_date(
+        let (start_date, end_date) = parse_stage_date_range(
+            "pre_study_stages",
+            i,
             &raw_pss.start_date,
-            &format!("pre_study_stages[{i}].start_date"),
-            path,
-        )?;
-        let end_date = parse_date(
             &raw_pss.end_date,
-            &format!("pre_study_stages[{i}].end_date"),
             path,
         )?;
-        if start_date >= end_date {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("pre_study_stages[{i}].end_date"),
-                message: format!("end_date ({end_date}) must be after start_date ({start_date})"),
-            });
-        }
 
         all_stages.push(Stage {
             index: 0,
@@ -667,11 +818,12 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
     Ok(StagesData {
         stages: all_stages,
         policy_graph,
+        openings_declared,
     })
 }
 
-fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<PolicyGraph, LoadError> {
-    let graph_type = convert_policy_graph_type(&raw.graph_type, path)?;
+fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<HorizonGraph, LoadError> {
+    let graph_type = convert_policy_graph_type(raw.graph_type, path)?;
 
     let transitions: Vec<Transition> = raw
         .transitions
@@ -684,13 +836,125 @@ fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<PolicyGraph,
         })
         .collect();
 
-    Ok(PolicyGraph {
+    let mut nodes: Vec<Node> = raw
+        .nodes
+        .into_iter()
+        .map(|n| Node {
+            id: n.id,
+            stage_id: n.stage_id,
+            scenario_id: n.scenario_id,
+            label: n.label,
+        })
+        .collect();
+    nodes.sort_by_key(|n| n.id);
+
+    Ok(HorizonGraph {
         graph_type,
         annual_discount_rate: raw.annual_discount_rate,
         transitions,
-        // season_map is set by the caller after convert_season_definitions runs.
+        nodes,
+        // season_map and stage_discount_rate_overrides are set by the caller, which
+        // has the study stages and season definitions.
+        stage_discount_rate_overrides: HashMap::new(),
         season_map: None,
     })
+}
+
+// ── Weight-vector normalization ─────────────────────────────────────────────────
+
+/// A weight vector whose compensated sum cannot be scaled to 1.0.
+enum WeightSumError {
+    /// The sum is exactly zero (or `-0.0`).
+    Zero,
+    /// The sum is `NaN` or infinite.
+    NonFinite,
+}
+
+/// Scale `weights` in place so they sum to 1.0 within 1 ULP, dividing each by the
+/// Neumaier compensated sum of the slice in its given order; the caller supplies the
+/// slice already in canonical order. The one weight vector normalized today is a
+/// source's out-edge probabilities; within-node weighted opening vectors, when added,
+/// normalize through this same routine unchanged — hence the generic slice rather than
+/// an out-edge-specific signature.
+///
+/// # Errors
+///
+/// [`WeightSumError`] when the compensated sum is zero or non-finite — a vector that
+/// cannot be scaled to 1.0.
+fn normalize_weights(weights: &mut [f64]) -> Result<(), WeightSumError> {
+    let mut sum = 0.0_f64;
+    let mut compensation = 0.0_f64;
+    for &w in weights.iter() {
+        let t = sum + w;
+        if sum.abs() >= w.abs() {
+            compensation += (sum - t) + w;
+        } else {
+            compensation += (w - t) + sum;
+        }
+        sum = t;
+    }
+    let total = sum + compensation;
+    if !total.is_finite() {
+        return Err(WeightSumError::NonFinite);
+    }
+    if total == 0.0 {
+        return Err(WeightSumError::Zero);
+    }
+    for w in weights.iter_mut() {
+        *w /= total;
+    }
+    Ok(())
+}
+
+/// Normalize every source node's out-edge probability vector to sum to 1.0 within
+/// 1 ULP, in canonical (ascending child node id) order with a compensated sum, so
+/// nothing downstream re-normalizes. Sources are independent; each is scaled by its
+/// own out-edge sum, stored back into [`Transition::probability`].
+///
+/// Runs once, after the semantic layer has rejected gross probability-sum errors, so
+/// it only polishes an already-near-unit vector to exact unit and rejects the residual
+/// zero/non-finite sum a tolerance gate cannot (rule 2: a `NaN` sum passes
+/// `|s − 1| ≤ ε`).
+///
+/// # Errors
+///
+/// [`LoadError::SchemaError`] naming the source node whose out-edge sum is zero or
+/// non-finite.
+pub(crate) fn normalize_out_edge_probabilities(
+    graph: &mut HorizonGraph,
+    path: &Path,
+) -> Result<(), LoadError> {
+    let mut by_source: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (i, transition) in graph.transitions.iter().enumerate() {
+        by_source.entry(transition.source_id).or_default().push(i);
+    }
+    for (source_id, mut edges) in by_source {
+        edges.sort_by_key(|&i| graph.transitions[i].target_id);
+        let mut weights: Vec<f64> = edges
+            .iter()
+            .map(|&i| graph.transitions[i].probability)
+            .collect();
+        normalize_weights(&mut weights).map_err(|err| out_edge_sum_error(source_id, &err, path))?;
+        for (&i, &w) in edges.iter().zip(&weights) {
+            graph.transitions[i].probability = w;
+        }
+    }
+    Ok(())
+}
+
+fn out_edge_sum_error(source_id: i32, err: &WeightSumError, path: &Path) -> LoadError {
+    let reason = match err {
+        WeightSumError::Zero => "sums to zero",
+        WeightSumError::NonFinite => "has a non-finite sum",
+    };
+    LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field: "policy_graph.transitions".to_string(),
+        message: format!(
+            "outgoing transition probabilities from source {source_id} {reason}; a weight \
+             vector must have a positive, finite sum to normalize to 1.0"
+        ),
+    }
 }
 
 fn convert_blocks(raw_blocks: &[RawBlock]) -> Vec<Block> {
@@ -729,50 +993,38 @@ fn convert_risk_measure(raw: RawRiskMeasure) -> StageRiskConfig {
     }
 }
 
-// ── String-to-enum converters ─────────────────────────────────────────────────
+// ── Raw-to-canonical converters ───────────────────────────────────────────────
 
-fn convert_block_mode(s: &str, field: &str, path: &Path) -> Result<BlockMode, LoadError> {
-    match s {
-        "parallel" => Ok(BlockMode::Parallel),
-        "chronological" => Ok(BlockMode::Chronological),
-        other => Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: field.to_string(),
-            message: format!(
-                "unknown block_mode '{other}', expected 'parallel' or 'chronological'"
-            ),
-        }),
+fn convert_block_mode(mode: RawBlockMode) -> BlockMode {
+    match mode {
+        RawBlockMode::Parallel => BlockMode::Parallel,
+        RawBlockMode::Chronological => BlockMode::Chronological,
     }
 }
 
-fn convert_noise_method(s: &str, field: &str, path: &Path) -> Result<NoiseMethod, LoadError> {
-    match s {
-        "saa" => Ok(NoiseMethod::Saa),
-        "lhs" => Ok(NoiseMethod::Lhs),
-        "qmc_sobol" => Ok(NoiseMethod::QmcSobol),
-        "qmc_halton" => Ok(NoiseMethod::QmcHalton),
-        "selective" => Ok(NoiseMethod::Selective),
-        "historical_residuals" => Ok(NoiseMethod::HistoricalResiduals),
-        other => Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: field.to_string(),
-            message: format!(
-                "unknown sampling_method '{other}', expected one of: saa, lhs, qmc_sobol, qmc_halton, selective, historical_residuals"
-            ),
-        }),
+fn convert_noise_method(method: RawNoiseMethod) -> NoiseMethod {
+    match method {
+        RawNoiseMethod::Saa => NoiseMethod::Saa,
+        RawNoiseMethod::Lhs => NoiseMethod::Lhs,
+        RawNoiseMethod::QmcSobol => NoiseMethod::QmcSobol,
+        RawNoiseMethod::QmcHalton => NoiseMethod::QmcHalton,
+        RawNoiseMethod::Selective => NoiseMethod::Selective,
+        RawNoiseMethod::HistoricalResiduals => NoiseMethod::HistoricalResiduals,
     }
 }
 
-fn convert_policy_graph_type(s: &str, path: &Path) -> Result<PolicyGraphType, LoadError> {
-    match s {
-        "finite_horizon" => Ok(PolicyGraphType::FiniteHorizon),
-        "cyclic" => Ok(PolicyGraphType::Cyclic),
-        other => Err(LoadError::SchemaError {
+fn convert_policy_graph_type(
+    graph_type: RawPolicyGraphType,
+    path: &Path,
+) -> Result<PolicyGraphType, LoadError> {
+    match graph_type {
+        RawPolicyGraphType::FiniteHorizon => Ok(PolicyGraphType::FiniteHorizon),
+        RawPolicyGraphType::Cyclic => Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: "policy_graph.type".to_string(),
-            message: format!(
-                "unknown policy_graph type '{other}', expected 'finite_horizon' or 'cyclic'"
-            ),
+            message: "policy_graph type 'cyclic' is reserved and not yet supported; \
+                      expected 'finite_horizon'"
+                .to_string(),
         }),
     }
 }
@@ -798,6 +1050,27 @@ fn parse_date(s: &str, field: &str, path: &Path) -> Result<NaiveDate, LoadError>
         field: field.to_string(),
         message: format!("invalid date '{s}', expected format YYYY-MM-DD"),
     })
+}
+
+/// Parse and order-validate one stage's `start_date`/`end_date` pair, field-pathed
+/// under `prefix[i]` (`"stages"` or `"pre_study_stages"`).
+fn parse_stage_date_range(
+    prefix: &str,
+    i: usize,
+    start_date: &str,
+    end_date: &str,
+    path: &Path,
+) -> Result<(NaiveDate, NaiveDate), LoadError> {
+    let start_date = parse_date(start_date, &format!("{prefix}[{i}].start_date"), path)?;
+    let end_date = parse_date(end_date, &format!("{prefix}[{i}].end_date"), path)?;
+    if start_date >= end_date {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("{prefix}[{i}].end_date"),
+            message: format!("end_date ({end_date}) must be after start_date ({start_date})"),
+        });
+    }
+    Ok((start_date, end_date))
 }
 
 fn convert_season_definitions(
@@ -1001,19 +1274,19 @@ mod tests {
           "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
           "season_id": 0,
           "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-          "num_scenarios": 50
+          "num_openings": 50
         },
         {
           "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
           "season_id": 1,
           "blocks": [{ "id": 0, "name": "LEVE", "hours": 696.0 }],
-          "num_scenarios": 50
+          "num_openings": 50
         },
         {
           "id": 2, "start_date": "2024-03-01", "end_date": "2024-04-01",
           "season_id": 2,
           "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-          "num_scenarios": 50
+          "num_openings": 50
         }
       ]
     }"#;
@@ -1043,17 +1316,17 @@ mod tests {
             {
               "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
               "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             },
             {
               "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
               "blocks": [{ "id": 0, "name": "SINGLE", "hours": 696.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             },
             {
               "id": 2, "start_date": "2024-03-01", "end_date": "2024-04-01",
               "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             }
           ]
         }"#;
@@ -1103,7 +1376,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-            "num_scenarios": 50,
+            "num_openings": 50,
             "risk_measure": { "cvar": { "alpha": 0.95, "lambda": 0.5 } }
           }]
         }"#;
@@ -1137,7 +1410,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-            "num_scenarios": 50
+            "num_openings": 50
           }]
         }"#;
         let f = write_json(json);
@@ -1156,7 +1429,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-            "num_scenarios": 50
+            "num_openings": 50
           }]
         }"#;
         let f = write_json(json);
@@ -1205,7 +1478,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-            "num_scenarios": 50
+            "num_openings": 50
           }]
         }"#;
         let f = write_json(json);
@@ -1252,7 +1525,7 @@ mod tests {
               "season_definitions": {{ "cycle_type": "weekly", "seasons": [{seasons}] }},
               "stages": [{{
                 "id": 0, "start_date": "2024-01-15", "end_date": "2024-01-22",
-                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 168.0 }}], "num_scenarios": 1
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 168.0 }}], "num_openings": 1
               }}]
             }}"#
         );
@@ -1286,17 +1559,17 @@ mod tests {
             {
               "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
               "season_id": 0,
-              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_scenarios": 1
+              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_openings": 1
             },
             {
               "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
               "season_id": 1,
-              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 696.0 }], "num_scenarios": 1
+              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 696.0 }], "num_openings": 1
             },
             {
               "id": 2, "start_date": "2024-03-01", "end_date": "2024-04-01",
               "season_id": 2,
-              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_scenarios": 1
+              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_openings": 1
             }
           ]
         }"#;
@@ -1332,7 +1605,7 @@ mod tests {
           "stages": [{
             "id": 7, "start_date": "2024-03-01", "end_date": "2024-04-01",
             "season_id": 5,
-            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_scenarios": 1
+            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_openings": 1
           }]
         }"#;
         let f = write_json(json);
@@ -1374,7 +1647,7 @@ mod tests {
           "stages": [{
             "id": 4, "start_date": "2026-05-02", "end_date": "2026-05-09",
             "season_id": 3,
-            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 168.0 }], "num_scenarios": 1
+            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 168.0 }], "num_openings": 1
           }]
         }"#;
         let f = write_json(json);
@@ -1427,7 +1700,7 @@ mod tests {
               "stages": [{{
                 "id": 6, "start_date": "2024-07-01", "end_date": "2024-10-01",
                 "season_id": 12,
-                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_scenarios": 1
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_openings": 1
               }}]
             }}"#
         );
@@ -1452,7 +1725,7 @@ mod tests {
               "season_definitions": {D30_SHAPED_SEASON_DEFINITIONS},
               "stages": [{{
                 "id": 6, "start_date": "2024-07-01", "end_date": "2024-10-01",
-                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_scenarios": 1
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_openings": 1
               }}]
             }}"#
         );
@@ -1484,7 +1757,7 @@ mod tests {
               { "id": 1, "name": "OFF", "hours": 496.0 }
             ],
             "block_mode": "chronological",
-            "num_scenarios": 10
+            "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1512,12 +1785,12 @@ mod tests {
             {
               "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
               "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             },
             {
               "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
               "blocks": [{ "id": 0, "name": "LEVE", "hours": 696.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             }
           ]
         }"#;
@@ -1526,7 +1799,6 @@ mod tests {
 
         assert_eq!(data.policy_graph.transitions.len(), 1);
         let override_rate = data.policy_graph.transitions[0].annual_discount_rate_override;
-        let expected = Some(0.08);
         match override_rate {
             Some(r) => assert!(
                 (r - 0.08).abs() < f64::EPSILON,
@@ -1534,7 +1806,49 @@ mod tests {
             ),
             None => panic!("expected Some(0.08), got None"),
         }
-        let _ = expected;
+    }
+
+    /// Chain dialect (no `nodes[]`): a departing-edge `annual_discount_rate_override`
+    /// folds onto its source stage in `stage_discount_rate_overrides`, so the edge
+    /// spelling still applies, and a `stages[].annual_discount_rate_override`
+    /// lands there directly.
+    #[test]
+    fn test_discount_override_folds_onto_stage_chain_dialect() {
+        let json = r#"{
+          "policy_graph": {
+            "type": "finite_horizon",
+            "annual_discount_rate": 0.06,
+            "transitions": [
+              { "source_id": 0, "target_id": 1, "probability": 1.0, "annual_discount_rate_override": 0.08 }
+            ]
+          },
+          "stages": [
+            {
+              "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
+              "num_openings": 5
+            },
+            {
+              "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
+              "blocks": [{ "id": 0, "name": "LEVE", "hours": 696.0 }],
+              "num_openings": 5,
+              "annual_discount_rate_override": 0.09
+            }
+          ]
+        }"#;
+        let f = write_json(json);
+        let data = parse_stages(f.path()).unwrap();
+        let overrides = &data.policy_graph.stage_discount_rate_overrides;
+        assert_eq!(
+            overrides.get(&0).copied(),
+            Some(0.08),
+            "the departing-edge override must fold onto stage 0 (C1)"
+        );
+        assert_eq!(
+            overrides.get(&1).copied(),
+            Some(0.09),
+            "the stage-field override must land on stage 1 (B2)"
+        );
     }
 
     // ── Error tests ───────────────────────────────────────────────────────────
@@ -1546,9 +1860,9 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [
             { "id": 5, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10 },
             { "id": 5, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_scenarios": 10 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_openings": 10 }
           ]
         }"#;
         let f = write_json(json);
@@ -1579,7 +1893,7 @@ mod tests {
           ],
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1609,7 +1923,7 @@ mod tests {
           ],
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1629,15 +1943,15 @@ mod tests {
         }
     }
 
-    /// `num_scenarios = 0` -> `SchemaError` on `stages[i].num_scenarios`.
+    /// `num_openings = 0` -> `SchemaError` on `stages[i].num_openings`.
     #[test]
-    fn test_error_num_scenarios_zero() {
+    fn test_error_num_openings_zero() {
         let json = r#"{
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }],
-            "num_scenarios": 0
+            "num_openings": 0
           }]
         }"#;
         let f = write_json(json);
@@ -1645,8 +1959,8 @@ mod tests {
         match &err {
             LoadError::SchemaError { field, message, .. } => {
                 assert!(
-                    field.contains("num_scenarios"),
-                    "field should contain 'num_scenarios', got: {field}"
+                    field.contains("num_openings"),
+                    "field should contain 'num_openings', got: {field}"
                 );
                 assert!(
                     message.contains("> 0"),
@@ -1664,7 +1978,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": -0.01, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1691,7 +2005,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 0.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 0.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1719,7 +2033,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }],
-            "num_scenarios": 10,
+            "num_openings": 10,
             "risk_measure": { "cvar": { "alpha": 0.0, "lambda": 0.5 } }
           }]
         }"#;
@@ -1748,7 +2062,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }],
-            "num_scenarios": 10,
+            "num_openings": 10,
             "risk_measure": { "cvar": { "alpha": 0.95, "lambda": 1.5 } }
           }]
         }"#;
@@ -1776,7 +2090,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "2024-02-01", "end_date": "2024-01-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1807,7 +2121,7 @@ mod tests {
               { "id": 0, "name": "A", "hours": 248.0 },
               { "id": 2, "name": "B", "hours": 496.0 }
             ],
-            "num_scenarios": 10
+            "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1834,7 +2148,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "not-a-date", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1863,18 +2177,18 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10 },
             { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_scenarios": 10 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_openings": 10 }
           ]
         }"#;
         let json_reversed = r#"{
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [
             { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_scenarios": 10 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_openings": 10 },
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10 }
           ]
         }"#;
         let f1 = write_json(json_forward);
@@ -1908,9 +2222,10 @@ mod tests {
         );
     }
 
-    /// Cyclic policy graph type parses correctly.
+    /// `policy_graph.type: "cyclic"` is rejected as reserved/unsupported (A4),
+    /// naming the type and the accepted value.
     #[test]
-    fn test_cyclic_policy_graph_type() {
+    fn test_cyclic_policy_graph_type_rejected() {
         let json = r#"{
           "policy_graph": {
             "type": "cyclic",
@@ -1922,14 +2237,175 @@ mod tests {
           },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-07-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 4344.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 4344.0 }], "num_openings": 5 },
             { "id": 1, "start_date": "2024-07-01", "end_date": "2025-01-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 4416.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 4416.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "policy_graph.type", "field: {field}");
+                assert!(
+                    message.contains("cyclic") && message.contains("reserved"),
+                    "message should name 'cyclic' as reserved, got: {message}"
+                );
+                assert!(
+                    message.contains("finite_horizon"),
+                    "message should name the accepted value, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// An unknown `policy_graph.type` that is not the reserved `cyclic` is
+    /// rejected at parse, and the serde error names the accepted set.
+    #[test]
+    fn unknown_policy_graph_type_is_rejected_naming_accepted_set() {
+        let json = r#"{
+          "policy_graph": { "type": "elliptic", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("finite_horizon") && message.contains("cyclic"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+    }
+
+    /// An unknown `block_mode` is rejected at parse, and the serde error names
+    /// the accepted set.
+    #[test]
+    fn unknown_block_mode_is_rejected_naming_accepted_set() {
+        let json = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5,
+              "block_mode": "diagonal" }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("parallel") && message.contains("chronological"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+    }
+
+    /// An unknown `sampling_method` is rejected at parse, and the serde error
+    /// names the accepted set.
+    #[test]
+    fn unknown_sampling_method_is_rejected_naming_accepted_set() {
+        let json = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5,
+              "sampling_method": "antithetic" }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("saa") && message.contains("historical_residuals"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+    }
+
+    /// The removed per-stage `num_scenarios` spelling is a deserialize error
+    /// naming the offending field (`deny_unknown_fields` rejects it at parse,
+    /// surfaced as [`LoadError::ParseError`]); the canonical `num_openings`
+    /// spelling loads and its count reaches `branching_factor`.
+    #[test]
+    fn test_num_scenarios_removed_field_rejected() {
+        let rejected = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 }
+          ]
+        }"#;
+        let f = write_json(rejected);
+        match parse_stages(f.path()).unwrap_err() {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("num_scenarios") && message.contains("unknown field"),
+                    "removed field must surface as an unknown-field error naming it, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+
+        let accepted = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 }
+          ]
+        }"#;
+        let f = write_json(accepted);
         let data = parse_stages(f.path()).unwrap();
-        assert_eq!(data.policy_graph.graph_type, PolicyGraphType::Cyclic);
+        assert_eq!(
+            data.stages[0].scenario_config.branching_factor, 5,
+            "num_openings must populate branching_factor"
+        );
+        assert!(
+            data.openings_declared.contains(&0),
+            "a declared count marks the stage in openings_declared"
+        );
+    }
+
+    /// An unrecognized `risk_measure` string is rejected naming the value and the
+    /// accepted set (A3) — a mistyped `"cvar"` does not silently train risk-neutral.
+    #[test]
+    fn test_unknown_risk_measure_string_rejected() {
+        let json = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [{
+            "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }],
+            "num_openings": 5,
+            "risk_measure": "cvar"
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(field.contains("risk_measure"), "field: {field}");
+                assert!(
+                    message.contains("cvar"),
+                    "message should name the offending value, got: {message}"
+                );
+                assert!(
+                    message.contains("expectation") && message.contains("CVaR"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 
     // ── build_season_stage_map ─────────────────────────────────────────────
@@ -1956,13 +2432,13 @@ mod tests {
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
               "season_id": 0,
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 },
             { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
               "season_id": 0,
-              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_openings": 5 },
             { "id": 2, "start_date": "2024-07-01", "end_date": "2024-08-01",
               "season_id": 1,
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
@@ -1994,9 +2470,9 @@ mod tests {
           },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 },
             { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
@@ -2008,16 +2484,312 @@ mod tests {
         );
     }
 
-    /// `convert_noise_method("historical_residuals", ...)` returns
-    /// `Ok(NoiseMethod::HistoricalResiduals)`.
+    /// `convert_noise_method(RawNoiseMethod::HistoricalResiduals)` returns
+    /// `NoiseMethod::HistoricalResiduals`.
     #[test]
     fn test_convert_noise_method_historical_residuals() {
-        let f = write_json(VALID_JSON);
-        let result = convert_noise_method(
-            "historical_residuals",
-            "stages[0].sampling_method",
-            f.path(),
+        assert_eq!(
+            convert_noise_method(RawNoiseMethod::HistoricalResiduals),
+            NoiseMethod::HistoricalResiduals
         );
-        assert_eq!(result.unwrap(), NoiseMethod::HistoricalResiduals);
+    }
+
+    /// Given study stages whose ids are non-contiguous and non-0-based (a
+    /// negative pre-study id then a gap: `-1, 0, 2, 5`), `parse_stages` returns
+    /// `Ok` — no contiguity or 0-basedness rule fires. Pins the absence of any
+    /// such rule so a later author cannot add one as a "tightening"; `stage_id`
+    /// is a declared domain id, not a positional index.
+    #[test]
+    fn non_contiguous_stage_ids_validate_ok() {
+        let json = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "pre_study_stages": [
+            { "id": -1, "start_date": "2023-12-01", "end_date": "2024-01-01" }
+          ],
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }], "num_openings": 5 },
+            { "id": 2, "start_date": "2024-02-01", "end_date": "2024-03-01",
+              "blocks": [{ "id": 0, "name": "S", "hours": 696.0 }], "num_openings": 5 },
+            { "id": 5, "start_date": "2024-03-01", "end_date": "2024-04-01",
+              "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }], "num_openings": 5 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let data =
+            parse_stages(f.path()).expect("non-contiguous, non-0-based stage ids validate Ok");
+
+        // Sorted by id: -1, 0, 2, 5 — the gaps between 0, 2, 5 are preserved,
+        // never rejected or renumbered.
+        let ids: Vec<i32> = data.stages.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![-1, 0, 2, 5]);
+    }
+
+    // ── nodes[] parsing ───────────────────────────────────────────────────────
+
+    /// A declared `nodes[]` parses into canonical `Node`s carrying
+    /// `{id, stage_id, scenario_id, label}`.
+    #[test]
+    fn test_parse_nodes_carries_fields() {
+        let json = r#"{
+          "policy_graph": {
+            "type": "finite_horizon",
+            "annual_discount_rate": 0.0,
+            "nodes": [
+              { "id": 0, "stage_id": 0, "scenario_id": 2, "label": "root" },
+              { "id": 1, "stage_id": 1 }
+            ],
+            "transitions": [ { "source_id": 0, "target_id": 1, "probability": 1.0 } ]
+          },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 },
+            { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_openings": 5 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let data = parse_stages(f.path()).unwrap();
+        let nodes = &data.policy_graph.nodes;
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].id, 0);
+        assert_eq!(nodes[0].stage_id, 0);
+        assert_eq!(nodes[0].scenario_id, Some(2));
+        assert_eq!(nodes[0].label.as_deref(), Some("root"));
+        assert_eq!(nodes[1].id, 1);
+        assert_eq!(nodes[1].scenario_id, None);
+        assert_eq!(nodes[1].label, None);
+    }
+
+    /// Absent `nodes[]` leaves `policy_graph.nodes` empty and preserves the
+    /// stage-endpoint transitions unchanged (chain-dialect parse).
+    #[test]
+    fn test_absent_nodes_gives_empty_vec_and_stage_endpoints() {
+        let f = write_json(VALID_JSON);
+        let data = parse_stages(f.path()).unwrap();
+        assert!(data.policy_graph.nodes.is_empty());
+        assert_eq!(data.policy_graph.transitions.len(), 2);
+        assert_eq!(data.policy_graph.transitions[0].source_id, 0);
+        assert_eq!(data.policy_graph.transitions[0].target_id, 1);
+    }
+
+    /// An unknown key inside a node is rejected (`deny_unknown_fields`).
+    #[test]
+    fn test_unknown_key_in_node_rejected() {
+        let json = r#"{
+          "policy_graph": {
+            "type": "finite_horizon",
+            "annual_discount_rate": 0.0,
+            "nodes": [ { "id": 0, "stage_id": 0, "noise_source": 3 } ],
+            "transitions": []
+          },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        assert!(
+            matches!(err, LoadError::ParseError { .. }),
+            "unknown node key should be a ParseError, got: {err:?}"
+        );
+    }
+
+    /// `nodes[]` are stored sorted by `id` ascending, so declaration order does
+    /// not change the parsed graph (declaration-order invariance).
+    #[test]
+    fn test_nodes_sorted_by_id_declaration_order_invariant() {
+        let make = |order: &str| {
+            let json = format!(
+                r#"{{
+                  "policy_graph": {{
+                    "type": "finite_horizon",
+                    "annual_discount_rate": 0.0,
+                    "nodes": [{order}],
+                    "transitions": []
+                  }},
+                  "stages": [
+                    {{ "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+                       "blocks": [{{ "id": 0, "name": "A", "hours": 744.0 }}], "num_openings": 5 }}
+                  ]
+                }}"#
+            );
+            let f = write_json(&json);
+            parse_stages(f.path())
+                .unwrap()
+                .policy_graph
+                .nodes
+                .iter()
+                .map(|n| n.id)
+                .collect::<Vec<_>>()
+        };
+        let forward = make(
+            r#"{ "id": 0, "stage_id": 0 }, { "id": 1, "stage_id": 0 }, { "id": 2, "stage_id": 0 }"#,
+        );
+        let reversed = make(
+            r#"{ "id": 2, "stage_id": 0 }, { "id": 1, "stage_id": 0 }, { "id": 0, "stage_id": 0 }"#,
+        );
+        assert_eq!(forward, vec![0, 1, 2]);
+        assert_eq!(forward, reversed);
+    }
+
+    // ── Out-edge probability normalization ────────────────────────────────────
+
+    fn tr(source_id: i32, target_id: i32, probability: f64) -> Transition {
+        Transition {
+            source_id,
+            target_id,
+            probability,
+            annual_discount_rate_override: None,
+        }
+    }
+
+    fn graph_with(transitions: Vec<Transition>) -> HorizonGraph {
+        HorizonGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions,
+            nodes: Vec::new(),
+            stage_discount_rate_overrides: HashMap::new(),
+            season_map: None,
+        }
+    }
+
+    fn prob(graph: &HorizonGraph, source_id: i32, target_id: i32) -> f64 {
+        graph
+            .transitions
+            .iter()
+            .find(|t| t.source_id == source_id && t.target_id == target_id)
+            .map(|t| t.probability)
+            .expect("edge present")
+    }
+
+    fn ulp_diff(a: f64, b: f64) -> u64 {
+        a.to_bits().abs_diff(b.to_bits())
+    }
+
+    /// Each normalized out-edge vector sums to 1.0 within 1 ULP, and the result is
+    /// independent of the declaration order of the edges (canonical child-id order).
+    #[test]
+    fn test_normalize_out_edges_ulp_bound_and_canonical_order() {
+        // Raw weights [1, 2, 3] from source 0; declared out of child-id order.
+        let mut shuffled = graph_with(vec![tr(0, 3, 3.0), tr(0, 1, 1.0), tr(0, 2, 2.0)]);
+        let mut sorted = graph_with(vec![tr(0, 1, 1.0), tr(0, 2, 2.0), tr(0, 3, 3.0)]);
+        let path = Path::new("stages.json");
+        normalize_out_edge_probabilities(&mut shuffled, path).unwrap();
+        normalize_out_edge_probabilities(&mut sorted, path).unwrap();
+
+        // Canonical order ⇒ declaration order cannot shift the bit pattern.
+        for target in [1, 2, 3] {
+            assert_eq!(
+                prob(&shuffled, 0, target).to_bits(),
+                prob(&sorted, 0, target).to_bits(),
+                "edge 0->{target} must be declaration-order-invariant"
+            );
+        }
+
+        let sum = prob(&sorted, 0, 1) + prob(&sorted, 0, 2) + prob(&sorted, 0, 3);
+        assert!(
+            ulp_diff(sum, 1.0) <= 1,
+            "normalized vector must sum to 1.0 within 1 ULP, got {sum} ({} ULPs)",
+            ulp_diff(sum, 1.0)
+        );
+    }
+
+    /// Path probabilities assembled from the normalized vectors of a 3-stage binary
+    /// tree deviate from 1.0 by at most T (= 3) ULPs. Raw weights force real
+    /// normalization at every source (thirds, halves, quarters).
+    #[test]
+    fn test_normalize_out_edges_path_measure_binary_tree() {
+        // T = number of stages in the fixture; the path-measure bound is T ULPs.
+        const T: u64 = 3;
+        let mut tree = graph_with(vec![
+            tr(0, 1, 1.0),
+            tr(0, 2, 2.0), // -> [1/3, 2/3]
+            tr(1, 3, 1.0),
+            tr(1, 4, 1.0), // -> [1/2, 1/2]
+            tr(2, 5, 1.0),
+            tr(2, 6, 3.0), // -> [1/4, 3/4]
+        ]);
+        normalize_out_edge_probabilities(&mut tree, Path::new("stages.json")).unwrap();
+
+        let paths = [(0, 1, 3), (0, 1, 4), (0, 2, 5), (0, 2, 6)];
+        let total: f64 = paths
+            .iter()
+            .map(|&(root, mid, leaf)| prob(&tree, root, mid) * prob(&tree, mid, leaf))
+            .sum();
+        assert!(
+            ulp_diff(total, 1.0) <= T,
+            "path measure must be within {T} ULPs of 1.0, got {total} ({} ULPs)",
+            ulp_diff(total, 1.0)
+        );
+    }
+
+    /// A chain (single unit out-edge per source) is bit-neutral under normalization —
+    /// the C1 golden-parity precondition.
+    #[test]
+    fn test_normalize_out_edges_chain_is_bit_neutral() {
+        let mut chain = graph_with(vec![tr(0, 1, 1.0), tr(1, 2, 1.0)]);
+        normalize_out_edge_probabilities(&mut chain, Path::new("stages.json")).unwrap();
+        assert_eq!(prob(&chain, 0, 1).to_bits(), 1.0_f64.to_bits());
+        assert_eq!(prob(&chain, 1, 2).to_bits(), 1.0_f64.to_bits());
+    }
+
+    /// Re-running normalization is a bit-exact no-op, so a second normalization
+    /// anywhere downstream cannot shift the path measure (the once-at-load contract).
+    #[test]
+    fn test_normalize_out_edges_is_idempotent() {
+        let build = || {
+            graph_with(vec![
+                tr(0, 1, 1.0),
+                tr(0, 2, 2.0),
+                tr(1, 3, 1.0),
+                tr(1, 4, 3.0),
+            ])
+        };
+        let path = Path::new("stages.json");
+        let mut once = build();
+        normalize_out_edge_probabilities(&mut once, path).unwrap();
+        let mut twice = once.clone();
+        normalize_out_edge_probabilities(&mut twice, path).unwrap();
+        for (a, b) in once.transitions.iter().zip(&twice.transitions) {
+            assert_eq!(
+                a.probability.to_bits(),
+                b.probability.to_bits(),
+                "second normalization must be a bit-exact no-op"
+            );
+        }
+    }
+
+    /// A source whose out-edge weights sum to zero is rejected naming the source.
+    #[test]
+    fn test_normalize_out_edges_rejects_zero_sum() {
+        let mut graph = graph_with(vec![tr(0, 1, 1.0), tr(0, 2, -1.0)]);
+        let err =
+            normalize_out_edge_probabilities(&mut graph, Path::new("stages.json")).unwrap_err();
+        let LoadError::SchemaError { message, .. } = err else {
+            panic!("expected SchemaError, got {err:?}");
+        };
+        assert!(
+            message.contains("source 0") && message.contains("sums to zero"),
+            "message must name the source and the zero sum, got: {message}"
+        );
+    }
+
+    /// A source with a non-finite out-edge (a `NaN` sum passes the tolerance gate but
+    /// cannot normalize) is rejected naming the source.
+    #[test]
+    fn test_normalize_out_edges_rejects_non_finite_sum() {
+        let mut graph = graph_with(vec![tr(0, 1, f64::NAN), tr(0, 2, 0.5)]);
+        let err =
+            normalize_out_edge_probabilities(&mut graph, Path::new("stages.json")).unwrap_err();
+        let LoadError::SchemaError { message, .. } = err else {
+            panic!("expected SchemaError, got {err:?}");
+        };
+        assert!(
+            message.contains("source 0") && message.contains("non-finite"),
+            "message must name the source and the non-finite sum, got: {message}"
+        );
     }
 }
