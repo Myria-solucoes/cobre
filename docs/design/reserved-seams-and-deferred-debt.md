@@ -17,8 +17,9 @@ non-obvious inert surfaces:
   debt (not limited to unwired seams) tracked alongside this one.
 
 For known **structural/algorithmic** limitations of the node-graph engine
-(as opposed to unwired config or code) — single-initial-node, shared terminal
-value, enumerated-selection restrictions — see
+(as opposed to unwired config or code) — single-initial-node, single-boundary
+-policy terminal cost (a per-leaf terminal future-cost function needs multi-policy
+input), enumerated-selection restrictions — see
 [`policy-graph-limitations.md`](policy-graph-limitations.md); this document
 does not restate those.
 
@@ -456,19 +457,26 @@ own owner and trigger:
   reconcile the note to the shipped format. **Owner.** The doc / comment owner.
   **Trigger.** The next cut-exchange wire-format touch.
 
-### SDDP.jl-compatibility limits
+### SDDP.jl-compatibility limit: multi-state first stage
 
-**What it is.** Two structural limits are deferred: a multi-state / reserved-root
-first stage (an initial probability distribution over several first-stage nodes)
-and a per-terminal-state (per-leaf) continuation value. Both are documented in
-[`policy-graph-limitations.md`](policy-graph-limitations.md) and cross-referenced
-here rather than restated.
+**What it is.** A structural limit is deferred here: a multi-state / reserved-root
+first stage — an initial probability distribution over several first-stage nodes. It
+is documented in [`policy-graph-limitations.md`](policy-graph-limitations.md) and
+cross-referenced here rather than restated.
+
+The companion terminal-side item once bundled here — a per-terminal-state
+continuation value — is **not** a deferred limit. The shared terminal pool holds one
+boundary future-cost function evaluated at each leaf's own ending state, which is the
+correct representation for the supported single-boundary-policy input (see
+[`policy-graph-limitations.md`](policy-graph-limitations.md)). A distinct future-cost
+function per leaf would need per-leaf boundary input — more than one boundary
+policy — and that multi-policy regime is tracked by the **Boundary-policy
+source-node** reserved-seam entry above, not restated here.
 
 **Owner.** The SDDP engine owner.
 
-**Trigger.** A model that begins from an uncertain initial regime (the
-multi-state first stage), or one that needs distinct per-leaf terminal water
-values (the per-terminal continuation value), respectively.
+**Trigger.** A model that begins from an uncertain initial regime (the multi-state
+first stage).
 
 ### Retired input spellings (recorded as retired, not deferred)
 

@@ -67,17 +67,33 @@ Closing it needs a dedicated root source that carries the initial distribution
 forward, and backward passes. It is not required when the initial state is known,
 which is the usual case (current storage and a known starting condition).
 
-### 2. Single terminal value across terminal states
+### 2. One shared boundary future-cost function, evaluated at each leaf's own state
 
 All terminal (leaf) nodes share one value-function pool — see `NodeRuntime` in
 `crates/cobre-sddp/src/setup/node_graph.rs`: leaves share one pool id, while a node
-with successors owns its own. Terminal nodes accumulate no cost-to-go, so the shared
-pool is harmless for ordinary training.
+with successors owns its own. In ordinary training terminal nodes accumulate no
+cost-to-go, so the shared pool holds nothing.
 
-It becomes a limitation only under terminal boundary-cut injection that needs a
-**per-terminal-state** continuation value (for example a wetter versus drier ending
-regime with a different water value): the shared pool holds one boundary-cut set for
-all leaves. Closing it needs a per-leaf terminal pool on the boundary-injection path.
+Under a boundary policy that shared pool holds one future-cost function
+`F(x) = maxₖ(αₖ + βₖ·x)` — the injected boundary cuts. Each terminal leaf prices its
+post-horizon value-to-go by evaluating that **same** `F` at its **own** ending state
+`x_leaf` (storage plus inflow-lag state): the leaf's LP carries the terminal epigraph
+row `θ ≥ αₖ + βₖ·x_leaf` for every cut in the pool, so `θ` realizes `F(x_leaf)` at the
+state that leaf actually reaches. A wetter ending and a drier ending therefore already
+receive different terminal values from the one shared pool — it holds a single
+water-value _function_, not a single water-value _number_. For the supported
+single-boundary-policy input this is the correct representation, not a limitation: one
+shared static terminal template, baked once and evaluated at each leaf's own state,
+with the terminal boundary future cost booked in the reported cost
+(`terminal_has_boundary_cuts`; see the "Terminal boundary FCF" contract in
+`.claude/rules/sddp.md`).
+
+A distinct future-cost _function_ per leaf — different `α/β`, say one water-value
+function for a wet-basin ending and another for a dry-basin ending — is a different
+model. It requires more than one boundary policy on input, one per terminal regime,
+which is a reserved future feature (per-leaf boundary input), not a fix to the
+single-policy path. That seam is tracked with the boundary-policy source-node entry in
+[`reserved-seams-and-deferred-debt.md`](reserved-seams-and-deferred-debt.md).
 
 The shared stage template across leaves is correct while a state affects only the
 inflow realization, not the LP structure — which holds for the hydrothermal model.
