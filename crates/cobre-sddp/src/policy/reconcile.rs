@@ -567,16 +567,25 @@ impl BoundaryReconciliationReport {
         ]
     }
 
+    /// The four aggregate tallies (copy, fan-out, default-zero, dropped-source)
+    /// summed across every family — shared by [`Self::tally_clause`]'s wording
+    /// and the CLI's own compact rendering of the same totals.
+    #[must_use]
+    pub fn tally_totals(&self) -> (usize, usize, usize, usize) {
+        let families = self.families();
+        let copy: usize = families.iter().map(|(_, t)| t.copy).sum();
+        let fan_out: usize = families.iter().map(|(_, t)| t.fan_out).sum();
+        let default_zero: usize = families.iter().map(|(_, t)| t.default_zero).sum();
+        let dropped: usize = families.iter().map(|(_, t)| t.dropped_source).sum();
+        (copy, fan_out, default_zero, dropped)
+    }
+
     /// The four-total tally clause, with no leading "boundary reconciliation: "
     /// prefix — [`Self::summary_line`]'s payload. Reconciled totals only; the
     /// dimension-only notice is [`Self::summary_line`]'s own early return.
     #[must_use]
     pub fn tally_clause(&self) -> String {
-        let families = self.families();
-        let total_copy: usize = families.iter().map(|(_, t)| t.copy).sum();
-        let total_fan_out: usize = families.iter().map(|(_, t)| t.fan_out).sum();
-        let total_default_zero: usize = families.iter().map(|(_, t)| t.default_zero).sum();
-        let total_dropped: usize = families.iter().map(|(_, t)| t.dropped_source).sum();
+        let (total_copy, total_fan_out, total_default_zero, total_dropped) = self.tally_totals();
         format!(
             "{total_copy} copied, {total_fan_out} fanned out, {total_default_zero} defaulted \
              to 0.0, {total_dropped} source slots dropped"

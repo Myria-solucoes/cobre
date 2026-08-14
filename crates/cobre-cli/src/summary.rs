@@ -353,24 +353,15 @@ pub fn format_provenance_summary_string(report: &ModelProvenanceReport) -> Strin
 /// The `Reconciliation:` row's value: the four-total tally with a compact
 /// trailing "N dropped" phrase, or the dimension-only notice on the skip path.
 ///
-/// Independent of [`BoundaryReconciliationReport::tally_clause`], which keeps
-/// the legacy "N source slots dropped" wording `summary_line` must render
-/// byte-identically for `cobre validate`.
+/// Wording is independent of [`BoundaryReconciliationReport::tally_clause`],
+/// which keeps the legacy "N source slots dropped" wording `summary_line` must
+/// render byte-identically for `cobre validate`; the totals themselves come
+/// from the same [`BoundaryReconciliationReport::tally_totals`] both share.
 fn format_boundary_reconciliation_row(report: &BoundaryReconciliationReport) -> String {
     if !report.reconciled {
         return "dimension-only load (entity manifest absent)".to_string();
     }
-    let families = [
-        &report.storage,
-        &report.inflow_lag,
-        &report.transit_bucket,
-        &report.anticipated,
-        &report.other_identity,
-    ];
-    let copy: usize = families.iter().map(|t| t.copy).sum();
-    let fan_out: usize = families.iter().map(|t| t.fan_out).sum();
-    let default_zero: usize = families.iter().map(|t| t.default_zero).sum();
-    let dropped: usize = families.iter().map(|t| t.dropped_source).sum();
+    let (copy, fan_out, default_zero, dropped) = report.tally_totals();
     format!(
         "{copy} copied, {fan_out} fanned out, {default_zero} defaulted to 0.0, {dropped} dropped"
     )
