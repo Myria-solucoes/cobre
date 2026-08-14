@@ -293,8 +293,11 @@ the cut lands in — the append-only, slot-identity contract is independent of
 
 **Basis matches by slot, never by count or column.** Warm-start basis
 reconstruction matches stored cut rows to current LP rows by **`CutPool` slot
-identity**, never by row count and never by absolute column index.
-`reconstruct_basis` is the single hot-path entry point — never bypass it.
+identity**, never by row count and never by absolute column index. On the
+frozen hot path `reconstruct_basis` is the single entry point for every pool
+whose cut set can still grow — the entire interior — and must never be
+bypassed there. The terminal-static short-circuit below is the SOLE licensed
+bypass, and only because a terminal pool's cut set is provably invariant.
 Read: `cut/pool.rs` (`CutPool::grow`, `add_cut`, `CutMetadata.node`,
 `slot_index`), `cut/fcf.rs` (the `node → pool` map / pool-id addressing),
 `cut/basis_reconstruct.rs`. Pinned by
@@ -303,6 +306,41 @@ Read: `cut/pool.rs` (`CutPool::grow`, `add_cut`, `CutMetadata.node`,
 column, yet the run records zero basis rejections because reconstruction matches
 by slot identity, not column index) and the slot-identity reconstruction
 regressions in `tests/cut_basis.rs`.
+
+### The terminal stage bypasses reconstruction with a 1:1 basis apply
+
+The terminal stage solves against a baked static template whose active-cut set
+is fixed once primed — a leaf never gains or loses a cut — so the template's
+shape never changes across iterations. There the slot-identity reconstruction
+above is REPLACED by a plain 1:1 basis apply (`run_stage_solve_terminal_static`,
+selected only at the terminal forward solve by `solve_forward_node`'s
+`is_terminal` gate): a node-matching stored basis maps onto the current LP by
+position and is copied verbatim into `scratch_basis` with no reconstruction.
+This is the sole licensed bypass of `reconstruct_basis` on the frozen hot path,
+and it is safe ONLY because the terminal cut set is provably invariant. The
+node-tag filter and a shape guard still gate the apply: a stored basis whose
+`node_id` mismatches the node being solved (`filtered_stored_basis`), or whose
+column/row status length does not match the current template
+(`terminal_basis_shape_matches`), drops to cold rather than applying a
+wrong-shaped basis.
+
+Applying this short-circuit on an interior node — or on any node whose cut set
+is NOT provably invariant — is the wrong-but-compiling alternative: an interior
+pool's shape changes as deeper backward levels append cuts, so a 1:1 apply
+matches a stored basis against a differently-shaped LP and silently warm-starts
+from the wrong factorization. The interior hot path is untouched —
+`reconstruct_basis` remains its sole entry, reached through `run_stage_solve`.
+Read: `solve/stage_solve.rs` (`run_stage_solve_terminal_static`,
+`filtered_stored_basis`, `terminal_basis_shape_matches`, and `run_stage_solve`
+for the interior path), `training/forward/enumerated.rs` (`solve_forward_node`'s
+`is_terminal` gate). Pinned by
+`run_stage_solve_terminal_static_applies_basis_1to1_without_reconstruct_basis`
+(the verbatim copy, no reconstruction) and its interior counterpart
+`run_stage_solve_interior_warm_start_invokes_reconstruct_basis` (an interior
+warm start still invokes `reconstruct_basis`), plus
+`run_stage_solve_terminal_static_cross_node_stored_basis_is_treated_as_cold` and
+`run_stage_solve_terminal_static_shape_mismatch_is_treated_as_cold` (the
+node-tag and shape guards each drop to cold), all in `solve/stage_solve.rs`.
 
 ## A stored basis warm-starts only at its own node (node-tag)
 
@@ -573,17 +611,39 @@ emits a wrong-length/wrong-projection dual slice the consumer still accepts,
 corrupting the fused cut (surfaces as an `allgather_outcomes` length-invariant
 violation, or a silently mis-projected cut driving a NEGATIVE gap).
 
-Fusion is confined to `is_external_terminal_leaf` (External, single-opening,
-terminal) and DISABLED under DCS (`params.dcs.is_none()`): DCS solves a lazily
-cut-reduced forward LP that need not match the full frozen template the backward
-loads, so a fused DCS slice could under-price the cut. A parentless leaf (a
-malformed graph) captures nothing and falls back to a direct backward solve.
+Fusion reuses the forward-captured slice ONLY for a leaf
+`is_external_terminal_leaf` admits (External, single-opening, terminal) — the
+one case where the forward and the backward read the byte-identical LP — and is
+DISABLED under DCS (`params.dcs.is_none()`): DCS solves a lazily cut-reduced
+forward LP that need not match the full frozen template the backward loads, so a
+fused DCS slice could under-price the cut. A Generated terminal leaf (forward
+samples one opening, backward integrates all of them) is NOT eligible and keeps
+the exhaustive backward integration the branching contract requires (see "The
+branching backward integrates every successor exhaustively" above); reusing its
+single forward opening would understate the cut and drive `final_lb` above
+`final_ub`. A parentless leaf (a malformed graph) captures nothing and falls
+back to a direct backward solve.
 
 Read: `training/forward/enumerated.rs` (`solve_forward_node`, `fusion_cut_state`),
-`training/backward_pass_state.rs` (`SuccessorSpec::cut_state`). Pinned by
+`training/backward_pass_state.rs` (`SuccessorSpec::cut_state`),
+`setup/node_graph.rs` (`NodeGraph::is_external_terminal_leaf`, the single
+eligibility source the forward capture and the backward consume both read, so the
+two cannot drift). The projection is pinned by
 `enumerated_forward_fused_slice_projects_with_parent_pool_not_leaf_pool` and
-`external_distinct_fan_heterogeneous_cut_state_matches_extensive_form`
-(`tests/branching_value_oracle.rs`).
+`external_distinct_fan_heterogeneous_cut_state_matches_extensive_form`; the
+eligibility gate by
+`is_external_terminal_leaf_true_for_terminal_external_single_opening`,
+`is_external_terminal_leaf_false_for_generated_terminal_leaf`, and
+`is_external_terminal_leaf_false_for_interior_external_node`
+(`setup/node_graph.rs`); and the External-fuses / Generated-integrates-exhaustively
+split end-to-end by the `terminal_fusion` oracle's
+`water_binding_external_fan_fused_cut_matches_independently_derived_cut` (the fused
+cut is a valid supporting hyperplane),
+`external_distinct_fan_backward_performs_zero_terminal_leaf_solves` (fusion removes
+every External terminal-leaf backward solve), and
+`terminal_generated_fan_integrates_exhaustively_and_backward_solves_every_leaf` (a
+Generated fan is never fused and solves every leaf every iteration), all in
+`tests/branching_value_oracle.rs`.
 
 ## Spillage is frozen `[0, 0]` during PreFilling
 

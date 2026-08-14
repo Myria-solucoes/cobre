@@ -19,7 +19,6 @@ Each doc carries a **status** at its top; this index is the map. Status vocabula
 | [`reserved-seams-and-deferred-debt.md`](reserved-seams-and-deferred-debt.md)   | Living register | Inert-but-intentional config/fields/functions (owner + consuming milestone) and the deferred-architectural-debt ledger                                          |
 | [`backward-warm-start-channels.md`](backward-warm-start-channels.md)           | Decision record | Backward-pass warm-start channels: one measured-and-closed (H3), two pre-registered, cluster-gated (H1, H2)                                                     |
 | [`testing-architecture.md`](testing-architecture.md)                           | Proposal        | Workspace-wide target testing standard — layering, per-crate structure, the `test-support` convention, and the migration path                                   |
-| [`terminal-leaf-optimization.md`](terminal-leaf-optimization.md)               | Proposal        | Enumerated terminal-leaf forward/backward fusion, cross-iteration basis reuse, and a static terminal pool (drops the boundary-fan memory doubling)              |
 
 ## Maintenance convention
 

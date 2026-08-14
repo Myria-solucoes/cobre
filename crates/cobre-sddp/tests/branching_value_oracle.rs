@@ -1009,7 +1009,7 @@ mod terminal_fusion {
     /// Fan-out width for every fixture in this module.
     const FUSION_FAN_K: usize = 3;
 
-    /// Training budget for the AC-1 analytical oracle: exactly one iteration,
+    /// Training budget for the analytical oracle: exactly one iteration,
     /// so the trial state driving the produced cut is deterministic. With no
     /// cuts yet on the root's pool, θ is unconstrained, so the root's own
     /// solve is a well-defined LP an independent probe solve can reproduce.
@@ -1072,7 +1072,7 @@ mod terminal_fusion {
         )
     }
 
-    /// AC-1 (analytical oracle): [`water_binding_external_fan_setup`]'s hydro
+    /// Analytical oracle: [`water_binding_external_fan_setup`]'s hydro
     /// genuinely generates against a scarce reservoir (ρ = 0.95), so each
     /// leaf's storage dual is a real, leaf-varying, nonzero number — unlike a
     /// zero-productivity fixture, where every leaf's dual collapses to zero
@@ -1202,7 +1202,7 @@ mod terminal_fusion {
         );
     }
 
-    /// AC-2 (behavioral bound): fusion must not perturb the External fan's
+    /// Behavioral bound: fusion must not perturb the External fan's
     /// bound closure or its thread-shape invariance.
     #[test]
     fn external_distinct_fan_final_bounds_match_extensive_form_and_thread_shape_invariant() {
@@ -1233,7 +1233,7 @@ mod terminal_fusion {
         );
     }
 
-    /// AC-3 (compute-win pin): fusion eliminates every terminal-leaf backward
+    /// Compute-win pin: fusion eliminates every terminal-leaf backward
     /// solve on the all-External fan.
     #[test]
     fn external_distinct_fan_backward_performs_zero_terminal_leaf_solves() {
@@ -1248,7 +1248,7 @@ mod terminal_fusion {
         );
     }
 
-    /// AC-4 (Generated-leaf guard, paired with AC-3's mirror): a Generated
+    /// Generated-leaf guard (paired with the compute-win mirror): a Generated
     /// terminal fan still integrates every opening exhaustively — its bounds
     /// still match the extensive-form optimum — and the backward still
     /// genuinely solves every Generated leaf every iteration (one solve per
@@ -1277,7 +1277,7 @@ mod terminal_fusion {
             u64::from(u32::try_from(FUSION_FAN_K).unwrap()) * u64::from(FUSION_MAX_ITERATIONS);
         assert_eq!(
             backward_lp_solves, expected_backward_lp_solves,
-            "the mirror of AC-3: a Generated terminal leaf is never fused, so the backward \
+            "the compute-win mirror: a Generated terminal leaf is never fused, so the backward \
              must solve every one of the {FUSION_FAN_K} leaves on every one of the \
              {FUSION_MAX_ITERATIONS} iterations, got {backward_lp_solves} backward LP solves"
         );
