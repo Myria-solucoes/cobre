@@ -711,7 +711,7 @@ fn external_distinct_fan_heterogeneous_cut_state_matches_extensive_form() {
 
 // ── Terminal-pool memory-shape regression guard (ignored) ────────────────────
 //
-// Change 3 (`docs/design/terminal-leaf-optimization.md`) removed the terminal
+// The static terminal pool removed the terminal
 // pool's growable training capacity (fixed-capacity `CutPool::new_with_warm_start`
 // construction and `grow_pools_for_next_iteration`'s terminal skip) and stopped
 // re-baking its frozen LP template every iteration (the priming-only freeze). Both

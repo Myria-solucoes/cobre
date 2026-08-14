@@ -373,6 +373,32 @@ drops to cold instead of erroring) and its DCS companion in `cut/dcs.rs`; the
 reproducibility the check protects is pinned by the `opening_order_determinism`
 gate in `tests/mpi_wire.rs` (bitwise `final_lb` across thread and rank shapes).
 
+### Simulation pool-fill re-tags a shared-pool sibling basis, never pool-matches
+
+Enumerated simulation warms each terminal leaf's solve from a stored basis, but
+training captures one only for the single leaf its scenario-0 forward walked; the
+other same-pool leaves would otherwise cold-solve the boundary-cut-heavy terminal
+LP. `pool_fill_basis_cache` (`setup/node_graph.rs`, called once from
+`StudySetup::simulate`, gated on `simulation_enumerated == Enumerated`) fills each
+empty leaf slot with a same-pool sibling's `CapturedBasis` **re-tagged with the
+target leaf's own `node_id`**. This is the licensed way to warm sibling fan leaves
+WITHOUT weakening the node-tag filter above: the filter still matches `node_id` to
+node exactly, and the re-tag is sound ONLY because same-`pool_id` nodes share one
+frozen template, so a sibling's basis has identical column/cut-row shape and is
+structurally valid at the target leaf. Reuse routes through the tolerant
+slot-identity `reconstruct_basis` path, which re-validates shape.
+
+Relaxing the filter to a pool-id match instead of re-tagging — the exact
+wrong-but-compiling alternative the paragraph above forbids — would let a basis
+from a genuinely different-shaped LP through, which CLP accepts silently. The
+precondition is same-`pool_id` ⇒ same-template-shape; if a future change bakes
+node-specific data into a shared template or widens pool sharing across differing
+shapes, this bypass is no longer safe. Read: `setup/node_graph.rs`
+(`pool_fill_basis_cache`), `setup/orchestration.rs` (`StudySetup::simulate` call
+site). Pinned by `enumerated_census_pool_fill_warms_previously_cold_leaves`
+(`tests/simulation_integration.rs`): zero basis-consistency failures and
+warm-vs-cold per-scenario cost bit-identity.
+
 ## NCS stochastic availability is a dimensionless factor
 
 Non-controllable-source availability `α_r(ω) ∈ [0, 1]` is dimensionless. The
