@@ -337,6 +337,7 @@ pub fn build_training_output(
         rows_in_lp_total,
         rows_in_lp_solve_count,
         rows_in_lp_max,
+        total_loaded: fcf.total_warm_start_cuts() as u64,
     };
 
     let converged = result.reason == RULE_BOUND_STALLING;

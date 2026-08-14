@@ -414,6 +414,14 @@ impl FutureCostFunction {
         self.pools.iter().map(|p| p.generated_count).sum()
     }
 
+    /// Return the total warm-start (loaded boundary) cuts across all pools
+    /// (sums `warm_start_count`) — the subset of [`Self::total_generated_cuts`]
+    /// that predates this run rather than being produced by it.
+    #[must_use]
+    pub fn total_warm_start_cuts(&self) -> usize {
+        self.pools.iter().map(|p| p.warm_start_count as usize).sum()
+    }
+
     /// Propagate [`CutPool::set_iteration_base`] to every pool. Call once before
     /// training with `start_iteration + 1` for dense slot packing.
     pub fn set_iteration_base(&mut self, iteration_base: u64) {
@@ -664,6 +672,23 @@ mod tests {
         assert_eq!(fcf.total_active_cuts(), 3);
         fcf.deactivate(0, &[0]);
         assert_eq!(fcf.total_active_cuts(), 2);
+    }
+
+    #[test]
+    fn total_warm_start_cuts_sums_across_pools() {
+        let fcf = FutureCostFunction::new(4, 1, 1, 20, &[0, 3, 0, 7]);
+        assert_eq!(fcf.total_warm_start_cuts(), 10);
+    }
+
+    #[test]
+    fn total_warm_start_cuts_is_unaffected_by_cuts_added_this_run() {
+        let mut fcf = FutureCostFunction::new(2, 1, 1, 20, &[0, 5]);
+        fcf.add_cut(NodeId(0), 0, 0, 0, 1.0, &[1.0]);
+        fcf.add_cut(NodeId(0), 1, 0, 0, 2.0, &[2.0]);
+
+        // warm_start_count is fixed at construction; only generated_count grows.
+        assert_eq!(fcf.total_warm_start_cuts(), 5);
+        assert_eq!(fcf.total_generated_cuts(), 7);
     }
 
     #[test]

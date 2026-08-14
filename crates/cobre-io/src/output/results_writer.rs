@@ -95,6 +95,7 @@ pub fn write_training_results(
             rows_in_lp_total: training_output.cut_stats.rows_in_lp_total,
             rows_in_lp_solve_count: training_output.cut_stats.rows_in_lp_solve_count,
             rows_in_lp_max: training_output.cut_stats.rows_in_lp_max,
+            total_loaded: training_output.cut_stats.total_loaded,
         },
         bounds: MetadataBounds {
             final_lower_bound: training_output.final_lower_bound,
@@ -258,6 +259,7 @@ mod tests {
                 rows_in_lp_total: 0,
                 rows_in_lp_solve_count: 0,
                 rows_in_lp_max: 0,
+                total_loaded: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
@@ -474,6 +476,33 @@ mod tests {
         assert_eq!(value["solver"].as_str(), Some("highs"));
         assert!(value["started_at"].is_string());
         assert!(value["completed_at"].is_string());
+    }
+
+    #[test]
+    fn write_results_metadata_row_pool_reports_loaded_boundary_cuts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut training = make_training_output(0);
+        training.cut_stats.total_generated = 10_009;
+        training.cut_stats.total_active = 10_009;
+        training.cut_stats.total_loaded = 10_000;
+
+        write_results(
+            tmp.path(),
+            &training,
+            None,
+            &make_system(),
+            &make_config(),
+            &make_output_context(),
+        )
+        .expect("write_results must succeed");
+
+        let path = tmp.path().join("training/metadata.json");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&content).expect("metadata.json must contain valid JSON");
+
+        assert_eq!(value["row_pool"]["total_generated"].as_u64(), Some(10_009));
+        assert_eq!(value["row_pool"]["total_loaded"].as_u64(), Some(10_000));
     }
 
     #[test]

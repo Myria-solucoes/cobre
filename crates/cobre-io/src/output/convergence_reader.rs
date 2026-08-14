@@ -263,6 +263,7 @@ mod tests {
                 rows_in_lp_total: 0,
                 rows_in_lp_solve_count: 0,
                 rows_in_lp_max: 0,
+                total_loaded: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],

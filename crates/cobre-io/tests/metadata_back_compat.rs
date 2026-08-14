@@ -138,6 +138,7 @@ fn legacy_training_json_deserializes_with_defaults() {
 
     assert_eq!(decoded.iterations.completed, 100);
     assert_eq!(decoded.row_pool.total_generated, 1_250_000);
+    assert_eq!(decoded.row_pool.total_loaded, 0);
 }
 
 #[test]
@@ -287,6 +288,7 @@ fn fully_populated_training_metadata() -> TrainingMetadata {
             rows_in_lp_total: 0,
             rows_in_lp_solve_count: 0,
             rows_in_lp_max: 0,
+            total_loaded: 50_000,
         },
         bounds: MetadataBounds {
             final_lower_bound: 48_500.0,
@@ -361,6 +363,10 @@ fn training_metadata_new_fields_survive_write_read_roundtrip() {
     write_training_metadata(&path, &original).expect("write must succeed");
     let decoded = read_training_metadata(&path).expect("read must succeed");
 
+    assert_eq!(
+        decoded.row_pool.total_loaded,
+        original.row_pool.total_loaded
+    );
     assert_eq!(
         decoded.bounds.final_lower_bound,
         original.bounds.final_lower_bound

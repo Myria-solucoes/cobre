@@ -207,6 +207,7 @@ pub(super) fn run_training_phase(
         gap_percent: training_result.final_gap * 100.0,
         total_rows_active: training_output.cut_stats.total_active,
         total_rows_generated: training_output.cut_stats.total_generated,
+        total_rows_loaded: training_output.cut_stats.total_loaded,
         rows_in_lp_total: training_output.cut_stats.rows_in_lp_total,
         rows_in_lp_solve_count: training_output.cut_stats.rows_in_lp_solve_count,
         rows_in_lp_max: training_output.cut_stats.rows_in_lp_max,

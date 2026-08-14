@@ -169,6 +169,7 @@ fn build_training_summary(
         gap_percent: convergence.final_gap_percent.unwrap_or(0.0),
         total_rows_active: metadata.row_pool.total_active,
         total_rows_generated: metadata.row_pool.total_generated,
+        total_rows_loaded: metadata.row_pool.total_loaded,
         rows_in_lp_total: metadata.row_pool.rows_in_lp_total,
         rows_in_lp_solve_count: metadata.row_pool.rows_in_lp_solve_count,
         rows_in_lp_max: metadata.row_pool.rows_in_lp_max,
@@ -343,6 +344,7 @@ mod tests {
                 rows_in_lp_total: 0,
                 rows_in_lp_solve_count: 0,
                 rows_in_lp_max: 0,
+                total_loaded: 0,
             },
             bounds: MetadataBounds {
                 final_lower_bound: 48_500.0,
@@ -456,6 +458,7 @@ mod tests {
         assert!((summary.gap_percent - 1.03).abs() < 1e-9);
         assert_eq!(summary.total_rows_active, 980_000);
         assert_eq!(summary.total_rows_generated, 1_250_000);
+        assert_eq!(summary.total_rows_loaded, 0);
         // From the parquet (70_000), not metadata.solve_stats (84_000).
         assert_eq!(summary.total_lp_solves, 70_000);
         assert_eq!(summary.total_time_ms, 12_345);
@@ -476,6 +479,20 @@ mod tests {
         assert_eq!(summary.serial_cut_sync_seconds, None);
         assert_eq!(summary.serial_allreduce_seconds, None);
         assert_eq!(summary.serial_scheduling_seconds, None);
+    }
+
+    #[test]
+    fn build_training_summary_maps_metadata_total_loaded() {
+        let mut metadata = make_training_metadata();
+        metadata.row_pool.total_generated = 10_009;
+        metadata.row_pool.total_active = 10_009;
+        metadata.row_pool.total_loaded = 10_000;
+        let convergence = make_convergence_summary();
+
+        let summary = build_training_summary(&metadata, &convergence, None);
+
+        assert_eq!(summary.total_rows_generated, 10_009);
+        assert_eq!(summary.total_rows_loaded, 10_000);
     }
 
     #[test]
