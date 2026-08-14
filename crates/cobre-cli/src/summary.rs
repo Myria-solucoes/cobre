@@ -17,8 +17,8 @@ use std::path::Path;
 // the module surface so those test imports resolve. Without it they would not.
 #[allow(unused_imports)]
 pub use cobre_sddp::{
-    HydroModelSummary, HydroProductionProvenance, InflowProvenance, ModelProvenanceReport,
-    ProvenanceSource,
+    BoundaryReconciliationReport, HydroModelSummary, HydroProductionProvenance, InflowProvenance,
+    ModelProvenanceReport, ProvenanceSource,
 };
 
 /// Print the hydro model preprocessing summary to `stderr`.
@@ -346,6 +346,70 @@ pub fn format_provenance_summary_string(report: &ModelProvenanceReport) -> Strin
     lines.push(format!(
         "  Opening tree:    {}",
         report.inflow.opening_tree_source
+    ));
+    lines.join("\n")
+}
+
+/// The `Reconciliation:` row's value: the four-total tally with a compact
+/// trailing "N dropped" phrase, or the dimension-only notice on the skip path.
+///
+/// Independent of [`BoundaryReconciliationReport::tally_clause`], which keeps
+/// the legacy "N source slots dropped" wording `summary_line` must render
+/// byte-identically for `cobre validate`.
+fn format_boundary_reconciliation_row(report: &BoundaryReconciliationReport) -> String {
+    if !report.reconciled {
+        return "dimension-only load (entity manifest absent)".to_string();
+    }
+    let families = [
+        &report.storage,
+        &report.inflow_lag,
+        &report.transit_bucket,
+        &report.anticipated,
+        &report.other_identity,
+    ];
+    let copy: usize = families.iter().map(|t| t.copy).sum();
+    let fan_out: usize = families.iter().map(|t| t.fan_out).sum();
+    let default_zero: usize = families.iter().map(|t| t.default_zero).sum();
+    let dropped: usize = families.iter().map(|t| t.dropped_source).sum();
+    format!(
+        "{copy} copied, {fan_out} fanned out, {default_zero} defaulted to 0.0, {dropped} dropped"
+    )
+}
+
+/// Print the boundary-policy load summary to `stderr`.
+pub fn print_boundary_summary(
+    stderr: &Term,
+    loaded: usize,
+    source_stage: u32,
+    path: &Path,
+    report: &BoundaryReconciliationReport,
+) {
+    let _ = stderr.write_line(&format!("{}", console::style("Boundary policy").bold()));
+    let _ = stderr.write_line(&format!(
+        "  Cuts loaded:    {loaded} (stage {source_stage})"
+    ));
+    let _ = stderr.write_line(&format!("  Source:         {}", path.display()));
+    let _ = stderr.write_line(&format!(
+        "  Reconciliation: {}",
+        format_boundary_reconciliation_row(report)
+    ));
+}
+
+/// Render the boundary-policy load summary as a plain-text `String`.
+#[cfg(test)]
+pub fn format_boundary_summary_string(
+    loaded: usize,
+    source_stage: u32,
+    path: &Path,
+    report: &BoundaryReconciliationReport,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("Boundary policy".to_string());
+    lines.push(format!("  Cuts loaded:    {loaded} (stage {source_stage})"));
+    lines.push(format!("  Source:         {}", path.display()));
+    lines.push(format!(
+        "  Reconciliation: {}",
+        format_boundary_reconciliation_row(report)
     ));
     lines.join("\n")
 }
@@ -2305,6 +2369,85 @@ mod tests {
             n_evaporation_ref_default_midpoint: 1,
         });
         print_provenance_summary(&Term::buffered_stderr(), &report);
+    }
+
+    // ── BoundaryReconciliationReport / boundary summary tests ───────────────
+
+    use std::path::Path;
+
+    use super::{
+        BoundaryReconciliationReport, format_boundary_summary_string, print_boundary_summary,
+    };
+    use cobre_sddp::{AnticipatedCoverage, FamilyTally};
+
+    fn make_reconciled_boundary_report() -> BoundaryReconciliationReport {
+        BoundaryReconciliationReport {
+            reconciled: true,
+            storage: FamilyTally {
+                copy: 2184,
+                ..FamilyTally::default()
+            },
+            inflow_lag: FamilyTally {
+                fan_out: 1,
+                ..FamilyTally::default()
+            },
+            transit_bucket: FamilyTally {
+                dropped_source: 2,
+                ..FamilyTally::default()
+            },
+            anticipated: FamilyTally {
+                default_zero: 1,
+                ..FamilyTally::default()
+            },
+            anticipated_coverage: AnticipatedCoverage::default(),
+            other_identity: FamilyTally::default(),
+        }
+    }
+
+    #[test]
+    fn format_boundary_summary_reconciled_renders_house_style() {
+        let report = make_reconciled_boundary_report();
+        let s = format_boundary_summary_string(10_000, 4, Path::new("/case/boundary"), &report);
+
+        assert!(
+            s.contains("Boundary policy"),
+            "output must contain the 'Boundary policy' header, got: {s}"
+        );
+        assert!(
+            s.contains("Cuts loaded:    10000 (stage 4)"),
+            "output must contain the aligned 'Cuts loaded:' row, got: {s}"
+        );
+        assert!(
+            s.contains("Source:         /case/boundary"),
+            "output must contain the aligned 'Source:' row, got: {s}"
+        );
+        assert!(
+            s.contains("Reconciliation: 2184 copied, 1 fanned out, 1 defaulted to 0.0, 2 dropped"),
+            "output must contain the compact reconciliation tally, got: {s}"
+        );
+    }
+
+    #[test]
+    fn format_boundary_summary_dimension_only_renders_notice() {
+        let report = BoundaryReconciliationReport::default();
+        let s = format_boundary_summary_string(500, 2, Path::new("/case/boundary"), &report);
+
+        assert!(
+            s.contains("Reconciliation: dimension-only load (entity manifest absent)"),
+            "output must render the dimension-only notice, got: {s}"
+        );
+    }
+
+    #[test]
+    fn print_boundary_summary_does_not_panic() {
+        let report = make_reconciled_boundary_report();
+        print_boundary_summary(
+            &Term::buffered_stderr(),
+            10_000,
+            4,
+            Path::new("/case/boundary"),
+            &report,
+        );
     }
 
     // ── format_rank_list tests ────────────────────────────────────────────────

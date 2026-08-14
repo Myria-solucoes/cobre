@@ -25,6 +25,7 @@ use cobre_sddp::resolve_boundary_source_stage;
 use cobre_sddp::validate_policy_load;
 
 use crate::error::CliError;
+use crate::summary::print_boundary_summary;
 
 use super::RunContext;
 
@@ -278,15 +279,13 @@ pub(super) fn apply_training_policy(
         .map_err(CliError::from)?;
         inject_boundary_cuts(setup, &boundary_records);
         if ctx.is_root && !ctx.quiet {
-            let _ = ctx.stderr.write_line(&format!(
-                "Boundary cuts: loaded {} cuts from stage {} of {}",
+            print_boundary_summary(
+                &ctx.stderr,
                 boundary_records.len(),
                 source_stage,
-                boundary_path.display()
-            ));
-            let _ = ctx
-                .stderr
-                .write_line(&boundary_records.report().summary_line());
+                &boundary_path,
+                boundary_records.report(),
+            );
         }
         if ctx.is_root {
             for line in boundary_records.report().detail_lines() {

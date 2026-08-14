@@ -567,6 +567,22 @@ impl BoundaryReconciliationReport {
         ]
     }
 
+    /// The four-total tally clause, with no leading "boundary reconciliation: "
+    /// prefix — [`Self::summary_line`]'s payload. Reconciled totals only; the
+    /// dimension-only notice is [`Self::summary_line`]'s own early return.
+    #[must_use]
+    pub fn tally_clause(&self) -> String {
+        let families = self.families();
+        let total_copy: usize = families.iter().map(|(_, t)| t.copy).sum();
+        let total_fan_out: usize = families.iter().map(|(_, t)| t.fan_out).sum();
+        let total_default_zero: usize = families.iter().map(|(_, t)| t.default_zero).sum();
+        let total_dropped: usize = families.iter().map(|(_, t)| t.dropped_source).sum();
+        format!(
+            "{total_copy} copied, {total_fan_out} fanned out, {total_default_zero} defaulted \
+             to 0.0, {total_dropped} source slots dropped"
+        )
+    }
+
     /// One-line reconciliation summary: the dimension-only notice on the skip
     /// path, otherwise the totals across every family. The per-family breakdown
     /// lives in [`Self::detail_lines`].
@@ -577,15 +593,7 @@ impl BoundaryReconciliationReport {
                     per-family fan-out tally"
                 .to_string();
         }
-        let families = self.families();
-        let total_copy: usize = families.iter().map(|(_, t)| t.copy).sum();
-        let total_fan_out: usize = families.iter().map(|(_, t)| t.fan_out).sum();
-        let total_default_zero: usize = families.iter().map(|(_, t)| t.default_zero).sum();
-        let total_dropped: usize = families.iter().map(|(_, t)| t.dropped_source).sum();
-        format!(
-            "boundary reconciliation: {total_copy} copied, {total_fan_out} fanned out, \
-             {total_default_zero} defaulted to 0.0, {total_dropped} source slots dropped"
-        )
+        format!("boundary reconciliation: {}", self.tally_clause())
     }
 
     /// Per-family reconciliation breakdown (one COPY / FAN-OUT / DEFAULT-0.0 /
@@ -739,8 +747,9 @@ mod tests {
 
     use super::{
         BoundaryReconciliationReport, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
-        ENTITY_TYPE_HYDRO_INFLOW_LAG, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, RebindOp, build_rebind,
-        build_reconciliation_report, decode_month_anchor, dropped_source_positions, rebind_cut,
+        ENTITY_TYPE_HYDRO_INFLOW_LAG, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, FamilyTally, RebindOp,
+        build_rebind, build_reconciliation_report, decode_month_anchor, dropped_source_positions,
+        rebind_cut,
     };
     use crate::SddpError;
     use cobre_io::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyCutRecord};
@@ -1368,6 +1377,49 @@ mod tests {
         assert!(
             report.detail_lines().is_empty(),
             "the skip path carries no per-family detail"
+        );
+    }
+
+    /// `summary_line()`'s reconciled-path wording is a correctness contract for
+    /// `cobre validate` (asserted byte-exact by `cli_validate.rs`) — the
+    /// `tally_clause()` extraction must not change a single byte of it, and
+    /// `tally_clause()` itself is exactly that wording minus the leading
+    /// "boundary reconciliation: " prefix.
+    #[test]
+    fn summary_line_reconciled_wording_is_byte_identical_after_tally_clause_extraction() {
+        let report = BoundaryReconciliationReport {
+            reconciled: true,
+            storage: FamilyTally {
+                copy: 2184,
+                ..FamilyTally::default()
+            },
+            inflow_lag: FamilyTally {
+                fan_out: 1,
+                ..FamilyTally::default()
+            },
+            transit_bucket: FamilyTally {
+                dropped_source: 2,
+                ..FamilyTally::default()
+            },
+            anticipated: FamilyTally {
+                default_zero: 1,
+                ..FamilyTally::default()
+            },
+            ..BoundaryReconciliationReport::default()
+        };
+
+        assert_eq!(
+            report.summary_line(),
+            "boundary reconciliation: 2184 copied, 1 fanned out, 1 defaulted to 0.0, 2 source \
+             slots dropped"
+        );
+        assert_eq!(
+            report.tally_clause(),
+            "2184 copied, 1 fanned out, 1 defaulted to 0.0, 2 source slots dropped"
+        );
+        assert_eq!(
+            report.summary_line(),
+            format!("boundary reconciliation: {}", report.tally_clause())
         );
     }
 }
