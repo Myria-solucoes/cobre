@@ -10,20 +10,22 @@
 //! `Σ cuts_added == n_nonleaf_nodes`. The bound closes to the extensive-form
 //! optimum, and the result is bitwise reproducible across thread shapes.
 //!
-//! # Recovering backward-only `lp_solves`
+//! # Backward `lp_solves` reconciliation
 //!
-//! `run_enumerated_backward` leaves `BackwardResult::stage_stats` empty (no
-//! per-opening breakdown wired for the node-native path), so
-//! `solver_stats_log`'s `phase == "backward"` rows are absent under
-//! `Traversal::Enumerated` — unlike the sampled path, where
+//! `solver_stats_log`'s `phase == "backward"` rows (summed) and
+//! `TrainingEvent::IterationSummary::lp_solves - forward - lower_bound` are two
+//! independently-derived views of the same count: the former reads
+//! `BackwardResult::stage_stats` directly (one `(rank, worker_id, 0, delta)`
+//! entry per visited successor stage on the node-native path — mirroring how
 //! `tests/branching_value_oracle.rs`'s `bwd_solves += entry.delta.lp_solves`
-//! accumulation works directly. The forward and lower-bound phases ARE
-//! populated unconditionally, and `TrainingEvent::IterationSummary::lp_solves`
-//! is their sum plus backward's (`forward_result.lp_solves +
-//! backward_result.lp_solves + lb_lp_solves`, `TrainingSession::run_iteration`),
-//! so backward-only solves are recovered as `total - forward - lower_bound` —
-//! three directly-observed quantities, never a re-derived closed form for
-//! forward or the lower bound.
+//! accumulation reads the sampled path's own `stage_stats`), the latter derives
+//! it from `TrainingEvent::IterationSummary::lp_solves` (
+//! `forward_result.lp_solves + backward_result.lp_solves + lb_lp_solves`,
+//! `TrainingSession::run_iteration`) minus the forward and lower-bound phases'
+//! own directly-observed sums. `IterationAccounting::backward_lp_solves`
+//! (indirect) and `IterationAccounting::backward_lp_solves_direct` must agree
+//! every iteration — `enumerated_backward_is_linear_and_bound_closes` asserts
+//! it.
 //!
 //! # Sampled sibling for the scheduler axis
 //!
@@ -85,12 +87,14 @@ const SAMPLED_FORWARD_PASSES: u32 = 6;
 
 /// Per-iteration accounting, keyed by iteration, filled from one `train()`
 /// call's event channel and `solver_stats_log`. `backward_lp_solves` is
-/// derived, never observed directly — see this file's module doc.
+/// derived; `backward_lp_solves_direct` reads `phase == "backward"` rows —
+/// see this file's module doc.
 #[derive(Default, Clone, Copy)]
 struct IterationAccounting {
     total_lp_solves: u64,
     forward_lp_solves: u64,
     lower_bound_lp_solves: u64,
+    backward_lp_solves_direct: u64,
     cuts_added: u32,
 }
 
@@ -150,6 +154,7 @@ fn train_and_collect(
         match entry.phase {
             "forward" => acc.forward_lp_solves += entry.delta.lp_solves,
             "lower_bound" => acc.lower_bound_lp_solves += entry.delta.lp_solves,
+            "backward" => acc.backward_lp_solves_direct += entry.delta.lp_solves,
             _ => {}
         }
     }
@@ -222,6 +227,12 @@ fn enumerated_backward_is_linear_and_bound_closes() {
             solves, expected_solves,
             "iteration {iteration}: backward lp_solves {solves} != k+(t_trunk-1) \
              {expected_solves}"
+        );
+        assert_eq!(
+            acc.backward_lp_solves_direct, solves,
+            "iteration {iteration}: direct backward-phase stage_stats sum {} must \
+             reconcile with the indirect total-forward-lower_bound derivation {solves}",
+            acc.backward_lp_solves_direct
         );
         assert!(
             solves < fan_squared,

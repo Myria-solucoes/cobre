@@ -351,6 +351,13 @@ pub struct BackwardPassState {
     /// (`run_backward_node_replicated`). Empty (zero footprint) under
     /// `Traversal::Sampled`, which never touches it.
     replicated_scratch: ReplicatedScratch,
+
+    /// Per-successor-stage accumulated solver-stats delta for the enumerated
+    /// backward, indexed by stage. Reset via `reset_in_place` at the start of
+    /// each [`Self::run_enumerated_backward`] call, mirroring the enumerated
+    /// forward's `worker_stage_stats` reuse; never touched under
+    /// `Traversal::Sampled`.
+    enumerated_stage_stats: Vec<SolverStatsDelta>,
 }
 
 /// One successor child's cut-pool binding-metadata region: which pool, the base
@@ -432,6 +439,9 @@ impl BackwardPassState {
             bwd_visit_displs: Vec::new(),
             level_pool_regions_scratch: Vec::new(),
             replicated_scratch: ReplicatedScratch::default(),
+            enumerated_stage_stats: (0..num_stages)
+                .map(|_| SolverStatsDelta::default())
+                .collect(),
         }
     }
 
@@ -738,6 +748,10 @@ impl BackwardPassState {
         #[cfg(debug_assertions)]
         debug_assert_node_predecessor_states_distinct(node_graph, inputs.enumerated_state);
 
+        for delta in &mut self.enumerated_stage_stats {
+            delta.reset_in_place();
+        }
+
         let levels = node_graph.backward_cut_levels();
         let mut cuts_generated: usize = 0;
         for level in &levels {
@@ -840,6 +854,7 @@ impl BackwardPassState {
                 };
 
                 let n_state = succ_spec.cut_state.n_slots();
+                let stats_before = ws0.solver.statistics();
                 let intercept = run_backward_node_replicated(
                     &mut self.replicated_scratch,
                     ws0,
@@ -855,6 +870,12 @@ impl BackwardPassState {
                     inputs.iteration,
                     inputs.enumerated_state,
                 )?;
+                let stage_delta =
+                    SolverStatsDelta::from_snapshots(&stats_before, &ws0.solver.statistics());
+                SolverStatsDelta::accumulate_into(
+                    &mut self.enumerated_stage_stats[successor_stage.0],
+                    &stage_delta,
+                );
                 inputs.fcf.add_cut(
                     node_id,
                     pool_id,
@@ -867,6 +888,8 @@ impl BackwardPassState {
             }
         }
 
+        let worker_id = ws0.worker_id;
+
         #[allow(clippy::cast_possible_truncation)]
         let elapsed_ms = start.elapsed().as_millis() as u64;
         let solves_after: u64 = inputs
@@ -875,11 +898,30 @@ impl BackwardPassState {
             .map(|ws| ws.solver.statistics().solve_count)
             .sum();
 
+        let rank_i32 = i32::try_from(my_rank).map_err(|_| {
+            SddpError::Validation(format!(
+                "enumerated backward: MPI rank {my_rank} overflows i32 (max {})",
+                i32::MAX
+            ))
+        })?;
+        let stage_stats: Vec<(usize, Vec<StageWorkerOpeningDelta>)> = self
+            .enumerated_stage_stats
+            .iter()
+            .enumerate()
+            .filter(|(_, delta)| delta.lp_solves > 0)
+            .map(|(stage_idx, delta)| {
+                (
+                    stage_idx,
+                    vec![(rank_i32, worker_id, 0_usize, delta.clone())],
+                )
+            })
+            .collect();
+
         Ok(BackwardResult {
             cuts_generated,
             elapsed_ms,
             lp_solves: solves_after - solves_before,
-            stage_stats: Vec::new(),
+            stage_stats,
             state_exchange_time_ms: 0,
             cut_batch_build_time_ms: 0,
             setup_time_ms: 0,
@@ -4965,6 +5007,36 @@ mod tests {
         assert_eq!(
             result.cuts_generated, 1,
             "the sole cut-generating node (root) still appends exactly one cut"
+        );
+    }
+
+    /// `run_enumerated_backward`'s `stage_stats` is populated on a genuine
+    /// (non-fused) real solve and its summed `lp_solves` reconciles exactly
+    /// with `BackwardResult::lp_solves`; every entry's `rank`/`worker_id` are
+    /// real, not the `-1` sentinel.
+    #[test]
+    fn enumerated_backward_stage_stats_reconciles_with_lp_solves() {
+        let mut setup = crate::test_support::terminal_generated_fan_setup(2, 1);
+        let result = run_real_enumerated_round(&mut setup);
+
+        assert!(
+            !result.stage_stats.is_empty(),
+            "stage_stats must be populated on the enumerated backward path"
+        );
+        let mut summed_lp_solves = 0_u64;
+        for (_, entries) in &result.stage_stats {
+            for &(rank, worker_id, _, ref delta) in entries {
+                assert_ne!(rank, -1, "backward stage_stats rank must be real, not -1");
+                assert_ne!(
+                    worker_id, -1,
+                    "backward stage_stats worker_id must be real, not -1"
+                );
+                summed_lp_solves += delta.lp_solves;
+            }
+        }
+        assert_eq!(
+            summed_lp_solves, result.lp_solves,
+            "the per-solve stage_stats sum must reconcile with the aggregate lp_solves"
         );
     }
 }

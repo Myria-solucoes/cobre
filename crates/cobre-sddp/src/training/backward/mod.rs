@@ -114,13 +114,15 @@ pub struct BackwardResult {
 
     /// Per-stage, per-`(rank, worker_id, opening)` solver statistics deltas.
     ///
-    /// Each outer entry is `(successor_stage_index, per_worker_opening_deltas)`.
-    /// The inner `Vec` element is `(rank, worker_id, omega, delta)`: one entry per
-    /// `(MPI rank, rayon worker, opening index)` triple gathered via `allgatherv`.
-    /// Only includes entries where `omega < n_openings(successor)` AND
-    /// `delta.lp_solves > 0 || omega == 0` (preserves the omega=0 "stage visited"
-    /// sentinel while skipping padded buffer slots).
-    /// Entries are in reverse stage order (matching the backward iteration direction).
+    /// Each outer entry is `(successor_stage_index, per_worker_opening_deltas)`;
+    /// the inner `Vec` element is `(rank, worker_id, omega, delta)`. The sampled
+    /// path gathers one entry per `(MPI rank, rayon worker, opening)` triple via
+    /// `allgatherv`, filtered to `omega < n_openings(successor)` and
+    /// `delta.lp_solves > 0 || omega == 0` (the omega=0 "stage visited"
+    /// sentinel), in reverse stage order. The enumerated path has no
+    /// per-worker/per-opening breakdown: one `(rank, worker_id, 0, delta)` entry
+    /// per visited successor stage (`delta.lp_solves > 0`), in ascending stage
+    /// order.
     pub stage_stats: Vec<(usize, Vec<StageWorkerOpeningDelta>)>,
 
     /// Wall-clock time for state exchange (`allgatherv`) accumulated across
