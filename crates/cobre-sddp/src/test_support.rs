@@ -1983,6 +1983,10 @@ pub fn external_distinct_fan_setup_heterogeneous_cut_state(
     build_external_distinct_fan_setup(k, max_iterations, Some(1))
 }
 
+// Rationale (too_many_lines): one linear pass assembling a StudySetup fixture —
+// policy graph, per-node external inflow openings, and config — from literal deck
+// data; splitting it would scatter shared locals across helpers for no
+// test-readability gain.
 #[allow(
     clippy::expect_used,
     clippy::too_many_lines,
