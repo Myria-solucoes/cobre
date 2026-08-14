@@ -25,6 +25,7 @@ use crate::{
     workspace::{CapturedBasis, SolverWorkspace, WorkspacePool, WorkspaceSizing},
 };
 
+use super::node_graph::pool_fill_basis_cache;
 use super::{SimulationEnumeratedRequest, StudySetup, Traversal};
 use crate::build_training_output;
 use crate::simulate;
@@ -239,14 +240,29 @@ impl StudySetup {
     {
         let stage_ctx = self.stage_ctx();
         let training_ctx = self.simulation_ctx();
+        let is_enumerated = matches!(
+            self.simulation_enumerated,
+            SimulationEnumeratedRequest::Enumerated
+        );
         let traversal = Traversal::resolve(
             &self.node_graph,
-            matches!(
-                self.simulation_enumerated,
-                SimulationEnumeratedRequest::Enumerated
-            ),
+            is_enumerated,
             self.simulation_config().n_scenarios,
         );
+
+        // Pool-fill confined to this simulate-local buffer: the source cache
+        // (and any checkpoint exported from it) stays sparse, so a warm-start
+        // resume-training reseeds only genuine captures — never a filled leaf.
+        let filled_bases: Option<Vec<Option<CapturedBasis>>> = is_enumerated.then(|| {
+            let mut owned = stage_bases.to_vec();
+            pool_fill_basis_cache(
+                &mut owned,
+                &self.node_graph.node_pool_ids(),
+                &self.node_graph.node_ids,
+            );
+            owned
+        });
+        let stage_bases = filled_bases.as_deref().unwrap_or(stage_bases);
 
         let output = SimulationOutputSpec {
             result_tx,

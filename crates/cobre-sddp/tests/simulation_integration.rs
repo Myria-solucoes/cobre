@@ -48,9 +48,9 @@ use cobre_io::{
     write_policy_checkpoint, write_results,
 };
 use cobre_sddp::{
-    Phase, PrepareHydroModelsResult, ResolvedParameters, SimulationSummary, SolverProfiles,
-    StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig, aggregate_simulation,
-    build_training_output,
+    CapturedBasis, Phase, PrepareHydroModelsResult, ResolvedParameters, SimulationSummary,
+    SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    aggregate_simulation, build_training_output,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -60,7 +60,10 @@ use cobre_sddp::{
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
-    setup::{SimulationEnumeratedRequest, StudySetup, node_graph::Traversal},
+    setup::{
+        SimulationEnumeratedRequest, StudySetup,
+        node_graph::{NodePos, Traversal},
+    },
     simulate,
     simulation::{
         EntityCounts, SimulationConfig, SimulationOutputSpec, SimulationScenarioResult,
@@ -1947,6 +1950,136 @@ fn run_census<C: Communicator>(setup: &StudySetup, comm: &C, n_threads: usize) -
         gathered,
         actual_lp_solves,
     }
+}
+
+/// One census run's warm-start accounting: per-scenario cost as raw bits (for
+/// bit-identity comparison), the summed warm-start basis offers, and the summed
+/// basis-consistency rejections across every workspace.
+struct WarmStartRun {
+    per_scenario_cost_bits: Vec<(u32, u64)>,
+    basis_offered: u64,
+    basis_consistency_failures: u64,
+}
+
+/// Census `simulate()` with a caller-supplied warm-start cache, measuring the
+/// warm-start offer/reject deltas across a fresh workspace pool.
+fn run_census_with_bases<C: Communicator>(
+    setup: &StudySetup,
+    comm: &C,
+    n_threads: usize,
+    stage_bases: &[Option<CapturedBasis>],
+) -> WarmStartRun {
+    let mut pool = setup
+        .create_workspace_pool(comm, n_threads, ActiveSolver::new)
+        .expect("workspace pool");
+    let before: Vec<SolverStatistics> = pool
+        .workspaces
+        .iter()
+        .map(|ws| ws.solver.statistics())
+        .collect();
+
+    let n_scenarios = setup.simulation_config().n_scenarios.max(1) as usize;
+    let (result_tx, result_rx) = mpsc::sync_channel(n_scenarios);
+    setup
+        .simulate(
+            &mut pool.workspaces,
+            comm,
+            &result_tx,
+            None,
+            None,
+            stage_bases,
+        )
+        .expect("census simulate must succeed");
+    drop(result_tx);
+    let mut results: Vec<SimulationScenarioResult> = result_rx.into_iter().collect();
+    results.sort_by_key(|r| r.scenario_id);
+
+    let (basis_offered, basis_consistency_failures) = before
+        .iter()
+        .zip(pool.workspaces.iter().map(|ws| ws.solver.statistics()))
+        .map(|(b, a)| SolverStatsDelta::from_snapshots(b, &a))
+        .fold((0_u64, 0_u64), |(off, fail), d| {
+            (off + d.basis_offered, fail + d.basis_consistency_failures)
+        });
+
+    WarmStartRun {
+        per_scenario_cost_bits: results
+            .iter()
+            .map(|r| (r.scenario_id, r.total_cost.to_bits()))
+            .collect(),
+        basis_offered,
+        basis_consistency_failures,
+    }
+}
+
+/// Pool-fill warms the previously-cold terminal leaves of an enumerated census:
+/// training captures a basis only at the scenario-0 leaf, so every sibling leaf
+/// starts `None`; `StudySetup::simulate` fills them from the shared pool. Stripping
+/// the leaf pool of every capture (`stripped`) removes the fill's source, so its
+/// leaves stay cold — the offered-basis delta between the two is the fill's work.
+/// The filled bases must be ACCEPTED (0 consistency failures) and must not move
+/// the objective (per-scenario cost bit-identical warm-vs-cold), and the run must
+/// be bit-reproducible across thread shapes (never `hot == cold`).
+#[test]
+fn enumerated_census_pool_fill_warms_previously_cold_leaves() {
+    let mut setup = branching_tree_setup_enumerated(30);
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("training must return Ok");
+    assert!(
+        outcome.error.is_none(),
+        "training must not error: {:?}",
+        outcome.error
+    );
+    let sparse = outcome.result.basis_cache;
+
+    let setup = as_enumerated_census(setup);
+
+    let leaves: Vec<usize> = (0..setup.node_graph.successors.len())
+        .filter(|&i| setup.node_graph.successors[NodePos(i)].is_empty())
+        .collect();
+    assert!(
+        leaves.len() >= 2,
+        "fixture must fan into >= 2 same-pool terminal leaves; got {}",
+        leaves.len()
+    );
+    let captured_leaves = leaves.iter().filter(|&&i| sparse[i].is_some()).count();
+    assert!(
+        captured_leaves >= 1,
+        "training must capture >= 1 terminal-leaf basis to seed the fill"
+    );
+
+    let mut stripped = sparse.clone();
+    for &i in &leaves {
+        stripped[i] = None;
+    }
+
+    let filled = run_census_with_bases(&setup, &comm, 1, &sparse);
+    let no_leaf_source = run_census_with_bases(&setup, &comm, 1, &stripped);
+
+    assert!(
+        filled.basis_offered >= no_leaf_source.basis_offered + leaves.len() as u64,
+        "pool-fill must warm every terminal leaf: offered {} vs stripped {} (>= +{} leaves)",
+        filled.basis_offered,
+        no_leaf_source.basis_offered,
+        leaves.len()
+    );
+    assert_eq!(
+        filled.basis_consistency_failures, 0,
+        "every re-tagged filled basis must be accepted (same-pool template, own node_id)"
+    );
+    assert_eq!(
+        filled.per_scenario_cost_bits, no_leaf_source.per_scenario_cost_bits,
+        "warm != cold: the moved dispatch vertex must not move the per-scenario cost"
+    );
+
+    let filled_4 = run_census_with_bases(&setup, &comm, 4, &sparse);
+    assert_eq!(
+        filled.per_scenario_cost_bits, filled_4.per_scenario_cost_bits,
+        "per-scenario cost must be bit-identical at threads=1 vs threads=4"
+    );
 }
 
 /// R1 — value oracle. `branching_tree_setup_enumerated` branches at BOTH

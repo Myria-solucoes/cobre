@@ -17,6 +17,7 @@ use cobre_stochastic::{StochasticContext, select_transition_child};
 
 use crate::error::SddpError;
 use crate::simulation::SimulationWeighting;
+use crate::workspace::CapturedBasis;
 
 /// A declared JSON node id — the value stored in [`NodeGraph::node_ids`], never
 /// a position into the graph's parallel arrays.
@@ -373,6 +374,54 @@ impl NodeGraph {
     #[must_use]
     pub fn node_pool_ids(&self) -> TypedVec<NodePos, usize> {
         self.nodes.iter().map(|n| n.pool_id).collect()
+    }
+}
+
+/// Warm every same-pool `None` sibling of a node-indexed simulation basis cache
+/// from the pool's representative capture (the lowest [`NodePos`] carrying a
+/// `Some`), re-tagged with the target node's own [`NodeId`].
+///
+/// A branching graph's terminal leaves share one pool and load the identical
+/// frozen template, so a sibling's captured basis is structurally valid at any
+/// same-pool leaf. Re-tagging with the target's own `node_id` is load-bearing:
+/// the apply-site node-tag filter (`run_stage_solve`) reuses a stored basis only
+/// when `captured.node_id == inputs.node_id`, so a filled slot MUST carry the
+/// target's id — matching by pool instead warms from the wrong node's LP, which
+/// CLP accepts silently. A pool with no `Some` capture is left `None` (cold); a
+/// chain is a no-op (one node per pool). Deterministic and declaration-order
+/// invariant, so every rank fills identically.
+pub(crate) fn pool_fill_basis_cache(
+    cache: &mut [Option<CapturedBasis>],
+    node_pool_ids: &TypedVec<NodePos, usize>,
+    node_ids: &TypedVec<NodePos, NodeId>,
+) {
+    let n = cache.len();
+    if node_pool_ids.len() != n || node_ids.len() != n {
+        return;
+    }
+    let n_pools = node_pool_ids.iter().copied().max().map_or(0, |m| m + 1);
+    let mut representative: Vec<Option<usize>> = vec![None; n_pools];
+    for (node, slot) in cache.iter().enumerate() {
+        if slot.is_some() {
+            let pool = node_pool_ids[NodePos(node)];
+            if representative[pool].is_none() {
+                representative[pool] = Some(node);
+            }
+        }
+    }
+    let fills: Vec<(usize, CapturedBasis)> = (0..n)
+        .filter_map(|node| {
+            if cache[node].is_some() {
+                return None;
+            }
+            let src = representative[node_pool_ids[NodePos(node)]]?;
+            let mut basis = cache[src].as_ref()?.clone();
+            basis.node_id = node_ids[NodePos(node)];
+            Some((node, basis))
+        })
+        .collect();
+    for (node, basis) in fills {
+        cache[node] = Some(basis);
     }
 }
 
@@ -1415,6 +1464,142 @@ mod tests {
     use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, Transition};
     use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
     use std::collections::HashMap as StdHashMap;
+
+    fn cb(node_id: i32, marker: u32) -> CapturedBasis {
+        let mut c = CapturedBasis::new(0, 0, 0, 1, 0, NodeId(node_id));
+        c.cut_row_slots.push(marker);
+        c
+    }
+
+    fn fingerprint(cache: &[Option<CapturedBasis>]) -> Vec<Option<(i32, Vec<u32>)>> {
+        cache
+            .iter()
+            .map(|slot| {
+                slot.as_ref()
+                    .map(|c| (c.node_id.0, c.cut_row_slots.clone()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pool_fill_warms_same_pool_none_siblings_retagged_with_own_node_id() {
+        let node_pools: TypedVec<NodePos, usize> = vec![0, 1, 2, 3, 3, 3, 3].into();
+        let node_ids: TypedVec<NodePos, NodeId> = vec![10, 11, 12, 13, 14, 15, 16]
+            .into_iter()
+            .map(NodeId)
+            .collect();
+        let mut cache: Vec<Option<CapturedBasis>> = vec![
+            Some(cb(10, 100)),
+            Some(cb(11, 101)),
+            Some(cb(12, 102)),
+            Some(cb(13, 103)),
+            None,
+            None,
+            None,
+        ];
+
+        pool_fill_basis_cache(&mut cache, &node_pools, &node_ids);
+
+        for (node, own_id) in [(4usize, 14i32), (5, 15), (6, 16)] {
+            let filled = cache[node].as_ref().expect("sibling leaf must be filled");
+            assert_eq!(
+                filled.node_id,
+                NodeId(own_id),
+                "filled leaf carries its OWN node_id, never the source's"
+            );
+            assert_eq!(
+                filled.cut_row_slots,
+                vec![103_u32],
+                "filled leaf copies pool 3 representative (leaf 3) content"
+            );
+        }
+        assert_eq!(cache[3].as_ref().expect("leaf 3").node_id, NodeId(13));
+        assert_eq!(cache[0].as_ref().expect("node 0").node_id, NodeId(10));
+    }
+
+    #[test]
+    fn pool_fill_leaves_no_capture_pool_unfilled() {
+        let node_pools: TypedVec<NodePos, usize> = vec![0, 1, 1].into();
+        let node_ids: TypedVec<NodePos, NodeId> = vec![0, 1, 2].into_iter().map(NodeId).collect();
+        let mut cache: Vec<Option<CapturedBasis>> = vec![Some(cb(0, 100)), None, None];
+
+        pool_fill_basis_cache(&mut cache, &node_pools, &node_ids);
+
+        assert!(cache[1].is_none(), "no capture in pool 1 → left cold");
+        assert!(cache[2].is_none(), "no capture in pool 1 → left cold");
+    }
+
+    #[test]
+    fn pool_fill_chain_is_a_no_op() {
+        let node_pools: TypedVec<NodePos, usize> = vec![0, 1, 2].into();
+        let node_ids: TypedVec<NodePos, NodeId> = vec![0, 1, 2].into_iter().map(NodeId).collect();
+        let mut cache: Vec<Option<CapturedBasis>> = vec![Some(cb(0, 100)), None, Some(cb(2, 102))];
+
+        pool_fill_basis_cache(&mut cache, &node_pools, &node_ids);
+
+        assert!(
+            cache[1].is_none(),
+            "chain pool has no same-pool sibling to fill from"
+        );
+        assert_eq!(
+            cache[0].as_ref().expect("node 0").cut_row_slots,
+            vec![100_u32]
+        );
+        assert_eq!(
+            cache[2].as_ref().expect("node 2").cut_row_slots,
+            vec![102_u32]
+        );
+    }
+
+    #[test]
+    fn pool_fill_representative_is_lowest_nodepos_with_capture() {
+        let node_pools: TypedVec<NodePos, usize> = vec![0, 1, 2, 3, 3, 3, 3].into();
+        let node_ids: TypedVec<NodePos, NodeId> = vec![10, 11, 12, 13, 14, 15, 16]
+            .into_iter()
+            .map(NodeId)
+            .collect();
+        let mut cache: Vec<Option<CapturedBasis>> = vec![
+            Some(cb(10, 100)),
+            Some(cb(11, 101)),
+            Some(cb(12, 102)),
+            None,
+            Some(cb(14, 140)),
+            None,
+            Some(cb(16, 160)),
+        ];
+
+        pool_fill_basis_cache(&mut cache, &node_pools, &node_ids);
+
+        for (node, own_id) in [(3usize, 13i32), (5, 15)] {
+            let filled = cache[node].as_ref().expect("gap leaf must be filled");
+            assert_eq!(filled.node_id, NodeId(own_id));
+            assert_eq!(
+                filled.cut_row_slots,
+                vec![140_u32],
+                "filled from node 4 (lowest NodePos with a capture), never node 6"
+            );
+        }
+        assert_eq!(cache[6].as_ref().expect("leaf 6").node_id, NodeId(16));
+    }
+
+    #[test]
+    fn pool_fill_is_deterministic_across_repeat_calls() {
+        let node_pools: TypedVec<NodePos, usize> = vec![0, 1, 1, 1].into();
+        let node_ids: TypedVec<NodePos, NodeId> =
+            vec![0, 1, 2, 3].into_iter().map(NodeId).collect();
+        let build = || vec![Some(cb(0, 100)), Some(cb(1, 200)), None, None];
+        let mut a = build();
+        let mut b = build();
+
+        pool_fill_basis_cache(&mut a, &node_pools, &node_ids);
+        pool_fill_basis_cache(&mut b, &node_pools, &node_ids);
+
+        assert_eq!(
+            fingerprint(&a),
+            fingerprint(&b),
+            "identical sparse input → identical fill (single shared helper on both sim paths)"
+        );
+    }
 
     fn transition(source_id: i32, target_id: i32, probability: f64) -> Transition {
         Transition {
