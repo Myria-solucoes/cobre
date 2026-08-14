@@ -15,6 +15,10 @@
 //! order — so the exact bound, the lower bound, and the generated cut set are
 //! bit-identical across worker, thread, and rank counts.
 
+use std::sync::mpsc::Sender;
+use std::time::Instant;
+
+use cobre_core::{TrainingEvent, WorkerTimingPhase};
 use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
 use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
@@ -191,6 +195,7 @@ pub(crate) struct EnumeratedParams<'a> {
     pub training_ctx: &'a TrainingContext<'a>,
     pub sampler: &'a ForwardSampler<'a>,
     pub dcs: Option<DcsParams>,
+    pub event_sender: Option<&'a Sender<TrainingEvent>>,
 }
 
 /// Aggregate return of the enumerated forward driver.
@@ -554,7 +559,8 @@ where
             .zip(scratch.worker_captures.par_iter_mut())
             .zip(scratch.worker_stage_stats.par_iter_mut())
             .map(|((ws, captures), stage_stats)| {
-                enumerated_stage_worker(
+                let worker_start = Instant::now();
+                let result = enumerated_stage_worker(
                     ws,
                     captures,
                     stage_stats,
@@ -567,7 +573,10 @@ where
                     solved,
                     m_rep,
                     store,
-                )
+                );
+                ws.worker_timing_buf.forward_wall_ms +=
+                    worker_start.elapsed().as_secs_f64() * 1_000.0;
+                result
             })
             .collect();
 
@@ -669,6 +678,18 @@ where
             lp_solves, expected,
             "single-rank enumerated solve total must equal Σ forward_solve_counts"
         );
+    }
+
+    if let Some(sender) = params.event_sender {
+        for ws in workspaces.iter() {
+            let _ = sender.send(TrainingEvent::WorkerTiming {
+                rank: ws.rank,
+                worker_id: ws.worker_id,
+                iteration: params.iteration,
+                phase: WorkerTimingPhase::Forward,
+                timings: ws.worker_timing_buf,
+            });
+        }
     }
 
     Ok(EnumeratedForwardResult {
@@ -976,6 +997,7 @@ mod tests {
         basis_store: &mut BasisStore,
         records: &mut [TrajectoryRecord],
         iteration: u64,
+        event_sender: Option<&Sender<TrainingEvent>>,
     ) -> EnumeratedForwardResult {
         let node_graph = &setup.node_graph;
         let stage_ctx = setup.stage_ctx();
@@ -1010,6 +1032,7 @@ mod tests {
             training_ctx: &training_ctx,
             sampler: &sampler,
             dcs,
+            event_sender,
         };
 
         run_enumerated_forward(plan, scratch, workspaces, basis_store, records, &params)
@@ -1054,6 +1077,7 @@ mod tests {
             &mut basis_store,
             &mut records,
             1,
+            None,
         );
 
         for &node in &ineligible {
@@ -1087,6 +1111,7 @@ mod tests {
             &mut basis_store,
             &mut records,
             2,
+            None,
         );
 
         for &node in &eligible {
@@ -1149,6 +1174,7 @@ mod tests {
             &mut basis_store,
             &mut records,
             1,
+            None,
         );
 
         for &node in &eligible {
@@ -1198,6 +1224,7 @@ mod tests {
             &mut basis_store,
             &mut records,
             1,
+            None,
         );
 
         for pos in (0..node_graph.nodes.len()).map(NodePos) {
@@ -1211,5 +1238,59 @@ mod tests {
                 "node {pos:?}'s basis must still be captured regardless of fusion eligibility"
             );
         }
+    }
+
+    /// `run_enumerated_forward` emits one `WorkerTiming { phase: Forward }`
+    /// event per workspace, each carrying a non-zero `forward_wall_ms` no
+    /// larger than the call's own wall-clock elapsed — every worker's
+    /// accumulated per-stage busy time is a subset of the call's total wall.
+    #[test]
+    fn enumerated_forward_emits_worker_timing_per_workspace() {
+        let setup = test_support::terminal_generated_fan_setup(2, 1);
+        let (mut pool, mut basis_store, mut records) = fresh_rig(&setup);
+        let mut scratch = EnumeratedForwardScratch::default();
+        let (tx, rx) = std::sync::mpsc::channel::<TrainingEvent>();
+
+        let call_start = Instant::now();
+        run_iteration(
+            &setup,
+            &mut scratch,
+            &mut pool.workspaces,
+            &mut basis_store,
+            &mut records,
+            1,
+            Some(&tx),
+        );
+        let call_elapsed_ms = call_start.elapsed().as_secs_f64() * 1_000.0;
+        drop(tx);
+
+        let n_workers = pool.workspaces.len();
+        let forward_walls: Vec<f64> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                TrainingEvent::WorkerTiming {
+                    phase: WorkerTimingPhase::Forward,
+                    timings,
+                    ..
+                } => Some(timings.forward_wall_ms),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            forward_walls.len(),
+            n_workers,
+            "one Forward WorkerTiming event must be emitted per workspace"
+        );
+        assert!(
+            forward_walls.iter().all(|&ms| ms > 0.0),
+            "every worker must report a non-zero forward_wall_ms on a genuine (non-fused) \
+             real solve, got {forward_walls:?}"
+        );
+        assert!(
+            forward_walls.iter().all(|&ms| ms <= call_elapsed_ms + 1.0),
+            "a worker's own accumulated wall time cannot exceed run_enumerated_forward's own \
+             call wall ({call_elapsed_ms} ms), got {forward_walls:?}"
+        );
     }
 }

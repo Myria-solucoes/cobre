@@ -606,6 +606,7 @@ impl ForwardPassState {
             training_ctx,
             sampler,
             dcs: dcs_params,
+            event_sender: inputs.event_sender,
         };
 
         let EnumeratedForwardResult {

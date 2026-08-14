@@ -53,7 +53,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::sync::mpsc;
 
-use cobre_core::TrainingEvent;
+use cobre_core::{TrainingEvent, WorkerTimingPhase};
 use cobre_io::config::BackwardScheduler;
 use cobre_sddp::StudySetup;
 use cobre_sddp::setup::NodePos;
@@ -88,7 +88,11 @@ const SAMPLED_FORWARD_PASSES: u32 = 6;
 /// Per-iteration accounting, keyed by iteration, filled from one `train()`
 /// call's event channel and `solver_stats_log`. `backward_lp_solves` is
 /// derived; `backward_lp_solves_direct` reads `phase == "backward"` rows —
-/// see this file's module doc.
+/// see this file's module doc. `forward_wall_ms`/`backward_wall_ms` sum every
+/// `TrainingEvent::WorkerTiming` event's own phase wall for the iteration —
+/// the same per-`(iteration, rank, worker_id)` summation
+/// `build_worker_timing_records` performs when it fills
+/// `training/timing/iterations.parquet`.
 #[derive(Default, Clone, Copy)]
 struct IterationAccounting {
     total_lp_solves: u64,
@@ -96,6 +100,8 @@ struct IterationAccounting {
     lower_bound_lp_solves: u64,
     backward_lp_solves_direct: u64,
     cuts_added: u32,
+    forward_wall_ms: f64,
+    backward_wall_ms: f64,
 }
 
 impl IterationAccounting {
@@ -145,6 +151,20 @@ fn train_and_collect(
                 ..
             } => {
                 by_iter.entry(iteration).or_default().cuts_added = rows_generated;
+            }
+            TrainingEvent::WorkerTiming {
+                iteration,
+                phase,
+                timings,
+                ..
+            } => {
+                let acc = by_iter.entry(iteration).or_default();
+                match phase {
+                    WorkerTimingPhase::Forward => acc.forward_wall_ms += timings.forward_wall_ms,
+                    WorkerTimingPhase::Backward => {
+                        acc.backward_wall_ms += timings.backward_wall_ms;
+                    }
+                }
             }
             _ => {}
         }
@@ -243,6 +263,22 @@ fn enumerated_backward_is_linear_and_bound_closes() {
             acc.cuts_added, expected_cuts,
             "iteration {iteration}: cuts_added {} != n_nonleaf_nodes {expected_cuts}",
             acc.cuts_added
+        );
+        // The enumerated engines must emit non-zero WorkerTiming walls — the
+        // values `training/timing/iterations.parquet` recovers via its
+        // per-(iteration, rank, worker_id) SUM — not the all-zero rows an
+        // absent emit would leave.
+        assert!(
+            acc.forward_wall_ms > 0.0,
+            "iteration {iteration}: summed WorkerTiming forward_wall_ms must be non-zero on \
+             the enumerated forward, got {}",
+            acc.forward_wall_ms
+        );
+        assert!(
+            acc.backward_wall_ms > 0.0,
+            "iteration {iteration}: summed WorkerTiming backward_wall_ms must be non-zero on \
+             the enumerated backward, got {}",
+            acc.backward_wall_ms
         );
     }
 

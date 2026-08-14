@@ -740,6 +740,7 @@ impl BackwardPassState {
         let ws0 = inputs.workspaces.first_mut().ok_or_else(|| {
             SddpError::Validation("enumerated backward: no solver workspace available".into())
         })?;
+        ws0.worker_timing_buf = WorkerPhaseTimings::default();
 
         let training_ctx = inputs.training_ctx;
         let node_graph = training_ctx.node_graph;
@@ -890,8 +891,19 @@ impl BackwardPassState {
 
         let worker_id = ws0.worker_id;
 
+        let elapsed = start.elapsed();
         #[allow(clippy::cast_possible_truncation)]
-        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let elapsed_ms = elapsed.as_millis() as u64;
+        ws0.worker_timing_buf.backward_wall_ms = elapsed.as_secs_f64() * 1_000.0;
+        if let Some(sender) = inputs.event_sender {
+            let _ = sender.send(TrainingEvent::WorkerTiming {
+                rank: ws0.rank,
+                worker_id,
+                iteration: inputs.iteration,
+                phase: WorkerTimingPhase::Backward,
+                timings: ws0.worker_timing_buf,
+            });
+        }
         let solves_after: u64 = inputs
             .workspaces
             .iter()
@@ -4802,7 +4814,10 @@ mod tests {
     /// compiler would treat their returned borrows as covering the whole
     /// struct and reject the later `&mut setup.fcf` this harness also needs.
     #[allow(clippy::too_many_lines)]
-    fn run_real_enumerated_round(setup: &mut crate::StudySetup) -> BackwardResult {
+    fn run_real_enumerated_round(
+        setup: &mut crate::StudySetup,
+        event_sender: Option<&Sender<TrainingEvent>>,
+    ) -> BackwardResult {
         use cobre_solver::ActiveSolver;
 
         let comm = StubComm;
@@ -4906,6 +4921,7 @@ mod tests {
             training_ctx: &training_ctx,
             sampler: &sampler,
             dcs: None,
+            event_sender,
         };
 
         let mut scratch = EnumeratedForwardScratch::default();
@@ -4959,7 +4975,7 @@ mod tests {
             records: &records,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            event_sender: None,
+            event_sender,
             risk_measures: &risk_measures,
             cut_activity_tolerance: 0.0,
             iteration: 1,
@@ -4981,7 +4997,7 @@ mod tests {
     #[test]
     fn enumerated_backward_fuses_all_external_terminal_fan_to_zero_solves() {
         let mut setup = crate::test_support::external_distinct_fan_setup(2, 1);
-        let result = run_real_enumerated_round(&mut setup);
+        let result = run_real_enumerated_round(&mut setup, None);
         assert_eq!(
             result.lp_solves, 0,
             "an all-External terminal fan must be fully fused: zero backward LP solves"
@@ -4998,7 +5014,7 @@ mod tests {
     #[test]
     fn enumerated_backward_still_solves_every_opening_for_generated_terminal_fan() {
         let mut setup = crate::test_support::terminal_generated_fan_setup(2, 1);
-        let result = run_real_enumerated_round(&mut setup);
+        let result = run_real_enumerated_round(&mut setup, None);
         assert!(
             result.lp_solves > 0,
             "power: a terminal-Generated fan has no fusion-eligible child, so the backward \
@@ -5017,7 +5033,7 @@ mod tests {
     #[test]
     fn enumerated_backward_stage_stats_reconciles_with_lp_solves() {
         let mut setup = crate::test_support::terminal_generated_fan_setup(2, 1);
-        let result = run_real_enumerated_round(&mut setup);
+        let result = run_real_enumerated_round(&mut setup, None);
 
         assert!(
             !result.stage_stats.is_empty(),
@@ -5037,6 +5053,52 @@ mod tests {
         assert_eq!(
             summed_lp_solves, result.lp_solves,
             "the per-solve stage_stats sum must reconcile with the aggregate lp_solves"
+        );
+    }
+
+    /// The enumerated backward drives a single workspace (never a rayon
+    /// pool), so it emits exactly one `WorkerTiming { phase: Backward }`
+    /// event, and its `backward_wall_ms` is consistent with
+    /// `BackwardResult::elapsed_ms` — both derive from the same
+    /// `Instant::elapsed()` call: `elapsed_ms` floors to whole milliseconds,
+    /// `backward_wall_ms` keeps the fractional part.
+    #[test]
+    fn enumerated_backward_emits_worker_timing_consistent_with_elapsed_ms() {
+        let mut setup = crate::test_support::terminal_generated_fan_setup(2, 1);
+        let (tx, rx) = std::sync::mpsc::channel::<TrainingEvent>();
+        let result = run_real_enumerated_round(&mut setup, Some(&tx));
+        drop(tx);
+
+        let backward_walls: Vec<f64> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                TrainingEvent::WorkerTiming {
+                    phase: WorkerTimingPhase::Backward,
+                    timings,
+                    ..
+                } => Some(timings.backward_wall_ms),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            backward_walls.len(),
+            1,
+            "the enumerated backward drives a single workspace, so it must emit exactly one \
+             Backward WorkerTiming event, got {backward_walls:?}"
+        );
+        let backward_wall_ms = backward_walls[0];
+        assert!(
+            backward_wall_ms > 0.0,
+            "backward_wall_ms must be non-zero on a genuine (non-fused) real solve"
+        );
+        #[allow(clippy::cast_precision_loss)]
+        let elapsed_ms_f64 = result.elapsed_ms as f64;
+        assert!(
+            (elapsed_ms_f64 - 0.001..elapsed_ms_f64 + 1.0).contains(&backward_wall_ms),
+            "backward_wall_ms ({backward_wall_ms}) must be consistent with the same \
+             Instant::elapsed() call that produced elapsed_ms ({}, floored to whole ms)",
+            result.elapsed_ms
         );
     }
 }
