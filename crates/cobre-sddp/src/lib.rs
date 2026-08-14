@@ -151,9 +151,10 @@ pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
     BoundaryInjection, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind, PolicyLoadProof,
-    PolicyStageManifest, ValidatedBoundaryCuts, build_basis_cache_from_checkpoint,
-    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
-    rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage, validate_policy_load,
+    PolicyStageManifest, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
+    build_basis_cache_from_checkpoint, compare_manifest_slot_identity, inject_boundary_cuts,
+    load_boundary_cuts, rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage,
+    resolve_effective_inflow_lag_depth, validate_policy_load,
 };
 // ── policy_load::reconcile (report) ──────────────────────────────────────────
 pub use policy::reconcile::{AnticipatedCoverage, BoundaryReconciliationReport, FamilyTally};

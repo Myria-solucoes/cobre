@@ -92,6 +92,7 @@ use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::resolve_boundary_source_stage;
+use cobre_sddp::resolve_effective_inflow_lag_depth;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
@@ -897,7 +898,20 @@ pub(crate) fn build_study_setup(
     let LoadedCase { system, artifacts } = loaded;
     let warnings = report.warnings;
 
-    let config = load_effective_config(&case_dir.join("config.json"), overrides)?;
+    let mut config = load_effective_config(&case_dir.join("config.json"), overrides)?;
+
+    // Size the inflow-lag state block to a loaded boundary policy — its cuts fix
+    // the required depth, so `state_space.inflow_lag_depth` is an optional
+    // override. Folded before setup so both the layout and the boundary-load
+    // reject see the effective depth; mirrors the CLI run path.
+    if let Some(boundary_rel) = config.policy.boundary.as_ref().map(|bp| bp.path.clone()) {
+        let boundary_path = case_dir.join(&boundary_rel);
+        config.state_space.inflow_lag_depth = resolve_effective_inflow_lag_depth(
+            config.state_space.inflow_lag_depth,
+            Some(&boundary_path),
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     let seed = config
         .training

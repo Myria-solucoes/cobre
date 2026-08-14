@@ -36,6 +36,7 @@ use cobre_sddp::reconcile_global_ok;
 use cobre_sddp::{
     EstimationReport, PrepareHydroModelsResult, PrepareStochasticResult, StudySetup,
     build_hydro_model_summary, prepare_hydro_models, prepare_stochastic,
+    resolve_effective_inflow_lag_depth,
     setup::{
         ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic,
         study_stage_noise_group_ids, widen_lag_state_depth,
@@ -118,8 +119,30 @@ fn load_case_and_config(
     let load_start = std::time::Instant::now();
     let cobre_io::LoadedCase { system, artifacts } = load_case_with_artifacts(&args.case_dir)?;
     let config_path = args.case_dir.join("config.json");
-    let config = parse_config(&config_path)?;
+    let mut config = parse_config(&config_path)?;
     timings.load_seconds = load_start.elapsed().as_secs_f64();
+
+    // Size the inflow-lag state block to the loaded boundary policy: its cuts fix
+    // the required depth, so `state_space.inflow_lag_depth` is an optional
+    // override, not a requirement. Folded into the config here (rank 0, the sole
+    // reader of the case dir) so both the broadcast layout and the boundary-load
+    // reject see the effective depth.
+    if let Some(boundary_rel) = config.policy.boundary.as_ref().map(|bp| bp.path.clone()) {
+        let boundary_path = args.case_dir.join(&boundary_rel);
+        let declared = config.state_space.inflow_lag_depth;
+        let effective = resolve_effective_inflow_lag_depth(declared, Some(&boundary_path))?;
+        if effective != declared && !quiet {
+            let _ = stderr.write_line(&format!(
+                "Boundary policy: inflow-lag depth resolved to {} ({})",
+                effective.unwrap_or(0),
+                declared.map_or_else(
+                    || "state_space.inflow_lag_depth omitted".to_string(),
+                    |d| format!("state_space.inflow_lag_depth {d} widened"),
+                ),
+            ));
+        }
+        config.state_space.inflow_lag_depth = effective;
+    }
 
     let bcast = BroadcastConfig::from_config(&config)?;
     let seed = bcast.seed;

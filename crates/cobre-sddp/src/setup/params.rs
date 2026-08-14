@@ -108,8 +108,9 @@ pub struct StudyParams {
     /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
     /// time — one value per study.
     pub cost_scale_factor: f64,
-    /// Declared inflow-lag state depth (`state_space.inflow_lag_depth`); `None`
-    /// when the study leaves it undeclared. Widens `L_state` in
+    /// Effective inflow-lag state depth (`state_space.inflow_lag_depth`, already
+    /// widened to a loaded boundary policy's required depth by the setup entry
+    /// point); `None` when neither is declared. Widens `L_state` in
     /// `resolve_state_layout` via `widen_lag_state_depth`.
     pub inflow_lag_depth: Option<u32>,
     /// `policy.boundary.is_some()`: whether the study declares a terminal
@@ -397,8 +398,9 @@ pub struct ConstructionConfig {
     /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
     /// time — one value per study.
     pub cost_scale_factor: f64,
-    /// Declared inflow-lag state depth (`state_space.inflow_lag_depth`); `None`
-    /// when the study leaves it undeclared. Widens `L_state` in
+    /// Effective inflow-lag state depth (`state_space.inflow_lag_depth`, already
+    /// widened to a loaded boundary policy's required depth by the setup entry
+    /// point); `None` when neither is declared. Widens `L_state` in
     /// `resolve_state_layout` via `widen_lag_state_depth`.
     pub inflow_lag_depth: Option<u32>,
     /// `policy.boundary.is_some()`; threaded into

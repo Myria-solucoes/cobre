@@ -35,6 +35,7 @@ use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
 use cobre_sddp::{
     BoundaryReconciliationReport, PrepareHydroModelsResult, SddpError, StudyParams, StudySetup,
     load_boundary_cuts, prepare_stochastic, resolve_boundary_source_stage,
+    resolve_effective_inflow_lag_depth,
 };
 use cobre_stochastic::StochasticContext;
 use console::{Term, style};
@@ -191,10 +192,19 @@ fn reconcile_boundary(
     hydro_models: PrepareHydroModelsResult,
     stdout: Option<&Term>,
 ) -> Result<BoundaryReconciliationReport, SddpError> {
-    let setup = StudySetup::new(system, config, stochastic, hydro_models)?;
     // Resolve against the CASE dir (an external source checkpoint), never the
     // current run's output dir; an absolute `bp.path` passes through unchanged.
     let boundary_path = case_dir.join(&bp.path);
+
+    // Size the inflow-lag block to the boundary policy before building the layout,
+    // so validate mirrors the run path (the config field is an optional override).
+    let mut config = config.clone();
+    config.state_space.inflow_lag_depth = resolve_effective_inflow_lag_depth(
+        config.state_space.inflow_lag_depth,
+        Some(&boundary_path),
+    )?;
+
+    let setup = StudySetup::new(system, &config, stochastic, hydro_models)?;
 
     // Rationale: the cast cannot truncate — `state_dimension` counts FCF
     // state variables (one per reservoir/lag), bounded by the validated study

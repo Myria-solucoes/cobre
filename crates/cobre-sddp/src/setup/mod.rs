@@ -1236,14 +1236,22 @@ fn resolve_commitment_hold_windows(
                 min_max.push((entry.min_mw, entry.max_mw));
                 dest_stage.push(resolved_dest.unwrap_or(0));
             } else {
+                // `resolve_future_delivery_decider` collapses both out-of-reach
+                // directions to `None`; re-derive which side for an accurate
+                // advisory (target ≤ 0 ⇒ before the horizon start, else past it).
+                let reach = if window_end_hours - delta_hours <= 0.0 {
+                    "its decider would precede the study horizon start"
+                } else {
+                    "its decider would fall past the study horizon end"
+                };
                 tracing::warn!(
                     "anticipated thermal {} ({}): future_anticipated_deliveries window \
-                     [{}, {}) dropped — out of the lead's reach (its decider precedes \
-                     the study horizon)",
+                     [{}, {}) dropped — out of the lead's reach ({})",
                     thermal.id,
                     thermal.name,
                     entry.delivery_start,
                     entry.delivery_end,
+                    reach,
                 );
             }
         }

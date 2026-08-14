@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 pub struct StateSpaceConfig {
     /// Number of active inflow-lag state slots, decoupled from the fitted AR
     /// order. Absent leaves the depth undeclared; a present value must be `>= 1`.
+    /// Optional override: when a boundary policy (`policy.boundary`) is loaded, the
+    /// required depth is inferred from its cuts and widens this value, so the field
+    /// need not be declared for a boundary-loaded study.
     pub inflow_lag_depth: Option<u32>,
 }
 

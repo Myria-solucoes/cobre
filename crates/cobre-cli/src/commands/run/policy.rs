@@ -265,14 +265,16 @@ pub(super) fn apply_training_policy(
                 let _ = stderr.write_line(&format!("warning: {msg}"));
             }
         };
-        let declared_inflow_lag_depth = root_config.and_then(|c| c.state_space.inflow_lag_depth);
+        // Already widened to this boundary policy's depth in `load_case_and_config`,
+        // so the load-time depth guard is a defensive check, never a user error.
+        let effective_inflow_lag_depth = root_config.and_then(|c| c.state_space.inflow_lag_depth);
         let boundary_records = load_boundary_cuts(
             &boundary_path,
             source_stage,
             state_dim,
             &current_manifest,
             &target_delivery_intervals,
-            declared_inflow_lag_depth,
+            effective_inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,
         )
