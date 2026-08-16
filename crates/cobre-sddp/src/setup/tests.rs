@@ -8916,11 +8916,12 @@ fn rules_without_gap() -> crate::stopping_rule::StoppingRuleSet {
     }
 }
 
-/// A `gap` rule under a stage carrying an effective `CVaR` (`lambda > 0`) is
-/// rejected, the message naming the rule, the measure, the offending stage, and
-/// the admitting (expectation) condition.
+/// A `gap` rule under enumerated forwards whose per-stage measures are NOT
+/// uniform (here `Expectation` at stage 0, effective `CVaR` at stage 1) is
+/// rejected, the message naming the rule, the offending stage, the measure, and
+/// the admitting (uniform-measure) condition.
 #[test]
-fn admission_gate_rejects_gap_under_effective_cvar() {
+fn admission_gate_rejects_gap_under_nonuniform_risk_enumerated() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![
         RiskMeasure::Expectation,
@@ -8935,8 +8936,48 @@ fn admission_gate_rejects_gap_under_effective_cvar() {
             assert!(msg.contains("CVaR"), "names the measure: {msg}");
             assert!(msg.contains("stage 1"), "names the offending stage: {msg}");
             assert!(
-                msg.contains("expectation"),
+                msg.contains("uniform"),
                 "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a Validation reject, got {other:?}"),
+    }
+}
+
+/// A `gap` rule under enumerated forwards with a UNIFORM effective `CVaR` at
+/// every stage is admitted: the enumerated engine makes the exact risk-adjusted
+/// upper bound computable, so the gap brackets the risk-adjusted lower bound.
+#[test]
+fn admission_gate_accepts_gap_under_enumerated_uniform_cvar() {
+    use crate::risk_measure::RiskMeasure;
+    let cvar = RiskMeasure::CVaR {
+        alpha: 0.15,
+        lambda: 0.4,
+    };
+    let measures = vec![cvar, cvar, cvar];
+    assert!(
+        super::admission_gate(&measures, &rules_with_gap(), true).is_ok(),
+        "a uniform CVaR under enumerated forwards must admit a gap rule"
+    );
+}
+
+/// A `gap` rule under a uniform `CVaR` but SAMPLED forwards stays rejected: the
+/// upper bound is then a statistical estimate, so there is no exact risk-adjusted
+/// bound to gap against.
+#[test]
+fn admission_gate_rejects_gap_under_uniform_cvar_sampled() {
+    use crate::risk_measure::RiskMeasure;
+    let cvar = RiskMeasure::CVaR {
+        alpha: 0.15,
+        lambda: 0.4,
+    };
+    let measures = vec![cvar, cvar];
+    match super::admission_gate(&measures, &rules_with_gap(), false) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("gap"), "names the rule: {msg}");
+            assert!(
+                msg.contains("sampled"),
+                "names the offending selection: {msg}"
             );
         }
         other => panic!("expected a Validation reject, got {other:?}"),

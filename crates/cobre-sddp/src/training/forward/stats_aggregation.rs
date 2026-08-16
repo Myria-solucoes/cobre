@@ -15,6 +15,7 @@ use cobre_core::WelfordAccumulator;
 
 use super::{ForwardResult, SyncResult};
 use crate::error::SddpError;
+use crate::risk_measure::RiskMeasure;
 // Rationale: imported solely so the `[run_forward_pass]` intra-doc link in
 // `sync_forward`'s rustdoc resolves; the function lives in the parent `mod.rs`.
 #[allow(unused_imports)]
@@ -27,12 +28,19 @@ pub enum ForwardBound<'a> {
     /// Sampled forward: Welford sample mean, standard deviation, and 95% CI
     /// half-width.
     Statistical,
-    /// Enumerated forward: exact `Σ wᵢ·cᵢ` over `path_weights` (canonical order);
-    /// standard deviation and CI half-width are `0` — a deduplicated enumeration
-    /// carries no sampling distribution.
+    /// Enumerated forward: the exact risk-adjusted bound over `path_weights`
+    /// (canonical order). Under `Expectation` (or `CVaR { lambda: 0 }`) it is the
+    /// compensated `Σ wᵢ·cᵢ`; under an effective `CVaR` it is
+    /// `(1 − λ) E[Z] + λ CVaR_α[Z]` — the exact risk-adjusted bound, not an
+    /// estimate, since enumeration visits every path. Standard deviation and CI
+    /// half-width are `0` either way: a deduplicated enumeration carries no
+    /// sampling distribution.
     Exact {
         /// Per-path probability weights, one per gathered cost, in canonical order.
         path_weights: &'a [f64],
+        /// The uniform study-wide risk measure whose weighting aggregates the
+        /// path costs into the bound.
+        risk_measure: RiskMeasure,
     },
 }
 
@@ -144,11 +152,24 @@ pub fn sync_forward<C: Communicator>(
                 (mean, 0.0_f64, 0.0_f64)
             }
         }
-        ForwardBound::Exact { path_weights } => {
-            // Exact probability-weighted bound; std/CI are 0 because a deduplicated
-            // enumeration has no sampling distribution — routing it through the
-            // Welford accumulator as S samples would be a category error.
-            let ub_exact = weighted_cost_reduction(&global_costs, path_weights);
+        ForwardBound::Exact {
+            path_weights,
+            risk_measure,
+        } => {
+            // Exact bound; std/CI are 0 because a deduplicated enumeration has no
+            // sampling distribution — routing it through the Welford accumulator
+            // as S samples would be a category error. An effective CVaR
+            // (`lambda > 0`) applies the same `evaluate_risk` weighting as the
+            // cut/lower-bound aggregation, so the reported gap brackets the
+            // risk-adjusted lower bound; Expectation (and `CVaR { lambda: 0 }`)
+            // keep the compensated `Σ wᵢ·cᵢ`, byte-identical to the pre-change
+            // bound.
+            let ub_exact = match risk_measure {
+                RiskMeasure::CVaR { alpha: _, lambda } if lambda > 0.0 => {
+                    risk_measure.evaluate_risk(&global_costs, path_weights)
+                }
+                _ => weighted_cost_reduction(&global_costs, path_weights),
+            };
             (ub_exact, 0.0_f64, 0.0_f64)
         }
     };

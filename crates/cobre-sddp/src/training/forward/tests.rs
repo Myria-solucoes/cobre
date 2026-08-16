@@ -1393,6 +1393,7 @@ fn sync_forward_exact_reduces_weighted_sum_and_zeroes_ci() {
         2,
         ForwardBound::Exact {
             path_weights: &weights,
+            risk_measure: RiskMeasure::Expectation,
         },
     )
     .unwrap();
@@ -1401,6 +1402,88 @@ fn sync_forward_exact_reduces_weighted_sum_and_zeroes_ci() {
     assert_eq!(result.global_ub_mean, 125.0);
     assert_eq!(result.global_ub_std, 0.0);
     assert_eq!(result.ci_95_half_width, 0.0);
+}
+
+/// Under an effective `CVaR` the enumerated bound is the risk-adjusted
+/// `(1 − λ) E[Z] + λ CVaR_α[Z]`, strictly above the risk-neutral `Σ w·c` — this
+/// is what lets the reported gap bracket a risk-adjusted lower bound.
+#[test]
+fn sync_forward_exact_cvar_reports_risk_adjusted_bound() {
+    let local = ForwardResult {
+        scenario_costs: vec![100.0, 200.0],
+        elapsed_ms: 0,
+        lp_solves: 0,
+        setup_time_ms: 0,
+        load_imbalance_ms: 0,
+        scheduling_overhead_ms: 0,
+        stage_stats: Vec::new(),
+    };
+    let comm = LocalBackend;
+    let weights = [0.5_f64, 0.5];
+    let cvar = RiskMeasure::CVaR {
+        alpha: 0.5,
+        lambda: 1.0,
+    };
+    let result = sync_forward(
+        &local,
+        &comm,
+        2,
+        ForwardBound::Exact {
+            path_weights: &weights,
+            risk_measure: cvar,
+        },
+    )
+    .unwrap();
+
+    // Pure CVaR_0.5 over {100 @ 0.5, 200 @ 0.5}: the worst 0.5-tail is the 200
+    // path at full weight → 200.0, above the risk-neutral 150.0. Matches the
+    // canonical `evaluate_risk` weighting the cut aggregation uses.
+    let expected = cvar.evaluate_risk(&[100.0, 200.0], &weights);
+    assert_eq!(result.global_ub_mean, expected);
+    assert_eq!(result.global_ub_mean, 200.0);
+    assert!(
+        result.global_ub_mean > 150.0,
+        "risk-adjusted bound must exceed the risk-neutral Σ w·c"
+    );
+    assert_eq!(result.global_ub_std, 0.0);
+    assert_eq!(result.ci_95_half_width, 0.0);
+}
+
+/// `CVaR { lambda: 0 }` is documented-equivalent to `Expectation`, so the
+/// enumerated bound stays the compensated `Σ w·c` — byte-identical to the
+/// risk-neutral path, never routed through the `evaluate_risk` sum.
+#[test]
+fn sync_forward_exact_cvar_lambda_zero_matches_weighted_sum() {
+    let local = ForwardResult {
+        scenario_costs: vec![100.0, 200.0],
+        elapsed_ms: 0,
+        lp_solves: 0,
+        setup_time_ms: 0,
+        load_imbalance_ms: 0,
+        scheduling_overhead_ms: 0,
+        stage_stats: Vec::new(),
+    };
+    let comm = LocalBackend;
+    let weights = [0.75_f64, 0.25];
+    let result = sync_forward(
+        &local,
+        &comm,
+        2,
+        ForwardBound::Exact {
+            path_weights: &weights,
+            risk_measure: RiskMeasure::CVaR {
+                alpha: 0.1,
+                lambda: 0.0,
+            },
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        result.global_ub_mean,
+        weighted_cost_reduction(&[100.0, 200.0], &weights)
+    );
+    assert_eq!(result.global_ub_mean, 125.0);
 }
 
 /// The degenerate single-path enumeration (`w = 1`) reports that path's cost as
@@ -1424,6 +1507,7 @@ fn sync_forward_exact_single_path_returns_cost_with_zero_ci() {
         1,
         ForwardBound::Exact {
             path_weights: &weights,
+            risk_measure: RiskMeasure::Expectation,
         },
     )
     .unwrap();

@@ -80,7 +80,7 @@ pub struct BackwardOutcome {
 /// let result = rm.evaluate_risk(&costs, &probs);
 /// assert!((result - 35.0).abs() < 1e-10);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RiskMeasure {
     /// Risk-neutral expected value: weights equal the opening probabilities
     /// `μ*_ω = p(ω)` (Cut Management SS3).
@@ -211,6 +211,35 @@ impl RiskMeasure {
             }
         }
     }
+
+    /// Collapse the documented `CVaR { lambda: 0 }` ≡ `Expectation` equivalence
+    /// to `Expectation` so a zero-risk-aversion `CVaR` compares and aggregates as
+    /// the risk-neutral measure it is. A positive-`lambda` `CVaR` is returned
+    /// unchanged. The `lambda > 0` predicate matches `is_effective_non_expectation`.
+    #[must_use]
+    pub(crate) fn effective(self) -> RiskMeasure {
+        if matches!(self, RiskMeasure::CVaR { lambda, .. } if lambda > 0.0) {
+            self
+        } else {
+            RiskMeasure::Expectation
+        }
+    }
+}
+
+/// The single risk measure shared by every stage, or `None` when they differ.
+///
+/// Compared on the [`effective`](RiskMeasure::effective) form, so a mix of
+/// `Expectation` and `CVaR { lambda: 0 }` counts as uniform. This is the measure
+/// the enumerated risk-adjusted upper bound applies once to the path costs, and
+/// the uniformity a `gap` stopping rule requires under `CVaR` (a per-stage
+/// varying measure has no single static bound).
+#[must_use]
+pub(crate) fn uniform_effective_measure(measures: &[RiskMeasure]) -> Option<RiskMeasure> {
+    let first = measures.first()?.effective();
+    measures
+        .iter()
+        .all(|m| m.effective() == first)
+        .then_some(first)
 }
 
 /// Compute `CVaR` weights via continuous-knapsack greedy allocation on objective
@@ -612,15 +641,16 @@ mod tests {
     }
 
     #[test]
-    fn risk_measure_debug_and_clone() {
+    fn risk_measure_debug_copy_eq() {
         let rm = RiskMeasure::CVaR {
             alpha: 0.5,
             lambda: 0.8,
         };
-        let cloned = rm.clone();
+        let copied = rm; // Copy leaves `rm` usable below.
+        assert_eq!(copied, rm);
+        assert_ne!(copied, RiskMeasure::Expectation);
         let debug_str = format!("{rm:?}");
         assert!(debug_str.contains("CVaR"));
-        let _ = cloned;
     }
 
     #[test]

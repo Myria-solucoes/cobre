@@ -622,6 +622,47 @@ there is no exponentially-weighted smoothing. Gap closure is immediate for
 deterministic cases.
 Read: `convergence/convergence.rs`.
 
+## The enumerated upper bound is risk-adjusted under a uniform CVaR
+
+The enumerated forward's exact upper bound (`ForwardBound::Exact` in
+`training/forward/stats_aggregation.rs`) applies the study's uniform risk measure
+to the gathered path costs, matching the measure the cut/lower-bound aggregation
+uses (`RiskMeasure::evaluate_risk` — its own doc names it "for convergence bound
+computation"). Under `Expectation` (and `CVaR { lambda: 0 }`, which
+[`effective`](RiskMeasure::effective) collapses to it) it is the compensated
+`Σ wᵢ·cᵢ` — byte-identical to the pre-change bound; under an effective `CVaR`
+(`lambda > 0`) it is `(1 − λ) E[Z] + λ CVaR_α[Z]`. Because enumeration visits
+every path this is the EXACT risk-adjusted bound, not an estimate, so it brackets
+the risk-adjusted lower bound and the reported gap is non-negative. Using the
+plain `Σ wᵢ·cᵢ` (risk-neutral) bound under a `CVaR` lower bound is the
+wrong-but-compiling alternative: the bound sits below the risk-adjusted LB, so the
+gap is persistently negative and a `gap` stopping rule can never trigger. The
+single UB measure is `uniform_effective_measure(risk_measures)` (the session's
+`run_forward_phase`), falling back to `Expectation` when the measure varies by
+stage — reachable only without a `gap` rule, since the admission gate rejects a
+non-uniform `CVaR` under a gap rule.
+
+**The `gap` stopping rule admits an effective `CVaR` only under enumerated
+forwards with a uniform measure.** The exact risk-adjusted bound above exists only
+when the forward is enumerated (a sampled forward's UB is a statistical estimate)
+and the measure is uniform across stages (a single static bound applies one
+measure). `reject_gap_under_effective_risk_aversion` (`setup/mod.rs`) enforces
+both: sampled forwards reject any effective risk aversion (and
+`reject_gap_under_sampled_selection` rejects the expectation case too); enumerated
+forwards defer to `reject_gap_under_nonuniform_risk`, which admits a uniform
+measure and rejects a stage-varying one. This is a strict relaxation of the prior
+unconditional CVaR rejection — expectation and sampled paths are unchanged.
+Read: `training/forward/stats_aggregation.rs` (`ForwardBound::Exact`),
+`convergence/risk_measure.rs` (`evaluate_risk`, `effective`,
+`uniform_effective_measure`), `training/session/mod.rs` (`run_forward_phase`),
+`setup/mod.rs` (`reject_gap_under_effective_risk_aversion`,
+`reject_gap_under_nonuniform_risk`). Pinned by
+`sync_forward_exact_cvar_reports_risk_adjusted_bound` and
+`sync_forward_exact_cvar_lambda_zero_matches_weighted_sum`
+(`training/forward/tests.rs`), the `admission_gate_*` gate tests
+(`setup/tests.rs`), and the end-to-end `enumerated_cvar_gap` module
+(`tests/deterministic.rs`).
+
 ## Terminal boundary FCF is booked in the reported total cost
 
 The forward trajectory cost and the simulation per-scenario cost both reconstruct

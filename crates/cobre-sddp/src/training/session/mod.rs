@@ -49,6 +49,7 @@ use crate::{
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
     rank_reconcile::{reconcile_error_flag, reconcile_result},
+    risk_measure::{RiskMeasure, uniform_effective_measure},
     setup::NodeGraph,
     setup::node_graph::{NodePos, StageIdx, Traversal, enumerated_requires_state_exchange},
     solver_stats::{
@@ -843,8 +844,15 @@ where
             );
             self.scratch.ub_path_weights.clear();
             self.scratch.ub_path_weights.extend_from_slice(weights);
+            // A uniform CVaR yields the exact risk-adjusted bound; a non-uniform
+            // measure (only reachable without a `gap` rule — the admission gate
+            // rejects it otherwise) has no single static bound, so the reported UB
+            // falls back to the risk-neutral `Expectation` reduction.
+            let risk_measure = uniform_effective_measure(&self.config.cut_management.risk_measures)
+                .unwrap_or(RiskMeasure::Expectation);
             ForwardBound::Exact {
                 path_weights: &self.scratch.ub_path_weights,
+                risk_measure,
             }
         } else {
             ForwardBound::Statistical
