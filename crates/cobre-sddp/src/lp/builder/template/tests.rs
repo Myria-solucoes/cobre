@@ -2420,7 +2420,10 @@ fn relocated_min_generation_row_bounds() {
 
 #[test]
 fn relocated_min_outflow_matrix_coefficients() {
-    // Per-block min outflow: q + s + d + slack = 1.0 per block-row.
+    // Per-block min outflow: q + s + slack = 1.0 per block-row. Diversion `d`
+    // is EXCLUDED (the floor binds the non-diverted river-remnant flow);
+    // `min_outflow_row_excludes_diversion_but_max_includes_it` pins that both
+    // ways against the deliberate min/max asymmetry.
     let (layout, t) = build_active_violations_layout_and_template();
     let n_blks = 2;
 
@@ -2449,6 +2452,40 @@ fn relocated_min_outflow_matrix_coefficients() {
         assert!(
             v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
             "outflow_below slack blk{blk}: {v:?}"
+        );
+    }
+}
+
+/// The diversion column is coupled into the max-outflow row (`+1.0`) but NOT
+/// the min-outflow row: the minimum binds the non-diverted `q + s`, the maximum
+/// caps total release including diversion. The two assertions together pin the
+/// deliberate asymmetry — a mirror that re-adds `d` to the minimum, or drops it
+/// from the maximum, fails exactly one of them.
+#[test]
+fn min_outflow_row_excludes_diversion_but_max_includes_it() {
+    let (layout, t) = build_active_violations_layout_and_template();
+    let n_blks = 2;
+
+    for blk in 0..n_blks {
+        let div_col = layout.equipment.diversion.start + blk;
+
+        let min_row = layout.slack.oper_violation.min_outflow_rows.start + blk;
+        let min_entry = csc_entries_for_col(&t, div_col)
+            .into_iter()
+            .find(|e| e.0 == min_row);
+        assert!(
+            min_entry.is_none(),
+            "diversion col must have NO entry in the min_outflow row (blk {blk}), got {min_entry:?}"
+        );
+
+        let max_row = layout.slack.oper_violation.max_outflow_rows.start + blk;
+        let max_entry = csc_entries_for_col(&t, div_col)
+            .into_iter()
+            .find(|e| e.0 == max_row)
+            .map(|e| e.1);
+        assert!(
+            max_entry.is_some() && (max_entry.unwrap() - 1.0).abs() < 1e-15,
+            "diversion col must have a +1.0 entry in the max_outflow row (blk {blk}), got {max_entry:?}"
         );
     }
 }

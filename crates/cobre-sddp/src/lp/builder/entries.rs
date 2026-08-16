@@ -1468,8 +1468,15 @@ pub(super) fn fill_z_inflow_entries(
 /// Fill entries for the 4 operational-violation families, linking decision
 /// variables to their slack columns:
 ///
-/// - **Min outflow** (`>=`, per hydro): `q + s + d + sigma_below`
-/// - **Max outflow** (`<=`, per hydro): `q + s + d - sigma_above`
+/// - **Min outflow** (`>=`, per hydro): `q + s + sigma_below` — binds the
+///   NON-DIVERTED river-remnant flow; the diversion column `d` is EXCLUDED
+///   (it routes to a different downstream target, not the natural reach), so
+///   the floor forces flow down the plant's own channel. Adding `d` here lets
+///   diverted water satisfy the minimum, understating the mandated release —
+///   a wrong-but-compiling bound.
+/// - **Max outflow** (`<=`, per hydro): `q + s + d - sigma_above` — `d` is KEPT
+///   here (caps TOTAL release, diversion included). The min/max asymmetry is
+///   deliberate: do NOT mirror the min's exclusion onto the maximum.
 /// - **Min turbine** (`>=`, per CELL): `q_c + sigma_below_c`
 /// - **Min generation** (`>=`, per CELL): `var_c + sigma_below_c`, where `var_c`
 ///   is `rho * q_c` for constant-productivity hydros, the cell's own generation
@@ -1501,8 +1508,9 @@ pub(super) fn fill_operational_violation_entries(
             }
             let col_s = layout.spillage_col(HydroSys::new(h_idx), blk);
             col_entries[col_s].push((row, 1.0));
-            let col_d = layout.diversion_col(HydroSys::new(h_idx), blk);
-            col_entries[col_d].push((row, 1.0));
+            // Diversion `d` is intentionally NOT coupled here: the minimum binds
+            // the non-diverted river-remnant flow `q + s`. The max-outflow row
+            // below keeps `d` — do not restore symmetry by re-adding it.
             let col_slack = layout.outflow_below_col(HydroSys::new(h_idx), blk);
             col_entries[col_slack].push((row, 1.0));
         }

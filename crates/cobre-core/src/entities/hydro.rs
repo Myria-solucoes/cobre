@@ -213,9 +213,14 @@ pub struct Hydro {
     pub min_storage_hm3: f64,
     /// Maximum operational storage (flood control level) \[hm³\].
     pub max_storage_hm3: f64,
-    /// Minimum total outflow (turbined + spilled) required at all times \[m³/s\].
+    /// Minimum outflow down the natural river reach (turbined + spilled)
+    /// required at all times \[m³/s\]. Excludes any `diversion` flow, which
+    /// routes to a separate downstream target — the floor binds the water that
+    /// stays in the plant's own channel.
     pub min_outflow_m3s: f64,
-    /// Maximum total outflow constraint \[m³/s\]. None = no upper bound.
+    /// Maximum total outflow constraint (turbined + spilled + diverted) \[m³/s\].
+    /// None = no upper bound. Unlike `min_outflow_m3s`, this DOES include
+    /// diversion — the asymmetry is deliberate.
     pub max_outflow_m3s: Option<f64>,
     /// Production function model for this plant.
     pub generation_model: HydroGenerationModel,
