@@ -1393,7 +1393,6 @@ fn sync_forward_exact_reduces_weighted_sum_and_zeroes_ci() {
         2,
         ForwardBound::Exact {
             path_weights: &weights,
-            risk_measure: RiskMeasure::Expectation,
         },
     )
     .unwrap();
@@ -1402,88 +1401,6 @@ fn sync_forward_exact_reduces_weighted_sum_and_zeroes_ci() {
     assert_eq!(result.global_ub_mean, 125.0);
     assert_eq!(result.global_ub_std, 0.0);
     assert_eq!(result.ci_95_half_width, 0.0);
-}
-
-/// Under an effective `CVaR` the enumerated bound is the risk-adjusted
-/// `(1 − λ) E[Z] + λ CVaR_α[Z]`, strictly above the risk-neutral `Σ w·c` — this
-/// is what lets the reported gap bracket a risk-adjusted lower bound.
-#[test]
-fn sync_forward_exact_cvar_reports_risk_adjusted_bound() {
-    let local = ForwardResult {
-        scenario_costs: vec![100.0, 200.0],
-        elapsed_ms: 0,
-        lp_solves: 0,
-        setup_time_ms: 0,
-        load_imbalance_ms: 0,
-        scheduling_overhead_ms: 0,
-        stage_stats: Vec::new(),
-    };
-    let comm = LocalBackend;
-    let weights = [0.5_f64, 0.5];
-    let cvar = RiskMeasure::CVaR {
-        alpha: 0.5,
-        lambda: 1.0,
-    };
-    let result = sync_forward(
-        &local,
-        &comm,
-        2,
-        ForwardBound::Exact {
-            path_weights: &weights,
-            risk_measure: cvar,
-        },
-    )
-    .unwrap();
-
-    // Pure CVaR_0.5 over {100 @ 0.5, 200 @ 0.5}: the worst 0.5-tail is the 200
-    // path at full weight → 200.0, above the risk-neutral 150.0. Matches the
-    // canonical `evaluate_risk` weighting the cut aggregation uses.
-    let expected = cvar.evaluate_risk(&[100.0, 200.0], &weights);
-    assert_eq!(result.global_ub_mean, expected);
-    assert_eq!(result.global_ub_mean, 200.0);
-    assert!(
-        result.global_ub_mean > 150.0,
-        "risk-adjusted bound must exceed the risk-neutral Σ w·c"
-    );
-    assert_eq!(result.global_ub_std, 0.0);
-    assert_eq!(result.ci_95_half_width, 0.0);
-}
-
-/// `CVaR { lambda: 0 }` is documented-equivalent to `Expectation`, so the
-/// enumerated bound stays the compensated `Σ w·c` — byte-identical to the
-/// risk-neutral path, never routed through the `evaluate_risk` sum.
-#[test]
-fn sync_forward_exact_cvar_lambda_zero_matches_weighted_sum() {
-    let local = ForwardResult {
-        scenario_costs: vec![100.0, 200.0],
-        elapsed_ms: 0,
-        lp_solves: 0,
-        setup_time_ms: 0,
-        load_imbalance_ms: 0,
-        scheduling_overhead_ms: 0,
-        stage_stats: Vec::new(),
-    };
-    let comm = LocalBackend;
-    let weights = [0.75_f64, 0.25];
-    let result = sync_forward(
-        &local,
-        &comm,
-        2,
-        ForwardBound::Exact {
-            path_weights: &weights,
-            risk_measure: RiskMeasure::CVaR {
-                alpha: 0.1,
-                lambda: 0.0,
-            },
-        },
-    )
-    .unwrap();
-
-    assert_eq!(
-        result.global_ub_mean,
-        weighted_cost_reduction(&[100.0, 200.0], &weights)
-    );
-    assert_eq!(result.global_ub_mean, 125.0);
 }
 
 /// The degenerate single-path enumeration (`w = 1`) reports that path's cost as
@@ -1507,7 +1424,6 @@ fn sync_forward_exact_single_path_returns_cost_with_zero_ci() {
         1,
         ForwardBound::Exact {
             path_weights: &weights,
-            risk_measure: RiskMeasure::Expectation,
         },
     )
     .unwrap();
@@ -1515,6 +1431,84 @@ fn sync_forward_exact_single_path_returns_cost_with_zero_ci() {
     assert_eq!(result.global_ub_mean, 500.0);
     assert_eq!(result.global_ub_std, 0.0);
     assert_eq!(result.ci_95_half_width, 0.0);
+}
+
+/// The nested backward risk recursion is the NESTED (time-consistent) `CVaR` of
+/// the realized costs, strictly above the end-of-horizon `CVaR` of the whole-path
+/// totals on a tree whose worst branch compounds. Fixture: a 3-stage binary tree;
+/// the "bad" stage-1 branch (node 2, immediate 100) leads to the "bad-bad" leaf
+/// (node 6, immediate 100); all other immediates are 0. Path totals are
+/// {0, 0, 100, 200} at weight 0.25.
+///
+/// - Pure `CVaR_0.5` nested → `V(root) = 200`: the recursion concentrates on the
+///   worst branch at every stage (the α² ≈ worst-quarter protection).
+/// - End-of-horizon `CVaR_0.5` of the totals → `150` (worst-half of the totals).
+/// - `Expectation` collapses to `Σ wᵢ·total = 75`, matching a plain weighted sum.
+#[test]
+fn nested_ub_recursion_is_nested_not_end_of_horizon() {
+    use super::stats_aggregation::nested_ub_recursion;
+    use crate::setup::node_graph::{NodePos, TypedVec};
+
+    // parent map: 0=root; 1,2 = stage-1 children of 0; 3,4 = leaves of 1; 5,6 = leaves of 2.
+    let parent: TypedVec<NodePos, Option<NodePos>> = vec![
+        None,
+        Some(NodePos(0)),
+        Some(NodePos(0)),
+        Some(NodePos(1)),
+        Some(NodePos(1)),
+        Some(NodePos(2)),
+        Some(NodePos(2)),
+    ]
+    .into();
+    let leaf = [NodePos(3), NodePos(4), NodePos(5), NodePos(6)];
+    let weight = [0.25_f64; 4];
+    // path-major [c_root, c_stage1, c_leaf] per path (paths in leaf order 3,4,5,6):
+    #[rustfmt::skip]
+    let global = [
+        0.0, 0.0, 0.0,   // path via leaf 3 (good branch)
+        0.0, 0.0, 0.0,   // path via leaf 4 (good branch)
+        0.0, 100.0, 0.0, // path via leaf 5 (bad stage-1, good leaf)
+        0.0, 100.0, 100.0, // path via leaf 6 (bad stage-1, bad leaf)
+    ];
+    let cum_d = [1.0_f64, 1.0, 1.0];
+
+    let cvar = RiskMeasure::CVaR {
+        alpha: 0.5,
+        lambda: 1.0,
+    };
+    let nested = nested_ub_recursion(&parent, &leaf, &weight, &global, 3, &cum_d, cvar);
+    assert!(
+        (nested - 200.0).abs() < 1e-12,
+        "nested pure CVaR_0.5 must be 200.0, got {nested}"
+    );
+
+    // End-of-horizon CVaR of the whole-path totals is only 150 — strictly below
+    // the nested 200, the exact gap the spec's negative-gap defect turned on.
+    let totals = [0.0_f64, 0.0, 100.0, 200.0];
+    let end_of_horizon = cvar.evaluate_risk(&totals, &weight);
+    assert!(
+        (end_of_horizon - 150.0).abs() < 1e-12,
+        "end-of-horizon CVaR_0.5 must be 150.0, got {end_of_horizon}"
+    );
+    assert!(
+        nested > end_of_horizon,
+        "the nested bound ({nested}) must exceed the end-of-horizon bound ({end_of_horizon})"
+    );
+
+    // Expectation collapses the recursion to the plain probability-weighted total.
+    let expectation = nested_ub_recursion(
+        &parent,
+        &leaf,
+        &weight,
+        &global,
+        3,
+        &cum_d,
+        RiskMeasure::Expectation,
+    );
+    assert!(
+        (expectation - 75.0).abs() < 1e-12,
+        "Expectation must collapse to Σ wᵢ·total = 75.0, got {expectation}"
+    );
 }
 
 // ── Unit tests: warm-start basis caching ─────────────────────────────────

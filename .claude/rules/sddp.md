@@ -622,44 +622,55 @@ there is no exponentially-weighted smoothing. Gap closure is immediate for
 deterministic cases.
 Read: `convergence/convergence.rs`.
 
-## The enumerated upper bound is risk-adjusted under a uniform CVaR
+## The enumerated CVaR upper bound is NESTED, not end-of-horizon
 
-The enumerated forward's exact upper bound (`ForwardBound::Exact` in
-`training/forward/stats_aggregation.rs`) applies the study's uniform risk measure
-to the gathered path costs, matching the measure the cut/lower-bound aggregation
-uses (`RiskMeasure::evaluate_risk` — its own doc names it "for convergence bound
-computation"). Under `Expectation` (and `CVaR { lambda: 0 }`, which
-[`effective`](RiskMeasure::effective) collapses to it) it is the compensated
-`Σ wᵢ·cᵢ` — byte-identical to the pre-change bound; under an effective `CVaR`
-(`lambda > 0`) it is `(1 − λ) E[Z] + λ CVaR_α[Z]`. Because enumeration visits
-every path this is the EXACT risk-adjusted bound, not an estimate, so it brackets
-the risk-adjusted lower bound and the reported gap is non-negative. Using the
-plain `Σ wᵢ·cᵢ` (risk-neutral) bound under a `CVaR` lower bound is the
-wrong-but-compiling alternative: the bound sits below the risk-adjusted LB, so the
-gap is persistently negative and a `gap` stopping rule can never trigger. The
-single UB measure is `uniform_effective_measure(risk_measures)` (the session's
-`run_forward_phase`), falling back to `Expectation` when the measure varies by
-stage — reachable only without a `gap` rule, since the admission gate rejects a
-non-uniform `CVaR` under a gap rule.
+Under an effective `CVaR` the enumerated forward's upper bound is computed by a
+NESTED backward risk recursion over the enumerated scenario tree
+(`nested_ub_recursion` / `enumerated_nested_ub` in
+`training/forward/stats_aggregation.rs`, applied in the session's
+`apply_nested_cvar_ub`): `Ṽ(n) = cum_d[stage(n)]·c(n) + ρ_children(Ṽ(child))`,
+where `ρ` is the same `RiskMeasure::evaluate_risk` weighting the per-node cut /
+lower-bound aggregation applies, over each node's children weighted by their
+conditional probabilities. This mirrors the nested measure SDDP optimizes
+(`ρ = ρ₁(c₁ + ρ₂(c₂ + … ρ_T(c_T)))`), the time-consistent CVaR (per-stage α
+compounding to ≈ α^T; CEPEL NT-66 §3.2.1) that DECOMP uses.
+
+Applying `evaluate_risk` ONCE to whole-path root-to-leaf totals — the
+end-of-horizon form `(1−λ)E[Z] + λ·CVaR_α[Z]` over path totals — is the
+wrong-but-compiling alternative. For a nested measure `ρ_nested ≥
+ρ_end-of-horizon`, so the end-of-horizon bound is NOT a valid upper bound on the
+nested objective: it can (and on `decomp-mar-26-rv2-reduced` does) fall BELOW the
+nested lower bound, giving a persistent negative gap that halts a `gap` rule at a
+spurious LB/UB crossover before the policy has converged. Same `evaluate_risk`
+weighting, wrong recursion. The nested `Ṽ(root)` is `≥ V* ≥ LB` at every
+iteration, so the gap stays non-negative and closes only at true convergence.
+
+`Expectation` (and `CVaR { lambda: 0 }`, which
+[`effective`](RiskMeasure::effective) collapses to it) leaves the bound at the
+risk-neutral compensated `Σ wᵢ·cᵢ` (`ForwardBound::Exact` in `sync_forward`) —
+byte-identical to the pre-change path, since nesting is linear under expectation
+and the session applies no override there. The override fires only for a uniform
+effective `CVaR` (`uniform_effective_measure`); a stage-varying measure (reachable
+only without a `gap` rule) falls back to the risk-neutral bound.
 
 **The `gap` stopping rule admits an effective `CVaR` only under enumerated
-forwards with a uniform measure.** The exact risk-adjusted bound above exists only
-when the forward is enumerated (a sampled forward's UB is a statistical estimate)
-and the measure is uniform across stages (a single static bound applies one
-measure). `reject_gap_under_effective_risk_aversion` (`setup/mod.rs`) enforces
-both: sampled forwards reject any effective risk aversion (and
-`reject_gap_under_sampled_selection` rejects the expectation case too); enumerated
-forwards defer to `reject_gap_under_nonuniform_risk`, which admits a uniform
-measure and rejects a stage-varying one. This is a strict relaxation of the prior
-unconditional CVaR rejection — expectation and sampled paths are unchanged.
-Read: `training/forward/stats_aggregation.rs` (`ForwardBound::Exact`),
-`convergence/risk_measure.rs` (`evaluate_risk`, `effective`,
-`uniform_effective_measure`), `training/session/mod.rs` (`run_forward_phase`),
-`setup/mod.rs` (`reject_gap_under_effective_risk_aversion`,
-`reject_gap_under_nonuniform_risk`). Pinned by
-`sync_forward_exact_cvar_reports_risk_adjusted_bound` and
-`sync_forward_exact_cvar_lambda_zero_matches_weighted_sum`
-(`training/forward/tests.rs`), the `admission_gate_*` gate tests
+forwards with a uniform measure.** The exact nested bound exists only when the
+forward is enumerated (a sampled forward's UB is a statistical estimate) and the
+measure is uniform across stages (one measure aggregates the tree).
+`reject_gap_under_effective_risk_aversion` (`setup/mod.rs`) enforces both: sampled
+forwards reject any effective risk aversion (and `reject_gap_under_sampled_selection`
+rejects the expectation case too); enumerated forwards defer to
+`reject_gap_under_nonuniform_risk`, which admits a uniform measure and rejects a
+stage-varying one.
+
+Read: `training/forward/stats_aggregation.rs` (`nested_ub_recursion`,
+`enumerated_nested_ub`, `ForwardBound::Exact`), `training/session/mod.rs`
+(`apply_nested_cvar_ub`), `convergence/risk_measure.rs` (`evaluate_risk`,
+`effective`, `uniform_effective_measure`), `setup/mod.rs`
+(`reject_gap_under_effective_risk_aversion`, `reject_gap_under_nonuniform_risk`).
+Pinned by `nested_ub_recursion_is_nested_not_end_of_horizon`
+(`training/forward/tests.rs` — the nested bound exceeds the end-of-horizon bound
+on a tree whose worst branch compounds), the `admission_gate_*` gate tests
 (`setup/tests.rs`), and the end-to-end `enumerated_cvar_gap` module
 (`tests/deterministic.rs`).
 

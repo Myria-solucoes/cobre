@@ -6212,7 +6212,6 @@ mod chronological_telescoping {
             1,
             ForwardBound::Exact {
                 path_weights: &[1.0],
-                risk_measure: cobre_sddp::RiskMeasure::Expectation,
             },
         )
         .unwrap();
