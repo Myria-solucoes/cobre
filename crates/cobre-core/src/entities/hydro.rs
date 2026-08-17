@@ -74,9 +74,9 @@ pub struct HydroPenalties {
     pub filling_target_violation_cost: f64,
     /// Penalty per m³/s of turbined flow below minimum bound \[$/m³/s\].
     pub turbined_violation_below_cost: f64,
-    /// Penalty per m³/s of total outflow below minimum bound \[$/m³/s\].
+    /// Penalty per m³/s of non-diverted outflow below minimum bound \[$/m³/s\].
     pub outflow_violation_below_cost: f64,
-    /// Penalty per m³/s of total outflow above maximum bound \[$/m³/s\].
+    /// Penalty per m³/s of non-diverted outflow above maximum bound \[$/m³/s\].
     pub outflow_violation_above_cost: f64,
     /// Penalty per MW of generation below minimum bound \[$/MW\].
     pub generation_violation_below_cost: f64,
@@ -218,9 +218,10 @@ pub struct Hydro {
     /// routes to a separate downstream target — the floor binds the water that
     /// stays in the plant's own channel.
     pub min_outflow_m3s: f64,
-    /// Maximum total outflow constraint (turbined + spilled + diverted) \[m³/s\].
-    /// None = no upper bound. Unlike `min_outflow_m3s`, this DOES include
-    /// diversion — the asymmetry is deliberate.
+    /// Maximum outflow down the natural river reach (turbined + spilled) \[m³/s\].
+    /// None = no upper bound. Symmetric with `min_outflow_m3s`: both bound the
+    /// non-diverted channel and exclude `diversion`, which is capped separately by
+    /// its own channel limit.
     pub max_outflow_m3s: Option<f64>,
     /// Production function model for this plant.
     pub generation_model: HydroGenerationModel,

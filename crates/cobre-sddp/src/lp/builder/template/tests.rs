@@ -2456,37 +2456,35 @@ fn relocated_min_outflow_matrix_coefficients() {
     }
 }
 
-/// The diversion column is coupled into the max-outflow row (`+1.0`) but NOT
-/// the min-outflow row: the minimum binds the non-diverted `q + s`, the maximum
-/// caps total release including diversion. The two assertions together pin the
-/// deliberate asymmetry — a mirror that re-adds `d` to the minimum, or drops it
-/// from the maximum, fails exactly one of them.
+/// The diversion column is coupled into NEITHER outflow row: both the minimum
+/// and the maximum bind the non-diverted `q + s`, leaving diversion to its own
+/// channel cap. Re-adding `d` to either row fails.
 #[test]
-fn min_outflow_row_excludes_diversion_but_max_includes_it() {
+fn both_outflow_rows_exclude_diversion() {
     let (layout, t) = build_active_violations_layout_and_template();
     let n_blks = 2;
 
     for blk in 0..n_blks {
         let div_col = layout.equipment.diversion.start + blk;
+        let entries = csc_entries_for_col(&t, div_col);
 
-        let min_row = layout.slack.oper_violation.min_outflow_rows.start + blk;
-        let min_entry = csc_entries_for_col(&t, div_col)
-            .into_iter()
-            .find(|e| e.0 == min_row);
-        assert!(
-            min_entry.is_none(),
-            "diversion col must have NO entry in the min_outflow row (blk {blk}), got {min_entry:?}"
-        );
-
-        let max_row = layout.slack.oper_violation.max_outflow_rows.start + blk;
-        let max_entry = csc_entries_for_col(&t, div_col)
-            .into_iter()
-            .find(|e| e.0 == max_row)
-            .map(|e| e.1);
-        assert!(
-            max_entry.is_some() && (max_entry.unwrap() - 1.0).abs() < 1e-15,
-            "diversion col must have a +1.0 entry in the max_outflow row (blk {blk}), got {max_entry:?}"
-        );
+        for (label, start) in [
+            (
+                "min_outflow",
+                layout.slack.oper_violation.min_outflow_rows.start,
+            ),
+            (
+                "max_outflow",
+                layout.slack.oper_violation.max_outflow_rows.start,
+            ),
+        ] {
+            let row = start + blk;
+            let entry = entries.iter().find(|e| e.0 == row);
+            assert!(
+                entry.is_none(),
+                "diversion col must have NO entry in the {label} row (blk {blk}), got {entry:?}"
+            );
+        }
     }
 }
 

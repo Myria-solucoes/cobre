@@ -263,40 +263,40 @@ Read: `crates/cobre-sddp/src/lp/builder/columns.rs` (`cell_min_turbined`,
 apportionment), the d53 binding fixture, and the group-declaration-order
 determinism regression.
 
-### Minimum outflow binds the non-diverted flow; maximum keeps diversion
+### Both outflow rows bind the non-diverted river-remnant flow
 
-The per-hydro **minimum-outflow** row couples turbine + spillage only:
-`q + s + σ_below ≥ min_outflow`. The diversion column `d` is DELIBERATELY
-EXCLUDED. A diversion routes water to a _different_ downstream target — the
-water balance books it `+τ_h` on the source's own row and `−τ_h` on the
-diversion target's row (`fill_state_and_water_entries`), and the water
-travel-time arc deposits only `q + s` (`stage_release_rate_m3s` excludes
-diversion for exactly this reason) — so `d` is a separate flow path, not part
-of the natural river reach the defluência-mínima governs. Coupling `d` into the
-minimum is the wrong-but-compiling alternative: it lets diverted water satisfy
-the floor, so a diverting plant reports zero below-slack while its own channel
-carries less than `min_outflow` (the Belo Monte / Volta Grande under-release).
+Both per-hydro outflow rows couple turbine + spillage only, symmetrically:
+`q + s + σ_below ≥ min_outflow` and `q + s − σ_above ≤ max_outflow`. The
+diversion column `d` is DELIBERATELY EXCLUDED from BOTH. A diversion routes water
+to a _different_ downstream target — the water balance books it `+τ_h` on the
+source's own row and `−τ_h` on the diversion target's row
+(`fill_state_and_water_entries`), and the water travel-time arc deposits only
+`q + s` (`stage_release_rate_m3s` excludes diversion for exactly this reason) — so
+`d` is a separate flow path, capped by its own `max_diversion_m3s` column bound,
+not part of the natural river reach the defluência bounds govern.
 
-The **maximum-outflow** row is asymmetric on purpose: `q + s + d − σ_above ≤
-max_outflow` KEEPS `d` (it caps total release). Do NOT mirror the minimum's
-exclusion onto the maximum — the two bind different physical quantities.
+Coupling `d` into either row is the wrong-but-compiling alternative: on the
+minimum it lets diverted water satisfy the floor, so a diverting plant reports
+zero below-slack while its own channel carries less than `min_outflow` (the Belo
+Monte / Volta Grande under-release); on the maximum it double-governs the
+diversion's own cap, capping total release rather than the natural channel.
 
-The change is byte-neutral on any non-diverting deck: the diversion column is
+The rows are byte-neutral on any non-diverting deck: the diversion column is
 dense but pinned `[0, 0]` (`fill_diversion_columns`) and presolve-eliminated, so
-dropping its zero-valued coefficient from the min-outflow row leaves the solved
-LP identical. Both flow families stay hydro-keyed (`n_op_hydro`), never per-cell.
+omitting its zero-valued coefficient leaves the solved LP identical. Both flow
+families stay hydro-keyed (`n_op_hydro`), never per-cell.
 
 Read: `crates/cobre-sddp/src/lp/builder/entries.rs`
-(`fill_operational_violation_entries` — the min block omits `d`, the max block
-keeps it), `crates/cobre-sddp/src/lp/builder/rows.rs`
-(`fill_operational_violation_rows`), `crates/cobre-core/src/entities/hydro.rs`
-(`Hydro::min_outflow_m3s` doc). Pinned by
-`min_outflow_row_excludes_diversion_but_max_includes_it`
-(`crates/cobre-sddp/src/lp/builder/template/tests.rs`, the structural both-ways
-coefficient check, mutation-verified against re-adding `d`) and
-`min_outflow_binds_the_non_diverted_flow_on_a_diverter`
-(`tests/hydro_sim.rs`, a run-of-river diverter whose cheaper-than-spill
-diversion would otherwise leave `q + s` below the floor).
+(`fill_operational_violation_entries` — both outflow blocks omit `d`),
+`crates/cobre-sddp/src/lp/builder/rows.rs` (`fill_operational_violation_rows`),
+`crates/cobre-core/src/entities/hydro.rs` (`Hydro::min_outflow_m3s` /
+`max_outflow_m3s` docs). Pinned by `both_outflow_rows_exclude_diversion`
+(`crates/cobre-sddp/src/lp/builder/template/tests.rs`, the structural coefficient
+check, mutation-verified against re-adding `d` to either row),
+`min_outflow_binds_the_non_diverted_flow_on_a_diverter`, and
+`max_outflow_binds_the_non_diverted_flow_on_a_diverter` (`tests/hydro_sim.rs`,
+run-of-river diverters where the diverted flow would otherwise satisfy the
+minimum or evade the maximum).
 
 ## Cut pool is append-only; basis matches by slot identity
 

@@ -2282,12 +2282,13 @@ mod transit_seed_round_trip {
     }
 }
 
-mod diversion_min_outflow {
-    //! The per-hydro minimum-outflow floor binds the NON-DIVERTED river-remnant
-    //! flow `q + s`, never `q + s + d`. Reproduces the Belo Monte / Volta Grande
-    //! defect: a diverting plant carrying a defluência-mínima must route the
-    //! minimum down its own channel (turbine + spill), not satisfy it with water
-    //! routed away through the diversion canal.
+mod diversion_outflow_bounds {
+    //! Both per-hydro outflow bounds bind the NON-DIVERTED river-remnant flow
+    //! `q + s`, never `q + s + d`. The minimum reproduces the Belo Monte / Volta
+    //! Grande defect (a defluência-mínima must be routed down the plant's own
+    //! channel, not satisfied by the diversion canal); the maximum is its mirror
+    //! (a defluência-máxima caps the natural channel, while the diversion canal —
+    //! bounded separately — carries the surplus past it).
 
     use chrono::NaiveDate;
     use cobre_core::entities::hydro::{DiversionChannel, HydroGenerationModel};
@@ -2322,6 +2323,9 @@ mod diversion_min_outflow {
     const BUS_ID: i32 = 1;
     /// The defluência-mínima on the source's natural reach (Volta Grande analog).
     const MIN_OUTFLOW_M3S: f64 = 400.0;
+    /// The defluência-máxima on the source's natural reach; below the inflow, so
+    /// the surplus must leave through the diversion canal past the cap.
+    const MAX_OUTFLOW_M3S: f64 = 300.0;
     /// Turbine cap below the floor, so meeting `q + s >= MIN_OUTFLOW` forces spill.
     const MAX_TURBINED_M3S: f64 = 100.0;
     /// Diversion capacity large enough to absorb every surplus m³/s.
@@ -2329,6 +2333,20 @@ mod diversion_min_outflow {
     /// Deterministic run-of-river inflow (std 0): the source must release exactly
     /// this every block, split among turbine / spill / diversion.
     const INFLOW_M3S: f64 = 500.0;
+
+    /// Which outflow bound the fixture exercises. Both bind `q + s`; each needs a
+    /// cost structure that would push the diverted flow across the bound if the
+    /// diversion column were (wrongly) coupled into the row.
+    #[derive(Clone, Copy)]
+    enum Bound {
+        /// Diversion is cheaper than spill, so the LP would meet the floor with
+        /// diversion if `d` counted toward the minimum.
+        Min,
+        /// Diversion is dearer than spill, so the LP pushes `q + s` up to the cap
+        /// and routes only the forced surplus through the canal — the canal flow
+        /// would evade the maximum if `d` counted toward it.
+        Max,
+    }
 
     fn study_start() -> NaiveDate {
         NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date")
@@ -2366,14 +2384,19 @@ mod diversion_min_outflow {
             .collect()
     }
 
-    /// Spillage costs more than diversion, so absent the floor the LP would route
-    /// the whole surplus through the (cheaper) diversion canal, leaving the natural
-    /// channel below `MIN_OUTFLOW`. The high below-violation cost makes the floor
-    /// bind rather than be paid off.
-    fn hydro_penalties() -> HydroStagePenalties {
+    /// `Min`: spill dearer than diversion, so absent the floor the LP would route
+    /// the surplus through the cheaper canal, leaving `q + s` below `MIN_OUTFLOW`.
+    /// `Max`: spill cheaper than diversion, so the LP fills the natural channel to
+    /// the cap and diverts only the forced surplus. The high violation costs make
+    /// each bound bind rather than be paid off.
+    fn hydro_penalties(bound: Bound) -> HydroStagePenalties {
+        let (spillage_cost, diversion_cost) = match bound {
+            Bound::Min => (0.5, 0.0),
+            Bound::Max => (0.01, 10.0),
+        };
         HydroStagePenalties {
-            spillage_cost: 0.5,
-            diversion_cost: 0.0,
+            spillage_cost,
+            diversion_cost,
             turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
@@ -2396,7 +2419,11 @@ mod diversion_min_outflow {
     /// headroom to absorb the whole diverted flow. Neither generates (default
     /// zero productivity): the operative economics are spill-vs-divert cost, which
     /// is all the floor semantics need to be exercised.
-    fn build_system() -> System {
+    fn build_system(bound: Bound) -> System {
+        let (entity_min, entity_max) = match bound {
+            Bound::Min => (MIN_OUTFLOW_M3S, None),
+            Bound::Max => (0.0, Some(MAX_OUTFLOW_M3S)),
+        };
         let bus = make_bus(
             EntityId(BUS_ID),
             BusSpec {
@@ -2414,7 +2441,8 @@ mod diversion_min_outflow {
             EntityId(SOURCE_ID),
             HydroSpec {
                 bus_id: EntityId(BUS_ID),
-                min_outflow_m3s: MIN_OUTFLOW_M3S,
+                min_outflow_m3s: entity_min,
+                max_outflow_m3s: entity_max,
                 max_turbined_m3s: MAX_TURBINED_M3S,
                 max_generation_mw: 500.0,
                 diversion: Some(DiversionChannel {
@@ -2494,14 +2522,17 @@ mod diversion_min_outflow {
                 },
             },
         );
-        // Source-only resolved overrides at canonical position 0 (the floor, the
-        // diversion cap, and the sub-floor turbine cap); the target keeps the
-        // defaults (no floor, no diversion column).
+        // Source-only resolved overrides at canonical position 0 (the exercised
+        // outflow bound, the diversion cap, and the sub-inflow turbine cap); the
+        // target keeps the defaults (no bounds, no diversion column).
         for stage_idx in 0..n_stages {
             let src = bounds.hydro_block_base_mut(0, stage_idx);
-            src.min_outflow_m3s = MIN_OUTFLOW_M3S;
             src.max_turbined_m3s = MAX_TURBINED_M3S;
             src.max_diversion_m3s = Some(DIVERSION_CAP_M3S);
+            match bound {
+                Bound::Min => src.min_outflow_m3s = MIN_OUTFLOW_M3S,
+                Bound::Max => src.max_outflow_m3s = Some(MAX_OUTFLOW_M3S),
+            }
         }
 
         let penalties = ResolvedPenalties::new(
@@ -2513,7 +2544,7 @@ mod diversion_min_outflow {
                 n_stages,
             },
             &PenaltiesDefaults {
-                hydro: hydro_penalties(),
+                hydro: hydro_penalties(bound),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -2543,7 +2574,7 @@ mod diversion_min_outflow {
                 ..InitialConditions::default()
             })
             .build()
-            .expect("diversion_min_outflow: valid two-hydro diverting system");
+            .expect("diversion_outflow_bounds: valid two-hydro diverting system");
 
         assert_eq!(
             system.hydros()[0].id,
@@ -2594,7 +2625,7 @@ mod diversion_min_outflow {
     /// zero below-slack — the silent Volta Grande under-release.
     #[test]
     fn min_outflow_binds_the_non_diverted_flow_on_a_diverter() {
-        let mut setup = build_setup_in_code(build_system(), &config());
+        let mut setup = build_setup_in_code(build_system(Bound::Min), &config());
         let results = run_simulation(&mut setup, 1);
         assert_eq!(results.len(), 1, "exactly one scenario must be produced");
         let scenario: &SimulationScenarioResult = &results[0];
@@ -2633,6 +2664,63 @@ mod diversion_min_outflow {
             assert!(
                 diverted > 1e-3,
                 "the source must actively divert (else the test is vacuous), got {diverted}"
+            );
+        }
+    }
+
+    /// The cap binds `q + s <= MAX_OUTFLOW` on the source's own channel while the
+    /// diversion canal carries the forced surplus past it (total release
+    /// `q + s + d = INFLOW > MAX_OUTFLOW`), with zero above-violation. Under the
+    /// pre-symmetry coefficient set (`q + s + d <= MAX_OUTFLOW`) the run-of-river
+    /// balance would instead force an above-slack of `INFLOW − MAX_OUTFLOW` and no
+    /// diversion — the total-release cap this change removes.
+    #[test]
+    fn max_outflow_binds_the_non_diverted_flow_on_a_diverter() {
+        let mut setup = build_setup_in_code(build_system(Bound::Max), &config());
+        let results = run_simulation(&mut setup, 1);
+        assert_eq!(results.len(), 1, "exactly one scenario must be produced");
+        let scenario: &SimulationScenarioResult = &results[0];
+
+        let source_blocks: Vec<_> = scenario
+            .stages
+            .iter()
+            .flat_map(|s| &s.hydros)
+            .filter(|h| h.hydro_id == SOURCE_ID)
+            .collect();
+        assert!(
+            !source_blocks.is_empty(),
+            "the source must appear in the simulation output"
+        );
+
+        for h in source_blocks {
+            let non_diverted = h.turbined_m3s + h.spillage_m3s;
+            assert!(
+                non_diverted <= MAX_OUTFLOW_M3S + 1e-3,
+                "non-diverted outflow (q + s = {non_diverted}) must honor the {MAX_OUTFLOW_M3S} \
+                 cap on the natural channel"
+            );
+            assert!(
+                h.outflow_slack_above_m3s < 1e-3,
+                "the cap is met without an above-violation, got slack {}; including diversion \
+                 in the maximum would force it to {} on this run-of-river balance",
+                h.outflow_slack_above_m3s,
+                INFLOW_M3S - MAX_OUTFLOW_M3S
+            );
+            let diverted = h
+                .diverted_outflow_m3s
+                .expect("a diverting plant reports its diverted outflow");
+            // Non-vacuous: the canal carries the surplus past the cap, so total
+            // release exceeds MAX_OUTFLOW even though `q + s` honors it — which is
+            // impossible if `d` counts toward the maximum.
+            assert!(
+                diverted > 1e-3,
+                "the source must actively divert (else the test is vacuous), got {diverted}"
+            );
+            assert!(
+                non_diverted + diverted > MAX_OUTFLOW_M3S + 1e-3,
+                "total release (q + s + d = {}) must exceed the {MAX_OUTFLOW_M3S} cap via the \
+                 diversion canal, proving the maximum bounds only the non-diverted flow",
+                non_diverted + diverted
             );
         }
     }
