@@ -338,6 +338,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                         accumulate_opening_outcome(
                             ws,
                             &child,
+                            succ.cut_state,
                             omega,
                             objective,
                             x_hat,

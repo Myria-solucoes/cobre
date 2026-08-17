@@ -23,6 +23,35 @@ Read: `training/backward/duals_extraction.rs` (`extract_duals_from_view`), `cut/
 `cut::row::push_scaled_coefficient`, where `batch.values.push(-coeff * d)`
 applies the negation.
 
+### The cut intercept dots the trial state through the projection, never positionally
+
+The intercept `Q(x̂) − Σ_j β_j·x̂[dim(j)]` gathers the full trial-state vector
+`x̂` (length `StateSpace::n_state`) through the pool's `CutStateProjection`,
+pairing projected coefficient slot `j` with global state dimension
+`global_state_index(j)`. `CutStateProjection::dot_trial_state` is the single
+owner; every backward intercept site routes through it
+(`backward/replicated.rs`, `backward/outcome_aggregation.rs`'s
+`write_opening_outcome`, which the by-scenario and by-node schedulers share).
+
+A positional `coefficients.iter().zip(x̂)` is the wrong-but-compiling
+alternative. It agrees ONLY for the all-enabled identity projection; the moment a
+pool drops a region — a `storage:false`/`inflow_lags:false` pool, e.g. a study
+whose stages disable inflow-lag cut-state — slot `j` past the gap projects a
+global dimension `> j`, so the zip multiplies that coefficient by the WRONG
+dimension's value (an anticipated coefficient against a lag entry). The intercept
+gains a per-cut roughly constant bias, so the cut sits too high: an invalid,
+still-converging bound that, under a state-coupling terminal boundary FCF, drives
+`final_lb > final_ub` — a persistent negative gap halting a `gap` rule at a
+spurious crossover. Reduces to the positional dot bit-for-bit for an all-enabled
+pool (`global_state_index(j) == j`), so no existing full-projection study moves.
+Read: `lp/indexer/cut_state_projection.rs` (`dot_trial_state`,
+`global_state_index`), `training/backward/replicated.rs`,
+`training/backward/outcome_aggregation.rs` (`write_opening_outcome`). Pinned by
+`dot_trial_state_gathers_reduced_projection_not_positional` (the gather picks the
+anticipated dimension past the dropped lag block) and
+`dot_trial_state_all_enabled_matches_positional_zip` (byte-neutral for the
+identity projection), both in `lp/indexer/cut_state_projection.rs`.
+
 ## State pinning uses column bounds, not equality rows
 
 Incoming state is pinned with `set_col_bounds` on the incoming-state LP column;

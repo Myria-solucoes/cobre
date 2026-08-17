@@ -8,6 +8,7 @@ use cobre_solver::{SolverInterface, SolverStatistics};
 use crate::{
     cut::{CutRowMap, pool::CutPool},
     forward::write_capture_metadata,
+    indexer::CutStateProjection,
     solver_stats::SolverStatsDelta,
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
 };
@@ -19,13 +20,22 @@ use super::SuccessorChild;
 pub(crate) fn accumulate_opening_outcome<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     succ: &SuccessorChild<'_>,
+    cut_state: &CutStateProjection,
     omega: usize,
     objective: f64,
     x_hat: &[f64],
     stats_before: &SolverStatistics,
     stats_after: &SolverStatistics,
 ) {
-    write_opening_outcome(ws, omega, objective, x_hat, stats_before, stats_after);
+    write_opening_outcome(
+        ws,
+        cut_state,
+        omega,
+        objective,
+        x_hat,
+        stats_before,
+        stats_after,
+    );
 
     // Bump the child's OWN pool region (`metadata_offset + slot`), so a fan's
     // sibling pools never collide on a shared slot index.
@@ -91,6 +101,7 @@ pub(crate) fn accumulate_dcs_binding_counts(
 /// intercept come from the state duals and are identical either way.
 pub(crate) fn write_opening_outcome<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
+    cut_state: &CutStateProjection,
     omega: usize,
     objective: f64,
     x_hat: &[f64],
@@ -108,13 +119,7 @@ pub(crate) fn write_opening_outcome<S: SolverInterface + Send>(
         .copy_from_slice(&ws.backward_accum.state_duals_buf);
     out.objective_value = objective;
     // Intercept and coefficients are in scaled cost units (LP duals inherit cost scaling).
-    out.intercept = objective
-        - out
-            .coefficients
-            .iter()
-            .zip(x_hat)
-            .map(|(pi, x)| pi * x)
-            .sum::<f64>();
+    out.intercept = objective - cut_state.dot_trial_state(&out.coefficients, x_hat);
 }
 
 /// Capture the post-solve basis at the first-solved opening into

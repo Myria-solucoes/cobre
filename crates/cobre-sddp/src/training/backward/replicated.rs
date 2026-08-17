@@ -314,12 +314,7 @@ pub(crate) fn run_backward_node_replicated<S: SolverInterface + Send, C: Communi
         out.coefficients.resize(n_state, 0.0);
         out.coefficients.copy_from_slice(coefficients);
         out.objective_value = objective;
-        out.intercept = objective
-            - coefficients
-                .iter()
-                .zip(x_hat)
-                .map(|(c, x)| c * x)
-                .sum::<f64>();
+        out.intercept = objective - succ.cut_state.dot_trial_state(coefficients, x_hat);
     }
 
     ws.backward_accum.agg_coefficients.resize(n_state, 0.0);

@@ -158,6 +158,35 @@ impl CutStateProjection {
         self.global_state_indices[j]
     }
 
+    /// Dot this pool's projected cut `coefficients` (length [`Self::n_slots`])
+    /// with the full trial-state vector `x_hat` (length
+    /// [`StateSpace::n_state`](super::StateSpace::n_state)), gathering each
+    /// slot's value through [`Self::global_state_index`]. Cut-intercept
+    /// construction (`Q(x̂) − β·x̂`) is its sole caller.
+    ///
+    /// A positional `coefficients.iter().zip(x_hat)` is the wrong-but-compiling
+    /// alternative: it holds only for the all-enabled identity projection; once
+    /// a region is dropped (a `storage:false`/`inflow_lags:false` pool), slot
+    /// `j` past the gap projects a global dimension `> j`, so the zip pairs the
+    /// coefficient with the wrong dimension's value — a silently over- or
+    /// under-stated intercept, hence an invalid bound.
+    #[inline]
+    #[must_use]
+    pub(crate) fn dot_trial_state(&self, coefficients: &[f64], x_hat: &[f64]) -> f64 {
+        debug_assert_eq!(
+            coefficients.len(),
+            self.n_slots(),
+            "coefficients length {} != n_slots {}",
+            coefficients.len(),
+            self.n_slots()
+        );
+        coefficients
+            .iter()
+            .enumerate()
+            .map(|(j, &c)| c * x_hat[self.global_state_index(CutSlot::new(j)).get()])
+            .sum()
+    }
+
     /// Map a cut slot `s ∈ [0, n_slots())` to its LP incoming-state column,
     /// indexing the enabled subset in storage → lag → buckets → anticipated
     /// order.
@@ -410,6 +439,58 @@ mod tests {
                 "lag slot {i} projects global StateDim N + {i}, not a prefix index"
             );
         }
+    }
+
+    /// A reduced projection must dot its coefficients against `x_hat` gathered
+    /// through `global_state_index`, never positionally: the cut-intercept
+    /// regression. `inflow_lags:false` drops the lag block, so the anticipated
+    /// slot projects a global dim past its own slot index; a positional
+    /// `zip(x_hat)` would multiply the anticipated coefficient by a lag value.
+    #[test]
+    fn dot_trial_state_gathers_reduced_projection_not_positional() {
+        // N=2 storage, L=3 (6 lag dims), A=1/k_max=1 (1 anticipated): full state
+        // is 9 dims — storage [0,2), lag [2,8), anticipated {8}.
+        let global = finalized(2, 3, 1, 1, vec![1]);
+        let cut = CutStateProjection::new(&global, STORAGE_ONLY);
+
+        assert_eq!(cut.n_slots(), 3, "storage(2) + anticipated(1), lag dropped");
+        assert_eq!(
+            cut.global_state_index(CutSlot::new(2)),
+            StateDim::new(8),
+            "the anticipated slot projects global dim 8, not its positional index 2"
+        );
+
+        let x_hat = vec![
+            100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0,
+        ];
+        let coeffs = vec![1.0, 1.0, 1.0];
+        assert_eq!(
+            cut.dot_trial_state(&coeffs, &x_hat),
+            100.0 + 101.0 + 108.0,
+            "gathered dot pairs the anticipated coeff with x_hat[8], not x_hat[2]"
+        );
+        assert_ne!(
+            cut.dot_trial_state(&coeffs, &x_hat),
+            100.0 + 101.0 + 102.0,
+            "a positional zip (the bug) would pair it with a lag value"
+        );
+    }
+
+    /// For an all-enabled (identity) projection `dot_trial_state` reduces to the
+    /// positional `zip(x_hat)` bit-for-bit — the byte-neutrality the reduced-case
+    /// gather must not disturb.
+    #[test]
+    fn dot_trial_state_all_enabled_matches_positional_zip() {
+        let global = finalized(3, 2, 0, 0, vec![]);
+        let cut = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let x_hat = vec![1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5];
+        assert_eq!(x_hat.len(), global.n_state);
+        let coeffs: Vec<f64> = vec![2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0, 23.0];
+        assert_eq!(coeffs.len(), cut.n_slots());
+
+        let positional: f64 = coeffs.iter().zip(&x_hat).map(|(c, x)| c * x).sum();
+        assert_eq!(cut.dot_trial_state(&coeffs, &x_hat), positional);
     }
 
     /// `inflow_lags` disabled drops the lag dims but keeps anticipated:
