@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-08-17
+
+### Added
+
+- **A `gap` stopping rule is now admitted under a CVaR risk measure when the
+  forward selection is `enumerated` and the measure is uniform across stages.**
+  An enumerated forward visits every path, so its upper bound is computed
+  exactly — aggregated with the study's own CVaR weighting through a nested,
+  time-consistent backward recursion over the scenario tree, the same measure
+  the cuts and lower bound already use. That risk-adjusted bound brackets the
+  risk-averse lower bound (a risk-neutral bound never would), so the optimality
+  gap stays non-negative and closes only at true convergence. Sampled forwards
+  and stage-varying measures remain rejected; `Expectation` runs are
+  byte-identical.
+
+### Changed
+
+- **Both the minimum- and maximum-outflow rows now bind the non-diverted
+  river-remnant flow — turbine plus spill — and exclude the diversion channel.**
+  A diversion routes water to a different downstream target and is governed
+  solely by its own `max_diversion_m3s` bound, so a plant that diverts can no
+  longer meet its minimum outflow with diverted water, and its diversion is no
+  longer double-capped by the maximum-outflow row; the two bounds are now
+  symmetric. Byte-neutral on any non-diverting deck — the diversion column is
+  pinned to `[0, 0]` and presolve-eliminated.
+
+### Fixed
+
+- **A loaded terminal boundary future cost function no longer produces an
+  invalid lower bound (a persistent negative optimality gap) for a study whose
+  stages disable inflow-lag cut-state.** The backward cut-intercept dot paired a
+  reduced projection's coefficients against the full-length trial state
+  positionally, so a commitment coefficient multiplied a lag value and biased
+  the intercept — leaving cuts too high and driving the lower bound above the
+  upper bound. The trial state is now gathered through the projection. Studies
+  whose stages keep the full state projection are byte-identical.
+
 ## [0.14.0] - 2026-08-13
 
 ### Added
@@ -3189,7 +3226,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/cobre-rs/cobre/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/cobre-rs/cobre/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/cobre-rs/cobre/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/cobre-rs/cobre/compare/v0.11.1...v0.12.0
