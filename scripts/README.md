@@ -10,6 +10,10 @@ Helper scripts for Cobre, grouped by role.
 - **`gen/`** — generators for release/build artifacts.
 - **`pre-commit`** — the git pre-commit hook. Install with
   `ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`.
+- **`loc-stats.sh`** — refreshable reporting tool (not a CI gate): Rust line
+  counts split into production vs test, per crate and global, plus test-function
+  counts. `--nextest` adds the runtime test count, `--worktree`/`--csv` vary the
+  source and output format.
 
 ## `ci/` — quality gates
 
