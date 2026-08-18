@@ -406,7 +406,6 @@ mod anticipated_5stage_k2_smoke {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -891,7 +890,6 @@ mod anticipated_two_plants_smoke {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -1399,7 +1397,6 @@ mod anticipated_simulation_ring_buffer {
     fn build_config(training_iters: u32) -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -1944,7 +1941,6 @@ mod anticipated_generic_constraint_e2e {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -2454,9 +2450,15 @@ mod d37_anticipated_commissioning_simulation {
         };
 
         let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -2968,7 +2970,6 @@ mod anticipated_commitment_at_cap {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,

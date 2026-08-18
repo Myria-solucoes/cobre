@@ -351,18 +351,6 @@ stale interface-review note that called it inert.
 **Trigger.** The decision to implement or retire vertex-based inner
 approximation.
 
-### State-space depth split across two homes
-
-**What it is.** The inflow-lag depth lives as a single global field in the
-top-level config (`state_space.inflow_lag_depth`), while the per-stage
-state-variable toggles live in the per-stage stage configuration
-(`state_variables`). The split should be settled before a second or third state
-axis (a belief-state or objective-state dimension) hardens it.
-
-**Owner.** The setup / config owner.
-
-**Trigger.** The addition of a third state axis.
-
 ### Boundary-policy source-node
 
 **What it is.** The boundary-policy config (`BoundaryPolicy`,

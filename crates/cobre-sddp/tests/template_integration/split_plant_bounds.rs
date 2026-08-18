@@ -29,9 +29,15 @@ fn build_d51_templates() -> (cobre_core::System, StageTemplates) {
     let config = cobre_io::parse_config(&config_path).expect("d51 config must parse");
     let system = cobre_io::load_case(case_dir).expect("d51 load_case must succeed");
 
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed for d51");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed for d51");
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 

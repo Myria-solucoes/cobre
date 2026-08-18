@@ -107,8 +107,15 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
         ExitCode::from(1)
     })?;
 
-    let prepared = prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-        .map_err(|e| {
+    let prepared = prepare_stochastic(
+        system,
+        &case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .map_err(|e| {
         eprintln!("error: prepare_stochastic failed: {e}");
         ExitCode::from(1)
     })?;

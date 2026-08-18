@@ -48,9 +48,15 @@ fn train_deterministic_case(
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 
@@ -105,8 +111,15 @@ fn run_with_simulation(
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
 
@@ -1341,8 +1354,15 @@ fn d12_checkpoint_round_trip() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
 
@@ -1973,9 +1993,15 @@ fn d18_ncs_commissioning_active_set_varies() {
     let case_dir = Path::new("../../examples/deterministic/d18-ncs-commissioning-window");
     let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
@@ -2031,9 +2057,15 @@ fn d33_per_stage_block_count_varies() {
     let case_dir = Path::new("../../examples/deterministic/d33-per-stage-block-counts");
     let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
@@ -3243,9 +3275,15 @@ fn d26_estimated_par2_order_selection() {
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
 
     let report = prepare_result
         .estimation_report
@@ -3395,7 +3433,7 @@ fn d29_weekly_par_noise_sharing() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &training_source)
+    let pr = prepare_stochastic(system, case_dir, &config, 42, &training_source, None)
         .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
@@ -3502,7 +3540,7 @@ fn d30_multi_resolution_loads_and_trains() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &training_source)
+    let pr = prepare_stochastic(system, case_dir, &config, 42, &training_source, None)
         .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
@@ -3550,8 +3588,15 @@ fn frozen_vs_fallback_simulation_costs_are_identical() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
 
@@ -3672,8 +3717,15 @@ fn d43_storage_only_cut_converges() {
     // while the lag-enabled pools carry storage + lags.
     let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
     let hydro_models =
@@ -3858,8 +3910,15 @@ fn d44_travel_time_substage_transit_bucket_dual() {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
     let hydro_models =
@@ -6098,7 +6157,6 @@ mod chronological_telescoping {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -6807,7 +6865,6 @@ mod chronological_attribution {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -7261,7 +7318,7 @@ mod nonzero_stage_fpha_override_regression {
         let config = cobre_io::parse_config(&config_path).expect("config must parse");
         let system = cobre_io::load_case(dir).expect("load_case must succeed");
 
-        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let system = pr.system;
         let stochastic = pr.stochastic;
@@ -7315,7 +7372,7 @@ mod custom_weekly_evaporation_regression {
     fn resolve_evaporation(dir: &Path) -> EvaporationModelSet {
         let config = cobre_io::parse_config(&dir.join("config.json")).expect("config must parse");
         let system = cobre_io::load_case(dir).expect("load_case must succeed");
-        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let hydro_models = prepare_hydro_models(&pr.system, dir, false)
             .expect("prepare_hydro_models must succeed (season_id >= 12 must no longer error)");
@@ -10091,7 +10148,6 @@ mod enumerated_cvar_gap {
     fn enumerated_gap_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: InflowNonNegativityMethod::Penalty,

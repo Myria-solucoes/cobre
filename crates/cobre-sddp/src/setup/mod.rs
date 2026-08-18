@@ -340,7 +340,30 @@ impl StudySetup {
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
     ) -> Result<Self, SddpError> {
-        let params = StudyParams::from_config(config)?;
+        Self::new_with_inflow_lag_depth(system, config, stochastic, hydro_models, None)
+    }
+
+    /// [`Self::new`] with the boundary-inferred inflow-lag depth supplied
+    /// explicitly.
+    ///
+    /// The inflow-lag state depth is inferred from a loaded boundary policy
+    /// (`resolve_effective_inflow_lag_depth`, an I/O read the caller performs),
+    /// not from any config knob; `None` sizes the lag block from the PAR model
+    /// alone. The MPI broadcast path carries the same value on
+    /// `ConstructionConfig::inflow_lag_depth` for non-root ranks.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::new`].
+    pub fn new_with_inflow_lag_depth(
+        system: &System,
+        config: &Config,
+        stochastic: StochasticContext,
+        hydro_models: PrepareHydroModelsResult,
+        inflow_lag_depth: Option<u32>,
+    ) -> Result<Self, SddpError> {
+        let mut params = StudyParams::from_config(config)?;
+        params.inflow_lag_depth = inflow_lag_depth;
         // Sentinel: the scenario-source resolvers use the path only for error
         // messages and the historical-years look-up, neither exercised here with a
         // validated Config.
@@ -987,15 +1010,15 @@ fn build_energy_and_templates(
     })
 }
 
-/// `L_state = max(computed_order, declared_depth)` — the single widening
+/// `L_state = max(computed_order, boundary_depth)` — the single widening
 /// every lag-state-slot source (`resolve_state_layout`'s dense stride and
 /// per-hydro activeness mask, `build_opening_tree_library`,
-/// `rebuild_historical_library_non_root`) applies in lockstep so a declared
-/// `state_space.inflow_lag_depth` never truncates on one source while
-/// widening another. `None` leaves `computed_order` unchanged.
+/// `rebuild_historical_library_non_root`) applies in lockstep so a
+/// boundary-inferred depth never truncates on one source while widening another.
+/// `None` (no boundary) leaves `computed_order` unchanged.
 #[must_use]
-pub fn widen_lag_state_depth(computed_order: usize, declared_depth: Option<u32>) -> usize {
-    declared_depth.map_or(computed_order, |d| computed_order.max(d as usize))
+pub fn widen_lag_state_depth(computed_order: usize, boundary_depth: Option<u32>) -> usize {
+    boundary_depth.map_or(computed_order, |d| computed_order.max(d as usize))
 }
 
 /// Resolve every anticipated thermal's delivery-anchored commitment and

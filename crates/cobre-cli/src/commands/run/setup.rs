@@ -119,32 +119,26 @@ fn load_case_and_config(
     let load_start = std::time::Instant::now();
     let cobre_io::LoadedCase { system, artifacts } = load_case_with_artifacts(&args.case_dir)?;
     let config_path = args.case_dir.join("config.json");
-    let mut config = parse_config(&config_path)?;
+    let config = parse_config(&config_path)?;
     timings.load_seconds = load_start.elapsed().as_secs_f64();
 
     // Size the inflow-lag state block to the loaded boundary policy: its cuts fix
-    // the required depth, so `state_space.inflow_lag_depth` is an optional
-    // override, not a requirement. Folded into the config here (rank 0, the sole
-    // reader of the case dir) so both the broadcast layout and the boundary-load
-    // reject see the effective depth.
-    if let Some(boundary_rel) = config.policy.boundary.as_ref().map(|bp| bp.path.clone()) {
-        let boundary_path = args.case_dir.join(&boundary_rel);
-        let declared = config.state_space.inflow_lag_depth;
-        let effective = resolve_effective_inflow_lag_depth(declared, Some(&boundary_path))?;
-        if effective != declared && !quiet {
-            let _ = stderr.write_line(&format!(
-                "Boundary policy: inflow-lag depth resolved to {} ({})",
-                effective.unwrap_or(0),
-                declared.map_or_else(
-                    || "state_space.inflow_lag_depth omitted".to_string(),
-                    |d| format!("state_space.inflow_lag_depth {d} widened"),
-                ),
-            ));
+    // the required depth, inferred here (rank 0, the sole reader of the case dir)
+    // and carried on the broadcast config so both the state layout and the
+    // boundary-load reject see the effective depth on every rank.
+    let inflow_lag_depth = if let Some(bp) = config.policy.boundary.as_ref() {
+        let boundary_path = args.case_dir.join(&bp.path);
+        let depth = resolve_effective_inflow_lag_depth(Some(&boundary_path))?;
+        if let (Some(d), false) = (depth, quiet) {
+            let _ = stderr.write_line(&format!("Boundary policy: inflow-lag depth {d}"));
         }
-        config.state_space.inflow_lag_depth = effective;
-    }
+        depth
+    } else {
+        None
+    };
 
-    let bcast = BroadcastConfig::from_config(&config)?;
+    let mut bcast = BroadcastConfig::from_config(&config)?;
+    bcast.inflow_lag_depth = inflow_lag_depth;
     let seed = bcast.seed;
 
     let stochastic_start = std::time::Instant::now();
@@ -154,6 +148,7 @@ fn load_case_and_config(
         &config,
         seed,
         &bcast.training_source,
+        inflow_lag_depth,
     )
     .map_err(CliError::from)?;
     timings.stochastic_fit_seconds = stochastic_start.elapsed().as_secs_f64();

@@ -137,6 +137,20 @@ impl Communicator for Rank0Of2 {
 /// `StudyParams::into_construction_config` never carries them — every setup
 /// caller must patch them in itself (cobre-cli via MPI broadcast,
 /// cobre-python directly).
+/// Resolve the boundary-inferred inflow-lag depth for a test case, tolerating a
+/// placeholder boundary path: a test that installs a fake `policy.boundary` and
+/// injects cuts manually must not trigger a read of the missing checkpoint.
+pub fn boundary_inflow_lag_depth(case_dir: &Path, config: &Config) -> Option<u32> {
+    let bp = config.policy.boundary.as_ref()?;
+    let path = case_dir.join(&bp.path);
+    if !path.join("metadata.json").exists() {
+        return None;
+    }
+    cobre_sddp::resolve_effective_inflow_lag_depth(Some(&path))
+        .ok()
+        .flatten()
+}
+
 pub fn build_setup_for_case(
     case_dir: &Path,
     config: &Config,
@@ -154,6 +168,7 @@ pub fn build_setup_for_case(
 
     let params = StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
     let mut construction = params.into_construction_config();
+    construction.inflow_lag_depth = boundary_inflow_lag_depth(case_dir, config);
     construction.scalar_parameters = cobre_io::load_case_with_artifacts(case_dir)
         .expect("load_case_with_artifacts must succeed")
         .artifacts
@@ -182,8 +197,16 @@ pub fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut Config)) -> St
     let training_source = config
         .training_scenario_source(&config_path)
         .expect("training_scenario_source must parse");
-    let prepare_result = prepare_stochastic(system, case_dir, &config, 42, &training_source)
-        .expect("prepare_stochastic must succeed");
+    let inflow_lag_depth = boundary_inflow_lag_depth(case_dir, &config);
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &training_source,
+        inflow_lag_depth,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 

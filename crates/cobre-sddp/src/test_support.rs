@@ -29,9 +29,8 @@ use cobre_io::config::{
     Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, InflowNonNegativityMethod,
     ModelingConfig, ParallelismConfig, PolicyConfig, RawClassConfigEntry, RawSamplingScheme,
     RawScenarioSourceConfig, RowSelectionConfig, SelectionMethod,
-    SimulationConfig as IoSimulationConfig, SimulationSelection, StateSpaceConfig, StoppingMode,
-    StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
-    UpperBoundEvaluationConfig,
+    SimulationConfig as IoSimulationConfig, SimulationSelection, StoppingMode, StoppingRuleConfig,
+    TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
@@ -1294,7 +1293,6 @@ fn fan_or_chain_system_ext(
 fn k_fan_config(forward_passes: u32, max_iterations: u32) -> Config {
     Config {
         schema: None,
-        state_space: StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: InflowNonNegativityMethod::None,
@@ -1956,7 +1954,7 @@ pub fn external_distinct_fan_setup(k: usize, max_iterations: u32) -> StudySetup 
 }
 
 /// [`external_distinct_fan_setup`] with an active inflow-lag slot
-/// (`state_space.inflow_lag_depth = Some(1)`) — the terminal-fusion regression
+/// (a boundary-inferred depth of `Some(1)`) — the terminal-fusion regression
 /// fixture whose leaf pool and cut-generating parent pool project DIFFERENT
 /// dimensions, unlike every other fan/chain fixture in this module.
 /// `build_cut_state_layouts` (`setup/mod.rs`) starts every pool at
@@ -2083,8 +2081,7 @@ fn build_external_distinct_fan_setup(
         &[],
     );
 
-    let mut config = external_fan_config_enumerated(max_iterations);
-    config.state_space.inflow_lag_depth = inflow_lag_depth;
+    let config = external_fan_config_enumerated(max_iterations);
     let stochastic = build_stochastic_context(
         &system,
         K_FAN_SEED,
@@ -2100,8 +2097,14 @@ fn build_external_distinct_fan_setup(
     )
     .expect("build_external_distinct_fan_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new(&system, &config, stochastic, hydro_models)
-        .expect("build_external_distinct_fan_setup: StudySetup::new must succeed")
+    StudySetup::new_with_inflow_lag_depth(
+        &system,
+        &config,
+        stochastic,
+        hydro_models,
+        inflow_lag_depth,
+    )
+    .expect("build_external_distinct_fan_setup: StudySetup::new must succeed")
 }
 
 /// A 2-stage all-external fan whose SINGLE stage-0 root is itself an external node
@@ -2502,7 +2505,7 @@ fn branching_tree_policy_graph(reversed: bool) -> HorizonGraph {
 /// pool, stage 2 (leaf level) sizes each FAN NODE's pool. Declaring stage 1
 /// `inflow_lags: true` and stage 2 `inflow_lags: false` makes the root's pool
 /// project the full storage+lag state (2 dims: 1 hydro × 1 declared lag slot,
-/// widened via `state_space.inflow_lag_depth` in
+/// widened via the depth passed to `new_with_inflow_lag_depth` in
 /// [`build_non_uniform_branching_setup`]'s config — not a fitted PAR order,
 /// which the K-fan/chain fixtures' zero-std inflow cannot normalize) while each
 /// fan node's pool projects storage only (1 dim) — and the trailing shared leaf
@@ -2535,7 +2538,7 @@ fn non_uniform_branching_stage_configs() -> [StageStateConfig; 3] {
 /// (non-binding) reservoir — Generated, `branching_factor: 1`, the
 /// oracle-compatible (`|Ω| = 1` per node) shape [`extensive_form_optimum`]
 /// requires, matching [`k_fan_system`]/[`oracle_chain_setup`]. The lag SLOT
-/// itself (`max_par_order`) comes from `state_space.inflow_lag_depth` in
+/// itself (`max_par_order`) comes from the depth passed to `new_with_inflow_lag_depth` in
 /// [`build_non_uniform_branching_setup`]'s config, not from an `ar_coefficients`
 /// declared here — the AR-normalization path this crate's inflow estimator uses
 /// rejects a zero-std series (`ar_order >= 1` needs nonzero variance to
@@ -2593,12 +2596,11 @@ fn build_non_uniform_branching_setup(
     reversed: bool,
 ) -> StudySetup {
     let system = branching_tree_system(reversed);
-    let mut config = k_fan_config(forward_passes, max_iterations);
+    let config = k_fan_config(forward_passes, max_iterations);
     // Declares one lag slot (`max_par_order = 1`) independent of any fitted AR
     // order, so `non_uniform_branching_stage_configs`'s `inflow_lags` toggle has
     // a non-degenerate lag block to project even though every stage's inflow std
     // is zero (the oracle-compatible design `branching_tree_system` documents).
-    config.state_space.inflow_lag_depth = Some(1);
     let stochastic = build_stochastic_context(
         &system,
         K_FAN_SEED,
@@ -2614,7 +2616,7 @@ fn build_non_uniform_branching_setup(
     )
     .expect("non_uniform_branching_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new(&system, &config, stochastic, hydro_models)
+    StudySetup::new_with_inflow_lag_depth(&system, &config, stochastic, hydro_models, Some(1))
         .expect("non_uniform_branching_setup: StudySetup::new must succeed")
 }
 
@@ -2898,7 +2900,7 @@ const DUAL_FOLDING_STORAGE: StorageSpec = StorageSpec {
 
 /// Which inflow-lag representation a dual-folding build carries on its
 /// deterministic trunk. Both variants share one [`System`] and one
-/// `state_space.inflow_lag_depth`; they differ ONLY in the per-stage
+/// the boundary-inferred inflow-lag depth; they differ ONLY in the per-stage
 /// `StageStateConfig.inflow_lags` toggle, so the LP columns (and the PAR
 /// dynamics) are identical and only the trunk cut PROJECTION changes.
 #[derive(Debug, Clone, Copy)]
@@ -3003,7 +3005,7 @@ fn dual_folding_system(fold: LagFold) -> System {
 /// Build the dual-folding [`StudySetup`] for `fold`: a deterministic PAR(1) trunk
 /// (root → mid) followed by a terminal fan of [`DUAL_FOLDING_FAN_K`] leaves,
 /// trained `sampled` with the shared fixed seed. Both `fold` variants set the
-/// same `state_space.inflow_lag_depth = Some(1)`, so they share one lag-state
+/// same boundary-inferred depth `Some(1)`, so they share one lag-state
 /// dimension and one LP column layout; only [`dual_folding_stage_configs`]'s
 /// `inflow_lags` toggle differs (see [`LagFold`]).
 ///
@@ -3016,11 +3018,10 @@ fn dual_folding_system(fold: LagFold) -> System {
 #[must_use]
 pub fn dual_folding_setup(fold: LagFold, forward_passes: u32, max_iterations: u32) -> StudySetup {
     let system = dual_folding_system(fold);
-    let mut config = k_fan_config(forward_passes, max_iterations);
+    let config = k_fan_config(forward_passes, max_iterations);
     // One explicit lag slot, independent of the fitted AR order, so both `fold`
     // variants share one lag-state dimension and differ only in the `inflow_lags`
     // cut toggle.
-    config.state_space.inflow_lag_depth = Some(1);
     let stochastic = build_stochastic_context(
         &system,
         K_FAN_SEED,
@@ -3049,7 +3050,7 @@ pub fn dual_folding_setup(fold: LagFold, forward_passes: u32, max_iterations: u3
         1,
         3,
     );
-    StudySetup::new(&system, &config, stochastic, hydro_models)
+    StudySetup::new_with_inflow_lag_depth(&system, &config, stochastic, hydro_models, Some(1))
         .expect("dual_folding_setup: StudySetup::new must succeed")
 }
 

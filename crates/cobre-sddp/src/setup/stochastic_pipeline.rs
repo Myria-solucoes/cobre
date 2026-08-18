@@ -365,6 +365,11 @@ fn compute_external_scenario_counts(
 /// Run the stochastic preprocessing pipeline: PAR estimation, block factor
 /// loading, opening-tree library construction, and stochastic context build.
 ///
+/// `inflow_lag_depth` is the boundary-inferred lag depth (from
+/// `resolve_effective_inflow_lag_depth`), or `None` for a study with no loaded
+/// boundary; it sizes the opening-tree library's lag state to match the state
+/// layout `StudySetup` reserves.
+///
 /// # Errors
 ///
 /// Returns [`SddpError::Io`] on file read/parse/validation failure,
@@ -375,6 +380,7 @@ pub fn prepare_stochastic(
     config: &Config,
     seed: u64,
     training_source: &ScenarioSource,
+    inflow_lag_depth: Option<u32>,
 ) -> Result<PrepareStochasticResult, SddpError> {
     let (system, estimation_report, estimation_path) =
         estimate_from_history(system, case_dir, config)?;
@@ -404,11 +410,8 @@ pub fn prepare_stochastic(
         .map(|(ncs_id, stage_id, pairs)| (*ncs_id, *stage_id, pairs.as_slice()))
         .collect();
 
-    let opening_tree_library = build_opening_tree_library(
-        &system,
-        training_source,
-        config.state_space.inflow_lag_depth,
-    )?;
+    let opening_tree_library =
+        build_opening_tree_library(&system, training_source, inflow_lag_depth)?;
     let external_scenario_counts = compute_external_scenario_counts(&system, training_source);
 
     let opening_tree_noise_group_ids = study_stage_noise_group_ids(&system);

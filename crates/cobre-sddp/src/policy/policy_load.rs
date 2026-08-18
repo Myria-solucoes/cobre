@@ -254,7 +254,7 @@ pub fn validate_policy_load<K: PolicyLoadKind>(
     if source.state_dimension != current.state_dimension {
         return Err(SddpError::Validation(format!(
             "policy state_dimension mismatch: policy has {}, current system has {} (a lag-state \
-             depth mismatch, e.g. state_space.inflow_lag_depth, is a common cause)",
+             depth mismatch is a common cause)",
             source.state_dimension, current.state_dimension
         )));
     }
@@ -586,29 +586,26 @@ pub fn boundary_policy_required_lag_depth(boundary_path: &Path) -> Result<u32, S
         .unwrap_or(0))
 }
 
-/// The effective inflow-lag state depth: the user-declared
-/// `state_space.inflow_lag_depth` raised to whatever a loaded boundary policy
-/// requires (`boundary_path`), so the config field is an optional override rather
-/// than a requirement whenever a boundary policy is present. `None` boundary path
-/// leaves `declared` unchanged; otherwise the result is
-/// `max(declared, boundary_policy_required_lag_depth)`, or `None` when both are
-/// zero. Fold this into `state_space.inflow_lag_depth` before setup so
-/// [`resolve_state_layout`](crate::setup::resolve_state_layout) sizes the lag
+/// The effective inflow-lag state depth: whatever a loaded boundary policy
+/// requires (`boundary_path`), inferred from its cuts. `None` boundary path (no
+/// boundary) yields `None`, leaving the lag block sized from the PAR model alone;
+/// otherwise the result is `boundary_policy_required_lag_depth`, or `None` when it
+/// is zero. Pass this into
+/// [`StudySetup::new_with_inflow_lag_depth`](crate::StudySetup::new_with_inflow_lag_depth)
+/// so [`resolve_state_layout`](crate::setup::resolve_state_layout) sizes the lag
 /// block to hold the loaded cuts.
 ///
 /// # Errors
 ///
 /// Propagates [`boundary_policy_required_lag_depth`]'s checkpoint read failure.
 pub fn resolve_effective_inflow_lag_depth(
-    declared: Option<u32>,
     boundary_path: Option<&Path>,
 ) -> Result<Option<u32>, SddpError> {
     let boundary_depth = match boundary_path {
         Some(path) => boundary_policy_required_lag_depth(path)?,
         None => 0,
     };
-    let effective = declared.unwrap_or(0).max(boundary_depth);
-    Ok((effective > 0).then_some(effective))
+    Ok((boundary_depth > 0).then_some(boundary_depth))
 }
 
 /// Load boundary cuts from the `source_stage` of a source Cobre policy checkpoint.
@@ -636,8 +633,8 @@ pub fn resolve_effective_inflow_lag_depth(
 /// skipped path; read via [`ValidatedBoundaryCuts::report`].
 ///
 /// `effective_inflow_lag_depth` is the resolved lag depth the current state
-/// layout reserves — `config.state_space.inflow_lag_depth` already widened to fit
-/// this boundary policy via [`resolve_effective_inflow_lag_depth`]. A cut
+/// layout reserves — inferred from this boundary policy via
+/// [`resolve_effective_inflow_lag_depth`]. A cut
 /// referencing inflow-lag state deeper than it is a coupling regression (the
 /// layout should have been sized to hold the loaded cuts), rejected before the
 /// manifest checks so the lag-depth-specific message wins over the generic
@@ -725,9 +722,9 @@ pub fn load_boundary_cuts(
             return Err(SddpError::Validation(format!(
                 "internal: boundary policy stage {source_stage} references inflow-lag state to \
                  depth {depth}, but the resolved state layout reserves only {reserved} inflow-lag \
-                 slots — resolve_effective_inflow_lag_depth must widen state_space.inflow_lag_depth \
-                 to fit the loaded boundary policy before the layout is built; reaching here means \
-                 that coupling broke and cut coefficients would truncate"
+                 slots — resolve_effective_inflow_lag_depth must infer the depth from the boundary \
+                 policy before the layout is built; reaching here means that coupling broke and cut \
+                 coefficients would truncate"
             )));
         }
     }
@@ -1658,10 +1655,10 @@ mod tests {
 
     /// A boundary cut at depth 12 reaching `load_boundary_cuts` with a reserved
     /// depth of only 6 is a layout-sizing coupling regression (the effective depth
-    /// should already have been widened to fit the policy). The defensive guard
-    /// rejects before the manifest checks, naming both depths and the widening
-    /// owner (`state_space.inflow_lag_depth`) — never a user-facing "raise the
-    /// config" instruction, since the depth is now auto-inferred.
+    /// should already have been inferred to fit the policy). The defensive guard
+    /// rejects before the manifest checks, naming both depths and the inference
+    /// entry point — never a user-facing "raise the config" instruction, since the
+    /// depth is auto-inferred from the boundary policy.
     #[test]
     fn load_boundary_cuts_lag_depth_exceeds_reserved_rejects_as_coupling_regression() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1691,8 +1688,8 @@ mod tests {
         );
         assert!(msg.contains('6'), "must name the reserved depth 6: {msg}");
         assert!(
-            msg.contains("state_space.inflow_lag_depth"),
-            "must name the widening owner: {msg}"
+            msg.contains("resolve_effective_inflow_lag_depth"),
+            "must name the inference entry point: {msg}"
         );
         assert!(
             msg.contains("internal"),
@@ -1748,20 +1745,12 @@ mod tests {
         assert_eq!(boundary_policy_required_lag_depth(flat.path()).unwrap(), 0);
     }
 
-    /// `resolve_effective_inflow_lag_depth` widens the declared depth up to the
-    /// boundary policy's required depth: an undeclared field inherits the policy
-    /// depth, a shallower declaration is widened, a deeper declaration wins, and a
-    /// `None` boundary path is the identity on the declared value.
+    /// `resolve_effective_inflow_lag_depth` infers the depth from the boundary
+    /// policy's cuts: no boundary yields `None` (the lag block sizes from the PAR
+    /// model alone), a loaded boundary yields its required depth.
     #[test]
-    fn resolve_effective_inflow_lag_depth_folds_boundary_over_declared() {
-        assert_eq!(
-            resolve_effective_inflow_lag_depth(None, None).unwrap(),
-            None
-        );
-        assert_eq!(
-            resolve_effective_inflow_lag_depth(Some(6), None).unwrap(),
-            Some(6)
-        );
+    fn resolve_effective_inflow_lag_depth_infers_from_boundary() {
+        assert_eq!(resolve_effective_inflow_lag_depth(None).unwrap(), None);
 
         let tmp = tempfile::tempdir().unwrap();
         write_checkpoint_with_manifest(
@@ -1771,21 +1760,10 @@ mod tests {
             &[10.0, 20.0],
             &[storage_slot(1), inflow_lag_slot(1, 12)],
         );
-        let path = Some(tmp.path());
         assert_eq!(
-            resolve_effective_inflow_lag_depth(None, path).unwrap(),
+            resolve_effective_inflow_lag_depth(Some(tmp.path())).unwrap(),
             Some(12),
-            "an undeclared field inherits the boundary policy depth"
-        );
-        assert_eq!(
-            resolve_effective_inflow_lag_depth(Some(6), path).unwrap(),
-            Some(12),
-            "a shallower declaration is widened up to the boundary depth"
-        );
-        assert_eq!(
-            resolve_effective_inflow_lag_depth(Some(24), path).unwrap(),
-            Some(24),
-            "a deeper declaration wins over the boundary depth"
+            "the depth is inferred from the boundary policy's required lag depth"
         );
     }
 
@@ -2680,7 +2658,7 @@ mod tests {
         assert!(msg.contains("10"), "should include source value: {msg}");
         assert!(msg.contains('8'), "should include current value: {msg}");
         assert!(
-            msg.contains("inflow_lag_depth"),
+            msg.contains("lag-state depth"),
             "message must name lag depth as a probable cause: {msg}"
         );
     }

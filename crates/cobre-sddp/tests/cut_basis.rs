@@ -93,8 +93,15 @@ mod boundary_cuts {
 
     fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> (StudySetup, cobre_core::System) {
         let system = cobre_io::load_case(case_dir).expect("load_case");
-        let prep = prepare_stochastic(system, case_dir, config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic");
+        let prep = prepare_stochastic(
+            system,
+            case_dir,
+            config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
         let setup = StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
@@ -909,9 +916,15 @@ mod basis_reconstruct_churn {
         config.training.cut_selection.max_active_per_stage = Some(6);
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -997,9 +1010,15 @@ mod basis_reconstruct_churn {
         config.training.cut_selection.max_active_per_stage = None;
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -1070,9 +1089,15 @@ mod basis_reconstruct_churn {
             StoppingRuleConfig::IterationLimit { limit: 1 },
         ]);
         let system = cobre_io::load_case(&case_dir).expect("load_case phase1 must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic phase1 must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic phase1 must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -1139,9 +1164,15 @@ mod basis_reconstruct_churn {
         // system and transplant the fully-deactivated FCF into it.
         {
             let system2 = cobre_io::load_case(&case_dir).expect("load_case phase2 must succeed");
-            let prepare2 =
-                prepare_stochastic(system2, &case_dir, &config, 42, &ScenarioSource::default())
-                    .expect("prepare_stochastic phase2 must succeed");
+            let prepare2 = prepare_stochastic(
+                system2,
+                &case_dir,
+                &config,
+                42,
+                &ScenarioSource::default(),
+                None,
+            )
+            .expect("prepare_stochastic phase2 must succeed");
             let system2 = prepare2.system;
             let stochastic2 = prepare2.stochastic;
             let hydro2 = prepare_hydro_models(&system2, &case_dir, false)
@@ -1238,9 +1269,15 @@ mod basis_reconstruct_churn {
         config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 2 });
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -1541,8 +1578,15 @@ mod warm_start {
 
     fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> StudySetup {
         let system = cobre_io::load_case(case_dir).expect("load_case");
-        let prep = prepare_stochastic(system, case_dir, config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic");
+        let prep = prepare_stochastic(
+            system,
+            case_dir,
+            config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
         StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
@@ -1797,9 +1841,15 @@ mod test_backward_cache_reduces_pivots {
         config.training.cut_selection.max_active_per_stage = None;
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -1978,9 +2028,15 @@ mod group_state_invariance {
         config: &cobre_io::Config,
         case_dir: &Path,
     ) -> (StudySetup, System) {
-        let prepare_result =
-            prepare_stochastic(system, case_dir, config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            case_dir,
+            config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let hydro_models = prepare_hydro_models(&system, case_dir, false)
             .expect("prepare_hydro_models must succeed");
@@ -2196,8 +2252,8 @@ mod range_warm_start_determinism {
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, ParallelismConfig,
         PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-        SimulationSelection, StateSpaceConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
-        TrainingSelection, TrainingSolverConfig,
+        SimulationSelection, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
+        TrainingSolverConfig,
     };
     use cobre_io::output::policy::{read_policy_checkpoint, write_policy_checkpoint};
     use cobre_sddp::basis_reconstruct::{
@@ -2558,7 +2614,6 @@ mod range_warm_start_determinism {
     fn build_config(limit: u32) -> Config {
         Config {
             schema: None,
-            state_space: StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -3161,7 +3216,7 @@ mod range_warm_start_determinism {
                  of generic_constraints.json's declared order {order:?}"
             );
 
-            let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+            let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default(), None)
                 .expect("prepare_stochastic must succeed");
             let system = pr.system;
             let stochastic = pr.stochastic;

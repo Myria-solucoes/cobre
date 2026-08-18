@@ -415,8 +415,9 @@ fn fresh_setup(
     let source = config
         .training_scenario_source(&config_path)
         .expect("training_scenario_source must resolve");
-    let prepared = cobre_sddp::setup::prepare_stochastic(system, case_dir, &config, SEED, &source)
-        .expect("prepare_stochastic must succeed for cobre_rodada");
+    let prepared =
+        cobre_sddp::setup::prepare_stochastic(system, case_dir, &config, SEED, &source, None)
+            .expect("prepare_stochastic must succeed for cobre_rodada");
     let hydro_models: PrepareHydroModelsResult =
         cobre_sddp::hydro_models::prepare_hydro_models(&prepared.system, case_dir, false)
             .expect("prepare_hydro_models must succeed for cobre_rodada");

@@ -111,8 +111,15 @@ fn main() {
 
     let cobre_sddp::PrepareStochasticResult {
         system, stochastic, ..
-    } = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    } = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
 
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");

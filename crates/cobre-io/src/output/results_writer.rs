@@ -282,7 +282,6 @@ mod tests {
         };
         crate::Config {
             schema: None,
-            state_space: crate::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig::default(),
                 cost_scale_factor: None,

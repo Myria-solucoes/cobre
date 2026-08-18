@@ -1749,9 +1749,15 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 

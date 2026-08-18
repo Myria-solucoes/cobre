@@ -404,7 +404,7 @@ mod self_reproducibility_regression {
 
         let system = cobre_io::load_case(&dir).expect("load_case must succeed");
 
-        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let system = pr.system;
         let stochastic = pr.stochastic;
@@ -655,7 +655,7 @@ mod b6a_hydro_inflow_parity {
 
         assert_cascade_inflow_constraint(&system);
 
-        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let system = pr.system;
         let stochastic = pr.stochastic;
@@ -2204,7 +2204,6 @@ mod water_travel_time_no_arc_byte_identity {
 
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -2392,7 +2391,7 @@ mod water_travel_time_no_arc_byte_identity {
         let prep_source = config
             .training_scenario_source(&config_path)
             .expect("training_scenario_source must parse");
-        let pr = prepare_stochastic(system, &dir, &config, 42, &prep_source)
+        let pr = prepare_stochastic(system, &dir, &config, 42, &prep_source, None)
             .expect("prepare_stochastic must succeed");
         let system = pr.system;
         let stochastic = pr.stochastic;

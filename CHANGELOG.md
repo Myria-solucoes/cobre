@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symmetric. Byte-neutral on any non-diverting deck — the diversion column is
   pinned to `[0, 0]` and presolve-eliminated.
 
+### Removed
+
+- **The `state_space` config section (`state_space.inflow_lag_depth`) is
+  removed — the inflow-lag state depth is now always inferred from a loaded
+  boundary policy's cuts.** The field was an optional override that only ever
+  widened the depth _beyond_ what the boundary and PAR model already require;
+  the inference covers every case, so the knob is redundant. A `config.json`
+  that still declares `state_space` now fails to load with an unknown-field
+  error (naming the section) rather than being silently ignored — delete the
+  section; the depth is resolved automatically.
+
 ### Fixed
 
 - **A loaded terminal boundary future cost function no longer produces an

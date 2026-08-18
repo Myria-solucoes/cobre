@@ -108,9 +108,8 @@ pub struct StudyParams {
     /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
     /// time — one value per study.
     pub cost_scale_factor: f64,
-    /// Effective inflow-lag state depth (`state_space.inflow_lag_depth`, already
-    /// widened to a loaded boundary policy's required depth by the setup entry
-    /// point); `None` when neither is declared. Widens `L_state` in
+    /// Effective inflow-lag state depth, inferred from a loaded boundary policy's
+    /// required depth (`None` when no boundary is loaded). Widens `L_state` in
     /// `resolve_state_layout` via `widen_lag_state_depth`.
     pub inflow_lag_depth: Option<u32>,
     /// `policy.boundary.is_some()`: whether the study declares a terminal
@@ -259,15 +258,6 @@ impl StudyParams {
             );
         }
 
-        let inflow_lag_depth = config.state_space.inflow_lag_depth;
-        if inflow_lag_depth == Some(0) {
-            return Err(SddpError::Validation(
-                "state_space.inflow_lag_depth (0) must be >= 1; omit the field to leave the \
-                 depth undeclared"
-                    .to_string(),
-            ));
-        }
-
         let boundary_present = config.policy.boundary.is_some();
 
         Ok(Self {
@@ -288,7 +278,10 @@ impl StudyParams {
             simulation_solver,
             backward_scheduler,
             cost_scale_factor,
-            inflow_lag_depth,
+            // The boundary-inferred depth (or None) is set by
+            // `StudySetup::new_with_inflow_lag_depth` after this returns; no config
+            // knob feeds it.
+            inflow_lag_depth: None,
             boundary_present,
         })
     }
@@ -398,9 +391,8 @@ pub struct ConstructionConfig {
     /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
     /// time — one value per study.
     pub cost_scale_factor: f64,
-    /// Effective inflow-lag state depth (`state_space.inflow_lag_depth`, already
-    /// widened to a loaded boundary policy's required depth by the setup entry
-    /// point); `None` when neither is declared. Widens `L_state` in
+    /// Effective inflow-lag state depth, inferred from a loaded boundary policy's
+    /// required depth (`None` when no boundary is loaded). Widens `L_state` in
     /// `resolve_state_layout` via `widen_lag_state_depth`.
     pub inflow_lag_depth: Option<u32>,
     /// `policy.boundary.is_some()`; threaded into
@@ -497,7 +489,6 @@ mod tests {
     fn base_test_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -588,14 +579,6 @@ mod tests {
     fn config_with_cost_scale_factor(value: Option<f64>) -> Config {
         let mut config = base_test_config();
         config.modeling.cost_scale_factor = value;
-        config
-    }
-
-    /// `state_space.inflow_lag_depth` set to `value` (`None` reproduces the
-    /// default-absent shape).
-    fn config_with_inflow_lag_depth(value: Option<u32>) -> Config {
-        let mut config = base_test_config();
-        config.state_space.inflow_lag_depth = value;
         config
     }
 
@@ -716,42 +699,14 @@ mod tests {
         }
     }
 
-    /// An absent `state_space.inflow_lag_depth` resolves to `None` — today's
-    /// undeclared-depth shape.
+    /// `from_config` leaves `inflow_lag_depth` at `None`; the boundary-inferred
+    /// depth is set later by `StudySetup::new_with_inflow_lag_depth`.
     #[test]
-    fn inflow_lag_depth_absent_resolves_to_none() {
-        let params = StudyParams::from_config(&config_with_inflow_lag_depth(None))
-            .expect("absent inflow_lag_depth is valid");
+    fn from_config_leaves_inflow_lag_depth_none() {
+        let params = StudyParams::from_config(&base_test_config()).expect("base config is valid");
         assert_eq!(params.inflow_lag_depth, None);
-    }
-
-    /// A present `state_space.inflow_lag_depth` resolves to `Some(value)` and is
-    /// carried through to the derived `ConstructionConfig`.
-    #[test]
-    fn inflow_lag_depth_present_resolves_and_carries_to_construction_config() {
-        let params = StudyParams::from_config(&config_with_inflow_lag_depth(Some(12)))
-            .expect("12 is a valid inflow_lag_depth");
-        assert_eq!(params.inflow_lag_depth, Some(12));
         let construction = params.into_construction_config();
-        assert_eq!(construction.inflow_lag_depth, Some(12));
-    }
-
-    /// `from_config` rejects `state_space.inflow_lag_depth == 0` with
-    /// `SddpError::Validation` naming the field.
-    #[test]
-    fn inflow_lag_depth_zero_rejected() {
-        use crate::SddpError;
-
-        let err = StudyParams::from_config(&config_with_inflow_lag_depth(Some(0)))
-            .expect_err("inflow_lag_depth of 0 must be rejected");
-        assert!(
-            matches!(err, SddpError::Validation(_)),
-            "expected SddpError::Validation, got: {err:?}"
-        );
-        assert!(
-            err.to_string().contains("state_space.inflow_lag_depth"),
-            "error message must name 'state_space.inflow_lag_depth'; got: {err}"
-        );
+        assert_eq!(construction.inflow_lag_depth, None);
     }
 
     /// An absent `policy.boundary` resolves `boundary_present` to `false`.

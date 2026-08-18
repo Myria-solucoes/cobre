@@ -898,20 +898,16 @@ pub(crate) fn build_study_setup(
     let LoadedCase { system, artifacts } = loaded;
     let warnings = report.warnings;
 
-    let mut config = load_effective_config(&case_dir.join("config.json"), overrides)?;
+    let config = load_effective_config(&case_dir.join("config.json"), overrides)?;
 
-    // Size the inflow-lag state block to a loaded boundary policy — its cuts fix
-    // the required depth, so `state_space.inflow_lag_depth` is an optional
-    // override. Folded before setup so both the layout and the boundary-load
-    // reject see the effective depth; mirrors the CLI run path.
-    if let Some(boundary_rel) = config.policy.boundary.as_ref().map(|bp| bp.path.clone()) {
-        let boundary_path = case_dir.join(&boundary_rel);
-        config.state_space.inflow_lag_depth = resolve_effective_inflow_lag_depth(
-            config.state_space.inflow_lag_depth,
-            Some(&boundary_path),
-        )
-        .map_err(|e| e.to_string())?;
-    }
+    // Infer the inflow-lag state block depth from a loaded boundary policy's cuts;
+    // carried onto the construction config below so both the layout and the
+    // boundary-load reject see it. Mirrors the CLI run path.
+    let inflow_lag_depth = match config.policy.boundary.as_ref() {
+        Some(bp) => resolve_effective_inflow_lag_depth(Some(&case_dir.join(&bp.path)))
+            .map_err(|e| e.to_string())?,
+        None => None,
+    };
 
     let seed = config
         .training
@@ -922,8 +918,15 @@ pub(crate) fn build_study_setup(
         .training_scenario_source(&case_dir.join("config.json"))
         .map_err(|e| format!("scenario source error: {e}"))?;
 
-    let result = prepare_stochastic(system, case_dir, &config, seed, &training_source)
-        .map_err(|e| format!("stochastic preprocessing error: {e}"))?;
+    let result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        seed,
+        &training_source,
+        inflow_lag_depth,
+    )
+    .map_err(|e| format!("stochastic preprocessing error: {e}"))?;
     let system = result.system;
     let estimation_report = result.estimation_report;
     let estimation_path = result.estimation_path;
@@ -941,6 +944,7 @@ pub(crate) fn build_study_setup(
         .map_err(|e| format!("scenario source error: {e}"))?;
     let params = StudyParams::from_config(&config).map_err(|e| e.to_string())?;
     let mut construction = params.into_construction_config();
+    construction.inflow_lag_depth = inflow_lag_depth;
     construction.scalar_parameters = artifacts.scalar_parameters;
     let mut setup = StudySetup::from_broadcast_params(
         &system,
@@ -1228,13 +1232,17 @@ pub(crate) fn apply_training_policy_mode(
             resolved
         };
         let mut on_warning = |msg: &str| eprintln!("cobre-python: boundary cut warning: {msg}");
+        // Inferred from this boundary policy's own cuts (the depth the state layout
+        // reserved) — a defensive guard on the load, never a user error.
+        let effective_inflow_lag_depth =
+            resolve_effective_inflow_lag_depth(Some(&boundary_path)).map_err(|e| e.to_string())?;
         let boundary_records = load_boundary_cuts(
             &boundary_path,
             source_stage,
             state_dim,
             &current_manifest,
             &target_delivery_intervals,
-            config.state_space.inflow_lag_depth,
+            effective_inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,
         )
@@ -2033,7 +2041,7 @@ mod tests {
             .training_scenario_source(&case_dir.join("config.json"))
             .expect("training_scenario_source must succeed for D01");
 
-        let result = prepare_stochastic(system, &case_dir, &config, seed, &training_source);
+        let result = prepare_stochastic(system, &case_dir, &config, seed, &training_source, None);
         assert!(
             result.is_ok(),
             "prepare_stochastic failed for D01 via Python path: {:?}",

@@ -134,10 +134,10 @@ pub(crate) struct BroadcastConfig {
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
     /// resolved identically on every rank by [`StudyParams::from_config`].
     pub(crate) cost_scale_factor: f64,
-    /// Effective inflow-lag state depth (`state_space.inflow_lag_depth`, already
-    /// widened on rank 0 to a loaded boundary policy's required depth); `None`
-    /// when neither is declared. Rebuilt into `ConstructionConfig` on every rank,
-    /// widening `L_state` in `resolve_state_layout`.
+    /// Effective inflow-lag state depth, inferred on rank 0 from a loaded boundary
+    /// policy's required depth (`None` when no boundary is loaded) and set after
+    /// `from_config`. Rebuilt into `ConstructionConfig` on every rank, widening
+    /// `L_state` in `resolve_state_layout`.
     pub(crate) inflow_lag_depth: Option<u32>,
     /// `policy.boundary.is_some()`, resolved identically on every rank by
     /// `StudyParams::from_config`. Gates the water-bucket terminal mask
@@ -740,8 +740,8 @@ mod tests {
         );
     }
 
-    /// A present `state_space.inflow_lag_depth` reaches `BroadcastConfig` and
-    /// survives the postcard wire hop.
+    /// The boundary-inferred `inflow_lag_depth` (set on `BroadcastConfig` by rank
+    /// 0 after `from_config`) survives the postcard wire hop to non-root ranks.
     #[test]
     fn broadcast_config_carries_inflow_lag_depth() {
         use super::BroadcastConfig;
@@ -750,12 +750,11 @@ mod tests {
             "training": {
                 "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }]
-            },
-            "state_space": { "inflow_lag_depth": 12 }
+            }
         }"#;
         let config: cobre_io::Config = serde_json::from_str(json).unwrap();
-        let original = BroadcastConfig::from_config(&config).unwrap();
-        assert_eq!(original.inflow_lag_depth, Some(12));
+        let mut original = BroadcastConfig::from_config(&config).unwrap();
+        original.inflow_lag_depth = Some(12);
 
         let bytes = postcard::to_allocvec(&original).expect("postcard serialization must succeed");
         let decoded: BroadcastConfig =

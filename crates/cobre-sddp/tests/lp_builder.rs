@@ -75,7 +75,7 @@ mod extraction_nonuniform_block_bases {
         let config = cobre_io::parse_config(&config_path).expect("config must parse");
         let system = cobre_io::load_case(&dir).expect("load_case must succeed");
 
-        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let system = pr.system;
         let stochastic = pr.stochastic;
@@ -587,7 +587,7 @@ mod policy_entity_manifest {
         let config = cobre_io::parse_config(&dir.join("config.json")).expect("config must parse");
         let system = cobre_io::load_case(&dir).expect("load_case must succeed");
 
-        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let system = pr.system;
         let stochastic = pr.stochastic;

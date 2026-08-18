@@ -53,9 +53,15 @@ mod simulation_only {
         let config = cobre_io::parse_config(&config_path).expect("config must parse");
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -238,7 +244,7 @@ mod d17_signed_evaporation {
         let config = cobre_io::parse_config(&config_path).expect("config must parse");
         let system = cobre_io::load_case(&dir).expect("load_case must succeed");
 
-        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let system = pr.system;
         let stochastic = pr.stochastic;
@@ -418,9 +424,15 @@ mod d41_energy_contracts_simulation {
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -641,8 +653,8 @@ mod multi_resolution_integration {
         let source = config
             .training_scenario_source(&config_path)
             .expect("training_scenario_source");
-        let prep =
-            prepare_stochastic(system, case_dir, config, 42, &source).expect("prepare_stochastic");
+        let prep = prepare_stochastic(system, case_dir, config, 42, &source, None)
+            .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
         StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
@@ -1013,8 +1025,8 @@ mod decomp_integration {
         let source = config
             .training_scenario_source(&config_path)
             .expect("training_scenario_source");
-        let prep =
-            prepare_stochastic(system, case_dir, config, 42, &source).expect("prepare_stochastic");
+        let prep = prepare_stochastic(system, case_dir, config, 42, &source, None)
+            .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
         let setup = StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
@@ -1576,7 +1588,6 @@ mod transit_seed_output {
     fn config(num_scenarios: u32) -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: InflowNonNegativityMethod::Penalty,
@@ -1987,7 +1998,6 @@ mod transit_seed_round_trip {
     fn config(boundary_on: bool) -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: InflowNonNegativityMethod::Penalty,
@@ -2587,7 +2597,6 @@ mod diversion_outflow_bounds {
     fn config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: InflowNonNegativityMethod::Penalty,

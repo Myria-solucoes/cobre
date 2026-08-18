@@ -275,7 +275,7 @@ pub fn validate(
         }
     };
 
-    let prepared = match prepare_stochastic(system, &path, &config, seed, &training_source) {
+    let prepared = match prepare_stochastic(system, &path, &config, seed, &training_source, None) {
         Ok(p) => p,
         Err(ref err) => {
             let (kind, file_label) = prep_phase_metadata(PrepPhase::Stochastic, err);
