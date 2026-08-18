@@ -1010,23 +1010,6 @@
         }
       ]
     },
-    "StateSpaceConfig": {
-      "additionalProperties": false,
-      "description": "State-space options (`config.json → state_space`).",
-      "properties": {
-        "inflow_lag_depth": {
-          "default": null,
-          "description": "Number of active inflow-lag state slots, decoupled from the fitted AR\norder. Absent leaves the depth undeclared; a present value must be `>= 1`.\nOptional override: when a boundary policy (`policy.boundary`) is loaded, the\nrequired depth is inferred from its cuts and widens this value, so the field\nneed not be declared for a boundary-loaded study.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "StoppingMode": {
       "description": "How multiple stopping rules combine into a single stop decision\n(`config.json → training.stopping_mode`).",
       "oneOf": [
@@ -1430,13 +1413,6 @@
         "solver": null
       },
       "description": "Post-training simulation settings."
-    },
-    "state_space": {
-      "$ref": "#/$defs/StateSpaceConfig",
-      "default": {
-        "inflow_lag_depth": null
-      },
-      "description": "State-space options (inflow-lag state depth)."
     },
     "training": {
       "$ref": "#/$defs/TrainingConfig",

@@ -201,9 +201,15 @@ mod d38_dead_volume_filling_simulation {
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -772,9 +778,15 @@ mod d40_filling_cascade_simulation {
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -1163,9 +1175,15 @@ mod prefilling_spillage_frozen {
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -1665,7 +1683,6 @@ mod filling_cut_validity {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -1998,9 +2015,15 @@ mod d35_pumping_commissioning_simulation {
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -2158,9 +2181,15 @@ mod d36_thermal_line_commissioning_simulation {
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -2464,9 +2493,15 @@ mod d42_nonfilling_hydro_commissioning {
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 

@@ -337,12 +337,11 @@ fn config() -> cobre_io::config::Config {
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod, ModelingConfig, ParallelismConfig, PolicyConfig,
-        RowSelectionConfig, SimulationConfig, StateSpaceConfig, StoppingMode, StoppingRuleConfig,
-        TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
+        RowSelectionConfig, SimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
+        TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     Config {
         schema: None,
-        state_space: StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: InflowNonNegativityMethod::Penalty,

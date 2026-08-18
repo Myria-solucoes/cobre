@@ -31,7 +31,6 @@ pub mod modeling;
 pub mod policy;
 pub mod scenario_source;
 pub mod simulation;
-pub mod state_space;
 pub mod training;
 
 pub use estimation::{EstimationConfig, OrderSelectionMethod};
@@ -43,7 +42,6 @@ pub use scenario_source::{
     RawSamplingScheme, RawScenarioSourceConfig,
 };
 pub use simulation::{NumScenariosResolution, SimulationConfig, SimulationSelection};
-pub use state_space::StateSpaceConfig;
 pub use training::{
     BackwardScheduler, DualEdgeWeight, ForwardPassesResolution, LipschitzConfig, ParallelismConfig,
     PhaseSolverProfileConfig, PresolveMode, PriceStrategy, RowSelectionConfig, ScaleStrategy,
@@ -74,10 +72,6 @@ pub struct Config {
     /// Modeling options (inflow non-negativity treatment).
     #[serde(default)]
     pub modeling: ModelingConfig,
-
-    /// State-space options (inflow-lag state depth).
-    #[serde(default)]
-    pub state_space: StateSpaceConfig,
 
     /// Training parameters — contains mandatory fields.
     pub training: TrainingConfig,
@@ -579,25 +573,19 @@ mod tests {
         assert_eq!(cfg.policy.path, "./policy");
     }
 
-    /// C1 input-compatibility: a `config.json` written before `state_space`
-    /// existed loads with `state_space.inflow_lag_depth` defaulted to `None`.
+    /// The retired `state_space` section (inflow-lag depth is now always inferred
+    /// from the boundary policy) is a `deny_unknown_fields` reject, not a silent
+    /// ignore — a stale `config.json` fails loudly with the field name.
     #[test]
-    fn test_config_without_state_space_defaults_to_none() {
-        let f = write_config(
-            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
-        );
-        let cfg = parse_config(f.path()).unwrap();
-        assert_eq!(cfg.state_space.inflow_lag_depth, None);
-    }
-
-    /// A present `state_space.inflow_lag_depth` survives `parse_config`.
-    #[test]
-    fn test_config_state_space_inflow_lag_depth_present() {
+    fn test_retired_state_space_section_is_rejected() {
         let f = write_config(
             r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}, "state_space": {"inflow_lag_depth": 12}}"#,
         );
-        let cfg = parse_config(f.path()).unwrap();
-        assert_eq!(cfg.state_space.inflow_lag_depth, Some(12));
+        let err = parse_config(f.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("state_space"),
+            "expected an unknown-field error naming state_space, got: {err}"
+        );
     }
 
     /// AC-2: missing `training.selection` (no forward-pass count) → SchemaError

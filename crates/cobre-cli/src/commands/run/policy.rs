@@ -22,6 +22,7 @@ use cobre_sddp::inject_boundary_cuts;
 use cobre_sddp::load_boundary_cuts;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::resolve_boundary_source_stage;
+use cobre_sddp::resolve_effective_inflow_lag_depth;
 use cobre_sddp::validate_policy_load;
 
 use crate::error::CliError;
@@ -265,9 +266,11 @@ pub(super) fn apply_training_policy(
                 let _ = stderr.write_line(&format!("warning: {msg}"));
             }
         };
-        // Already widened to this boundary policy's depth in `load_case_and_config`,
-        // so the load-time depth guard is a defensive check, never a user error.
-        let effective_inflow_lag_depth = root_config.and_then(|c| c.state_space.inflow_lag_depth);
+        // Inferred from this boundary policy's own cuts (the same depth the state
+        // layout reserved), so the load-time depth guard is a defensive check,
+        // never a user error.
+        let effective_inflow_lag_depth =
+            resolve_effective_inflow_lag_depth(Some(&boundary_path)).map_err(CliError::from)?;
         let boundary_records = load_boundary_cuts(
             &boundary_path,
             source_stage,

@@ -1468,8 +1468,16 @@ pub(super) fn fill_z_inflow_entries(
 /// Fill entries for the 4 operational-violation families, linking decision
 /// variables to their slack columns:
 ///
-/// - **Min outflow** (`>=`, per hydro): `q + s + d + sigma_below`
-/// - **Max outflow** (`<=`, per hydro): `q + s + d - sigma_above`
+/// Both outflow rows bind the NON-DIVERTED river-remnant flow `q + s`; the
+/// diversion column `d` is EXCLUDED from both. Diversion routes to a different
+/// downstream target (a separate flow path, capped by its own
+/// `max_diversion_m3s` column bound), not the plant's natural reach. Coupling
+/// `d` into either row is a wrong-but-compiling bound: on the minimum it lets
+/// diverted water satisfy the floor (understating the mandated river release);
+/// on the maximum it double-governs the diversion's own cap.
+///
+/// - **Min outflow** (`>=`, per hydro): `q + s + sigma_below`
+/// - **Max outflow** (`<=`, per hydro): `q + s - sigma_above`
 /// - **Min turbine** (`>=`, per CELL): `q_c + sigma_below_c`
 /// - **Min generation** (`>=`, per CELL): `var_c + sigma_below_c`, where `var_c`
 ///   is `rho * q_c` for constant-productivity hydros, the cell's own generation
@@ -1501,8 +1509,9 @@ pub(super) fn fill_operational_violation_entries(
             }
             let col_s = layout.spillage_col(HydroSys::new(h_idx), blk);
             col_entries[col_s].push((row, 1.0));
-            let col_d = layout.diversion_col(HydroSys::new(h_idx), blk);
-            col_entries[col_d].push((row, 1.0));
+            // Diversion `d` is intentionally NOT coupled into either outflow row —
+            // both bind the non-diverted `q + s` (see the fn doc); re-adding it is
+            // the wrong-but-compiling bound.
             let col_slack = layout.outflow_below_col(HydroSys::new(h_idx), blk);
             col_entries[col_slack].push((row, 1.0));
         }
@@ -1519,8 +1528,6 @@ pub(super) fn fill_operational_violation_entries(
             }
             let col_s = layout.spillage_col(HydroSys::new(h_idx), blk);
             col_entries[col_s].push((row, 1.0));
-            let col_d = layout.diversion_col(HydroSys::new(h_idx), blk);
-            col_entries[col_d].push((row, 1.0));
             let col_slack = layout.outflow_above_col(HydroSys::new(h_idx), blk);
             col_entries[col_slack].push((row, -1.0));
         }

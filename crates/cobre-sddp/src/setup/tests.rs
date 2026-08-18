@@ -508,7 +508,6 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
 fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
     Config {
         schema: None,
-        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::Penalty,
@@ -1456,7 +1455,6 @@ fn study_params_from_config_defaults() {
 
     let config = Config {
         schema: None,
-        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::None,
@@ -1524,7 +1522,6 @@ fn study_params_from_config_explicit() {
 
     let config = Config {
         schema: None,
-        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::Penalty,
@@ -1610,7 +1607,6 @@ fn write_minimal_case_dir(root: &std::path::Path) {
 fn minimal_prepare_config() -> cobre_io::Config {
     Config {
         schema: None,
-        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::None,
@@ -1658,7 +1654,7 @@ fn prepare_stochastic_no_history_no_tree_returns_none_report_and_generated_prove
         seed: None,
         historical_years: None,
     };
-    let result = prepare_stochastic(system, root, &config, seed, &source)
+    let result = prepare_stochastic(system, root, &config, seed, &source, None)
         .expect("prepare_stochastic should succeed with no optional files");
 
     assert!(
@@ -1701,7 +1697,7 @@ fn prepare_stochastic_with_stats_file_present_skips_estimation() {
         seed: None,
         historical_years: None,
     };
-    let result = prepare_stochastic(system, root, &config, seed, &source)
+    let result = prepare_stochastic(system, root, &config, seed, &source, None)
         .expect("prepare_stochastic should succeed when stats file is present");
 
     assert!(
@@ -1734,7 +1730,7 @@ fn prepare_stochastic_no_opening_tree_gives_non_user_supplied_provenance() {
         seed: None,
         historical_years: None,
     };
-    let result = prepare_stochastic(system, root, &config, 0, &source)
+    let result = prepare_stochastic(system, root, &config, 0, &source, None)
         .expect("prepare_stochastic must succeed with no opening tree file");
 
     assert_ne!(
@@ -1992,7 +1988,7 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
         seed: None,
         historical_years: None,
     };
-    let result = prepare_stochastic(system, root, &config, 42, &source)
+    let result = prepare_stochastic(system, root, &config, 42, &source, None)
         .expect("prepare_stochastic must succeed with HistoricalResiduals noise method");
 
     assert_eq!(
@@ -6837,7 +6833,7 @@ fn stage_data_state_matches_indexer_role_a_uniform() {
     assert_state_layout_finalized(&setup.stage_data.state);
 }
 
-/// Given `state_space.inflow_lag_depth` (24) greater than the fitted AR order
+/// Given a boundary-inferred depth (24) greater than the fitted AR order
 /// (2, from `minimal_system_2_hydros_with_history`'s `ar_coefficients: vec![0.5,
 /// 0.3]`), `resolve_state_layout` must widen BOTH the dense stride
 /// (`max_par_order`) AND the per-hydro activeness mask in lockstep: the
@@ -6848,8 +6844,7 @@ fn stage_data_state_matches_indexer_role_a_uniform() {
 #[test]
 fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
     let system = minimal_system_2_hydros_with_history(3, None, vec![]);
-    let mut config = minimal_config(1, 5);
-    config.state_space.inflow_lag_depth = Some(24);
+    let config = minimal_config(1, 5);
 
     let stochastic = build_stochastic_context(
         &system,
@@ -6866,18 +6861,19 @@ fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
     )
     .expect("stochastic context");
 
-    let setup = StudySetup::new(
+    let setup = StudySetup::new_with_inflow_lag_depth(
         &system,
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
+        Some(24),
     )
-    .expect("setup with a declared depth exceeding the AR order");
+    .expect("setup with a boundary depth exceeding the AR order");
 
     let state = &setup.stage_data.state;
     assert_eq!(
         state.max_par_order, 24,
-        "dense stride must widen to the declared depth (AR order is 2)"
+        "dense stride must widen to the boundary-inferred depth (AR order is 2)"
     );
 
     let lag_active_count = state
@@ -6892,15 +6888,71 @@ fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
     );
 }
 
-/// Given `state_space.inflow_lag_depth` (1) LESS than the fitted AR order (2),
+/// Given a boundary-inferred depth (1) LESS than the fitted AR order (2),
 /// `resolve_state_layout` must never shrink below the AR order: `max(AR order,
 /// declared depth)` floors at AR order, both for the dense stride and for every
 /// hydro's activeness-mask entry.
 #[test]
 fn resolve_state_layout_floors_declared_depth_at_ar_order() {
     let system = minimal_system_2_hydros_with_history(3, None, vec![]);
-    let mut config = minimal_config(1, 5);
-    config.state_space.inflow_lag_depth = Some(1);
+    let config = minimal_config(1, 5);
+
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new_with_inflow_lag_depth(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+        Some(1),
+    )
+    .expect("setup with a boundary depth below the AR order");
+
+    let state = &setup.stage_data.state;
+    assert_eq!(
+        state.max_par_order, 2,
+        "a boundary depth below the AR order must not shrink the dense stride"
+    );
+
+    let lag_active_count = state
+        .nonzero_state_indices
+        .iter()
+        .filter(|d| state.inflow_lags.contains(&d.get()))
+        .count();
+    assert_eq!(
+        lag_active_count,
+        2 * system.hydros().len(),
+        "a boundary depth below the AR order must leave the mask at the unwidened AR order"
+    );
+}
+
+/// Cross-crate coherence: cobre-io's seed lag depth
+/// (`cobre_io::seed_lag_state_depth`, the formula `max_seed_lag_depth` uses) and
+/// cobre-sddp's `resolve_state_layout` dense stride (`state.max_par_order`) must
+/// return the identical `L_state` for a study with no loaded boundary — both are
+/// the PAR-derived depth. A drift desyncs the load-time seed derivation from the
+/// runtime state layout. A loaded boundary may widen the runtime deeper (its own
+/// lags are supplied by the boundary cuts, not seeded), so this coherence is the
+/// no-boundary case. The fixture's fitted AR order is 2 with no annual component.
+#[test]
+fn cobre_io_seed_depth_matches_resolve_state_layout_depth() {
+    const FIXTURE_AR_ORDER: usize = 2;
+
+    let system = minimal_system_2_hydros_with_history(3, None, vec![]);
+    let config = minimal_config(1, 5);
 
     let stochastic = build_stochastic_context(
         &system,
@@ -6923,72 +6975,14 @@ fn resolve_state_layout_floors_declared_depth_at_ar_order() {
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
     )
-    .expect("setup with a declared depth below the AR order");
+    .expect("setup");
 
-    let state = &setup.stage_data.state;
+    let io_depth = cobre_io::seed_lag_state_depth(FIXTURE_AR_ORDER, false);
     assert_eq!(
-        state.max_par_order, 2,
-        "a declared depth below the AR order must not shrink the dense stride"
+        setup.stage_data.state.max_par_order, io_depth,
+        "cobre-io seed depth and resolve_state_layout dense stride must agree \
+         (both the PAR-derived depth) without a loaded boundary"
     );
-
-    let lag_active_count = state
-        .nonzero_state_indices
-        .iter()
-        .filter(|d| state.inflow_lags.contains(&d.get()))
-        .count();
-    assert_eq!(
-        lag_active_count,
-        2 * system.hydros().len(),
-        "a declared depth below the AR order must leave the mask at the unwidened AR order"
-    );
-}
-
-/// Cross-crate coherence: cobre-io's seed lag depth
-/// (`cobre_io::seed_lag_state_depth`, the formula `max_seed_lag_depth` uses) and
-/// cobre-sddp's `resolve_state_layout` dense stride (`state.max_par_order`) must
-/// return the identical `L_state` under the same declared depth — both apply
-/// `max(AR, declared)`. A drift desyncs the load-time seed derivation from the
-/// runtime state layout. The fixture's fitted AR order is 2 with no annual
-/// component.
-#[test]
-fn cobre_io_seed_depth_matches_resolve_state_layout_depth_under_declared() {
-    const FIXTURE_AR_ORDER: usize = 2;
-
-    for declared in [24u32, 1] {
-        let system = minimal_system_2_hydros_with_history(3, None, vec![]);
-        let mut config = minimal_config(1, 5);
-        config.state_space.inflow_lag_depth = Some(declared);
-
-        let stochastic = build_stochastic_context(
-            &system,
-            42,
-            None,
-            &[],
-            &[],
-            OpeningTreeInputs::default(),
-            ClassSchemes {
-                inflow: Some(SamplingScheme::InSample),
-                load: Some(SamplingScheme::InSample),
-                ncs: Some(SamplingScheme::InSample),
-            },
-        )
-        .expect("stochastic context");
-
-        let setup = StudySetup::new(
-            &system,
-            &config,
-            stochastic,
-            PrepareHydroModelsResult::default_from_system(&system),
-        )
-        .expect("setup");
-
-        let io_depth = cobre_io::seed_lag_state_depth(FIXTURE_AR_ORDER, false, Some(declared));
-        assert_eq!(
-            setup.stage_data.state.max_par_order, io_depth,
-            "cobre-io seed depth and resolve_state_layout dense stride must agree at \
-             declared depth {declared}"
-        );
-    }
 }
 
 /// Cross-crate coherence: a `StageIdResolver` built (via the cobre-io
@@ -8916,11 +8910,12 @@ fn rules_without_gap() -> crate::stopping_rule::StoppingRuleSet {
     }
 }
 
-/// A `gap` rule under a stage carrying an effective `CVaR` (`lambda > 0`) is
-/// rejected, the message naming the rule, the measure, the offending stage, and
-/// the admitting (expectation) condition.
+/// A `gap` rule under enumerated forwards whose per-stage measures are NOT
+/// uniform (here `Expectation` at stage 0, effective `CVaR` at stage 1) is
+/// rejected, the message naming the rule, the offending stage, the measure, and
+/// the admitting (uniform-measure) condition.
 #[test]
-fn admission_gate_rejects_gap_under_effective_cvar() {
+fn admission_gate_rejects_gap_under_nonuniform_risk_enumerated() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![
         RiskMeasure::Expectation,
@@ -8935,8 +8930,48 @@ fn admission_gate_rejects_gap_under_effective_cvar() {
             assert!(msg.contains("CVaR"), "names the measure: {msg}");
             assert!(msg.contains("stage 1"), "names the offending stage: {msg}");
             assert!(
-                msg.contains("expectation"),
+                msg.contains("uniform"),
                 "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a Validation reject, got {other:?}"),
+    }
+}
+
+/// A `gap` rule under enumerated forwards with a UNIFORM effective `CVaR` at
+/// every stage is admitted: the enumerated engine makes the exact risk-adjusted
+/// upper bound computable, so the gap brackets the risk-adjusted lower bound.
+#[test]
+fn admission_gate_accepts_gap_under_enumerated_uniform_cvar() {
+    use crate::risk_measure::RiskMeasure;
+    let cvar = RiskMeasure::CVaR {
+        alpha: 0.15,
+        lambda: 0.4,
+    };
+    let measures = vec![cvar, cvar, cvar];
+    assert!(
+        super::admission_gate(&measures, &rules_with_gap(), true).is_ok(),
+        "a uniform CVaR under enumerated forwards must admit a gap rule"
+    );
+}
+
+/// A `gap` rule under a uniform `CVaR` but SAMPLED forwards stays rejected: the
+/// upper bound is then a statistical estimate, so there is no exact risk-adjusted
+/// bound to gap against.
+#[test]
+fn admission_gate_rejects_gap_under_uniform_cvar_sampled() {
+    use crate::risk_measure::RiskMeasure;
+    let cvar = RiskMeasure::CVaR {
+        alpha: 0.15,
+        lambda: 0.4,
+    };
+    let measures = vec![cvar, cvar];
+    match super::admission_gate(&measures, &rules_with_gap(), false) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("gap"), "names the rule: {msg}");
+            assert!(
+                msg.contains("sampled"),
+                "names the offending selection: {msg}"
             );
         }
         other => panic!("expected a Validation reject, got {other:?}"),

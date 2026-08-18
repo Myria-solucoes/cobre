@@ -387,7 +387,6 @@ mod anticipated_backward_cut {
     fn build_config(iterations: usize) -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -1094,7 +1093,6 @@ mod hm_distribute_conservation {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -1638,7 +1636,6 @@ mod anticipated_pre_horizon_seed_delivery {
     fn build_config(iterations: usize) -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -2630,7 +2627,6 @@ mod anticipated_d_t_saturation {
     fn build_config(iterations: usize) -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -3221,7 +3217,6 @@ mod anticipated_forward_pass {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -3848,7 +3843,6 @@ mod anticipated_closed_form_lb_k1_single_thermal {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -4221,7 +4215,6 @@ mod lead_time_single_decider_end_to_end {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -4728,7 +4721,6 @@ mod anticipated_numerical_reconciliation_k2 {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -5296,7 +5288,6 @@ mod anticipated_bridge_st_cruz_nova_k1 {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -6268,7 +6259,6 @@ mod a1b_value_cut_identity_anchor {
     fn build_config(iterations: usize) -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -6912,7 +6902,6 @@ mod a1c_stage_count_mode_anchor {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,

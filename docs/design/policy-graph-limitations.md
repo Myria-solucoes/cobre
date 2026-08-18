@@ -148,8 +148,9 @@ infinite-horizon (discounted-cycle) construction.
 ### Autocorrelation model
 
 Inter-stage inflow dependence is modeled with a continuous periodic-autoregressive
-lag state (the `state_space.inflow_lag_depth` configuration), not by discretizing
-the process into a Markov lattice as SDDP.jl's "Markov chain approach" does. The
+lag state (its depth fitted from the PAR model and widened to a loaded boundary
+policy), not by discretizing the process into a Markov lattice as SDDP.jl's
+"Markov chain approach" does. The
 node graph is for **explicit discrete branching** (scenario trees, regime states);
 the two compose — a branching graph whose nodes each carry the continuous lag state.
 

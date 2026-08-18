@@ -48,9 +48,15 @@ fn train_deterministic_case(
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 
@@ -105,8 +111,15 @@ fn run_with_simulation(
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
 
@@ -1341,8 +1354,15 @@ fn d12_checkpoint_round_trip() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
 
@@ -1973,9 +1993,15 @@ fn d18_ncs_commissioning_active_set_varies() {
     let case_dir = Path::new("../../examples/deterministic/d18-ncs-commissioning-window");
     let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
@@ -2031,9 +2057,15 @@ fn d33_per_stage_block_count_varies() {
     let case_dir = Path::new("../../examples/deterministic/d33-per-stage-block-counts");
     let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let hydro_models =
         prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
@@ -3243,9 +3275,15 @@ fn d26_estimated_par2_order_selection() {
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
+    let prepare_result = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
 
     let report = prepare_result
         .estimation_report
@@ -3395,7 +3433,7 @@ fn d29_weekly_par_noise_sharing() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &training_source)
+    let pr = prepare_stochastic(system, case_dir, &config, 42, &training_source, None)
         .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
@@ -3502,7 +3540,7 @@ fn d30_multi_resolution_loads_and_trains() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &training_source)
+    let pr = prepare_stochastic(system, case_dir, &config, 42, &training_source, None)
         .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
@@ -3550,8 +3588,15 @@ fn frozen_vs_fallback_simulation_costs_are_identical() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
 
@@ -3672,8 +3717,15 @@ fn d43_storage_only_cut_converges() {
     // while the lag-enabled pools carry storage + lags.
     let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
     let hydro_models =
@@ -3858,8 +3910,15 @@ fn d44_travel_time_substage_transit_bucket_dual() {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-        .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(
+        system,
+        case_dir,
+        &config,
+        42,
+        &ScenarioSource::default(),
+        None,
+    )
+    .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
     let hydro_models =
@@ -6098,7 +6157,6 @@ mod chronological_telescoping {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -6807,7 +6865,6 @@ mod chronological_attribution {
     fn build_config() -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -7261,7 +7318,7 @@ mod nonzero_stage_fpha_override_regression {
         let config = cobre_io::parse_config(&config_path).expect("config must parse");
         let system = cobre_io::load_case(dir).expect("load_case must succeed");
 
-        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let system = pr.system;
         let stochastic = pr.stochastic;
@@ -7315,7 +7372,7 @@ mod custom_weekly_evaporation_regression {
     fn resolve_evaporation(dir: &Path) -> EvaporationModelSet {
         let config = cobre_io::parse_config(&dir.join("config.json")).expect("config must parse");
         let system = cobre_io::load_case(dir).expect("load_case must succeed");
-        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let hydro_models = prepare_hydro_models(&pr.system, dir, false)
             .expect("prepare_hydro_models must succeed (season_id >= 12 must no longer error)");
@@ -9860,5 +9917,329 @@ mod water_terminal_fcf_valuation {
              state; got {}",
             coefficients[bucket_col]
         );
+    }
+}
+
+/// Enumerated forward selection makes the exact risk-adjusted upper bound
+/// computable, so a `gap` stopping rule is admissible under a uniform `CVaR` —
+/// the DECOMP-parity capability. These integration tests drive the whole
+/// pipeline (`StudySetup::new` admission gate → enumerated forward UB → gap).
+mod enumerated_cvar_gap {
+    use chrono::NaiveDate;
+    use cobre_core::entities::hydro::HydroGenerationModel;
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod, ModelingConfig, PolicyConfig, RowSelectionConfig,
+        SimulationConfig as IoSimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
+        TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+    use super::common::{StubComm, build_setup_in_code, try_build_setup_in_code};
+
+    const BUS_ID: i32 = 1;
+    const HYDRO_ID: i32 = 1;
+    const N_STAGES: usize = 2;
+    const CVAR: StageRiskConfig = StageRiskConfig::CVaR {
+        alpha: 0.15,
+        lambda: 0.4,
+    };
+
+    fn zero_hydro_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    fn stages() -> Vec<Stage> {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+        (0..N_STAGES)
+            .map(|i| {
+                let s = start + chrono::Duration::days(30 * i64::try_from(i).unwrap_or(0));
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: s,
+                        end_date: s + chrono::Duration::days(30),
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: 730.0,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// One bus (deterministic 100 MW load served entirely by deficit — the
+    /// default zero productivity leaves the hydro non-generating) and one
+    /// reservoir hydro, with `risk_config` applied per stage.
+    fn build_system(risk_config: &[StageRiskConfig]) -> System {
+        assert_eq!(risk_config.len(), N_STAGES);
+        let bus = make_bus(
+            EntityId(BUS_ID),
+            BusSpec {
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+        let hydro = make_hydro(
+            EntityId(HYDRO_ID),
+            HydroSpec {
+                bus_id: EntityId(BUS_ID),
+                max_storage_hm3: 200.0,
+                max_turbined_m3s: 100.0,
+                max_generation_mw: 100.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                ..Default::default()
+            },
+        );
+
+        let mut stages = stages();
+        for (stage, rc) in stages.iter_mut().zip(risk_config) {
+            stage.risk_config = *rc;
+        }
+
+        let inflow_models: Vec<InflowModel> = (0..N_STAGES)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(HYDRO_ID),
+                stage_id: i32::try_from(i).unwrap_or(0),
+                mean_m3s: 50.0,
+                std_m3s: 0.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: EntityId(BUS_ID),
+                stage_id: i32::try_from(i).unwrap_or(0),
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    max_turbined_m3s: 100.0,
+                    max_generation_mw: 100.0,
+                    ..Default::default()
+                },
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: zero_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(InitialConditions {
+                storage: vec![HydroStorage {
+                    hydro_id: EntityId(HYDRO_ID),
+                    value_hm3: 100.0,
+                }],
+                ..InitialConditions::default()
+            })
+            .build()
+            .expect("enumerated_cvar_gap: valid single-hydro study")
+    }
+
+    fn enumerated_gap_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: InflowNonNegativityMethod::Penalty,
+                },
+                cost_scale_factor: Some(1.0),
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![
+                    StoppingRuleConfig::Gap {
+                        tolerance: Some(1.0e9),
+                        relative_tolerance: None,
+                    },
+                    StoppingRuleConfig::IterationLimit { limit: 20 },
+                ]),
+                stopping_mode: StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Enumerated {}),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig {
+                enabled: false,
+                ..IoSimulationConfig::default()
+            },
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// A gap rule under enumerated forwards + a UNIFORM CVaR builds (the gate now
+    /// admits it), trains without error, and reports a NON-NEGATIVE gap — the
+    /// risk-adjusted upper bound brackets the risk-adjusted lower bound. Before
+    /// the change `StudySetup::new` rejected this pairing outright.
+    #[test]
+    fn uniform_cvar_gap_admits_trains_and_brackets() {
+        let system = build_system(&[CVAR, CVAR]);
+        let config = enumerated_gap_config();
+
+        assert!(
+            try_build_setup_in_code(build_system(&[CVAR, CVAR]), &config).is_ok(),
+            "enumerated + uniform CVaR + gap rule must be admitted by StudySetup::new"
+        );
+
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "training must not error: {:?}",
+            outcome.error
+        );
+
+        let r = &outcome.result;
+        assert!(r.final_ub.is_finite(), "final_ub must be finite");
+        assert!(
+            r.final_ub >= r.final_lb - 1e-6,
+            "the risk-adjusted UB ({}) must bracket the LB ({}); a risk-neutral UB \
+             under a CVaR LB is the negative-gap defect this change fixes",
+            r.final_ub,
+            r.final_lb
+        );
+        assert!(
+            r.final_gap >= -1e-6,
+            "reported gap must be non-negative, got {}",
+            r.final_gap
+        );
+    }
+
+    /// A gap rule under enumerated forwards but a NON-UNIFORM measure (stage 0
+    /// expectation, stage 1 CVaR) stays rejected: the static path-cost bound has
+    /// no single measure to apply.
+    #[test]
+    fn nonuniform_risk_gap_is_rejected() {
+        let config = enumerated_gap_config();
+        let result =
+            try_build_setup_in_code(build_system(&[StageRiskConfig::Expectation, CVAR]), &config);
+        match result {
+            Err(cobre_sddp::SddpError::Validation(msg)) => {
+                assert!(
+                    msg.contains("uniform") && msg.contains("gap"),
+                    "reject message must name the uniformity requirement: {msg}"
+                );
+            }
+            other => panic!("expected a uniformity Validation reject, got {other:?}"),
+        }
     }
 }

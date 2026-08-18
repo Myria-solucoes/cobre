@@ -234,6 +234,7 @@ impl StageOpeningSolver {
         accumulate_opening_outcome(
             ws,
             child,
+            succ.cut_state,
             omega,
             objective,
             x_hat,
@@ -361,6 +362,7 @@ impl StageOpeningSolver {
 
         write_opening_outcome(
             ws,
+            succ.cut_state,
             omega,
             objective,
             x_hat,

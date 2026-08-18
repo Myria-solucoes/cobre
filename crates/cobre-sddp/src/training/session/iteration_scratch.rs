@@ -54,6 +54,10 @@ pub(crate) struct IterationScratch {
     /// Per-path probability weights for the exact upper-bound reduction, filled
     /// only on an enumerated forward. Empty (unallocated) on the sampled path.
     pub(crate) ub_path_weights: Vec<f64>,
+    /// Per-path per-stage immediate costs (this rank's paths, path-major) fed to
+    /// the nested risk-adjusted upper bound. Filled only on an enumerated forward
+    /// under an effective `CVaR`; empty otherwise.
+    pub(crate) ub_stage_costs: Vec<f64>,
     /// Whether the terminal pool carried boundary cuts when the static
     /// terminal template was baked at priming; the terminal template is never
     /// refrozen afterward, so this stays fixed for the rest of the run.
@@ -167,6 +171,7 @@ impl IterationScratch {
             lb_noise_scratch,
             freeze_scratch,
             ub_path_weights: Vec::new(),
+            ub_stage_costs: Vec::new(),
             terminal_has_boundary_cuts: false,
         }
     }

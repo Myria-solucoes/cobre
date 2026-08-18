@@ -421,7 +421,6 @@ fn make_config() -> Config {
     };
     Config {
         schema: None,
-        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig::default(),
             cost_scale_factor: None,

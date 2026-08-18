@@ -2420,7 +2420,10 @@ fn relocated_min_generation_row_bounds() {
 
 #[test]
 fn relocated_min_outflow_matrix_coefficients() {
-    // Per-block min outflow: q + s + d + slack = 1.0 per block-row.
+    // Per-block min outflow: q + s + slack = 1.0 per block-row. Diversion `d`
+    // is EXCLUDED (the floor binds the non-diverted river-remnant flow);
+    // `min_outflow_row_excludes_diversion_but_max_includes_it` pins that both
+    // ways against the deliberate min/max asymmetry.
     let (layout, t) = build_active_violations_layout_and_template();
     let n_blks = 2;
 
@@ -2450,6 +2453,38 @@ fn relocated_min_outflow_matrix_coefficients() {
             v.is_some() && (v.unwrap() - 1.0).abs() < 1e-15,
             "outflow_below slack blk{blk}: {v:?}"
         );
+    }
+}
+
+/// The diversion column is coupled into NEITHER outflow row: both the minimum
+/// and the maximum bind the non-diverted `q + s`, leaving diversion to its own
+/// channel cap. Re-adding `d` to either row fails.
+#[test]
+fn both_outflow_rows_exclude_diversion() {
+    let (layout, t) = build_active_violations_layout_and_template();
+    let n_blks = 2;
+
+    for blk in 0..n_blks {
+        let div_col = layout.equipment.diversion.start + blk;
+        let entries = csc_entries_for_col(&t, div_col);
+
+        for (label, start) in [
+            (
+                "min_outflow",
+                layout.slack.oper_violation.min_outflow_rows.start,
+            ),
+            (
+                "max_outflow",
+                layout.slack.oper_violation.max_outflow_rows.start,
+            ),
+        ] {
+            let row = start + blk;
+            let entry = entries.iter().find(|e| e.0 == row);
+            assert!(
+                entry.is_none(),
+                "diversion col must have NO entry in the {label} row (blk {blk}), got {entry:?}"
+            );
+        }
     }
 }
 

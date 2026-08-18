@@ -53,9 +53,15 @@ mod simulation_only {
         let config = cobre_io::parse_config(&config_path).expect("config must parse");
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -238,7 +244,7 @@ mod d17_signed_evaporation {
         let config = cobre_io::parse_config(&config_path).expect("config must parse");
         let system = cobre_io::load_case(&dir).expect("load_case must succeed");
 
-        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default())
+        let pr = prepare_stochastic(system, &dir, &config, 42, &ScenarioSource::default(), None)
             .expect("prepare_stochastic must succeed");
         let system = pr.system;
         let stochastic = pr.stochastic;
@@ -418,9 +424,15 @@ mod d41_energy_contracts_simulation {
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
-        let prepare_result =
-            prepare_stochastic(system, &case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
+        let prepare_result = prepare_stochastic(
+            system,
+            &case_dir,
+            &config,
+            42,
+            &ScenarioSource::default(),
+            None,
+        )
+        .expect("prepare_stochastic must succeed");
         let system = prepare_result.system;
         let stochastic = prepare_result.stochastic;
 
@@ -641,8 +653,8 @@ mod multi_resolution_integration {
         let source = config
             .training_scenario_source(&config_path)
             .expect("training_scenario_source");
-        let prep =
-            prepare_stochastic(system, case_dir, config, 42, &source).expect("prepare_stochastic");
+        let prep = prepare_stochastic(system, case_dir, config, 42, &source, None)
+            .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
         StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
@@ -1013,8 +1025,8 @@ mod decomp_integration {
         let source = config
             .training_scenario_source(&config_path)
             .expect("training_scenario_source");
-        let prep =
-            prepare_stochastic(system, case_dir, config, 42, &source).expect("prepare_stochastic");
+        let prep = prepare_stochastic(system, case_dir, config, 42, &source, None)
+            .expect("prepare_stochastic");
         let hydro_models =
             prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
         let setup = StudySetup::new(&prep.system, config, prep.stochastic, hydro_models)
@@ -1576,7 +1588,6 @@ mod transit_seed_output {
     fn config(num_scenarios: u32) -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: InflowNonNegativityMethod::Penalty,
@@ -1987,7 +1998,6 @@ mod transit_seed_round_trip {
     fn config(boundary_on: bool) -> Config {
         Config {
             schema: None,
-            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: InflowNonNegativityMethod::Penalty,
@@ -2279,5 +2289,448 @@ mod transit_seed_round_trip {
             "the gate must not change which lags are structurally reachable, only whether \
              they are masked"
         );
+    }
+}
+
+mod diversion_outflow_bounds {
+    //! Both per-hydro outflow bounds bind the NON-DIVERTED river-remnant flow
+    //! `q + s`, never `q + s + d`. The minimum reproduces the Belo Monte / Volta
+    //! Grande defect (a defluência-mínima must be routed down the plant's own
+    //! channel, not satisfied by the diversion canal); the maximum is its mirror
+    //! (a defluência-máxima caps the natural channel, while the diversion canal —
+    //! bounded separately — carries the surplus past it).
+
+    use chrono::NaiveDate;
+    use cobre_core::entities::hydro::{DiversionChannel, HydroGenerationModel};
+    use cobre_core::scenario::InflowModel;
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod, ModelingConfig, PolicyConfig, RowSelectionConfig,
+        SimulationConfig as IoSimulationConfig, SimulationSelection, StoppingMode,
+        StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
+        UpperBoundEvaluationConfig,
+    };
+    use cobre_sddp::SimulationScenarioResult;
+
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+    use super::common::{build_setup_in_code, run_simulation};
+
+    const SOURCE_ID: i32 = 1;
+    const TARGET_ID: i32 = 2;
+    const BUS_ID: i32 = 1;
+    /// The defluência-mínima on the source's natural reach (Volta Grande analog).
+    const MIN_OUTFLOW_M3S: f64 = 400.0;
+    /// The defluência-máxima on the source's natural reach; below the inflow, so
+    /// the surplus must leave through the diversion canal past the cap.
+    const MAX_OUTFLOW_M3S: f64 = 300.0;
+    /// Turbine cap below the floor, so meeting `q + s >= MIN_OUTFLOW` forces spill.
+    const MAX_TURBINED_M3S: f64 = 100.0;
+    /// Diversion capacity large enough to absorb every surplus m³/s.
+    const DIVERSION_CAP_M3S: f64 = 900.0;
+    /// Deterministic run-of-river inflow (std 0): the source must release exactly
+    /// this every block, split among turbine / spill / diversion.
+    const INFLOW_M3S: f64 = 500.0;
+
+    /// Which outflow bound the fixture exercises. Both bind `q + s`; each needs a
+    /// cost structure that would push the diverted flow across the bound if the
+    /// diversion column were (wrongly) coupled into the row.
+    #[derive(Clone, Copy)]
+    enum Bound {
+        /// Diversion is cheaper than spill, so the LP would meet the floor with
+        /// diversion if `d` counted toward the minimum.
+        Min,
+        /// Diversion is dearer than spill, so the LP pushes `q + s` up to the cap
+        /// and routes only the forced surplus through the canal — the canal flow
+        /// would evade the maximum if `d` counted toward it.
+        Max,
+    }
+
+    fn study_start() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date")
+    }
+
+    fn stages() -> Vec<Stage> {
+        let start = study_start();
+        (0..2_usize)
+            .map(|i| {
+                let s = start + chrono::Duration::days(30 * i64::try_from(i).unwrap_or(0));
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: s,
+                        end_date: s + chrono::Duration::days(30),
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: 730.0,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// `Min`: spill dearer than diversion, so absent the floor the LP would route
+    /// the surplus through the cheaper canal, leaving `q + s` below `MIN_OUTFLOW`.
+    /// `Max`: spill cheaper than diversion, so the LP fills the natural channel to
+    /// the cap and diverts only the forced surplus. The high violation costs make
+    /// each bound bind rather than be paid off.
+    fn hydro_penalties(bound: Bound) -> HydroStagePenalties {
+        let (spillage_cost, diversion_cost) = match bound {
+            Bound::Min => (0.5, 0.0),
+            Bound::Max => (0.01, 10.0),
+        };
+        HydroStagePenalties {
+            spillage_cost,
+            diversion_cost,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 1000.0,
+            outflow_violation_above_cost: 1000.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    /// Source `S` (id 1) is run-of-river with a `MIN_OUTFLOW_M3S` floor and a
+    /// diversion channel to target `T` (id 2). `T` is run-of-river with turbine
+    /// headroom to absorb the whole diverted flow. Neither generates (default
+    /// zero productivity): the operative economics are spill-vs-divert cost, which
+    /// is all the floor semantics need to be exercised.
+    fn build_system(bound: Bound) -> System {
+        let (entity_min, entity_max) = match bound {
+            Bound::Min => (MIN_OUTFLOW_M3S, None),
+            Bound::Max => (0.0, Some(MAX_OUTFLOW_M3S)),
+        };
+        let bus = make_bus(
+            EntityId(BUS_ID),
+            BusSpec {
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+        // Source: id 1 → canonical position 0 (smallest id, shared start date);
+        // asserted below before the per-hydro bounds override is trusted.
+        let source = make_hydro(
+            EntityId(SOURCE_ID),
+            HydroSpec {
+                bus_id: EntityId(BUS_ID),
+                min_outflow_m3s: entity_min,
+                max_outflow_m3s: entity_max,
+                max_turbined_m3s: MAX_TURBINED_M3S,
+                max_generation_mw: 500.0,
+                diversion: Some(DiversionChannel {
+                    downstream_id: EntityId(TARGET_ID),
+                    max_flow_m3s: DIVERSION_CAP_M3S,
+                }),
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                ..Default::default()
+            },
+        );
+        let target = make_hydro(
+            EntityId(TARGET_ID),
+            HydroSpec {
+                bus_id: EntityId(BUS_ID),
+                max_turbined_m3s: DIVERSION_CAP_M3S,
+                max_generation_mw: 500.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                ..Default::default()
+            },
+        );
+
+        let stages = stages();
+        let n_stages = stages.len();
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(SOURCE_ID),
+                stage_id: i32::try_from(i).unwrap_or(0),
+                mean_m3s: INFLOW_M3S,
+                std_m3s: 0.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    max_turbined_m3s: DIVERSION_CAP_M3S,
+                    max_generation_mw: 500.0,
+                    ..Default::default()
+                },
+                thermal: ThermalStageBounds {
+                    cost_per_mwh: 500.0,
+                },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        // Source-only resolved overrides at canonical position 0 (the exercised
+        // outflow bound, the diversion cap, and the sub-inflow turbine cap); the
+        // target keeps the defaults (no bounds, no diversion column).
+        for stage_idx in 0..n_stages {
+            let src = bounds.hydro_block_base_mut(0, stage_idx);
+            src.max_turbined_m3s = MAX_TURBINED_M3S;
+            src.max_diversion_m3s = Some(DIVERSION_CAP_M3S);
+            match bound {
+                Bound::Min => src.min_outflow_m3s = MIN_OUTFLOW_M3S,
+                Bound::Max => src.max_outflow_m3s = Some(MAX_OUTFLOW_M3S),
+            }
+        }
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 2,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: hydro_penalties(bound),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![source, target])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(InitialConditions {
+                storage: vec![
+                    HydroStorage {
+                        hydro_id: EntityId(SOURCE_ID),
+                        value_hm3: 0.0,
+                    },
+                    HydroStorage {
+                        hydro_id: EntityId(TARGET_ID),
+                        value_hm3: 0.0,
+                    },
+                ],
+                ..InitialConditions::default()
+            })
+            .build()
+            .expect("diversion_outflow_bounds: valid two-hydro diverting system");
+
+        assert_eq!(
+            system.hydros()[0].id,
+            EntityId(SOURCE_ID),
+            "the source must occupy canonical position 0 for the per-hydro bounds override"
+        );
+        system
+    }
+
+    fn config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: InflowNonNegativityMethod::Penalty,
+                },
+                cost_scale_factor: Some(1.0),
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
+                stopping_mode: StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig {
+                enabled: true,
+                io_channel_capacity: 16,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
+                ..IoSimulationConfig::default()
+            },
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// The floor forces `q + s >= MIN_OUTFLOW` down the source's own channel even
+    /// though diverting the surplus is strictly cheaper. Under the pre-fix
+    /// coefficient set (`q + s + d >= MIN_OUTFLOW`) the LP would meet the floor
+    /// with diversion, leaving `q + s = q = MAX_TURBINED_M3S < MIN_OUTFLOW` at
+    /// zero below-slack — the silent Volta Grande under-release.
+    #[test]
+    fn min_outflow_binds_the_non_diverted_flow_on_a_diverter() {
+        let mut setup = build_setup_in_code(build_system(Bound::Min), &config());
+        let results = run_simulation(&mut setup, 1);
+        assert_eq!(results.len(), 1, "exactly one scenario must be produced");
+        let scenario: &SimulationScenarioResult = &results[0];
+
+        let source_blocks: Vec<_> = scenario
+            .stages
+            .iter()
+            .flat_map(|s| &s.hydros)
+            .filter(|h| h.hydro_id == SOURCE_ID)
+            .collect();
+        assert!(
+            !source_blocks.is_empty(),
+            "the source must appear in the simulation output"
+        );
+
+        for h in source_blocks {
+            let non_diverted = h.turbined_m3s + h.spillage_m3s;
+            assert!(
+                non_diverted >= MIN_OUTFLOW_M3S - 1e-3,
+                "non-diverted outflow (q + s = {non_diverted}) must meet the {MIN_OUTFLOW_M3S} \
+                 floor; including diversion in the floor would let it drop to \
+                 turbined={} with zero slack",
+                h.turbined_m3s
+            );
+            assert!(
+                h.outflow_slack_below_m3s < 1e-3,
+                "the floor is met without a below-violation, got slack {}",
+                h.outflow_slack_below_m3s
+            );
+            // Non-vacuous: the plant genuinely diverts, so the floor is satisfied
+            // by `q + s` DESPITE water leaving through the canal — not because no
+            // diversion occurs.
+            let diverted = h
+                .diverted_outflow_m3s
+                .expect("a diverting plant reports its diverted outflow");
+            assert!(
+                diverted > 1e-3,
+                "the source must actively divert (else the test is vacuous), got {diverted}"
+            );
+        }
+    }
+
+    /// The cap binds `q + s <= MAX_OUTFLOW` on the source's own channel while the
+    /// diversion canal carries the forced surplus past it (total release
+    /// `q + s + d = INFLOW > MAX_OUTFLOW`), with zero above-violation. Under the
+    /// pre-symmetry coefficient set (`q + s + d <= MAX_OUTFLOW`) the run-of-river
+    /// balance would instead force an above-slack of `INFLOW − MAX_OUTFLOW` and no
+    /// diversion — the total-release cap this change removes.
+    #[test]
+    fn max_outflow_binds_the_non_diverted_flow_on_a_diverter() {
+        let mut setup = build_setup_in_code(build_system(Bound::Max), &config());
+        let results = run_simulation(&mut setup, 1);
+        assert_eq!(results.len(), 1, "exactly one scenario must be produced");
+        let scenario: &SimulationScenarioResult = &results[0];
+
+        let source_blocks: Vec<_> = scenario
+            .stages
+            .iter()
+            .flat_map(|s| &s.hydros)
+            .filter(|h| h.hydro_id == SOURCE_ID)
+            .collect();
+        assert!(
+            !source_blocks.is_empty(),
+            "the source must appear in the simulation output"
+        );
+
+        for h in source_blocks {
+            let non_diverted = h.turbined_m3s + h.spillage_m3s;
+            assert!(
+                non_diverted <= MAX_OUTFLOW_M3S + 1e-3,
+                "non-diverted outflow (q + s = {non_diverted}) must honor the {MAX_OUTFLOW_M3S} \
+                 cap on the natural channel"
+            );
+            assert!(
+                h.outflow_slack_above_m3s < 1e-3,
+                "the cap is met without an above-violation, got slack {}; including diversion \
+                 in the maximum would force it to {} on this run-of-river balance",
+                h.outflow_slack_above_m3s,
+                INFLOW_M3S - MAX_OUTFLOW_M3S
+            );
+            let diverted = h
+                .diverted_outflow_m3s
+                .expect("a diverting plant reports its diverted outflow");
+            // Non-vacuous: the canal carries the surplus past the cap, so total
+            // release exceeds MAX_OUTFLOW even though `q + s` honors it — which is
+            // impossible if `d` counts toward the maximum.
+            assert!(
+                diverted > 1e-3,
+                "the source must actively divert (else the test is vacuous), got {diverted}"
+            );
+            assert!(
+                non_diverted + diverted > MAX_OUTFLOW_M3S + 1e-3,
+                "total release (q + s + d = {}) must exceed the {MAX_OUTFLOW_M3S} cap via the \
+                 diversion canal, proving the maximum bounds only the non-diverted flow",
+                non_diverted + diverted
+            );
+        }
     }
 }

@@ -340,7 +340,30 @@ impl StudySetup {
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
     ) -> Result<Self, SddpError> {
-        let params = StudyParams::from_config(config)?;
+        Self::new_with_inflow_lag_depth(system, config, stochastic, hydro_models, None)
+    }
+
+    /// [`Self::new`] with the boundary-inferred inflow-lag depth supplied
+    /// explicitly.
+    ///
+    /// The inflow-lag state depth is inferred from a loaded boundary policy
+    /// (`resolve_effective_inflow_lag_depth`, an I/O read the caller performs),
+    /// not from any config knob; `None` sizes the lag block from the PAR model
+    /// alone. The MPI broadcast path carries the same value on
+    /// `ConstructionConfig::inflow_lag_depth` for non-root ranks.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::new`].
+    pub fn new_with_inflow_lag_depth(
+        system: &System,
+        config: &Config,
+        stochastic: StochasticContext,
+        hydro_models: PrepareHydroModelsResult,
+        inflow_lag_depth: Option<u32>,
+    ) -> Result<Self, SddpError> {
+        let mut params = StudyParams::from_config(config)?;
+        params.inflow_lag_depth = inflow_lag_depth;
         // Sentinel: the scenario-source resolvers use the path only for error
         // messages and the historical-years look-up, neither exercised here with a
         // validated Config.
@@ -987,15 +1010,15 @@ fn build_energy_and_templates(
     })
 }
 
-/// `L_state = max(computed_order, declared_depth)` — the single widening
+/// `L_state = max(computed_order, boundary_depth)` — the single widening
 /// every lag-state-slot source (`resolve_state_layout`'s dense stride and
 /// per-hydro activeness mask, `build_opening_tree_library`,
-/// `rebuild_historical_library_non_root`) applies in lockstep so a declared
-/// `state_space.inflow_lag_depth` never truncates on one source while
-/// widening another. `None` leaves `computed_order` unchanged.
+/// `rebuild_historical_library_non_root`) applies in lockstep so a
+/// boundary-inferred depth never truncates on one source while widening another.
+/// `None` (no boundary) leaves `computed_order` unchanged.
 #[must_use]
-pub fn widen_lag_state_depth(computed_order: usize, declared_depth: Option<u32>) -> usize {
-    declared_depth.map_or(computed_order, |d| computed_order.max(d as usize))
+pub fn widen_lag_state_depth(computed_order: usize, boundary_depth: Option<u32>) -> usize {
+    boundary_depth.map_or(computed_order, |d| computed_order.max(d as usize))
 }
 
 /// Resolve every anticipated thermal's delivery-anchored commitment and
@@ -2060,33 +2083,72 @@ fn admission_gate(
     stopping_rules: &StoppingRuleSet,
     training_enumerated: bool,
 ) -> Result<(), SddpError> {
-    reject_gap_under_effective_risk_aversion(risk_measures, stopping_rules)?;
+    reject_gap_under_effective_risk_aversion(risk_measures, stopping_rules, training_enumerated)?;
     reject_gap_under_sampled_selection(stopping_rules, training_enumerated)
 }
 
-/// Reject a `gap` stopping rule under an effective non-expectation risk measure:
-/// the exact upper bound a `gap` rule compares the lower bound against is
-/// defined only under expectation, so pairing a `gap` rule with an effectively
-/// risk-averse measure at any stage is inadmissible. No `gap` rule present ⇒
-/// `Ok(())`.
+/// Reject a `gap` stopping rule that has no exact bound to compare against.
+///
+/// Under **sampled** forwards the upper bound is a statistical estimate under any
+/// measure — the [`reject_gap_under_sampled_selection`] companion rejects that
+/// separately; this function additionally names the offending risk measure so a
+/// risk-averse sampled study gets the more specific message. Under **enumerated**
+/// forwards every path is visited, so the exact risk-adjusted upper bound is
+/// computable and a `gap` rule IS admissible under `CVaR` — **provided the
+/// measure is uniform across stages** (see [`reject_gap_under_nonuniform_risk`]):
+/// the bound applies one static risk measure to the enumerated path costs, which
+/// is undefined when stages differ. No `gap` rule present ⇒ `Ok(())`.
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] naming the rule, the offending stage's
-/// measure, and the admitting condition (an expectation measure).
+/// measure, and the admitting condition.
 fn reject_gap_under_effective_risk_aversion(
     risk_measures: &[RiskMeasure],
     stopping_rules: &StoppingRuleSet,
+    training_enumerated: bool,
 ) -> Result<(), SddpError> {
     if !stopping_rules.rules.iter().any(rule_is_gap) {
         return Ok(());
+    }
+    if training_enumerated {
+        return reject_gap_under_nonuniform_risk(risk_measures);
     }
     for (stage, measure) in risk_measures.iter().enumerate() {
         if is_effective_non_expectation(measure) {
             return Err(SddpError::Validation(format!(
                 "gap stopping rule is inadmissible under the effective non-expectation \
-                 risk measure at stage {stage} ({measure:?}); a gap rule admits only an \
-                 expectation risk measure at every stage"
+                 risk measure at stage {stage} ({measure:?}) with sampled forward selection; \
+                 enumerated forwards admit a gap rule under a uniform risk measure"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject a `gap` stopping rule under enumerated forwards whose per-stage risk
+/// measures are not uniform. The enumerated risk-adjusted upper bound applies one
+/// static risk measure to the whole-path costs, so a measure that varies stage to
+/// stage has no single bound to gap against. Uniformity is checked on the
+/// [`effective`](RiskMeasure::effective) form, so a mix of `Expectation` and
+/// `CVaR { lambda: 0 }` is uniform. Uniform (or empty) ⇒ `Ok(())`.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the first stage whose measure differs
+/// and the admitting condition (a uniform measure).
+fn reject_gap_under_nonuniform_risk(risk_measures: &[RiskMeasure]) -> Result<(), SddpError> {
+    let Some(first) = risk_measures.first().map(|m| m.effective()) else {
+        return Ok(());
+    };
+    for (stage, measure) in risk_measures.iter().enumerate() {
+        if measure.effective() != first {
+            return Err(SddpError::Validation(format!(
+                "gap stopping rule under enumerated forwards requires a uniform risk measure \
+                 across all stages; stage {stage} ({measure:?}) differs from stage 0 \
+                 ({:?}). The risk-adjusted upper bound applies one static CVaR measure to the \
+                 enumerated path costs, undefined when stages differ",
+                risk_measures[0]
             )));
         }
     }

@@ -26,8 +26,8 @@ use cobre_core::{
 use cobre_io::config::{
     Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, InflowNonNegativityMethod,
     ModelingConfig, ParallelismConfig, PolicyConfig, RowSelectionConfig, SimulationConfig,
-    StateSpaceConfig, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
-    TrainingSolverConfig, UpperBoundEvaluationConfig,
+    StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
+    UpperBoundEvaluationConfig,
 };
 use cobre_io::{EntitySlot, OwnedPolicyCutRecord, StageCutsReadResult};
 use cobre_sddp::{
@@ -164,7 +164,6 @@ fn build_system() -> System {
 fn build_config() -> Config {
     Config {
         schema: None,
-        state_space: StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: InflowNonNegativityMethod::Penalty,

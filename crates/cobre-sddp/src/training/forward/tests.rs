@@ -1433,6 +1433,84 @@ fn sync_forward_exact_single_path_returns_cost_with_zero_ci() {
     assert_eq!(result.ci_95_half_width, 0.0);
 }
 
+/// The nested backward risk recursion is the NESTED (time-consistent) `CVaR` of
+/// the realized costs, strictly above the end-of-horizon `CVaR` of the whole-path
+/// totals on a tree whose worst branch compounds. Fixture: a 3-stage binary tree;
+/// the "bad" stage-1 branch (node 2, immediate 100) leads to the "bad-bad" leaf
+/// (node 6, immediate 100); all other immediates are 0. Path totals are
+/// {0, 0, 100, 200} at weight 0.25.
+///
+/// - Pure `CVaR_0.5` nested → `V(root) = 200`: the recursion concentrates on the
+///   worst branch at every stage (the α² ≈ worst-quarter protection).
+/// - End-of-horizon `CVaR_0.5` of the totals → `150` (worst-half of the totals).
+/// - `Expectation` collapses to `Σ wᵢ·total = 75`, matching a plain weighted sum.
+#[test]
+fn nested_ub_recursion_is_nested_not_end_of_horizon() {
+    use super::stats_aggregation::nested_ub_recursion;
+    use crate::setup::node_graph::{NodePos, TypedVec};
+
+    // parent map: 0=root; 1,2 = stage-1 children of 0; 3,4 = leaves of 1; 5,6 = leaves of 2.
+    let parent: TypedVec<NodePos, Option<NodePos>> = vec![
+        None,
+        Some(NodePos(0)),
+        Some(NodePos(0)),
+        Some(NodePos(1)),
+        Some(NodePos(1)),
+        Some(NodePos(2)),
+        Some(NodePos(2)),
+    ]
+    .into();
+    let leaf = [NodePos(3), NodePos(4), NodePos(5), NodePos(6)];
+    let weight = [0.25_f64; 4];
+    // path-major [c_root, c_stage1, c_leaf] per path (paths in leaf order 3,4,5,6):
+    #[rustfmt::skip]
+    let global = [
+        0.0, 0.0, 0.0,   // path via leaf 3 (good branch)
+        0.0, 0.0, 0.0,   // path via leaf 4 (good branch)
+        0.0, 100.0, 0.0, // path via leaf 5 (bad stage-1, good leaf)
+        0.0, 100.0, 100.0, // path via leaf 6 (bad stage-1, bad leaf)
+    ];
+    let cum_d = [1.0_f64, 1.0, 1.0];
+
+    let cvar = RiskMeasure::CVaR {
+        alpha: 0.5,
+        lambda: 1.0,
+    };
+    let nested = nested_ub_recursion(&parent, &leaf, &weight, &global, 3, &cum_d, cvar);
+    assert!(
+        (nested - 200.0).abs() < 1e-12,
+        "nested pure CVaR_0.5 must be 200.0, got {nested}"
+    );
+
+    // End-of-horizon CVaR of the whole-path totals is only 150 — strictly below
+    // the nested 200, the exact gap the spec's negative-gap defect turned on.
+    let totals = [0.0_f64, 0.0, 100.0, 200.0];
+    let end_of_horizon = cvar.evaluate_risk(&totals, &weight);
+    assert!(
+        (end_of_horizon - 150.0).abs() < 1e-12,
+        "end-of-horizon CVaR_0.5 must be 150.0, got {end_of_horizon}"
+    );
+    assert!(
+        nested > end_of_horizon,
+        "the nested bound ({nested}) must exceed the end-of-horizon bound ({end_of_horizon})"
+    );
+
+    // Expectation collapses the recursion to the plain probability-weighted total.
+    let expectation = nested_ub_recursion(
+        &parent,
+        &leaf,
+        &weight,
+        &global,
+        3,
+        &cum_d,
+        RiskMeasure::Expectation,
+    );
+    assert!(
+        (expectation - 75.0).abs() < 1e-12,
+        "Expectation must collapse to Σ wᵢ·total = 75.0, got {expectation}"
+    );
+}
+
 // ── Unit tests: warm-start basis caching ─────────────────────────────────
 
 /// Helper: run one iteration of `run_forward_pass` with a single scenario

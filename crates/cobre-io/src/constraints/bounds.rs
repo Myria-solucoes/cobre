@@ -27,8 +27,8 @@
 //! | `max_turbined_m3s`    | DOUBLE | No       | Max turbined flow (m3/s)           |
 //! | `min_storage_hm3`     | DOUBLE | No       | Min reservoir storage (hm3)        |
 //! | `max_storage_hm3`     | DOUBLE | No       | Max reservoir storage (hm3)        |
-//! | `min_outflow_m3s`     | DOUBLE | No       | Min total outflow (m3/s)           |
-//! | `max_outflow_m3s`     | DOUBLE | No       | Max total outflow (m3/s)           |
+//! | `min_outflow_m3s`     | DOUBLE | No       | Min non-diverted outflow (m3/s)    |
+//! | `max_outflow_m3s`     | DOUBLE | No       | Max non-diverted outflow (m3/s)    |
 //! | `min_generation_mw`   | DOUBLE | No       | Min generation (MW)                |
 //! | `max_generation_mw`   | DOUBLE | No       | Max generation (MW)                |
 //! | `min_diversion_m3s`   | DOUBLE | No       | Min diversion flow (m3/s)          |

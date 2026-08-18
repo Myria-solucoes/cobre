@@ -23,6 +23,35 @@ Read: `training/backward/duals_extraction.rs` (`extract_duals_from_view`), `cut/
 `cut::row::push_scaled_coefficient`, where `batch.values.push(-coeff * d)`
 applies the negation.
 
+### The cut intercept dots the trial state through the projection, never positionally
+
+The intercept `Q(x̂) − Σ_j β_j·x̂[dim(j)]` gathers the full trial-state vector
+`x̂` (length `StateSpace::n_state`) through the pool's `CutStateProjection`,
+pairing projected coefficient slot `j` with global state dimension
+`global_state_index(j)`. `CutStateProjection::dot_trial_state` is the single
+owner; every backward intercept site routes through it
+(`backward/replicated.rs`, `backward/outcome_aggregation.rs`'s
+`write_opening_outcome`, which the by-scenario and by-node schedulers share).
+
+A positional `coefficients.iter().zip(x̂)` is the wrong-but-compiling
+alternative. It agrees ONLY for the all-enabled identity projection; the moment a
+pool drops a region — a `storage:false`/`inflow_lags:false` pool, e.g. a study
+whose stages disable inflow-lag cut-state — slot `j` past the gap projects a
+global dimension `> j`, so the zip multiplies that coefficient by the WRONG
+dimension's value (an anticipated coefficient against a lag entry). The intercept
+gains a per-cut roughly constant bias, so the cut sits too high: an invalid,
+still-converging bound that, under a state-coupling terminal boundary FCF, drives
+`final_lb > final_ub` — a persistent negative gap halting a `gap` rule at a
+spurious crossover. Reduces to the positional dot bit-for-bit for an all-enabled
+pool (`global_state_index(j) == j`), so no existing full-projection study moves.
+Read: `lp/indexer/cut_state_projection.rs` (`dot_trial_state`,
+`global_state_index`), `training/backward/replicated.rs`,
+`training/backward/outcome_aggregation.rs` (`write_opening_outcome`). Pinned by
+`dot_trial_state_gathers_reduced_projection_not_positional` (the gather picks the
+anticipated dimension past the dropped lag block) and
+`dot_trial_state_all_enabled_matches_positional_zip` (byte-neutral for the
+identity projection), both in `lp/indexer/cut_state_projection.rs`.
+
 ## State pinning uses column bounds, not equality rows
 
 Incoming state is pinned with `set_col_bounds` on the incoming-state LP column;
@@ -262,6 +291,41 @@ Read: `crates/cobre-sddp/src/lp/builder/columns.rs` (`cell_min_turbined`,
 `.min(plant)` clamp, the `max`-fold, the ρ-fold, and `1/|cells|`
 apportionment), the d53 binding fixture, and the group-declaration-order
 determinism regression.
+
+### Both outflow rows bind the non-diverted river-remnant flow
+
+Both per-hydro outflow rows couple turbine + spillage only, symmetrically:
+`q + s + σ_below ≥ min_outflow` and `q + s − σ_above ≤ max_outflow`. The
+diversion column `d` is DELIBERATELY EXCLUDED from BOTH. A diversion routes water
+to a _different_ downstream target — the water balance books it `+τ_h` on the
+source's own row and `−τ_h` on the diversion target's row
+(`fill_state_and_water_entries`), and the water travel-time arc deposits only
+`q + s` (`stage_release_rate_m3s` excludes diversion for exactly this reason) — so
+`d` is a separate flow path, capped by its own `max_diversion_m3s` column bound,
+not part of the natural river reach the defluência bounds govern.
+
+Coupling `d` into either row is the wrong-but-compiling alternative: on the
+minimum it lets diverted water satisfy the floor, so a diverting plant reports
+zero below-slack while its own channel carries less than `min_outflow` (the Belo
+Monte / Volta Grande under-release); on the maximum it double-governs the
+diversion's own cap, capping total release rather than the natural channel.
+
+The rows are byte-neutral on any non-diverting deck: the diversion column is
+dense but pinned `[0, 0]` (`fill_diversion_columns`) and presolve-eliminated, so
+omitting its zero-valued coefficient leaves the solved LP identical. Both flow
+families stay hydro-keyed (`n_op_hydro`), never per-cell.
+
+Read: `crates/cobre-sddp/src/lp/builder/entries.rs`
+(`fill_operational_violation_entries` — both outflow blocks omit `d`),
+`crates/cobre-sddp/src/lp/builder/rows.rs` (`fill_operational_violation_rows`),
+`crates/cobre-core/src/entities/hydro.rs` (`Hydro::min_outflow_m3s` /
+`max_outflow_m3s` docs). Pinned by `both_outflow_rows_exclude_diversion`
+(`crates/cobre-sddp/src/lp/builder/template/tests.rs`, the structural coefficient
+check, mutation-verified against re-adding `d` to either row),
+`min_outflow_binds_the_non_diverted_flow_on_a_diverter`, and
+`max_outflow_binds_the_non_diverted_flow_on_a_diverter` (`tests/hydro_sim.rs`,
+run-of-river diverters where the diverted flow would otherwise satisfy the
+minimum or evade the maximum).
 
 ## Cut pool is append-only; basis matches by slot identity
 
@@ -586,6 +650,58 @@ extensive-form optimum) and its by-node companion
 there is no exponentially-weighted smoothing. Gap closure is immediate for
 deterministic cases.
 Read: `convergence/convergence.rs`.
+
+## The enumerated CVaR upper bound is NESTED, not end-of-horizon
+
+Under an effective `CVaR` the enumerated forward's upper bound is computed by a
+NESTED backward risk recursion over the enumerated scenario tree
+(`nested_ub_recursion` / `enumerated_nested_ub` in
+`training/forward/stats_aggregation.rs`, applied in the session's
+`apply_nested_cvar_ub`): `Ṽ(n) = cum_d[stage(n)]·c(n) + ρ_children(Ṽ(child))`,
+where `ρ` is the same `RiskMeasure::evaluate_risk` weighting the per-node cut /
+lower-bound aggregation applies, over each node's children weighted by their
+conditional probabilities. This mirrors the nested measure SDDP optimizes
+(`ρ = ρ₁(c₁ + ρ₂(c₂ + … ρ_T(c_T)))`), the time-consistent CVaR (per-stage α
+compounding to ≈ α^T; CEPEL NT-66 §3.2.1) that DECOMP uses.
+
+Applying `evaluate_risk` ONCE to whole-path root-to-leaf totals — the
+end-of-horizon form `(1−λ)E[Z] + λ·CVaR_α[Z]` over path totals — is the
+wrong-but-compiling alternative. For a nested measure `ρ_nested ≥
+ρ_end-of-horizon`, so the end-of-horizon bound is NOT a valid upper bound on the
+nested objective: it can (and on `decomp-mar-26-rv2-reduced` does) fall BELOW the
+nested lower bound, giving a persistent negative gap that halts a `gap` rule at a
+spurious LB/UB crossover before the policy has converged. Same `evaluate_risk`
+weighting, wrong recursion. The nested `Ṽ(root)` is `≥ V* ≥ LB` at every
+iteration, so the gap stays non-negative and closes only at true convergence.
+
+`Expectation` (and `CVaR { lambda: 0 }`, which
+[`effective`](RiskMeasure::effective) collapses to it) leaves the bound at the
+risk-neutral compensated `Σ wᵢ·cᵢ` (`ForwardBound::Exact` in `sync_forward`) —
+byte-identical to the pre-change path, since nesting is linear under expectation
+and the session applies no override there. The override fires only for a uniform
+effective `CVaR` (`uniform_effective_measure`); a stage-varying measure (reachable
+only without a `gap` rule) falls back to the risk-neutral bound.
+
+**The `gap` stopping rule admits an effective `CVaR` only under enumerated
+forwards with a uniform measure.** The exact nested bound exists only when the
+forward is enumerated (a sampled forward's UB is a statistical estimate) and the
+measure is uniform across stages (one measure aggregates the tree).
+`reject_gap_under_effective_risk_aversion` (`setup/mod.rs`) enforces both: sampled
+forwards reject any effective risk aversion (and `reject_gap_under_sampled_selection`
+rejects the expectation case too); enumerated forwards defer to
+`reject_gap_under_nonuniform_risk`, which admits a uniform measure and rejects a
+stage-varying one.
+
+Read: `training/forward/stats_aggregation.rs` (`nested_ub_recursion`,
+`enumerated_nested_ub`, `ForwardBound::Exact`), `training/session/mod.rs`
+(`apply_nested_cvar_ub`), `convergence/risk_measure.rs` (`evaluate_risk`,
+`effective`, `uniform_effective_measure`), `setup/mod.rs`
+(`reject_gap_under_effective_risk_aversion`, `reject_gap_under_nonuniform_risk`).
+Pinned by `nested_ub_recursion_is_nested_not_end_of_horizon`
+(`training/forward/tests.rs` — the nested bound exceeds the end-of-horizon bound
+on a tree whose worst branch compounds), the `admission_gate_*` gate tests
+(`setup/tests.rs`), and the end-to-end `enumerated_cvar_gap` module
+(`tests/deterministic.rs`).
 
 ## Terminal boundary FCF is booked in the reported total cost
 

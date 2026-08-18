@@ -196,15 +196,17 @@ fn reconcile_boundary(
     // current run's output dir; an absolute `bp.path` passes through unchanged.
     let boundary_path = case_dir.join(&bp.path);
 
-    // Size the inflow-lag block to the boundary policy before building the layout,
-    // so validate mirrors the run path (the config field is an optional override).
-    let mut config = config.clone();
-    config.state_space.inflow_lag_depth = resolve_effective_inflow_lag_depth(
-        config.state_space.inflow_lag_depth,
-        Some(&boundary_path),
-    )?;
+    // Infer the inflow-lag depth from the boundary policy before building the
+    // layout, so validate mirrors the run path.
+    let inflow_lag_depth = resolve_effective_inflow_lag_depth(Some(&boundary_path))?;
 
-    let setup = StudySetup::new(system, &config, stochastic, hydro_models)?;
+    let setup = StudySetup::new_with_inflow_lag_depth(
+        system,
+        config,
+        stochastic,
+        hydro_models,
+        inflow_lag_depth,
+    )?;
 
     // Rationale: the cast cannot truncate — `state_dimension` counts FCF
     // state variables (one per reservoir/lag), bounded by the validated study
@@ -238,7 +240,7 @@ fn reconcile_boundary(
         state_dim,
         &current_manifest,
         &target_delivery_intervals,
-        config.state_space.inflow_lag_depth,
+        inflow_lag_depth,
         setup.stage_data.stage_templates.cost_scale_factor,
         &mut on_warning,
     )?;
@@ -381,8 +383,18 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
 
     // The most expensive step (PAR estimation, opening trees); validate runs it
     // anyway so an exit-0 guarantees full parity with `run`.
-    let prepared = match prepare_stochastic(system, &args.case_dir, &config, seed, &training_source)
-    {
+    let inflow_lag_depth = match config.policy.boundary.as_ref() {
+        Some(bp) => resolve_effective_inflow_lag_depth(Some(&args.case_dir.join(&bp.path)))?,
+        None => None,
+    };
+    let prepared = match prepare_stochastic(
+        system,
+        &args.case_dir,
+        &config,
+        seed,
+        &training_source,
+        inflow_lag_depth,
+    ) {
         Ok(p) => p,
         Err(ref err) => {
             return Err(prep_error_to_cli_error(

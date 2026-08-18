@@ -262,7 +262,7 @@ where
     let prep_source = config
         .training_scenario_source(&config_path)
         .expect("training_scenario_source must parse");
-    let pr = prepare_stochastic(system, dir, &config, 42, &prep_source)
+    let pr = prepare_stochastic(system, dir, &config, 42, &prep_source, None)
         .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;

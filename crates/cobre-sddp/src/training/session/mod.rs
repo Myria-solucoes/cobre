@@ -44,11 +44,12 @@ use crate::{
     cut::row::build_cut_row_batch_into,
     cut_selection::CutActivityUpdates,
     cut_sync::CutSyncBuffers,
-    forward::{ForwardBound, ForwardResult, SyncResult, sync_forward},
+    forward::{ForwardBound, ForwardResult, SyncResult, enumerated_nested_ub, sync_forward},
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
     rank_reconcile::{reconcile_error_flag, reconcile_result},
+    risk_measure::{RiskMeasure, uniform_effective_measure},
     setup::NodeGraph,
     setup::node_graph::{NodePos, StageIdx, Traversal, enumerated_requires_state_exchange},
     solver_stats::{
@@ -849,7 +850,8 @@ where
         } else {
             ForwardBound::Statistical
         };
-        let sync_result = sync_forward(&forward_result, self.comm, global_n, bound)?;
+        let mut sync_result = sync_forward(&forward_result, self.comm, global_n, bound)?;
+        self.apply_nested_cvar_ub(&forward_result, global_n, &mut sync_result)?;
 
         emit(
             self.runtime.event_sender(),
@@ -862,6 +864,51 @@ where
         );
 
         Ok((forward_result, sync_result, fwd_solve_time_ms))
+    }
+
+    /// Replace the reported upper bound with the NESTED risk-adjusted bound when
+    /// the forward is enumerated under a uniform effective `CVaR`. `sync_forward`
+    /// computes the end-of-horizon `Σ wᵢ·cᵢ`, which for a nested measure can fall
+    /// below the nested lower bound (a spurious negative gap); the recursion over
+    /// the enumerated tree restores a valid non-negative bracket. A no-op for
+    /// `Expectation`, sampled forwards, or a stage-varying measure (the last only
+    /// reachable without a `gap` rule — the admission gate rejects it otherwise).
+    ///
+    /// # Errors
+    ///
+    /// Propagates the `allgatherv` failure from [`enumerated_nested_ub`].
+    fn apply_nested_cvar_ub(
+        &mut self,
+        forward_result: &ForwardResult,
+        total_forward_passes: usize,
+        sync_result: &mut SyncResult,
+    ) -> Result<(), SddpError> {
+        let Traversal::Enumerated(plan) = self.fwd_state.traversal() else {
+            return Ok(());
+        };
+        let ub_measure = uniform_effective_measure(&self.config.cut_management.risk_measures)
+            .unwrap_or(RiskMeasure::Expectation);
+        if !matches!(ub_measure, RiskMeasure::CVaR { lambda, .. } if lambda > 0.0) {
+            return Ok(());
+        }
+        let num_stages = forward_result.stage_stats.len();
+        let local_n = forward_result.scenario_costs.len();
+        self.scratch.ub_stage_costs.clear();
+        for i in 0..local_n * num_stages {
+            self.scratch
+                .ub_stage_costs
+                .push(self.scratch.records[i].stage_cost);
+        }
+        sync_result.global_ub_mean = enumerated_nested_ub(
+            self.comm,
+            &self.scratch.ub_stage_costs,
+            total_forward_passes,
+            num_stages,
+            plan,
+            self.stage_ctx.cumulative_discount_factors,
+            ub_measure,
+        )?;
+        Ok(())
     }
 
     /// Run the backward pass for one iteration.
