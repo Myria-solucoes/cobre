@@ -539,8 +539,17 @@ whose state-family dictionary lives downstream in the policy writer, while a
 second, overlapping physical-output-entity dictionary
 (`crates/cobre-io/src/output/dictionary.rs`) shares the same integer prefix with
 divergent meanings — a grep hazard and a type-safety gap (no live bug; the two
-dictionaries are used disjointly). Target: a typed state-family enum owned next
-to the slot type, and disambiguated names for the two dictionaries.
+dictionaries are used disjointly). Two later growths raise the fix's value and
+constrain its shape: the boundary-checkpoint slot-reservation path
+(`reserve_boundary_inflow_lag_slots`, `crates/cobre-sddp/src/policy/policy_export.rs`)
+is a public export consumed by the Python binding, so the untyped `u8` semantics
+now cross a public crate seam; and `crates/cobre-io/src/output/policy/checkpoint.rs`
+independently re-declares one state-family constant from the FlatBuffers schema
+for its monotonicity check — a duplicate the writer-side dictionary cannot see.
+Since `cobre-io` cannot depend on `cobre-sddp`, the typed state-family enum must
+be owned where both crates can reach it (next to the slot type in `cobre-io`),
+with the sddp-side constants retired onto it. Target: that typed enum, and
+disambiguated names for the two dictionaries.
 
 **Owner.** The I/O owner.
 
@@ -715,7 +724,12 @@ buffers" rule. The codebase is overwhelmingly disciplined (near-universal
   every cut-selection cycle; the graph topology is fixed for the run, so it is now
   resolved once in `TrainingSession::new` and stored on `interior_cut_nodes`. The
   cached order is byte-identical to the recompute (same canonical `iter_indexed`
-  order); the cut-selection determinism suite confirms neutrality.
+  order); the cut-selection determinism suite confirms neutrality. Residue (minor):
+  the derivation is open-coded in the session constructor and copy-pasted by the
+  test that pins it, rather than owned by a `NodeGraph` accessor beside the
+  sibling predicate `backward_cut_levels` already owns — a one-owner follow-up.
+  **Owner.** The training owner. **Trigger.** The next interior-node-set or
+  cut-selection touch.
 
 **Investigated and refuted (recorded so a future audit does not re-raise).**
 
@@ -737,6 +751,173 @@ buffers" rule. The codebase is overwhelmingly disciplined (near-universal
   buffer is a symmetric follow-up, not escalated here. **Owner.** The training
   owner. **Trigger.** The next backward-scheduler scratch touch.
 
+### Post-release fix-wave findings (2026-08-19)
+
+A commit-by-commit architecture read of the bug-fix wave that shipped the
+boundary-lag inference, the gap-rule-under-CVaR admission, the nested CVaR
+upper bound, the outflow-diversion exclusion, and the projection-aware
+intercept dot. The fixes are functionally correct and test-pinned; the debt
+below is structural residue of their speed.
+
+#### Boundary-derived setup context has no single owner
+
+**What it is.** The depth-resolution rule is single-owner
+(`boundary_policy_required_lag_depth` / `resolve_effective_inflow_lag_depth`,
+`crates/cobre-sddp/src/policy/policy_load.rs`), but the fold — given a case
+directory and a `Config`, produce the effective depth — is open-coded, in
+differing shapes, at every production setup entry point (CLI run, CLI
+validate, Python run) plus a laxer test-helper copy. The resolved value rides
+three relay carriers (`StudyParams` → `BroadcastConfig` →
+`ConstructionConfig`), and `ConstructionConfig` holds two facts derived from
+the same `config.policy.boundary` filled by different owners at different
+times (`boundary_present`, pure, vs `inflow_lag_depth`, patched out-of-band)
+with nothing guarding their agreement. Two sibling smells share the fix: the
+boundary checkpoint path join (`case_dir.join(&bp.path)`) is open-coded at
+every consumer — several carrying an identical warning comment, with no
+`BoundaryPolicy` accessor owning the rule — and each entry point reads and
+parses the checkpoint from disk twice (layout sizing, then boundary load), so
+the layout's depth and the load guard's depth are computed independently
+rather than being one value by construction.
+
+**Owner.** The setup / config owner.
+
+**Trigger.** The setup-layer redesign (it is the config-projection sprawl's
+newest instance), or the next boundary-policy entry-point change — whichever
+lands first. **Fix-shape constraint (owner-ratified):** the resolver's output
+must be the family-generic boundary state-requirements object described in the
+per-family-channel entry below — never a struct with a lag-specific field,
+which would enshrine the very debt it fixes.
+
+#### Boundary state-family coupling channels are per-family bespoke
+
+**What it is.** The question "how does an externally-authored boundary
+future-cost function's coupling on a given state family reach the study's
+state space?" is answered by a different bespoke mechanism per family. The
+inflow-lag family threads a family-specific scalar through the Python writer
+argument and per-cut keyed field, `StudySetup::new_with_inflow_lag_depth`, all
+three config-projection carriers, every entry-point fold, a family-specific
+manifest decoder (`boundary_cut_lag_depth`), a family-specific widening
+(`widen_lag_state_depth`), and a family-specific writer helper
+(`reserve_boundary_inflow_lag_slots`). The anticipated family has its own
+manifest decoder (`decode_pool_anticipated_months`) and reserves post-horizon
+lanes from study config with calendar fan-out reconciliation. Transit buckets
+reserve from study arc topology with boundary-gated terminal unmasking and
+have NO widening path at all — the target-driven rebind
+(`resolve_target_slot`, `crates/cobre-sddp/src/policy/reconcile.rs`) silently
+never consults boundary bucket coupling the study's topology does not
+reserve: the same silent-drop class the inflow-lag work fixed, latent in
+another family. Each new family under this shape repeats the full channel
+(API argument + keyed cut field + reservation helper + manifest decoder +
+carrier relay + entry-point folds). The generic frame half-exists: the
+checkpoint manifest already self-describes every slot
+(`entity_type`/`entity_id`/`subindex`/`delivery_date` — no format change
+needed) and the load-side rebind dispatch is already family-generic in frame.
+Target: one boundary state-requirements object derived once from the manifest
+(per-family summary) riding the config carriers, and a family-parameterized
+slot-reservation writer (the lag helper's internals — leading-block
+detection, canonical insertion, keyed placement — are largely
+family-independent). Per-family reconciliation SEMANTICS (widen vs calendar
+fan-out vs reject) are genuinely irreducible and stay per-family; the debt is
+the missing shared frame. The typed state-family enum (the untyped-primitive
+entry above) is this frame's prerequisite vocabulary.
+
+**Owner.** The policy / setup owner.
+
+**Trigger.** Before the next state family gains external boundary authoring
+(the anticipated post-study-commitment import is the concrete queued case), or
+with the setup-layer redesign — whichever lands first.
+
+#### Nested risk-adjusted upper bound is an override, not an estimator arm
+
+**What it is.** `ForwardBound` is the named dispatch for the training upper
+bound, yet the nested CVaR estimator lives outside it: `sync_forward` computes
+the risk-neutral bound (one full `allgatherv` plus compensated reduction), then
+`apply_nested_cvar_ub` discards that result and re-gathers with a second
+`allgatherv` (`crates/cobre-sddp/src/training/forward/stats_aggregation.rs`).
+`ForwardBound::Exact`'s rustdoc documents the external override — the enum
+documents behavior it does not own — and `SimulationWeighting`, documented as
+mirroring `ForwardBound`, no longer covers the estimator space. Three
+duplicate-owner smells sit in the same code path: the recursion re-implements
+`EnumeratedPlan::walk_path` (the documented single owner of the root→leaf
+walk) without its length assertion; the rank-partition counts/displs
+arithmetic gains another implementation beside `RankDistribution::actual_per_rank`
+(the declared owner) and the copy in `cut_sync.rs`; and the per-path stage
+stride is derived from a solver-statistics vector's length instead of the
+declared `num_stages` owner. The recursion also allocates its full working
+state fresh every iteration — topology vectors that are pure functions of the
+`EnumeratedPlan`, plus a fresh `RiskMeasureScratch` per interior node while
+the `_into` scratch form exists unused — against the hot-path pre-allocation
+rule.
+
+**Owner.** The training owner.
+
+**Trigger.** The next stopping-rule, risk-measure, or upper-bound-estimator
+change — promote to a `ForwardBound` arm consuming `EnumeratedPlan` +
+`RankDistribution` with precomputed topology before a new variant lands on top.
+
+#### Admission predicate duplicated between setup gate and session override
+
+**What it is.** The setup rejecter (`reject_gap_under_nonuniform_risk`) and
+the session override condition answer "uniform effective CVaR under enumerated
+forwards" with independent code: the rejecter open-codes the uniformity scan
+that `uniform_effective_measure` (`convergence/risk_measure.rs`) implements,
+and effective-risk-aversion is implemented separately in the setup predicate,
+the session's inline match, and `RiskMeasure::effective`. A divergence admits
+a gap rule whose override does not fire — silently reverting to the
+risk-neutral end-of-horizon bound and manifesting as a spurious bound
+crossover, not an error.
+
+**Owner.** The training owner.
+
+**Trigger.** Same as the estimator-arm promotion above (one consolidation).
+
+#### Outflow row-pair entries are hand-mirrored
+
+**What it is.** After the diversion-exclusion fix made the minimum- and
+maximum-outflow rows symmetric, their entry blocks in
+`crates/cobre-sddp/src/lp/builder/entries.rs` are two copy-shaped loops
+gathering the identical turbine-plus-spill expression, differing only in
+row-family base, slack accessor, and slack sign — the "both rows bind
+turbine+spill, neither couples diversion" invariant is held by a comment
+across two sites. The sibling rows builder already emits the same row pair
+from a descriptor array (`fill_operational_violation_rows`,
+`lp/builder/rows.rs`), so the better shape exists one file over; the merge is
+byte-neutral because the template sorts entries before CSC assembly.
+
+**Owner.** The LP-builder owner.
+
+**Trigger.** The next outflow-row or entries-builder touch.
+
+#### Opening-outcome aggregation takes an untyped projection role
+
+**What it is.** `accumulate_opening_outcome` / `write_opening_outcome`
+(`crates/cobre-sddp/src/training/backward/outcome_aggregation.rs`) accept a
+bare `&CutStateProjection` at a call site where two role-distinct projections
+are live (the child pool's layout and the required cut-generating parent's
+`SuccessorSpec.cut_state`); passing the wrong one compiles and diverges
+exactly in the reduced-projection configuration the intercept fix addressed —
+against the projection module's own compile-fail typed-role discipline. Fix:
+pass `&SuccessorSpec`, or a role newtype.
+
+**Owner.** The training owner.
+
+**Trigger.** The next backward outcome-aggregation or successor-spec change.
+
+#### Minor residues (same wave, small)
+
+- `IterationScratch`'s upper-bound buffers (`ub_path_weights`,
+  `ub_stage_costs`) are lazily grown on first use while the struct doc
+  promises allocation in `new` — size them in `new` beside their pre-sized
+  siblings. **Owner.** Training. **Trigger.** Next scratch touch.
+- `CutStateProjection` exposes only the fused `dot_trial_state`; the
+  cut-selection sweep open-codes the gather loop. Add a gather-only sibling
+  and define the dot over it. **Owner.** Training. **Trigger.** Next
+  projection-surface touch.
+- The two gap-rule rejecters re-evaluate the same predicates and the rejection
+  message a sampled-forwards study sees is call-order-dependent (documented as
+  deliberate). Optional single-match consolidation in `admission_gate`.
+  **Owner.** Setup. **Trigger.** Next admission-gate change.
+
 ### Cleared (recorded so a future audit does not re-raise)
 
 The computed-parameter resolver is not a god-function (cohesive); the water
@@ -744,6 +925,21 @@ block-mode fill duplication is deliberate-by-design (two distinct LP
 formulations); and the cut-pool substrate, the shared solve-prep, the training
 session, the captured-basis codec, and the entity-family writers/extractors are
 positive references, not debt.
+
+The 2026-08-19 fix-wave read additionally cleared: the projection-aware
+intercept fix is complete (no unfixed positional-zip sibling — the three gather
+axes `global_state_index` / `outgoing_column` / `incoming_column` are correctly
+distinguished by design); the `state_space` config removal left no residue
+(survivors are the deliberate reject test and the CHANGELOG entry — remaining
+`state_space` matches are the unrelated `lp/indexer/state_space.rs` name
+collision); stopping-rule admission is single-owner and well-homed
+(`admission_gate`, one call site, exhaustively-destructured predicates); the
+infrastructure-genericity gate stays green across the wave's edits; and the
+boundary-checkpoint slot-reservation authoring path
+(`reserve_boundary_inflow_lag_slots`) is correctly homed in cobre-sddp beside
+the canonical manifest builder, with the generic cobre-io writer unchanged —
+cleared for execution and homing only; its family-specific mechanism shape is
+the per-family-channel entry above, not cleared.
 
 ## Audit-evidence
 
