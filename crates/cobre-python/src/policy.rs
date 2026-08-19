@@ -5,6 +5,7 @@
 //! Input dict shapes mirror what [`crate::results::load_policy`] emits, so a
 //! loaded checkpoint round-trips: load -> edit -> write.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use pyo3::exceptions::PyValueError;
@@ -15,6 +16,7 @@ use cobre_io::{
     ManifestNode, PolicyBasisRecord, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
     STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload, StageStatesPayload,
 };
+use cobre_sddp::{SddpError, reserve_boundary_inflow_lag_slots};
 
 use crate::errors::{ErrorSource, convert_error};
 
@@ -51,6 +53,12 @@ pub(crate) struct PyCutRecord {
     intercept: f64,
     coefficients: Vec<f64>,
     is_active: bool,
+    /// Inflow-lag gradient terms keyed by hydro id (`hydro_id -> [coef_by_depth]`,
+    /// index `0` = lag depth 1), separate from the storage-aligned
+    /// `coefficients`. Consumed only when the top-level `inflow_lag_depth` is
+    /// set; empty (the default) leaves the checkpoint byte-identical.
+    #[pyo3(default)]
+    inflow_lag_coefficients: HashMap<i32, Vec<f64>>,
 }
 
 #[derive(Debug, FromPyObject)]
@@ -267,6 +275,53 @@ fn validate_stage_states(stage_states: &[PyStageStatesPayload]) -> PyResult<()> 
     Ok(())
 }
 
+/// Owned per-stage payload data: the entity manifest and each cut's coefficient
+/// vector, either as supplied or widened by an inflow-lag reservation, plus the
+/// resulting `state_dimension`. Owning these lets the borrowed
+/// [`StageCutsPayload`]/[`PolicyCutRecord`] views reference the reserved
+/// coefficients (which the writer must own — the caller's `coefficients` are
+/// storage-only when a reservation runs).
+struct StageCutsData {
+    manifest: Vec<EntitySlot>,
+    coefficients: Vec<Vec<f64>>,
+    state_dimension: u32,
+}
+
+/// Convert one stage's manifest and coefficients to owned form, reserving the
+/// canonical `HydroInflowLag` slots when `reserve_depth` is set.
+fn build_stage_cuts_data(
+    sc: &PyStageCutsPayload,
+    reserve_depth: Option<u32>,
+) -> PyResult<StageCutsData> {
+    let manifest: Vec<EntitySlot> = sc.entity_manifest.iter().map(EntitySlot::from).collect();
+    let coefficients: Vec<Vec<f64>> = sc.cuts.iter().map(|c| c.coefficients.clone()).collect();
+    match reserve_depth {
+        Some(depth) => {
+            let cut_lag: Vec<HashMap<i32, Vec<f64>>> = sc
+                .cuts
+                .iter()
+                .map(|c| c.inflow_lag_coefficients.clone())
+                .collect();
+            let reserved =
+                reserve_boundary_inflow_lag_slots(&manifest, &coefficients, &cut_lag, depth)
+                    .map_err(|e| match e {
+                        SddpError::Validation(msg) => PyValueError::new_err(msg),
+                        other => PyValueError::new_err(other.to_string()),
+                    })?;
+            Ok(StageCutsData {
+                manifest: reserved.manifest,
+                coefficients: reserved.coefficients,
+                state_dimension: reserved.state_dimension,
+            })
+        }
+        None => Ok(StageCutsData {
+            manifest,
+            coefficients,
+            state_dimension: sc.state_dimension,
+        }),
+    }
+}
+
 /// Write a policy checkpoint from plain Python dicts/sequences to `path`.
 ///
 /// `stage_cuts` and `metadata` mirror the `"stage_cuts"`/`"metadata"` keys
@@ -274,14 +329,23 @@ fn validate_stage_states(stage_states: &[PyStageStatesPayload]) -> PyResult<()> 
 /// default to empty when omitted (a checkpoint authored from raw cut data
 /// carries neither).
 ///
+/// `inflow_lag_depth`, when set to `N > 0`, has cobre reserve `N` canonical
+/// `HydroInflowLag` state slots per storage hydro in every stage's manifest
+/// (via [`reserve_boundary_inflow_lag_slots`]), placing each cut's
+/// `inflow_lag_coefficients` at their `(hydro, depth)` positions. This is the
+/// authoring path for a boundary policy of a case with no PAR model to infer
+/// the depth from (a DECOMP-bridge bootstrap). Absent or `0`, the checkpoint is
+/// byte-identical to one written without the argument.
+///
 /// # Errors
 ///
 /// `ValueError` when a cut's `coefficients` length does not match its stage's
-/// `state_dimension`, or a stage's state data length does not match
-/// `count * state_dimension`; otherwise the `cobre.errors` leaf mapped from
-/// the underlying [`cobre_io::OutputError`].
+/// `state_dimension`, a stage's state data length does not match
+/// `count * state_dimension`, or (under `inflow_lag_depth`) a manifest lacks a
+/// leading storage block or an inflow-lag coefficient is unplaceable; otherwise
+/// the `cobre.errors` leaf mapped from the underlying [`cobre_io::OutputError`].
 #[pyfunction]
-#[pyo3(signature = (path, stage_cuts, metadata, stage_bases=None, stage_states=None))]
+#[pyo3(signature = (path, stage_cuts, metadata, stage_bases=None, stage_states=None, inflow_lag_depth=None))]
 #[allow(clippy::needless_pass_by_value)]
 pub fn write_policy_checkpoint(
     py: Python<'_>,
@@ -290,6 +354,7 @@ pub fn write_policy_checkpoint(
     metadata: PyPolicyCheckpointMetadata,
     stage_bases: Option<Vec<PyBasisRecord>>,
     stage_states: Option<Vec<PyStageStatesPayload>>,
+    inflow_lag_depth: Option<u32>,
 ) -> PyResult<()> {
     let stage_bases = stage_bases.unwrap_or_default();
     let stage_states = stage_states.unwrap_or_default();
@@ -297,41 +362,48 @@ pub fn write_policy_checkpoint(
     let populated_counts = resolve_populated_counts(&stage_cuts)?;
     validate_stage_states(&stage_states)?;
 
+    let reserve_depth = inflow_lag_depth.filter(|&n| n > 0);
+    let stage_data: Vec<StageCutsData> = stage_cuts
+        .iter()
+        .map(|sc| build_stage_cuts_data(sc, reserve_depth))
+        .collect::<PyResult<_>>()?;
+
     let metadata: PolicyCheckpointMetadata = metadata.into();
 
     py.detach(|| {
-        let mut entity_manifests: Vec<Vec<EntitySlot>> = Vec::with_capacity(stage_cuts.len());
-        let mut cut_records: Vec<Vec<PolicyCutRecord<'_>>> = Vec::with_capacity(stage_cuts.len());
-        for sc in &stage_cuts {
-            entity_manifests.push(sc.entity_manifest.iter().map(EntitySlot::from).collect());
-            cut_records.push(
+        let cut_records: Vec<Vec<PolicyCutRecord<'_>>> = stage_cuts
+            .iter()
+            .zip(&stage_data)
+            .map(|(sc, data)| {
                 sc.cuts
                     .iter()
-                    .map(|c| PolicyCutRecord {
+                    .zip(&data.coefficients)
+                    .map(|(c, coefficients)| PolicyCutRecord {
                         cut_id: c.cut_id,
                         slot_index: c.slot_index,
                         iteration: c.iteration,
                         forward_pass_index: c.forward_pass_index,
                         intercept: c.intercept,
-                        coefficients: &c.coefficients,
+                        coefficients,
                         is_active: c.is_active,
                     })
-                    .collect(),
-            );
-        }
+                    .collect()
+            })
+            .collect();
 
         let stage_cuts_payloads: Vec<StageCutsPayload<'_>> = stage_cuts
             .iter()
+            .zip(&stage_data)
             .enumerate()
-            .map(|(i, sc)| StageCutsPayload {
+            .map(|(i, (sc, data))| StageCutsPayload {
                 stage_id: sc.stage_id,
-                state_dimension: sc.state_dimension,
+                state_dimension: data.state_dimension,
                 capacity: sc.capacity,
                 warm_start_count: sc.warm_start_count,
                 cuts: &cut_records[i],
                 active_cut_indices: &sc.active_cut_indices,
                 populated_count: populated_counts[i],
-                entity_manifest: &entity_manifests[i],
+                entity_manifest: &data.manifest,
             })
             .collect();
 

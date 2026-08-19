@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-08-19
+
+### Added
+
+- **`cobre.write_policy_checkpoint` accepts an `inflow_lag_depth` argument so a
+  boundary policy authored outside cobre reserves the canonical inflow-lag state
+  slots.** When set to `N > 0`, cobre widens every stage's manifest with `N`
+  `HydroInflowLag` slots per storage hydro — in its own canonical layout — and
+  places each cut's per-hydro `inflow_lag_coefficients` at their `(hydro, depth)`
+  positions, so the checkpoint self-describes depth `N` and the load path
+  reserves the matching forward lag state. This lets a case with no autoregressive
+  inflow model to infer the depth from (explicit-scenario inflows) carry an
+  inflow-lag-coupled terminal boundary cost-to-go that would otherwise be
+  silently dropped. Absent or `0`, the written checkpoint is byte-identical.
+
 ## [0.14.2] - 2026-08-19
 
 ### Changed
