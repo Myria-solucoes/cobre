@@ -14,6 +14,7 @@ use crate::{
     lower_bound::LbEvalScratch,
     lp_builder::PatchBuffer,
     setup::{NodeId, node_graph::StageIdx},
+    solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{ScratchBuffers, WorkspaceSizing},
 };
@@ -62,6 +63,14 @@ pub(crate) struct IterationScratch {
     /// terminal template was baked at priming; the terminal template is never
     /// refrozen afterward, so this stays fixed for the rest of the run.
     pub(crate) terminal_has_boundary_cuts: bool,
+    /// Packed per-stage forward solver-stat scalars, the cross-rank allreduce
+    /// input in `run_forward_phase` (reused; empty until the first forward phase).
+    pub(crate) fwd_stats_pack_local: Vec<f64>,
+    /// Allreduced (summed) counterpart of [`Self::fwd_stats_pack_local`].
+    pub(crate) fwd_stats_pack_global: Vec<f64>,
+    /// Per-stage forward stats unpacked from [`Self::fwd_stats_pack_global`] for
+    /// the rank-0 solver-stats log.
+    pub(crate) fwd_stats_unpacked: Vec<SolverStatsDelta>,
 }
 
 impl IterationScratch {
@@ -173,6 +182,9 @@ impl IterationScratch {
             ub_path_weights: Vec::new(),
             ub_stage_costs: Vec::new(),
             terminal_has_boundary_cuts: false,
+            fwd_stats_pack_local: Vec::new(),
+            fwd_stats_pack_global: Vec::new(),
+            fwd_stats_unpacked: Vec::new(),
         }
     }
 }

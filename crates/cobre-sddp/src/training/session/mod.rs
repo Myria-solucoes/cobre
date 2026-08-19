@@ -125,6 +125,10 @@ pub(crate) struct TrainingSession<'a, S: SolverInterface + Send, C: Communicator
     /// Reusable projected trial-state buffer for cut selection; grown on first
     /// use, reused across iterations (no per-cut/per-trial-point allocation).
     cut_selection_state_scratch: Vec<f64>,
+    /// Interior cut-generating nodes (canonical order), the loop-invariant filter
+    /// cut management sweeps each cycle; the graph topology is fixed for the run,
+    /// so it is resolved once here rather than re-derived per cut-selection cycle.
+    interior_cut_nodes: Vec<NodePos>,
     scratch: IterationScratch,
     convergence_monitor: ConvergenceMonitor,
 
@@ -391,6 +395,14 @@ where
             cut_sync_bufs,
             visited_archive,
             cut_selection_state_scratch: Vec::new(),
+            interior_cut_nodes: {
+                let ng = training_ctx.node_graph;
+                ng.nodes
+                    .iter_indexed()
+                    .filter(|&(pos, n)| n.stage >= StageIdx(1) && !ng.successors[pos].is_empty())
+                    .map(|(pos, _)| pos)
+                    .collect()
+            },
             scratch,
             convergence_monitor,
             fwd_state,
@@ -767,34 +779,43 @@ where
         // `retry_level_histogram` is not packed here, so it is absent from the
         // aggregated forward rows (backward keeps it via per-worker rows).
         let num_stages = forward_result.stage_stats.len();
-        let global_forward_stage_stats = if num_stages == 0 {
-            Vec::new()
-        } else {
-            let mut local_buf = vec![0.0_f64; num_stages * SOLVER_STATS_DELTA_SCALAR_FIELDS];
+        self.scratch.fwd_stats_unpacked.clear();
+        if num_stages != 0 {
+            let n_packed = num_stages * SOLVER_STATS_DELTA_SCALAR_FIELDS;
+            self.scratch.fwd_stats_pack_local.clear();
+            self.scratch.fwd_stats_pack_local.resize(n_packed, 0.0);
             for (i, delta) in forward_result.stage_stats.iter().enumerate() {
                 let packed = pack_delta_scalars(delta);
-                let slot = &mut local_buf[i * SOLVER_STATS_DELTA_SCALAR_FIELDS..]
-                    [..SOLVER_STATS_DELTA_SCALAR_FIELDS];
-                slot.copy_from_slice(&packed);
+                self.scratch.fwd_stats_pack_local[i * SOLVER_STATS_DELTA_SCALAR_FIELDS..]
+                    [..SOLVER_STATS_DELTA_SCALAR_FIELDS]
+                    .copy_from_slice(&packed);
             }
-            let mut global_buf = vec![0.0_f64; local_buf.len()];
+            self.scratch.fwd_stats_pack_global.clear();
+            self.scratch.fwd_stats_pack_global.resize(n_packed, 0.0);
             self.comm
-                .allreduce(&local_buf, &mut global_buf, ReduceOp::Sum)
+                .allreduce(
+                    &self.scratch.fwd_stats_pack_local,
+                    &mut self.scratch.fwd_stats_pack_global,
+                    ReduceOp::Sum,
+                )
                 .map_err(SddpError::Communication)?;
-            global_buf
+            let mut unpacked = std::mem::take(&mut self.scratch.fwd_stats_unpacked);
+            for chunk in self
+                .scratch
+                .fwd_stats_pack_global
                 .chunks_exact(SOLVER_STATS_DELTA_SCALAR_FIELDS)
-                .map(|chunk| {
-                    #[allow(clippy::expect_used)]
-                    let arr: [f64; SOLVER_STATS_DELTA_SCALAR_FIELDS] = chunk.try_into().expect(
-                        "chunks_exact yields slices of exactly SOLVER_STATS_DELTA_SCALAR_FIELDS",
-                    );
-                    unpack_delta_scalars(&arr)
-                })
-                .collect::<Vec<SolverStatsDelta>>()
-        };
+            {
+                #[allow(clippy::expect_used)]
+                let arr: [f64; SOLVER_STATS_DELTA_SCALAR_FIELDS] = chunk.try_into().expect(
+                    "chunks_exact yields slices of exactly SOLVER_STATS_DELTA_SCALAR_FIELDS",
+                );
+                unpacked.push(unpack_delta_scalars(&arr));
+            }
+            self.scratch.fwd_stats_unpacked = unpacked;
+        }
 
         #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-        for (stage_idx, delta) in global_forward_stage_stats.iter().enumerate() {
+        for (stage_idx, delta) in self.scratch.fwd_stats_unpacked.iter().enumerate() {
             let mut entry = SolverStatsDelta::default();
             delta.clone_into_reuse(&mut entry);
             self.results
@@ -1066,14 +1087,7 @@ where
             // per-pool; the visited states are read by NODE position (siblings at
             // one stage own distinct visited regions). On a chain node position
             // equals stage, reproducing the former 1..T-2 stage loop.
-            let interior_nodes: Vec<NodePos> = node_graph
-                .nodes
-                .iter_indexed()
-                .filter(|&(pos, n)| {
-                    n.stage >= StageIdx(1) && !node_graph.successors[pos].is_empty()
-                })
-                .map(|(pos, _)| pos)
-                .collect();
+            let interior_nodes = &self.interior_cut_nodes;
             let pools = &self.fcf.pools;
             let cut_state_layouts = self.training_ctx.cut_state_layouts;
             let n_global = archive_ref.map_or(0, VisitedStatesArchive::packing_stride);
@@ -1083,7 +1097,7 @@ where
             let mut deactivations: Vec<(usize, usize, CutActivityUpdates, f64)> =
                 Vec::with_capacity(interior_nodes.len());
             #[allow(clippy::cast_possible_truncation)]
-            for &node_pos in &interior_nodes {
+            for &node_pos in interior_nodes {
                 let node = &node_graph.nodes[node_pos];
                 let pool_id = node.pool_id;
                 let pool = &pools[pool_id];
@@ -1186,7 +1200,7 @@ where
             record_by_pool = Some(selection_record_index_by_pool(
                 node_graph,
                 root_pool,
-                &interior_nodes,
+                interior_nodes,
             ));
 
             sel_state = Some((

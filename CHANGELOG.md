@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-08-19
+
+### Changed
+
+- **Internal: the SDDP training loop reuses pre-allocated buffers on two hot
+  paths that previously allocated on every iteration.** The forward pass's
+  cross-rank per-stage stats aggregation now reuses buffers held on the per-run
+  iteration scratch, and the interior cut-generating node set is resolved once
+  per run instead of being re-derived on every cut-selection cycle. Byte-neutral:
+  solver output, cuts, bounds, and run-to-run and declaration-order determinism
+  are unchanged.
+
 ## [0.14.1] - 2026-08-17
 
 ### Added
@@ -3237,7 +3249,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/cobre-rs/cobre/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/cobre-rs/cobre/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/cobre-rs/cobre/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/cobre-rs/cobre/compare/v0.12.0...v0.13.0
