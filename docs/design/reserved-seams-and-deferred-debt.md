@@ -643,13 +643,99 @@ workspace.
   measure the basis-consistency-failure ratio before investing in a
   metadata-driven demotion. **Owner.** The training owner. **Trigger.** A
   warm-start-quality investigation.
-- **Shared solve-prep re-home.** The shared solve-prep single owner lives under
-  the training module, yet the simulation pass depends on it — a
-  simulation→training dependency the shared-primitive hoist's own principle names
-  an inversion. A byte-neutral move to a neutral home plus import retarget
-  resolves it; land it with the simulation-dispatch symmetry work so the
-  simulation call site is retargeted once. **Owner.** The training owner.
-  **Trigger.** The simulation-dispatch symmetry refactor.
+- **Shared solve-prep re-home (partially addressed).** The LP-**solve** entry has
+  since moved to a neutral crate-level module: `run_stage_solve` / `StageInputs`
+  live in `crates/cobre-sddp/src/solve/stage_solve.rs`, and every hot path
+  (including `simulation/pipeline.rs`) imports them via `crate::stage_solve::…`, so
+  the simulation→training inversion is gone _for the solve entry_. The solve-**prep**
+  single owner (`StageSolvePrep`, `crates/cobre-sddp/src/training/stage_solve_prep.rs`)
+  was **not** re-homed: `simulation/pipeline.rs` still imports it via
+  `training::stage_solve_prep`, so the inversion **persists for the prep**. (`solve/`
+  and `stage_solve_prep.rs` are two sequential phases of one pipeline —
+  prep-then-solve — not duplicates.) A byte-neutral move of the prep to the neutral
+  `solve/` home plus import retarget closes it. **Owner.** The training owner.
+  **Trigger.** The simulation-dispatch symmetry refactor, or the next `solve/`-module
+  touch.
+
+### Post-lifecycle-walk findings (fresh pass, 2026-08-18)
+
+The lifecycle walk above never covered the modules that landed with the later
+branching / GNL / generic-constraint work (`solve/`, `hull/`, `lead_time/`,
+`horizon_mode.rs`, `generic_constraint_echo.rs`, `validate_phases.rs`,
+`simulation/enumerated.rs`, `training/backward/replicated.rs`). A fresh read
+found those overwhelmingly clean (`hull/`, `lead_time/`, `horizon_mode.rs`'s
+single-variant enum is a documented reserved seam, `generic_constraint_echo.rs`,
+`config.rs`, `training/backward/replicated.rs`) plus two architecture items:
+
+- **Prep-phase abstraction covers three of four phases; boundary check
+  unmirrored.** `crates/cobre-sddp/src/validate_phases.rs` `PrepPhase` documents
+  itself as unifying "one of the four SDDP preparation steps," but the enum has
+  exactly three variants (`Config`, `Stochastic`, `HydroModels`) — a doc/code
+  mismatch. The real fourth step — boundary-cut reconciliation — bypasses the
+  shared `PrepPhase` / `prep_phase_metadata` abstraction with its own ad-hoc error
+  formatting (`crates/cobre-cli/src/commands/validate.rs`) and has no equivalent
+  in the Python binding (`crates/cobre-python/src/io.rs` carries no boundary check).
+  This is a validation-surface asymmetry (the Python-parity hard rule proper
+  governs _output_ files, not validation phases — so whether the Python path must
+  gain the check is an owner call), plus an over-sold "shared validation-phase"
+  contract. Fold the boundary check into `PrepPhase` (or correct the doc to
+  "three"). **Owner.** The setup / I-O owner. **Trigger.** The next
+  validation-phase or boundary-check change.
+- **Enumerated forward and enumerated simulation duplicate their mid-level
+  claim/scatter orchestration.** `simulation/enumerated.rs` and
+  `training/forward/enumerated.rs` each reimplement the stage-synchronous
+  claim/scatter skeleton; only the low-level primitives (`ClaimCursor` /
+  `canonical_scatter`, `EnumeratedPlan` / `NodeGraph`) are shared. The primitive
+  reuse mitigates the _kernels_ but not the _orchestration_, so a claim/scatter
+  protocol change is a two-site edit held together only by mirror comments (same
+  family as the backward reification copy in the god-function follow-up above).
+  **Owner.** The training owner. **Trigger.** The enumerated broadcast-distribution
+  migration (see [`enumerated-traversal-distribution.md`](enumerated-traversal-distribution.md))
+  or the next claim/scatter change.
+
+### Performance-debt follow-ups (first performance pass, 2026-08-18)
+
+The lifecycle audit was architecture-only; this is a first hot-path allocation
+pass against the "never allocate on hot paths — pre-allocate workspaces, reuse
+buffers" rule. The codebase is overwhelmingly disciplined (near-universal
+`mem::take` + reuse; no `Box<dyn>` on any hot path). Outcomes of the pass:
+
+**Fixed (byte-neutral; determinism gates green).**
+
+- **Per-iteration forward-stats aggregation buffers hoisted.**
+  `TrainingSession::run_forward_phase` (`crates/cobre-sddp/src/training/session/mod.rs`)
+  previously allocated two fresh `Vec`s plus a `.collect()` every training
+  iteration to cross-rank-aggregate per-stage forward stats; they are now reused
+  buffers on `IterationScratch` (`fwd_stats_pack_local` / `fwd_stats_pack_global` /
+  `fwd_stats_unpacked`), resized-and-fully-overwritten each iteration. Telemetry
+  only (no effect on cuts/bounds); the `solver_stats` roundtrip and the
+  `opening_order_determinism` gate confirm neutrality.
+- **Loop-invariant interior-node filter cached.** `run_cut_management` re-derived
+  the interior cut-generating node set (`node_graph.nodes.iter_indexed().filter(…)`)
+  every cut-selection cycle; the graph topology is fixed for the run, so it is now
+  resolved once in `TrainingSession::new` and stored on `interior_cut_nodes`. The
+  cached order is byte-identical to the recompute (same canonical `iter_indexed`
+  order); the cut-selection determinism suite confirms neutrality.
+
+**Investigated and refuted (recorded so a future audit does not re-raise).**
+
+- **Enumerated-simulation per-node capture is NOT a fixable allocation.** The
+  per-node fresh buffer in `simulation/enumerated.rs` `enumerated_sim_stage_worker`
+  is optimal, not debt: the `EnumeratedSimScratch::worker_captures` doc documents
+  the deliberate move-scatter — each census arena entry needs its own buffer, so a
+  move achieves exactly one allocation per arena buffer with zero copies. The
+  training sibling's copy-reuse pays off only because its arena is reused across
+  many iterations; the simulation sweep runs once per call, so copy-reuse would
+  _add_ copies. (A first-pass write here proposed "fix" it; that was withdrawn on
+  reading the design rationale.)
+
+**Deferred (minor).**
+
+- A fresh per-call `Vec` + per-stage `clone` in `run_enumerated_backward`
+  (`backward_pass_state.rs`) is not a regression — the pre-existing
+  `run_sampled_backward` has the identical shape — so folding both onto a recycled
+  buffer is a symmetric follow-up, not escalated here. **Owner.** The training
+  owner. **Trigger.** The next backward-scheduler scratch touch.
 
 ### Cleared (recorded so a future audit does not re-raise)
 
