@@ -156,6 +156,8 @@ pub use policy::policy_load::{
     load_boundary_cuts, rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage,
     resolve_effective_inflow_lag_depth, validate_policy_load,
 };
+// ── policy_export (checkpoint authoring) ─────────────────────────────────────
+pub use policy::policy_export::{ReservedInflowLagLayout, reserve_boundary_inflow_lag_slots};
 // ── policy_load::reconcile (report) ──────────────────────────────────────────
 pub use policy::reconcile::{AnticipatedCoverage, BoundaryReconciliationReport, FamilyTally};
 // ── provenance ────────────────────────────────────────────────────────────────

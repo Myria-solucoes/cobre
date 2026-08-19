@@ -162,3 +162,135 @@ def test_write_policy_checkpoint_defaults_apply_when_keys_omitted(
 
     loaded = cobre.results.load_policy(str(tmp_path))
     assert loaded["stage_cuts"][0]["warm_start_count"] == 0
+
+
+# EntityType discriminants from schemas/policy.fbs (owned by cobre-sddp, mirrored
+# here for the manifest a bridge-style caller supplies).
+_ENTITY_TYPE_HYDRO_STORAGE = 0
+_ENTITY_TYPE_HYDRO_INFLOW_LAG = 1
+
+
+def _storage_only_stage_cuts(
+    hydro_ids: list[int], lag_coefficients: dict[int, list[float]]
+) -> list[dict[str, Any]]:
+    """A single stage whose manifest is one HydroStorage slot per hydro (no lag
+    slots — the DECOMP bootstrap shape), one cut carrying storage-aligned
+    coefficients plus keyed inflow_lag_coefficients.
+    """
+    manifest = [
+        {
+            "entity_type": _ENTITY_TYPE_HYDRO_STORAGE,
+            "entity_id": hid,
+            "subindex": 0,
+            "was_active": True,
+        }
+        for hid in hydro_ids
+    ]
+    return [
+        {
+            "stage_id": 0,
+            "state_dimension": len(hydro_ids),
+            "capacity": 4,
+            "entity_manifest": manifest,
+            "cuts": [
+                {
+                    "cut_id": 1,
+                    "slot_index": 0,
+                    "iteration": 1,
+                    "forward_pass_index": 0,
+                    "intercept": 7.0,
+                    "coefficients": [float(hid) for hid in hydro_ids],
+                    "inflow_lag_coefficients": lag_coefficients,
+                    "is_active": True,
+                }
+            ],
+        }
+    ]
+
+
+def test_write_policy_checkpoint_reserves_inflow_lag_slots(
+    tmp_path: pathlib.Path,
+) -> None:
+    """inflow_lag_depth=N widens the written manifest with N canonical
+    HydroInflowLag slots per storage hydro, self-describing depth N, and places
+    each keyed pi_qafl coefficient at its (hydro, depth) position.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    hydro_ids = [1, 2]
+    # hydro 1: depth1=1.1, depth2=1.2; hydro 2: depth1=2.1, depth2 defaults 0.0.
+    lag_coefficients = {1: [1.1, 1.2], 2: [2.1]}
+    stage_cuts = _storage_only_stage_cuts(hydro_ids, lag_coefficients)
+
+    cobre.write_policy_checkpoint(
+        str(tmp_path / "policy"),
+        stage_cuts,
+        _make_metadata(),
+        inflow_lag_depth=2,
+    )
+
+    loaded = cobre.results.load_policy(str(tmp_path))
+    stage = loaded["stage_cuts"][0]
+
+    # 2 storage + 2 hydros × 2 depths = 6 slots.
+    assert stage["state_dimension"] == 6
+    manifest = stage["entity_manifest"]
+    assert len(manifest) == 6
+
+    lag_slots = [
+        s for s in manifest if s["entity_type"] == _ENTITY_TYPE_HYDRO_INFLOW_LAG
+    ]
+    assert len(lag_slots) == 4
+    # Self-describes depth 2: deepest 1-based lag subindex is 2.
+    assert max(s["subindex"] for s in lag_slots) == 2
+
+    # Coefficients: storage[1.0, 2.0] ++ lag-major (h1,d1),(h2,d1),(h1,d2),(h2,d2).
+    coeffs = stage["cuts"][0]["coefficients"]
+    assert coeffs == pytest.approx([1.0, 2.0, 1.1, 2.1, 1.2, 0.0])
+
+
+def test_write_policy_checkpoint_inflow_lag_depth_absent_is_byte_identical(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Omitting inflow_lag_depth (or passing 0) writes the exact same bytes as
+    not passing it — the reservation path is inert by default.
+    """
+    import cobre  # noqa: PLC0415
+
+    def _digest(policy_dir: pathlib.Path) -> dict[str, bytes]:
+        return {
+            p.name: p.read_bytes() for p in sorted((policy_dir / "cuts").glob("*.bin"))
+        }
+
+    stage_cuts = _storage_only_stage_cuts([1, 2], {})
+
+    default_dir = tmp_path / "default"
+    cobre.write_policy_checkpoint(str(default_dir), stage_cuts, _make_metadata())
+
+    zero_dir = tmp_path / "zero"
+    cobre.write_policy_checkpoint(
+        str(zero_dir), stage_cuts, _make_metadata(), inflow_lag_depth=0
+    )
+
+    assert _digest(default_dir) == _digest(zero_dir)
+
+
+def test_write_policy_checkpoint_unplaceable_lag_coefficient_raises(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A keyed inflow-lag coefficient for a hydro with no storage slot is
+    unplaceable and raises ValueError naming the hydro — never silently dropped.
+    """
+    import cobre  # noqa: PLC0415
+
+    # hydro 99 is not among the storage hydros [1, 2].
+    stage_cuts = _storage_only_stage_cuts([1, 2], {99: [0.5]})
+
+    with pytest.raises(ValueError, match=r"hydro 99"):
+        cobre.write_policy_checkpoint(
+            str(tmp_path / "policy"),
+            stage_cuts,
+            _make_metadata(),
+            inflow_lag_depth=2,
+        )

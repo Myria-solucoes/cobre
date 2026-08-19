@@ -18,6 +18,7 @@ def write_policy_checkpoint(
     metadata: Mapping[str, Any],
     stage_bases: Optional[Sequence[Mapping[str, Any]]] = None,
     stage_states: Optional[Sequence[Mapping[str, Any]]] = None,
+    inflow_lag_depth: Optional[int] = None,
 ) -> None: ...
 
 class Study:

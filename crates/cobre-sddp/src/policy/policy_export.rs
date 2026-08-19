@@ -11,6 +11,8 @@
 // below its target width.
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
+use std::collections::{HashMap, HashSet};
+
 use crate::visited_states::VisitedStatesArchive;
 use chrono::NaiveDate;
 use cobre_core::System;
@@ -21,6 +23,7 @@ use cobre_io::output::policy::{
     OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, StageCutsPayload, StageStatesPayload,
 };
 
+use crate::SddpError;
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CommitmentHoldAddress, CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
@@ -256,6 +259,173 @@ pub fn build_stage_entity_manifest(
         "manifest length must equal projection.n_slots()"
     );
     manifest
+}
+
+/// A boundary checkpoint manifest widened with canonical `HydroInflowLag`
+/// slots, each cut's coefficient vector extended to match. The three fields are
+/// mutually consistent: `state_dimension == manifest.len()`, and every
+/// `coefficients` row has that same length.
+#[derive(Debug)]
+pub struct ReservedInflowLagLayout {
+    /// Widened per-slot manifest: the original leading storage block, then the
+    /// reserved lag block, then the original tail (buckets / commitment-hold).
+    pub manifest: Vec<EntitySlot>,
+    /// One extended coefficient vector per input cut, positionally aligned to
+    /// [`Self::manifest`].
+    pub coefficients: Vec<Vec<f64>>,
+    /// `manifest.len()` — the widened state dimension the writer stamps on the
+    /// pool.
+    pub state_dimension: u32,
+}
+
+/// Reserve the canonical `HydroInflowLag` state slots in a boundary checkpoint
+/// authored outside cobre (the DECOMP-bridge bootstrap), so cobre — never the
+/// caller — owns the lag-block layout.
+///
+/// The caller supplies a `manifest` whose leading contiguous block is one
+/// `HydroStorage` slot per hydro (the shape [`build_stage_entity_manifest`]
+/// emits), each cut's storage-aligned `cut_coefficients`, and — separately —
+/// each cut's inflow-lag coefficients keyed by hydro id
+/// (`hydro_id -> [coef_by_depth]`, index `0` = lag depth 1). For
+/// `inflow_lag_depth == N`, this inserts `N` `HydroInflowLag` slots per storage
+/// hydro directly after the storage block, in the SAME lag-major
+/// (`for lag { for hydro }`) order and 1-based `subindex` convention
+/// [`build_stage_entity_manifest`]'s [`StateRegion::Lag`] arm produces, and
+/// extends every cut's coefficient vector at the same positions — each keyed
+/// value at its `(hydro_id, depth)` slot, `0.0` elsewhere. The widened manifest
+/// then self-describes depth `N`, so
+/// [`boundary_policy_required_lag_depth`](crate::boundary_policy_required_lag_depth)
+/// reads `N` and the load path reserves the matching forward lag state. Each
+/// lag slot inherits its owning storage slot's `was_active`, matching the
+/// per-hydro `hydro_operating_active` flag stamped on both families.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if `inflow_lag_depth == 0`, the two
+/// per-cut slices differ in length, the manifest's `HydroStorage` slots are not
+/// a non-empty leading contiguous block, a cut's coefficient length does not
+/// equal the manifest length, or a keyed lag coefficient names a hydro with no
+/// storage slot or a depth beyond `N` (an unplaceable term — never silently
+/// dropped, so every source `pi_qafl` term is placed or the write fails).
+pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
+    manifest: &[EntitySlot],
+    cut_coefficients: &[Vec<f64>],
+    cut_inflow_lag_coefficients: &[HashMap<i32, Vec<f64>, S>],
+    inflow_lag_depth: u32,
+) -> Result<ReservedInflowLagLayout, SddpError> {
+    if inflow_lag_depth == 0 {
+        return Err(SddpError::Validation(
+            "reserve_boundary_inflow_lag_slots called with inflow_lag_depth == 0; reserve lag \
+             slots only for a positive declared depth"
+                .to_string(),
+        ));
+    }
+    if cut_coefficients.len() != cut_inflow_lag_coefficients.len() {
+        return Err(SddpError::Validation(format!(
+            "cut coefficient count {} does not match keyed inflow-lag count {}",
+            cut_coefficients.len(),
+            cut_inflow_lag_coefficients.len()
+        )));
+    }
+    let n = inflow_lag_depth as usize;
+
+    // The storage slots are the state's must-correspond hydro core; the lag
+    // block spans exactly those same hydros. Require them to be the non-empty
+    // leading contiguous block the canonical manifest emits — the position the
+    // lag block inserts after.
+    let storage_count = manifest
+        .iter()
+        .take_while(|s| s.entity_type == ENTITY_TYPE_HYDRO_STORAGE)
+        .count();
+    if storage_count == 0 {
+        return Err(SddpError::Validation(
+            "boundary manifest carries no leading HydroStorage slot; cannot reserve inflow-lag \
+             slots without the storage hydros to key them on"
+                .to_string(),
+        ));
+    }
+    if manifest[storage_count..]
+        .iter()
+        .any(|s| s.entity_type == ENTITY_TYPE_HYDRO_STORAGE)
+    {
+        return Err(SddpError::Validation(
+            "boundary manifest interleaves HydroStorage slots with other entity types; the \
+             canonical layout emits storage as a leading contiguous block"
+                .to_string(),
+        ));
+    }
+    let storage_slots = &manifest[..storage_count];
+    let storage_ids: HashSet<i32> = storage_slots.iter().map(|s| s.entity_id).collect();
+
+    // Reject any unplaceable keyed term BEFORE building, so a pi_qafl for an
+    // unknown hydro or a depth past `N` fails the write rather than dropping.
+    for (c, keyed) in cut_inflow_lag_coefficients.iter().enumerate() {
+        for (&hydro_id, coeffs) in keyed {
+            if !storage_ids.contains(&hydro_id) {
+                return Err(SddpError::Validation(format!(
+                    "cut {c} carries an inflow-lag coefficient for hydro {hydro_id}, which has no \
+                     HydroStorage slot in the boundary manifest"
+                )));
+            }
+            if coeffs.len() > n {
+                return Err(SddpError::Validation(format!(
+                    "cut {c} inflow-lag coefficient for hydro {hydro_id} has depth {} exceeding \
+                     the reserved inflow_lag_depth {n}",
+                    coeffs.len()
+                )));
+            }
+        }
+    }
+
+    let lag_slots: Vec<EntitySlot> = (0..n)
+        .flat_map(|lag| {
+            storage_slots.iter().map(move |storage| EntitySlot {
+                entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+                entity_id: storage.entity_id,
+                subindex: (lag + 1) as u32,
+                was_active: storage.was_active,
+                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            })
+        })
+        .collect();
+
+    let mut new_manifest = Vec::with_capacity(manifest.len() + lag_slots.len());
+    new_manifest.extend_from_slice(&manifest[..storage_count]);
+    new_manifest.extend_from_slice(&lag_slots);
+    new_manifest.extend_from_slice(&manifest[storage_count..]);
+
+    let mut new_coefficients = Vec::with_capacity(cut_coefficients.len());
+    for (coeffs, keyed) in cut_coefficients.iter().zip(cut_inflow_lag_coefficients) {
+        if coeffs.len() != manifest.len() {
+            return Err(SddpError::Validation(format!(
+                "cut has {} coefficients but the boundary manifest has {} slots; the two must be \
+                 positionally aligned before reserving lag slots",
+                coeffs.len(),
+                manifest.len()
+            )));
+        }
+        let lag_block = (0..n).flat_map(|lag| {
+            storage_slots.iter().map(move |storage| {
+                keyed
+                    .get(&storage.entity_id)
+                    .and_then(|per_depth| per_depth.get(lag))
+                    .copied()
+                    .unwrap_or(0.0)
+            })
+        });
+        let mut extended = Vec::with_capacity(coeffs.len() + n * storage_count);
+        extended.extend_from_slice(&coeffs[..storage_count]);
+        extended.extend(lag_block);
+        extended.extend_from_slice(&coeffs[storage_count..]);
+        new_coefficients.push(extended);
+    }
+
+    let state_dimension = new_manifest.len() as u32;
+    Ok(ReservedInflowLagLayout {
+        manifest: new_manifest,
+        coefficients: new_coefficients,
+        state_dimension,
+    })
 }
 
 /// Build the per-slot post-horizon delivery INTERVAL, in LOCKSTEP with
@@ -604,8 +774,9 @@ pub fn build_stage_states_payloads<'a>(
 mod tests {
     use super::{
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
-        ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, EntitySlot,
-        build_stage_entity_manifest, build_stage_states_payloads, year_month_day_anchor,
+        ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, EntitySlot, HashMap,
+        build_stage_entity_manifest, build_stage_states_payloads,
+        reserve_boundary_inflow_lag_slots, year_month_day_anchor,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
@@ -1601,5 +1772,179 @@ mod tests {
         for date in dates {
             assert_eq!(year_month_day_anchor(date) % 100, 1);
         }
+    }
+
+    // ── reserve_boundary_inflow_lag_slots ────────────────────────────────────
+
+    fn storage_slot(id: i32, was_active: bool) -> EntitySlot {
+        EntitySlot {
+            entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+            entity_id: id,
+            subindex: 0,
+            was_active,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        }
+    }
+
+    fn anticipated_slot(id: i32, subindex: u32) -> EntitySlot {
+        EntitySlot {
+            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_id: id,
+            subindex,
+            was_active: true,
+            delivery_date: 20260101,
+        }
+    }
+
+    /// A depth-2 reservation over a 2-storage manifest inserts the lag block in
+    /// canonical lag-major / 1-based-subindex order immediately after storage,
+    /// preserving the trailing (anticipated) slots, and places each keyed
+    /// `pi_qafl` at its `(hydro, depth)` position with `0.0` elsewhere.
+    #[test]
+    fn reserve_inserts_canonical_lag_block_after_storage_and_places_coefficients() {
+        // storage(h1), storage(h2), anticipated(t9)
+        let manifest = vec![
+            storage_slot(1, true),
+            storage_slot(2, false),
+            anticipated_slot(9, 0),
+        ];
+        // One cut: storage coeffs [s1, s2, a9]; lag coeffs keyed by hydro.
+        let cut_coefficients = vec![vec![10.0, 20.0, 99.0]];
+        let mut keyed: HashMap<i32, Vec<f64>> = HashMap::new();
+        keyed.insert(1, vec![1.1, 1.2]); // hydro 1: depth1=1.1, depth2=1.2
+        keyed.insert(2, vec![2.1]); // hydro 2: depth1=2.1, depth2 defaults 0.0
+        let cut_lag = vec![keyed];
+
+        let out = reserve_boundary_inflow_lag_slots(&manifest, &cut_coefficients, &cut_lag, 2)
+            .expect("reservation succeeds");
+
+        // Manifest: 2 storage + (2 hydros × 2 depths) lag + 1 anticipated = 7.
+        assert_eq!(out.state_dimension, 7);
+        assert_eq!(out.manifest.len(), 7);
+        assert_eq!(out.manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(out.manifest[1].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+
+        // Lag block, lag-major: (h1,d1),(h2,d1),(h1,d2),(h2,d2); subindex = depth.
+        let expected_lag = [(1, 1u32, true), (2, 1, false), (1, 2, true), (2, 2, false)];
+        for (i, (id, subindex, active)) in expected_lag.into_iter().enumerate() {
+            let slot = &out.manifest[2 + i];
+            assert_eq!(slot.entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG);
+            assert_eq!(slot.entity_id, id, "lag slot {i} hydro id");
+            assert_eq!(slot.subindex, subindex, "lag slot {i} 1-based depth");
+            assert_eq!(
+                slot.was_active, active,
+                "lag slot {i} inherits storage was_active"
+            );
+            assert_eq!(slot.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+        }
+
+        // Trailing anticipated slot survives unchanged, now at index 6.
+        assert_eq!(
+            out.manifest[6].entity_type,
+            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        );
+        assert_eq!(out.manifest[6].entity_id, 9);
+
+        // Coefficients: storage[..2] ++ lag_block ++ tail; lag block in the same
+        // lag-major order: (h1,d1)=1.1,(h2,d1)=2.1,(h1,d2)=1.2,(h2,d2)=0.0.
+        assert_eq!(out.coefficients.len(), 1);
+        assert_eq!(
+            out.coefficients[0],
+            vec![10.0, 20.0, 1.1, 2.1, 1.2, 0.0, 99.0]
+        );
+    }
+
+    /// The written lag slots' `(entity_type, entity_id, subindex)` identity is
+    /// exactly what `boundary_cut_lag_depth`/reconciliation match on: the
+    /// deepest `HydroInflowLag` subindex equals the declared depth.
+    #[test]
+    fn reserve_self_describes_the_declared_depth() {
+        let manifest = vec![storage_slot(1, true), storage_slot(2, true)];
+        let cut_coefficients = vec![vec![1.0, 2.0]];
+        let cut_lag = vec![HashMap::new()];
+
+        let out = reserve_boundary_inflow_lag_slots(&manifest, &cut_coefficients, &cut_lag, 12)
+            .expect("reservation succeeds");
+
+        let max_lag_subindex = out
+            .manifest
+            .iter()
+            .filter(|s| s.entity_type == ENTITY_TYPE_HYDRO_INFLOW_LAG)
+            .map(|s| s.subindex)
+            .max()
+            .expect("lag slots exist");
+        assert_eq!(max_lag_subindex, 12);
+        // 2 storage + 2 hydros × 12 depths = 26.
+        assert_eq!(out.state_dimension, 26);
+    }
+
+    /// A keyed `pi_qafl` for a hydro with no storage slot is unplaceable — the
+    /// write fails rather than silently dropping the term.
+    #[test]
+    fn reserve_rejects_coefficient_for_unknown_hydro() {
+        let manifest = vec![storage_slot(1, true)];
+        let cut_coefficients = vec![vec![1.0]];
+        let mut keyed: HashMap<i32, Vec<f64>> = HashMap::new();
+        keyed.insert(7, vec![0.5]); // hydro 7 has no storage slot
+        let cut_lag = vec![keyed];
+
+        let err = reserve_boundary_inflow_lag_slots(&manifest, &cut_coefficients, &cut_lag, 2)
+            .expect_err("unplaceable term must reject");
+        assert!(
+            format!("{err}").contains("hydro 7"),
+            "error names the unplaceable hydro: {err}"
+        );
+    }
+
+    /// A keyed coefficient vector deeper than the declared depth is unplaceable.
+    #[test]
+    fn reserve_rejects_depth_beyond_declared() {
+        let manifest = vec![storage_slot(1, true)];
+        let cut_coefficients = vec![vec![1.0]];
+        let mut keyed: HashMap<i32, Vec<f64>> = HashMap::new();
+        keyed.insert(1, vec![0.1, 0.2, 0.3]); // depth 3 > N=2
+        let cut_lag = vec![keyed];
+
+        let err = reserve_boundary_inflow_lag_slots(&manifest, &cut_coefficients, &cut_lag, 2)
+            .expect_err("depth beyond N must reject");
+        assert!(format!("{err}").contains("exceeding"), "{err}");
+    }
+
+    /// A manifest with no leading storage block cannot key lag slots.
+    #[test]
+    fn reserve_rejects_manifest_without_leading_storage() {
+        let manifest = vec![anticipated_slot(9, 0)];
+        let cut_coefficients = vec![vec![1.0]];
+        let cut_lag = vec![HashMap::new()];
+
+        let err = reserve_boundary_inflow_lag_slots(&manifest, &cut_coefficients, &cut_lag, 1)
+            .expect_err("no leading storage must reject");
+        assert!(format!("{err}").contains("HydroStorage"), "{err}");
+    }
+
+    /// A coefficient vector whose length disagrees with the manifest cannot be
+    /// positionally aligned for insertion.
+    #[test]
+    fn reserve_rejects_coefficient_manifest_length_mismatch() {
+        let manifest = vec![storage_slot(1, true), storage_slot(2, true)];
+        let cut_coefficients = vec![vec![1.0]]; // len 1, manifest len 2
+        let cut_lag = vec![HashMap::new()];
+
+        let err = reserve_boundary_inflow_lag_slots(&manifest, &cut_coefficients, &cut_lag, 1)
+            .expect_err("length mismatch must reject");
+        assert!(format!("{err}").contains("positionally aligned"), "{err}");
+    }
+
+    /// `inflow_lag_depth == 0` is a misuse: the caller reserves only for a
+    /// positive depth (the absent/zero case is the byte-identical no-op path).
+    #[test]
+    fn reserve_rejects_zero_depth() {
+        let manifest = vec![storage_slot(1, true)];
+        let cut_coefficients = vec![vec![1.0]];
+        let cut_lag = vec![HashMap::new()];
+
+        assert!(
+            reserve_boundary_inflow_lag_slots(&manifest, &cut_coefficients, &cut_lag, 0).is_err()
+        );
     }
 }
