@@ -1594,9 +1594,9 @@ fn first_fanned_plant_id(
 /// same accepted redundant-but-deterministic recompute this crate already
 /// applies to the bucket topology, not a second advisory emission. Returns the
 /// per-plant resolution and the anticipated-local constant leads: a
-/// `LeadStages(ℓ)` plant keeps `ℓ` byte-for-byte; a `LeadTime` plant (gated off
-/// the load path until the in-LP ring lands) takes its per-plant max depth as a
-/// `k_max`-consistent placeholder, so its LP path is not yet correct.
+/// `LeadStages(ℓ)` plant keeps `ℓ` byte-for-byte; a `LeadTime` plant takes its
+/// per-plant max in-flight depth `max_t K_i(t)` — the plant's own `k_i`
+/// reachability/padding bound the slot masking and policy manifest read.
 pub(crate) fn resolve_anticipated_commitments_core(
     system: &System,
 ) -> (AnticipatedResolution, Vec<usize>) {
