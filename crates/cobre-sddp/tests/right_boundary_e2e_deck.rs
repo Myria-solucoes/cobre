@@ -29,7 +29,7 @@ mod deck_independent_fanout {
     //! rejects at setup time (pinned by `lead_time_fanout_rejected_at_setup`,
     //! not re-pinned here).
 
-    use cobre_sddp::lead_time::{AnticipatedResolution, LeadTime};
+    use cobre_sddp::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
 
     /// The deck's plant carries a uniform two-week anticipation lag on a
     /// weekly calendar: one delivery stage anchors to exactly one decision
@@ -40,8 +40,11 @@ mod deck_independent_fanout {
         let stage_lengths_hours = [168.0; 6];
         let resolution = AnticipatedResolution::resolve(
             &[LeadTime::Stages(2)],
-            &stage_lengths_hours,
-            stage_lengths_hours.len(),
+            DeliveryAxis {
+                stage_lengths_hours: &stage_lengths_hours,
+                n_decision: stage_lengths_hours.len(),
+                n_delivery: stage_lengths_hours.len(),
+            },
         );
 
         assert_eq!(
@@ -59,8 +62,11 @@ mod deck_independent_fanout {
         let stage_lengths_hours = [720.0, 168.0, 168.0, 168.0, 168.0];
         let resolution = AnticipatedResolution::resolve(
             &[LeadTime::Time(720.0)],
-            &stage_lengths_hours,
-            stage_lengths_hours.len(),
+            DeliveryAxis {
+                stage_lengths_hours: &stage_lengths_hours,
+                n_decision: stage_lengths_hours.len(),
+                n_delivery: stage_lengths_hours.len(),
+            },
         );
 
         assert!(

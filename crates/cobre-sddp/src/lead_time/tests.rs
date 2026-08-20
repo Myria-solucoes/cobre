@@ -1,5 +1,10 @@
 use super::*;
 
+use std::collections::HashMap;
+
+use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
+
 const TOL: f64 = 1e-9;
 
 fn assert_close(actual: &[f64], expected: &[f64]) {
@@ -357,7 +362,14 @@ fn test_arrival_density_conservation_per_lag() {
 #[test]
 fn test_pmo_end_anchored_delivery_resolution() {
     let stage_lengths_hours = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0];
-    let resolution = resolve_point(LeadTime::Time(720.0), &stage_lengths_hours, 7);
+    let resolution = resolve_point(
+        LeadTime::Time(720.0),
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: 7,
+            n_delivery: 7,
+        },
+    );
 
     assert_eq!(
         resolution.decider,
@@ -376,7 +388,14 @@ fn test_pmo_end_anchored_delivery_resolution() {
 #[test]
 fn test_sub_stage_lead_k0_degeneracy() {
     let stage_lengths_hours = [700.0, 744.0];
-    let resolution = resolve_point(LeadTime::Time(720.0), &stage_lengths_hours, 2);
+    let resolution = resolve_point(
+        LeadTime::Time(720.0),
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: 2,
+            n_delivery: 2,
+        },
+    );
 
     assert_eq!(resolution.decider, vec![None, Some(1)]);
     assert_eq!(resolution.decision_sets, vec![vec![], vec![1]]);
@@ -392,7 +411,14 @@ fn test_sub_stage_lead_k0_degeneracy() {
 #[test]
 fn test_stage_count_mode_unequal_monthly_hours() {
     let stage_lengths_hours = [672.0, 700.0, 744.0, 720.0, 672.0, 744.0, 700.0, 744.0];
-    let resolution = resolve_point(LeadTime::Stages(2), &stage_lengths_hours, 8);
+    let resolution = resolve_point(
+        LeadTime::Stages(2),
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: 8,
+            n_delivery: 8,
+        },
+    );
 
     for m in 2..8 {
         assert_eq!(
@@ -415,7 +441,14 @@ fn test_stage_count_mode_unequal_monthly_hours() {
 #[test]
 fn test_ic_boundary_decider_is_none() {
     let stage_lengths_hours = [100.0];
-    let resolution = resolve_point(LeadTime::Time(1000.0), &stage_lengths_hours, 1);
+    let resolution = resolve_point(
+        LeadTime::Time(1000.0),
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: 1,
+            n_delivery: 1,
+        },
+    );
 
     assert_eq!(resolution.decider, vec![None]);
     assert_eq!(resolution.decision_sets, vec![Vec::<usize>::new()]);
@@ -430,7 +463,14 @@ fn test_ic_boundary_decider_is_none() {
 #[test]
 fn test_coarse_decision_fans_out_over_fine_delivery_stages() {
     let stage_lengths_hours = [720.0, 168.0, 168.0, 168.0, 168.0];
-    let resolution = resolve_point(LeadTime::Time(750.0), &stage_lengths_hours, 5);
+    let resolution = resolve_point(
+        LeadTime::Time(750.0),
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: 5,
+            n_delivery: 5,
+        },
+    );
 
     assert_eq!(
         resolution.decider,
@@ -452,7 +492,14 @@ fn test_coarse_decision_fans_out_over_fine_delivery_stages() {
 fn test_anticipated_resolution_k_max_is_global_depth_max() {
     let stage_lengths_hours = [720.0; 8];
     let leads = [LeadTime::Stages(2), LeadTime::Stages(4)];
-    let resolution = AnticipatedResolution::resolve(&leads, &stage_lengths_hours, 8);
+    let resolution = AnticipatedResolution::resolve(
+        &leads,
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: 8,
+            n_delivery: 8,
+        },
+    );
 
     assert_eq!(resolution.per_plant.len(), 2);
     assert_eq!(resolution.per_plant[0].depth.iter().copied().max(), Some(2));
@@ -462,7 +509,14 @@ fn test_anticipated_resolution_k_max_is_global_depth_max() {
 
 #[test]
 fn test_anticipated_resolution_empty_is_zero_depth() {
-    let resolution = AnticipatedResolution::resolve(&[], &[720.0; 4], 4);
+    let resolution = AnticipatedResolution::resolve(
+        &[],
+        DeliveryAxis {
+            stage_lengths_hours: &[720.0; 4],
+            n_decision: 4,
+            n_delivery: 4,
+        },
+    );
     assert!(resolution.per_plant.is_empty());
     assert_eq!(resolution.k_max, 0);
 }
@@ -476,8 +530,11 @@ fn test_genuine_decisions_at_matches_fanout_hand_derivation() {
     let stage_lengths_hours = [720.0, 168.0, 168.0, 168.0, 168.0, 168.0];
     let resolution = AnticipatedResolution::resolve(
         &[LeadTime::Time(720.0)],
-        &stage_lengths_hours,
-        stage_lengths_hours.len(),
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: stage_lengths_hours.len(),
+            n_delivery: stage_lengths_hours.len(),
+        },
     );
     let point = &resolution.per_plant[0];
 
@@ -501,8 +558,11 @@ fn test_k0_uniform_calendar_self_delivers_every_stage() {
     let stage_lengths_hours = [744.0, 744.0, 744.0, 744.0];
     let resolution = AnticipatedResolution::resolve(
         &[LeadTime::Time(720.0)],
-        &stage_lengths_hours,
-        stage_lengths_hours.len(),
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: stage_lengths_hours.len(),
+            n_delivery: stage_lengths_hours.len(),
+        },
     );
     let point = &resolution.per_plant[0];
 
@@ -531,8 +591,14 @@ fn test_k0_uniform_calendar_self_delivers_every_stage() {
 #[test]
 fn test_is_ready_at_monotonic_prefix_for_constant_lead() {
     let stage_lengths_hours = [744.0; 6];
-    let resolution =
-        AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &stage_lengths_hours, 6);
+    let resolution = AnticipatedResolution::resolve(
+        &[LeadTime::Stages(2)],
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: 6,
+            n_delivery: 6,
+        },
+    );
     let point = &resolution.per_plant[0];
 
     // At t=0: m=1 (slot 0, IC-seeded) and m=2 (slot 1, this stage's own fresh
@@ -616,8 +682,11 @@ fn migration_equivalence_spread_daily_chronological_block() {
 fn migration_equivalence_point_pmo_end_anchored() {
     let resolution = resolve_point(
         LeadTime::Time(720.0),
-        &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0],
-        7,
+        DeliveryAxis {
+            stage_lengths_hours: &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0],
+            n_decision: 7,
+            n_delivery: 7,
+        },
     );
     assert_eq!(
         resolution,
@@ -625,19 +694,28 @@ fn migration_equivalence_point_pmo_end_anchored() {
             decider: vec![None, None, None, None, Some(3), Some(4), Some(5)],
             decision_sets: vec![vec![], vec![], vec![], vec![4], vec![5], vec![6], vec![]],
             depth: vec![0, 0, 0, 1, 1, 1, 0],
+            occupancy: vec![3, 2, 1, 1, 1, 1, 0],
         }
     );
 }
 
 #[test]
 fn migration_equivalence_point_k0_degeneracy() {
-    let resolution = resolve_point(LeadTime::Time(720.0), &[700.0, 744.0], 2);
+    let resolution = resolve_point(
+        LeadTime::Time(720.0),
+        DeliveryAxis {
+            stage_lengths_hours: &[700.0, 744.0],
+            n_decision: 2,
+            n_delivery: 2,
+        },
+    );
     assert_eq!(
         resolution,
         PointResolution {
             decider: vec![None, Some(1)],
             decision_sets: vec![vec![], vec![1]],
             depth: vec![0, 0],
+            occupancy: vec![0, 0],
         }
     );
 }
@@ -708,29 +786,45 @@ fn test_resolve_future_delivery_decider_boundary_tie_resolves_earlier() {
     assert_eq!(resolution, Some((0, DeciderKind::Trunk)));
 }
 
-// Regression: resolve_decider_physical / resolve_point / AnticipatedResolution
-// stay byte-identical to a captured baseline -- the in-study ring, k_max, and
-// the in-study resolve path are untouched by adding the post-horizon resolver.
+// resolve_point's decider/decision_sets/depth stay byte-identical to a captured
+// baseline; k_max now derives from full occupancy, so this fixture's plant-0
+// LeadTime shape (leading None-run 4 > max depth 1 — the currently-under-sized
+// case) grows from the old depth-derived 2 to the true in-flight 3.
 #[test]
 fn test_in_study_path_byte_identity_regression() {
     let stage_lengths_hours = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0];
-    let resolution = resolve_point(LeadTime::Time(720.0), &stage_lengths_hours, 7);
+    let resolution = resolve_point(
+        LeadTime::Time(720.0),
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: 7,
+            n_delivery: 7,
+        },
+    );
     assert_eq!(
         resolution,
         PointResolution {
             decider: vec![None, None, None, None, Some(3), Some(4), Some(5)],
             decision_sets: vec![vec![], vec![], vec![], vec![4], vec![5], vec![6], vec![]],
             depth: vec![0, 0, 0, 1, 1, 1, 0],
+            occupancy: vec![3, 2, 1, 1, 1, 1, 0],
         },
-        "resolve_point's in-study path must stay byte-identical"
+        "resolve_point's decider/decision_sets/depth must stay byte-identical"
     );
 
     let anticipated = AnticipatedResolution::resolve(
         &[LeadTime::Time(720.0), LeadTime::Stages(2)],
-        &stage_lengths_hours,
-        7,
+        DeliveryAxis {
+            stage_lengths_hours: &stage_lengths_hours,
+            n_decision: 7,
+            n_delivery: 7,
+        },
     );
-    assert_eq!(anticipated.k_max, 2, "k_max must stay byte-identical");
+    assert_eq!(
+        anticipated.k_max, 3,
+        "k_max derives from occupancy: plant 0's leading None-run (4) exceeds its \
+         depth (1), so the ring grows to its true in-flight count"
+    );
     assert_eq!(
         anticipated.max_fanout, 1,
         "max_fanout must stay byte-identical"
@@ -746,8 +840,11 @@ fn test_in_study_path_byte_identity_regression() {
 fn migration_equivalence_point_stage_count() {
     let resolution = resolve_point(
         LeadTime::Stages(2),
-        &[672.0, 700.0, 744.0, 720.0, 672.0, 744.0, 700.0, 744.0],
-        8,
+        DeliveryAxis {
+            stage_lengths_hours: &[672.0, 700.0, 744.0, 720.0, 672.0, 744.0, 700.0, 744.0],
+            n_decision: 8,
+            n_delivery: 8,
+        },
     );
     assert_eq!(
         resolution,
@@ -773,6 +870,479 @@ fn migration_equivalence_point_stage_count() {
                 vec![]
             ],
             depth: vec![1, 2, 2, 2, 2, 2, 1, 0],
+            occupancy: vec![2, 2, 2, 2, 2, 2, 1, 0],
         }
     );
+}
+
+// Equal-domain axis (n_decision == n_delivery): resolve_point reproduces the
+// pre-split result exactly. Hand-written expected value (not a recomputation)
+// so a projection-kernel perturbation of one field is caught.
+#[test]
+fn test_delivery_axis_equal_domains_matches_pre_split() {
+    let axis = DeliveryAxis {
+        stage_lengths_hours: &[100.0; 4],
+        n_decision: 4,
+        n_delivery: 4,
+    };
+    let resolution = resolve_point(LeadTime::Time(350.0), axis);
+
+    assert_eq!(
+        resolution,
+        PointResolution {
+            decider: vec![None, None, None, Some(0)],
+            decision_sets: vec![vec![3], vec![], vec![], vec![]],
+            depth: vec![1, 1, 1, 0],
+            occupancy: vec![3, 2, 1, 0],
+        }
+    );
+    assert_eq!(resolution.decision_sets.len(), 4);
+    assert_eq!(resolution.depth.len(), 4);
+}
+
+// Delivery axis wider than the decision axis (Stages mode, empty calendar): the
+// decider spans all n_delivery stages, decision_sets/depth stay decision-sized.
+#[test]
+fn test_delivery_axis_wider_than_decision_stages_mode() {
+    let axis = DeliveryAxis {
+        stage_lengths_hours: &[],
+        n_decision: 3,
+        n_delivery: 6,
+    };
+    let resolution = resolve_point(LeadTime::Stages(3), axis);
+
+    assert_eq!(
+        resolution.decider,
+        vec![None, None, None, Some(0), Some(1), Some(2)]
+    );
+    assert_eq!(resolution.decision_sets.len(), 3);
+    assert_eq!(resolution.depth.len(), 3);
+    assert_eq!(resolution.decision_sets[0], vec![3]);
+}
+
+// A delivery decided at a post-study stage contributes to neither decision_sets
+// nor depth: m == 3 (decider Some(2), in study) appears in decision_sets[2],
+// while m == 4 (decider Some(3), a post-study decision stage) appears in no
+// decision set and leaves depth untouched.
+#[test]
+fn test_post_study_decided_delivery_absent_from_decision_domain() {
+    let axis = DeliveryAxis {
+        stage_lengths_hours: &[],
+        n_decision: 3,
+        n_delivery: 6,
+    };
+    let resolution = resolve_point(LeadTime::Stages(1), axis);
+
+    assert_eq!(
+        resolution.decider,
+        vec![None, Some(0), Some(1), Some(2), Some(3), Some(4)]
+    );
+    assert_eq!(resolution.decider[3], Some(2));
+    assert!(resolution.decision_sets[2].contains(&3));
+    assert_eq!(resolution.decider[4], Some(3));
+    assert!(resolution.decision_sets.iter().all(|set| !set.contains(&4)));
+    assert_eq!(resolution.decision_sets, vec![vec![1], vec![2], vec![3]]);
+    assert_eq!(resolution.depth, vec![1, 1, 1]);
+    // The post-study deciders (m == 4 at Some(3), m == 5 at Some(4), both
+    // c >= n_decision) have no carrier and inflate neither depth nor occupancy.
+    assert_eq!(resolution.occupancy, vec![1, 1, 1]);
+}
+
+// The four-stage `LeadTime(350)` shape whose leading None-run (3) exceeds
+// its max depth (1). Occupancy counts the pre-study seeds `depth` drops, so
+// k_max is the true stage-0 in-flight count 3, not the depth-derived 1.
+#[test]
+fn test_occupancy_full_in_flight_pre_study_prefix() {
+    let resolution = AnticipatedResolution::resolve(
+        &[LeadTime::Time(350.0)],
+        DeliveryAxis {
+            stage_lengths_hours: &[100.0; 4],
+            n_decision: 4,
+            n_delivery: 4,
+        },
+    );
+    let point = &resolution.per_plant[0];
+
+    assert_eq!(point.occupancy, vec![3, 2, 1, 0]);
+    assert_eq!(point.depth, vec![1, 1, 1, 0]);
+    assert_eq!(resolution.k_max, 3);
+}
+
+// The DECOMP shape — `LeadStages(6)` over an empty calendar with a delivery
+// axis (12) twice the decision axis (6). Every in-study stage carries a full
+// pre-study-plus-in-study ring of six deliveries, so occupancy is uniformly 6.
+#[test]
+fn test_occupancy_decomp_shape_full_ring_every_stage() {
+    let resolution = AnticipatedResolution::resolve(
+        &[LeadTime::Stages(6)],
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: 6,
+            n_delivery: 12,
+        },
+    );
+    let point = &resolution.per_plant[0];
+
+    assert_eq!(point.occupancy, vec![6, 6, 6, 6, 6, 6]);
+    assert_eq!(resolution.k_max, 6);
+    assert_eq!(resolution.max_fanout, 1);
+}
+
+// Byte-identity floor: on a well-behaved uniform calendar whose leading None-run
+// is <= 1 (a one-stage physical lead, n_none == max_t depth == 1), occupancy and
+// depth coincide element-for-element, so sizing from occupancy leaves k_max
+// unchanged from the depth-derived value.
+#[test]
+fn test_occupancy_equals_depth_on_short_uniform_lead() {
+    let resolution = resolve_point(
+        LeadTime::Time(720.0),
+        DeliveryAxis {
+            stage_lengths_hours: &[720.0; 5],
+            n_decision: 5,
+            n_delivery: 5,
+        },
+    );
+
+    assert_eq!(resolution.depth, vec![1, 1, 1, 1, 0]);
+    assert_eq!(resolution.occupancy, resolution.depth);
+    assert_eq!(
+        resolution.occupancy.iter().max(),
+        resolution.depth.iter().max()
+    );
+}
+
+// The byte-identity identity `occupancy[t] == depth[t] + max(0, n_none−1−t)`
+// hand-computed on the four-stage `LeadTime(350)` fixture: n_none == 3, depth == [1,1,1,0], so the
+// pre-study correction is [2,1,0,0] and occupancy is [3,2,1,0].
+#[test]
+fn test_occupancy_depth_identity_hand_computed() {
+    let resolution = resolve_point(
+        LeadTime::Time(350.0),
+        DeliveryAxis {
+            stage_lengths_hours: &[100.0; 4],
+            n_decision: 4,
+            n_delivery: 4,
+        },
+    );
+
+    let n_none = resolution
+        .decider
+        .iter()
+        .take_while(|d| d.is_none())
+        .count();
+    assert_eq!(n_none, 3);
+
+    let expected: Vec<usize> = resolution
+        .depth
+        .iter()
+        .enumerate()
+        .map(|(t, &d)| d + (n_none).saturating_sub(1).saturating_sub(t))
+        .collect();
+    assert_eq!(resolution.occupancy, expected);
+    assert_eq!(resolution.occupancy, vec![3, 2, 1, 0]);
+}
+
+// Edge E2: a `None`-decider whose delivery target is post-study
+// (`decider[m] == None`, `m >= n_decision`) has no carrier and is excluded from
+// occupancy. `LeadStages(4)` over `n_decision == 3`, `n_delivery == 6` puts
+// delivery 3 (None, m == 3 == n_decision) in the post-study span; counting it
+// would raise occupancy[0..3] by one.
+#[test]
+fn test_occupancy_excludes_none_decider_post_study_target() {
+    let resolution = resolve_point(
+        LeadTime::Stages(4),
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: 3,
+            n_delivery: 6,
+        },
+    );
+
+    assert_eq!(
+        resolution.decider,
+        vec![None, None, None, None, Some(0), Some(1)]
+    );
+    assert_eq!(resolution.decider[3], None);
+    assert_eq!(resolution.depth, vec![1, 2, 2]);
+    assert_eq!(resolution.occupancy, vec![3, 3, 2]);
+}
+
+/// The carried in-flight set at decision stage `t` as the ring actually sweeps
+/// it (`build_anticipated_slot_row_pos`): the window `m in {t+1, ..., t+k_max}`
+/// capped at `n_delivery`, restricted to deliveries that are READY
+/// (`PointResolution::is_ready_at` — a fresh deposit this stage or an
+/// already-decided interior carry).
+///
+/// The modular slot key `m mod k_max` is a bijection on THIS window set, never
+/// on [`carrier_predicate_targets`]'s occupancy set over `(t, n_delivery)`. The
+/// two diverge when a plant's lead exceeds the horizon: a pre-study-decided
+/// post-study delivery reads ready yet carries nothing, punching a hole that
+/// makes the occupancy set's residues collide — while the ring only ever hosts
+/// this contiguous window, so a delivery outside it occupies no slot and the
+/// collision never reaches the LP. The two sets coincide whenever the lead
+/// stays within the horizon.
+fn ring_window_carried(
+    point: &PointResolution,
+    t: usize,
+    k_max: usize,
+    n_delivery: usize,
+) -> Vec<usize> {
+    ((t + 1)..(t + 1 + k_max).min(n_delivery))
+        .filter(|&m| point.is_ready_at(m, t))
+        .collect()
+}
+
+/// The occupancy set at decision stage `t`: delivery targets `m in (t,
+/// n_delivery)` that lift `occupancy`/`depth` — a pre-study seed
+/// (`decider[m] == None`, `m < n_decision`) or an at-or-before-`t` in-study
+/// decision (`decider[m] == Some(c)`, `c <= t`). A post-study decider, or a
+/// pre-study decider for a post-study target, has no carrier and never appears.
+/// Its cardinality equals `occupancy[t]`; it is NOT the ring window
+/// ([`ring_window_carried`]) when the lead exceeds the horizon.
+fn carrier_predicate_targets(
+    point: &PointResolution,
+    t: usize,
+    n_decision: usize,
+    n_delivery: usize,
+) -> Vec<usize> {
+    ((t + 1)..n_delivery)
+        .filter(|&m| match point.decider[m] {
+            None => m < n_decision,
+            Some(c) => c <= t,
+        })
+        .collect()
+}
+
+fn lead_time_strategy() -> impl Strategy<Value = LeadTime> {
+    prop_oneof![
+        (1u32..=12).prop_map(LeadTime::Stages),
+        (24.0f64..=744.0).prop_map(LeadTime::Time),
+    ]
+}
+
+prop_compose! {
+    /// A resolver case over the full declared generated space: `n_decision in
+    /// 1..=8`, `n_post in 0..=8`, a per-stage duration vector whose length is
+    /// always `n_decision + n_post` (a shorter vector trips
+    /// `resolve_decider_physical`'s own debug_assert and masks the property),
+    /// and a `LeadStages(1..=12)` or `LeadTime(24.0..=744.0)` lead.
+    fn resolver_case()(n_decision in 1usize..=8, n_post in 0usize..=8)(
+        durations in prop::collection::vec(24.0f64..=744.0, n_decision + n_post),
+        lead in lead_time_strategy(),
+        n_decision in Just(n_decision),
+        n_post in Just(n_post),
+    ) -> (LeadTime, Vec<f64>, usize, usize) {
+        (lead, durations, n_decision, n_decision + n_post)
+    }
+}
+
+/// Fixed cases/seed so a failing shrink is reproducible run-to-run (the
+/// determinism discipline applied to test generation).
+fn resolver_property_config() -> ProptestConfig {
+    ProptestConfig {
+        cases: 256,
+        rng_seed: RngSeed::Fixed(42),
+        ..ProptestConfig::default()
+    }
+}
+
+/// The mirror shape (lead equal to the decision-stage count over a post-study
+/// calendar the same width) resolves a full-depth ring: every in-study stage
+/// carries a complete occupancy, the ring width equals the decision-stage
+/// count, and no stage fans out. Here the ring window and the occupancy set
+/// coincide (nothing delivers post-study without a carrier), so the carried run
+/// is exactly `{t+1, ..., n_decision + t}`.
+#[test]
+fn decomp_mirror_shape_resolves_full_depth_ring() {
+    let anticipated = AnticipatedResolution::resolve(
+        &[LeadTime::Stages(6)],
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: 6,
+            n_delivery: 12,
+        },
+    );
+
+    assert_eq!(anticipated.k_max, 6);
+    assert_eq!(anticipated.max_fanout, 1);
+
+    let point = &anticipated.per_plant[0];
+    assert_eq!(point.occupancy, vec![6; 6]);
+    for t in 0..6 {
+        assert_eq!(point.decider[t], None, "decider[{t}] must be pre-study");
+        assert_eq!(
+            point.decider[6 + t],
+            Some(t),
+            "decider[6 + {t}] must decide at stage {t}"
+        );
+    }
+    assert_eq!(
+        ring_window_carried(point, 0, anticipated.k_max, 12),
+        vec![1, 2, 3, 4, 5, 6],
+        "the full-depth ring at t=0 carries the contiguous run 1..=6"
+    );
+}
+
+proptest! {
+    #![proptest_config(resolver_property_config())]
+
+    /// The modular slot key `m mod k_max` assigns a distinct residue to every
+    /// delivery target the ring carries at each decision stage, over the whole
+    /// generated space. Skips `k_max == 0`, where the ring is empty and the
+    /// slot key is undefined.
+    #[test]
+    fn modular_slot_key_is_injective_on_the_carried_in_flight_set(case in resolver_case()) {
+        let (lead, durations, n_decision, n_delivery) = case;
+        let anticipated = AnticipatedResolution::resolve(
+            &[lead],
+            DeliveryAxis {
+                stage_lengths_hours: &durations,
+                n_decision,
+                n_delivery,
+            },
+        );
+        let k_max = anticipated.k_max;
+        if k_max == 0 {
+            return Ok(());
+        }
+        let point = &anticipated.per_plant[0];
+
+        for t in 0..n_decision {
+            let carried = ring_window_carried(point, t, k_max, n_delivery);
+            let mut slot_owner: HashMap<usize, usize> = HashMap::new();
+            for &m in &carried {
+                let slot = m % k_max;
+                let collided_with = slot_owner.insert(slot, m);
+                prop_assert!(
+                    collided_with.is_none(),
+                    "modular slot collision at t={t}: targets {prev} and {m} both map to \
+                     residue {slot} mod k_max={k_max}; carried set = {carried:?}",
+                    prev = collided_with.unwrap_or(m),
+                );
+            }
+        }
+    }
+
+    /// The ring's carried in-flight set at each decision stage is a contiguous
+    /// run of delivery targets starting at `t + 1` (or empty when nothing is
+    /// ready) — the reason the modular slot key stays injective. Holds over the
+    /// whole generated space.
+    #[test]
+    fn carried_in_flight_set_is_contiguous(case in resolver_case()) {
+        let (lead, durations, n_decision, n_delivery) = case;
+        let anticipated = AnticipatedResolution::resolve(
+            &[lead],
+            DeliveryAxis {
+                stage_lengths_hours: &durations,
+                n_decision,
+                n_delivery,
+            },
+        );
+        let k_max = anticipated.k_max;
+        if k_max == 0 {
+            return Ok(());
+        }
+        let point = &anticipated.per_plant[0];
+
+        for t in 0..n_decision {
+            let carried = ring_window_carried(point, t, k_max, n_delivery);
+            if carried.is_empty() {
+                continue;
+            }
+            prop_assert_eq!(
+                carried[0],
+                t + 1,
+                "carried run at t={} must start at t+1; got {:?}",
+                t,
+                carried
+            );
+            for pair in carried.windows(2) {
+                prop_assert_eq!(
+                    pair[1],
+                    pair[0] + 1,
+                    "carried run at t={} must be contiguous; gap in {:?}",
+                    t,
+                    carried
+                );
+            }
+        }
+    }
+}
+
+/// A pre-study decider whose delivery target is post-study
+/// (`decider[m] == None`, `m >= n_decision`) has no carrier: it appears in no
+/// per-stage carrier set and lifts neither `occupancy` nor `depth`.
+#[test]
+fn pre_study_decider_with_post_study_target_has_no_carrier() {
+    let n_decision = 3;
+    let n_delivery = 6;
+    let resolution = resolve_point(
+        LeadTime::Stages(4),
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision,
+            n_delivery,
+        },
+    );
+
+    let m = 3;
+    assert_eq!(resolution.decider[m], None);
+    assert!(m >= n_decision, "target {m} must be post-study");
+    assert!(
+        resolution.decision_sets.iter().all(|set| !set.contains(&m)),
+        "a pre-study decider must not appear in any decision set"
+    );
+    for t in 0..n_decision {
+        let carried = carrier_predicate_targets(&resolution, t, n_decision, n_delivery);
+        assert!(
+            !carried.contains(&m),
+            "target {m} must have no carrier, yet appears at t={t}: {carried:?}"
+        );
+        assert_eq!(
+            carried.len(),
+            resolution.occupancy[t],
+            "the carrier set is the occupancy set at t={t}"
+        );
+    }
+}
+
+/// A post-study decision (`decider[m] == Some(c)`, `c >= n_decision`) is not an
+/// in-study decision: it appears in no decision set and has no carrier, so it
+/// lifts neither `occupancy` nor `depth`.
+#[test]
+fn post_study_decider_is_not_a_decision() {
+    let n_decision = 3;
+    let n_delivery = 6;
+    let resolution = resolve_point(
+        LeadTime::Stages(1),
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision,
+            n_delivery,
+        },
+    );
+
+    let m = 4;
+    let c = 3;
+    assert_eq!(resolution.decider[m], Some(c));
+    assert!(
+        m >= n_decision && c >= n_decision,
+        "decider {c} and target {m} must both be post-study"
+    );
+    assert!(
+        resolution.decision_sets.iter().all(|set| !set.contains(&m)),
+        "a post-study decision must not appear in any decision set"
+    );
+    for t in 0..n_decision {
+        let carried = carrier_predicate_targets(&resolution, t, n_decision, n_delivery);
+        assert!(
+            !carried.contains(&m),
+            "target {m} must have no carrier, yet appears at t={t}: {carried:?}"
+        );
+        assert_eq!(
+            carried.len(),
+            resolution.occupancy[t],
+            "the carrier set is the occupancy set at t={t}"
+        );
+    }
 }

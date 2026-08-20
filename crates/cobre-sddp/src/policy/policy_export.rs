@@ -779,7 +779,7 @@ mod tests {
         reserve_boundary_inflow_lag_slots, year_month_day_anchor,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
-    use crate::lead_time::{AnticipatedResolution, LeadTime};
+    use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
     use crate::setup::{
         NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         StageIdx,
@@ -1279,8 +1279,11 @@ mod tests {
         let mut global = test_support::state_layout_full(1, 1, 1, 2, vec![2]);
         global.set_anticipated_resolution(AnticipatedResolution::resolve(
             &[LeadTime::Stages(2)],
-            &[720.0; 3],
-            3,
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
         ));
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
@@ -1330,8 +1333,11 @@ mod tests {
         let mut global = test_support::state_layout_full(1, 1, 1, 2, vec![2]);
         global.set_anticipated_resolution(AnticipatedResolution::resolve(
             &[LeadTime::Stages(2)],
-            &[720.0; 3],
-            3,
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
         ));
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
@@ -1359,8 +1365,11 @@ mod tests {
         let mut global = test_support::state_layout_full(1, 1, 1, 2, vec![2]);
         global.set_anticipated_resolution(AnticipatedResolution::resolve(
             &[LeadTime::Time(720.0)],
-            &[720.0; 3],
-            3,
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
         ));
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
@@ -1389,8 +1398,11 @@ mod tests {
         let mut global = test_support::state_layout_full(1, 1, 2, 2, vec![1, 2]);
         global.set_anticipated_resolution(AnticipatedResolution::resolve(
             &[LeadTime::Stages(1), LeadTime::Stages(2)],
-            &[720.0; 3],
-            3,
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
         ));
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 

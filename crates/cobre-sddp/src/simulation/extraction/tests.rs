@@ -1836,6 +1836,7 @@ fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
             decider: vec![None, Some(0), None],
             decision_sets: vec![vec![1], vec![], vec![]],
             depth: vec![1, 0, 0],
+            occupancy: vec![2, 1, 0],
         }],
         k_max: 3,
         max_fanout: 1,

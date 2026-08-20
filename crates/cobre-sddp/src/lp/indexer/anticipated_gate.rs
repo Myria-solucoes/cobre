@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use super::{AnticipatedLocal, StateSpace};
 use crate::lead_time::LeadTime::Stages;
 use crate::lead_time::PointResolution;
-use crate::lead_time::resolve_point;
+use crate::lead_time::{DeliveryAxis, resolve_point};
 
 use cobre_core::commissioning::commissioning_active;
 
@@ -122,7 +122,14 @@ pub(crate) fn anticipated_resolution_for(
         return Cow::Borrowed(&state.anticipated_resolution.per_plant[local_idx]);
     }
     let lead = u32::try_from(state.anticipated_lead_stages[local_idx]).unwrap_or(u32::MAX);
-    Cow::Owned(resolve_point(Stages(lead), &[], n_stages))
+    Cow::Owned(resolve_point(
+        Stages(lead),
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: n_stages,
+            n_delivery: n_stages,
+        },
+    ))
 }
 
 #[cfg(test)]

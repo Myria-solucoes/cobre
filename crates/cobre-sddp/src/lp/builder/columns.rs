@@ -581,12 +581,20 @@ pub(super) fn fill_thermal_columns(
             .bounds
             .thermal_bounds(t_idx, stage_idx)
             .cost_per_mwh;
+        // Indexed via `.get` rather than `[local_idx]`: `build_anticipated_fishing_row_pos`
+        // returns an empty vec whenever `k_max == 0`, regardless of `n_anticipated`.
         let is_anticipated =
             layout
                 .anticipated_local_by_sys_pos
                 .get(&t_idx)
                 .is_some_and(|&local_idx| {
-                    layout.anticipated.anticipated_fishing_row_pos[local_idx].is_some()
+                    layout
+                        .anticipated
+                        .anticipated_fishing_row_pos
+                        .get(local_idx)
+                        .copied()
+                        .flatten()
+                        .is_some()
                 });
         for blk in 0..layout.n_blks {
             let tb = ctx

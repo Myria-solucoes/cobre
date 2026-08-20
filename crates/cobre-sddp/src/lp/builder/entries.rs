@@ -86,12 +86,23 @@ pub(super) fn fill_anticipated_fishing_entries(
     let ring = anticipated_ring(layout);
     let mut n_active = 0_usize;
     for local_idx in 0..ctx.n_anticipated {
-        let Some(pos) = layout.anticipated.anticipated_fishing_row_pos[local_idx] else {
+        // Indexed via `.get` rather than `[local_idx]`: `n_anticipated` sizes
+        // this loop, but `build_anticipated_fishing_row_pos` returns an empty
+        // vec whenever `k_max == 0`, regardless of `n_anticipated`.
+        let Some(pos) = layout
+            .anticipated
+            .anticipated_fishing_row_pos
+            .get(local_idx)
+            .copied()
+            .flatten()
+        else {
             continue;
         };
-        // A `Some` position here implies at least one anticipated plant
-        // exists, so `k_max >= 1` (every anticipated thermal's own
-        // `lead_stages >= 1`) — no divide-by-zero guard needed.
+        // Reachable only because `build_anticipated_fishing_row_pos` gates
+        // this position on `k_max >= 1`, not `n_anticipated >= 1` alone —
+        // `is_anticipated_at` is `true` for a pre-study (`None`) decider, so
+        // an `n_anticipated`-only gate would reach this modulo on an empty
+        // ring.
         let slot = stage_idx % layout.k_max;
         let row = layout.anticipated.row_anticipated_fishing_start + pos;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
@@ -139,7 +150,15 @@ pub(super) fn fill_anticipated_state_out_def_entries(
         let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
             continue;
         };
-        let Some(pos) = layout.anticipated.anticipated_decision_row_pos[local_idx] else {
+        // Indexed via `.get` rather than `[local_idx]`: `build_anticipated_decision_row_pos`
+        // returns an empty vec whenever `k_max == 0`, regardless of `n_ant`.
+        let Some(pos) = layout
+            .anticipated
+            .anticipated_decision_row_pos
+            .get(local_idx)
+            .copied()
+            .flatten()
+        else {
             continue;
         };
         let row = row_start + pos;
@@ -2263,7 +2282,7 @@ mod zero_cost_tests {
 
     use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
     use crate::indexer::{BlockIdx, HydroCellIndex, ThermalSys};
-    use crate::lead_time::{AnticipatedResolution, LeadTime};
+    use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
     use crate::resolved_parameters::ResolvedParameters;
     use crate::setup::PostStudyResolved;
 
@@ -2272,7 +2291,9 @@ mod zero_cost_tests {
     use super::super::rows::{
         fill_anticipated_fishing_rows, fill_anticipated_state_out_def_rows, fill_stage_rows,
     };
-    use super::super::test_support::{state_layout_for, two_block_stage};
+    use super::super::test_support::{
+        state_layout_for, state_layout_with_resolution, two_block_stage,
+    };
     use super::{
         build_stage_matrix_entries, fill_anticipated_fishing_entries,
         fill_anticipated_slot_definition_entries, fill_anticipated_state_out_def_entries,
@@ -2672,6 +2693,33 @@ mod zero_cost_tests {
         }
     }
 
+    /// C13 regression: `build_anticipated_fishing_row_pos` gates a plant's
+    /// fishing row on `k_max >= 1`, not merely `n_anticipated >= 1`.
+    /// `anticipated_lead_stages = vec![1]` (not `vec![0]`, the `K = 0`
+    /// self-delivery case
+    /// `k0_sub_stage_lead_emits_no_anticipated_rows_or_fishing_coupling` above
+    /// covers) makes the plant genuinely in-flight via a pre-study (`None`)
+    /// decider, so `is_anticipated_at` would still be `true` on an empty ring
+    /// absent the guard. `fill_anticipated_fishing_entries` must reach the
+    /// final line without panicking and without writing any coupling.
+    #[test]
+    fn fishing_fill_on_an_empty_ring_does_not_divide_by_zero() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(1, 0, 1);
+        let ctx = fixtures.make_ctx(1, 0, vec![1], vec![0], 1);
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_fishing_entries(&ctx, &stage, 0, &layout, &mut col_entries);
+
+        assert!(
+            col_entries.iter().all(Vec::is_empty),
+            "an empty ring must emit no anticipated fishing coupling entries"
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Fixture helper for anticipated state-out tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -3037,8 +3085,11 @@ mod zero_cost_tests {
         let mut state = state_layout_for(&ctx);
         state.set_anticipated_resolution(AnticipatedResolution::resolve(
             &[LeadTime::Time(720.0)],
-            &[744.0, 744.0, 744.0, 744.0],
-            4,
+            DeliveryAxis {
+                stage_lengths_hours: &[744.0, 744.0, 744.0, 744.0],
+                n_decision: 4,
+                n_delivery: 4,
+            },
         ));
 
         for stage_idx in 0..4 {
@@ -3088,6 +3139,99 @@ mod zero_cost_tests {
                     col_entries[col_gen]
                 );
             }
+        }
+    }
+
+    /// Three-family collapse (C13 guard): `anticipated_lead_stages = vec![1]`
+    /// genuinely fishes at stage 0 (`m = 0`'s decider is `None`, pre-study)
+    /// AND genuinely decides at stage 0 (`m = 1`'s decider is `Some(0)`) —
+    /// absent the `k_max >= 1` guard, both `build_anticipated_fishing_row_pos`
+    /// and `build_anticipated_decision_row_pos` would produce a `Some`
+    /// position on this empty (`k_max == 0`) ring. All three row
+    /// families — fishing, deposit, and interior carry — collapse to zero,
+    /// and none of the three entry-fill functions panics or writes a
+    /// coupling.
+    #[test]
+    fn empty_ring_collapses_all_three_anticipated_row_families() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(2, 0, 1);
+        let ctx = fixtures.make_ctx(1, 0, vec![1], vec![0], 1);
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        assert_eq!(
+            layout.anticipated.n_anticipated_fishing_rows, 0,
+            "k_max == 0 must collapse the fishing-row family to zero"
+        );
+        assert_eq!(
+            layout.anticipated.n_anticipated_state_out_def_rows, 0,
+            "k_max == 0 must collapse the deposit-row family to zero"
+        );
+        assert_eq!(
+            layout.anticipated.n_anticipated_slot_definition_rows, 0,
+            "k_max == 0 must collapse the interior-carry-row family to zero"
+        );
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_fishing_entries(&ctx, &stage, 0, &layout, &mut col_entries);
+        fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
+        fill_anticipated_slot_definition_entries(&layout, &mut col_entries);
+
+        assert!(
+            col_entries.iter().all(Vec::is_empty),
+            "an empty ring must emit no anticipated coupling entries from any of \
+             the three families"
+        );
+    }
+
+    /// Ring-undersizing collision reproduction: a `LeadTime(350.0)` plant on
+    /// the uniform `[100.0; 4]` calendar has a real stage-0 in-flight set of
+    /// three deliveries (`decider == [None, None, None, Some(0)]`), but
+    /// `AnticipatedResolution::k_max` (derived from `PointResolution::depth`,
+    /// which excludes pre-study occupancy) resolves a ring only `1` slot
+    /// deep. The interior carry row (delivery 1, pre-study, still in flight)
+    /// and the deposit row (delivery 3, decided this stage) both address
+    /// modular slot `m % k_max == 0`, so both write the SAME outgoing column
+    /// — a definition-row collision no column in the ring's outgoing block
+    /// may exhibit.
+    #[test]
+    fn deposit_and_carry_never_share_an_outgoing_column() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(4, 3, 1);
+        let mut ctx = fixtures.make_ctx(1, 3, vec![3], vec![0], 1);
+        ctx.anticipated_resolution = AnticipatedResolution::resolve(
+            &[LeadTime::Time(350.0)],
+            DeliveryAxis {
+                stage_lengths_hours: &[100.0; 4],
+                n_decision: 4,
+                n_delivery: 4,
+            },
+        );
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_with_resolution(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_slot_definition_entries(&layout, &mut col_entries);
+        fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let out_start = layout.anticipated.col_anticipated_slots_out_start;
+        let n_ant_state = layout.n_anticipated * layout.k_max;
+        for (offset, entries) in col_entries[out_start..out_start + n_ant_state]
+            .iter()
+            .enumerate()
+        {
+            let col = out_start + offset;
+            let mut rows: Vec<usize> = entries.iter().map(|(r, _)| *r).collect();
+            rows.sort_unstable();
+            rows.dedup();
+            assert!(
+                rows.len() <= 1,
+                "outgoing column {col} carries entries from {} distinct rows ({rows:?}); \
+                 expected at most 1",
+                rows.len()
+            );
         }
     }
 

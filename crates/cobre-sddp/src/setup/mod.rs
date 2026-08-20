@@ -103,7 +103,7 @@ use crate::{
     hydro_models::PrepareHydroModelsResult,
     indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     lead_time::{
-        AnticipatedResolution, LeadTime, PointResolution, SpreadResolution,
+        AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution, SpreadResolution,
         resolve_future_delivery_decider,
     },
     lp_builder::{M3S_TO_HM3, build_stage_templates},
@@ -1595,8 +1595,9 @@ fn first_fanned_plant_id(
 /// applies to the bucket topology, not a second advisory emission. Returns the
 /// per-plant resolution and the anticipated-local constant leads: a
 /// `LeadStages(ℓ)` plant keeps `ℓ` byte-for-byte; a `LeadTime` plant takes its
-/// per-plant max in-flight depth `max_t K_i(t)` — the plant's own `k_i`
-/// reachability/padding bound the slot masking and policy manifest read.
+/// per-plant max in-flight occupancy `max_t occupancy_i(t)` (NOT `depth`, which
+/// excludes pre-study occupancy) — the plant's own `k_i` reachability/padding
+/// bound the slot masking and policy manifest read.
 pub(crate) fn resolve_anticipated_commitments_core(
     system: &System,
 ) -> (AnticipatedResolution, Vec<usize>) {
@@ -1619,7 +1620,14 @@ pub(crate) fn resolve_anticipated_commitments_core(
 
     let durations = bucket_topology::study_stage_durations(system);
     let n_stages = durations.len();
-    let resolution = AnticipatedResolution::resolve(&leads, &durations, n_stages);
+    let resolution = AnticipatedResolution::resolve(
+        &leads,
+        DeliveryAxis {
+            stage_lengths_hours: &durations,
+            n_decision: n_stages,
+            n_delivery: n_stages,
+        },
+    );
 
     let lead_stages: Vec<usize> = leads
         .iter()
@@ -1639,7 +1647,7 @@ pub(crate) fn resolve_anticipated_commitments_core(
                 );
                 l
             }
-            LeadTime::Time(_) => point.depth.iter().copied().max().unwrap_or(0),
+            LeadTime::Time(_) => point.occupancy.iter().copied().max().unwrap_or(0),
         })
         .collect();
 

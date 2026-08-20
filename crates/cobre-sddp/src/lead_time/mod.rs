@@ -330,6 +330,34 @@ pub enum LeadTime {
     Stages(u32),
 }
 
+/// The delivery-vs-decision domain split for [`resolve_point`]: the decision
+/// axis `[0, n_decision)` is a prefix of the delivery axis `[0, n_delivery)`
+/// (`n_decision <= n_delivery`). `n_delivery` is explicit rather than derived
+/// from `stage_lengths_hours.len()`, so a [`LeadTime::Stages`] empty calendar
+/// keeps its full delivery domain. Built by struct literal (never a positional
+/// `new`) so a `n_decision`/`n_delivery` transposition is a field-name error at
+/// the call site, not a silent argument swap.
+#[derive(Debug, Clone, Copy)]
+pub struct DeliveryAxis<'a> {
+    /// Delivery calendar's per-stage total hours: length `n_delivery` in
+    /// [`LeadTime::Time`] mode, unconstrained (typically empty) in
+    /// [`LeadTime::Stages`] mode.
+    pub stage_lengths_hours: &'a [f64],
+    /// In-study (decision) stage count.
+    pub n_decision: usize,
+    /// Delivery-stage count, `>= n_decision`.
+    pub n_delivery: usize,
+}
+
+impl DeliveryAxis<'_> {
+    fn debug_assert_well_formed(self) {
+        debug_assert!(
+            self.n_decision <= self.n_delivery,
+            "n_decision must not exceed n_delivery (decision axis is a delivery-axis prefix)"
+        );
+    }
+}
+
 /// Resolved point-commitment lag: the delivery-anchored decider, the
 /// per-decision-stage outgoing commitment sets, and the per-decision-stage
 /// depths.
@@ -342,6 +370,20 @@ pub struct PointResolution {
     pub decision_sets: Vec<Vec<usize>>,
     /// `K(t) = |{ m > t : c(m) <= t }|`, indexed by decision stage `t`.
     pub depth: Vec<usize>,
+    /// Full in-flight occupancy `|{ m > t : m has a carrier as of t }|` — every
+    /// delivery still in flight at decision stage `t` that a pre-study
+    /// (`None`-decider, `m < n_decision`) or an at-or-before-`t` in-study
+    /// decision (`Some(c)`, `c <= t < n_decision`) can deposit into. Indexed by
+    /// decision stage `t` (length `n_decision`). This, NOT [`Self::depth`], is
+    /// the ring's per-stage occupancy boundary: `depth` structurally excludes
+    /// pre-study occupancy (its sweep adds a delta only for `Some(t)`), so
+    /// sizing the ring from `depth` under-counts and collides a carry row with a
+    /// deposit row whenever a pre-study seed outlives the in-study in-flight
+    /// count. `occupancy[t] == depth[t] + max(0, n_none − 1 − t)` (`n_none` =
+    /// leading `None`-run length), so the two coincide on a uniform-calendar
+    /// lead and `occupancy` is strictly larger only where the ring is
+    /// under-sized today.
+    pub occupancy: Vec<usize>,
 }
 
 impl PointResolution {
@@ -397,7 +439,7 @@ impl PointResolution {
     /// boundary from it (rather than checking readiness directly per slot) is
     /// the wrong-but-plausible shortcut this method exists to rule out. `m`
     /// beyond [`Self::decider`]'s range safely yields `false` (no data, so no
-    /// shift row) — callers already gate on `m < n_stages` before reaching
+    /// shift row) — callers already gate on `m < n_delivery` before reaching
     /// here in the well-formed case.
     #[must_use]
     pub fn is_ready_at(&self, m: usize, t: usize) -> bool {
@@ -411,33 +453,33 @@ impl PointResolution {
 /// per-decision-stage outgoing commitment sets, and the per-decision-stage
 /// depths.
 ///
-/// `stage_lengths_hours` must have length `n_stages`; [`LeadTime::Stages`] never
-/// reads it.
+/// `axis.stage_lengths_hours` must have length `axis.n_delivery`;
+/// [`LeadTime::Stages`] never reads it.
 ///
 /// # Panics
 ///
-/// Debug builds panic if `stage_lengths_hours.len() != n_stages` in
-/// [`LeadTime::Time`] mode, if a stage length or the lead time is not finite and
-/// positive, or if a non-IC delivery stage fails to appear in its own
-/// decision set.
+/// Debug builds panic if `axis.n_decision > axis.n_delivery`, if
+/// `axis.stage_lengths_hours.len() != axis.n_delivery` in [`LeadTime::Time`]
+/// mode, if a stage length or the lead time is not finite and positive, or if a
+/// delivery stage decided in-study (decider `Some(t)`, `t < axis.n_decision`)
+/// fails to appear in its own decision set.
 #[must_use]
-pub fn resolve_point(
-    lag: LeadTime,
-    stage_lengths_hours: &[f64],
-    n_stages: usize,
-) -> PointResolution {
+pub fn resolve_point(lag: LeadTime, axis: DeliveryAxis<'_>) -> PointResolution {
+    axis.debug_assert_well_formed();
     let decider = match lag {
         LeadTime::Time(delta_hours) => {
-            resolve_decider_physical(delta_hours, stage_lengths_hours, n_stages)
+            resolve_decider_physical(delta_hours, axis.stage_lengths_hours, axis.n_delivery)
         }
-        LeadTime::Stages(lead_stages) => resolve_decider_stage_count(lead_stages, n_stages),
+        LeadTime::Stages(lead_stages) => resolve_decider_stage_count(lead_stages, axis.n_delivery),
     };
-    let (decision_sets, depth) = build_decision_sets_and_depth(&decider, n_stages);
+    let (decision_sets, depth, occupancy) =
+        build_decision_sets_and_depth(&decider, axis.n_decision);
 
     PointResolution {
         decider,
         decision_sets,
         depth,
+        occupancy,
     }
 }
 
@@ -452,8 +494,10 @@ pub struct AnticipatedResolution {
     /// One [`PointResolution`] per anticipated plant, in anticipated-local
     /// (`anticipated_thermal_indices`) order.
     pub per_plant: Vec<PointResolution>,
-    /// Delivery-anchored ring depth `max_i max_t K_i(t)` over every plant's
-    /// per-stage depth; `0` with no anticipated plants.
+    /// Delivery-anchored ring depth `max_i max_t occupancy_i(t)` over every
+    /// plant's per-stage full in-flight occupancy — NOT `depth`, which excludes
+    /// pre-study occupancy and under-sizes the ring (see
+    /// [`PointResolution::occupancy`]); `0` with no anticipated plants.
     pub k_max: usize,
     /// Fan-out width `max_i max_t |genuine C_i(t)|` (bounded by [`Self::k_max`]
     /// — a decision set's genuine members are a subset of the plant's in-flight
@@ -465,27 +509,28 @@ pub struct AnticipatedResolution {
 }
 
 impl AnticipatedResolution {
-    /// Resolve every plant's point-commitment lag against the study calendar and
+    /// Resolve every plant's point-commitment lag against the delivery axis and
     /// derive the ring depth and fan-out width.
     ///
-    /// `leads` is in anticipated-local order; `stage_lengths_hours` has length
-    /// `n_stages` ([`LeadTime::Stages`] never reads it). This is the single
-    /// [`resolve_point`] consumer — a second call site is forbidden; the
-    /// resolution threads through instead.
+    /// `leads` is in anticipated-local order; `axis` carries the delivery
+    /// calendar and the decision/delivery stage counts ([`LeadTime::Stages`]
+    /// never reads the calendar). This is the single [`resolve_point`]
+    /// consumer — a second call site is forbidden; the resolution threads
+    /// through instead.
     #[must_use]
-    pub fn resolve(leads: &[LeadTime], stage_lengths_hours: &[f64], n_stages: usize) -> Self {
+    pub fn resolve(leads: &[LeadTime], axis: DeliveryAxis<'_>) -> Self {
         let per_plant: Vec<PointResolution> = leads
             .iter()
-            .map(|&lead| resolve_point(lead, stage_lengths_hours, n_stages))
+            .map(|&lead| resolve_point(lead, axis))
             .collect();
         let k_max = per_plant
             .iter()
-            .flat_map(|resolution| resolution.depth.iter().copied())
+            .flat_map(|resolution| resolution.occupancy.iter().copied())
             .max()
             .unwrap_or(0);
         let max_fanout = per_plant
             .iter()
-            .flat_map(|point| (0..n_stages).map(|t| point.genuine_decisions_at(t).count()))
+            .flat_map(|point| (0..axis.n_decision).map(|t| point.genuine_decisions_at(t).count()))
             .max()
             .unwrap_or(0);
         Self {
@@ -520,7 +565,7 @@ fn cumulative_stage_boundaries(stage_lengths_hours: &[f64]) -> Vec<f64> {
 fn resolve_decider_physical(
     delta_hours: f64,
     stage_lengths_hours: &[f64],
-    n_stages: usize,
+    n_delivery: usize,
 ) -> Vec<Option<usize>> {
     debug_assert!(
         delta_hours.is_finite() && delta_hours > 0.0,
@@ -528,13 +573,13 @@ fn resolve_decider_physical(
     );
     debug_assert_eq!(
         stage_lengths_hours.len(),
-        n_stages,
+        n_delivery,
         "stage_lengths_hours must cover every delivery stage in physical mode"
     );
 
     let boundaries = cumulative_stage_boundaries(stage_lengths_hours);
 
-    (0..n_stages)
+    (0..n_delivery)
         .map(|m| {
             let target = boundaries[m + 1] - delta_hours;
             let before_target = boundaries.partition_point(|&boundary| boundary < target);
@@ -601,49 +646,84 @@ pub(crate) fn resolve_future_delivery_decider(
 /// `c(m) = m − ℓ` (or `None` if negative); the calendar is never read —
 /// enforced by construction, since this arm takes no stage-length
 /// parameter.
-fn resolve_decider_stage_count(lead_stages: u32, n_stages: usize) -> Vec<Option<usize>> {
+fn resolve_decider_stage_count(lead_stages: u32, n_delivery: usize) -> Vec<Option<usize>> {
     let lead = usize::try_from(lead_stages).unwrap_or(usize::MAX);
-    (0..n_stages).map(|m| m.checked_sub(lead)).collect()
+    (0..n_delivery).map(|m| m.checked_sub(lead)).collect()
 }
 
-/// Builds `C(t)` and `K(t)` from `decider` via a difference-array prefix sum
-/// in one forward pass, avoiding an O(n²) rescan of every `(m, t)` pair.
+/// Builds `C(t)`, `K(t)` (`depth`), and the full in-flight occupancy from
+/// `decider` via difference-array prefix sums in one forward pass, avoiding an
+/// O(n²) rescan of every `(m, t)` pair.
+///
+/// Two difference arrays share the sweep: `depth` counts only in-study-decided
+/// carriers (`Some(c)`, `c < n_decision`), `occupancy` additionally counts
+/// pre-study carriers (`None`, `m < n_decision`). A post-study decider
+/// (`Some(c)`, `c >= n_decision`) and a pre-study decider for a post-study
+/// target (`None`, `m >= n_decision`) have no carrier and enter neither.
+/// A carrier is in flight over `(c_or_0, m]`: it
+/// contributes `+1` at its decision stage (`c`, or `0` for a pre-study seed)
+/// and `-1` at its maturity `m`, the `-1` dropped when `m >= n_decision`.
 fn build_decision_sets_and_depth(
     decider: &[Option<usize>],
-    n_stages: usize,
-) -> (Vec<Vec<usize>>, Vec<usize>) {
-    let mut decision_sets: Vec<Vec<usize>> = vec![Vec::new(); n_stages];
-    let mut depth_delta = vec![0_isize; n_stages];
+    n_decision: usize,
+) -> (Vec<Vec<usize>>, Vec<usize>, Vec<usize>) {
+    let mut decision_sets: Vec<Vec<usize>> = vec![Vec::new(); n_decision];
+    let mut depth_delta = vec![0_isize; n_decision];
+    let mut occupancy_delta = vec![0_isize; n_decision];
 
     for (m, &decided_at) in decider.iter().enumerate() {
-        if let Some(t) = decided_at {
-            decision_sets[t].push(m);
-            depth_delta[t] += 1;
-            depth_delta[m] -= 1;
+        match decided_at {
+            Some(t) if t < n_decision => {
+                decision_sets[t].push(m);
+                depth_delta[t] += 1;
+                occupancy_delta[t] += 1;
+                if m < n_decision {
+                    depth_delta[m] -= 1;
+                    occupancy_delta[m] -= 1;
+                }
+            }
+            None if m < n_decision => {
+                occupancy_delta[0] += 1;
+                occupancy_delta[m] -= 1;
+            }
+            Some(_) | None => {}
         }
     }
 
-    let mut running = 0_isize;
+    let mut depth_running = 0_isize;
     let depth: Vec<usize> = depth_delta
         .iter()
         .map(|&delta| {
-            running += delta;
+            depth_running += delta;
             debug_assert!(
-                running >= 0,
+                depth_running >= 0,
                 "depth sweep invariant violated: every decider must satisfy c(m) <= m"
             );
-            usize::try_from(running).unwrap_or(0)
+            usize::try_from(depth_running).unwrap_or(0)
+        })
+        .collect();
+
+    let mut occupancy_running = 0_isize;
+    let occupancy: Vec<usize> = occupancy_delta
+        .iter()
+        .map(|&delta| {
+            occupancy_running += delta;
+            debug_assert!(
+                occupancy_running >= 0,
+                "occupancy sweep invariant violated: a carrier is in flight over (c, m]"
+            );
+            usize::try_from(occupancy_running).unwrap_or(0)
         })
         .collect();
 
     for (m, &decided_at) in decider.iter().enumerate() {
         debug_assert!(
-            decided_at.is_none_or(|t| decision_sets[t].contains(&m)),
-            "every non-IC delivery stage must appear in exactly one decision_set"
+            decided_at.is_none_or(|t| t >= n_decision || decision_sets[t].contains(&m)),
+            "every delivery stage decided in-study must appear in exactly one decision_set"
         );
     }
 
-    (decision_sets, depth)
+    (decision_sets, depth, occupancy)
 }
 
 #[cfg(test)]

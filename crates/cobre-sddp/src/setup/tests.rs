@@ -6701,7 +6701,10 @@ fn setup_leadstages_resolution_preserves_k_max_and_state_dimension() {
 /// Hand-derived: a `LeadTime(720.0)` plant on the weekly-then-monthly PMO
 /// calendar `[168,168,168,168,720,720]` resolves (end-anchored `resolve_point`)
 /// to `decider == [None,None,None,None,Some(3),Some(4)]`, `C(3) == {4}`,
-/// `C(4) == {5}`, `depth == [0,0,0,1,1,0]` (ring depth 1).
+/// `C(4) == {5}`, `depth == [0,0,0,1,1,0]`. Its leading None-run (4) exceeds its
+/// max depth (1) — the currently-under-sized case — so occupancy is
+/// `[3,2,1,1,1,0]` and the occupancy-derived ring depth is 3, not the
+/// depth-derived 1.
 #[test]
 fn test_anticipated_resolve_point_pmo_calendar() {
     let system = minimal_system_with_anticipated(
@@ -6721,7 +6724,64 @@ fn test_anticipated_resolve_point_pmo_calendar() {
     assert_eq!(point.decision_sets[3], vec![4]);
     assert_eq!(point.decision_sets[4], vec![5]);
     assert_eq!(point.depth, vec![0, 0, 0, 1, 1, 0]);
-    assert_eq!(resolution.k_max, 1);
+    assert_eq!(point.occupancy, vec![3, 2, 1, 1, 1, 0]);
+    assert_eq!(resolution.k_max, 3);
+}
+
+/// Anchor: a `LeadTime(350.0)` plant on the uniform `[100.0; 4]` calendar
+/// resolves cumulative boundaries `[0, 100, 200, 300, 400]`; the per-delivery
+/// targets `end_m - 350` are `-250, -150, -50, +50`, so only delivery 3 has a
+/// non-negative target and decides at stage 0 — `decider == [None, None,
+/// None, Some(0)]`.
+#[test]
+fn lead_time_three_stage_lead_resolves_a_pre_study_prefix() {
+    let system = minimal_system_with_anticipated(
+        &[100.0; 4],
+        AnticipatedConfig::LeadTime(350.0),
+        1,
+        Vec::new(),
+        None,
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+    let point = &resolution.per_plant[0];
+
+    assert_eq!(point.decider, vec![None, None, None, Some(0)]);
+}
+
+/// Ring-undersizing reproduction: the same four-stage `LeadTime` shape's true
+/// stage-0 in-flight set is `{1, 2, 3}` (delivery 1 and 2 are pre-study,
+/// `None`-decided; delivery 3 is decided at stage 0) — three items, so the
+/// ring must be at least `k_max == 3` deep to hold them. `AnticipatedResolution::k_max`
+/// derives from `PointResolution::depth`, which structurally excludes
+/// pre-study (`None`-decider) occupancy from its running count, so it
+/// resolves a ring too narrow to hold the true in-flight set.
+#[test]
+fn ring_depth_counts_pre_study_occupancy() {
+    let system = minimal_system_with_anticipated(
+        &[100.0; 4],
+        AnticipatedConfig::LeadTime(350.0),
+        1,
+        Vec::new(),
+        None,
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(resolution.k_max, 3);
+}
+
+/// `LeadStages` occupancy vs. retained per-plant lead at `ℓ == n_stages`: the
+/// occupancy-sized `k_max` tops out at `min(ℓ, n_stages − 1) == n_stages − 1`,
+/// while the per-plant lead stays `ℓ` — the two inputs `resolve_state_layout`'s
+/// `.max(anticipated_lead_stages)` clamp combines to size the ring at `ℓ`.
+#[test]
+fn leadstages_clamp_restores_full_lead_when_lead_equals_horizon() {
+    let n_stages = 4;
+    let system =
+        minimal_system_with_anticipated_lead_stages(n_stages, u32::try_from(n_stages).unwrap());
+    let (resolution, lead_stages) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(resolution.k_max, n_stages - 1);
+    assert_eq!(lead_stages, vec![n_stages]);
 }
 
 /// Hand-derived: a `LeadTime(720.0)` plant on the monthly-then-weekly fan-out

@@ -725,7 +725,10 @@ fn build_anticipated_slot_row_pos(
 /// the deposit-row family, or `None` when the plant has no genuine decision
 /// this stage (`PointResolution::genuine_decisions_at(stage_idx).next()`) or
 /// the delivery is commissioning-inactive
-/// (`is_anticipated_decision_active_for_delivery`). Returns the
+/// (`is_anticipated_decision_active_for_delivery`). Empty (`(Vec::new(), 0)`)
+/// when `n_anticipated == 0 || k_max == 0`, mirroring
+/// [`build_anticipated_slot_row_pos`] — a genuine decision implies a carried
+/// in-flight delivery, so an empty ring can hold none. Returns the
 /// mapping and the active count.
 fn build_anticipated_decision_row_pos(
     state: &StateSpace,
@@ -735,7 +738,8 @@ fn build_anticipated_decision_row_pos(
     study_stage_ids: &[i32],
 ) -> (Vec<Option<usize>>, usize) {
     let n_anticipated = state.n_anticipated;
-    if n_anticipated == 0 {
+    let k_max = state.k_max;
+    if n_anticipated == 0 || k_max == 0 {
         return (Vec::new(), 0);
     }
     let mut row_pos = vec![None; n_anticipated];
@@ -777,7 +781,11 @@ fn build_anticipated_decision_row_pos(
 /// [`super::entries::fill_anticipated_fishing_entries`] ALWAYS renders the
 /// must-generate fish coupling for it (reading `commit_in`, never writing
 /// `commit_out`) — a commissioning-inactive delivery's dormant `commit_in`
-/// simply carries 0, pinning that stage's generation to 0. Returns the
+/// simply carries 0, pinning that stage's generation to 0. Empty
+/// (`(Vec::new(), 0)`) when `n_anticipated == 0 || k_max == 0`, mirroring
+/// [`build_anticipated_slot_row_pos`]: `is_anticipated_at` is `true` for a
+/// pre-study (`None`) decider, so gating on `n_anticipated` alone would let a
+/// pre-study-only plant reach a fishing row on an empty ring. Returns the
 /// mapping and the active count.
 fn build_anticipated_fishing_row_pos(
     state: &StateSpace,
@@ -785,7 +793,8 @@ fn build_anticipated_fishing_row_pos(
     stage_idx: usize,
 ) -> (Vec<Option<usize>>, usize) {
     let n_anticipated = state.n_anticipated;
-    if n_anticipated == 0 {
+    let k_max = state.k_max;
+    if n_anticipated == 0 || k_max == 0 {
         return (Vec::new(), 0);
     }
     let mut row_pos = vec![None; n_anticipated];

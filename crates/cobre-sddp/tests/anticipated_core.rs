@@ -6538,7 +6538,7 @@ mod a1c_stage_count_mode_anchor {
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
-    use cobre_sddp::lead_time::{AnticipatedResolution, LeadTime};
+    use cobre_sddp::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
     use cobre_solver::ActiveSolver;
 
     use super::common::StubComm;
@@ -6557,7 +6557,14 @@ mod a1c_stage_count_mode_anchor {
     /// horizon and are empty), and every `depth` entry is `≤ 2`.
     #[test]
     fn a1c_lead_stages_is_pure_index_shift() {
-        let resolution = AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &D37_DURATIONS, 6);
+        let resolution = AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &D37_DURATIONS,
+                n_decision: 6,
+                n_delivery: 6,
+            },
+        );
         let point = &resolution.per_plant[0];
 
         assert_eq!(
@@ -6599,8 +6606,22 @@ mod a1c_stage_count_mode_anchor {
     /// so `decider`, `decision_sets`, and `depth` are byte-for-byte identical.
     #[test]
     fn a1c_lead_stages_ignores_calendar() {
-        let on_d37 = AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &D37_DURATIONS, 6);
-        let on_uniform = AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &[672.0; 6], 6);
+        let on_d37 = AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &D37_DURATIONS,
+                n_decision: 6,
+                n_delivery: 6,
+            },
+        );
+        let on_uniform = AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &[672.0; 6],
+                n_decision: 6,
+                n_delivery: 6,
+            },
+        );
 
         let a = &on_d37.per_plant[0];
         let b = &on_uniform.per_plant[0];
@@ -6626,8 +6647,22 @@ mod a1c_stage_count_mode_anchor {
     /// `[None, Some(0), Some(1), Some(1), Some(3), Some(4)]`.
     #[test]
     fn a1c_lead_time_consults_calendar() {
-        let physical = AnticipatedResolution::resolve(&[LeadTime::Time(1450.0)], &D37_DURATIONS, 6);
-        let stage_count = AnticipatedResolution::resolve(&[LeadTime::Stages(2)], &D37_DURATIONS, 6);
+        let physical = AnticipatedResolution::resolve(
+            &[LeadTime::Time(1450.0)],
+            DeliveryAxis {
+                stage_lengths_hours: &D37_DURATIONS,
+                n_decision: 6,
+                n_delivery: 6,
+            },
+        );
+        let stage_count = AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &D37_DURATIONS,
+                n_decision: 6,
+                n_delivery: 6,
+            },
+        );
 
         let phys = &physical.per_plant[0];
         let sc = &stage_count.per_plant[0];
@@ -6937,8 +6972,14 @@ mod a1c_stage_count_mode_anchor {
     fn a1c_lead_time_solves_on_unequal_hours() {
         // Guard the fixture's single-decider premise before building the study: a
         // fan-out (max_fanout > 1) would trip the setup guard, not converge.
-        let resolution =
-            AnticipatedResolution::resolve(&[LeadTime::Time(LEAD_TIME_HOURS)], &D37_DURATIONS, 6);
+        let resolution = AnticipatedResolution::resolve(
+            &[LeadTime::Time(LEAD_TIME_HOURS)],
+            DeliveryAxis {
+                stage_lengths_hours: &D37_DURATIONS,
+                n_decision: 6,
+                n_delivery: 6,
+            },
+        );
         assert_eq!(
             resolution.per_plant[0].decider,
             vec![None, Some(0), Some(1), Some(2), Some(3), Some(4)],
