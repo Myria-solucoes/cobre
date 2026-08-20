@@ -1,27 +1,26 @@
-//! Terminal boundary-FCF pricing of the post-horizon carry lanes on the
-//! unified hold geometry: a loaded boundary cut carrying coefficient `β` on a
-//! post-horizon `commit_out`/`commit_in` lane reaches the terminal `θ`, which
-//! responds to the carried committed MW by `β·x`, and the backward pass
-//! propagates that `β` inward to the deciding stage's cut. The one shared
-//! boundary prices every terminal fan leaf against its OWN lane state
-//! (the shared-fan injection topology, extended to the lanes). `β`
-//! values the carried STATE; the delivery-anchored fuel is booked separately on
-//! the decision column — the two are disjoint columns, so they compose without
-//! double-counting.
+//! Terminal boundary-FCF pricing of a post-study-targeted delivery on the
+//! unified anticipated ring: a loaded boundary cut carrying coefficient `β` on
+//! the ring slot the delivery's modular residue resolves to reaches the
+//! terminal `θ`, which responds to the carried committed MW by `β·x`, and the
+//! backward pass propagates that `β` inward to the deciding stage's cut. The
+//! one shared boundary prices every terminal fan leaf against its OWN ring
+//! state (the shared-fan injection topology). `β` values the carried STATE;
+//! the delivery-anchored fuel is booked separately on the decision column —
+//! the two are disjoint columns, so they compose without double-counting.
 //!
 //! The fixture is deliberately minimal: zero hydros, one bus, one anticipated
-//! thermal declared `LeadTime`, two study stages, and one
-//! `future_anticipated_deliveries` window resolving into one declared
+//! thermal declared `LeadTime`, two study stages, and one declared
 //! `post_study_stages` stage. The lead is long enough that the thermal's own
-//! stage-1 self-delivery keeps `k_max == 1` (the in-study ring sizes
-//! non-degenerately, avoiding the untested `k_max == 0` path) yet the
-//! post-horizon window's decider lands at stage 0 (`DeciderKind::Trunk`, NOT
-//! the terminal) — so the terminal's own lane row is a pure CARRY (`out = in`),
-//! and pinning the incoming lane column via `patch_backward_opening_for_probe`
-//! controls the terminal's priced committed MW directly. With `hydro_count = 0`
-//! and `max_par_order = 0`, the state vector is exactly `[in-study ring slot,
-//! post-horizon lane]` (`n_state == 2`), so a boundary priced ONLY on the lane
-//! slot isolates the pricing arithmetic to the lane.
+//! stage-1 delivery decides PRE-STUDY (dormant, no genuine in-study decision)
+//! while the post-study target's decider lands at stage 0 — so the ring sizes
+//! non-degenerately (`k_max == 2`, avoiding the untested `k_max == 0` path)
+//! and the terminal's own carried slot is a pure CARRY (`out = in`), never a
+//! fresh deposit — pinning the incoming ring column via
+//! `patch_backward_opening_for_probe` controls the terminal's priced
+//! committed MW directly. With `hydro_count = 0` and `max_par_order = 0`, the
+//! state vector is exactly the two-slot ring (`n_state == 2`), so a boundary
+//! priced ONLY on the post-study-targeted slot isolates the pricing
+//! arithmetic to that slot.
 
 #![allow(
     clippy::unwrap_used,
@@ -68,16 +67,16 @@ use common::builders::{BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, ma
 
 const BUS_ID: EntityId = EntityId(1);
 const THERMAL_ID: EntityId = EntityId(2);
-/// `LeadTime` delta (hours), ~60 days. Resolves the thermal's own stage-1
-/// self-delivery to a stage-0 decider (`k_max == 1`), while the post-horizon
-/// window (delivering in the first post-study month) resolves to a stage-0
-/// `DeciderKind::Trunk` decider — the terminal is a carry, not the latch.
-const DELTA_HOURS: f64 = 1450.0;
+/// `LeadTime` delta (hours), ~62.5 days. Resolves the thermal's own stage-1
+/// delivery to a PRE-STUDY decider (`None` — dormant, no genuine decision),
+/// while the post-study target resolves to a stage-0 decider — the terminal
+/// slot is a carry, not the latch.
+const DELTA_HOURS: f64 = 1500.0;
 /// Boundary cut intercept `α`, positive so the single injected cut binds `θ`
 /// above its zero floor for every committed MW `x >= 0`.
 const ALPHA: f64 = 5.0;
-/// Boundary cut coefficient `β` on the post-horizon lane slot (zero on the
-/// in-study ring slot), so `θ = α + β·x` isolates the lane.
+/// Boundary cut coefficient `β` on the post-study-targeted ring slot (zero on
+/// the dormant padding slot), so `θ = α + β·x` isolates that slot.
 const BETA: f64 = 3.0;
 /// Post-study fuel `$/MWh` at the resolved cell — booked on the decision
 /// column, disjoint from the terminal `β·state` valuation this file pins.
@@ -369,11 +368,16 @@ fn config() -> cobre_io::config::Config {
     }
 }
 
-/// State-vector index of the (sole) post-horizon lane: the trailing
-/// `n_commitment` block of `commit_out`, after the leading in-study ring.
-fn lane_state_index(setup: &cobre_sddp::StudySetup) -> usize {
+/// State-vector index of the ring slot carrying the post-study-targeted
+/// delivery: `commitment_hold_in_study_offset(plant, m)` for the sole
+/// anticipated plant and delivery target `m = num_stages()` (the first
+/// post-study stage) — mirrors `StateSpace::commitment_hold_in_study_offset`
+/// byte-for-byte (`pub(crate)`, unreachable from this integration-test
+/// binary), never a hand-rolled `commit_out.end`-relative guess.
+fn post_study_ring_slot(setup: &cobre_sddp::StudySetup) -> usize {
     let state = setup.stage_state();
-    state.commit_out.end - state.n_commitment
+    let m = setup.num_stages();
+    state.commit_out.start + (m % state.k_max) * state.n_anticipated
 }
 
 /// Write a synthetic single-cut boundary checkpoint carrying `intercept` and
@@ -438,13 +442,13 @@ fn write_synthetic_boundary(
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }
 
-/// Load a lane-only boundary (`β` on [`lane_state_index`], zero elsewhere,
-/// intercept `α`) and inject it into `setup`'s terminal pool.
-fn inject_lane_boundary(setup: &mut cobre_sddp::StudySetup, dir: &Path) {
+/// Load a boundary carrying `β` on [`post_study_ring_slot`] alone, zero
+/// elsewhere, intercept `α`, and inject it into `setup`'s terminal pool.
+fn inject_ring_boundary(setup: &mut cobre_sddp::StudySetup, dir: &Path) {
     let state_dimension = setup.fcf.state_dimension as u32;
-    let lane = lane_state_index(setup);
+    let slot = post_study_ring_slot(setup);
     let mut coefficients = vec![0.0_f64; state_dimension as usize];
-    coefficients[lane] = BETA;
+    coefficients[slot] = BETA;
     write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
     let boundary_cuts =
@@ -536,12 +540,12 @@ fn terminal_theta(
     view.primal[theta_col]
 }
 
-/// Pin the state vector with `x` on the post-horizon lane and `0.0` on every
-/// other component (the in-study ring slot carries a zero boundary coefficient,
-/// so its pinned value never reaches `θ`).
-fn lane_pin(setup: &cobre_sddp::StudySetup, x: f64) -> Vec<f64> {
+/// Pin the state vector with `x` on [`post_study_ring_slot`] and `0.0` on
+/// every other component (the dormant padding slot carries a zero boundary
+/// coefficient, so its pinned value never reaches `θ`).
+fn ring_pin(setup: &cobre_sddp::StudySetup, x: f64) -> Vec<f64> {
     let mut pin = vec![0.0_f64; setup.stage_state().n_state];
-    pin[lane_state_index(setup)] = x;
+    pin[post_study_ring_slot(setup)] = x;
     pin
 }
 
@@ -557,21 +561,22 @@ fn leaf_positions(graph: &NodeGraph) -> Vec<NodePos> {
 
 // ── θ prices the carried committed MW by β·x, and β propagates inward ──
 
-/// The terminal value responds to the outstanding committed MW on the lane by
-/// exactly `β·Δx`: with the single injected cut binding (`α > 0`), `θ = α + β·x`
-/// on the lane, so `θ(x1) − θ(x0) = β·(x1 − x0)` — closed-form for the
-/// single-lane single-coefficient case. Repeating the solve at the same pin
-/// reproduces `θ` bit-for-bit (run-to-run reproducibility).
+/// The terminal value responds to the outstanding committed MW on the
+/// post-study-targeted ring slot by exactly `β·Δx`: with the single injected
+/// cut binding (`α > 0`), `θ = α + β·x` on that slot, so `θ(x1) − θ(x0) =
+/// β·(x1 − x0)` — closed-form for the single-slot single-coefficient case.
+/// Repeating the solve at the same pin reproduces `θ` bit-for-bit
+/// (run-to-run reproducibility).
 #[test]
 fn boundary_cut_prices_the_committed_mw_by_beta_times_x() {
     let mut setup = build_setup_in_code(build_system(true, false), &config());
     assert_eq!(
         setup.fcf.state_dimension, 2,
-        "fixture must be [in-study ring slot, post-horizon lane]"
+        "fixture must be a two-slot ring (the post-study-targeted slot and the dormant padding slot)"
     );
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    inject_lane_boundary(&mut setup, &tmp.path().join("boundary"));
+    inject_ring_boundary(&mut setup, &tmp.path().join("boundary"));
 
     let terminal_pool_id = setup.fcf.pools.len() - 1;
     let template = freeze_terminal_template(&setup, terminal_pool_id);
@@ -579,8 +584,8 @@ fn boundary_cut_prices_the_committed_mw_by_beta_times_x() {
 
     let x0 = 0.0;
     let x1 = 2.0;
-    let theta0 = terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, x0));
-    let theta1 = terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, x1));
+    let theta0 = terminal_theta(&setup, &template, pool, NodeId(1), &ring_pin(&setup, x0));
+    let theta1 = terminal_theta(&setup, &template, pool, NodeId(1), &ring_pin(&setup, x1));
 
     assert!(
         theta0 > 0.0 && theta1 > 0.0,
@@ -595,7 +600,7 @@ fn boundary_cut_prices_the_committed_mw_by_beta_times_x() {
         "theta must respond to the committed MW by beta*x: expected delta {expected_delta}, \
          got {actual_delta}"
     );
-    // The closed form is exact: theta = alpha + beta*x on the lane.
+    // The closed form is exact: theta = alpha + beta*x on the priced slot.
     assert!(
         (theta0 - ALPHA).abs() < TOL && (theta1 - (ALPHA + BETA * x1)).abs() < TOL,
         "theta must equal alpha + beta*x: theta0={theta0} (alpha={ALPHA}), \
@@ -603,7 +608,7 @@ fn boundary_cut_prices_the_committed_mw_by_beta_times_x() {
         ALPHA + BETA * x1
     );
 
-    let theta1_again = terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, x1));
+    let theta1_again = terminal_theta(&setup, &template, pool, NodeId(1), &ring_pin(&setup, x1));
     assert_eq!(
         theta1.to_bits(),
         theta1_again.to_bits(),
@@ -612,28 +617,31 @@ fn boundary_cut_prices_the_committed_mw_by_beta_times_x() {
 }
 
 /// The backward pass propagates the boundary coefficient inward: with the
-/// lane-only boundary injected into the terminal pool, one training iteration
+/// ring-only boundary injected into the terminal pool, one training iteration
 /// leaves the deciding stage's generated cut carrying a nonzero coefficient on
-/// the post-horizon lane slot. Because the terminal row is a pure carry
+/// the post-study-targeted slot. Because the terminal row is a pure carry
 /// (`out = in`) with unit `col_scale` and unit `cost_scale`, the propagated
 /// coefficient is exactly `β` (analytical).
 #[test]
 fn backward_pass_propagates_boundary_coefficient_to_the_deciding_stage() {
     let mut setup = build_setup_in_code(build_system(true, false), &config());
-    // The window decides at stage 0 (Trunk); pool 0 is the FCF the deciding
-    // stage carries, populated by the backward pass solving the terminal.
+    // The post-study target decides at stage 0; pool 0 is the FCF the
+    // deciding stage carries, populated by the backward pass solving the
+    // terminal. The stage-0 anticipated-decision column is active (nonzero
+    // fuel objective) — the decider's own sanity check, since the range
+    // itself is dense (one column per anticipated plant at EVERY stage).
     let deciding_pool = 0;
-    assert_eq!(
-        setup.stage_ctx().geometry_per_stage[deciding_pool]
-            .commitment_decision
-            .len(),
-        1,
-        "the post-horizon window must decide at stage 0"
+    let decision_col = setup.stage_ctx().geometry_per_stage[deciding_pool]
+        .anticipated_decision
+        .start;
+    assert!(
+        setup.stage_ctx().templates[deciding_pool].objective[decision_col].abs() > TOL,
+        "the post-study target must decide at stage 0 (a priced, active decision column)"
     );
-    let lane = lane_state_index(&setup);
+    let slot = post_study_ring_slot(&setup);
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    inject_lane_boundary(&mut setup, &tmp.path().join("boundary"));
+    inject_ring_boundary(&mut setup, &tmp.path().join("boundary"));
 
     let comm = StubComm;
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -651,16 +659,16 @@ fn backward_pass_propagates_boundary_coefficient_to_the_deciding_stage() {
         .active_cuts(deciding_pool)
         .next()
         .expect("the deciding stage's pool must carry a generated cut after training");
-    let lane_coeff = coefficients[lane];
+    let slot_coeff = coefficients[slot];
     assert!(
-        lane_coeff.abs() > TOL,
-        "the deciding stage's cut must carry a nonzero coefficient on the post-horizon lane; \
-         got {lane_coeff}"
+        slot_coeff.abs() > TOL,
+        "the deciding stage's cut must carry a nonzero coefficient on the post-study-targeted \
+         slot; got {slot_coeff}"
     );
     assert!(
-        (lane_coeff - BETA).abs() < TOL,
+        (slot_coeff - BETA).abs() < TOL,
         "the carried terminal boundary must propagate the coefficient unchanged (out = in, \
-         unit scale): expected {BETA}, got {lane_coeff}"
+         unit scale): expected {BETA}, got {slot_coeff}"
     );
 }
 
@@ -669,32 +677,27 @@ fn backward_pass_propagates_boundary_coefficient_to_the_deciding_stage() {
 /// The terminal `β·state` valuation and the delivery-anchored fuel
 /// booking live on DIFFERENT LP columns, so they compose additively with no
 /// double-count: at the deciding stage the decision column carries the fuel in
-/// its objective while the lane's `commit_out` column carries no objective at
-/// all (β reaches it through the boundary cut ROW, never the objective).
+/// its objective while the ring slot's own `commit_out` column carries no
+/// objective at all (β reaches it through the boundary cut ROW, never the
+/// objective).
 #[test]
 fn terminal_valuation_and_decision_fuel_are_disjoint_columns() {
     let setup = build_setup_in_code(build_system(true, false), &config());
     let deciding_stage = 0;
 
-    let decision_range = setup.stage_ctx().geometry_per_stage[deciding_stage]
-        .commitment_decision
-        .clone();
-    assert_eq!(
-        decision_range.len(),
-        1,
-        "one decision column at the decider"
-    );
-    let decision_col = decision_range.start;
+    let decision_col = setup.stage_ctx().geometry_per_stage[deciding_stage]
+        .anticipated_decision
+        .start;
 
-    let lane = lane_state_index(&setup);
-    let lane_out_col = setup
+    let slot = post_study_ring_slot(&setup);
+    let slot_out_col = setup
         .stage_state()
-        .state_to_lp_column(StateDim::new(lane))
+        .state_to_lp_column(StateDim::new(slot))
         .get();
 
     assert_ne!(
-        decision_col, lane_out_col,
-        "the fuel-bearing decision column and the beta-priced lane state column must be distinct"
+        decision_col, slot_out_col,
+        "the fuel-bearing decision column and the beta-priced ring-slot column must be distinct"
     );
 
     let template = &setup.stage_ctx().templates[deciding_stage];
@@ -704,20 +707,21 @@ fn terminal_valuation_and_decision_fuel_are_disjoint_columns() {
         template.objective[decision_col]
     );
     assert_eq!(
-        template.objective[lane_out_col], 0.0,
-        "the lane's commit_out column must carry no fuel term — beta prices it via the cut row"
+        template.objective[slot_out_col], 0.0,
+        "the ring slot's commit_out column must carry no fuel term — beta prices it via the \
+         cut row"
     );
 }
 
-// ── one shared boundary prices each fanned leaf by its own lane state ──
+// ── one shared boundary prices each fanned leaf by its own ring state ──
 
-/// Extends the shared-boundary fan to the `commit_out`/`commit_in`
-/// lanes: both terminal fan leaves resolve to ONE shared pool carrying the
-/// single injected boundary, and each leaf's terminal value is priced by ITS
-/// OWN committed MW from that one shared `β` — `θ = α + β·x_leaf`, distinct
+/// Extends the shared-boundary fan to the `commit_out`/`commit_in` ring:
+/// both terminal fan leaves resolve to ONE shared pool carrying the single
+/// injected boundary, and each leaf's terminal value is priced by ITS OWN
+/// committed MW from that one shared `β` — `θ = α + β·x_leaf`, distinct
 /// across leaves committing distinct MW.
 #[test]
-fn shared_boundary_prices_each_fanned_leaf_by_its_own_lane_state() {
+fn shared_boundary_prices_each_fanned_leaf_by_its_own_ring_state() {
     let mut setup = build_setup_in_code(build_system(true, true), &config());
 
     let leaves = leaf_positions(&setup.node_graph);
@@ -736,7 +740,7 @@ fn shared_boundary_prices_each_fanned_leaf_by_its_own_lane_state() {
     );
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    inject_lane_boundary(&mut setup, &tmp.path().join("boundary"));
+    inject_ring_boundary(&mut setup, &tmp.path().join("boundary"));
 
     let shared_pool_id = leaf_pool_ids[0];
     assert_eq!(
@@ -749,13 +753,13 @@ fn shared_boundary_prices_each_fanned_leaf_by_its_own_lane_state() {
         .active_cuts()
         .map(|(_, intercept, coeffs)| (intercept, coeffs.to_vec()))
         .collect();
-    let lane = lane_state_index(&setup);
+    let slot = post_study_ring_slot(&setup);
     let mut expected_coeffs = vec![0.0_f64; setup.fcf.state_dimension];
-    expected_coeffs[lane] = BETA;
+    expected_coeffs[slot] = BETA;
     assert_eq!(
         injected,
         vec![(ALPHA, expected_coeffs)],
-        "the shared pool must carry exactly the one injected lane boundary"
+        "the shared pool must carry exactly the one injected ring boundary"
     );
 
     let template = freeze_terminal_template(&setup, shared_pool_id);
@@ -766,14 +770,14 @@ fn shared_boundary_prices_each_fanned_leaf_by_its_own_lane_state() {
         &template,
         pool,
         NodeId(1),
-        &lane_pin(&setup, x_leaf1),
+        &ring_pin(&setup, x_leaf1),
     );
     let theta_leaf2 = terminal_theta(
         &setup,
         &template,
         pool,
         NodeId(2),
-        &lane_pin(&setup, x_leaf2),
+        &ring_pin(&setup, x_leaf2),
     );
 
     for (label, x, theta) in [
@@ -793,53 +797,19 @@ fn shared_boundary_prices_each_fanned_leaf_by_its_own_lane_state() {
     );
 }
 
-// ── a declared post-horizon window solves the first stage, no walk-off ──
-
-/// End-to-end sizing pin: a study declaring a post-horizon commitment window
-/// solves its first stage without a `fill_col_state_patches` Vec walk-off. One
-/// training iteration exercises the forward pass's stage-0 solve through the
-/// full patch pipeline (`StageSolvePrep::run` → `fill_col_state_patches`), which
-/// panics on an undersized `+ n_commitment` buffer; a clean `Ok` proves the
-/// buffer covers the post-horizon lane end-to-end.
-#[test]
-fn post_horizon_commitment_first_stage_solves_without_patch_walk_off() {
-    let mut setup = build_setup_in_code(build_system(true, false), &config());
-    assert_eq!(
-        setup.stage_state().n_commitment,
-        1,
-        "the fixture must declare exactly one post-horizon commitment window"
-    );
-
-    let comm = StubComm;
-    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
-    let outcome = setup
-        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
-        .expect("first stage must solve without a fill_col_state_patches panic");
-    assert!(
-        outcome.error.is_none(),
-        "training over the post-horizon-commitment study must complete; got {:?}",
-        outcome.error
-    );
-}
-
-// ── Inert/bootstrap: no boundary → θ bounded at zero, lane columns present ──
+// ── Inert/bootstrap: no boundary → θ bounded at zero, ring columns present ──
 
 /// Without an injected boundary the terminal carries no future cost, so `θ` is
-/// bounded at zero regardless of the committed MW — yet the post-horizon lane
-/// columns are structurally present (kept open at every stage, per the
-/// keep-live contract), ready to be priced once a boundary is injected.
+/// bounded at zero regardless of the committed MW — yet the ring columns are
+/// structurally present (kept open at every stage, per the keep-live
+/// contract), ready to be priced once a boundary is injected.
 #[test]
-fn no_boundary_leaves_theta_zero_with_lane_columns_present() {
+fn no_boundary_leaves_theta_zero_with_ring_columns_present() {
     let setup = build_setup_in_code(build_system(true, false), &config());
 
     assert_eq!(
-        setup.stage_state().n_commitment,
-        1,
-        "the lane must exist in the state layout"
-    );
-    assert_eq!(
         setup.fcf.state_dimension, 2,
-        "the post-horizon lane column must be present in the state dimension"
+        "the post-study-targeted ring slot must be present in the state dimension"
     );
 
     let terminal_pool_id = setup.fcf.pools.len() - 1;
@@ -847,7 +817,7 @@ fn no_boundary_leaves_theta_zero_with_lane_columns_present() {
     assert_eq!(pool.populated(), 0, "no boundary cut must be loaded");
 
     let template = freeze_terminal_template(&setup, terminal_pool_id);
-    let theta = terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, 2.0));
+    let theta = terminal_theta(&setup, &template, pool, NodeId(1), &ring_pin(&setup, 2.0));
     assert!(
         theta.abs() < 1e-9,
         "with no boundary cut, theta must be 0 regardless of the committed MW: got {theta}"

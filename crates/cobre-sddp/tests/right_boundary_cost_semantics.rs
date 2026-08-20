@@ -1,18 +1,18 @@
-//! Cost semantics of the post-horizon commitment-hold decision column: the
-//! decision column books the discounted, delivery-anchored fuel cost
-//! (`cost_per_mwh[thermal, dest] * post_study_hours[dest] *
-//! post_study_cumulative_discount[dest]`, unscaled) and is bounded by the
-//! intersection of the commitment interval and the post-study capability.
-//! The terminal boundary FCF prices the carried state fuel-exclusively, so
-//! this booking does not double-count.
+//! Cost semantics of the anticipated-decision column when its delivery
+//! target lands post-study: the decision column books the discounted,
+//! delivery-anchored fuel cost (`cost_per_mwh[thermal, dest] *
+//! post_study_hours[dest] * post_study_cumulative_discount[dest]`, unscaled)
+//! and is bounded by `post_study_stages.json`'s own `[min_mw, max_mw]`
+//! interval ALONE — the sole post-horizon bound surface, no intersection
+//! with a second declaration. The terminal boundary FCF prices the carried
+//! state fuel-exclusively, so this booking does not double-count.
 //!
 //! The fixture is deliberately minimal: zero hydros, one bus, one anticipated
 //! thermal declared `LeadTime` over two study stages. Its OWN in-study
-//! self-delivery (stage 1, decided at stage 0) keeps `lead_stages >= 1` alive
-//! so the in-study ring sizes non-degenerately; the ONE
-//! `future_anticipated_deliveries` window (decider stage 1) resolves into the
-//! ONE declared `post_study_stages` stage (`dest = 0`), so the decision
-//! column's bound/cost is isolated from every other column family.
+//! delivery (stage 1) decides at stage 0 (`lead_stages >= 1`, so the ring
+//! sizes non-degenerately) and the post-study target decides at stage 1 —
+//! two distinct decider stages, no fan-out, isolating the post-study
+//! decision column's bound/cost from every other column family.
 
 #![allow(
     clippy::unwrap_used,
@@ -29,10 +29,10 @@
 use chrono::NaiveDate;
 use cobre_core::entities::thermal::AnticipatedConfig;
 use cobre_core::{
-    BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, FutureAnticipatedDelivery,
-    HydroBlockBounds, HydroStageBounds, InitialConditions, LineBlockBounds, PostStudyStage,
-    PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds, System,
-    SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, HydroBlockBounds,
+    HydroStageBounds, LineBlockBounds, PostStudyStage, PostStudyStages, PostStudyThermalBound,
+    PumpingBlockBounds, ResolvedBounds, System, SystemBuilder, ThermalBlockBounds,
+    ThermalStageBounds,
 };
 use cobre_solver::{ActiveSolver, SolverInterface};
 
@@ -42,14 +42,13 @@ use common::builders::{BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, ma
 
 const BUS_ID: EntityId = EntityId(1);
 const THERMAL_ID: EntityId = EntityId(2);
-/// `LeadTime` delta (hours). Chosen so BOTH resolve in-study: the thermal's
-/// own stage-1 self-delivery decides at stage 0 (`744 + 1450 -` overlap keeps
-/// `decider(m=1) == 0`, a genuine one-stage-ahead decision — `lead_stages ==
-/// 1`, avoiding the degenerate `k_max == 0` ring), and the far post-horizon
-/// window (day ~121) decides at stage 1 (`decider(window) == 1`).
-const DELTA_HOURS: f64 = 1450.0;
-/// The decider stage for both [`future_delivery`] and the decision-column
-/// lookups below — the LAST study stage (`DeciderKind::TerminalFan`).
+/// `LeadTime` delta (hours), ~41.7 days. The thermal's own stage-1 delivery
+/// decides at stage 0 (a genuine one-stage-ahead decision — `lead_stages ==
+/// 1`, avoiding the degenerate `k_max == 0` ring) and the post-study target
+/// decides at stage 1 — two distinct decider stages, no fan-out.
+const DELTA_HOURS: f64 = 1000.0;
+/// The decider stage for the post-study target and the decision-column
+/// lookups below — the LAST study stage.
 const DECIDER_STAGE: usize = 1;
 /// Fuel cost `$/MWh` at the resolved post-study cell.
 const COST_PER_MWH: f64 = 37.5;
@@ -100,22 +99,11 @@ fn stages() -> Vec<cobre_core::temporal::Stage> {
     ]
 }
 
-/// The one declared post-horizon window: `[2024-04-01, 2024-05-01)`,
-/// resolving (via `DELTA_HOURS`) to decider stage [`DECIDER_STAGE`] and (via
-/// the post-study calendar below) to post-study destination stage 0.
-fn future_delivery(min_mw: f64, max_mw: f64) -> FutureAnticipatedDelivery {
-    FutureAnticipatedDelivery {
-        thermal_id: THERMAL_ID,
-        delivery_start: NaiveDate::from_ymd_opt(2024, 4, 1).expect("valid date"),
-        delivery_end: NaiveDate::from_ymd_opt(2024, 5, 1).expect("valid date"),
-        min_mw,
-        max_mw,
-    }
-}
-
 /// The one declared post-study stage: `[2024-04-01, 2024-05-01)` — 30 days,
-/// `POST_STUDY_HOURS` (720h) — the EXACT span [`future_delivery`] targets, so
-/// `StageCalendar::resolve_window` covers it at destination index 0.
+/// `POST_STUDY_HOURS` (720h) — the post-study target `m` (`DECIDER_STAGE + 1`
+/// modular reach) resolves into, so `min_k`/`max_k` alone bound and cost the
+/// decision column (`post_study_stages.json`'s table is the sole post-horizon
+/// bound surface — no `future_anticipated_deliveries` interval to intersect).
 fn post_study_stages(min_k: f64, max_k: f64) -> PostStudyStages {
     PostStudyStages {
         stages: vec![PostStudyStage {
@@ -214,10 +202,9 @@ fn penalties() -> cobre_core::resolved::ResolvedPenalties {
     )
 }
 
-/// `with_commitment` toggles the declared `future_anticipated_deliveries`
-/// window and its `post_study_stages` destination; `(min_c, max_c, min_k,
-/// max_k)` are read only when `with_commitment` is `true`.
-fn build_system(with_commitment: bool, min_c: f64, max_c: f64, min_k: f64, max_k: f64) -> System {
+/// `with_commitment` toggles the declared `post_study_stages` destination;
+/// `(min_k, max_k)` are read only when `with_commitment` is `true`.
+fn build_system(with_commitment: bool, min_k: f64, max_k: f64) -> System {
     let bus = make_bus(BUS_ID, BusSpec::default());
     let thermal = make_thermal(
         THERMAL_ID,
@@ -230,22 +217,13 @@ fn build_system(with_commitment: bool, min_c: f64, max_c: f64, min_k: f64, max_k
             ..Default::default()
         },
     );
-    let initial_conditions = InitialConditions {
-        future_anticipated_deliveries: if with_commitment {
-            vec![future_delivery(min_c, max_c)]
-        } else {
-            Vec::new()
-        },
-        ..Default::default()
-    };
 
     let mut builder = SystemBuilder::new()
         .buses(vec![bus])
         .thermals(vec![thermal])
         .stages(stages())
         .bounds(bounds())
-        .penalties(penalties())
-        .initial_conditions(initial_conditions);
+        .penalties(penalties());
     if with_commitment {
         builder = builder.post_study_stages(Some(post_study_stages(min_k, max_k)));
     }
@@ -288,30 +266,28 @@ fn config() -> cobre_io::config::Config {
     }
 }
 
-/// The decider stage's post-horizon decision-column range, resolved through
-/// the same `StageGeometry::commitment_decision` the LP builder itself
-/// derives — never a hand-computed offset that could drift from the real
-/// layout.
+/// The decider stage's anticipated-decision column, resolved through the
+/// same `StageGeometry::anticipated_decision` the LP builder itself derives
+/// — never a hand-computed offset that could drift from the real layout.
+/// The range is dense (one column per anticipated plant at EVERY stage, not
+/// only where a genuine decision fires), so — unlike the retired
+/// `commitment_decision` range — its length alone cannot confirm "the
+/// fixture's plant decides at this stage"; callers needing that confirm it
+/// separately (a nonzero objective, e.g.).
 fn decision_col(setup: &cobre_sddp::StudySetup, decider_stage: usize) -> usize {
-    let range = setup.stage_ctx().geometry_per_stage[decider_stage]
-        .commitment_decision
-        .clone();
-    assert_eq!(
-        range.len(),
-        1,
-        "fixture declares exactly one post-horizon window deciding at this stage"
-    );
-    range.start
+    setup.stage_ctx().geometry_per_stage[decider_stage]
+        .anticipated_decision
+        .start
 }
 
-// -- Analytical costing + intersection bound (LP structural, no solve) --
+// -- Analytical costing + post-study-table bound (LP structural, no solve) --
 
 mod analytical_costing_and_bounds {
     use super::*;
 
     #[test]
     fn decision_column_objective_equals_cost_times_hours_times_discount() {
-        let system = build_system(true, 20.0, 80.0, 10.0, 50.0);
+        let system = build_system(true, 20.0, 80.0);
         let setup = build_setup_in_code(system, &config());
 
         let col = decision_col(&setup, DECIDER_STAGE);
@@ -325,44 +301,23 @@ mod analytical_costing_and_bounds {
         );
     }
 
+    /// The decision column's bound equals `post_study_stages.json`'s own
+    /// `[min_mw, max_mw]` interval ALONE — the sole post-horizon bound
+    /// surface, no intersection with a second declaration.
     #[test]
-    fn decision_column_bound_is_the_intersection_not_either_interval_alone() {
-        // Commitment [20, 80], capability [10, 50] -> intersection [20, 50]:
-        // strictly narrower than either declared interval on its own.
-        let system = build_system(true, 20.0, 80.0, 10.0, 50.0);
+    fn decision_column_bound_equals_the_post_study_capability_alone() {
+        let system = build_system(true, 20.0, 80.0);
         let setup = build_setup_in_code(system, &config());
 
         let col = decision_col(&setup, DECIDER_STAGE);
         let template = &setup.stage_ctx().templates[DECIDER_STAGE];
 
-        assert_eq!(
-            template.col_lower[col], 20.0,
-            "col_lower must be max(min_c, min_k) == max(20, 10)"
-        );
-        assert_eq!(
-            template.col_upper[col], 50.0,
-            "col_upper must be min(max_c, max_k) == min(80, 50)"
-        );
-    }
-
-    /// Swap which side of each interval binds: capability wider on the low
-    /// end, commitment wider on the high end -- the intersection is neither
-    /// input interval, ruling out "bind to the commitment" or "bind to the
-    /// capability" as a wrong-but-plausible simplification.
-    #[test]
-    fn decision_column_bound_intersection_holds_regardless_of_which_side_binds() {
-        let system = build_system(true, 30.0, 60.0, 5.0, 45.0);
-        let setup = build_setup_in_code(system, &config());
-
-        let col = decision_col(&setup, DECIDER_STAGE);
-        let template = &setup.stage_ctx().templates[DECIDER_STAGE];
-
-        assert_eq!(template.col_lower[col], 30.0, "max(30, 5) == 30");
-        assert_eq!(template.col_upper[col], 45.0, "min(60, 45) == 45");
+        assert_eq!(template.col_lower[col], 20.0, "col_lower must equal min_k");
+        assert_eq!(template.col_upper[col], 80.0, "col_upper must equal max_k");
     }
 }
 
-// -- Pinned commitment: min_c == max_c, solved end-to-end --
+// -- Pinned commitment: min_k == max_k, solved end-to-end --
 
 mod pinned_decision {
     use super::*;
@@ -370,7 +325,7 @@ mod pinned_decision {
     #[test]
     fn pinned_commitment_within_capability_fixes_the_decision_and_its_contribution() {
         let pinned = 30.0;
-        let system = build_system(true, pinned, pinned, 10.0, 50.0);
+        let system = build_system(true, pinned, pinned);
         let setup = build_setup_in_code(system, &config());
 
         let col = decision_col(&setup, DECIDER_STAGE);
@@ -404,83 +359,42 @@ mod pinned_decision {
 mod byte_identity_without_commitment {
     use super::*;
 
-    /// Dropping `future_anticipated_deliveries`/`post_study_stages` resolves
-    /// zero commitment windows and widens NEITHER `commit_out` nor
-    /// `commit_in` by the post-horizon lane's width — the merged
-    /// commitment-hold region collapses to exactly the in-study ring's own
-    /// width (`n_anticipated * k_max`), matching the no-post-horizon-lane
-    /// layout exactly. This is the structural half of the
-    /// inertness claim; `fill_commitment_decision_columns`'s own byte-level
-    /// no-op (an empty `commitment_decision_windows` never touches `bufs`) is
-    /// pinned directly by the `crates/cobre-sddp/src/lp/builder/columns.rs`
-    /// unit test, not re-derived here via a fragile cross-build column-index
-    /// comparison (the ONE added lane shifts every later column index by 2,
-    /// so raw positional diffing across the two builds would spuriously fail).
+    /// Dropping the declared `post_study_stages` destination is carried by
+    /// the SAME in-study anticipated ring every study already has
+    /// (`commit_out.len() == n_anticipated * k_max`, no separate lane block
+    /// ever appended). The two fixtures differ only in whether the ring's
+    /// DECIDER_STAGE column is ACTIVE: with no post-study destination
+    /// declared, the plant has no genuine decision at DECIDER_STAGE at all
+    /// (dormant `[0, 0]`, zero objective); with one declared, that same
+    /// column books the real post-study fuel cost.
     #[test]
     fn no_future_anticipated_deliveries_resolves_zero_commitment_windows() {
-        let with_setup = build_setup_in_code(build_system(true, 20.0, 80.0, 10.0, 50.0), &config());
-        let without_setup = build_setup_in_code(build_system(false, 0.0, 0.0, 0.0, 0.0), &config());
+        let with_setup = build_setup_in_code(build_system(true, 20.0, 80.0), &config());
+        let without_setup = build_setup_in_code(build_system(false, 0.0, 0.0), &config());
 
-        assert_eq!(
-            without_setup.stage_state().n_commitment,
-            0,
-            "a study with no future_anticipated_deliveries must resolve zero commitment windows"
-        );
-        assert_eq!(
-            with_setup.stage_state().n_commitment,
-            1,
-            "the sibling fixture must declare exactly one commitment window"
-        );
-
-        let n_ant_state = with_setup.stage_state().n_anticipated * with_setup.stage_state().k_max;
-        assert_eq!(
-            without_setup.stage_state().commit_out.len(),
-            n_ant_state,
-            "without a declared window, commit_out must be exactly the in-study ring's width"
-        );
-        assert_eq!(
-            with_setup.stage_state().commit_out.len(),
-            n_ant_state + 1,
-            "with one declared window, commit_out must be the ring's width plus one lane"
-        );
-
-        // The ONE added lane is the sole structural delta, stage-invariant and
-        // symmetric across commit_out and commit_in: every stage's num_cols
-        // grows by exactly 2 (one outgoing lane column, one incoming) — plus
-        // one more, exactly at DECIDER_STAGE, for the sparse decision column
-        // itself.
-        for stage in 0..2 {
-            let without_cols = without_setup.stage_ctx().templates[stage].num_cols;
-            let with_cols = with_setup.stage_ctx().templates[stage].num_cols;
-            let expected_delta = 2 + usize::from(stage == DECIDER_STAGE);
+        for (label, setup) in [("with", &with_setup), ("without", &without_setup)] {
+            let state = setup.stage_state();
             assert_eq!(
-                with_cols,
-                without_cols + expected_delta,
-                "stage {stage}: num_cols must grow by exactly {expected_delta}"
+                state.commit_out.len(),
+                state.n_anticipated * state.k_max,
+                "{label}: commit_out must be exactly the in-study ring's width, never a \
+                 separate lane block"
             );
         }
 
-        // The decision column itself is sparse: it exists ONLY at the
-        // deciding stage, in both builds (empty at stage 0, populated only at
-        // DECIDER_STAGE in the "with" build; never populated at all "without").
-        for stage in 0..2 {
-            let without_range = without_setup.stage_ctx().geometry_per_stage[stage]
-                .commitment_decision
-                .clone();
-            assert_eq!(
-                without_range.len(),
-                0,
-                "stage {stage}: no window is ever declared, so no decision column ever exists"
-            );
-            let with_range = with_setup.stage_ctx().geometry_per_stage[stage]
-                .commitment_decision
-                .clone();
-            let expected_with_len = usize::from(stage == DECIDER_STAGE);
-            assert_eq!(
-                with_range.len(),
-                expected_with_len,
-                "stage {stage}: the decision column exists only at DECIDER_STAGE"
-            );
-        }
+        let without_col = decision_col(&without_setup, DECIDER_STAGE);
+        assert_eq!(
+            without_setup.stage_ctx().templates[DECIDER_STAGE].objective[without_col],
+            0.0,
+            "without a declared post-study destination, the plant has no genuine decision at \
+             DECIDER_STAGE — the column stays dormant"
+        );
+
+        let with_col = decision_col(&with_setup, DECIDER_STAGE);
+        assert!(
+            with_setup.stage_ctx().templates[DECIDER_STAGE].objective[with_col].abs() > 1e-9,
+            "with a declared post-study destination, the plant's post-study delivery decides \
+             at DECIDER_STAGE — the column books the real fuel cost"
+        );
     }
 }

@@ -212,7 +212,6 @@ where
                 noise_dim: training_ctx.stochastic.dim(),
                 n_anticipated: state.n_anticipated,
                 k_max: state.k_max,
-                n_commitment: state.n_commitment,
             },
             solver_factory,
         )
@@ -326,7 +325,6 @@ where
             state.n_buckets,
             state.n_anticipated,
             state.k_max,
-            state.n_commitment,
             stage_ctx,
         );
 

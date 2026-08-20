@@ -588,61 +588,6 @@ fn resolve_decider_physical(
         .collect()
 }
 
-/// Trunk (shared across the terminal fan) vs terminal-fan (per-scenario)
-/// classification of a post-horizon window's in-study decider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeciderKind {
-    /// Decider is strictly before the last operative stage: one decision
-    /// shared across every terminal-fan node.
-    Trunk,
-    /// Decider is the last operative stage: decided independently per
-    /// terminal-fan node (per scenario).
-    TerminalFan,
-}
-
-/// Resolve a single post-horizon delivery window's in-study decider: the
-/// stage containing `window_end_hours − delta_hours`, reusing
-/// [`resolve_decider_physical`]'s end-anchored, earlier-stage-tie arithmetic
-/// against the window's own end on the same hour clock — extended past the
-/// horizon rather than read off `stage_lengths_hours` — instead of a
-/// decision-anchored stage index. Classifies the decider
-/// [`DeciderKind::TerminalFan`] when it is the last operative stage,
-/// [`DeciderKind::Trunk`] otherwise. `None` when the target
-/// falls outside the in-study calendar in either direction (before the
-/// horizon start, or past its end) — out of the lead's reach.
-// Voice 4: no production call site wires this in yet — the terminal
-// commitment-state block's setup wiring activates it. The `#[allow(dead_code)]`
-// refires once that caller lands.
-#[allow(dead_code)]
-#[must_use]
-pub(crate) fn resolve_future_delivery_decider(
-    delta_hours: f64,
-    stage_lengths_hours: &[f64],
-    window_end_hours: f64,
-) -> Option<(usize, DeciderKind)> {
-    debug_assert!(
-        delta_hours.is_finite() && delta_hours > 0.0,
-        "delta_hours must be finite and > 0.0"
-    );
-    debug_assert!(
-        window_end_hours.is_finite(),
-        "window_end_hours must be finite"
-    );
-
-    let n_stages = stage_lengths_hours.len();
-    let boundaries = cumulative_stage_boundaries(stage_lengths_hours);
-    let target = window_end_hours - delta_hours;
-    let before_target = boundaries.partition_point(|&boundary| boundary < target);
-    let decider = before_target.checked_sub(1).filter(|&m| m < n_stages)?;
-
-    let kind = if decider == n_stages - 1 {
-        DeciderKind::TerminalFan
-    } else {
-        DeciderKind::Trunk
-    };
-    Some((decider, kind))
-}
-
 /// `c(m) = m − ℓ` (or `None` if negative); the calendar is never read —
 /// enforced by construction, since this arm takes no stage-length
 /// parameter.

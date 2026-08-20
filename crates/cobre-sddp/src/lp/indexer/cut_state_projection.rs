@@ -314,35 +314,6 @@ mod tests {
         )
     }
 
-    /// Like [`finalized`] but with declared terminal commitment-hold
-    /// post-horizon windows.
-    fn finalized_with_commitment_hold_windows(
-        hydro_count: usize,
-        max_par_order: usize,
-        n_anticipated: usize,
-        k_max: usize,
-        anticipated_lead_stages: Vec<usize>,
-        n_commitment: usize,
-        commitment_decider_stage: Vec<usize>,
-    ) -> StateSpace {
-        let lag_counts = vec![max_par_order; hydro_count];
-        StateSpace::new_with_commitment_hold_windows(
-            hydro_count,
-            max_par_order,
-            0,
-            Vec::new(),
-            n_anticipated,
-            k_max,
-            anticipated_lead_stages,
-            &lag_counts,
-            n_commitment,
-            commitment_decider_stage,
-            vec![cobre_core::EntityId(0); n_commitment],
-            vec![(0.0, 0.0); n_commitment],
-            vec![0; n_commitment],
-        )
-    }
-
     /// Like [`finalized`] but with a declared bucket block.
     fn finalized_with_transit_buckets(
         hydro_count: usize,
@@ -801,50 +772,35 @@ mod tests {
         }
     }
 
-    // ── Terminal commitment-hold (post-horizon lanes) tests ────────────────
+    // ── Commitment-hold ring tests ──────────────────────────────────────────
 
-    /// A declared commitment-hold post-horizon window joins the projection —
-    /// `n_slots()` grows by exactly the window count over the pre-window
-    /// dimension, and every post-horizon lane is present, mirroring the
-    /// always-included bucket and in-study slots.
+    /// The commitment-hold region — the single in-study anticipated ring that
+    /// now carries every post-study target directly — joins the projection
+    /// completely: `n_slots()` grows by exactly the ring's width over the
+    /// pre-ring dimension, and every ring slot is present, mirroring the
+    /// always-included bucket contract. No entity-type or per-stage arm gates
+    /// this inclusion.
     #[test]
-    fn commitment_hold_post_horizon_joins_the_projection() {
-        let pre_block = finalized(2, 1, 1, 2, vec![2]);
-        let with_block = finalized_with_commitment_hold_windows(2, 1, 1, 2, vec![2], 2, vec![0, 1]);
+    fn commitment_hold_post_study_target_joins_the_projection() {
+        let pre_ring = finalized(2, 1, 0, 0, vec![]);
+        let with_ring = finalized(2, 1, 1, 2, vec![2]);
 
-        let cut_pre = CutStateProjection::new(&pre_block, ALL_ENABLED);
-        let cut_with = CutStateProjection::new(&with_block, ALL_ENABLED);
+        let cut_pre = CutStateProjection::new(&pre_ring, ALL_ENABLED);
+        let cut_with = CutStateProjection::new(&with_ring, ALL_ENABLED);
 
         assert_eq!(
             cut_with.n_slots(),
-            cut_pre.n_slots() + 2,
-            "n_slots must grow by exactly the window count"
+            cut_pre.n_slots() + with_ring.n_anticipated * with_ring.k_max,
+            "n_slots must grow by exactly the anticipated-ring width"
         );
-        assert_eq!(cut_with.n_slots(), with_block.n_state);
+        assert_eq!(cut_with.n_slots(), with_ring.n_state);
 
-        for window in 0..with_block.n_commitment {
-            let j =
-                with_block.commit_in.start + with_block.commitment_hold_post_horizon_offset(window);
+        for (i, j) in with_ring.commit_in.clone().enumerate() {
             assert_eq!(
-                cut_with.incoming_column(CutSlot::new(cut_pre.n_slots() + window)),
+                cut_with.incoming_column(CutSlot::new(cut_pre.n_slots() + i)),
                 InCol::new(j),
-                "commitment-hold post-horizon incoming lane {j} must appear in the projection"
+                "commitment-hold ring incoming slot {j} must appear in the projection"
             );
-        }
-    }
-
-    /// Always included, ignoring [`StageStateConfig`]: the post-horizon lanes
-    /// stay in the projection even under `STORAGE_ONLY`, the same "always
-    /// included" contract buckets and the in-study slots already carry.
-    #[test]
-    fn commitment_hold_post_horizon_always_included_regardless_of_state_config() {
-        let global = finalized_with_commitment_hold_windows(2, 1, 0, 0, vec![], 2, vec![0, 1]);
-        let cut = CutStateProjection::new(&global, STORAGE_ONLY);
-
-        // storage (2) + commitment-hold post-horizon lanes (2), lag/in-study/buckets absent.
-        assert_eq!(cut.n_slots(), 4);
-        for (i, j) in global.commit_in.clone().enumerate() {
-            assert_eq!(cut.incoming_column(CutSlot::new(2 + i)), InCol::new(j));
         }
     }
 }

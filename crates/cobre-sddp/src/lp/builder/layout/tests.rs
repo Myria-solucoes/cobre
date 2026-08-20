@@ -249,9 +249,7 @@ impl ZeroEntityFixtures {
             has_penalty: false,
             // Tests that use ZeroEntityFixtures don't exercise discount
             // factors; provide n_stages = 1 element vecs that won't panic.
-            cumulative_discount_factors: vec![1.0],
             delivery_cumulative_discount_factors: vec![1.0],
-            total_hours_per_stage: vec![744.0],
             delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
@@ -651,9 +649,7 @@ impl TwoHydroFixtures {
             study_stage_ids: vec![],
             delivery_stage_ids: vec![],
             has_penalty: false,
-            cumulative_discount_factors: vec![1.0],
             delivery_cumulative_discount_factors: vec![1.0],
-            total_hours_per_stage: vec![744.0],
             delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
@@ -986,9 +982,7 @@ impl FphaMixFixtures {
             study_stage_ids: vec![],
             delivery_stage_ids: vec![],
             has_penalty: false,
-            cumulative_discount_factors: vec![1.0],
             delivery_cumulative_discount_factors: vec![1.0],
-            total_hours_per_stage: vec![744.0],
             delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
@@ -1166,9 +1160,7 @@ impl FillingMembershipFixtures {
             study_stage_ids: vec![],
             delivery_stage_ids: vec![],
             has_penalty: false,
-            cumulative_discount_factors: vec![1.0],
             delivery_cumulative_discount_factors: vec![1.0],
-            total_hours_per_stage: vec![744.0],
             delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
@@ -2091,9 +2083,7 @@ impl AntFixturesWithNStages {
             study_stage_ids: (0..i32::try_from(n_stages).unwrap_or(0)).collect(),
             delivery_stage_ids: (0..i32::try_from(n_stages).unwrap_or(0)).collect(),
             has_penalty: false,
-            cumulative_discount_factors: vec![1.0; n_stages],
             delivery_cumulative_discount_factors: vec![1.0; n_stages],
-            total_hours_per_stage: vec![744.0; n_stages],
             delivery_total_hours: vec![744.0; n_stages],
             filling_v_target: BTreeMap::new(),
         }
@@ -2348,9 +2338,7 @@ impl PumpingFixtures {
             study_stage_ids: vec![],
             delivery_stage_ids: vec![],
             has_penalty: false,
-            cumulative_discount_factors: vec![1.0; n_stages],
             delivery_cumulative_discount_factors: vec![1.0; n_stages],
-            total_hours_per_stage: vec![744.0; n_stages],
             delivery_total_hours: vec![744.0; n_stages],
             filling_v_target: BTreeMap::new(),
         }
@@ -3074,9 +3062,7 @@ impl TwoHydroMultiBusFixtures {
             study_stage_ids: vec![],
             delivery_stage_ids: vec![],
             has_penalty: false,
-            cumulative_discount_factors: vec![1.0],
             delivery_cumulative_discount_factors: vec![1.0],
-            total_hours_per_stage: vec![744.0],
             delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
@@ -3325,9 +3311,7 @@ impl FphaMultiBusFixtures {
             study_stage_ids: vec![],
             delivery_stage_ids: vec![],
             has_penalty: false,
-            cumulative_discount_factors: vec![1.0],
             delivery_cumulative_discount_factors: vec![1.0],
-            total_hours_per_stage: vec![744.0],
             delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }

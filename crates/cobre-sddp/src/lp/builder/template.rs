@@ -241,15 +241,6 @@ pub struct StageGeometry {
     /// stage-level). Starts at `thermal.end`, which is `n_blks`-dependent, so the
     /// cost-breakdown `range_sum` needs the per-stage base.
     pub anticipated_decision: Range<usize>,
-    /// Post-horizon commitment-decision column range (one per declared window
-    /// whose decider stage is this stage — sparse, `0..0` at a stage no window
-    /// decides at).
-    pub commitment_decision: Range<usize>,
-    /// Global window index per `commitment_decision` local position, parallel
-    /// to it (`commitment_decision_windows[i]` is the window whose deposited
-    /// decision lives at `commitment_decision.start + i`). Sparse, empty at a
-    /// stage no window decides at.
-    pub commitment_decision_windows: Vec<usize>,
     /// Forward line-flow column range (one per line per block).
     pub line_fwd: Range<usize>,
     /// Reverse line-flow column range (one per line per block).
@@ -1143,9 +1134,7 @@ fn build_template_build_ctx<'a>(
         study_stage_ids,
         delivery_stage_ids,
         has_penalty: n_hydros > 0 && inflow_method.has_slack_columns(),
-        cumulative_discount_factors,
         delivery_cumulative_discount_factors,
-        total_hours_per_stage,
         delivery_total_hours,
         filling_v_target,
         arc_stage_weights,

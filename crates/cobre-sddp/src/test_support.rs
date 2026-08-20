@@ -528,9 +528,7 @@ pub fn geometry(
         study_stage_ids: Vec::new(),
         delivery_stage_ids: Vec::new(),
         has_penalty: dims.has_inflow_penalty,
-        cumulative_discount_factors: vec![1.0],
         delivery_cumulative_discount_factors: vec![1.0],
-        total_hours_per_stage: vec![744.0],
         delivery_total_hours: vec![744.0],
         filling_v_target: BTreeMap::new(),
         arc_stage_weights: HashMap::new(),
@@ -1716,7 +1714,6 @@ pub fn capture_patched_node_template(setup: &StudySetup, node_pos: NodePos) -> S
         space.n_buckets,
         space.n_anticipated,
         space.k_max,
-        space.n_commitment,
     );
     let mut scratch = ScratchBuffers::new(WorkspaceSizing {
         hydro_count: space.hydro_count,
@@ -1733,7 +1730,6 @@ pub fn capture_patched_node_template(setup: &StudySetup, node_pos: NodePos) -> S
         noise_dim: 0,
         n_anticipated: space.n_anticipated,
         k_max: space.k_max,
-        n_commitment: space.n_commitment,
     });
 
     let raw_noise = oracle_raw_noise(setup, node_pos);

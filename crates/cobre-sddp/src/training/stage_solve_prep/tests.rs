@@ -216,7 +216,6 @@ fn minimal_sizing() -> WorkspaceSizing {
         noise_dim: 1,
         n_anticipated: 0,
         k_max: 0,
-        n_commitment: 0,
     }
 }
 
@@ -336,7 +335,7 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     // (no load buses, no anticipated thermals, no NCS in scope) ----
     let mut reference_scratch = ScratchBuffers::new(sizing);
     let mut reference_solver = RecordingSolver::default();
-    let mut reference_patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0);
+    let mut reference_patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
 
     transform_inflow_noise(
         &raw_noise,
@@ -375,7 +374,7 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     // ---- owner: StageSolvePrep::run configured the way forward would ----
     let mut owner_scratch = ScratchBuffers::new(sizing);
     let mut owner_solver = RecordingSolver::default();
-    let mut owner_patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0);
+    let mut owner_patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
     let params = StageSolvePrepParams {
         state_source: StateSource(&current_state),
         load_noise: LoadNoise::Present,
@@ -619,7 +618,6 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
         noise_dim: 1,
         n_anticipated: 0,
         k_max: 0,
-        n_commitment: 0,
     };
     let params = StageSolvePrepParams {
         state_source: StateSource(&[]),
@@ -671,7 +669,7 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     // ---- owner: StageSolvePrep::run's internal NCS-patch wiring ----
     let mut owner_scratch = ScratchBuffers::new(sizing);
     let mut owner_solver = RecordingSolver::default();
-    let mut owner_patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0, 0, 0);
+    let mut owner_patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0, 0);
     StageSolvePrep::run(
         &mut owner_solver,
         &mut owner_patch_buf,
@@ -771,7 +769,7 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
     scratch.load_rhs_buf = vec![777.0];
 
     let mut solver = RecordingSolver::default();
-    let mut patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0);
+    let mut patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
     let params = StageSolvePrepParams {
         state_source: StateSource(&current_state),
         load_noise: LoadNoise::Absent,

@@ -274,48 +274,65 @@ fn compute_anticipated_committed_mw(
     Some(view.primal[col])
 }
 
-/// Extract one post-horizon commitment-lane row per window whose in-study
-/// decider stage is THIS stage — `geometry.commitment_decision_windows`'s own
-/// sparsity, sparse/empty at every other stage. Reads the deposited decision
-/// directly from the sparse decision column and the ring's freshly-latched
-/// value from the SAME stage's `commit_out` lane (the deposit row pins the two
-/// equal). `delivery_dates` is the setup-resolved, per-window delivery date
-/// (`StudySetup::commitment_window_delivery_dates`), indexed by the same
-/// global survivor window index [`StateSpace::commitment_window_thermal_id`] uses.
-pub(crate) fn extract_commitment_lanes(
-    primal: &[f64],
-    geometry: &StageGeometry,
-    state: &StateSpace,
+/// Extract one `anticipated_lanes` row per anticipated plant's genuine decision
+/// at THIS stage whose delivery target `m` is post-study (`m >= n_stages`).
+///
+/// Sparse by construction: a plant with no genuine decision this stage, or one
+/// targeting an in-study delivery, contributes nothing, so the partition is
+/// empty at every non-decider stage. `deposited_decision_mw` reads the plant's
+/// ring decision column (`geometry.anticipated_decision.start + local`);
+/// `carried_committed_mw` reads the ring slot the target lands in
+/// (`commit_out.start + commitment_hold_in_study_offset(local, m)`) — the SAME
+/// slot the deposit latches (`fill_anticipated_state_out_def_entries`), so the
+/// deposit row pins the two equal at the decider stage. `delivery_dates` is the
+/// extended delivery-stage anchor array indexed by delivery target `m` (study
+/// stages then the post-study continuation), the same calendar the policy
+/// manifest dates ring slots against via `delivery_anchor_at`. `thermal_id`
+/// resolves anticipated-local `local` through
+/// [`StudyDimensions::anticipated_thermal_indices`] into the system thermals,
+/// the canonical anticipated order the ring and manifest share.
+///
+/// Iterating every genuine post-study decision (not `.next()`) keeps one row per
+/// decision, so a future multi-decider fill fans out rather than silently
+/// keeping the first; today's single-decider fill makes this at most one row per
+/// plant per stage.
+pub(crate) fn extract_anticipated_lanes(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
     delivery_dates: &[i32],
     stage_id: u32,
 ) -> Vec<SimulationAnticipatedLaneResult> {
-    let windows = &geometry.commitment_decision_windows;
-    debug_assert!(
-        delivery_dates.len() == state.n_commitment,
-        "commitment_window_delivery_dates length {} must match n_commitment {}",
-        delivery_dates.len(),
-        state.n_commitment,
-    );
-    let mut results = Vec::with_capacity(windows.len());
-    for (local_idx, &w) in windows.iter().enumerate() {
-        let decision_col = geometry.commitment_decision.start + local_idx;
-        let carried_col = state.commit_out.start + state.commitment_hold_post_horizon_offset(w);
-        debug_assert!(
-            decision_col < geometry.commitment_decision.end
-                && decision_col < primal.len()
-                && carried_col < primal.len(),
-            "post-horizon lane cols {decision_col}/{carried_col} out of bounds \
-             (commitment_decision {:?}, primal len {})",
-            geometry.commitment_decision,
-            primal.len(),
-        );
-        results.push(SimulationAnticipatedLaneResult {
-            stage_id,
-            thermal_id: state.commitment_window_thermal_id[w].0,
-            delivery_date: delivery_dates[w],
-            deposited_decision_mw: primal[decision_col],
-            carried_committed_mw: primal[carried_col],
-        });
+    let state = spec.state;
+    let mut results = Vec::new();
+    for local in 0..state.n_anticipated {
+        let resolution =
+            anticipated_resolution_for(state, AnticipatedLocal::new(local), spec.n_stages);
+        for m in resolution.genuine_decisions_at(spec.stage_index) {
+            if m < spec.n_stages {
+                continue;
+            }
+            let decision_col = spec.geometry.anticipated_decision.start + local;
+            let carried_col =
+                state.commit_out.start + state.commitment_hold_in_study_offset(local, m);
+            debug_assert!(
+                decision_col < view.primal.len() && carried_col < view.primal.len(),
+                "anticipated-lane ring cols {decision_col}/{carried_col} out of primal bounds {}",
+                view.primal.len(),
+            );
+            debug_assert!(
+                m < delivery_dates.len(),
+                "delivery target {m} out of delivery_dates bounds {}",
+                delivery_dates.len(),
+            );
+            let sys_thermal = spec.study_dims.anticipated_thermal_indices[local];
+            results.push(SimulationAnticipatedLaneResult {
+                stage_id,
+                thermal_id: spec.entity_counts.thermal_ids[sys_thermal],
+                delivery_date: delivery_dates[m],
+                deposited_decision_mw: view.primal[decision_col],
+                carried_committed_mw: view.primal[carried_col],
+            });
+        }
     }
     results
 }
@@ -1567,9 +1584,9 @@ pub(crate) fn extract_stage_result_with_lookups(
         transit_buckets: extract_transit_buckets(view, spec, stage_id),
         generic_violations,
         // The window-indexed delivery-date array lives outside `StageExtractionSpec`
-        // (`SimulationOutputSpec::commitment_window_delivery_dates`); the hot path
+        // (`SimulationOutputSpec::extended_delivery_anchors`); the hot path
         // (`extract_sim_stage_result`) populates this field as a post-step via
-        // `extract_commitment_lanes` instead of through this shared builder.
+        // `extract_anticipated_lanes` instead of through this shared builder.
         anticipated_lanes: Vec::new(),
     }
 }

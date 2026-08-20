@@ -8182,6 +8182,146 @@ fn warn_on_sub_stage_lead_emits_once_per_self_delivered_stage() {
 }
 
 // ---------------------------------------------------------------------------
+// Extended delivery axis — n_delivery spans n_stages + n_post
+// ---------------------------------------------------------------------------
+
+/// The no-half-switch invariant: `resolve_anticipated_commitments_core`'s
+/// primary axis site resolves a plant's `decider` vector to the EXTENDED
+/// delivery width `n_stages + n_post`, not the study-only `n_stages` a
+/// half-switched site would still report. Two study stages plus two declared
+/// post-study stages resolve `decider.len() == 4`.
+#[test]
+fn resolve_anticipated_commitments_core_reports_the_extended_delivery_width() {
+    let post_study = PostStudyStages {
+        stages: vec![
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                duration_hours: 744.0,
+            },
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+                duration_hours: 720.0,
+            },
+        ],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        Vec::new(),
+        Some(post_study),
+    );
+
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(
+        resolution.per_plant[0].decider.len(),
+        4,
+        "n_stages (2) + n_post (2) must resolve to 4, the extended delivery axis"
+    );
+}
+
+/// A study declaring no post-study stages leaves the primary axis site
+/// byte-identical to the pre-widening study-only axis: `decider.len() ==
+/// n_stages`.
+#[test]
+fn resolve_anticipated_commitments_core_matches_study_only_width_without_post_study() {
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        Vec::new(),
+        None,
+    );
+
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(resolution.per_plant[0].decider.len(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// Boundary-absent post-study delivery advisory
+// ---------------------------------------------------------------------------
+
+/// A `LeadStages(1)` plant with one declared post-study stage decides its
+/// post-study-targeted delivery in-study (`m = n_stages`, `c(m) = n_stages -
+/// 1 < n_stages`). With no `config.policy.boundary` declared, exactly one
+/// advisory fires naming the plant, once at setup.
+#[test]
+fn warn_on_boundary_absent_post_study_delivery_fires_once_when_boundary_absent() {
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            duration_hours: 744.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        Vec::new(),
+        Some(post_study),
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, false);
+    });
+    let recorded = messages.lock().unwrap();
+    let relevant: Vec<&str> = recorded
+        .iter()
+        .filter(|msg| msg.contains("post-study-targeted delivery"))
+        .map(std::string::String::as_str)
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        1,
+        "expected exactly one boundary-absent advisory, got: {recorded:?}"
+    );
+    assert!(
+        relevant[0].contains("T1"),
+        "advisory must name the plant, got: {}",
+        relevant[0]
+    );
+}
+
+/// The same fixture with `boundary_present == true` emits no advisory — the
+/// post-study delivery has a real terminal FCF to price against.
+#[test]
+fn warn_on_boundary_absent_post_study_delivery_silent_when_boundary_present() {
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            duration_hours: 744.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        Vec::new(),
+        Some(post_study),
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, true);
+    });
+    let recorded = messages.lock().unwrap();
+    assert!(
+        recorded
+            .iter()
+            .all(|msg| !msg.contains("post-study-targeted delivery")),
+        "a declared boundary must suppress the advisory; got: {recorded:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // LeadTime fan-out — rejected at setup, not silently dropped, no panic
 // ---------------------------------------------------------------------------
 
@@ -8248,125 +8388,6 @@ fn lead_time_fanout_rejected_at_setup() {
         msg.contains("not yet supported"),
         "message should state fan-out output is not yet supported, got: {msg}"
     );
-}
-
-// ---------------------------------------------------------------------------
-// resolve_commitment_hold_windows — survivor-indexed post-horizon windows
-// ---------------------------------------------------------------------------
-
-/// The coordinate-space regression this resolution exists to prevent: a
-/// `LeadTime` thermal declares TWO post-horizon windows in ascending
-/// `delivery_start` order. The FIRST's decider precedes the study horizon
-/// (dropped, logged as a warning) and the SECOND survives. Survivor index 0
-/// must describe the SECOND window's `(min_mw, max_mw)` and destination
-/// stage — a raw-index-by-survivor-position implementation would instead
-/// report the dropped first window's data at index 0.
-#[test]
-fn commitment_hold_windows_survivor_index_diverges_from_raw_index_on_a_drop() {
-    let dropped = FutureAnticipatedDelivery {
-        thermal_id: EntityId(2),
-        delivery_start: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        delivery_end: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        min_mw: 1.0,
-        max_mw: 2.0,
-    };
-    let survives = FutureAnticipatedDelivery {
-        thermal_id: EntityId(2),
-        delivery_start: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
-        delivery_end: NaiveDate::from_ymd_opt(2024, 3, 11).unwrap(),
-        min_mw: 10.0,
-        max_mw: 20.0,
-    };
-    let post_study = PostStudyStages {
-        stages: vec![PostStudyStage {
-            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
-            duration_hours: 240.0,
-        }],
-        thermal_bounds: Vec::new(),
-    };
-
-    let system = minimal_system_with_anticipated(
-        &[744.0],
-        AnticipatedConfig::LeadTime(1500.0),
-        0,
-        vec![dropped, survives],
-        Some(post_study),
-    );
-
-    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
-
-    assert_eq!(windows.n_commitment, 1, "the first window must be dropped");
-    assert_eq!(
-        windows.min_max[0],
-        (10.0, 20.0),
-        "survivor 0 must describe the SECOND (surviving) window, not the dropped first"
-    );
-    assert_eq!(
-        windows.dest_stage[0], 0,
-        "survivor 0 must resolve to the post-study stage the surviving window covers"
-    );
-}
-
-/// Happy path: a single surviving post-horizon window resolves its
-/// `(min_mw, max_mw)` interval and its destination post-study stage `j` — here
-/// `j == 1`, the SECOND declared post-study stage, ruling out a resolver that
-/// always reports stage 0.
-#[test]
-fn commitment_hold_windows_happy_path_min_max_and_dest_stage() {
-    let delivery = FutureAnticipatedDelivery {
-        thermal_id: EntityId(2),
-        delivery_start: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
-        delivery_end: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
-        min_mw: 30.0,
-        max_mw: 40.0,
-    };
-    let post_study = PostStudyStages {
-        stages: vec![
-            PostStudyStage {
-                start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
-                duration_hours: 744.0,
-            },
-            PostStudyStage {
-                start_date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
-                duration_hours: 720.0,
-            },
-        ],
-        thermal_bounds: Vec::new(),
-    };
-
-    let system = minimal_system_with_anticipated(
-        &[744.0],
-        AnticipatedConfig::LeadTime(2400.0),
-        0,
-        vec![delivery],
-        Some(post_study),
-    );
-
-    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
-
-    assert_eq!(windows.n_commitment, 1);
-    assert_eq!(windows.min_max[0], (30.0, 40.0));
-    assert_eq!(
-        windows.dest_stage[0], 1,
-        "must resolve into the second post-study stage"
-    );
-}
-
-/// Inert: a study with no `future_anticipated_deliveries` resolves both
-/// survivor arrays empty and `n_commitment == 0`.
-#[test]
-fn commitment_hold_windows_inert_without_deliveries() {
-    let system = minimal_system_with_anticipated(
-        &[744.0],
-        AnticipatedConfig::LeadTime(720.0),
-        0,
-        Vec::new(),
-        None,
-    );
-
-    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
-
-    assert_eq!(windows, super::CommitmentHoldWindows::default());
 }
 
 /// Two anticipated thermals: id=20 non-fanning `LeadStages(1)`, id=21

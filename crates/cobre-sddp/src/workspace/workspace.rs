@@ -386,10 +386,6 @@ pub struct WorkspaceSizing {
     /// Maximum lead-time horizon across anticipated thermals (K); with
     /// `n_anticipated`, sizes the anticipated-state ring buffer.
     pub k_max: usize,
-    /// Terminal commitment-block window count (W); pre-sizes the
-    /// `PatchBuffer` commitment-block column region. `0` when no commitment
-    /// window is declared.
-    pub n_commitment: usize,
 }
 
 /// Pre-allocated accumulators for the backward pass trial-point loop.
@@ -895,7 +891,6 @@ impl<S: SolverInterface> WorkspacePool<S> {
                     sizing.n_buckets,
                     sizing.n_anticipated,
                     sizing.k_max,
-                    sizing.n_commitment,
                 );
                 SolverWorkspace::new(rank, worker_id, solver, patch_buf, n_state, sizing)
             })
@@ -935,7 +930,6 @@ impl<S: SolverInterface> WorkspacePool<S> {
                 sizing.n_buckets,
                 sizing.n_anticipated,
                 sizing.k_max,
-                sizing.n_commitment,
             );
             workspaces.push(SolverWorkspace::new(
                 rank, worker_id, solver, patch_buf, n_state, sizing,
@@ -2681,7 +2675,7 @@ mod tests {
             0,
             0,
             MockSolver,
-            PatchBuffer::new(0, 0, 0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(0, 0, 0, 0, 0, 0, 0),
             0,
             WorkspaceSizing::default(),
         );

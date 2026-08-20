@@ -8,18 +8,16 @@
 //! state vector to the LP columns a forward-pass cut row references.
 //!
 //! Every offset here is a pure function of `N` (`hydro_count`), `L`
-//! (`max_par_order`), `B` (`n_buckets`), `A` (`n_anticipated`), `k_max`, and
-//! `W` (`n_commitment`, the terminal commitment-hold post-horizon window
-//! count) — independent of `n_blks`/`n_thermals` — so a single global stage-0
-//! layout resolves onto the correct column at every stage regardless of
-//! per-stage block counts.
+//! (`max_par_order`), `B` (`n_buckets`), `A` (`n_anticipated`), and `k_max` —
+//! independent of `n_blks`/`n_thermals` — so a single global stage-0 layout
+//! resolves onto the correct column at every stage regardless of per-stage
+//! block counts.
 
 use std::ops::Range;
 
 use super::{InCol, OutCol, RangeCursor, StateDim};
 use crate::lead_time::AnticipatedResolution;
 
-use cobre_core::EntityId;
 use cobre_core::temporal::StageStateConfig;
 
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
@@ -38,19 +36,15 @@ use cobre_core::temporal::StageStateConfig;
 /// … + S                                       theta                 — future cost variable (scalar)
 /// ```
 ///
-/// `S = A*k_max + W`: the merged commitment-hold region packs the in-study
-/// anticipated-ring slots and the terminal post-horizon lanes into one
-/// contiguous out/in pair each — an outgoing block ([`Self::commit_out`],
-/// identity-resolved, contributing to [`Self::n_state`]) and a separate
-/// incoming block ([`Self::commit_in`], pinned via
-/// [`Self::state_to_lp_incoming_column`]) — never one dual-purpose range
-/// shifted out-of-LP. The leading `A*k_max` slots are in-study, slot-major/
-/// plant-minor, keyed delivery-target-modular (delivery target `m`'s slot is
-/// `m mod k_max`); the trailing `W` (= [`Self::n_commitment`]) slots are the
-/// terminal post-horizon lanes, one per declared window, with no depth axis
-/// (one slot per window, not per lead-stage). Like the bucket block, the
-/// whole region is always cut-enabled, ignoring [`StageStateConfig`] (see
-/// [`StateRegion::cut_enabled`]).
+/// `S = A*k_max`: the commitment-hold region is the in-study anticipated-ring
+/// slots in one contiguous out/in pair — an outgoing block
+/// ([`Self::commit_out`], identity-resolved, contributing to
+/// [`Self::n_state`]) and a separate incoming block ([`Self::commit_in`],
+/// pinned via [`Self::state_to_lp_incoming_column`]) — never one
+/// dual-purpose range shifted out-of-LP. Slots are slot-major/plant-minor,
+/// keyed delivery-target-modular (delivery target `m`'s slot is `m mod
+/// k_max`). Like the bucket block, the whole region is always cut-enabled,
+/// ignoring [`StageStateConfig`] (see [`StateRegion::cut_enabled`]).
 #[derive(Debug, Clone)]
 pub struct StateSpace {
     /// Outgoing storage volumes.
@@ -65,19 +59,14 @@ pub struct StateSpace {
     /// lag remap.
     pub transit_buckets_out: Range<usize>,
 
-    /// Commitment-hold OUTGOING slots: the leading `n_anticipated * k_max`
-    /// in-study anticipated-ring slots, slot-major/plant-minor (slot `k` for
-    /// plant `i` at `commit_out.start + k * n_anticipated + i` —
-    /// [`Self::commitment_hold_in_study_offset`]), followed by the trailing
-    /// `n_commitment` terminal post-horizon lanes, one per declared window
-    /// (window `w` at `commit_out.start + n_anticipated * k_max + w` —
-    /// [`Self::commitment_hold_post_horizon_offset`]). Every slot is a genuine
-    /// LP column resolved by identity (the `transit_buckets_out` convention)
-    /// and defined by an in-LP definition row — never resolved out-of-LP. An
-    /// in-study slot `k >= k_i` for a plant whose own reachable depth is
-    /// smaller is padding, frozen `[0, 0]`; a post-horizon lane is never
-    /// padding (a window either resolves to a lane or is dropped before
-    /// reaching this layout).
+    /// Commitment-hold OUTGOING slots: the `n_anticipated * k_max` in-study
+    /// anticipated-ring slots, slot-major/plant-minor (slot `k` for plant `i`
+    /// at `commit_out.start + k * n_anticipated + i` —
+    /// [`Self::commitment_hold_in_study_offset`]). Every slot is a genuine LP
+    /// column resolved by identity (the `transit_buckets_out` convention) and
+    /// defined by an in-LP definition row — never resolved out-of-LP. A slot
+    /// `k >= k_i` for a plant whose own reachable depth is smaller is
+    /// padding, frozen `[0, 0]`.
     pub commit_out: Range<usize>,
 
     /// Incoming storage volumes, pinned via
@@ -91,10 +80,9 @@ pub struct StateSpace {
     /// Realized-inflow variables `z_h`, one per hydro.
     pub z_inflow: Range<usize>,
 
-    /// Commitment-hold INCOMING slots, the same leading in-study /
-    /// trailing post-horizon layout as [`Self::commit_out`], pinned via
-    /// [`StateSpace::state_to_lp_incoming_column`]. The in-study slot maturing
-    /// this stage is also read directly by [`crate::lp_builder`]'s
+    /// Commitment-hold INCOMING slots, the same layout as [`Self::commit_out`],
+    /// pinned via [`StateSpace::state_to_lp_incoming_column`]. The slot
+    /// maturing this stage is also read directly by [`crate::lp_builder`]'s
     /// commitment-fishing row fill.
     pub commit_in: Range<usize>,
 
@@ -138,32 +126,6 @@ pub struct StateSpace {
     /// (anticipated-local order); default-empty until
     /// [`Self::set_anticipated_resolution`] attaches it.
     pub(crate) anticipated_resolution: AnticipatedResolution,
-
-    /// Terminal commitment-hold post-horizon window count (`W`); the trailing
-    /// width of both [`Self::commit_out`] and [`Self::commit_in`], after their
-    /// shared leading `n_anticipated * k_max` in-study width.
-    pub n_commitment: usize,
-
-    /// Per-window in-study decider stage index, length [`Self::n_commitment`],
-    /// in [`Self::commit_out`]'s post-horizon-lane order: window `w` latches
-    /// at stage `commitment_decider_stage[w]` and carries by identity at
-    /// every other stage.
-    pub(crate) commitment_decider_stage: Vec<usize>,
-
-    /// Per-window owning thermal id, length [`Self::n_commitment`], parallel to
-    /// [`Self::commitment_decider_stage`]. [`crate::policy_export::build_stage_entity_manifest`]
-    /// derives a window's manifest `subindex` from the count of prior entries
-    /// sharing its owner — never a raw window index — so two windows of the
-    /// same thermal get distinct subindices.
-    pub(crate) commitment_window_thermal_id: Vec<EntityId>,
-
-    /// Per-window `(min_mw, max_mw)` commitment interval, length
-    /// [`Self::n_commitment`], parallel to [`Self::commitment_decider_stage`].
-    pub(crate) commitment_window_min_max: Vec<(f64, f64)>,
-
-    /// Per-window resolved post-study destination stage index, length
-    /// [`Self::n_commitment`], parallel to [`Self::commitment_decider_stage`].
-    pub(crate) commitment_window_dest_stage: Vec<usize>,
 
     /// Canonical `(plant_canonical_idx, lag)` pair per bucket state-vector
     /// dimension, in [`Self::transit_buckets_out`] order.
@@ -227,19 +189,6 @@ impl StateRegion {
     }
 }
 
-/// The two addressing forms a [`StateSpace::commit_out`]/
-/// [`StateSpace::commit_in`]-relative offset decodes to — the exact inverse
-/// of [`StateSpace::commitment_hold_in_study_offset`] and
-/// [`StateSpace::commitment_hold_post_horizon_offset`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommitmentHoldAddress {
-    /// In-study anticipated-ring position: anticipated-local plant `plant`'s
-    /// modular slot `slot = m mod k_max` for some delivery target `m`.
-    InStudy { plant: usize, slot: usize },
-    /// Terminal post-horizon lane for declared window `window`.
-    PostHorizon { window: usize },
-}
-
 impl StateSpace {
     /// Construct a finalized [`StateSpace`] from the state dimensions and the
     /// per-hydro effective lag-slot counts.
@@ -270,91 +219,15 @@ impl StateSpace {
         anticipated_lead_stages: Vec<usize>,
         effective_lag_count: &[usize],
     ) -> Self {
-        Self::new_with_commitment_hold_windows(
-            hydro_count,
-            max_par_order,
-            n_buckets,
-            transit_bucket_column_order,
-            n_anticipated,
-            k_max,
-            anticipated_lead_stages,
-            effective_lag_count,
-            0,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-    }
-
-    /// [`Self::new`] plus the terminal commitment-hold windows: `n_commitment`
-    /// declared post-horizon windows, each latching at its own
-    /// `commitment_decider_stage[w]`, owned by `commitment_window_thermal_id[w]`,
-    /// spanning MW interval `commitment_window_min_max[w]`, and resolving to
-    /// post-study destination stage `commitment_window_dest_stage[w]` (all four
-    /// length `n_commitment`, [`Self::commit_out`]'s post-horizon-lane order).
-    /// `n_commitment == 0` with `n_anticipated * k_max == 0` collapses
-    /// [`Self::commit_out`]/[`Self::commit_in`] to `0..0` and reproduces
-    /// [`Self::new`]'s layout byte-for-byte — the single owner every other
-    /// constructor delegates to.
-    ///
-    /// # Panics (debug builds only)
-    ///
-    /// Inherits [`Self::new`]'s panics, plus panics if
-    /// `commitment_decider_stage.len()`, `commitment_window_thermal_id.len()`,
-    /// `commitment_window_min_max.len()`, or `commitment_window_dest_stage.len()`
-    /// differ from `n_commitment`.
-    // Rationale: each argument sizes an independent state region (storage, lags,
-    // buckets, the anticipated ring, the commitment block); `Self::new` forwards
-    // eight of these unchanged, so splitting the thirteen into a sub-struct would just
-    // wrap-then-immediately-destructure at the sole call site (`resolve_state_layout`).
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub(crate) fn new_with_commitment_hold_windows(
-        hydro_count: usize,
-        max_par_order: usize,
-        n_buckets: usize,
-        transit_bucket_column_order: Vec<(usize, usize)>,
-        n_anticipated: usize,
-        k_max: usize,
-        anticipated_lead_stages: Vec<usize>,
-        effective_lag_count: &[usize],
-        n_commitment: usize,
-        commitment_decider_stage: Vec<usize>,
-        commitment_window_thermal_id: Vec<EntityId>,
-        commitment_window_min_max: Vec<(f64, f64)>,
-        commitment_window_dest_stage: Vec<usize>,
-    ) -> Self {
         debug_assert_eq!(
             transit_bucket_column_order.len(),
             n_buckets,
             "transit_bucket_column_order must have exactly n_buckets entries"
         );
-        debug_assert_eq!(
-            commitment_decider_stage.len(),
-            n_commitment,
-            "commitment_decider_stage must have exactly n_commitment entries"
-        );
-        debug_assert_eq!(
-            commitment_window_thermal_id.len(),
-            n_commitment,
-            "commitment_window_thermal_id must have exactly n_commitment entries"
-        );
-        debug_assert_eq!(
-            commitment_window_min_max.len(),
-            n_commitment,
-            "commitment_window_min_max must have exactly n_commitment entries"
-        );
-        debug_assert_eq!(
-            commitment_window_dest_stage.len(),
-            n_commitment,
-            "commitment_window_dest_stage must have exactly n_commitment entries"
-        );
 
         let n = hydro_count;
         let l = max_par_order;
         let n_ant_state = n_anticipated * k_max;
-        let n_commit_hold = n_ant_state + n_commitment;
 
         // Optional blocks collapse to the literal `0..0`, not `RangeCursor::alloc`'s
         // `pos..pos` — skipping `alloc` when a count is `0` is safe because a
@@ -368,12 +241,8 @@ impl StateSpace {
         } else {
             0..0
         };
-        // One alloc call spanning both the leading in-study slots and the
-        // trailing post-horizon lanes — `commit_out`/`commit_in` are single
-        // contiguous ranges, never a separately-allocated pair stitched
-        // together after the fact.
-        let commit_out = if n_commit_hold > 0 {
-            cursor.alloc(n_commit_hold)
+        let commit_out = if n_ant_state > 0 {
+            cursor.alloc(n_ant_state)
         } else {
             0..0
         };
@@ -384,8 +253,8 @@ impl StateSpace {
         } else {
             0..0
         };
-        let commit_in = if n_commit_hold > 0 {
-            cursor.alloc(n_commit_hold)
+        let commit_in = if n_ant_state > 0 {
+            cursor.alloc(n_ant_state)
         } else {
             0..0
         };
@@ -393,13 +262,13 @@ impl StateSpace {
         let theta = cursor.pos();
 
         // Outgoing and incoming commitment-hold pairs describe the SAME state
-        // dimensions each, so `n_commit_hold` enters `n_state` once, not twice.
-        let n_state = n * (1 + l) + n_buckets + n_commit_hold;
+        // dimensions each, so `n_ant_state` enters `n_state` once, not twice.
+        let n_state = n * (1 + l) + n_buckets + n_ant_state;
 
         debug_assert_eq!(
             commit_out.len(),
-            n_ant_state + n_commitment,
-            "commit_out must span exactly the in-study slots plus the post-horizon lanes"
+            n_ant_state,
+            "commit_out must span exactly the in-study anticipated-ring slots"
         );
         debug_assert_eq!(
             commit_out.len(),
@@ -426,11 +295,6 @@ impl StateSpace {
             n_delivery: 0,
             anticipated_lead_stages,
             anticipated_resolution: AnticipatedResolution::default(),
-            n_commitment,
-            commitment_decider_stage,
-            commitment_window_thermal_id,
-            commitment_window_min_max,
-            commitment_window_dest_stage,
             transit_bucket_column_order,
             nonzero_state_indices: Vec::new(),
             state_to_lp_column_map: Vec::new(),
@@ -513,15 +377,13 @@ impl StateSpace {
         start..start + self.n_buckets
     }
 
-    /// State-dimension region `[N*(1+L) + B, N*(1+L) + B + S)` — the merged
-    /// commitment-hold region (`S = A*k_max + W`): the leading `A*k_max`
-    /// in-study anticipated-ring slots followed by the trailing `W` (=
-    /// [`Self::n_commitment`]) terminal post-horizon lanes.
+    /// State-dimension region `[N*(1+L) + B, N*(1+L) + B + A*k_max)` — the
+    /// in-study anticipated-ring slots.
     #[inline]
     #[must_use]
     pub(crate) fn state_dim_commitment_hold_range(&self) -> Range<usize> {
         let start = self.state_dim_bucket_range().end;
-        start..start + self.n_anticipated * self.k_max + self.n_commitment
+        start..start + self.n_anticipated * self.k_max
     }
 
     /// Resolve `region`'s state-dimension range through the matching
@@ -716,46 +578,6 @@ impl StateSpace {
         (m % self.k_max) * self.n_anticipated + plant
     }
 
-    /// Encode a post-horizon commitment-hold position: declared window
-    /// `window`'s offset within [`Self::commit_out`]/[`Self::commit_in`],
-    /// appended past the leading in-study block. The encoder counterpart to
-    /// [`Self::commitment_hold_address`]'s decoder.
-    #[must_use]
-    pub(crate) fn commitment_hold_post_horizon_offset(&self, window: usize) -> usize {
-        debug_assert!(
-            window < self.n_commitment,
-            "window {window} out of range (n_commitment = {})",
-            self.n_commitment
-        );
-        self.n_anticipated * self.k_max + window
-    }
-
-    /// Decode a [`Self::commit_out`]/[`Self::commit_in`]-relative offset back
-    /// to its addressing form — the exact inverse of
-    /// [`Self::commitment_hold_in_study_offset`] and
-    /// [`Self::commitment_hold_post_horizon_offset`]. `slot` (not `m`) is all
-    /// an offset can recover: every delivery target congruent modulo `k_max`
-    /// addresses the same in-study slot.
-    #[must_use]
-    pub(crate) fn commitment_hold_address(&self, offset: usize) -> CommitmentHoldAddress {
-        let n_ant_state = self.n_anticipated * self.k_max;
-        debug_assert!(
-            offset < n_ant_state + self.n_commitment,
-            "offset {offset} out of range (commit width = {})",
-            n_ant_state + self.n_commitment
-        );
-        if offset < n_ant_state {
-            CommitmentHoldAddress::InStudy {
-                plant: offset % self.n_anticipated,
-                slot: offset / self.n_anticipated,
-            }
-        } else {
-            CommitmentHoldAddress::PostHorizon {
-                window: offset - n_ant_state,
-            }
-        }
-    }
-
     fn storage_state_dim(&self, h: usize) -> StateDim {
         debug_assert!(h < self.hydro_count);
         StateDim::new(self.state_dim_storage_range().start + h)
@@ -820,13 +642,9 @@ impl StateSpace {
     ///
     /// Every travel-time bucket slot is always included — bucket depth is
     /// already sized as the per-stage reachability union, so (unlike the
-    /// commitment-hold region's in-study slots) there is no padding to
-    /// exclude. Every commitment-hold post-horizon lane is likewise always
-    /// included — a window either resolves to a lane or is dropped before
-    /// reaching this layout, so (unlike the in-study slots) there is no
-    /// padding to exclude there either.
+    /// commitment-hold region's slots) there is no padding to exclude.
     ///
-    /// For the commitment-hold region's in-study slots, anticipated plant `i`
+    /// For the commitment-hold region, anticipated plant `i`
     /// only has slots `0..K_i` included; the trailing `k_max − K_i` are
     /// padding whose cut coefficients are structurally zero (no decision
     /// writes them). Including padding over-estimates cut hyperplanes — the
@@ -847,16 +665,13 @@ impl StateSpace {
 
         let n_lag_active: usize = lag_counts.iter().copied().sum();
         let n_ant_active: usize = anticipated_lead_stages.iter().copied().sum();
-        let mut mask = Vec::with_capacity(
-            self.hydro_count + n_lag_active + self.n_buckets + n_ant_active + self.n_commitment,
-        );
+        let mut mask =
+            Vec::with_capacity(self.hydro_count + n_lag_active + self.n_buckets + n_ant_active);
 
         // REGION_ORDER fixes the walk order; storage and buckets have no
-        // padding to exclude and extend their full range, lag keeps its own
-        // per-region active-slot filter (padding stays excluded — see the doc
-        // comment above), and commitment-hold applies that same filter to its
-        // leading in-study slots before extending its trailing post-horizon
-        // lanes unfiltered.
+        // padding to exclude and extend their full range, lag and
+        // commitment-hold each keep their own per-region active-slot filter
+        // (padding stays excluded — see the doc comment above).
         for region in REGION_ORDER {
             match region {
                 StateRegion::Storage | StateRegion::Buckets => {
@@ -883,11 +698,6 @@ impl StateSpace {
                             }
                         }
                     }
-                    let n_ant_state = self.n_anticipated * self.k_max;
-                    mask.extend(
-                        (start + n_ant_state..start + n_ant_state + self.n_commitment)
-                            .map(StateDim::new),
-                    );
                 }
             }
         }
@@ -903,12 +713,8 @@ impl StateSpace {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AnticipatedResolution, CommitmentHoldAddress, InCol, OutCol, StateDim, StateRegion,
-        StateSpace,
-    };
+    use super::{AnticipatedResolution, InCol, OutCol, StateDim, StateSpace};
     use crate::lead_time::PointResolution;
-    use cobre_core::EntityId;
 
     /// Build a [`StateSpace`] finalized the way production `resolve_state_layout`
     /// does: full `max_par_order` lag stride for every hydro (the coverage the
@@ -1733,245 +1539,7 @@ mod tests {
         );
     }
 
-    // ── Terminal commitment-hold (post-horizon lanes) ───────────────────────
-
-    /// Sizing and column layout: `commit_out`/`commit_in` each span the
-    /// merged in-study + post-horizon width (`n_anticipated*k_max +
-    /// n_commitment`), inserted between the travel-time buckets and
-    /// `z_inflow`/`theta` respectively — hand-computed against `N=3, L=2,
-    /// B=0, A=2, k_max=2, W=2`.
-    #[test]
-    fn commitment_hold_sizing_and_column_layout() {
-        let idx = StateSpace::new_with_commitment_hold_windows(
-            3,
-            2,
-            0,
-            Vec::new(),
-            2,
-            2,
-            vec![1, 2],
-            &[2, 2, 2],
-            2,
-            vec![0, 1],
-            vec![EntityId(0), EntityId(0)],
-            vec![(0.0, 0.0), (0.0, 0.0)],
-            vec![0, 0],
-        );
-
-        assert_eq!(idx.n_commitment, 2);
-        assert_eq!(idx.commitment_decider_stage, vec![0, 1]);
-        assert_eq!(idx.storage, 0..3);
-        assert_eq!(idx.inflow_lags, 3..9);
-        assert_eq!(idx.commit_out, 9..15);
-        assert_eq!(idx.z_inflow, 15..18);
-        assert_eq!(idx.storage_in, 18..21);
-        assert_eq!(idx.commit_in, 21..27);
-        assert_eq!(idx.theta, 27);
-        assert_eq!(idx.n_state, 15);
-    }
-
-    /// `state_to_lp_column` resolves every commitment-hold post-horizon lane
-    /// by identity, mirroring storage/buckets/the in-study slots.
-    #[test]
-    fn commitment_hold_post_horizon_state_to_lp_column_is_identity() {
-        let idx = StateSpace::new_with_commitment_hold_windows(
-            3,
-            2,
-            0,
-            Vec::new(),
-            2,
-            2,
-            vec![1, 2],
-            &[2, 2, 2],
-            2,
-            vec![0, 1],
-            vec![EntityId(0), EntityId(0)],
-            vec![(0.0, 0.0), (0.0, 0.0)],
-            vec![0, 0],
-        );
-        for window in 0..idx.n_commitment {
-            let j = idx.commit_out.start + idx.commitment_hold_post_horizon_offset(window);
-            assert_eq!(
-                idx.state_to_lp_column(StateDim::new(j)),
-                OutCol::new(j),
-                "commitment-hold post-horizon lane {j} must resolve by identity"
-            );
-            let (region, _) = idx.classify(StateDim::new(j));
-            assert!(matches!(region, StateRegion::CommitmentHold));
-        }
-    }
-
-    /// `classify_incoming_column` inverts `state_to_lp_incoming_column` for
-    /// every commitment-hold post-horizon state dimension — the incoming
-    /// (pinned) side of the classification the outgoing test above pins.
-    #[test]
-    fn commitment_hold_post_horizon_classify_incoming_column_inverts() {
-        let idx = StateSpace::new_with_commitment_hold_windows(
-            3,
-            2,
-            0,
-            Vec::new(),
-            2,
-            2,
-            vec![1, 2],
-            &[2, 2, 2],
-            2,
-            vec![0, 1],
-            vec![EntityId(0), EntityId(0)],
-            vec![(0.0, 0.0), (0.0, 0.0)],
-            vec![0, 0],
-        );
-        for window in 0..idx.n_commitment {
-            let offset = idx.commitment_hold_post_horizon_offset(window);
-            let j = idx.state_dim_commitment_hold_range().start + offset;
-            let dim = StateDim::new(j);
-            let (region, region_offset) =
-                idx.classify_incoming_column(idx.state_to_lp_incoming_column(dim));
-            assert!(matches!(region, StateRegion::CommitmentHold));
-            assert_eq!(region_offset, offset);
-            assert_eq!(
-                idx.commitment_hold_address(region_offset),
-                CommitmentHoldAddress::PostHorizon { window }
-            );
-        }
-    }
-
-    /// Every commitment-hold post-horizon lane enters `nonzero_state_indices`
-    /// — unlike the in-study slots there is no padding concept (a window
-    /// either resolves to a lane or is dropped upstream).
-    #[test]
-    fn commitment_hold_nonzero_mask_includes_every_window() {
-        let idx = StateSpace::new_with_commitment_hold_windows(
-            0,
-            0,
-            0,
-            Vec::new(),
-            0,
-            0,
-            vec![],
-            &[],
-            3,
-            vec![0, 1, 2],
-            vec![EntityId(0), EntityId(0), EntityId(0)],
-            vec![(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
-            vec![0, 0, 0],
-        );
-        assert_eq!(idx.commit_out, 0..3);
-        assert_eq!(idx.nonzero_state_indices, [0, 1, 2].map(StateDim::new));
-    }
-
-    /// `n_commitment == 0` reproduces [`StateSpace::new`]'s layout byte-for-byte
-    /// — the additive & inert contract: with no declared post-horizon windows,
-    /// every existing case stays untouched.
-    #[test]
-    fn commitment_hold_zero_windows_is_byte_identical_to_pre_commitment_layout() {
-        let with_zero_commitment = StateSpace::new_with_commitment_hold_windows(
-            3,
-            2,
-            0,
-            Vec::new(),
-            2,
-            2,
-            vec![1, 2],
-            &[2, 2, 2],
-            0,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
-        let baseline = StateSpace::new(3, 2, 0, Vec::new(), 2, 2, vec![1, 2], &[2, 2, 2]);
-
-        assert_eq!(with_zero_commitment.n_commitment, 0);
-        assert!(with_zero_commitment.commitment_decider_stage.is_empty());
-        assert_eq!(with_zero_commitment.storage, baseline.storage);
-        assert_eq!(with_zero_commitment.inflow_lags, baseline.inflow_lags);
-        assert_eq!(
-            with_zero_commitment.transit_buckets_out,
-            baseline.transit_buckets_out
-        );
-        assert_eq!(with_zero_commitment.commit_out, baseline.commit_out);
-        assert_eq!(with_zero_commitment.z_inflow, baseline.z_inflow);
-        assert_eq!(with_zero_commitment.storage_in, baseline.storage_in);
-        assert_eq!(
-            with_zero_commitment.transit_buckets_in,
-            baseline.transit_buckets_in
-        );
-        assert_eq!(with_zero_commitment.commit_in, baseline.commit_in);
-        assert_eq!(with_zero_commitment.theta, baseline.theta);
-        assert_eq!(with_zero_commitment.n_state, baseline.n_state);
-        assert_eq!(
-            with_zero_commitment.state_to_lp_column_map,
-            baseline.state_to_lp_column_map
-        );
-        assert_eq!(
-            with_zero_commitment.nonzero_state_indices,
-            baseline.nonzero_state_indices
-        );
-    }
-
     // ── CommitmentHold addressing helper ────────────────────────────────────
-
-    /// `commit_out`/`commit_in` always span exactly `n_anticipated*k_max +
-    /// n_commitment` with equal width — the invariant
-    /// [`StateSpace::new_with_commitment_hold_windows`]'s `debug_assert` pins,
-    /// checked here across in-study-only, post-horizon-only, both, and
-    /// neither.
-    #[test]
-    fn commit_out_in_width_matches_in_study_plus_post_horizon() {
-        for idx in [
-            StateSpace::new_with_commitment_hold_windows(
-                3,
-                2,
-                0,
-                Vec::new(),
-                2,
-                2,
-                vec![1, 2],
-                &[2, 2, 2],
-                2,
-                vec![0, 1],
-                vec![EntityId(0), EntityId(0)],
-                vec![(0.0, 0.0), (0.0, 0.0)],
-                vec![0, 0],
-            ),
-            StateSpace::new_with_commitment_hold_windows(
-                3,
-                2,
-                0,
-                Vec::new(),
-                0,
-                0,
-                vec![],
-                &[2, 2, 2],
-                2,
-                vec![0, 1],
-                vec![EntityId(0), EntityId(0)],
-                vec![(0.0, 0.0), (0.0, 0.0)],
-                vec![0, 0],
-            ),
-            StateSpace::new_with_commitment_hold_windows(
-                3,
-                2,
-                0,
-                Vec::new(),
-                2,
-                2,
-                vec![1, 2],
-                &[2, 2, 2],
-                0,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ),
-            StateSpace::new(3, 2, 0, Vec::new(), 0, 0, vec![], &[2, 2, 2]),
-        ] {
-            let expected = idx.n_anticipated * idx.k_max + idx.n_commitment;
-            assert_eq!(idx.commit_out.len(), expected);
-            assert_eq!(idx.commit_in.len(), expected);
-        }
-    }
 
     /// `commitment_hold_in_study_offset` is delivery-target-modular: delivery
     /// targets congruent modulo `k_max` share the same plant's slot, and one
@@ -2003,85 +1571,6 @@ mod tests {
             offsets, expected,
             "one period of m must biject onto the full leading in-study block"
         );
-    }
-
-    /// `commitment_hold_address` inverts the two encoders for every position
-    /// in the merged region — in-study offsets decode back to their `(plant,
-    /// slot)` pair, post-horizon offsets decode back to their `window`.
-    #[test]
-    fn commitment_hold_address_round_trips_encoders() {
-        let idx = StateSpace::new_with_commitment_hold_windows(
-            0,
-            0,
-            0,
-            Vec::new(),
-            2,
-            3,
-            vec![3, 3],
-            &[],
-            2,
-            vec![0, 1],
-            vec![EntityId(0), EntityId(0)],
-            vec![(0.0, 0.0), (0.0, 0.0)],
-            vec![0, 0],
-        );
-
-        for plant in 0..idx.n_anticipated {
-            for slot in 0..idx.k_max {
-                let offset = idx.commitment_hold_in_study_offset(plant, slot);
-                assert_eq!(
-                    idx.commitment_hold_address(offset),
-                    CommitmentHoldAddress::InStudy { plant, slot }
-                );
-            }
-        }
-        for window in 0..idx.n_commitment {
-            let offset = idx.commitment_hold_post_horizon_offset(window);
-            assert_eq!(
-                idx.commitment_hold_address(offset),
-                CommitmentHoldAddress::PostHorizon { window }
-            );
-        }
-    }
-
-    /// `classify_incoming_column` composed with `commitment_hold_address`
-    /// round-trips every commitment-hold state dimension back to its
-    /// structured address, for a layout exercising the in-study and
-    /// post-horizon sub-ranges together.
-    #[test]
-    fn commitment_hold_classify_incoming_column_round_trips_address() {
-        let idx = StateSpace::new_with_commitment_hold_windows(
-            0,
-            0,
-            0,
-            Vec::new(),
-            2,
-            3,
-            vec![3, 3],
-            &[],
-            2,
-            vec![0, 1],
-            vec![EntityId(0), EntityId(0)],
-            vec![(0.0, 0.0), (0.0, 0.0)],
-            vec![0, 0],
-        );
-
-        for j in idx.state_dim_commitment_hold_range() {
-            let dim = StateDim::new(j);
-            let (region, offset) =
-                idx.classify_incoming_column(idx.state_to_lp_incoming_column(dim));
-            assert!(matches!(region, StateRegion::CommitmentHold));
-            let expected_offset = j - idx.state_dim_commitment_hold_range().start;
-            assert_eq!(offset, expected_offset);
-            match idx.commitment_hold_address(offset) {
-                CommitmentHoldAddress::InStudy { plant, slot } => {
-                    assert_eq!(offset, slot * idx.n_anticipated + plant);
-                }
-                CommitmentHoldAddress::PostHorizon { window } => {
-                    assert_eq!(offset, idx.n_anticipated * idx.k_max + window);
-                }
-            }
-        }
     }
 
     // ── State-dimension region accessors ────────────────────────────────────

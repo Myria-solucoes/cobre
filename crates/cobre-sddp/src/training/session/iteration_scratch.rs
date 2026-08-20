@@ -93,7 +93,6 @@ impl IterationScratch {
         n_buckets: usize,
         n_anticipated: usize,
         k_max: usize,
-        n_commitment: usize,
         stage_ctx: &StageContext<'_>,
     ) -> Self {
         let n_pools = pool_stage.len();
@@ -110,11 +109,10 @@ impl IterationScratch {
             .collect();
 
         // The LB path never calls `fill_load_patches` (load), so the
-        // `n_load_buses` and `max_blocks` args are 0. Bucket, anticipated, and
-        // commitment-block column capacity MUST be sized by the actual
-        // `n_buckets` / `n_anticipated * k_max` / `n_commitment`: undersizing
-        // leaves those state slots unpinned or panics in
-        // `fill_col_state_patches`.
+        // `n_load_buses` and `max_blocks` args are 0. Bucket and anticipated
+        // column capacity MUST be sized by the actual `n_buckets` /
+        // `n_anticipated * k_max`: undersizing leaves those state slots
+        // unpinned or panics in `fill_col_state_patches`.
         let patch_buf = PatchBuffer::new(
             hydro_count,
             max_par_order,
@@ -123,7 +121,6 @@ impl IterationScratch {
             n_buckets,
             n_anticipated,
             k_max,
-            n_commitment,
         );
 
         let empty_row_batch = || RowBatch {
@@ -288,7 +285,6 @@ mod tests {
             0,
             0,
             0,
-            0,
             &stage_ctx,
         );
 
@@ -341,7 +337,6 @@ mod tests {
             template_0_num_rows,
             hydro_count,
             max_par_order,
-            0,
             0,
             0,
             0,
@@ -400,7 +395,6 @@ mod tests {
             0,
             n_anticipated,
             k_max,
-            0,
             &stage_ctx,
         );
 
@@ -464,7 +458,6 @@ mod tests {
             0,
             0,
             0,
-            0,
             &stage_ctx,
         );
 
@@ -506,7 +499,6 @@ mod tests {
             hydro_count,
             max_par_order,
             n_buckets,
-            0,
             0,
             0,
             &stage_ctx,

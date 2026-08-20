@@ -144,28 +144,16 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) delivery_stage_ids: Vec<i32>,
     /// Whether any penalty method is active.
     pub(crate) has_penalty: bool,
-    /// Present-value multiplier at each stage, length `n_study_stages`. The strict
-    /// predicate `stage_idx + K_i < n_stages` keeps every delivery lookup in range.
-    // Rationale: remains read by the study-only byte-identity test pin in
-    // `template::tests` (`ctx.delivery_cumulative_discount_factors ==
-    // ctx.cumulative_discount_factors`); production reads the extended
-    // `delivery_cumulative_discount_factors` vector.
-    #[allow(dead_code)]
-    pub(crate) cumulative_discount_factors: Vec<f64>,
-    /// `cumulative_discount_factors` concatenated with
-    /// `post_study_resolved.cumulative_discount_factors`, length
-    /// `n_study_stages + n_post`; indexed by DELIVERY stage, not study stage.
+    /// Present-value multiplier at each DELIVERY stage, length
+    /// `n_study_stages + n_post` — the study's own per-stage factors
+    /// concatenated with `post_study_resolved.cumulative_discount_factors`. The
+    /// strict predicate `stage_idx + K_i < n_stages` keeps every delivery
+    /// lookup in range.
     pub(crate) delivery_cumulative_discount_factors: Vec<f64>,
-    /// Σ `block.duration_hours` per study stage, length `n_study_stages` (same
-    /// in-range guarantee as `cumulative_discount_factors`).
-    // Rationale: remains read by the study-only byte-identity test pin in
-    // `template::tests` (`ctx.delivery_total_hours == ctx.total_hours_per_stage`);
-    // production reads the extended `delivery_total_hours` vector.
-    #[allow(dead_code)]
-    pub(crate) total_hours_per_stage: Vec<f64>,
-    /// `total_hours_per_stage` concatenated with `post_study_resolved.total_hours`,
-    /// length `n_study_stages + n_post`; indexed by DELIVERY stage, not study
-    /// stage.
+    /// Σ `block.duration_hours` per DELIVERY stage, length
+    /// `n_study_stages + n_post` — the study's own per-stage hours
+    /// concatenated with `post_study_resolved.total_hours` (same in-range
+    /// guarantee as `delivery_cumulative_discount_factors`).
     pub(crate) delivery_total_hours: Vec<f64>,
     /// Per-stage minimum target-storage trajectory, keyed `(hydro_idx, stage_id)
     /// → V_target` \[hm³\]. Computed once by a backward fold from the dead volume
@@ -206,31 +194,30 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) per_stage_mask: Vec<Vec<usize>>,
     /// Resolved post-study boundary artifacts
     /// ([`crate::setup::resolve_post_study_artifacts`]) — the fuel cost/bounds
-    /// and discount continuation [`super::columns::fill_commitment_decision_columns`]
-    /// books onto each post-horizon decision column. The sole owner, computed once
-    /// per template build from this function's `system` parameter (see
+    /// and discount continuation [`super::columns::fill_anticipated_columns`]
+    /// books onto a post-horizon delivery's decision column via
+    /// `anticipated_bound`. The sole owner, computed once per template build
+    /// from this function's `system` parameter (see
     /// [`super::template::build_template_build_ctx`]); `PostStudyResolved::default()`
     /// (empty) without a declared post-horizon commitment.
     pub(crate) post_study_resolved: PostStudyResolved,
 }
 
-/// Column/row offsets for one stage's unified commitment-hold layout: the
-/// in-study anticipated-ring family (latch/carry/fish, modular-slot-addressed)
-/// and the terminal post-horizon lane family (latch/carry only, no fish),
-/// both carved from the same [`StateSpace::commit_out`]/[`StateSpace::commit_in`]
-/// region. There is no separate block-layout struct — [`StageLayout::new`]
-/// allocates both families' columns and rows in one pass.
+/// Column/row offsets for one stage's in-study anticipated-ring layout
+/// (latch/carry/fish, modular-slot-addressed), carved from
+/// [`StateSpace::commit_out`]/[`StateSpace::commit_in`]. There is no separate
+/// block-layout struct — [`StageLayout::new`] allocates both columns and rows
+/// in one pass.
 pub(crate) struct AnticipatedLayout {
     /// Start of the anticipated-decision column block: `n_anticipated`
     /// columns (`col_anticipated_decision_start + local_idx`). Equals
     /// `col_thermal_end`.
     pub(crate) col_anticipated_decision_start: usize,
     /// Start of the merged [`StateSpace::commit_out`]/[`StateSpace::commit_in`]
-    /// column block (the leading `A * k_max` in-study slots, slot-major/
-    /// plant-minor, followed by the trailing `n_commitment` post-horizon
-    /// lanes). Sourced from `StateSpace::commit_out.start`, so the offset is
-    /// stage-invariant — keeping the global stage-0 cut map on the correct
-    /// column at every stage regardless of this stage's block count.
+    /// column block (the `A * k_max` in-study anticipated-ring slots,
+    /// slot-major/plant-minor). Sourced from `StateSpace::commit_out.start`, so
+    /// the offset is stage-invariant — keeping the global stage-0 cut map on the
+    /// correct column at every stage regardless of this stage's block count.
     pub(crate) col_anticipated_slots_out_start: usize,
     /// Start of the `anticipated_state_out_def` equality row block: one row
     /// per plant with a genuine, ACTIVE decision this stage
@@ -290,20 +277,6 @@ pub(crate) struct AnticipatedLayout {
     /// the study horizon, or is not yet ready
     /// (`PointResolution::is_ready_at`). Length `n_anticipated * k_max`.
     pub(crate) anticipated_slot_row_pos: Vec<Option<usize>>,
-    /// Row index of post-horizon window `w`'s per-stage row:
-    /// `row_commitment_start + w`. Dense — every declared window gets exactly
-    /// one row every stage (latch at its own
-    /// [`StateSpace::commitment_decider_stage`], carry-by-identity
-    /// otherwise); no fish arm exists for a post-horizon lane.
-    pub(crate) row_commitment_start: usize,
-    /// Start of this stage's post-horizon decision-column family (sparse: one
-    /// column per window whose decider is this stage,
-    /// `col_commitment_decision_start + local_idx`).
-    pub(crate) col_commitment_decision_start: usize,
-    /// Global post-horizon window indices deciding at this stage, ascending —
-    /// parallel to the decision columns above; the [`Self::row_commitment_start`]
-    /// row for window `w` is a latch iff `w` appears here, else a carry.
-    pub(crate) commitment_decision_windows: Vec<usize>,
 }
 
 /// Equipment column ranges and their block-start cursors: every dispatchable
@@ -1274,11 +1247,6 @@ impl<'a> StageLayout<'a> {
             BlockMode::Chronological => n_blks.saturating_sub(1),
             BlockMode::Parallel => 0,
         };
-        // Global post-horizon window indices deciding at this stage, ascending
-        // — the sparse decision-column family below sizes from this.
-        let commitment_decision_windows: Vec<usize> = (0..state.n_commitment)
-            .filter(|&w| state.commitment_decider_stage[w] == stage_idx)
-            .collect();
         let mut col = RangeCursor::new(state.control_region_start());
         let storage_internal = col.alloc(n_h * n_interior);
         let storage_internal_start = storage_internal.start;
@@ -1289,7 +1257,6 @@ impl<'a> StageLayout<'a> {
         let thermal = col.alloc(ctx.n_thermals * n_blks);
         let thermal_end = thermal.end;
         col.alloc(ctx.n_anticipated);
-        let col_commitment_decision_start = col.alloc(commitment_decision_windows.len()).start;
         let line_fwd = col.alloc(ctx.n_lines * n_blks);
         let line_rev = col.alloc(ctx.n_lines * n_blks);
         let deficit = col.alloc(ctx.n_buses * max_deficit_segments * n_blks);
@@ -1417,11 +1384,6 @@ impl<'a> StageLayout<'a> {
         let row_anticipated_slot_definition_start =
             row.alloc(n_anticipated_slot_definition_rows).start;
 
-        // Terminal post-horizon lane rows: dense, one per declared window
-        // every stage (latch at its own decider, carry-by-identity otherwise
-        // — no fish arm exists for a post-horizon lane).
-        let row_commitment_start = row.alloc(state.n_commitment).start;
-
         // Peeked before `generic` below is computed: the generic row block's
         // length depends on `col_generic_slack_start` (the column axis), but its
         // own start does not depend on that length.
@@ -1483,9 +1445,6 @@ impl<'a> StageLayout<'a> {
             row_anticipated_slot_definition_start,
             n_anticipated_slot_definition_rows,
             anticipated_slot_row_pos,
-            row_commitment_start,
-            col_commitment_decision_start,
-            commitment_decision_windows,
         };
 
         let anticipated_local_by_sys_pos = ctx
@@ -1901,22 +1860,6 @@ impl<'a> StageLayout<'a> {
         }
     }
 
-    /// Post-horizon commitment-decision column range: one column per window
-    /// deciding this stage, `col_commitment_decision_start .. + len`. `0..0`
-    /// (never `start..start`, same convention as [`Self::anticipated_decision`])
-    /// when no window decides this stage.
-    #[inline]
-    #[must_use]
-    pub(crate) fn commitment_decision(&self) -> Range<usize> {
-        let n = self.anticipated.commitment_decision_windows.len();
-        if n > 0 {
-            let s = self.anticipated.col_commitment_decision_start;
-            s..s + n
-        } else {
-            0..0
-        }
-    }
-
     /// Owned per-stage equipment-geometry snapshot: every field is a clone or
     /// range accessor of `self`, so `StageLayout` alone owns each family's
     /// start/end arithmetic. Must stay OWNED — the result is cloned into
@@ -1931,8 +1874,6 @@ impl<'a> StageLayout<'a> {
             diversion: self.equipment.diversion.clone(),
             thermal: self.equipment.thermal.clone(),
             anticipated_decision: self.anticipated_decision(),
-            commitment_decision: self.commitment_decision(),
-            commitment_decision_windows: self.anticipated.commitment_decision_windows.clone(),
             line_fwd: self.equipment.line_fwd.clone(),
             line_rev: self.equipment.line_rev.clone(),
             deficit: self.equipment.deficit.clone(),

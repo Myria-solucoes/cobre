@@ -2734,3 +2734,854 @@ mod diversion_outflow_bounds {
         }
     }
 }
+
+mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
+    //! The water in-transit bucket ring and the anticipated-commitment ring
+    //! are the two `DeliveryRing` instantiations, and `commit_out`/`commit_in`
+    //! sit ahead of every water incoming column in the state layout
+    //! (`storage -> inflow_lags -> transit_buckets_out -> commit_out ->
+    //! z_inflow -> storage_in -> transit_buckets_in -> commit_in -> theta`).
+    //! No existing fixture combines a water travel-time arc, a post-study
+    //! anticipated delivery, and a boundary policy on one deck, so nothing
+    //! catches an off-by-region incoming-column resolution, a broken
+    //! per-arc `k`-weight conservation identity, a per-family terminal
+    //! pricing arm, or a basis-rejecting warm start under this specific
+    //! two-family width shift. This module pins all four against the deck.
+
+    use std::path::Path;
+
+    use chrono::{Duration, NaiveDate};
+    use cobre_core::entities::hydro::HydroGenerationModel;
+    use cobre_core::entities::thermal::AnticipatedConfig;
+    use cobre_core::scenario::InflowModel;
+    use cobre_core::temporal::{Block, Stage};
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, FutureAnticipatedDelivery,
+        HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStorage, InitialConditions,
+        LineBlockBounds, PostStudyStage, PostStudyStages, PostStudyThermalBound,
+        PumpingBlockBounds, ResolvedBounds, System, SystemBuilder, ThermalBlockBounds,
+        ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        BoundaryPolicy, Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod, ModelingConfig, ParallelismConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
+        TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_io::{
+        FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord,
+        ProducerBlock, StageCutsPayload, write_policy_checkpoint,
+    };
+    use cobre_sddp::indexer::{CutStateProjection, StateDim};
+    use cobre_sddp::setup::{NodeId, StageIdx};
+    use cobre_sddp::test_support::{patch_backward_opening_for_probe, solve_stage_for_probe};
+    use cobre_sddp::workspace::SolverWorkspace;
+    use cobre_sddp::{SolverStatsDelta, inject_boundary_cuts, load_boundary_cuts};
+    use cobre_solver::{
+        ActiveSolver, FreezeScratch, RowBatch, SolverInterface, StageTemplate,
+        freeze_rows_into_template,
+    };
+
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
+    };
+
+    const BUS_ID: EntityId = EntityId(1);
+    const THERMAL_ID: EntityId = EntityId(2);
+    const DOWNSTREAM_ID: EntityId = EntityId(3);
+    const UPSTREAM_ID: EntityId = EntityId(4);
+    const N_STAGES: usize = 2;
+    const N_TRAIN_ITERATIONS: u32 = 8;
+
+    /// Wide enough that every anchor's own release reaches TWO stages ahead
+    /// (`stage_reach == 2`, a lag-1 AND a lag-2 bucket), so lag 1's outgoing
+    /// definition genuinely depends on lag 2's incoming state
+    /// (`b_1^out = b_2^in + k_1*D`) — the shift dependency property 4 pins
+    /// via a delta comparison; a depth-1 ring's sole lag has no incoming
+    /// dependency at all (`b_1^out = k_1*D` alone), so it cannot demonstrate
+    /// this. Still well short of the study's own 1464h horizon —
+    /// coexistence with the anticipated ring, not an interaction with the
+    /// `t_v > horizon` rolling-seed limitation.
+    const TRAVEL_TIME_HOURS: f64 = 900.0;
+    /// `LeadTime` delta (hours): resolves the thermal's own stage-1 delivery
+    /// to a pre-study decider (dormant) while the post-study target resolves
+    /// to a stage-0 decider, ring-sizing `k_max == 2` — the same fixture
+    /// shape `right_boundary_pricing.rs` pins for the anticipated family
+    /// alone.
+    const DELTA_HOURS: f64 = 1500.0;
+    const POST_STUDY_HOURS: f64 = 720.0;
+    const ALPHA: f64 = 5.0;
+    const BETA_WATER: f64 = 3.0;
+    const BETA_ANT: f64 = 4.0;
+    const TOL: f64 = 1e-6;
+
+    fn study_start() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date")
+    }
+
+    /// Study end date (stage 1 end) — the first `post_study_stages` stage and
+    /// the post-horizon delivery window both anchor here.
+    fn study_end() -> NaiveDate {
+        study_start() + Duration::days(61)
+    }
+
+    fn stages() -> Vec<Stage> {
+        let start = study_start();
+        let stage0_end = start + Duration::days(31);
+        vec![
+            make_stage(
+                0,
+                StageSpec {
+                    start_date: start,
+                    end_date: stage0_end,
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S0".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    ..Default::default()
+                },
+            ),
+            make_stage(
+                1,
+                StageSpec {
+                    start_date: stage0_end,
+                    end_date: study_end(),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S1".to_string(),
+                        duration_hours: 720.0,
+                    }],
+                    ..Default::default()
+                },
+            ),
+        ]
+    }
+
+    /// Per-stage total hours, mirroring `bucket_topology::study_stage_durations`
+    /// for the [`resolve_spread`](cobre_sddp::lead_time::resolve_spread) calls
+    /// property 3 drives directly.
+    fn study_durations() -> Vec<f64> {
+        stages()
+            .iter()
+            .map(|s| s.blocks.iter().map(|b| b.duration_hours).sum())
+            .collect()
+    }
+
+    /// The one declared post-horizon window: the 30-day month beginning at
+    /// the study end, resolving (via [`DELTA_HOURS`]) to a stage-0 decider and
+    /// (via the post-study calendar below) to post-study destination stage 0.
+    fn future_delivery() -> FutureAnticipatedDelivery {
+        FutureAnticipatedDelivery {
+            thermal_id: THERMAL_ID,
+            delivery_start: study_end(),
+            delivery_end: study_end() + Duration::days(30),
+            min_mw: 0.0,
+            max_mw: 100.0,
+        }
+    }
+
+    /// The one declared post-study stage: the exact span [`future_delivery`]
+    /// targets, so `StageCalendar::resolve_window` covers it at destination
+    /// index 0.
+    fn post_study_stages() -> PostStudyStages {
+        PostStudyStages {
+            stages: vec![PostStudyStage {
+                start_date: study_end(),
+                duration_hours: POST_STUDY_HOURS,
+            }],
+            thermal_bounds: vec![PostStudyThermalBound {
+                thermal_id: THERMAL_ID,
+                post_study_stage_index: 0,
+                cost_per_mwh: 37.5,
+                min_mw: 0.0,
+                max_mw: 100.0,
+            }],
+        }
+    }
+
+    fn bounds() -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 1,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 1_000.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    max_turbined_m3s: 200.0,
+                    max_generation_mw: 500.0,
+                    ..Default::default()
+                },
+                thermal: ThermalStageBounds { cost_per_mwh: 1.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    fn penalties() -> cobre_core::resolved::ResolvedPenalties {
+        use cobre_core::resolved::{
+            BusStagePenalties, HydroStagePenalties, LineStagePenalties, NcsStagePenalties,
+            PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,
+        };
+        ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 2,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1_000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        )
+    }
+
+    /// The combined deck: a water travel-time arc (`UPSTREAM_ID` ->
+    /// `DOWNSTREAM_ID`), a `LeadTime` anticipated thermal with a post-study
+    /// target, and the `post_study_stages` calendar that target resolves
+    /// into. Reuses the water-arc `HydroSpec` shape from
+    /// `transit_seed_output` and the anticipated/post-study shape from
+    /// `right_boundary_pricing.rs`.
+    fn build_system() -> System {
+        let bus = make_bus(BUS_ID, BusSpec::default());
+
+        let downstream = make_hydro(
+            DOWNSTREAM_ID,
+            HydroSpec {
+                bus_id: BUS_ID,
+                max_storage_hm3: 1_000.0,
+                max_turbined_m3s: 200.0,
+                max_generation_mw: 500.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                ..Default::default()
+            },
+        );
+        let upstream = make_hydro(
+            UPSTREAM_ID,
+            HydroSpec {
+                bus_id: BUS_ID,
+                downstream_id: Some(DOWNSTREAM_ID),
+                travel_time_hours: Some(TRAVEL_TIME_HOURS),
+                min_outflow_m3s: 50.0,
+                max_storage_hm3: 1_000.0,
+                max_turbined_m3s: 200.0,
+                max_generation_mw: 500.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                ..Default::default()
+            },
+        );
+        let thermal = make_thermal(
+            THERMAL_ID,
+            ThermalSpec {
+                bus_id: BUS_ID,
+                cost_per_mwh: 1.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.0,
+                anticipated_config: Some(AnticipatedConfig::LeadTime(DELTA_HOURS)),
+                ..Default::default()
+            },
+        );
+
+        let inflow_models: Vec<InflowModel> = (0..N_STAGES)
+            .map(|i| InflowModel {
+                hydro_id: UPSTREAM_ID,
+                stage_id: i32::try_from(i).unwrap_or(0),
+                mean_m3s: 80.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let initial_conditions = InitialConditions {
+            storage: vec![
+                HydroStorage {
+                    hydro_id: DOWNSTREAM_ID,
+                    value_hm3: 100.0,
+                },
+                HydroStorage {
+                    hydro_id: UPSTREAM_ID,
+                    value_hm3: 100.0,
+                },
+            ],
+            past_defluences: vec![HydroPastDefluence {
+                hydro_id: UPSTREAM_ID,
+                // 38 days (912h) over-covers TRAVEL_TIME_HOURS (900h, not a
+                // whole day count); the windowed IC seed only requires the
+                // window to COVER [start_0 - t_v, start_0), not match it
+                // exactly.
+                start_date: study_start() - Duration::days(38),
+                end_date: study_start(),
+                value_m3s: 50.0,
+            }],
+            future_anticipated_deliveries: vec![future_delivery()],
+            ..Default::default()
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![downstream, upstream])
+            .thermals(vec![thermal])
+            .stages(stages())
+            .inflow_models(inflow_models)
+            .bounds(bounds())
+            .penalties(penalties())
+            .initial_conditions(initial_conditions)
+            .post_study_stages(Some(post_study_stages()))
+            .build()
+            .expect("combined deck: water arc + post-study anticipated thermal must build")
+    }
+
+    fn config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: InflowNonNegativityMethod::Penalty,
+                },
+                // Unscaled: the priced `theta` and the propagated cut
+                // coefficient compare directly against ALPHA/BETA_* with no
+                // COST_SCALE_FACTOR back-out.
+                cost_scale_factor: Some(1.0),
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: N_TRAIN_ITERATIONS,
+                }]),
+                stopping_mode: StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig {
+                boundary: Some(BoundaryPolicy {
+                    path: "unused-boundary-checkpoint".to_string(),
+                    source_stage: None,
+                }),
+                ..PolicyConfig::default()
+            },
+            simulation: SimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// State-vector index of the ring slot carrying the post-study-targeted
+    /// delivery: `commitment_hold_in_study_offset(plant, m)` for the sole
+    /// anticipated plant and delivery target `m = num_stages()` (the first
+    /// post-study stage) — mirrors `StateSpace::commitment_hold_in_study_offset`
+    /// byte-for-byte (`pub(crate)`, unreachable from this integration-test
+    /// binary), never a hand-rolled `commit_out.end`-relative guess.
+    fn post_study_ring_slot(setup: &cobre_sddp::StudySetup) -> usize {
+        let state = setup.stage_state();
+        let m = setup.num_stages();
+        state.commit_out.start + (m % state.k_max) * state.n_anticipated
+    }
+
+    /// State-vector index of the water arc's lag-1 bucket — the slot property
+    /// 4 prices with `BETA_WATER`. Masked at the terminal stage without a
+    /// declared boundary, kept live with one (the "Delivery-family
+    /// right-boundary pricing" contract). Its OUTGOING definition is
+    /// `b_1^out = b_2^in + k_1*D` ([`water_pin_slot`]'s incoming state plus
+    /// this stage's own deposit share).
+    fn water_priced_slot(setup: &cobre_sddp::StudySetup) -> usize {
+        let state = setup.stage_state();
+        assert_eq!(
+            state.n_buckets, 2,
+            "fixture must declare exactly two water bucket lags (lag 1 and lag 2)"
+        );
+        state.transit_buckets_out.start
+    }
+
+    /// State-vector index of the water arc's lag-2 (deepest) bucket — pinning
+    /// its INCOMING column controls [`water_priced_slot`]'s outgoing value by
+    /// the shift row `b_1^out = b_2^in + k_1*D`, up to the deposit share
+    /// `k_1*D` (identical across pin values, so it cancels in a delta
+    /// comparison). Unlike lag 1, lag 2's own outgoing has no incoming
+    /// dependency (`b_2^out = k_2*D` alone, the deepest lag), so it is not
+    /// itself pin-controllable — only usable as the CONTROL for lag 1.
+    fn water_pin_slot(setup: &cobre_sddp::StudySetup) -> usize {
+        let state = setup.stage_state();
+        assert_eq!(
+            state.n_buckets, 2,
+            "fixture must declare exactly two water bucket lags (lag 1 and lag 2)"
+        );
+        state.transit_buckets_out.start + 1
+    }
+
+    /// Pin the full state vector at zero except `entries`.
+    fn pin_state(setup: &cobre_sddp::StudySetup, entries: &[(usize, f64)]) -> Vec<f64> {
+        let mut pin = vec![0.0_f64; setup.stage_state().n_state];
+        for &(slot, v) in entries {
+            pin[slot] = v;
+        }
+        pin
+    }
+
+    /// Write a synthetic single-cut boundary checkpoint carrying `intercept`
+    /// and the explicit per-slot `coefficients`. No entity manifest (`&[]`):
+    /// the loader's identity check short-circuits with a warning (mirrors
+    /// `right_boundary_pricing.rs`'s `write_synthetic_boundary`), so this test
+    /// controls only the state dimension, not entity-identity matching.
+    fn write_synthetic_boundary(
+        dir: &Path,
+        state_dimension: u32,
+        intercept: f64,
+        coefficients: &[f64],
+    ) {
+        let cuts = vec![PolicyCutRecord {
+            cut_id: 0,
+            slot_index: 0,
+            iteration: 0,
+            forward_pass_index: 0,
+            intercept,
+            coefficients,
+            is_active: true,
+        }];
+        let payload = StageCutsPayload {
+            stage_id: 0,
+            state_dimension,
+            capacity: 1,
+            warm_start_count: 0,
+            cuts: &cuts,
+            active_cut_indices: &[0],
+            populated_count: 1,
+            entity_manifest: &[],
+        };
+        let metadata = PolicyCheckpointMetadata {
+            format_version: FORMAT_VERSION,
+            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: "2026-08-20T00:00:00Z".to_string(),
+            num_stages: 1,
+            graph_manifest: GraphManifest {
+                n_pools: 1,
+                nodes: vec![ManifestNode {
+                    id: 100,
+                    stage_id: 0,
+                    pool_id: 0,
+                }],
+                edges: vec![],
+            },
+            producer: ProducerBlock {
+                completed_iterations: 0,
+                final_lower_bound: 0.0,
+                best_upper_bound: None,
+                max_iterations: 0,
+                forward_passes: 0,
+                warm_start_cuts: 0,
+                warm_start_counts: vec![],
+                rng_seed: 0,
+                total_visited_states: 0,
+                training_block_mode: "parallel".to_string(),
+                training_block_mode_per_stage: vec![],
+                cost_scale_factor: Some(1.0),
+            },
+        };
+        write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
+    }
+
+    /// Load a boundary carrying `BETA_WATER` on `water_priced_slot` and
+    /// `BETA_ANT` on `ant_slot`, zero elsewhere, intercept `ALPHA`, and
+    /// inject it into `setup`'s terminal pool.
+    fn inject_two_family_boundary(
+        setup: &mut cobre_sddp::StudySetup,
+        dir: &Path,
+        water_priced_slot: usize,
+        ant_slot: usize,
+    ) {
+        let state_dimension = setup.fcf.state_dimension as u32;
+        let mut coefficients = vec![0.0_f64; state_dimension as usize];
+        coefficients[water_priced_slot] = BETA_WATER;
+        coefficients[ant_slot] = BETA_ANT;
+        write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
+
+        let boundary_cuts =
+            load_boundary_cuts(dir, 0, state_dimension, &[], &[], None, 1.0, &mut |_msg| {})
+                .expect("boundary cut must load");
+        inject_boundary_cuts(setup, &boundary_cuts);
+    }
+
+    /// Build the terminal pool's frozen LP template: the base structural
+    /// template plus one literal row per active cut in the pool. The terminal
+    /// pool always projects the full global state (`build_cut_state_layouts`),
+    /// so the all-enabled projection reproduces exactly the coefficients the
+    /// boundary cut carries, regardless of this study's own per-stage
+    /// `StageStateConfig`.
+    fn freeze_terminal_template(setup: &cobre_sddp::StudySetup, pool_id: usize) -> StageTemplate {
+        let state = setup.stage_state();
+        let terminal_stage = setup.num_stages() - 1;
+        let ctx = setup.stage_ctx();
+        let base = &ctx.templates[terminal_stage];
+
+        let cut_state = CutStateProjection::new(
+            state,
+            cobre_core::temporal::StageStateConfig {
+                storage: true,
+                inflow_lags: true,
+            },
+        );
+
+        let mut batch = RowBatch {
+            num_rows: 0,
+            row_starts: Vec::new(),
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
+        cobre_sddp::build_cut_row_batch_into(
+            &mut batch,
+            &setup.fcf,
+            pool_id,
+            state,
+            &cut_state,
+            &base.col_scale,
+        );
+
+        let mut frozen = StageTemplate::empty();
+        let mut scratch = FreezeScratch::new();
+        freeze_rows_into_template(base, &batch, &mut frozen, &mut scratch);
+        frozen
+    }
+
+    /// Solve the terminal stage's frozen `template` against `pool` with the
+    /// state vector pinned to `pinned_state`, returning `theta`'s primal
+    /// value. `raw_noise` is zeroed per hydro (deterministic mean inflow):
+    /// the probe's pinned state alone drives `theta`, independent of the
+    /// realized noise draw.
+    fn terminal_theta(
+        setup: &cobre_sddp::StudySetup,
+        template: &StageTemplate,
+        pool: &cobre_sddp::CutPool,
+        node_id: NodeId,
+        pinned_state: &[f64],
+    ) -> f64 {
+        let comm = super::common::StubComm;
+        let mut workspace_pool = setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("create_workspace_pool");
+        let ws: &mut SolverWorkspace<ActiveSolver> = &mut workspace_pool.workspaces[0];
+        let ctx = setup.stage_ctx();
+        let training_ctx = setup.training_ctx();
+        let theta_col = setup.stage_state().theta;
+        let terminal_stage = setup.num_stages() - 1;
+        let raw_noise = vec![0.0_f64; setup.stage_state().hydro_count];
+
+        ws.solver.reset_solver_state();
+        ws.solver.load_model(template);
+        patch_backward_opening_for_probe(
+            ws,
+            &ctx,
+            &training_ctx,
+            StageIdx(terminal_stage),
+            pinned_state,
+            &raw_noise,
+        )
+        .expect("StageSolvePrep::run must not error on the combined-deck fixture");
+
+        let view =
+            solve_stage_for_probe(ws, &ctx, pool, None, StageIdx(terminal_stage), 0, node_id)
+                .expect("terminal stage solve must not error");
+        view.primal[theta_col]
+    }
+
+    // ── Property 2: every water incoming bucket resolves through the
+    // transit_buckets_in arm, never the commitment-hold catch-all ──────────
+
+    #[test]
+    fn every_water_incoming_bucket_resolves_through_the_transit_buckets_in_arm() {
+        let setup = build_setup_in_code(build_system(), &config());
+        let state = setup.stage_state();
+
+        assert!(
+            state.n_buckets > 0,
+            "fixture must declare a water travel-time arc"
+        );
+        assert!(
+            state.n_anticipated > 0 && state.k_max > 0,
+            "fixture must also carry the anticipated ring so both families widen \
+             commit_out/commit_in"
+        );
+
+        for j in state.transit_buckets_out.clone() {
+            let incoming = state.state_to_lp_incoming_column(StateDim::new(j)).get();
+            assert!(
+                state.transit_buckets_in.contains(&incoming),
+                "bucket state dim {j} must resolve through the transit_buckets_in arm \
+                 [{:?}); got column {incoming}",
+                state.transit_buckets_in
+            );
+            assert!(
+                !state.commit_in.contains(&incoming),
+                "bucket state dim {j} must never fall through to the commitment-hold \
+                 catch-all commit_in [{:?}); got column {incoming}",
+                state.commit_in
+            );
+        }
+    }
+
+    // ── Property 3: Sigma_d k_d = 1 per arc per anchor stage ────────────────
+
+    #[test]
+    fn bucket_k_weight_conservation_holds_per_arc_per_anchor_stage() {
+        let durations = study_durations();
+
+        // Mirrors `bucket_topology::extend_for_resolution`: pad the calendar
+        // with copies of the trailing stage so `resolve_spread` never sees a
+        // window it cannot fully absorb.
+        let mut extended = durations.clone();
+        let last = *durations.last().expect("at least one stage");
+        let mut padded_hours = 0.0_f64;
+        while padded_hours < TRAVEL_TIME_HOURS {
+            extended.push(last);
+            padded_hours += last;
+        }
+
+        for anchor in 0..durations.len() {
+            let resolution =
+                cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, anchor, &extended, None);
+            let sum: f64 = resolution.stage_weights.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-9,
+                "stage-clock weights must sum to 1.0 at anchor {anchor}; got {sum} from {:?}",
+                resolution.stage_weights
+            );
+        }
+    }
+
+    // ── Property 4: the post-study carry and the water terminal buckets
+    // price through the shared cut-state projection, additively ─────────────
+
+    #[test]
+    fn post_study_carry_and_water_terminal_buckets_price_through_the_shared_projection() {
+        // Part A: the terminal probe. `water_priced_slot`'s outgoing value
+        // (lag 1) is `water_pin_slot`'s (lag 2) pinned incoming value plus
+        // this stage's own deposit share (`b_1^out = b_2^in + k_1*D`) — a
+        // constant, identical across every probe below since none of them
+        // touch the release decision. Comparing theta by DELTA against the
+        // zero-pin baseline cancels that constant, proving theta prices both
+        // families additively through the shared projection with no
+        // per-family pricing arm.
+        let mut setup = build_setup_in_code(build_system(), &config());
+        let water_priced = water_priced_slot(&setup);
+        let water_pin = water_pin_slot(&setup);
+        let ant_slot = post_study_ring_slot(&setup);
+        assert_ne!(
+            water_priced, ant_slot,
+            "the water and anticipated families must price distinct state dims"
+        );
+        assert_ne!(
+            water_pin, ant_slot,
+            "the water pin slot and the anticipated slot must be distinct state dims"
+        );
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        inject_two_family_boundary(
+            &mut setup,
+            &tmp.path().join("boundary"),
+            water_priced,
+            ant_slot,
+        );
+
+        let terminal_pool_id = setup.fcf.pools.len() - 1;
+        let template = freeze_terminal_template(&setup, terminal_pool_id);
+        let pool = &setup.fcf.pools[terminal_pool_id];
+        let node_id = NodeId(i32::try_from(setup.num_stages() - 1).unwrap_or(0));
+
+        let x_water = 4.0;
+        let x_ant = 6.0;
+
+        let theta_baseline =
+            terminal_theta(&setup, &template, pool, node_id, &pin_state(&setup, &[]));
+        let theta_water = terminal_theta(
+            &setup,
+            &template,
+            pool,
+            node_id,
+            &pin_state(&setup, &[(water_pin, x_water)]),
+        );
+        let theta_ant = terminal_theta(
+            &setup,
+            &template,
+            pool,
+            node_id,
+            &pin_state(&setup, &[(ant_slot, x_ant)]),
+        );
+        let theta_both = terminal_theta(
+            &setup,
+            &template,
+            pool,
+            node_id,
+            &pin_state(&setup, &[(water_pin, x_water), (ant_slot, x_ant)]),
+        );
+
+        let delta_water = theta_water - theta_baseline;
+        let delta_ant = theta_ant - theta_baseline;
+        let delta_both = theta_both - theta_baseline;
+
+        assert!(
+            (delta_water - BETA_WATER * x_water).abs() < TOL,
+            "theta must price the water terminal bucket alone by BETA_WATER*x_water via the \
+             b_1^out = b_2^in + k_1*D shift: expected delta {}, got {delta_water}",
+            BETA_WATER * x_water
+        );
+        assert!(
+            (delta_ant - BETA_ANT * x_ant).abs() < TOL,
+            "theta must price the post-study carry alone by BETA_ANT*x_ant: expected delta {}, \
+             got {delta_ant}",
+            BETA_ANT * x_ant
+        );
+        let expected_delta_both = BETA_WATER * x_water + BETA_ANT * x_ant;
+        assert!(
+            (delta_both - expected_delta_both).abs() < TOL,
+            "theta must price both families additively through the shared projection, with no \
+             per-family pricing arm: expected delta {expected_delta_both}, got {delta_both}"
+        );
+
+        // Part B: the solved training bound reflects the injected post-study
+        // carry — training with the boundary cut raises final_lb over an
+        // identical run with no boundary cut injected (ALPHA > 0 alone lifts
+        // the terminal floor, independent of which state the optimum visits).
+        let mut baseline = build_setup_in_code(build_system(), &config());
+        let mut treated = build_setup_in_code(build_system(), &config());
+        let treated_water_priced_slot = water_priced_slot(&treated);
+        let treated_ant_slot = post_study_ring_slot(&treated);
+        let tmp2 = tempfile::tempdir().expect("tempdir");
+        inject_two_family_boundary(
+            &mut treated,
+            &tmp2.path().join("boundary"),
+            treated_water_priced_slot,
+            treated_ant_slot,
+        );
+
+        let comm = super::common::StubComm;
+        let mut solver_baseline = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome_baseline = baseline
+            .train(
+                &mut solver_baseline,
+                &comm,
+                1,
+                ActiveSolver::new,
+                None,
+                None,
+            )
+            .expect("train must not return Err");
+        assert!(
+            outcome_baseline.error.is_none(),
+            "baseline training error: {:?}",
+            outcome_baseline.error
+        );
+
+        let mut solver_treated = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome_treated = treated
+            .train(&mut solver_treated, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome_treated.error.is_none(),
+            "treated training error: {:?}",
+            outcome_treated.error
+        );
+
+        assert!(
+            outcome_treated.result.final_lb > outcome_baseline.result.final_lb + TOL,
+            "training with the injected post-study boundary must raise the lower bound: \
+             treated final_lb={}, baseline final_lb={}",
+            outcome_treated.result.final_lb,
+            outcome_baseline.result.final_lb
+        );
+    }
+
+    // ── Property 5: slot-identity reconstruction absorbs the two-family
+    // width shift — zero basis rejections across warm-started iterations ────
+
+    #[test]
+    fn two_family_width_shift_warm_starts_with_zero_basis_rejections() {
+        let mut setup = build_setup_in_code(build_system(), &config());
+        let comm = super::common::StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+
+        let result = &outcome.result;
+        assert_eq!(
+            result.iterations,
+            u64::from(N_TRAIN_ITERATIONS),
+            "warm-start regression needs the full iteration run to exercise \
+             reconstruct_basis across iterations"
+        );
+
+        let total_rejections =
+            SolverStatsDelta::aggregate(result.solver_stats_log.iter().map(|entry| &entry.delta))
+                .basis_consistency_failures;
+        assert_eq!(
+            total_rejections, 0,
+            "two-family width shift: expected 0 basis rejections, got {total_rejections} \
+             (reconstruct_basis must match cut rows by CutPool slot identity, not absolute \
+             column index, so the commit_out/commit_in width shift stays transparent)"
+        );
+    }
+}

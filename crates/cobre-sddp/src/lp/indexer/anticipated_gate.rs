@@ -136,7 +136,7 @@ pub(crate) fn anticipated_resolution_for(
         DeliveryAxis {
             stage_lengths_hours: &[],
             n_decision: n_stages,
-            n_delivery: n_stages,
+            n_delivery: state.delivery_stage_count(n_stages),
         },
     ))
 }
@@ -144,9 +144,10 @@ pub(crate) fn anticipated_resolution_for(
 #[cfg(test)]
 mod tests {
     use super::{
-        AnticipatedLocal, StateSpace, is_anticipated_decision_active,
+        AnticipatedLocal, StateSpace, anticipated_resolution_for, is_anticipated_decision_active,
         is_anticipated_decision_active_for_delivery,
     };
+    use crate::lead_time::{AnticipatedResolution, PointResolution};
 
     /// Build a [`StateSpace`] for the gating tests below — both fixtures use
     /// `hydro_count == 0`, matching `state_space.rs`'s `finalized` helper
@@ -322,5 +323,46 @@ mod tests {
             &windows,
             &delivery_stage_ids,
         ));
+    }
+
+    /// The fallback axis (no resolution attached) reports exactly `n_stages`:
+    /// `delivery_stage_count` falls back to the caller's value when
+    /// `n_delivery == 0`, so the resolved decider's length is byte-identical
+    /// to the pre-widening study-only axis.
+    #[test]
+    fn anticipated_resolution_for_fallback_reports_n_stages_without_a_resolution() {
+        let idx = ant_layout(1, 1, vec![1]);
+        let n_stages = 5;
+
+        let point = anticipated_resolution_for(&idx, AnticipatedLocal::new(0), n_stages);
+
+        assert_eq!(point.decider.len(), n_stages);
+    }
+
+    /// Once a resolution is attached, `anticipated_resolution_for` returns it
+    /// verbatim — including a delivery width extended past `n_stages` — so the
+    /// secondary axis site reports the same extended width the primary site
+    /// attaches (the no-half-switch invariant).
+    #[test]
+    fn anticipated_resolution_for_attached_resolution_reports_extended_delivery_width() {
+        let mut idx = ant_layout(1, 2, vec![2]);
+        let n_stages = 4;
+        let n_post = 3;
+        let n_delivery = n_stages + n_post;
+        let resolution = AnticipatedResolution {
+            per_plant: vec![PointResolution {
+                decider: vec![None; n_delivery],
+                decision_sets: vec![Vec::new(); n_stages],
+                depth: vec![0; n_stages],
+                occupancy: vec![0; n_stages],
+            }],
+            k_max: 2,
+            max_fanout: 0,
+        };
+        idx.set_anticipated_resolution(resolution);
+
+        let point = anticipated_resolution_for(&idx, AnticipatedLocal::new(0), n_stages);
+
+        assert_eq!(point.decider.len(), n_delivery);
     }
 }

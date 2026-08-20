@@ -525,35 +525,19 @@ mod tests {
     // Commitment-hold col_scale=1.0 override
     // =========================================================================
 
-    /// `N=2` hydros, `L=0`, `A=1` anticipated plant, `K=2` slots, `W=2` declared
-    /// windows: seeds every `col_scale` entry with a distinct non-1.0 value, then
-    /// asserts the override forces exactly the merged `commit_out`/`commit_in`
-    /// indices (spanning both the in-study ring slots and the post-horizon
-    /// lanes) to `1.0` while leaving every other index byte-identical to its
-    /// seed.
+    /// `N=2` hydros, `L=0`, `A=1` anticipated plant, `K=2` slots: seeds every
+    /// `col_scale` entry with a distinct non-1.0 value, then asserts the
+    /// override forces exactly the `commit_out`/`commit_in` indices to `1.0`
+    /// while leaving every other index byte-identical to its seed.
     #[test]
     fn apply_commitment_hold_col_scale_unscale_forces_hold_to_one() {
-        let state_layout = StateSpace::new_with_commitment_hold_windows(
-            2,
-            0,
-            0,
-            vec![],
-            1,
-            2,
-            vec![2],
-            &[0, 0],
-            2,
-            vec![0, 0],
-            vec![EntityId(0), EntityId(0)],
-            vec![(0.0, 0.0), (0.0, 0.0)],
-            vec![0, 0],
-        );
+        let state_layout = StateSpace::new(2, 0, 0, vec![], 1, 2, vec![2], &[0, 0]);
 
-        assert_eq!(state_layout.commit_out, 2..6);
-        assert_eq!(state_layout.commit_in, 10..14);
-        assert_eq!(state_layout.theta, 14);
+        assert_eq!(state_layout.commit_out, 2..4);
+        assert_eq!(state_layout.commit_in, 8..10);
+        assert_eq!(state_layout.theta, 10);
 
-        let mut col_scale: Vec<f64> = (2..17).map(f64::from).collect();
+        let mut col_scale: Vec<f64> = (2..13).map(f64::from).collect();
         assert_eq!(col_scale.len(), state_layout.theta + 1);
         let before = col_scale.clone();
 
@@ -573,10 +557,9 @@ mod tests {
         }
     }
 
-    /// `n_anticipated * k_max == 0` and `n_commitment == 0`: `commit_out`/
-    /// `commit_in` both collapse to `0..0`, so the override loop touches no
-    /// column — `col_scale` is left exactly as the generic computation
-    /// produced it.
+    /// `n_anticipated * k_max == 0`: `commit_out`/`commit_in` both collapse to
+    /// `0..0`, so the override loop touches no column — `col_scale` is left
+    /// exactly as the generic computation produced it.
     #[test]
     fn apply_commitment_hold_col_scale_unscale_is_noop_when_empty() {
         let state_layout = StateSpace::new(2, 0, 0, vec![], 0, 0, vec![], &[0, 0]);

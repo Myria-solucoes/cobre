@@ -40,9 +40,9 @@ use cobre_core::entities::thermal::AnticipatedConfig;
 use cobre_core::temporal::StageStateConfig;
 use cobre_core::{
     AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId,
-    FutureAnticipatedDelivery, HydroBlockBounds, HydroStageBounds, InitialConditions,
-    LineBlockBounds, PostStudyStage, PostStudyStages, PostStudyThermalBound, PumpingBlockBounds,
-    ResolvedBounds, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    HydroBlockBounds, HydroStageBounds, InitialConditions, LineBlockBounds, PostStudyStage,
+    PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds, System,
+    SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_io::{
     FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord,
@@ -66,12 +66,11 @@ use common::{StubComm, build_setup_in_code, run_simulation};
 
 const BUS_ID: EntityId = EntityId(1);
 const THERMAL_ID: EntityId = EntityId(2);
-/// RIGHT-boundary `LeadTime` delta (hours), ~60 days: the thermal's own
-/// stage-1 self-delivery decides at stage 0 (`k_max == 1`), and the
-/// post-horizon window (delivering immediately after the horizon) resolves
-/// to the same stage-0 (`DeciderKind::Trunk`) decider — the pricing fixture's
-/// calendar (`right_boundary_pricing.rs`).
-const DELTA_HOURS: f64 = 1450.0;
+/// RIGHT-boundary `LeadTime` delta (hours), ~62.5 days: the thermal's own
+/// stage-1 delivery decides PRE-STUDY (`None` — dormant, no genuine
+/// decision), while the post-study target resolves to a stage-0 decider —
+/// the pricing fixture's calendar (`right_boundary_pricing.rs`).
+const DELTA_HOURS: f64 = 1500.0;
 /// Boundary cut intercept, positive so an injected cut binds `theta` above
 /// its zero floor for every committed MW `x >= 0`.
 const ALPHA: f64 = 5.0;
@@ -138,22 +137,11 @@ fn stages() -> Vec<cobre_core::temporal::Stage> {
     ]
 }
 
-/// The RIGHT fixture's one declared post-horizon window: the 30-day month
-/// beginning at the study end, pinned to `v` (`min_mw == max_mw`).
-fn future_delivery(v: f64) -> FutureAnticipatedDelivery {
-    FutureAnticipatedDelivery {
-        thermal_id: THERMAL_ID,
-        delivery_start: study_end(),
-        delivery_end: study_end() + TimeDelta::days(30),
-        min_mw: v,
-        max_mw: v,
-    }
-}
-
-/// The RIGHT fixture's one declared post-study stage: the EXACT span
-/// [`future_delivery`] targets, so `StageCalendar::resolve_window` covers it
-/// at destination index 0.
-fn post_study_stages() -> PostStudyStages {
+/// The RIGHT fixture's declared post-study stage: `[study_end(), study_end()
+/// + 30 days)`, pinned to `v` (`min_mw == max_mw`) — the ring's post-study
+/// bound now comes SOLELY from `post_study_stages.json`'s own table, never a
+/// `future_anticipated_deliveries` window's interval.
+fn post_study_stages(v: f64) -> PostStudyStages {
     PostStudyStages {
         stages: vec![PostStudyStage {
             start_date: study_end(),
@@ -163,8 +151,8 @@ fn post_study_stages() -> PostStudyStages {
             thermal_id: THERMAL_ID,
             post_study_stage_index: 0,
             cost_per_mwh: COST_PER_MWH,
-            min_mw: 0.0,
-            max_mw: CAPABILITY_MAX_MW,
+            min_mw: v,
+            max_mw: v,
         }],
     }
 }
@@ -255,10 +243,9 @@ fn penalties() -> cobre_core::resolved::ResolvedPenalties {
     )
 }
 
-/// RIGHT boundary: `LeadTime` thermal, `with_window` toggles the single
-/// post-horizon `future_anticipated_deliveries` window (pinned to `v`) plus
-/// its covering `post_study_stages` destination; `v` is read only when
-/// `with_window` is `true`.
+/// RIGHT boundary: `LeadTime` thermal, `with_window` toggles the declared
+/// `post_study_stages` destination pinning the post-study-targeted delivery
+/// to `v`; `v` is read only when `with_window` is `true`.
 fn build_system_right(with_window: bool, v: f64) -> System {
     let bus = make_bus(BUS_ID, BusSpec::default());
     let thermal = make_thermal(
@@ -272,24 +259,15 @@ fn build_system_right(with_window: bool, v: f64) -> System {
             ..Default::default()
         },
     );
-    let initial_conditions = InitialConditions {
-        future_anticipated_deliveries: if with_window {
-            vec![future_delivery(v)]
-        } else {
-            Vec::new()
-        },
-        ..Default::default()
-    };
 
     let mut builder = SystemBuilder::new()
         .buses(vec![bus])
         .thermals(vec![thermal])
         .stages(stages())
         .bounds(bounds(0.0))
-        .penalties(penalties())
-        .initial_conditions(initial_conditions);
+        .penalties(penalties());
     if with_window {
-        builder = builder.post_study_stages(Some(post_study_stages()));
+        builder = builder.post_study_stages(Some(post_study_stages(v)));
     }
     builder.build().expect("fixture System must build")
 }
@@ -372,12 +350,14 @@ fn config() -> cobre_io::config::Config {
     }
 }
 
-/// State-vector index of the RIGHT fixture's sole post-horizon lane: the
-/// trailing `n_commitment` block of `commit_out`, after the leading in-study
-/// ring.
-fn lane_state_index(setup: &StudySetup) -> usize {
+/// State-vector index of the ring slot carrying the post-study-targeted
+/// delivery: mirrors `StateSpace::commitment_hold_in_study_offset`
+/// byte-for-byte (`pub(crate)`, unreachable from this integration-test
+/// binary), never a hand-rolled `commit_out.end`-relative guess.
+fn post_study_ring_slot(setup: &StudySetup) -> usize {
     let state = setup.stage_state();
-    state.commit_out.end - state.n_commitment
+    let m = setup.num_stages();
+    state.commit_out.start + (m % state.k_max) * state.n_anticipated
 }
 
 /// Write a synthetic single-cut boundary checkpoint carrying `intercept` and
@@ -441,14 +421,14 @@ fn write_synthetic_boundary(
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }
 
-/// Load a lane-only boundary (`beta` on [`lane_state_index`], zero
-/// elsewhere, intercept [`ALPHA`]) and inject it into `setup`'s terminal
+/// Load a boundary carrying `beta` on [`post_study_ring_slot`] alone, zero
+/// elsewhere, intercept [`ALPHA`], and inject it into `setup`'s terminal
 /// pool.
-fn inject_lane_boundary(setup: &mut StudySetup, dir: &Path, beta: f64) {
+fn inject_ring_boundary(setup: &mut StudySetup, dir: &Path, beta: f64) {
     let state_dimension = setup.fcf.state_dimension as u32;
-    let lane = lane_state_index(setup);
+    let slot = post_study_ring_slot(setup);
     let mut coefficients = vec![0.0_f64; state_dimension as usize];
-    coefficients[lane] = beta;
+    coefficients[slot] = beta;
     write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
     let boundary_cuts =
@@ -533,11 +513,11 @@ fn terminal_theta(
     view.primal[theta_col]
 }
 
-/// Pin the state vector with `x` on the post-horizon lane and `0.0` on every
-/// other component.
-fn lane_pin(setup: &StudySetup, x: f64) -> Vec<f64> {
+/// Pin the state vector with `x` on [`post_study_ring_slot`] and `0.0` on
+/// every other component.
+fn ring_pin(setup: &StudySetup, x: f64) -> Vec<f64> {
     let mut pin = vec![0.0_f64; setup.stage_state().n_state];
-    pin[lane_state_index(setup)] = x;
+    pin[post_study_ring_slot(setup)] = x;
     pin
 }
 
@@ -573,10 +553,6 @@ mod inert_regression {
     fn structural_inertness_when_no_window_declared() {
         let setup = build_setup_in_code(build_system_right(false, 0.0), &config());
         let state = setup.stage_state();
-        assert_eq!(
-            state.n_commitment, 0,
-            "a study with no future_anticipated_deliveries must resolve zero commitment windows"
-        );
         assert_eq!(
             state.commit_out.len(),
             state.n_anticipated * state.k_max,
@@ -642,7 +618,7 @@ mod fcf_prices_committed_mw {
     fn train_with_beta(beta: f64) -> f64 {
         let mut setup = build_setup_in_code(build_system_right(true, V), &config());
         let tmp = tempfile::tempdir().expect("tempdir");
-        inject_lane_boundary(&mut setup, &tmp.path().join("boundary"), beta);
+        inject_ring_boundary(&mut setup, &tmp.path().join("boundary"), beta);
 
         let comm = StubComm;
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
@@ -733,42 +709,37 @@ mod left_right_symmetry {
         );
     }
 
-    /// RIGHT: a `future_anticipated_deliveries` window committed to the SAME
-    /// magnitude is deposited, carried to the terminal lane, and priced
+    /// RIGHT: a post-study destination pinned to the SAME magnitude is
+    /// deposited into the ring, carried to the terminal slot, and priced
     /// there by an injected boundary at exactly `beta*V` — the mirror
     /// mechanism at the right boundary.
     #[test]
     fn right_boundary_carries_and_prices_the_committed_value() {
-        let mut setup = build_setup_in_code(build_system_right(true, V), &config());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        inject_lane_boundary(&mut setup, &tmp.path().join("boundary"), BETA);
-
-        let results = run_simulation(&mut setup, 1);
-        assert_eq!(results.len(), 1, "must produce exactly one scenario");
-
-        let scenario = &results[0];
-        let decider_stage = scenario
-            .stages
-            .iter()
-            .find(|s| s.stage_id == 0)
-            .expect("the window's decider stage must be present");
+        let setup_struct = build_setup_in_code(build_system_right(true, V), &config());
+        let decision_col = setup_struct.stage_ctx().geometry_per_stage[0]
+            .anticipated_decision
+            .start;
+        let decider_template = &setup_struct.stage_ctx().templates[0];
         assert_eq!(
-            decider_stage.anticipated_lanes.len(),
-            1,
-            "exactly one declared window decides at this stage"
+            (
+                decider_template.col_lower[decision_col],
+                decider_template.col_upper[decision_col]
+            ),
+            (V, V),
+            "the RIGHT decision column must pin the committed value V (the post-study table's \
+             own [min_mw, max_mw] interval)"
         );
-        let carried = decider_stage.anticipated_lanes[0].carried_committed_mw;
-        assert!(
-            (carried - V).abs() < TOL,
-            "the RIGHT lane must carry the committed value V: expected {V}, got {carried}"
-        );
+
+        let mut setup = setup_struct;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        inject_ring_boundary(&mut setup, &tmp.path().join("boundary"), BETA);
 
         let terminal_pool_id = setup.fcf.pools.len() - 1;
         let template = freeze_terminal_template(&setup, terminal_pool_id);
         let pool = &setup.fcf.pools[terminal_pool_id];
-        let theta_at_v = terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, V));
+        let theta_at_v = terminal_theta(&setup, &template, pool, NodeId(1), &ring_pin(&setup, V));
         let theta_at_zero =
-            terminal_theta(&setup, &template, pool, NodeId(1), &lane_pin(&setup, 0.0));
+            terminal_theta(&setup, &template, pool, NodeId(1), &ring_pin(&setup, 0.0));
 
         let expected_delta = BETA * V;
         let actual_delta = theta_at_v - theta_at_zero;

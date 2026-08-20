@@ -1714,9 +1714,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         study_stage_ids: ctx_a.study_stage_ids.clone(),
         delivery_stage_ids: ctx_a.delivery_stage_ids.clone(),
         has_penalty: ctx_a.has_penalty,
-        cumulative_discount_factors: ctx_a.cumulative_discount_factors.clone(),
         delivery_cumulative_discount_factors: ctx_a.delivery_cumulative_discount_factors.clone(),
-        total_hours_per_stage: ctx_a.total_hours_per_stage.clone(),
         delivery_total_hours: ctx_a.delivery_total_hours.clone(),
         filling_v_target: ctx_a.filling_v_target.clone(),
         arc_stage_weights: ctx_a.arc_stage_weights.clone(),
@@ -2068,11 +2066,11 @@ fn two_post_study_stages() -> PostStudyStages {
     }
 }
 
-/// With no `post_study_stages` declared, each extended DELIVERY vector is
-/// element-wise identical to its study-axis counterpart — `n_post == 0`
-/// collapses the concatenation to a no-op.
+/// With no `post_study_stages` declared, `delivery_stage_ids` is element-wise
+/// identical to `study_stage_ids` — `n_post == 0` collapses the concatenation
+/// to a no-op.
 #[test]
-fn delivery_vectors_equal_study_vectors_with_no_post_study() {
+fn delivery_stage_ids_equals_study_stage_ids_with_no_post_study() {
     let system = discounted_multi_stage_system();
     let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
     let par_lp = PrecomputedPar::default();
@@ -2106,11 +2104,6 @@ fn delivery_vectors_equal_study_vectors_with_no_post_study() {
     );
 
     assert_eq!(ctx.delivery_stage_ids, ctx.study_stage_ids);
-    assert_eq!(ctx.delivery_total_hours, ctx.total_hours_per_stage);
-    assert_eq!(
-        ctx.delivery_cumulative_discount_factors,
-        ctx.cumulative_discount_factors
-    );
 }
 
 /// Three study stages (ids `[0, 1, 2]`) plus two post-study stages continue

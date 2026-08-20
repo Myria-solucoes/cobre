@@ -21,9 +21,8 @@ use std::ops::Range;
 /// The in-study commitment-hold ring (`n_lanes = n_anticipated`,
 /// slot-major/plant-minor, `depth = k_max`, modular-addressed) every
 /// anticipated call site shares — the single owner of its out/in block
-/// construction. Borrows the LEADING `n_anticipated * k_max` sub-range of the
-/// merged [`StateSpace::commit_out`]/[`StateSpace::commit_in`] region; see
-/// [`commitment_hold_post_horizon_ring`] for the trailing sub-range.
+/// construction. Borrows the merged [`StateSpace::commit_out`]/
+/// [`StateSpace::commit_in`] region.
 pub(super) fn anticipated_ring(layout: &StageLayout) -> DeliveryRing {
     let state = layout.state;
     let n_ant_state = layout.n_anticipated * layout.k_max;
@@ -32,24 +31,6 @@ pub(super) fn anticipated_ring(layout: &StageLayout) -> DeliveryRing {
         state.commit_in.start..state.commit_in.start + n_ant_state,
         layout.n_anticipated,
         layout.k_max,
-    )
-}
-
-/// The terminal post-horizon lane ring (`n_lanes = n_commitment`, `depth =
-/// 1` — no lead-stage axis, a window's state never shifts slots). Borrows
-/// the TRAILING `n_commitment` sub-range of the merged
-/// [`StateSpace::commit_out`]/[`StateSpace::commit_in`] region, immediately
-/// after [`anticipated_ring`]'s in-study sub-range.
-pub(super) fn commitment_hold_post_horizon_ring(layout: &StageLayout) -> DeliveryRing {
-    let state = layout.state;
-    let n_ant_state = layout.n_anticipated * layout.k_max;
-    let out_base = state.commit_out.start + n_ant_state;
-    let in_base = state.commit_in.start + n_ant_state;
-    DeliveryRing::new(
-        out_base..out_base + state.n_commitment,
-        in_base..in_base + state.n_commitment,
-        state.n_commitment,
-        1,
     )
 }
 
@@ -204,38 +185,6 @@ fn fill_anticipated_slot_definition_entries(
         "fill_anticipated_slot_definition_entries: reachable-slot count must match \
          n_anticipated_slot_definition_rows"
     );
-}
-
-/// Encode the terminal post-horizon lanes' per-window row: at window `w`'s
-/// own decider stage, the LATCH row (`out_col(w) +1`, `decision_col −1`, via
-/// [`DeliveryRing::emit_deposit`]); every other stage, the CARRY row
-/// (`out_col(w) +1`, `in_col(w) −1`, via [`DeliveryRing::emit_carry_rows`]'s
-/// same-slot hold identity at `depth = 1`). No fish arm exists for a
-/// post-horizon lane — it is never consumed in-study; the boundary FCF prices
-/// the carried state (`fill_commitment_decision_columns` books the fuel).
-fn fill_commitment_post_horizon_entries(
-    layout: &StageLayout,
-    col_entries: &mut [Vec<(usize, f64)>],
-) {
-    let state = layout.state;
-    if state.n_commitment == 0 {
-        return;
-    }
-    let ring = commitment_hold_post_horizon_ring(layout);
-    let row_start = layout.anticipated.row_commitment_start;
-    let decision_start = layout.anticipated.col_commitment_decision_start;
-    let decision_windows = &layout.anticipated.commitment_decision_windows;
-
-    for w in 0..state.n_commitment {
-        let row = row_start + w;
-        if let Ok(local_idx) = decision_windows.binary_search(&w) {
-            let decision_col = decision_start + local_idx;
-            ring.emit_deposit(0, w, row, decision_col, col_entries);
-        } else {
-            col_entries[ring.out_col(0, w)].push((row, 1.0));
-            col_entries[ring.in_col(0, w)].push((row, -1.0));
-        }
-    }
 }
 
 /// Returns `true` when hydro `h_idx` is in the `PreFilling` phase at this stage.
@@ -1646,7 +1595,6 @@ pub(super) fn build_stage_matrix_entries(
     fill_pumping_water_entries(ctx, stage, layout, &mut col_entries);
     fill_anticipated_state_out_def_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_anticipated_slot_definition_entries(layout, &mut col_entries);
-    fill_commitment_post_horizon_entries(layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
     fill_fpha_entries(ctx, stage, stage_idx, layout, &mut col_entries);
@@ -2465,9 +2413,7 @@ mod zero_cost_tests {
                 // Sized to cover every active plant's delivery stage
                 // (`stage_idx + K_i < n_stages`); `fill_anticipated_columns`
                 // indexes these by delivery stage when pricing the decision column.
-                cumulative_discount_factors: vec![1.0; self.bounds.n_stages() + k_max],
                 delivery_cumulative_discount_factors: vec![1.0; self.bounds.n_stages() + k_max],
-                total_hours_per_stage: vec![744.0; self.bounds.n_stages() + k_max],
                 delivery_total_hours: vec![744.0; self.bounds.n_stages() + k_max],
                 // No hydros ⇒ no filling targets.
                 filling_v_target: BTreeMap::new(),
@@ -4033,9 +3979,7 @@ mod pumping_water_tests {
                 study_stage_ids: vec![],
                 delivery_stage_ids: vec![],
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0; N_STAGES],
                 delivery_cumulative_discount_factors: vec![1.0; N_STAGES],
-                total_hours_per_stage: vec![744.0; N_STAGES],
                 delivery_total_hours: vec![744.0; N_STAGES],
                 // These single-stage fixtures decouple `stage.id` from
                 // `stage_idx` (every phase is exercised at `stage_idx = 0` against

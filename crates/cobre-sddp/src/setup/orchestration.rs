@@ -291,7 +291,7 @@ impl StudySetup {
             energy_conversion: &self.energy_conversion,
             hydro_min_storage_hm3: &self.hydro_min_storage_hm3,
             event_sender,
-            commitment_window_delivery_dates: &self.commitment_window_delivery_dates,
+            extended_delivery_anchors: &self.extended_delivery_anchors,
             transit_seed_arcs: &self.transit_seed_arcs,
             past_defluences: &self.past_defluences,
             study_stage_dates: &self.study_stage_dates,
@@ -367,7 +367,6 @@ impl StudySetup {
                 noise_dim: 0,
                 n_anticipated: self.stage_data.state.n_anticipated,
                 k_max: self.stage_data.state.k_max,
-                n_commitment: self.stage_data.state.n_commitment,
             },
             solver_factory,
         )?;

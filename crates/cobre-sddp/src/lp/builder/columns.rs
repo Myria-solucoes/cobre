@@ -43,7 +43,6 @@ pub(super) fn fill_stage_columns(
     fill_anticipated_slot_columns(layout, bufs);
     fill_ar_lag_columns(layout, bufs);
     fill_anticipated_state_columns(layout, bufs);
-    fill_commitment_decision_columns(ctx, layout, bufs);
     fill_theta_column(layout, bufs);
     fill_turbine_columns(ctx, stage, stage_idx, layout, bufs);
     fill_spillage_columns(ctx, stage, stage_idx, layout, bufs);
@@ -144,12 +143,7 @@ fn fill_transit_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) 
 /// the water buckets' `[0, inf)`) for every reachable slot, frozen `[0, 0]`
 /// otherwise (mirroring [`fill_transit_bucket_columns`]; a plant's own
 /// latching slot is bounded later by [`fill_anticipated_columns`], which
-/// overwrites this fill when active). The trailing post-horizon lanes are
-/// NEVER frozen — `freeze_masked_columns`'s masking is retired for them,
-/// replaced with the same keep-live open bound at every stage including the
-/// terminal, so the boundary FCF prices the carried state (`β·x`) while
-/// [`fill_commitment_decision_columns`] books the delivery-anchored fuel
-/// (fuel-exclusive β, so the two do not double-count).
+/// overwrites this fill when active).
 fn fill_anticipated_slot_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     let base = layout.anticipated.col_anticipated_slots_out_start;
     let ring = super::entries::anticipated_ring(layout);
@@ -159,12 +153,6 @@ fn fill_anticipated_slot_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>
         (f64::NEG_INFINITY, f64::INFINITY),
         bufs,
     );
-    let n_ant_state = layout.n_anticipated * layout.k_max;
-    let post_horizon_base = base + n_ant_state;
-    for col in post_horizon_base..post_horizon_base + layout.state.n_commitment {
-        bufs.col_lower[col] = f64::NEG_INFINITY;
-        bufs.col_upper[col] = f64::INFINITY;
-    }
 }
 
 /// AR lag columns: unconstrained (signed).
@@ -186,57 +174,6 @@ fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_
     for col in layout.state.commit_in.clone() {
         bufs.col_lower[col] = f64::NEG_INFINITY;
         bufs.col_upper[col] = f64::INFINITY;
-    }
-}
-
-/// This stage's post-horizon decision-column family: books the discounted,
-/// delivery-anchored fuel cost onto each decision column (mirroring
-/// [`fill_anticipated_columns`]'s in-study booking, reading post-study hours,
-/// discount, cost, and bounds instead) and bounds it to the intersection of the
-/// commitment interval and the post-study capability. The terminal boundary FCF
-/// prices the carried state fuel-exclusively, so this booking does not
-/// double-count; the carry rows and `commit_out`/`commit_in` stay cost-free.
-fn fill_commitment_decision_columns(
-    ctx: &TemplateBuildCtx<'_>,
-    layout: &StageLayout,
-    bufs: &mut ColumnBufs<'_>,
-) {
-    let decision_start = layout.anticipated.col_commitment_decision_start;
-    for (local_idx, &w) in layout
-        .anticipated
-        .commitment_decision_windows
-        .iter()
-        .enumerate()
-    {
-        let col = decision_start + local_idx;
-        let thermal_id = layout.state.commitment_window_thermal_id[w];
-        let (min_c, max_c) = layout.state.commitment_window_min_max[w];
-        let dest = layout.state.commitment_window_dest_stage[w];
-
-        let bounds = ctx
-            .post_study_resolved
-            .thermal_bounds
-            .lookup(thermal_id, dest);
-        debug_assert!(
-            bounds.is_some(),
-            "post-horizon window {w} (thermal {thermal_id}, dest stage {dest}) must resolve a \
-             post-study thermal bound — the commitment-capability intersection is validated \
-             non-empty at read time"
-        );
-        let Some((cost, min_k, max_k)) = bounds else {
-            // Degrade a violated invariant to the dormant-zero column convention
-            // (as `fill_anticipated_columns` does), never an unbounded free column.
-            bufs.col_lower[col] = 0.0;
-            bufs.col_upper[col] = 0.0;
-            continue;
-        };
-
-        bufs.col_lower[col] = min_c.max(min_k);
-        bufs.col_upper[col] = max_c.min(max_k);
-
-        let hours = ctx.post_study_resolved.total_hours[dest];
-        let discount = ctx.post_study_resolved.cumulative_discount_factors[dest];
-        bufs.objective[col] = cost * hours * discount;
     }
 }
 
@@ -1665,9 +1602,7 @@ mod interior_storage_bound_tests {
                 study_stage_ids: vec![],
                 delivery_stage_ids: vec![],
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0],
                 delivery_cumulative_discount_factors: vec![1.0],
-                total_hours_per_stage: vec![744.0],
                 delivery_total_hours: vec![744.0],
                 filling_v_target: BTreeMap::new(),
             }
@@ -2170,9 +2105,7 @@ mod diversion_bound_tests {
                 study_stage_ids: vec![],
                 delivery_stage_ids: vec![],
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0],
                 delivery_cumulative_discount_factors: vec![1.0],
-                total_hours_per_stage: vec![744.0],
                 delivery_total_hours: vec![744.0],
                 filling_v_target: BTreeMap::new(),
             }
@@ -2602,9 +2535,7 @@ mod filling_phase_gating_tests {
                 study_stage_ids: vec![],
                 delivery_stage_ids: vec![],
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0],
                 delivery_cumulative_discount_factors: vec![1.0],
-                total_hours_per_stage: vec![744.0],
                 delivery_total_hours: vec![744.0],
                 filling_v_target: BTreeMap::new(),
             }
@@ -3621,9 +3552,7 @@ mod anticipated_objective_tests {
                 study_stage_ids: (0..N_STAGES as i32).collect(),
                 delivery_stage_ids: (0..N_STAGES as i32).collect(),
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0, 0.9, 0.81, 0.729, 0.6561, 0.59049],
                 delivery_cumulative_discount_factors: vec![1.0, 0.9, 0.81, 0.729, 0.6561, 0.59049],
-                total_hours_per_stage: vec![744.0; N_STAGES],
                 delivery_total_hours: vec![744.0; N_STAGES],
                 filling_v_target: BTreeMap::new(),
             }
@@ -3717,8 +3646,8 @@ mod anticipated_objective_tests {
         // cost_per_mwh(delivery) * total_hours[delivery] * cumulative_discount[delivery].
         let decision_col = layout.anticipated.col_anticipated_decision_start;
         let expected_npv = DELIVERY_COST_PER_MWH
-            * ctx.total_hours_per_stage[DELIVERY_STAGE]
-            * ctx.cumulative_discount_factors[DELIVERY_STAGE];
+            * ctx.delivery_total_hours[DELIVERY_STAGE]
+            * ctx.delivery_cumulative_discount_factors[DELIVERY_STAGE];
         assert_eq!(
             objective[decision_col], expected_npv,
             "anticipated decision objective must equal the NPV commitment cost",
@@ -3906,9 +3835,7 @@ mod anticipated_objective_tests {
                 study_stage_ids: (0..self.n_stages as i32).collect(),
                 delivery_stage_ids: (0..self.n_stages as i32).collect(),
                 has_penalty: false,
-                cumulative_discount_factors: self.discount.clone(),
                 delivery_cumulative_discount_factors: self.discount.clone(),
-                total_hours_per_stage: self.hours.clone(),
                 delivery_total_hours: self.hours.clone(),
                 filling_v_target: BTreeMap::new(),
             }
@@ -3973,8 +3900,9 @@ mod anticipated_objective_tests {
             "decision column must bound at its OWN delivery stage {delivery}'s \
              min_generation_mw, not the decision stage's",
         );
-        let expected_obj =
-            cost * ctx.total_hours_per_stage[delivery] * ctx.cumulative_discount_factors[delivery];
+        let expected_obj = cost
+            * ctx.delivery_total_hours[delivery]
+            * ctx.delivery_cumulative_discount_factors[delivery];
         assert_eq!(
             objective[decision_col], expected_obj,
             "decision objective must be priced at its OWN delivery stage \
@@ -4021,8 +3949,6 @@ mod anticipated_objective_tests {
         post_study_resolved: PostStudyResolved,
         k_max: usize,
         resolution: AnticipatedResolution,
-        study_hours: Vec<f64>,
-        study_discount: Vec<f64>,
         delivery_hours: Vec<f64>,
         delivery_discount: Vec<f64>,
         delivery_stage_ids: Vec<i32>,
@@ -4152,7 +4078,7 @@ mod anticipated_objective_tests {
             let k_max = resolution.k_max;
             let bounds = psa_bounds(k_max);
 
-            let study_hours = vec![PSA_STUDY_HOURS; PSA_N_STAGES];
+            let study_hours = [PSA_STUDY_HOURS; PSA_N_STAGES];
             let mut study_discount = Vec::with_capacity(PSA_N_STAGES);
             let mut d = 1.0_f64;
             for _ in 0..PSA_N_STAGES {
@@ -4208,8 +4134,6 @@ mod anticipated_objective_tests {
                 post_study_resolved,
                 k_max,
                 resolution,
-                study_hours,
-                study_discount,
                 delivery_hours,
                 delivery_discount,
                 delivery_stage_ids,
@@ -4270,9 +4194,7 @@ mod anticipated_objective_tests {
                 study_stage_ids: (0..i32::try_from(PSA_N_STAGES).unwrap()).collect(),
                 delivery_stage_ids: self.delivery_stage_ids.clone(),
                 has_penalty: false,
-                cumulative_discount_factors: self.study_discount.clone(),
                 delivery_cumulative_discount_factors: self.delivery_discount.clone(),
-                total_hours_per_stage: self.study_hours.clone(),
                 delivery_total_hours: self.delivery_hours.clone(),
                 filling_v_target: BTreeMap::new(),
             }
@@ -4304,8 +4226,9 @@ mod anticipated_objective_tests {
             col_lower[decision_col], min_g,
             "col_lower must equal thermal_block_base's min_generation_mw at the delivery stage"
         );
-        let expected_obj =
-            cost * ctx.total_hours_per_stage[delivery] * ctx.cumulative_discount_factors[delivery];
+        let expected_obj = cost
+            * ctx.delivery_total_hours[delivery]
+            * ctx.delivery_cumulative_discount_factors[delivery];
         assert_eq!(
             objective[decision_col], expected_obj,
             "objective must equal cost * hours * discount at the delivery stage"
@@ -4394,320 +4317,6 @@ mod anticipated_objective_tests {
             col_upper[decision_col], 30.0,
             "the pinned cell must set col_upper"
         );
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::float_cmp,
-    clippy::similar_names
-)]
-mod commitment_decision_cost_tests {
-    use std::collections::{BTreeMap, HashMap};
-
-    use chrono::NaiveDate;
-    use cobre_core::{
-        EntityId, HorizonGraph, PostStudyStage, PostStudyStages, PostStudyThermalBound,
-    };
-    use cobre_stochastic::par::precompute::PrecomputedPar;
-
-    use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
-    use crate::indexer::StateSpace;
-    use crate::lead_time::AnticipatedResolution;
-    use crate::resolved_parameters::ResolvedParameters;
-    use crate::setup::PostStudyResolved;
-
-    use super::super::layout::ResolvedTables;
-    use super::super::test_support::two_block_stage;
-    use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_commitment_decision_columns};
-    use crate::indexer::HydroCellIndex;
-
-    const STAGE_IDX: usize = 0;
-    const THERMAL_ID: EntityId = EntityId(9);
-    const DEST_STAGE: usize = 0;
-    const COST_PER_MWH: f64 = 25.0;
-    const POST_STUDY_HOURS: f64 = 500.0;
-    /// Chosen so the resolved cumulative discount factor `D` (the product of
-    /// these two) is neither `0.0` nor `1.0` — proving `D` is genuinely
-    /// multiplied into the objective, not just `C * H`.
-    const LAST_REAL_CUMULATIVE: f64 = 0.95;
-    const LAST_REAL_PER_STAGE: f64 = 0.9;
-
-    /// Owns the borrow targets for a `TemplateBuildCtx` isolating the
-    /// post-horizon commitment-hold decision column: zero hydros, zero
-    /// in-study anticipated ring (`n_anticipated == 0`, `k_max == 0`) — only
-    /// [`Self::make_state`]'s `n_commitment` slots exist, so
-    /// `fill_commitment_decision_columns` is the only fill touching anything
-    /// beyond `theta`.
-    struct CommitmentDecisionFixtures {
-        par_lp: PrecomputedPar,
-        cascade: cobre_core::CascadeTopology,
-        hydro_cell_index: HydroCellIndex,
-        bounds: cobre_core::ResolvedBounds,
-        penalties: cobre_core::ResolvedPenalties,
-        production_models: ProductionModelSet,
-        evaporation_models: EvaporationModelSet,
-        resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds,
-        resolved_load_factors: cobre_core::ResolvedLoadFactors,
-        resolved_ncs_bounds: cobre_core::ResolvedNcsBounds,
-        resolved_ncs_factors: cobre_core::ResolvedNcsFactors,
-        resolved_parameters: ResolvedParameters,
-        post_study_resolved: PostStudyResolved,
-    }
-
-    impl CommitmentDecisionFixtures {
-        /// `min_k`/`max_k` is the post-study capability; the caller declares
-        /// the commitment interval separately via [`Self::make_state`].
-        fn new(min_k: f64, max_k: f64) -> Self {
-            let post_study = PostStudyStages {
-                stages: vec![PostStudyStage {
-                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1)
-                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                    duration_hours: POST_STUDY_HOURS,
-                }],
-                thermal_bounds: vec![PostStudyThermalBound {
-                    thermal_id: THERMAL_ID,
-                    post_study_stage_index: DEST_STAGE,
-                    cost_per_mwh: COST_PER_MWH,
-                    min_mw: min_k,
-                    max_mw: max_k,
-                }],
-            };
-            let post_study_resolved = crate::setup::resolve_post_study_artifacts(
-                Some(&post_study),
-                &[],
-                &HorizonGraph::default(),
-                LAST_REAL_CUMULATIVE,
-                LAST_REAL_PER_STAGE,
-            );
-            Self {
-                par_lp: PrecomputedPar::default(),
-                cascade: cobre_core::CascadeTopology::build(&[]),
-                hydro_cell_index: HydroCellIndex::build(&[]),
-                bounds: cobre_core::ResolvedBounds::empty(),
-                penalties: cobre_core::ResolvedPenalties::empty(),
-                production_models: ProductionModelSet::new(vec![], 0, 1),
-                evaporation_models: EvaporationModelSet::new(vec![]),
-                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
-                resolved_load_factors: cobre_core::ResolvedLoadFactors::empty(),
-                resolved_ncs_bounds: cobre_core::ResolvedNcsBounds::empty(),
-                resolved_ncs_factors: cobre_core::ResolvedNcsFactors::empty(),
-                resolved_parameters: ResolvedParameters {
-                    per_param: vec![],
-                    id_to_slot: vec![],
-                    cost_scale_factor: 1_000_000.0,
-                },
-                post_study_resolved,
-            }
-        }
-
-        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
-            TemplateBuildCtx {
-                hydros: &[],
-                thermals: &[],
-                lines: &[],
-                buses: &[],
-                load_models: &[],
-                cascade: &self.cascade,
-                hydro_cell_index: &self.hydro_cell_index,
-                resolved: ResolvedTables {
-                    bounds: &self.bounds,
-                    penalties: &self.penalties,
-                    resolved_generic_bounds: &self.resolved_generic_bounds,
-                    resolved_load_factors: &self.resolved_load_factors,
-                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
-                    resolved_ncs_factors: &self.resolved_ncs_factors,
-                    resolved_parameters: &self.resolved_parameters,
-                },
-                hydro_pos: BTreeMap::new(),
-                thermal_pos: BTreeMap::new(),
-                line_pos: BTreeMap::new(),
-                bus_pos: BTreeMap::new(),
-                par_lp: &self.par_lp,
-                production_models: &self.production_models,
-                evaporation_models: &self.evaporation_models,
-                generic_constraints: &[],
-                non_controllable_sources: &[],
-                pumping_stations: &[],
-                pumping_pos: BTreeMap::new(),
-                n_pumping: 0,
-                contracts: &[],
-                contract_pos: BTreeMap::new(),
-                n_contract_import: 0,
-                n_contract_export: 0,
-                diversion_upstream: HashMap::new(),
-                arc_stage_weights: HashMap::new(),
-                arc_spread_chrono: HashMap::new(),
-                arc_arrival_density: HashMap::new(),
-                per_stage_mask: Vec::new(),
-                post_study_resolved: self.post_study_resolved.clone(),
-                n_hydros: 0,
-                n_thermals: 0,
-                n_lines: 0,
-                n_buses: 0,
-                max_par_order: 0,
-                n_anticipated: 0,
-                k_max: 0,
-                anticipated_lead_stages: Vec::new(),
-                anticipated_thermal_indices: Vec::new(),
-                anticipated_windows: Vec::new(),
-                anticipated_resolution: AnticipatedResolution::default(),
-                study_stage_ids: vec![0],
-                delivery_stage_ids: vec![0],
-                has_penalty: false,
-                cumulative_discount_factors: vec![1.0],
-                delivery_cumulative_discount_factors: vec![1.0],
-                total_hours_per_stage: vec![744.0],
-                delivery_total_hours: vec![744.0],
-                filling_v_target: BTreeMap::new(),
-            }
-        }
-
-        /// One declared post-horizon window, deciding at [`STAGE_IDX`] and
-        /// resolving to [`DEST_STAGE`], spanning `[min_c, max_c]`. No in-study
-        /// ring at all (`n_anticipated == 0`), isolating the lane.
-        fn make_state(min_c: f64, max_c: f64) -> StateSpace {
-            StateSpace::new_with_commitment_hold_windows(
-                0,
-                0,
-                0,
-                Vec::new(),
-                0,
-                0,
-                Vec::new(),
-                &[],
-                1,
-                vec![STAGE_IDX],
-                vec![THERMAL_ID],
-                vec![(min_c, max_c)],
-                vec![DEST_STAGE],
-            )
-        }
-
-        /// The inert sibling: zero declared windows, so `commit_out`/`commit_in`
-        /// collapse to width `0` and no decision column exists anywhere.
-        fn make_state_no_window() -> StateSpace {
-            StateSpace::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[])
-        }
-    }
-
-    /// Run [`fill_commitment_decision_columns`] against raw, default-filled
-    /// buffers (`0.0`/`INFINITY`/`0.0`, matching `fill_stage_columns`'s own
-    /// pre-fill) and return them by value.
-    fn run_fill(
-        ctx: &TemplateBuildCtx<'_>,
-        layout: &StageLayout<'_>,
-    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        let mut col_lower = vec![0.0_f64; layout.num_cols];
-        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
-        let mut objective = vec![0.0_f64; layout.num_cols];
-        let mut bufs = ColumnBufs {
-            col_lower: &mut col_lower,
-            col_upper: &mut col_upper,
-            objective: &mut objective,
-        };
-        fill_commitment_decision_columns(ctx, layout, &mut bufs);
-        (col_lower, col_upper, objective)
-    }
-
-    #[test]
-    fn decision_column_objective_equals_cost_times_hours_times_discount() {
-        let fixtures = CommitmentDecisionFixtures::new(10.0, 50.0);
-        let ctx = fixtures.make_ctx();
-        let state = CommitmentDecisionFixtures::make_state(20.0, 80.0);
-        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
-        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
-
-        let (_col_lower, _col_upper, objective) = run_fill(&ctx, &layout);
-        let col = layout.anticipated.col_commitment_decision_start;
-
-        let expected =
-            COST_PER_MWH * POST_STUDY_HOURS * (LAST_REAL_CUMULATIVE * LAST_REAL_PER_STAGE);
-        assert_eq!(
-            objective[col], expected,
-            "unscaled objective must equal C*H*D exactly (analytical derivation)"
-        );
-    }
-
-    #[test]
-    fn decision_column_bound_is_the_intersection_not_either_interval_alone() {
-        // Commitment [20, 80], capability [10, 50] -> intersection [20, 50].
-        let fixtures = CommitmentDecisionFixtures::new(10.0, 50.0);
-        let ctx = fixtures.make_ctx();
-        let state = CommitmentDecisionFixtures::make_state(20.0, 80.0);
-        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
-        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
-
-        let (col_lower, col_upper, _objective) = run_fill(&ctx, &layout);
-        let col = layout.anticipated.col_commitment_decision_start;
-
-        assert_eq!(col_lower[col], 20.0, "col_lower must be max(min_c, min_k)");
-        assert_eq!(col_upper[col], 50.0, "col_upper must be min(max_c, max_k)");
-        assert_ne!(col_lower[col], f64::NEG_INFINITY, "must not be left open");
-        assert_ne!(col_upper[col], f64::INFINITY, "must not be left open");
-    }
-
-    #[test]
-    fn pinned_commitment_within_capability_fixes_both_bounds_to_the_same_value() {
-        let pinned = 30.0;
-        let fixtures = CommitmentDecisionFixtures::new(10.0, 50.0);
-        let ctx = fixtures.make_ctx();
-        let state = CommitmentDecisionFixtures::make_state(pinned, pinned);
-        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
-        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
-
-        let (col_lower, col_upper, objective) = run_fill(&ctx, &layout);
-        let col = layout.anticipated.col_commitment_decision_start;
-
-        assert_eq!(col_lower[col], pinned);
-        assert_eq!(col_upper[col], pinned);
-        let expected_contribution =
-            pinned * COST_PER_MWH * POST_STUDY_HOURS * (LAST_REAL_CUMULATIVE * LAST_REAL_PER_STAGE);
-        let actual_contribution = pinned * objective[col];
-        assert_eq!(
-            actual_contribution, expected_contribution,
-            "a pinned decision's objective contribution must equal min_c*C*H*D"
-        );
-    }
-
-    /// Byte-identity: with zero declared post-horizon windows,
-    /// `fill_commitment_decision_columns` never runs its loop body, so every
-    /// buffer entry stays exactly at its `fill_stage_columns` pre-fill default
-    /// — never `(-inf, inf)` (the open-bound fill a declared window applies) and never any
-    /// nonzero objective.
-    #[test]
-    fn no_declared_window_leaves_every_buffer_entry_at_its_pre_fill_default() {
-        let fixtures = CommitmentDecisionFixtures::new(10.0, 50.0);
-        let ctx = fixtures.make_ctx();
-        let state = CommitmentDecisionFixtures::make_state_no_window();
-        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
-        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
-
-        assert_eq!(
-            layout.anticipated.commitment_decision_windows.len(),
-            0,
-            "fixture must declare zero commitment windows"
-        );
-
-        let (col_lower, col_upper, objective) = run_fill(&ctx, &layout);
-
-        for col in 0..layout.num_cols {
-            assert_eq!(
-                col_lower[col], 0.0,
-                "col_lower[{col}] must stay at its pre-fill default"
-            );
-            assert_eq!(
-                col_upper[col],
-                f64::INFINITY,
-                "col_upper[{col}] must stay at its pre-fill default"
-            );
-            assert_eq!(
-                objective[col], 0.0,
-                "objective[{col}] must stay at its pre-fill default"
-            );
-        }
     }
 }
 
@@ -5104,9 +4713,7 @@ mod block_family_slack_tests {
                 study_stage_ids: vec![],
                 delivery_stage_ids: vec![],
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0],
                 delivery_cumulative_discount_factors: vec![1.0],
-                total_hours_per_stage: vec![BLOCK_HOURS[0] + BLOCK_HOURS[1]],
                 delivery_total_hours: vec![BLOCK_HOURS[0] + BLOCK_HOURS[1]],
                 filling_v_target: BTreeMap::new(),
             }
@@ -5557,9 +5164,7 @@ mod evaporation_slack_objective_tests {
                 study_stage_ids: vec![],
                 delivery_stage_ids: vec![],
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0],
                 delivery_cumulative_discount_factors: vec![1.0],
-                total_hours_per_stage: vec![744.0],
                 delivery_total_hours: vec![744.0],
                 filling_v_target: BTreeMap::new(),
             }
@@ -5881,9 +5486,7 @@ mod contract_column_tests {
                 study_stage_ids: vec![],
                 delivery_stage_ids: vec![],
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0; N_STAGES],
                 delivery_cumulative_discount_factors: vec![1.0; N_STAGES],
-                total_hours_per_stage: vec![744.0; N_STAGES],
                 delivery_total_hours: vec![744.0; N_STAGES],
                 filling_v_target: BTreeMap::new(),
             }
@@ -6229,9 +5832,7 @@ mod thermal_block_bound_tests {
                 study_stage_ids: (0..N_STAGES as i32).collect(),
                 delivery_stage_ids: (0..N_STAGES as i32).collect(),
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0; N_STAGES],
                 delivery_cumulative_discount_factors: vec![1.0; N_STAGES],
-                total_hours_per_stage: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
                 delivery_total_hours: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
                 filling_v_target: BTreeMap::new(),
             }
@@ -6795,9 +6396,7 @@ mod line_contract_pumping_block_bound_tests {
                 study_stage_ids: (0..N_STAGES as i32).collect(),
                 delivery_stage_ids: (0..N_STAGES as i32).collect(),
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0; N_STAGES],
                 delivery_cumulative_discount_factors: vec![1.0; N_STAGES],
-                total_hours_per_stage: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
                 delivery_total_hours: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
                 filling_v_target: BTreeMap::new(),
             }
@@ -7544,9 +7143,7 @@ mod hydro_block_bound_tests {
                 study_stage_ids: (0..N_STAGES as i32).collect(),
                 delivery_stage_ids: (0..N_STAGES as i32).collect(),
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0; N_STAGES],
                 delivery_cumulative_discount_factors: vec![1.0; N_STAGES],
-                total_hours_per_stage: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
                 delivery_total_hours: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
                 filling_v_target: BTreeMap::new(),
             }
@@ -8659,9 +8256,7 @@ mod cell_column_bound_tests {
                 study_stage_ids: (0..self.n_stages as i32).collect(),
                 delivery_stage_ids: (0..self.n_stages as i32).collect(),
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0; self.n_stages],
                 delivery_cumulative_discount_factors: vec![1.0; self.n_stages],
-                total_hours_per_stage: vec![BLOCK_HOURS.iter().sum(); self.n_stages],
                 delivery_total_hours: vec![BLOCK_HOURS.iter().sum(); self.n_stages],
                 filling_v_target: BTreeMap::new(),
             }
