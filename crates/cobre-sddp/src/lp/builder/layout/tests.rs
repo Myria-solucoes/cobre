@@ -25,7 +25,7 @@ use crate::indexer::{
     BlockIdx, Boundary, EvapLocal, FphaCellLocal, FphaLocal, HydroCell, HydroCellIndex, HydroSys,
     LineSys, ThermalSys,
 };
-use crate::lead_time::AnticipatedResolution;
+use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
 use crate::resolved_parameters::ResolvedParameters;
 use crate::setup::PostStudyResolved;
 use crate::test_support::{make_unit_group, state_layout};
@@ -33,7 +33,8 @@ use crate::test_support::{make_unit_group, state_layout};
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, RangeCursor,
-    ResolvedTables, StageLayout, TemplateBuildCtx, build_transit_bucket_row_pos, fold_endpoint,
+    ResolvedTables, StageLayout, StateSpace, TemplateBuildCtx, build_anticipated_fishing_row_pos,
+    build_anticipated_slot_row_pos, build_transit_bucket_row_pos, fold_endpoint,
 };
 
 // ── RangeCursor ──────────────────────────────────────────────────────────
@@ -240,6 +241,7 @@ impl ZeroEntityFixtures {
             anticipated_windows: vec![(None, None); n_anticipated],
             anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
+            delivery_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
             anticipated_thermal_indices: anticipated_thermal_indices
                 .into_iter()
                 .map(ThermalSys::new)
@@ -248,7 +250,9 @@ impl ZeroEntityFixtures {
             // Tests that use ZeroEntityFixtures don't exercise discount
             // factors; provide n_stages = 1 element vecs that won't panic.
             cumulative_discount_factors: vec![1.0],
+            delivery_cumulative_discount_factors: vec![1.0],
             total_hours_per_stage: vec![744.0],
+            delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
     }
@@ -645,9 +649,12 @@ impl TwoHydroFixtures {
             anticipated_windows: vec![],
             anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
+            delivery_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
+            delivery_cumulative_discount_factors: vec![1.0],
             total_hours_per_stage: vec![744.0],
+            delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
     }
@@ -977,9 +984,12 @@ impl FphaMixFixtures {
             anticipated_windows: vec![],
             anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
+            delivery_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
+            delivery_cumulative_discount_factors: vec![1.0],
             total_hours_per_stage: vec![744.0],
+            delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
     }
@@ -1154,9 +1164,12 @@ impl FillingMembershipFixtures {
             anticipated_windows: vec![],
             anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
+            delivery_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
+            delivery_cumulative_discount_factors: vec![1.0],
             total_hours_per_stage: vec![744.0],
+            delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
     }
@@ -1725,7 +1738,10 @@ fn stage_layout_with_anticipated_shifts_decision_region() {
 /// the production code path (`n_hydros * n_blks` counts operational violation rows).
 ///
 /// Setup: `n_anticipated=2`, `k_max=2`, `anticipated_lead_stages=[1,2]`,
-/// zero hydros, one block. At `stage_idx=1`:
+/// zero hydros, one block, `n_stages=4` (`AntFixturesWithNStages`, not the
+/// study-stage-count-0 `ZeroEntityFixtures`: `build_anticipated_fishing_row_pos`'s
+/// in-study guard reads the fixture's own `n_stages`, so a `stage_idx=1` probe
+/// needs a real study-stage count to stay in-study). At `stage_idx=1`:
 /// - `n_op_rows = 0 * 1 = 0` (no hydros)
 /// - `row_anticipated_fishing_start` must equal `row_min_generation_start + 0`
 #[test]
@@ -1733,7 +1749,7 @@ fn anticipated_fishing_row_offset_after_operational_violations() {
     let n_anticipated = 2_usize;
     let k_max = 2_usize;
 
-    let fixtures = ZeroEntityFixtures::new();
+    let fixtures = AntFixturesWithNStages::new(4);
     let ctx = fixtures.make_ctx(
         n_anticipated,
         k_max,
@@ -1759,13 +1775,15 @@ fn anticipated_fishing_row_offset_after_operational_violations() {
 
 /// `n_anticipated_fishing_rows` equals `n_anticipated` at every stage under
 /// the always-active predicate. With `K_i=[1,2]` and `n_anticipated=2`, the
-/// count is 2 at every stage in `[0, 1, 2, 3]`.
+/// count is 2 at every stage in `[0, 1, 2, 3]`. `n_stages=4` covers the
+/// probed range (`AntFixturesWithNStages`, not the study-stage-count-0
+/// `ZeroEntityFixtures` — see the sibling test above for why).
 #[test]
 fn anticipated_fishing_row_count_grows_with_stage() {
     let n_anticipated = 2_usize;
     let k_max = 2_usize;
 
-    let fixtures = ZeroEntityFixtures::new();
+    let fixtures = AntFixturesWithNStages::new(4);
     let ctx = fixtures.make_ctx(
         n_anticipated,
         k_max,
@@ -1791,12 +1809,16 @@ fn anticipated_fishing_row_count_grows_with_stage() {
 /// prefix. `num_rows` equals the count of structural rows only (`z_inflow`,
 /// water balance, load balance, FPHA, evap, operational, fishing,
 /// `anticipated_state_out_def`, generic).
+///
+/// `AntFixturesWithNStages`, not the study-stage-count-0 `ZeroEntityFixtures`:
+/// `build_anticipated_fishing_row_pos`'s in-study guard reads the fixture's
+/// own `n_stages`, so even `stage_idx=0` needs a real study-stage count.
 #[test]
 fn num_rows_drops_by_n_state_with_anticipated_thermals() {
     let n_anticipated = 2_usize;
     let k_max = 3_usize;
 
-    let fixtures = ZeroEntityFixtures::new();
+    let fixtures = AntFixturesWithNStages::new(1);
     let ctx = fixtures.make_ctx(n_anticipated, k_max, vec![3, 2], vec![0, 1]);
     let stage = minimal_stage();
     let state = state_layout_for(&ctx);
@@ -1828,6 +1850,129 @@ fn num_rows_drops_by_n_state_with_anticipated_thermals() {
         layout.rows.water_balance.start, ctx.n_hydros,
         "row_water_balance_start does not include the n_state offset"
     );
+}
+
+// ── Delivery-axis generalization: row positions & masking ────────────────
+
+/// Build a one-plant `StateSpace` carrying an attached delivery-anchored
+/// `AnticipatedResolution` directly — never the constant-lead fallback
+/// `anticipated_resolution_for` falls back to when none is attached
+/// (`state_layout_for` leaves that fallback active; these tests need the
+/// real resolved axis instead).
+fn state_with_attached_resolution(k_max: usize, resolution: AnticipatedResolution) -> StateSpace {
+    let n_anticipated = resolution.per_plant.len();
+    let mut state = StateSpace::new(0, 0, 0, Vec::new(), n_anticipated, k_max, vec![k_max], &[]);
+    state.set_anticipated_resolution(resolution);
+    state
+}
+
+/// Study-only axis (`delivery_stage_count(n_stages) == n_stages`): every
+/// returned position must be byte-identical to the pre-generalization
+/// `m >= n_stages` skip. `k_max = 2`, `LeadTime::Stages(2)` over 3 study
+/// stages, `stage_idx = 1`. Depths `[2, 3]` reach delivery targets `m = [2,
+/// 3]`: `m=2` (`decider[2] = Some(0)`) is ready at stage 1 and not a fresh
+/// deposit there, so slot `2 % 2 = 0` is an interior carry; `m=3 >=
+/// n_delivery(3)` is masked. Hand-written, not recomputed, so a regression in
+/// the residue arithmetic is caught rather than reproduced.
+#[test]
+fn build_anticipated_slot_row_pos_study_only_byte_identity() {
+    let k_max = 2;
+    let resolution = AnticipatedResolution::resolve(
+        &[LeadTime::Stages(2)],
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: 3,
+            n_delivery: 3,
+        },
+    );
+    assert_eq!(resolution.k_max, k_max, "fixture must realize k_max == 2");
+    let state = state_with_attached_resolution(k_max, resolution);
+
+    let (row_pos, n_reachable) = build_anticipated_slot_row_pos(&state, 3, 1);
+
+    assert_eq!(
+        row_pos,
+        vec![Some(0), None],
+        "study-only axis must reproduce the exact pre-generalization positions"
+    );
+    assert_eq!(n_reachable, 1);
+}
+
+/// Extended axis (four study stages, four post-study stages: `n_decision =
+/// 4`, `n_delivery = 8`), `k_max = 4`, `LeadTime::Stages(4)`. At `stage_idx =
+/// 2`, depth `2` reaches delivery target `m = 5` — a POST-STUDY stage
+/// (`m >= n_decision`). `decider[5] = Some(1)`: not a fresh deposit at stage
+/// 2 (`Some(1) != Some(2)`) and ready (`1 <= 2`), so slot `5 % 4 = 1` must be
+/// `Some` — an interior carry — rather than masked by the retired
+/// `m >= n_stages` bound.
+#[test]
+fn build_anticipated_slot_row_pos_extended_axis_carries_post_study_target_m5() {
+    let k_max = 4;
+    let resolution = AnticipatedResolution::resolve(
+        &[LeadTime::Stages(4)],
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: 4,
+            n_delivery: 8,
+        },
+    );
+    assert_eq!(resolution.k_max, k_max, "fixture must realize k_max == 4");
+    let state = state_with_attached_resolution(k_max, resolution);
+
+    let (row_pos, _n_reachable) = build_anticipated_slot_row_pos(&state, 4, 2);
+
+    let slot = 5 % k_max;
+    assert!(
+        row_pos[slot].is_some(),
+        "post-study delivery target m=5 (slot {slot}) must carry as an interior \
+         position, not be masked by the retired study-horizon bound"
+    );
+}
+
+/// Fishing-count invariance under the same extended axis as the carry test
+/// above: `build_anticipated_fishing_row_pos` run at every in-study
+/// `stage_idx` (`0..4`) must produce the SAME active count whether the
+/// attached resolution's delivery axis is study-only (`n_delivery = 4`) or
+/// extended (`n_delivery = 8`) — no post-study maturity ever produces a
+/// fishing row, since a maturity is always checked against `stage_idx`
+/// itself, which the caller (and the function's own explicit in-study guard)
+/// keeps in `[0, n_stages)`.
+#[test]
+fn build_anticipated_fishing_row_pos_extended_axis_matches_study_only_count() {
+    let k_max = 4;
+    let lead = LeadTime::Stages(4);
+    let n_stages = 4;
+
+    let study_only_resolution = AnticipatedResolution::resolve(
+        &[lead],
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: n_stages,
+            n_delivery: n_stages,
+        },
+    );
+    let extended_resolution = AnticipatedResolution::resolve(
+        &[lead],
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: n_stages,
+            n_delivery: 2 * n_stages,
+        },
+    );
+    let study_only_state = state_with_attached_resolution(k_max, study_only_resolution);
+    let extended_state = state_with_attached_resolution(k_max, extended_resolution);
+
+    for stage_idx in 0..n_stages {
+        let (_, study_only_count) =
+            build_anticipated_fishing_row_pos(&study_only_state, n_stages, stage_idx);
+        let (_, extended_count) =
+            build_anticipated_fishing_row_pos(&extended_state, n_stages, stage_idx);
+        assert_eq!(
+            extended_count, study_only_count,
+            "extended-axis fishing count at stage_idx={stage_idx} must match the \
+             study-only count — no post-study maturity produces a fishing row"
+        );
+    }
 }
 
 // ── Anticipated-decision range tests ──────────────────────────────────────
@@ -1944,9 +2089,12 @@ impl AntFixturesWithNStages {
             anticipated_windows: vec![(None, None); n_anticipated],
             anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: (0..i32::try_from(n_stages).unwrap_or(0)).collect(),
+            delivery_stage_ids: (0..i32::try_from(n_stages).unwrap_or(0)).collect(),
             has_penalty: false,
             cumulative_discount_factors: vec![1.0; n_stages],
+            delivery_cumulative_discount_factors: vec![1.0; n_stages],
             total_hours_per_stage: vec![744.0; n_stages],
+            delivery_total_hours: vec![744.0; n_stages],
             filling_v_target: BTreeMap::new(),
         }
     }
@@ -2198,9 +2346,12 @@ impl PumpingFixtures {
             anticipated_windows: vec![],
             anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
+            delivery_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0; n_stages],
+            delivery_cumulative_discount_factors: vec![1.0; n_stages],
             total_hours_per_stage: vec![744.0; n_stages],
+            delivery_total_hours: vec![744.0; n_stages],
             filling_v_target: BTreeMap::new(),
         }
     }
@@ -2921,9 +3072,12 @@ impl TwoHydroMultiBusFixtures {
             anticipated_windows: vec![],
             anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
+            delivery_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
+            delivery_cumulative_discount_factors: vec![1.0],
             total_hours_per_stage: vec![744.0],
+            delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
     }
@@ -3169,9 +3323,12 @@ impl FphaMultiBusFixtures {
             anticipated_windows: vec![],
             anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
+            delivery_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
+            delivery_cumulative_discount_factors: vec![1.0],
             total_hours_per_stage: vec![744.0],
+            delivery_total_hours: vec![744.0],
             filling_v_target: BTreeMap::new(),
         }
     }

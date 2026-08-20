@@ -2459,12 +2459,16 @@ mod zero_cost_tests {
                 anticipated_windows: vec![(None, None); n_anticipated],
                 anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
+                delivery_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0))
+                    .collect(),
                 has_penalty: false,
                 // Sized to cover every active plant's delivery stage
                 // (`stage_idx + K_i < n_stages`); `fill_anticipated_columns`
                 // indexes these by delivery stage when pricing the decision column.
                 cumulative_discount_factors: vec![1.0; self.bounds.n_stages() + k_max],
+                delivery_cumulative_discount_factors: vec![1.0; self.bounds.n_stages() + k_max],
                 total_hours_per_stage: vec![744.0; self.bounds.n_stages() + k_max],
+                delivery_total_hours: vec![744.0; self.bounds.n_stages() + k_max],
                 // No hydros ⇒ no filling targets.
                 filling_v_target: BTreeMap::new(),
             }
@@ -4027,9 +4031,12 @@ mod pumping_water_tests {
                 anticipated_windows: vec![],
                 anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: vec![],
+                delivery_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0; N_STAGES],
+                delivery_cumulative_discount_factors: vec![1.0; N_STAGES],
                 total_hours_per_stage: vec![744.0; N_STAGES],
+                delivery_total_hours: vec![744.0; N_STAGES],
                 // These single-stage fixtures decouple `stage.id` from
                 // `stage_idx` (every phase is exercised at `stage_idx = 0` against
                 // one bounds row), so the filling window's stage ids all resolve to

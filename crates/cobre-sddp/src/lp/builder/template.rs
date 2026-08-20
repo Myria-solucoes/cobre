@@ -1010,8 +1010,18 @@ fn build_template_build_ctx<'a>(
         "total_hours_per_stage length must equal n_study_stages"
     );
 
+    // Same canonical anticipated-local order `resolve_state_layout` derives
+    // (`system.thermals()` filtered on `anticipated_config.is_some()`) —
+    // `anticipated_thermal_indices` above is that exact order, so this reads
+    // back through it rather than re-filtering `system.thermals()` a second time.
+    let anticipated_thermal_ids: Vec<EntityId> = anticipated_thermal_indices
+        .iter()
+        .map(|&idx| system.thermals()[idx.get()].id)
+        .collect();
+
     let post_study_resolved = resolve_post_study_artifacts(
         system.post_study_stages(),
+        &anticipated_thermal_ids,
         system.policy_graph(),
         cumulative_discount_factors.last().copied().unwrap_or(1.0),
         per_stage_discount.last().copied().unwrap_or(1.0),
@@ -1021,6 +1031,60 @@ fn build_template_build_ctx<'a>(
     // operation-window clause on the DELIVERY stage's `stage.id`, mapping the
     // delivery index `t + K_i` to its id through this slice.
     let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
+
+    // Concatenate rather than recompute: `resolve_post_study_artifacts` already
+    // establishes that the post-study half continues the study recurrence, so a
+    // second derivation would risk diverging from it.
+    let delivery_total_hours: Vec<f64> = total_hours_per_stage
+        .iter()
+        .copied()
+        .chain(post_study_resolved.total_hours.iter().copied())
+        .collect();
+    let delivery_cumulative_discount_factors: Vec<f64> = cumulative_discount_factors
+        .iter()
+        .copied()
+        .chain(
+            post_study_resolved
+                .cumulative_discount_factors
+                .iter()
+                .copied(),
+        )
+        .collect();
+    // Synthetic continuation from `study_stage_ids.last()` (never
+    // `study_stages.len()` — the `s.id >= 0` filter breaks that relation), never
+    // `post_study_calendar_stages`'s own `Stage::id`: those restart at `0` and
+    // would make a post-study delivery compare as an early study stage.
+    let n_post = post_study_resolved.total_hours.len();
+    let next_delivery_id = study_stage_ids.last().map_or(0, |&last| last + 1);
+    let end_delivery_id =
+        next_delivery_id.saturating_add(i32::try_from(n_post).unwrap_or(i32::MAX));
+    let delivery_stage_ids: Vec<i32> = study_stage_ids
+        .iter()
+        .copied()
+        .chain(next_delivery_id..end_delivery_id)
+        .collect();
+
+    let n_delivery = study_stage_ids.len() + n_post;
+    debug_assert_eq!(
+        delivery_total_hours.len(),
+        n_delivery,
+        "delivery_total_hours length must equal n_study_stages + n_post"
+    );
+    debug_assert_eq!(
+        delivery_cumulative_discount_factors.len(),
+        n_delivery,
+        "delivery_cumulative_discount_factors length must equal n_study_stages + n_post"
+    );
+    debug_assert_eq!(
+        delivery_stage_ids.len(),
+        n_delivery,
+        "delivery_stage_ids length must equal n_study_stages + n_post"
+    );
+    debug_assert!(
+        delivery_stage_ids.windows(2).all(|w| w[0] < w[1]),
+        "delivery_stage_ids must be strictly increasing — commissioning_active's \
+         monotonicity depends on it"
+    );
 
     let stage_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
 
@@ -1077,9 +1141,12 @@ fn build_template_build_ctx<'a>(
         anticipated_windows,
         anticipated_resolution,
         study_stage_ids,
+        delivery_stage_ids,
         has_penalty: n_hydros > 0 && inflow_method.has_slack_columns(),
         cumulative_discount_factors,
+        delivery_cumulative_discount_factors,
         total_hours_per_stage,
+        delivery_total_hours,
         filling_v_target,
         arc_stage_weights,
         arc_spread_chrono,

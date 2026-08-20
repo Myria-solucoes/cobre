@@ -104,6 +104,21 @@ impl StudySetup {
         &self.stage_data.state
     }
 
+    /// Resolve the terminal cut pool's ordinal and its owning study stage id.
+    ///
+    /// `terminal_idx` is a pool ordinal (`== n_pools - 1`); its owning stage
+    /// resolves through `node_graph.pool_stage`, never `study_stage_ids[terminal_idx]`,
+    /// which is OOB once `n_pools > n_stages` on a branching graph. Sole owner of
+    /// this resolution so [`Self::build_terminal_entity_manifest`] and
+    /// [`Self::build_terminal_anticipated_delivery_intervals`] date a slot and
+    /// interval it at the SAME stage — a divergence would date a slot at one stage
+    /// and interval it at another.
+    fn terminal_pool_stage_id(&self) -> (usize, i32) {
+        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx].0];
+        (terminal_idx, stage_id)
+    }
+
     /// Build the per-slot entity-identity manifest for the terminal cut pool —
     /// the pool a boundary policy injects into.
     ///
@@ -120,11 +135,7 @@ impl StudySetup {
     /// `system` is passed explicitly because [`StudySetup`] does not own it.
     #[must_use]
     pub fn build_terminal_entity_manifest(&self, system: &System) -> Vec<EntitySlot> {
-        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
-        // `terminal_idx` is a pool ordinal (`== n_pools - 1`); its owning stage
-        // resolves through `pool_stage`, never `study_stage_ids[terminal_idx]`,
-        // which is OOB once `n_pools > n_stages` on a branching graph.
-        let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx].0];
+        let (terminal_idx, stage_id) = self.terminal_pool_stage_id();
         build_stage_entity_manifest(
             system,
             &self.stage_data.state,
@@ -133,10 +144,11 @@ impl StudySetup {
         )
     }
 
-    /// Build the per-slot post-horizon delivery interval for the terminal cut
-    /// pool, aligned 1:1 with [`Self::build_terminal_entity_manifest`]:
-    /// `Some((start, end))` for a live, dated `AnticipatedThermalState`
-    /// post-horizon lane slot, `None` elsewhere.
+    /// Build the per-slot delivery interval for the terminal cut pool, aligned
+    /// 1:1 with [`Self::build_terminal_entity_manifest`]: `Some((start, end))` for
+    /// a dated post-study target — a post-horizon commitment-window lane slot or
+    /// an in-study ring slot whose modular delivery target lands on a post-study
+    /// stage — `None` elsewhere.
     ///
     /// Delegates to [`build_stage_entity_delivery_intervals`], the companion
     /// [`build_stage_entity_manifest`] walks in lockstep, against the SAME
@@ -153,11 +165,12 @@ impl StudySetup {
         &self,
         system: &System,
     ) -> Vec<Option<(NaiveDate, NaiveDate)>> {
-        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        let (terminal_idx, stage_id) = self.terminal_pool_stage_id();
         build_stage_entity_delivery_intervals(
             system,
             &self.stage_data.state,
             &self.stage_data.cut_state_layouts[terminal_idx],
+            stage_id,
         )
     }
 

@@ -128,18 +128,45 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// (`crate::setup::resolve_state_layout`) — the same resolution the role-(a)
     /// `StateSpace` this build receives already carries.
     pub(crate) anticipated_resolution: AnticipatedResolution,
-    /// `study_stage_ids[t] = stage.id`, length `n_study_stages`. The decision gate
-    /// keys its window clause on the delivery stage's `stage.id`, NOT the stage
-    /// index, mapping delivery index `t + K_i` through this slice.
+    /// `study_stage_ids[t] = stage.id`, length `n_study_stages`.
+    // Rationale: read only by the study-only-axis regression assertions in
+    // `template::tests` (`ctx.delivery_stage_ids == ctx.study_stage_ids`);
+    // the decision gate's window clause reads `delivery_stage_ids` in
+    // production.
+    #[allow(dead_code)]
     pub(crate) study_stage_ids: Vec<i32>,
+    /// `study_stage_ids` continued past the horizon by a synthetic id sequence
+    /// (`max(study_stage_ids) + 1 ..`), length `n_study_stages + n_post`; indexed
+    /// by DELIVERY stage, not study stage. Never `post_study_calendar_stages`'s
+    /// own `Stage::id` — those restart at `0` and would collide with a real
+    /// study id. The decision gate's window clause keys on this slice, mapping
+    /// delivery index `t + K_i` through `id(t + K_i)`.
+    pub(crate) delivery_stage_ids: Vec<i32>,
     /// Whether any penalty method is active.
     pub(crate) has_penalty: bool,
     /// Present-value multiplier at each stage, length `n_study_stages`. The strict
     /// predicate `stage_idx + K_i < n_stages` keeps every delivery lookup in range.
+    // Rationale: remains read by the study-only byte-identity test pin in
+    // `template::tests` (`ctx.delivery_cumulative_discount_factors ==
+    // ctx.cumulative_discount_factors`); production reads the extended
+    // `delivery_cumulative_discount_factors` vector.
+    #[allow(dead_code)]
     pub(crate) cumulative_discount_factors: Vec<f64>,
+    /// `cumulative_discount_factors` concatenated with
+    /// `post_study_resolved.cumulative_discount_factors`, length
+    /// `n_study_stages + n_post`; indexed by DELIVERY stage, not study stage.
+    pub(crate) delivery_cumulative_discount_factors: Vec<f64>,
     /// Σ `block.duration_hours` per study stage, length `n_study_stages` (same
     /// in-range guarantee as `cumulative_discount_factors`).
+    // Rationale: remains read by the study-only byte-identity test pin in
+    // `template::tests` (`ctx.delivery_total_hours == ctx.total_hours_per_stage`);
+    // production reads the extended `delivery_total_hours` vector.
+    #[allow(dead_code)]
     pub(crate) total_hours_per_stage: Vec<f64>,
+    /// `total_hours_per_stage` concatenated with `post_study_resolved.total_hours`,
+    /// length `n_study_stages + n_post`; indexed by DELIVERY stage, not study
+    /// stage.
+    pub(crate) delivery_total_hours: Vec<f64>,
     /// Per-stage minimum target-storage trajectory, keyed `(hydro_idx, stage_id)
     /// → V_target` \[hm³\]. Computed once by a backward fold from the dead volume
     /// because the fold needs the full per-stage ζ·rate schedule across a hydro's
@@ -676,13 +703,16 @@ fn build_transit_bucket_row_pos(
 /// the slot's delivery target `m = stage_idx + depth + 1` is a genuine fresh
 /// decision this stage (`decider[m] == Some(stage_idx)`, the deposit-row
 /// family `row_anticipated_state_out_def_start` owns it instead), beyond the
-/// study horizon (`m >= n_stages`), or not yet ready
-/// (`PointResolution::is_ready_at`, structural padding). This covers only
-/// STRICTLY FUTURE, not-yet-due deliveries; the commitment maturing EXACTLY
-/// this stage (`m == stage_idx`) is the single governing branch's fish-or-
-/// carry decision, owned by [`build_anticipated_fishing_row_pos`] and its
-/// entries-side `if`/`else` — never duplicated here. Returns the mapping and
-/// the reachable count.
+/// EXTENDED delivery calendar (`m >= state.delivery_stage_count(n_stages)`),
+/// or not yet ready (`PointResolution::is_ready_at`, structural padding).
+/// Masking on the study horizon (`m >= n_stages`) instead is the
+/// wrong-but-compiling alternative: it would freeze `[0, 0]` a slot the
+/// terminal boundary must carry, zeroing a commitment the FCF prices. This
+/// covers only STRICTLY FUTURE, not-yet-due deliveries; the commitment
+/// maturing EXACTLY this stage (`m == stage_idx`) is the single governing
+/// branch's fish-or-carry decision, owned by
+/// [`build_anticipated_fishing_row_pos`] and its entries-side `if`/`else` —
+/// never duplicated here. Returns the mapping and the reachable count.
 fn build_anticipated_slot_row_pos(
     state: &StateSpace,
     n_stages: usize,
@@ -693,6 +723,7 @@ fn build_anticipated_slot_row_pos(
     if n_anticipated == 0 || k_max == 0 {
         return (Vec::new(), 0);
     }
+    let n_delivery = state.delivery_stage_count(n_stages);
     let points: Vec<_> = (0..n_anticipated)
         .map(|plant| anticipated_resolution_for(state, AnticipatedLocal::new(plant), n_stages))
         .collect();
@@ -701,7 +732,7 @@ fn build_anticipated_slot_row_pos(
     let mut n_reachable = 0_usize;
     for depth in 0..k_max {
         let m = stage_idx + depth + 1;
-        if m >= n_stages {
+        if m >= n_delivery {
             continue;
         }
         // Modular addressing (`m % k_max`) in place of the pre-migration
@@ -718,6 +749,11 @@ fn build_anticipated_slot_row_pos(
             }
         }
     }
+    debug_assert_eq!(
+        row_pos.iter().filter(|pos| pos.is_some()).count(),
+        n_reachable,
+        "n_reachable must equal the count of Some positions in row_pos"
+    );
     (row_pos, n_reachable)
 }
 
@@ -735,13 +771,14 @@ fn build_anticipated_decision_row_pos(
     n_stages: usize,
     stage_idx: usize,
     anticipated_windows: &[(Option<i32>, Option<i32>)],
-    study_stage_ids: &[i32],
+    delivery_stage_ids: &[i32],
 ) -> (Vec<Option<usize>>, usize) {
     let n_anticipated = state.n_anticipated;
     let k_max = state.k_max;
     if n_anticipated == 0 || k_max == 0 {
         return (Vec::new(), 0);
     }
+    let n_delivery = state.delivery_stage_count(n_stages);
     let mut row_pos = vec![None; n_anticipated];
     let mut n_active = 0_usize;
     for (plant, pos) in row_pos.iter_mut().enumerate() {
@@ -759,9 +796,9 @@ fn build_anticipated_decision_row_pos(
             state,
             plant,
             m,
-            n_stages,
+            n_delivery,
             anticipated_windows,
-            study_stage_ids,
+            delivery_stage_ids,
         ) {
             *pos = Some(n_active);
             n_active += 1;
@@ -785,8 +822,14 @@ fn build_anticipated_decision_row_pos(
 /// (`(Vec::new(), 0)`) when `n_anticipated == 0 || k_max == 0`, mirroring
 /// [`build_anticipated_slot_row_pos`]: `is_anticipated_at` is `true` for a
 /// pre-study (`None`) decider, so gating on `n_anticipated` alone would let a
-/// pre-study-only plant reach a fishing row on an empty ring. Returns the
-/// mapping and the active count.
+/// pre-study-only plant reach a fishing row on an empty ring.
+///
+/// STUDY-only domain, deliberately NOT generalized to the extended calendar:
+/// `stage_idx` must itself be in-study (`stage_idx < n_stages`, checked
+/// explicitly here rather than trusted from the caller), because a
+/// post-study-targeted slot has no stage LP to couple generation into — it
+/// carries to the terminal instead ([`build_anticipated_slot_row_pos`]),
+/// never fishes. Returns the mapping and the active count.
 fn build_anticipated_fishing_row_pos(
     state: &StateSpace,
     n_stages: usize,
@@ -794,7 +837,7 @@ fn build_anticipated_fishing_row_pos(
 ) -> (Vec<Option<usize>>, usize) {
     let n_anticipated = state.n_anticipated;
     let k_max = state.k_max;
-    if n_anticipated == 0 || k_max == 0 {
+    if n_anticipated == 0 || k_max == 0 || stage_idx >= n_stages {
         return (Vec::new(), 0);
     }
     let mut row_pos = vec![None; n_anticipated];
@@ -1361,7 +1404,7 @@ impl<'a> StageLayout<'a> {
                 n_stages,
                 stage_idx,
                 &ctx.anticipated_windows,
-                &ctx.study_stage_ids,
+                &ctx.delivery_stage_ids,
             );
         let row_anticipated_state_out_def_start = row.alloc(n_anticipated_state_out_def_rows).start;
 

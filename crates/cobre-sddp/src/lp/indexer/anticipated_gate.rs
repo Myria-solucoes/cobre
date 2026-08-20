@@ -23,17 +23,26 @@ use cobre_core::commissioning::commissioning_active;
 /// owner of the anticipated-decision gate. Both clauses key on the
 /// **delivery** stage `t + K_i`:
 ///
-/// 1. **Strict horizon** — `stage_idx + K_i < n_stages`. The `<` is strict:
-///    a `<=` would price a commitment delivered at `n_stages`, outside
-///    `[0, n_stages)`, with no delivery LP.
+/// 1. **Strict extended-calendar bound** — `stage_idx + K_i < n_delivery`,
+///    against the extended delivery calendar (study stages plus the
+///    synthetic post-study continuation), not merely `n_stages`. The `<` is
+///    strict: a `<=` would price a commitment delivered at `n_delivery`,
+///    outside `[0, n_delivery)`, with no delivery LP.
 /// 2. **Operation window** — the delivery stage is commissioning-active,
-///    `commissioning_active(entry_i, exit_i, id(t + K_i))`. Keying on the
-///    DELIVERY stage, not the decision stage `t`, is load-bearing: a
-///    pre-entry decision at `entry − K_i` legitimately delivers at `entry`,
-///    and keying on `t` would invert which decisions are active.
+///    `commissioning_active(entry_i, exit_i, id(t + K_i))`, resolved through
+///    `delivery_stage_ids` UNIFORMLY at every delivery stage, study or
+///    post-study alike — no `delivery_stage < n_stages` conjunct exempts a
+///    post-study delivery from this check: a plant whose `exit_stage_id`
+///    lies inside the study is inactive for every delivery after it,
+///    in-study or not (pinned by
+///    `is_anticipated_decision_active_for_delivery_uniform_gate_rejects_post_study_delivery_for_exited_plant`).
+///    Keying on the DELIVERY stage, not the
+///    decision stage `t`, is separately load-bearing: a pre-entry decision
+///    at `entry − K_i` legitimately delivers at `entry`, and keying on `t`
+///    would invert which decisions are active.
 ///
 /// `anticipated_windows` is indexed by anticipated-local position;
-/// `study_stage_ids` by study stage index.
+/// `delivery_stage_ids` by delivery stage index.
 ///
 /// Test-only: every production call site resolves its delivery stage via
 /// `anticipated_resolution_for` and gates through
@@ -82,9 +91,9 @@ pub(crate) fn is_anticipated_decision_active_for_delivery(
     _state: &StateSpace,
     local_idx: AnticipatedLocal,
     delivery_stage: usize,
-    n_stages: usize,
+    n_delivery: usize,
     anticipated_windows: &[(Option<i32>, Option<i32>)],
-    study_stage_ids: &[i32],
+    delivery_stage_ids: &[i32],
 ) -> bool {
     let local_idx = local_idx.get();
     debug_assert!(
@@ -92,17 +101,17 @@ pub(crate) fn is_anticipated_decision_active_for_delivery(
         "local_idx {local_idx} out of bounds (anticipated_windows.len() = {})",
         anticipated_windows.len(),
     );
-    if delivery_stage >= n_stages {
+    if delivery_stage >= n_delivery {
         return false;
     }
     debug_assert!(
-        delivery_stage < study_stage_ids.len(),
-        "delivery_stage {delivery_stage} out of bounds for study_stage_ids \
+        delivery_stage < delivery_stage_ids.len(),
+        "delivery_stage {delivery_stage} out of bounds for delivery_stage_ids \
          (len {})",
-        study_stage_ids.len(),
+        delivery_stage_ids.len(),
     );
     let (entry, exit) = anticipated_windows[local_idx];
-    commissioning_active(entry, exit, study_stage_ids[delivery_stage])
+    commissioning_active(entry, exit, delivery_stage_ids[delivery_stage])
 }
 
 /// Plant `local_idx`'s delivery-anchored resolution: the setup-threaded
@@ -134,7 +143,10 @@ pub(crate) fn anticipated_resolution_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{StateSpace, is_anticipated_decision_active};
+    use super::{
+        AnticipatedLocal, StateSpace, is_anticipated_decision_active,
+        is_anticipated_decision_active_for_delivery,
+    };
 
     /// Build a [`StateSpace`] for the gating tests below — both fixtures use
     /// `hydro_count == 0`, matching `state_space.rs`'s `finalized` helper
@@ -231,6 +243,84 @@ mod tests {
         // t=4: t+K=6 == n_stages → horizon-inactive (short-circuits before window).
         assert!(!is_anticipated_decision_active(
             &idx, 0, 4, n_stages, &windows, &stage_ids
+        ));
+    }
+
+    /// The strict bound now gates against `n_delivery`, the extended
+    /// delivery-calendar width, not `n_stages`. On a study-only axis
+    /// (`n_delivery == n_stages`, as here) this is byte-identical to the
+    /// pre-generalization bound: active strictly inside `[0, n_delivery)`,
+    /// inactive at the `==` boundary and beyond. The `<` stays strict — a
+    /// `<=` would price a commitment delivered at `n_delivery`, one past the
+    /// last defined delivery stage.
+    #[test]
+    fn is_anticipated_decision_active_for_delivery_strict_extended_bound() {
+        let idx = ant_layout(1, 1, vec![1]);
+        let n_delivery = 5;
+        let windows = [(None, None)];
+        let delivery_stage_ids = [0, 1, 2, 3, 4];
+
+        assert!(is_anticipated_decision_active_for_delivery(
+            &idx,
+            AnticipatedLocal::new(0),
+            4,
+            n_delivery,
+            &windows,
+            &delivery_stage_ids,
+        ));
+        assert!(!is_anticipated_decision_active_for_delivery(
+            &idx,
+            AnticipatedLocal::new(0),
+            5,
+            n_delivery,
+            &windows,
+            &delivery_stage_ids,
+        ));
+    }
+
+    /// A post-study delivery (`delivery_stage >= n_stages`, still `<
+    /// n_delivery`) is admissible on the extended axis: five study stages
+    /// (`ids [0..5)`) followed by three synthetic post-study stages
+    /// (`ids [5..8)`), a windowless plant, delivery at stage 6.
+    #[test]
+    fn is_anticipated_decision_active_for_delivery_post_study_delivery_admitted_for_windowless_plant()
+     {
+        let idx = ant_layout(1, 1, vec![1]);
+        let n_delivery = 8;
+        let windows = [(None, None)];
+        let delivery_stage_ids = [0, 1, 2, 3, 4, 5, 6, 7];
+
+        assert!(is_anticipated_decision_active_for_delivery(
+            &idx,
+            AnticipatedLocal::new(0),
+            6,
+            n_delivery,
+            &windows,
+            &delivery_stage_ids,
+        ));
+    }
+
+    /// The uniform gate: a post-study delivery is commissioning-gated
+    /// against the CONTINUED SYNTHETIC id, with no `delivery_stage <
+    /// n_stages` exemption. A plant with `(entry, exit) == (Some(0),
+    /// Some(5))` has exited before synthetic id `6`, so its post-study
+    /// delivery at `delivery_stage == 6` is inactive; reintroducing a
+    /// post-study commissioning exemption would have to delete this test.
+    #[test]
+    fn is_anticipated_decision_active_for_delivery_uniform_gate_rejects_post_study_delivery_for_exited_plant()
+     {
+        let idx = ant_layout(1, 1, vec![1]);
+        let n_delivery = 8;
+        let windows = [(Some(0), Some(5))];
+        let delivery_stage_ids = [0, 1, 2, 3, 4, 5, 6, 7];
+
+        assert!(!is_anticipated_decision_active_for_delivery(
+            &idx,
+            AnticipatedLocal::new(0),
+            6,
+            n_delivery,
+            &windows,
+            &delivery_stage_ids,
         ));
     }
 }

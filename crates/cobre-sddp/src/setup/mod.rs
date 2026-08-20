@@ -101,7 +101,7 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
+    indexer::{AnticipatedLocal, CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     lead_time::{
         AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution, SpreadResolution,
         resolve_future_delivery_decider,
@@ -1457,12 +1457,53 @@ pub(crate) struct PostStudyResolved {
     pub(crate) cumulative_discount_factors: Vec<f64>,
     /// Per-`(thermal, post-study stage)` cost/bounds lookup.
     pub(crate) thermal_bounds: PostStudyThermalLookup,
+    /// Dense row-major `[anticipated_local][post_study_stage]` projection of
+    /// [`PostStudyThermalLookup::lookup`] — one cell per anticipated plant times
+    /// post-study stage, `None` where the deck declares none. `anticipated_local`
+    /// MUST be [`resolve_state_layout`]'s own `anticipated_thermal_indices`
+    /// canonical order (`system.thermals()` filtered on
+    /// `anticipated_config.is_some()`); a mismatched order silently prices one
+    /// plant's post-study commitment with another's fuel cost. Never index this
+    /// directly — read it only through [`Self::anticipated_bound`], and never
+    /// rebuild it into a `Vec<Vec<_>>` (a per-plant allocation) or an
+    /// `EntityId`-keyed map (a nondeterministic-iteration-order read).
+    anticipated_bounds: Vec<Option<(f64, f64, f64)>>,
+    /// Row stride of [`Self::anticipated_bounds`] — the post-study stage count,
+    /// `total_hours.len()`.
+    anticipated_bounds_stride: usize,
 }
 
-/// Resolve [`System::post_study_stages`] into the three setup-side artifacts:
-/// post-study `total_hours`, the discount continuation, and the per-thermal
-/// cost/bounds lookup. `None`/empty `post_study` returns
-/// [`PostStudyResolved::default`] — inert.
+impl PostStudyResolved {
+    /// `(cost_per_mwh, min_mw, max_mw)` declared for anticipated-local plant
+    /// `local_idx` at post-study stage `post_study_stage`, or `None` when the
+    /// deck declares no cell there — never a panic, including on an empty table
+    /// (`PostStudyResolved::default()`) or an out-of-range `local_idx`/
+    /// `post_study_stage`.
+    #[must_use]
+    pub(crate) fn anticipated_bound(
+        &self,
+        local_idx: AnticipatedLocal,
+        post_study_stage: usize,
+    ) -> Option<(f64, f64, f64)> {
+        if post_study_stage >= self.anticipated_bounds_stride {
+            return None;
+        }
+        self.anticipated_bounds
+            .get(local_idx.get() * self.anticipated_bounds_stride + post_study_stage)
+            .copied()
+            .flatten()
+    }
+}
+
+/// Resolve [`System::post_study_stages`] into the setup-side artifacts:
+/// post-study `total_hours`, the discount continuation, the per-thermal
+/// cost/bounds lookup, and its dense anticipated-local projection. `None`/empty
+/// `post_study` returns [`PostStudyResolved::default`] — inert.
+///
+/// `anticipated_thermal_ids` is the anticipated plants' `EntityId`s in
+/// anticipated-local order — [`resolve_state_layout`]'s own
+/// `anticipated_thermal_indices` order, handed in rather than re-derived here,
+/// since a second derivation could silently diverge from it.
 ///
 /// `last_real_cumulative` and `last_real_per_stage` are the study's own last
 /// cumulative and per-stage discount factors — [`crate::StageTemplates::
@@ -1478,6 +1519,7 @@ pub(crate) struct PostStudyResolved {
 /// cover the post-study stages.
 pub(crate) fn resolve_post_study_artifacts(
     post_study: Option<&PostStudyStages>,
+    anticipated_thermal_ids: &[EntityId],
     pg: &HorizonGraph,
     last_real_cumulative: f64,
     last_real_per_stage: f64,
@@ -1513,10 +1555,31 @@ pub(crate) fn resolve_post_study_artifacts(
 
     let thermal_bounds = PostStudyThermalLookup::new(post_study.thermal_bounds.clone());
 
+    // Dense [anticipated_local][post_study_stage] projection of `thermal_bounds`,
+    // built once here so the ring fill (`fill_anticipated_columns`) never
+    // reconstructs an `EntityId` from an anticipated-local index or re-searches
+    // `thermal_bounds` per fill call.
+    let anticipated_bounds_stride = total_hours.len();
+    let mut anticipated_bounds =
+        Vec::with_capacity(anticipated_thermal_ids.len() * anticipated_bounds_stride);
+    for &thermal_id in anticipated_thermal_ids {
+        for post_study_stage in 0..anticipated_bounds_stride {
+            anticipated_bounds.push(thermal_bounds.lookup(thermal_id, post_study_stage));
+        }
+    }
+    debug_assert_eq!(
+        anticipated_bounds.len(),
+        anticipated_thermal_ids.len() * anticipated_bounds_stride,
+        "PostStudyResolved.anticipated_bounds row count must equal \
+         anticipated_thermal_ids.len()"
+    );
+
     PostStudyResolved {
         total_hours,
         cumulative_discount_factors,
         thermal_bounds,
+        anticipated_bounds,
+        anticipated_bounds_stride,
     }
 }
 
@@ -2844,7 +2907,7 @@ mod post_study_resolution_tests {
 
     #[test]
     fn post_study_absent_returns_default() {
-        let resolved = resolve_post_study_artifacts(None, &HorizonGraph::default(), 1.0, 1.0);
+        let resolved = resolve_post_study_artifacts(None, &[], &HorizonGraph::default(), 1.0, 1.0);
         assert_eq!(resolved, PostStudyResolved::default());
     }
 
@@ -2855,23 +2918,33 @@ mod post_study_resolution_tests {
             thermal_bounds: Vec::new(),
         };
         let resolved =
-            resolve_post_study_artifacts(Some(&empty), &HorizonGraph::default(), 1.0, 1.0);
+            resolve_post_study_artifacts(Some(&empty), &[], &HorizonGraph::default(), 1.0, 1.0);
         assert_eq!(resolved, PostStudyResolved::default());
     }
 
     #[test]
     fn total_hours_matches_declared_duration() {
         let post_study = two_stage_post_study();
-        let resolved =
-            resolve_post_study_artifacts(Some(&post_study), &HorizonGraph::default(), 1.0, 1.0);
+        let resolved = resolve_post_study_artifacts(
+            Some(&post_study),
+            &[],
+            &HorizonGraph::default(),
+            1.0,
+            1.0,
+        );
         assert_eq!(resolved.total_hours, vec![720.0, 744.0]);
     }
 
     #[test]
     fn continued_cumulative_discount_is_seed_at_zero_rate() {
         let post_study = two_stage_post_study();
-        let resolved =
-            resolve_post_study_artifacts(Some(&post_study), &HorizonGraph::default(), 0.9, 1.0);
+        let resolved = resolve_post_study_artifacts(
+            Some(&post_study),
+            &[],
+            &HorizonGraph::default(),
+            0.9,
+            1.0,
+        );
         assert_eq!(resolved.cumulative_discount_factors, vec![0.9, 0.9]);
     }
 
@@ -2892,6 +2965,7 @@ mod post_study_resolution_tests {
 
         let resolved = resolve_post_study_artifacts(
             Some(&post_study),
+            &[],
             &pg,
             last_real_cumulative,
             last_real_per_stage,
@@ -2919,8 +2993,13 @@ mod post_study_resolution_tests {
     #[test]
     fn thermal_bound_lookup_returns_declared_triple() {
         let post_study = two_stage_post_study();
-        let resolved =
-            resolve_post_study_artifacts(Some(&post_study), &HorizonGraph::default(), 1.0, 1.0);
+        let resolved = resolve_post_study_artifacts(
+            Some(&post_study),
+            &[],
+            &HorizonGraph::default(),
+            1.0,
+            1.0,
+        );
 
         assert_eq!(
             resolved.thermal_bounds.lookup(EntityId(1), 0),

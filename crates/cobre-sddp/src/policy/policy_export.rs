@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::visited_states::VisitedStatesArchive;
 use chrono::NaiveDate;
+use cobre_core::Stage;
 use cobre_core::System;
 use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
@@ -22,6 +23,7 @@ use cobre_io::output::policy::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
     OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, StageCutsPayload, StageStatesPayload,
 };
+use cobre_stochastic::season_cast::post_study_calendar_stages;
 
 use crate::SddpError;
 use crate::cut::FutureCostFunction;
@@ -42,6 +44,61 @@ pub(crate) const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 /// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
 pub(crate) const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
 
+/// The ring slot's modular delivery target `m` at study-stage index
+/// `current_stage_idx`: the next `m >= current_stage_idx` whose residue
+/// `m mod k_max` equals `slot_idx`
+/// (`delta = (slot_idx + k_max − current_stage_idx mod k_max) mod k_max`,
+/// `m = current_stage_idx + delta`). Sole owner of the residue arithmetic that a
+/// ring slot's `delivery_date` ([`build_stage_entity_manifest`]) and its target
+/// interval ([`build_stage_entity_delivery_intervals`]) both derive from — a
+/// second copy of the formula is how the date and the interval start to
+/// disagree, fanning out an undated slot or zeroing a dated one.
+fn modular_delivery_target(slot_idx: usize, current_stage_idx: usize, k_max: usize) -> usize {
+    let delta = (slot_idx + k_max - current_stage_idx % k_max) % k_max;
+    current_stage_idx + delta
+}
+
+/// The study's post-study delivery calendar ([`post_study_calendar_stages`]),
+/// empty when none is declared. Appended after the study stages to extend the
+/// ring's dating calendar so a slot maturing past the horizon dates onto its
+/// real post-study stage; shared by [`build_stage_entity_manifest`] and
+/// [`build_stage_entity_delivery_intervals`] so the two derive one calendar.
+/// The synthetic `Stage::id` restarts at `0` and collides with study ids — only
+/// `start_date`/`end_date` are ever read.
+fn post_study_delivery_calendar(system: &System) -> Vec<Stage> {
+    system
+        .post_study_stages()
+        .map(|post_study| post_study_calendar_stages(&post_study.stages))
+        .unwrap_or_default()
+}
+
+/// The manifest's dating calendar: the `study_stages` view chained with the
+/// borrowed `post_study_calendar`, so a ring slot maturing past the horizon
+/// dates onto its real post-study stage (study-only when the calendar is empty).
+fn extended_delivery_stages<'a>(
+    study_stages: &[&'a Stage],
+    post_study_calendar: &'a [Stage],
+) -> Vec<&'a Stage> {
+    study_stages
+        .iter()
+        .copied()
+        .chain(post_study_calendar)
+        .collect()
+}
+
+/// Day-01 delivery anchor of the stage `current_stage_idx + offset` against
+/// `stages`: the `YYYYMMDD` anchor of that stage's `start_date`, or the sentinel
+/// when the current stage is unknown or the target lands past `stages`. Callers
+/// pass the calendar the slot's ring dates against (the extended delivery
+/// calendar for the anticipated ring; study stages only for the water ring).
+fn calendar_anchor_at(current_stage_idx: Option<usize>, stages: &[&Stage], offset: usize) -> i32 {
+    current_stage_idx
+        .and_then(|t| stages.get(t + offset))
+        .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |s| {
+            year_month_day_anchor(s.start_date)
+        })
+}
+
 /// Build the per-slot entity-identity manifest for one stage's cut pool: one
 /// [`EntitySlot`] per enabled cut-state dimension of `projection`.
 ///
@@ -61,6 +118,14 @@ pub(crate) const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
 /// and post-horizon lanes never collides on `(entity_type, entity_id,
 /// subindex)`; its `delivery_date` is the `YYYYMM01` anchor of the window's
 /// resolved destination post-study stage (`StateSpace::commitment_window_dest_stage`).
+///
+/// An in-study ring slot's `delivery_date` is the `YYYYMM01` anchor of its
+/// modular delivery stage against the delivery calendar `study_stages` extended
+/// by [`post_study_calendar_stages`] when the study declares one: a slot whose
+/// modular target lands on a post-study stage carries that stage's real anchor,
+/// a target past the extended calendar or a padding slot beyond the plant's own
+/// lead carries the sentinel. With no post-study stages the calendar is
+/// study-only, so every date is byte-identical to a study-stages-only walk.
 ///
 /// # Panics (debug builds only)
 ///
@@ -96,25 +161,29 @@ pub fn build_stage_entity_manifest(
 
     // Study stages in canonical index order — the space `AnticipatedResolution`'s
     // decider/depth and the bucket topology both index.
-    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let current_stage_idx = study_stages.iter().position(|s| s.id == stage_id);
-    // Delivery/arrival calendar anchor of the stage `current_stage_idx + offset`;
-    // sentinel when this stage is unknown or the target lands past the horizon.
-    let anchor_at = |offset: usize| -> i32 {
-        current_stage_idx
-            .and_then(|t| study_stages.get(t + offset))
-            .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |s| {
-                year_month_day_anchor(s.start_date)
-            })
-    };
+    // Delivery calendar: study stages, then the post-study calendar (empty when
+    // none is declared, so the walk is byte-identical to a study-only one). A
+    // ring slot maturing past the horizon then dates onto its real post-study
+    // stage instead of the sentinel.
+    let post_study_calendar = post_study_delivery_calendar(system);
+    let delivery_stages = extended_delivery_stages(&study_stages, &post_study_calendar);
+    // `delivery_anchor_at` walks the EXTENDED calendar (study stages then the
+    // post-study continuation); `bucket_anchor_at` walks STUDY STAGES ONLY. The
+    // two are kept distinct on purpose — see the `Buckets` arm.
+    let delivery_anchor_at =
+        |offset: usize| calendar_anchor_at(current_stage_idx, &delivery_stages, offset);
+    let bucket_anchor_at =
+        |offset: usize| calendar_anchor_at(current_stage_idx, &study_stages, offset);
 
     let anticipated_slot = |offset: usize| -> EntitySlot {
         let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
         let plant = anticipated_thermals[plant_pos];
         // `slot_idx` is the ring's modular residue `m mod k_max`, NOT a
         // distance-to-maturity: the delivery stage is the next `m >= t` in that
-        // residue class (`t + delta` below), so the slot maturing at `t` is
-        // `t mod k_max` delivering at `m = t` — matching the producer
+        // residue class (`modular_delivery_target` below), so the slot maturing at
+        // `t` is `t mod k_max` delivering at `m = t` — matching the producer
         // `fill_anticipated_fishing_entries`. Dating the slot at `t + slot_idx`
         // (the retired shift-ring form) is wrong whenever `t mod k_max != 0`.
         // Reachability uses the SAME per-plant bound the LP masking itself uses
@@ -124,9 +193,7 @@ pub fn build_stage_entity_manifest(
         let k_i = global_layout.anticipated_lead_stages[plant_pos];
         let delivery_date = if slot_idx < k_i {
             current_stage_idx.map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |t| {
-                let delta = (slot_idx + global_layout.k_max - t % global_layout.k_max)
-                    % global_layout.k_max;
-                let m = t + delta;
+                let m = modular_delivery_target(slot_idx, t, global_layout.k_max);
                 // Defensive cross-check against the resolver (the single owner
                 // of c(m), from `resolve_point`): a within-study decider must
                 // have already fired by `t`; a pre-study (IC-seeded) delivery
@@ -142,7 +209,7 @@ pub fn build_stage_entity_manifest(
                         .is_none_or(|decided_at| decided_at <= t),
                     "anticipated delivery {m} observed at stage {t} was not yet decided"
                 );
-                anchor_at(delta)
+                delivery_anchor_at(m - t)
             })
         } else {
             ENTITY_SLOT_DELIVERY_DATE_SENTINEL
@@ -241,8 +308,11 @@ pub fn build_stage_entity_manifest(
                         hydro.exit_stage_id,
                         stage_id,
                     ),
-                    // Water in this bucket arrives `lag` stages after this one.
-                    delivery_date: anchor_at(lag),
+                    // Study-only dating (`bucket_anchor_at`, never the extended
+                    // `delivery_anchor_at`): a bucket lag landing past the study
+                    // horizon stays sentinel — §W1, the water ring's dating is
+                    // unchanged by post-study stages (Terminal credit deferred).
+                    delivery_date: bucket_anchor_at(lag),
                 }
             }
             StateRegion::CommitmentHold => match global_layout.commitment_hold_address(offset) {
@@ -428,22 +498,38 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
     })
 }
 
-/// Build the per-slot post-horizon delivery INTERVAL, in LOCKSTEP with
+/// Build the per-slot delivery INTERVAL, in LOCKSTEP with
 /// [`build_stage_entity_manifest`]'s `0..projection.n_slots()` classification
-/// walk: `Some((start, end))` for a live, dated post-horizon commitment-window
-/// lane slot ([`post_horizon_delivery_interval`]'s resolved destination
-/// window), `None` for every other slot (storage/lag/bucket/in-study-ring).
-/// Alignment with [`build_stage_entity_manifest`]'s output is by
-/// construction — both classify the same slot the same way — never a
-/// re-derived subindex convention. The in-study anticipated ring's own
-/// dating (stage-dependent) has no bearing here: a ring slot always reads
-/// `None`, so this function needs no `stage_id` parameter.
+/// walk: `Some((start, end))` for a dated post-study target — a post-horizon
+/// commitment-window lane ([`post_horizon_delivery_interval`]) or an in-study
+/// ring slot whose modular delivery target `m` at `stage_id` lands on a
+/// post-study stage — and `None` for every other slot.
+///
+/// The reconciliation reads `None` as "in-study": a dated ring slot with **no**
+/// interval is a delivery matured and discharged within the horizon and resolves
+/// `Zero`; a dated ring slot **with** an interval is a post-study target and fans
+/// out. That is sound because a ring slot's `delivery_date` (in
+/// [`build_stage_entity_manifest`]) and its interval here both derive from the
+/// SAME modular delivery target `m` at the SAME stage (`modular_delivery_target`,
+/// resolved against `stage_id` identically in both), so
+/// `dated-post-study ⟺ Some(interval)` holds by construction: `m` in study dates
+/// a real study anchor with a `None` interval, `m` on a post-study stage dates a
+/// real post-study anchor with a `Some` interval, and a padding or past-extended
+/// slot is sentinel-dated with a `None` interval. Alignment with
+/// [`build_stage_entity_manifest`]'s output is otherwise by construction — both
+/// classify the same slot the same way — never a re-derived subindex convention.
 #[must_use]
 pub fn build_stage_entity_delivery_intervals(
     system: &System,
     global_layout: &StateSpace,
     projection: &CutStateProjection,
+    stage_id: i32,
 ) -> Vec<Option<(NaiveDate, NaiveDate)>> {
+    let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    let current_stage_idx = study_stages.iter().position(|s| s.id == stage_id);
+    let post_study_calendar = post_study_delivery_calendar(system);
+    let n_study = study_stages.len();
+
     (0..projection.n_slots())
         .map(|j| {
             let (region, offset) =
@@ -451,7 +537,28 @@ pub fn build_stage_entity_delivery_intervals(
             match region {
                 StateRegion::CommitmentHold => {
                     match global_layout.commitment_hold_address(offset) {
-                        CommitmentHoldAddress::InStudy { .. } => None,
+                        CommitmentHoldAddress::InStudy { plant, slot } => {
+                            // Resolve the interval the SAME way `anticipated_slot`
+                            // resolves the date: the plant's own reachability
+                            // bound, then the modular delivery target `m` — `Some`
+                            // only when `m` lands on a post-study stage, so a ring
+                            // slot is dated-post-study ⟺ `Some(interval)`.
+                            // `slot`/`plant` are `slot_lane_at`'s decomposition
+                            // (`offset / n_anticipated`, `offset % n_anticipated`),
+                            // decoded once by `commitment_hold_address`.
+                            let k_i = global_layout.anticipated_lead_stages[plant];
+                            if slot >= k_i {
+                                return None;
+                            }
+                            let m = modular_delivery_target(
+                                slot,
+                                current_stage_idx?,
+                                global_layout.k_max,
+                            );
+                            m.checked_sub(n_study)
+                                .and_then(|post_idx| post_study_calendar.get(post_idx))
+                                .map(|stage| (stage.start_date, stage.end_date))
+                        }
                         CommitmentHoldAddress::PostHorizon { window } => {
                             post_horizon_delivery_interval(system, global_layout, window)
                         }
@@ -775,8 +882,9 @@ mod tests {
     use super::{
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
         ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, EntitySlot, HashMap,
-        build_stage_entity_manifest, build_stage_states_payloads,
-        reserve_boundary_inflow_lag_slots, year_month_day_anchor,
+        build_stage_entity_delivery_intervals, build_stage_entity_manifest,
+        build_stage_states_payloads, post_study_calendar_stages, reserve_boundary_inflow_lag_slots,
+        year_month_day_anchor,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
@@ -1112,6 +1220,48 @@ mod tests {
         );
     }
 
+    /// §W1 — the water ring's dating is unchanged by post-study stages. A
+    /// transit-bucket lag maturing past the STUDY horizon dates to the sentinel
+    /// even when the study declares a post-study calendar: the bucket arm anchors
+    /// on study stages only (`bucket_anchor_at`), never the extended
+    /// `delivery_anchor_at` the anticipated ring uses. On this single-study-stage
+    /// fixture both bucket lags (1 and 2) target past the horizon, so both stay
+    /// sentinel; re-broadening the bucket arm to the extended calendar would date
+    /// the lag-1 slot onto the declared post-study stage — the regression this pins.
+    #[test]
+    fn transit_bucket_past_study_horizon_stays_sentinel_with_post_study_stages() {
+        let post_study_start = chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
+        let system = system_2h_1ant(
+            (None, None),
+            (None, None),
+            Some(post_study_stages_from(post_study_start)),
+        );
+        let global = test_support::state_layout_with_transit_buckets(
+            2,
+            2,
+            2,
+            vec![(0, 1), (1, 2)],
+            1,
+            2,
+            vec![2],
+        );
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        for slot in [6, 7] {
+            assert_eq!(
+                manifest[slot].entity_type, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                "slot {slot} must be a transit-bucket slot"
+            );
+            assert_eq!(
+                manifest[slot].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                "a transit-bucket lag past the study horizon must stay sentinel, never \
+                 date onto the post-study calendar"
+            );
+        }
+    }
+
     /// Storage-only projection (`inflow_lags: false`): the lag block is dropped, so
     /// the manifest is length 4 (2 storage + 2 anticipated) and carries NO type-1
     /// (`HydroInflowLag`) slot. Anticipated state is always included.
@@ -1263,6 +1413,39 @@ mod tests {
             .bounds(bounds)
             .build()
             .expect("valid 3-stage 2-anticipated-plant system")
+    }
+
+    /// `System` with 1 hydro and 1 anticipated thermal (`LeadStages(3)`, so the
+    /// ring is `k_max = 3`) over the same three monthly stages as
+    /// [`system_1h_1ant_3monthly`], carrying `post_study`. The extended-calendar
+    /// fixture: at the terminal stage the three ring slots' modular delivery
+    /// targets fan across in-study, post-study, and past-extended.
+    fn system_1h_1ant_3monthly_lead3(post_study: PostStudyStages) -> System {
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 3,
+                k_max: 3,
+            },
+            &bounds_defaults(),
+        );
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![make_hydro(1, None, None)])
+            .thermals(vec![anticipated_thermal(1, 3)])
+            .stages(vec![
+                make_stage_ym(0, 0, 2024, 4),
+                make_stage_ym(1, 1, 2024, 5),
+                make_stage_ym(2, 2, 2024, 6),
+            ])
+            .bounds(bounds)
+            .post_study_stages(Some(post_study))
+            .build()
+            .expect("valid 3-stage lead-3 system with post-study calendar")
     }
 
     /// An `AnticipatedThermalState` ring slot's `delivery_date` is the `YYYYMMDD`
@@ -1440,13 +1623,104 @@ mod tests {
         );
     }
 
+    // -- Extended delivery calendar: ring slots targeting post-study stages --
+
+    /// With a post-study calendar declared, an in-study ring slot whose modular
+    /// delivery target lands on a post-study stage carries that stage's real
+    /// `YYYYMM01` anchor — not the sentinel — while a target past the extended
+    /// calendar stays sentinel and an in-study target keeps its study anchor.
+    /// Layout `N=1, L=1, A=1, k_max=3` at the terminal stage index 2: ring slot 0
+    /// delivers at `m=3` (the post-study stage 2024-07), slot 1 at `m=4` (past the
+    /// extended calendar), slot 2 at `m=2` (in-study 2024-06).
+    #[test]
+    fn ring_slot_targeting_post_study_carries_a_real_anchor() {
+        let start = chrono::NaiveDate::from_ymd_opt(2024, 7, 1).unwrap();
+        let system = system_1h_1ant_3monthly_lead3(post_study_stages_from(start));
+        let mut global = test_support::state_layout_full(1, 1, 1, 3, vec![3]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(3)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        // Terminal stage index 2 (2024-06).
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 2);
+
+        // storage j=0, lag j=1, anticipated ring slots j=2,3,4 (slot-major).
+        assert_eq!(manifest.len(), 5);
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(
+            manifest[2].delivery_date, 20240701,
+            "ring slot 0 (m=3) targets the post-study stage 2024-07"
+        );
+        assert_eq!(manifest[3].subindex, 1);
+        assert_eq!(
+            manifest[3].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "ring slot 1 (m=4) lands past the extended calendar"
+        );
+        assert_eq!(manifest[4].subindex, 2);
+        assert_eq!(
+            manifest[4].delivery_date, 20240601,
+            "ring slot 2 (m=2) matures in-study at 2024-06"
+        );
+    }
+
+    /// The companion interval builder is `Some` for EXACTLY the ring slot whose
+    /// modular delivery target lands post-study, equal to
+    /// `post_study_calendar_stages`' first entry's `(start, end)`; the in-study
+    /// and past-extended slots — and storage/lag — read `None`. This is the
+    /// `dated-post-study ⟺ Some(interval)` equivalence the boundary reconciliation
+    /// depends on, over the same fixture as
+    /// [`ring_slot_targeting_post_study_carries_a_real_anchor`].
+    #[test]
+    fn ring_slot_interval_is_some_exactly_when_its_target_is_post_study() {
+        let start = chrono::NaiveDate::from_ymd_opt(2024, 7, 1).unwrap();
+        let post_study = post_study_stages_from(start);
+        let expected = {
+            let calendar = post_study_calendar_stages(&post_study.stages);
+            (calendar[0].start_date, calendar[0].end_date)
+        };
+        let system = system_1h_1ant_3monthly_lead3(post_study);
+        let mut global = test_support::state_layout_full(1, 1, 1, 3, vec![3]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(3)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let intervals = build_stage_entity_delivery_intervals(&system, &global, &projection, 2);
+
+        assert_eq!(intervals.len(), 5);
+        assert_eq!(
+            intervals[2],
+            Some(expected),
+            "ring slot 0 (m=3) fans out over the post-study stage's real span"
+        );
+        assert_eq!(
+            intervals[3], None,
+            "ring slot 1 (m=4) is past the extended calendar"
+        );
+        assert_eq!(intervals[4], None, "ring slot 2 (m=2) matures in-study");
+        assert_eq!(intervals[0], None, "storage carries no interval");
+        assert_eq!(intervals[1], None, "lag carries no interval");
+    }
+
     // -- Terminal commitment-hold post-horizon lane: real manifest arm --
 
     /// A declared post-horizon commitment window joins the manifest with a
     /// real `EntitySlot`: reused `AnticipatedThermalState` type, the owning
     /// thermal's id, and the real `YYYYMM01` delivery date of its resolved
-    /// destination post-study stage — never the sentinel. The in-study ring
-    /// and storage/lag slots' own delivery dates are unaffected.
+    /// destination post-study stage — never the sentinel. Storage/lag slots stay
+    /// undated; the in-study ring dates its post-study-targeted slot to the same
+    /// real anchor the lane produces (the ring==lane date-match).
     #[test]
     fn commitment_hold_post_horizon_slot_carries_real_delivery_date() {
         let dest_start = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
@@ -1489,9 +1763,12 @@ mod tests {
             "delivery date is the destination post-study stage's day-01 anchor"
         );
 
-        // Feature-interaction guard: storage/lag never carry a delivery date,
-        // and the in-study ring's own dates (the sole stage, then past-horizon)
-        // are unaffected by post-horizon resolution.
+        // Storage/lag carry no delivery date. Ring slot 0 matures at the sole
+        // study stage; ring slot 1's delivery target lands past that stage, so
+        // the ring dates it onto the SAME post-study anchor (20261101) the
+        // post-horizon lane at manifest[8] produces — the ring arm and the lane
+        // arm agree on a post-study target's date, which is what makes retiring
+        // the lane in favour of the ring a source change, not a behaviour change.
         for storage_or_lag in &manifest[0..6] {
             assert_eq!(
                 storage_or_lag.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
@@ -1503,8 +1780,8 @@ mod tests {
             "ring slot 0 delivers at the system's only stage (2024-01)"
         );
         assert_eq!(
-            manifest[7].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            "ring slot 1 delivers past the single-stage horizon"
+            manifest[7].delivery_date, 20261101,
+            "ring slot 1's post-study target dates to the lane's post-study anchor"
         );
     }
 

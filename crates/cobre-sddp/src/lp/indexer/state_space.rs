@@ -125,6 +125,11 @@ pub struct StateSpace {
     /// Maximum `lead_stages` across the anticipated thermals (`K_max`).
     pub k_max: usize,
 
+    /// Backing store for [`Self::delivery_stage_count`]; `0` until
+    /// [`Self::set_anticipated_resolution`] attaches a resolution with at
+    /// least one plant.
+    n_delivery: usize,
+
     /// Per-plant `lead_stages` (`K_i`), indexed by anticipated-local position;
     /// length [`Self::n_anticipated`].
     pub anticipated_lead_stages: Vec<usize>,
@@ -418,6 +423,7 @@ impl StateSpace {
             n_buckets,
             n_anticipated,
             k_max,
+            n_delivery: 0,
             anticipated_lead_stages,
             anticipated_resolution: AnticipatedResolution::default(),
             n_commitment,
@@ -454,6 +460,19 @@ impl StateSpace {
             self.n_anticipated,
             "resolution must carry one PointResolution per anticipated plant"
         );
+        let n_delivery = resolution
+            .per_plant
+            .first()
+            .map_or(0, |plant| plant.decider.len());
+        debug_assert!(
+            resolution
+                .per_plant
+                .iter()
+                .all(|plant| plant.decider.len() == n_delivery),
+            "every plant's decider must share one per-study delivery-stage count \
+             (the delivery axis is per-study, not per-plant)"
+        );
+        self.n_delivery = n_delivery;
         self.anticipated_resolution = resolution;
     }
 
@@ -777,6 +796,17 @@ impl StateSpace {
         self.state_to_lp_column(StateDim::new(self.state_dim_bucket_range().start + b))
     }
 
+    /// The delivery-axis stage count: `self.n_delivery`, maxed against
+    /// `n_stages` because a fixture that never attaches a resolution leaves
+    /// `n_delivery == 0`, and such a fixture's delivery axis is the caller's
+    /// `n_stages` — the same fallback `anticipated_resolution_for` applies to
+    /// the resolution itself.
+    #[inline]
+    #[must_use]
+    pub(crate) fn delivery_stage_count(&self, n_stages: usize) -> usize {
+        self.n_delivery.max(n_stages)
+    }
+
     /// Compute and store [`Self::nonzero_state_indices`] from per-hydro
     /// lag-slot counts and per-plant anticipated lead-stage counts.
     ///
@@ -873,7 +903,11 @@ impl StateSpace {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitmentHoldAddress, InCol, OutCol, StateDim, StateRegion, StateSpace};
+    use super::{
+        AnticipatedResolution, CommitmentHoldAddress, InCol, OutCol, StateDim, StateRegion,
+        StateSpace,
+    };
+    use crate::lead_time::PointResolution;
     use cobre_core::EntityId;
 
     /// Build a [`StateSpace`] finalized the way production `resolve_state_layout`
@@ -2137,5 +2171,60 @@ mod tests {
                 idx.transit_buckets_out.start + b
             );
         }
+    }
+
+    // ── delivery_stage_count tests ────────────────────────────────────────
+
+    /// Build an [`AnticipatedResolution`] whose single plant's `decider` has
+    /// `decider_len` entries — the only field [`StateSpace::set_anticipated_resolution`]
+    /// reads to derive `n_delivery`.
+    fn single_plant_resolution(decider_len: usize, k_max: usize) -> AnticipatedResolution {
+        AnticipatedResolution {
+            per_plant: vec![PointResolution {
+                decider: vec![None; decider_len],
+                decision_sets: Vec::new(),
+                depth: Vec::new(),
+                occupancy: Vec::new(),
+            }],
+            k_max,
+            max_fanout: 0,
+        }
+    }
+
+    /// No resolution attached (`n_delivery == 0`): `delivery_stage_count`
+    /// falls back to the caller's `n_stages`.
+    #[test]
+    fn delivery_stage_count_no_resolution_falls_back_to_n_stages() {
+        let idx = StateSpace::new(0, 0, 0, Vec::new(), 1, 2, vec![2], &[]);
+        assert_eq!(idx.delivery_stage_count(5), 5);
+    }
+
+    /// An attached resolution whose single plant's `decider` is wider than
+    /// `n_stages`: `delivery_stage_count` returns the wider delivery-axis
+    /// width.
+    #[test]
+    fn delivery_stage_count_extended_resolution_returns_wider_delivery_axis() {
+        let mut idx = finalized(0, 0, 1, 2, vec![2]);
+        idx.set_anticipated_resolution(single_plant_resolution(12, 2));
+        assert_eq!(idx.delivery_stage_count(6), 12);
+    }
+
+    /// A study-only resolution whose `decider` length equals `n_stages`:
+    /// `delivery_stage_count` returns exactly the caller's value.
+    #[test]
+    fn delivery_stage_count_study_only_resolution_matches_caller_value() {
+        let mut idx = finalized(0, 0, 1, 2, vec![2]);
+        idx.set_anticipated_resolution(single_plant_resolution(4, 2));
+        assert_eq!(idx.delivery_stage_count(4), 4);
+    }
+
+    /// An attached resolution with no plants (`per_plant` empty):
+    /// `delivery_stage_count` falls back to `n_stages`, and the per-plant
+    /// decider-length-agreement `debug_assert` does not fire.
+    #[test]
+    fn delivery_stage_count_empty_per_plant_falls_back_to_n_stages() {
+        let mut idx = finalized(0, 0, 0, 0, vec![]);
+        idx.set_anticipated_resolution(AnticipatedResolution::default());
+        assert_eq!(idx.delivery_stage_count(3), 3);
     }
 }
