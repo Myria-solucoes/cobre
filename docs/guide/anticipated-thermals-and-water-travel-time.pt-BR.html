@@ -486,7 +486,7 @@ entrega que matura agora:</p>
 
 <div class="table-scroll">
 <table>
-  <thead><tr><th>Estágio \(t\)</th><th>Pesca \(m = t\) — lê <code>commit_in</code>, slot \(t \bmod 2\)</th><th>Deposita \(m = t+2\) — escreve <code>commit_out</code>, slot \((t{+}2)\bmod 2\)</th></tr></thead>
+  <thead><tr><th>Estágio \(t\)</th><th>Pesca \(m = t\) — lê <code>commit_in</code>, slot \(t \bmod 2\)</th><th>Deposita \(m = t+2\) — escreve <code>commit_out</code>, slot \((t+2)\bmod 2\)</th></tr></thead>
   <tbody>
     <tr><td>0</td><td>\(m=0\) — semente pré-estudo, slot 0</td><td>\(m=2\) → slot 0</td></tr>
     <tr><td>1</td><td>\(m=1\) — semente pré-estudo, slot 1</td><td>\(m=3\) → slot 1</td></tr>
@@ -497,7 +497,7 @@ entrega que matura agora:</p>
 </div>
 
 <p>Repare que, em cada estágio, a pesca e o depósito tocam o <em>mesmo</em> índice de slot
-(\((t{+}2)\bmod 2 = t \bmod 2\)) — inofensivo, pois a pesca lê <code>commit_in</code> enquanto o depósito
+(\((t+2)\bmod 2 = t \bmod 2\)) — inofensivo, pois a pesca lê <code>commit_in</code> enquanto o depósito
 escreve <code>commit_out</code> (§3.3).</p>
 
 <h4>Exemplo B — <code>lead_time_hours</code> vs. <code>lead_stages</code> em um calendário DECOMP</h4>

@@ -472,7 +472,7 @@ on, each stage deposits the decision for two stages ahead and fishes the deliver
 
 <div class="table-scroll">
 <table>
-  <thead><tr><th>Stage \(t\)</th><th>Fishes \(m = t\) — reads <code>commit_in</code>, slot \(t \bmod 2\)</th><th>Deposits \(m = t+2\) — writes <code>commit_out</code>, slot \((t{+}2)\bmod 2\)</th></tr></thead>
+  <thead><tr><th>Stage \(t\)</th><th>Fishes \(m = t\) — reads <code>commit_in</code>, slot \(t \bmod 2\)</th><th>Deposits \(m = t+2\) — writes <code>commit_out</code>, slot \((t+2)\bmod 2\)</th></tr></thead>
   <tbody>
     <tr><td>0</td><td>\(m=0\) — pre-study seed, slot 0</td><td>\(m=2\) → slot 0</td></tr>
     <tr><td>1</td><td>\(m=1\) — pre-study seed, slot 1</td><td>\(m=3\) → slot 1</td></tr>
@@ -483,7 +483,7 @@ on, each stage deposits the decision for two stages ahead and fishes the deliver
 </div>
 
 <p>Notice that at each stage the fish and the deposit touch the <em>same</em> slot index
-(\((t{+}2)\bmod 2 = t \bmod 2\)) — harmless because the fish reads <code>commit_in</code> while the
+(\((t+2)\bmod 2 = t \bmod 2\)) — harmless because the fish reads <code>commit_in</code> while the
 deposit writes <code>commit_out</code> (§3.3).</p>
 
 <h4>Example B — <code>lead_time_hours</code> vs. <code>lead_stages</code> on a DECOMP calendar</h4>
