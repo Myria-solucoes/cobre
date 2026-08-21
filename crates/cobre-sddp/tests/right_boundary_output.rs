@@ -221,17 +221,13 @@ fn build_system(with_commitment: bool, min_k: f64, max_k: f64) -> System {
             ..Default::default()
         },
     );
-    let initial_conditions = InitialConditions {
-        ..Default::default()
-    };
-
     let mut builder = SystemBuilder::new()
         .buses(vec![bus])
         .thermals(vec![thermal])
         .stages(stages())
         .bounds(bounds())
         .penalties(penalties())
-        .initial_conditions(initial_conditions);
+        .initial_conditions(InitialConditions::default());
     if with_commitment {
         builder = builder.post_study_stages(Some(post_study_stages(min_k, max_k)));
     }

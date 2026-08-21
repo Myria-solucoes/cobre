@@ -172,8 +172,7 @@ pub struct SimulationOutputSpec<'a> {
     /// target stage `m`, indexed by `m` (study stages then the synthetic
     /// post-study continuation). The `anticipated_lanes` extractor dates a
     /// post-study-targeted decision by `[m]`, matching the policy manifest's
-    /// `delivery_anchor_at` walk over the same extended calendar. (Field name
-    /// retained pending the design-reference rewrite.)
+    /// `delivery_anchor_at` walk over the same extended calendar.
     pub extended_delivery_anchors: &'a [i32],
 
     /// Declared travel-time arcs for the rolling-seed emitter

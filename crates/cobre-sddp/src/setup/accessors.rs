@@ -146,9 +146,8 @@ impl StudySetup {
 
     /// Build the per-slot delivery interval for the terminal cut pool, aligned
     /// 1:1 with [`Self::build_terminal_entity_manifest`]: `Some((start, end))` for
-    /// a dated post-study target — a post-horizon commitment-window lane slot or
-    /// an in-study ring slot whose modular delivery target lands on a post-study
-    /// stage — `None` elsewhere.
+    /// a dated post-study target — an in-study ring slot whose modular delivery
+    /// target lands on a post-study stage — `None` elsewhere.
     ///
     /// Delegates to [`build_stage_entity_delivery_intervals`], the companion
     /// [`build_stage_entity_manifest`] walks in lockstep, against the SAME

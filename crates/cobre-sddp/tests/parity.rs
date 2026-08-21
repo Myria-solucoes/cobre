@@ -812,6 +812,7 @@ mod determinism {
     // ===========================================================================
 
     /// Mirrors the gated `test_support::state_layout_for` via the public
+    /// [`StateSpace::new`] constructor: this external test crate cannot see the
     /// parent crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch
     /// columns on the default feature set.
     fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {

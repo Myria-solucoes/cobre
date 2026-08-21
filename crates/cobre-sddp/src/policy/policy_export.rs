@@ -23,13 +23,15 @@ use cobre_io::output::policy::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
     OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, StageCutsPayload, StageStatesPayload,
 };
-use cobre_stochastic::season_cast::post_study_calendar_stages;
 
 use crate::SddpError;
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
-use crate::setup::{NodeGraph, NodePos, year_month_day_anchor};
+use crate::setup::{
+    NodeGraph, NodePos, extended_delivery_stages, post_study_delivery_calendar,
+    year_month_day_anchor,
+};
 use crate::training::TrainingResult;
 
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
@@ -69,34 +71,6 @@ fn reachable_delivery_target(
     k_max: usize,
 ) -> Option<usize> {
     (slot_idx < k_i).then(|| modular_delivery_target(slot_idx, current_stage_idx, k_max))
-}
-
-/// The study's post-study delivery calendar ([`post_study_calendar_stages`]),
-/// empty when none is declared. Appended after the study stages to extend the
-/// ring's dating calendar so a slot maturing past the horizon dates onto its
-/// real post-study stage; shared by [`build_stage_entity_manifest`] and
-/// [`build_stage_entity_delivery_intervals`] so the two derive one calendar.
-/// The synthetic `Stage::id` restarts at `0` and collides with study ids — only
-/// `start_date`/`end_date` are ever read.
-fn post_study_delivery_calendar(system: &System) -> Vec<Stage> {
-    system
-        .post_study_stages()
-        .map(|post_study| post_study_calendar_stages(&post_study.stages))
-        .unwrap_or_default()
-}
-
-/// The manifest's dating calendar: the `study_stages` view chained with the
-/// borrowed `post_study_calendar`, so a ring slot maturing past the horizon
-/// dates onto its real post-study stage (study-only when the calendar is empty).
-fn extended_delivery_stages<'a>(
-    study_stages: &[&'a Stage],
-    post_study_calendar: &'a [Stage],
-) -> Vec<&'a Stage> {
-    study_stages
-        .iter()
-        .copied()
-        .chain(post_study_calendar)
-        .collect()
 }
 
 /// Day-01 delivery anchor of the stage `current_stage_idx + offset` against
@@ -145,7 +119,7 @@ fn anticipated_ring_for(global_layout: &StateSpace) -> DeliveryRing {
 ///
 /// An in-study ring slot's `delivery_date` is the `YYYYMM01` anchor of its
 /// modular delivery stage against the delivery calendar `study_stages` extended
-/// by [`post_study_calendar_stages`] when the study declares one: a slot whose
+/// by [`post_study_delivery_calendar`] when the study declares one: a slot whose
 /// modular target lands on a post-study stage carries that stage's real anchor,
 /// a target past the extended calendar or a padding slot beyond the plant's own
 /// lead carries the sentinel. With no post-study stages the calendar is
@@ -845,8 +819,7 @@ mod tests {
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
         ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, EntitySlot, HashMap,
         build_stage_entity_delivery_intervals, build_stage_entity_manifest,
-        build_stage_states_payloads, post_study_calendar_stages, reserve_boundary_inflow_lag_slots,
-        year_month_day_anchor,
+        build_stage_states_payloads, reserve_boundary_inflow_lag_slots, year_month_day_anchor,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
@@ -869,6 +842,7 @@ mod tests {
         },
     };
     use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+    use cobre_stochastic::season_cast::post_study_calendar_stages;
 
     const ALL_ENABLED: StageStateConfig = StageStateConfig {
         storage: true,

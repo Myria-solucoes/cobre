@@ -1165,9 +1165,40 @@ pub(crate) fn year_month_day_anchor(date: NaiveDate) -> i32 {
     date.year() * 10_000 + i32::try_from(date.month()).unwrap_or(1) * 100 + 1
 }
 
+/// The study's post-study delivery calendar ([`post_study_calendar_stages`]),
+/// empty when none is declared. Appended after the study stages to extend the
+/// ring's dating calendar so a slot maturing past the horizon dates onto its
+/// real post-study stage. Shared by [`build_extended_delivery_anchors`] and the
+/// policy manifest builders (`build_stage_entity_manifest`,
+/// `build_stage_entity_delivery_intervals`), so every delivery-dating site
+/// derives one calendar. The synthetic `Stage::id` restarts at `0` and collides
+/// with study ids — only `start_date`/`end_date` are ever read.
+pub(crate) fn post_study_delivery_calendar(system: &System) -> Vec<Stage> {
+    system
+        .post_study_stages()
+        .map(|post_study| post_study_calendar_stages(&post_study.stages))
+        .unwrap_or_default()
+}
+
+/// The extended dating calendar: the `study_stages` view chained with the
+/// borrowed `post_study_calendar`, so a slot maturing past the horizon dates
+/// onto its real post-study stage (study-only when the calendar is empty).
+/// Shared by [`build_extended_delivery_anchors`] and the policy manifest
+/// builders, so all derive one calendar.
+pub(crate) fn extended_delivery_stages<'a>(
+    study_stages: &[&'a Stage],
+    post_study_calendar: &'a [Stage],
+) -> Vec<&'a Stage> {
+    study_stages
+        .iter()
+        .copied()
+        .chain(post_study_calendar)
+        .collect()
+}
+
 /// Extended delivery-stage anchors: the `YYYYMM01` anchor of each delivery
 /// target stage — the study stages (`id >= 0`) followed by the synthetic
-/// post-study continuation ([`post_study_calendar_stages`]) — indexed by
+/// post-study continuation ([`post_study_delivery_calendar`]) — indexed by
 /// delivery target `m`. The dating input the `anticipated_lanes` output
 /// extractor reads for a post-study-targeted decision (`delivery_dates[m]`),
 /// matching the policy manifest's `delivery_anchor_at` walk over the same
@@ -1178,15 +1209,10 @@ fn build_extended_delivery_anchors(
     state: &StateSpace,
     n_stages: usize,
 ) -> Vec<i32> {
-    let post_study_calendar = system
-        .post_study_stages()
-        .map(|post_study| post_study_calendar_stages(&post_study.stages))
-        .unwrap_or_default();
-    let anchors: Vec<i32> = system
-        .stages()
+    let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    let post_study_calendar = post_study_delivery_calendar(system);
+    let anchors: Vec<i32> = extended_delivery_stages(&study_stages, &post_study_calendar)
         .iter()
-        .filter(|s| s.id >= 0)
-        .chain(post_study_calendar.iter())
         .map(|s| year_month_day_anchor(s.start_date))
         .collect();
     debug_assert!(

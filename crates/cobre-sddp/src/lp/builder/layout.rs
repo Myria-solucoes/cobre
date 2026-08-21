@@ -574,8 +574,7 @@ pub(crate) struct StageLayout<'a> {
     // `n_anticipated * k_max` inline, so dead_code fires on the production side.
     #[allow(dead_code)]
     pub(crate) n_ant_state: usize,
-    /// Unified commitment-hold column/row offsets — in-study anticipated ring
-    /// plus terminal post-horizon lanes (see [`AnticipatedLayout`]).
+    /// In-study anticipated-ring column/row offsets (see [`AnticipatedLayout`]).
     pub(crate) anticipated: AnticipatedLayout,
     /// Equipment column ranges (see [`EquipmentColumns`]).
     pub(crate) equipment: EquipmentColumns,
@@ -1425,8 +1424,8 @@ impl<'a> StageLayout<'a> {
         // NOT `thermal_end + n_anticipated`, so the global stage-0 cut map
         // lands on the correct column even when this stage's block count
         // differs from stage 0's. `commit_out` collapses to the literal
-        // `0..0` only when BOTH the in-study ring and the post-horizon lanes
-        // are empty, mirroring the same `0..0`-vs-cursor-position fallback
+        // `0..0` only when the in-study anticipated ring is empty,
+        // mirroring the same `0..0`-vs-cursor-position fallback
         // every other optional-block start already needs.
         let col_anticipated_slots_out_start = if state.commit_out.is_empty() {
             thermal_end
