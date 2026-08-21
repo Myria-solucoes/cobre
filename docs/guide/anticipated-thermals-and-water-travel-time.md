@@ -237,7 +237,8 @@ flowchart LR
    migrate; it waits in its delivery-residue slot until it matures.
 3. **Fish** (maturity): at the delivery stage, the plant's per-block generation is
    tied to the matured commitment — `Σ_b h_b · g_b − H · in_col(m mod k_max) = 0`
-   (MW → MWh, `H = Σ_b h_b` = total stage hours). This row **reads** `commit_in`
+   (MW → MWh) — where `b` indexes the stage's blocks, `h_b` is block `b`'s duration,
+   `g_b` its generation, and `H = Σ_b h_b` the total stage hours. This row **reads** `commit_in`
    and never writes `commit_out`, which is exactly why the same stage's fresh
    deposit (which writes `commit_out`) can never collide with it. It fires for
    _every_ maturing delivery: a plant not yet commissioned never deposited,
@@ -319,7 +320,8 @@ landing in the stage `d` steps ahead is the **k-weight**:
 k_d  =  | [t_v, t_v + h_t) ∩ [S_d, S_{d+1}) |  /  h_t
 ```
 
-with two properties that make it a conservation law rather than an approximation:
+where `|·|` is the length (in hours) of the interval overlap. Two properties make
+this a conservation law rather than an approximation:
 
 - `Σ_d k_d = 1` — every released drop is accounted for (checked at runtime).
 - `k_0` is the **same-stage share** — delivered onto the downstream water balance

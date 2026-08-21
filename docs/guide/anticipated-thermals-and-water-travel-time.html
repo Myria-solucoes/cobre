@@ -218,13 +218,15 @@ flowchart LR
 
 \[ \theta \;\ge\; \alpha + \pi^{\top}\hat{x}, \]
 
-<p>where \(\hat{x}\) is the incoming state and \(\pi\) the subgradient. Cobre realizes this without a
+<p>where \(\theta\) is the epigraph variable bounding the future cost, \(\alpha\) the cut's intercept,
+\(\hat{x}\) the incoming state, and \(\pi\) the subgradient (the cut's coefficients). Cobre realizes this without a
 state-fixing <em>constraint row</em>. Instead, each incoming-state coordinate is its own LP column,
 pinned by equal bounds:</p>
 
-\[ \underline{x} \;=\; \overline{x} \;=\; \hat{x} \qquad\text{(the value carried from stage } t-1). \]
+\[ \underline{x} \;=\; \overline{x} \;=\; \hat{x}. \]
 
-<p>The cut coefficient \(\pi\) for that coordinate is then the <strong>reduced cost</strong> of the
+<p>Here \(\underline{x}\) and \(\overline{x}\) are the column's lower and upper bounds, and \(\hat{x}\)
+is the value carried from stage \(t-1\). The cut coefficient \(\pi\) for that coordinate is then the <strong>reduced cost</strong> of the
 pinned column (divided by a fixed per-column prescaler, with no sign change). This is cobre's version
 of SDDP.jl "fishing": fix the incoming state, solve, read the price off the pinned column.</p>
 
@@ -245,20 +247,27 @@ incoming column. Nothing about the cut algorithm changes.</p>
 \(k_{\max}\) slots. Each stage, the slot that matures this stage is consumed, the survivors advance one
 step, and a fresh amount is deposited for future delivery. That carousel is a single code primitive,
 <code>DeliveryRing</code>, and <strong>both features are instances of it</strong>. A ring is a dense
-grid of \(n_{\text{lanes}} \times \text{depth}\) columns with an outgoing block (contributes to state
-and cuts) and an incoming block (pinned). Its column address is</p>
+grid of \(n_{\text{lanes}} \times \text{depth}\) columns (\(n_{\text{lanes}}\) is the number of lanes and
+\(\text{depth} = k_{\max}\) the number of slots) with an outgoing block (contributes to state and cuts)
+and an incoming block (pinned). The column of slot \(s\), lane \(\ell\) in the outgoing block is</p>
 
-\[ \operatorname{out\_col}(s, \ell) \;=\; \texttt{out\_block.start} + s\,n_{\text{lanes}} + \ell
-   \qquad(\text{slot-major, lane-minor}). \]
+\[ x^{\text{out}}_{s,\ell} \;=\; o_{\text{start}} + s\,n_{\text{lanes}} + \ell
+   \qquad(\text{slot-major, lane-minor}), \]
 
-<p>The ring emits four kinds of structural rows; each feature uses a subset:</p>
+<p>where \(s \in \{0, \dots, \text{depth}-1\}\) is the slot index, \(\ell \in \{0, \dots, n_{\text{lanes}}-1\}\)
+the lane index, and \(o_{\text{start}}\) the offset where the outgoing block begins in the state vector
+(the code names this address <code>out_col</code>, computed from <code>out_block.start</code>). The
+incoming column \(x^{\text{in}}_{s,\ell}\) is addressed the same way from its own start.</p>
+
+<p>The ring emits four kinds of structural rows; each feature uses a subset (write \(x^{\text{out}}_{s}\)
+and \(x^{\text{in}}_{s}\) for the outgoing and pinned-incoming columns of slot \(s\)):</p>
 
 <div class="table-scroll">
 <table>
   <thead><tr><th>Ring operation</th><th>What it emits</th><th>Used by</th></tr></thead>
   <tbody>
-    <tr><td><code>emit_shift_rows</code></td><td>\(\operatorname{out}[s] = \operatorname{in}[s+1]\) — advance to next slot</td><td><strong>water</strong></td></tr>
-    <tr><td><code>emit_carry_rows</code></td><td>\(\operatorname{out}[s] = \operatorname{in}[s]\) — hold in the same slot</td><td><strong>anticipated</strong></td></tr>
+    <tr><td><code>emit_shift_rows</code></td><td>\(x^{\text{out}}_{s} = x^{\text{in}}_{s+1}\) — advance to next slot</td><td><strong>water</strong></td></tr>
+    <tr><td><code>emit_carry_rows</code></td><td>\(x^{\text{out}}_{s} = x^{\text{in}}_{s}\) — hold in the same slot</td><td><strong>anticipated</strong></td></tr>
     <tr><td><code>emit_deposit</code></td><td>latch a decision column into a slot</td><td>anticipated</td></tr>
     <tr><td><code>freeze_masked_columns</code></td><td>pin unreachable slots to \([0,0]\)</td><td>both</td></tr>
   </tbody>
@@ -321,10 +330,11 @@ delivery stage \(m\) is decided, indexed on an <strong>extended delivery axis</s
 \([0, n_{\text{delivery}})\) that can run past the study horizon (§3.5):</p>
 
 <ul>
-  <li><code>lead_stages</code>: \(c(m) = m - \ell\).</li>
-  <li><code>lead_time_hours</code>: end-anchored — \(c(m)\) is the stage containing
-  \(\operatorname{stage\_end}(m) - (\text{lead hours})\). End-anchoring is what lets a sub-stage lead
-  resolve to \(c(m) = m\), the \(K_i = 0\) case.</li>
+  <li><code>lead_stages</code>: \(c(m) = m - \ell\), where \(\ell\) is the integer lead
+  (<code>lead_stages</code>).</li>
+  <li><code>lead_time_hours</code>: end-anchored — \(c(m)\) is the stage containing the instant
+  \(e_m - \Delta\), where \(e_m\) is the end time of stage \(m\) and \(\Delta\) the lead in hours.
+  End-anchoring is what lets a sub-stage lead resolve to \(c(m) = m\), the \(K_i = 0\) case.</li>
   <li>\(c(m) = \varnothing\) means the decider is <em>before</em> the study — a pre-study commitment
   (§3.4).</li>
 </ul>
@@ -333,9 +343,10 @@ delivery stage \(m\) is decided, indexed on an <strong>extended delivery axis</s
 flight</strong>, across all plants and stages — not merely the lead. Each delivery target is placed
 into the ring by its <strong>residue</strong>:</p>
 
-\[ \operatorname{slot}(m) \;=\; m \bmod k_{\max}. \]
+\[ \operatorname{slot}(m) \;=\; m \bmod k_{\max}, \]
 
-<p>This is safe because at any stage \(t\) the commitments still in flight target the \(k_{\max}\)
+<p>where \(\operatorname{slot}(m)\) is the ring slot that delivery stage \(m\) occupies and \(k_{\max}\)
+the ring depth. This is safe because at any stage \(t\) the commitments still in flight target the \(k_{\max}\)
 consecutive stages \(\{t+1, \dots, t+k_{\max}\}\) — \(k_{\max}\) consecutive integers have \(k_{\max}\)
 distinct residues, so no two collide. The state region is \(S = A\,k_{\max}\) (one lane per anticipated
 plant, \(k_{\max}\) slots deep).</p>
@@ -375,16 +386,19 @@ flowchart LR
 <ol>
   <li><strong>Deposit</strong> (<code>emit_deposit</code>): the fresh decision pins the slot of its own
   delivery target,
-  \[ \operatorname{out\_col}(m \bmod k_{\max}) \;-\; d \;=\; 0. \]</li>
+  \[ x^{\text{out}}_{\,m \bmod k_{\max}} \;-\; d \;=\; 0, \]
+  where \(d\) is the committed MW and \(m\) the decision's delivery stage.</li>
   <li><strong>Hold</strong> (<code>emit_carry_rows</code>): an in-flight, not-yet-due commitment is
   pinned to the <em>same</em> slot's incoming column,
-  \[ \operatorname{out}[s] \;-\; \operatorname{in}[s] \;=\; 0. \]
+  \[ x^{\text{out}}_{s} \;-\; x^{\text{in}}_{s} \;=\; 0 \quad\text{for an in-flight slot } s. \]
   It does not migrate; it waits in its delivery-residue slot until it matures.</li>
   <li><strong>Fish</strong> (maturity): at the delivery stage the per-block generation is tied to the
   matured commitment,
-  \[ \sum_b h_b\,g_b \;-\; H\cdot\operatorname{in\_col}(m \bmod k_{\max}) \;=\; 0,
+  \[ \sum_b h_b\,g_b \;-\; H\,x^{\text{in}}_{\,m \bmod k_{\max}} \;=\; 0,
      \qquad H = \sum_b h_b, \]
-  converting MW to MWh. This row <strong>reads</strong> <code>commit_in</code> and never writes
+  converting MW to MWh, where \(b\) indexes the delivery stage's blocks, \(h_b\) is block \(b\)'s
+  duration (hours), \(g_b\) the plant's generation in block \(b\) (MW), and \(H\) the total stage hours.
+  This row <strong>reads</strong> <code>commit_in</code> and never writes
   <code>commit_out</code>, so the same stage's fresh deposit (which writes <code>commit_out</code>)
   cannot collide with it. It fires for <em>every</em> maturing delivery: a plant not yet commissioned
   never deposited, so its incoming slot is \(0\) and the row harmlessly pins that generation to
@@ -396,11 +410,12 @@ committed MW for delivery stage \(m\) enters the objective as</p>
 
 \[ c_i(m)\; H_m\; \delta_m\; d_i, \]
 
-<p>with \(c_i(m)\) the unit fuel cost (\$/MWh) at the delivery stage, \(H_m\) its total hours, and
-\(\delta_m\) the NPV discount to that stage. The plant's per-block generation columns carry <em>no</em>
-objective cost — the fuel is booked once on the commitment column, so nothing is double-charged. The
-commitment column's bounds \([\,\underline{G}_i(m),\, \overline{G}_i(m)\,]\) and its commissioning gate
-also come from stage \(m\).</p>
+<p>for plant \(i\) delivering at stage \(m\), with \(c_i(m)\) the unit fuel cost (\$/MWh) at the delivery
+stage, \(H_m\) its total hours, \(\delta_m\) the NPV discount factor to that stage, and \(d_i\) the
+committed MW. The plant's per-block generation columns carry <em>no</em> objective cost — the fuel is
+booked once on the commitment column, so nothing is double-charged. The commitment column's bounds
+\([\,\underline{G}_i(m),\, \overline{G}_i(m)\,]\) — the plant's minimum and maximum generation at the
+delivery stage — and its commissioning gate also come from stage \(m\).</p>
 
 <h3>3.4 Seeding the leading stages</h3>
 
@@ -416,7 +431,10 @@ bound such a delivery, the study declares <strong><code>post_study_stages.json</
 continuation calendar plus, per \((\text{thermal}, \text{post-study stage})\), a <code>cost_per_mwh</code>
 / <code>min_mw</code> / <code>max_mw</code>. This <strong>extends the delivery axis</strong> to</p>
 
-\[ n_{\text{delivery}} \;=\; T \;+\; n_{\text{post}}. \]
+\[ n_{\text{delivery}} \;=\; T \;+\; n_{\text{post}}, \]
+
+<p>where \(T\) is the number of study stages and \(n_{\text{post}}\) the number of declared post-study
+stages.</p>
 
 <p>The key point: a post-horizon delivery is <strong>not</strong> a special separate structure. It is
 one of the ring's own slots — the slot its residue \(m \bmod k_{\max}\) resolves to — held open and
@@ -425,7 +443,9 @@ priced through the same generic \(\beta\!\cdot\! x\) cut projection as every oth
 targeting \(m \ge T\) is unreachable and frozen to \([0,0]\). The <strong>decision-existence gate</strong>
 is a single inequality on the extended axis:</p>
 
-\[ \text{a decision is active} \quad\Longleftrightarrow\quad \text{delivery\_stage} \;<\; n_{\text{delivery}}. \]
+\[ \text{a decision is active} \quad\Longleftrightarrow\quad m \;<\; n_{\text{delivery}}, \]
+
+<p>where \(m\) is the decision's delivery stage.</p>
 
 <div class="admon warn">
   <span class="tag">Note for readers of older material</span>
@@ -458,7 +478,10 @@ is the <strong>k-weight</strong>:</p>
 
 \[ k_d \;=\; \frac{\big|\; [\,t_v,\; t_v + h_t)\;\cap\;[\,S_d,\; S_{d+1})\;\big|}{h_t}, \]
 
-<p>with two properties that make it a conservation law, not an approximation:</p>
+<p>where \(k_d\) is the share of the release arriving \(d\) stages later, \(t_v\) the travel time,
+\(h_t\) the current stage's duration, \(S_d\) the \(d\)-th stage boundary counted from the release stage,
+and \(|\cdot|\) the length (in hours) of the interval overlap. Two properties make this a conservation
+law, not an approximation:</p>
 
 \[ \sum_d k_d \;=\; 1 \qquad\text{(every released drop is accounted for),} \]
 
