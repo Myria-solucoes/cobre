@@ -247,8 +247,8 @@ identidade) e uma coluna de entrada fixada. Nada no algoritmo de cortes muda.</p
 <h3>2.2 O buffer circular</h3>
 
 <p>O montante em trânsito vive em um <strong>buffer circular de slots de estado</strong> — um pequeno carrossel de
-\(k_{\max}\) slots. A cada estágio, o slot que matura neste estágio é consumido, os sobreviventes
-avançam um passo, e um montante novo é depositado para entrega futura. Esse carrossel é uma única
+\(k_{\max}\) slots. A cada estágio, o slot que se realiza neste estágio é consumido, os sobreviventes
+avançam um passo, e um montante novo é inserido para entrega futura. Esse carrossel é uma única
 primitiva de código, <code>DeliveryRing</code>, e <strong>ambos os recursos são instâncias dela</strong>.
 Um buffer circular é uma grade densa de \(n_{\text{faixas}} \times \text{prof}\) colunas (\(n_{\text{faixas}}\) é o
 número de faixas e \(\text{prof} = k_{\max}\) o número de slots), com um bloco de saída (contribui ao
@@ -273,7 +273,7 @@ A coluna de entrada \(x^{\text{in}}_{s,\ell}\) é endereçada do mesmo modo a pa
   <tbody>
     <tr><td><code>emit_shift_rows</code></td><td>\(x^{\text{out}}_{s} = x^{\text{in}}_{s+1}\) — avança para o próximo slot</td><td><strong>água</strong></td></tr>
     <tr><td><code>emit_carry_rows</code></td><td>\(x^{\text{out}}_{s} = x^{\text{in}}_{s}\) — retém no mesmo slot</td><td><strong>antecipada</strong></td></tr>
-    <tr><td><code>emit_deposit</code></td><td>trava uma coluna de decisão em um slot</td><td>antecipada</td></tr>
+    <tr><td><code>emit_deposit</code></td><td>insere uma coluna de decisão em um slot</td><td>antecipada</td></tr>
     <tr><td><code>freeze_masked_columns</code></td><td>fixa slots inalcançáveis em \([0,0]\)</td><td>ambas</td></tr>
   </tbody>
 </table>
@@ -328,7 +328,7 @@ menor que a duração do próprio estágio de decisão, ela resolve para \(K_i =
 alguma, e a usina é despachada como térmica comum naquele estágio (com um aviso de uma linha, nunca um
 erro). A decisão térmica por estágio, portanto, <strong>divide-se em duas quantidades
 acopladas</strong>: o <strong>compromisso</strong> \(d\) (um valor em MW decidido no estágio de decisão)
-e a <strong>geração entregue</strong> \(g_b\) por patamar \(b\) (forçada a igualar o compromisso maturado
+e a <strong>geração entregue</strong> \(g_b\) por patamar \(b\) (forçada a igualar o compromisso realizado
 no estágio de entrega).</p>
 
 <h3>3.2 Da antecedência ao slot do buffer</h3>
@@ -381,35 +381,35 @@ Tome uma usina com <code>lead_stages = 2</code> que decide no estágio 1 para en
 <pre class="mermaid">
 flowchart LR
   subgraph S1["estágio 1: decidir, c(3)=1"]
-    dep["depósito: trava o compromisso d"]
+    dep["inserção: insere o compromisso d"]
   end
   subgraph S2["estágio 2: em aberto"]
     hold["retenção: mesmo slot"]
   end
   subgraph S3["estágio 3: entregar m=3"]
-    fish["fishing: geração = compromisso maturado"]
+    fish["fishing: geração = compromisso realizado"]
   end
   dep --> hold --> fish
 </pre>
 
 <ol>
-  <li><strong>Depósito</strong> (<code>emit_deposit</code>): a decisão nova fixa o slot do seu próprio
+  <li><strong>Inserção</strong> (<code>emit_deposit</code>): a decisão nova fixa o slot do seu próprio
   alvo de entrega,
   \[ x^{\text{out}}_{\,m \bmod k_{\max}} \;-\; d \;=\; 0, \]
   onde \(d\) é o MW comprometido e \(m\) o estágio de entrega da decisão.</li>
   <li><strong>Retenção</strong> (<code>emit_carry_rows</code>): um compromisso em aberto, ainda não
-  vencido, é fixado à coluna de entrada do <em>mesmo</em> slot,
+  realizado, é fixado à coluna de entrada do <em>mesmo</em> slot,
   \[ x^{\text{out}}_{s} \;-\; x^{\text{in}}_{s} \;=\; 0 \quad\text{para um slot em aberto } s. \]
-  Ele não migra; espera no slot do seu resíduo de entrega até maturar.</li>
-  <li><strong>Fishing</strong> (maturação): no estágio de entrega, a geração por patamar é amarrada ao
-  compromisso maturado,
+  Ele não migra; espera no slot do seu resíduo de entrega até se realizar.</li>
+  <li><strong>Fishing</strong> (realização): no estágio de entrega, a geração por patamar é amarrada ao
+  compromisso realizado,
   \[ \sum_b h_b\,g_b \;-\; H\,x^{\text{in}}_{\,m \bmod k_{\max}} \;=\; 0,
      \qquad H = \sum_b h_b, \]
   convertendo MW em MWh, onde \(b\) indexa os patamares do estágio de entrega, \(h_b\) é a duração do
   patamar \(b\) (horas), \(g_b\) a geração da usina no patamar \(b\) (MW), e \(H\) o total de horas do
   estágio. Esta linha <strong>lê</strong> <code>commit_in</code> e nunca escreve <code>commit_out</code>,
-  então o depósito novo do mesmo estágio (que escreve <code>commit_out</code>) não pode colidir com ela.
-  Ela dispara para <em>toda</em> entrega que matura: uma usina ainda não comissionada nunca depositou,
+  então a inserção nova do mesmo estágio (que escreve <code>commit_out</code>) não pode colidir com ela.
+  Ela dispara para <em>toda</em> entrega que se realiza: uma usina ainda não comissionada nunca inseriu,
   então seu slot de entrada é \(0\) e a linha fixa inofensivamente aquela geração em \(0\).</li>
 </ol>
 
@@ -481,12 +481,12 @@ aqui os idealizamos como 720 h) e as <strong>semanas operativas</strong> do DECO
 <p>Uma usina com <code>lead_stages = 2</code> em estágios mensais (cada mês com 720 h). O decisor ignora
 o calendário — \(c(m) = m - 2\) — então a profundidade é \(k_{\max} = 2\) e toda entrega cai no slot
 \(m \bmod 2\). As duas primeiras entregas são decididas antes do estudo (sementes pré-estudo); do
-estágio 0 em diante, cada estágio deposita a decisão para dois estágios à frente e pesca ("fishing") a
-entrega que matura agora:</p>
+estágio 0 em diante, cada estágio insere a decisão para dois estágios à frente e faz o "fishing" da
+entrega que se realiza agora:</p>
 
 <div class="table-scroll">
 <table>
-  <thead><tr><th>Estágio \(t\)</th><th>Pesca \(m = t\) — lê <code>commit_in</code>, slot \(t \bmod 2\)</th><th>Deposita \(m = t+2\) — escreve <code>commit_out</code>, slot \((t+2)\bmod 2\)</th></tr></thead>
+  <thead><tr><th>Estágio \(t\)</th><th>Fishing \(m = t\) — lê <code>commit_in</code>, slot \(t \bmod 2\)</th><th>Insere \(m = t+2\) — escreve <code>commit_out</code>, slot \((t+2)\bmod 2\)</th></tr></thead>
   <tbody>
     <tr><td>0</td><td>\(m=0\) — semente pré-estudo, slot 0</td><td>\(m=2\) → slot 0</td></tr>
     <tr><td>1</td><td>\(m=1\) — semente pré-estudo, slot 1</td><td>\(m=3\) → slot 1</td></tr>
@@ -496,8 +496,8 @@ entrega que matura agora:</p>
 </table>
 </div>
 
-<p>Repare que, em cada estágio, a pesca e o depósito tocam o <em>mesmo</em> índice de slot
-(\((t+2)\bmod 2 = t \bmod 2\)) — inofensivo, pois a pesca lê <code>commit_in</code> enquanto o depósito
+<p>Repare que, em cada estágio, o fishing e a inserção tocam o <em>mesmo</em> índice de slot
+(\((t+2)\bmod 2 = t \bmod 2\)) — inofensivo, pois o fishing lê <code>commit_in</code> enquanto a inserção
 escreve <code>commit_out</code> (§3.3).</p>
 
 <h4>Exemplo B — <code>lead_time_hours</code> vs. <code>lead_stages</code> em um calendário DECOMP</h4>
@@ -594,22 +594,22 @@ confluentes em uma mesma usina de jusante colapsam em <strong>um</strong> bloco 
 
 <p>Tudo, exceto a parcela do mesmo estágio \(k_0\), vai para <strong>baldes em trânsito</strong> — um
 <code>DeliveryRing</code> por usina de jusante (\(n_{\text{faixas}} = 1\)). Um balde guarda um volume
-(hm³) que matura alguns estágios adiante. A cada estágio o buffer <strong>desloca</strong>: cada balde em
-trânsito move-se uma defasagem para mais perto da chegada, e o balde que matura neste estágio cai na
+(hm³) que se realiza alguns estágios adiante. A cada estágio o buffer <strong>desloca</strong>: cada balde em
+trânsito move-se uma defasagem para mais perto da chegada, e o balde que se realiza neste estágio cai na
 linha de balanço hídrico de jusante.</p>
 
 <pre class="mermaid">
 flowchart LR
   rel["defluência a montante o = q + s no estágio t"] -->|parcela k_0| bal["balanço de jusante, mesmo estágio"]
   rel -->|parcelas k_1, k_2| bkt["baldes em trânsito"]
-  bkt -->|desloca uma defasagem por estágio| mat["matura na afluência de jusante"]
+  bkt -->|desloca uma defasagem por estágio| mat["realiza-se como afluência de jusante"]
 </pre>
 
 <ul>
   <li><strong>A coluna de defluência alimenta os dois</strong>: o balanço do mesmo estágio (\(k_0\)) e os
   baldes (\(k_1, \dots\)). Não é uma transação separada por estágio; a conservação
   (\(\sum_d k_d = 1\)) vale por defluência.</li>
-  <li><strong>Um balde que matura já é um volume</strong>, então entra no balanço de jusante com um
+  <li><strong>Um balde que se realiza já é um volume</strong>, então entra no balanço de jusante com um
   coeficiente \(-1\) simples — sem reescalonamento por tempo de viagem na chegada. (Sob patamares
   cronológicos, o volume que chega é espalhado pelos patamares do estágio de chegada por uma densidade de
   chegada fixa que também soma 1.)</li>
@@ -677,7 +677,7 @@ começa 168 h após o início do estágio de liberação):</p>
 <p>O mesmo tempo de viagem \(t_v = 200\) h produz <em>dois</em> baldes (0,810 / 0,190) quando a água
 chega em estágios semanais curtos, mas um <em>único</em> balde (1,000) quando chega no longo estágio
 mensal — porque os pesos k medem a sobreposição contra os comprimentos dos estágios de destino, não uma
-contagem fixa de defasagens. (Uma liberação dentro do próprio mês final maturaria após o horizonte, e sua
+contagem fixa de defasagens. (Uma liberação dentro do próprio mês final se realizaria após o horizonte, e sua
 parcela é descartada a menos que uma fronteira terminal seja carregada — §5.)</p>
 
 <h2 id="differ">5. Como os dois recursos diferem</h2>
@@ -693,7 +693,7 @@ Diferem em um punhado de escolhas locais de chamada:</p>
     <tr><td>Instâncias do buffer</td><td>uma por usina de jusante (\(n_{\text{faixas}} = 1\))</td><td>um buffer denso (\(n_{\text{faixas}}\) = nº de usinas antecipadas)</td></tr>
     <tr><td>Transição</td><td><strong>deslocamento</strong> (\(s \to s+1\))</td><td><strong>retenção</strong> (mesmo slot)</td></tr>
     <tr><td>Chave do slot</td><td>defasagem = distância ainda em trânsito</td><td>resíduo do alvo de entrega \(m \bmod k_{\max}\)</td></tr>
-    <tr><td>O que é depositado</td><td>uma parcela ponderada por \(k_d\) de uma defluência</td><td>um único compromisso de decisão</td></tr>
+    <tr><td>O que é inserido</td><td>uma parcela ponderada por \(k_d\) de uma defluência</td><td>um único compromisso de decisão</td></tr>
     <tr><td>Dimensionamento da profundidade</td><td>sobreposição medida da janela de chegada</td><td>máximo de compromissos simultâneos em aberto</td></tr>
     <tr><td>Limite da coluna alcançável</td><td>\([0, \infty)\) — um volume</td><td>\((-\infty, \infty)\) — um valor de MW com sinal</td></tr>
   </tbody>
@@ -710,11 +710,11 @@ movimento oposto.</p>
 flowchart TB
   subgraph W["água: DESLOCAMENTO"]
     direction LR
-    w2["defasagem 2"] --> w1["defasagem 1"] --> w0["matura"]
+    w2["defasagem 2"] --> w1["defasagem 1"] --> w0["realiza-se"]
   end
   subgraph A["antecipada: RETENÇÃO"]
     direction LR
-    a0["slot m mod k_max"] --> a1["mesmo slot, próximo estágio"] --> af["matura em m"]
+    a0["slot m mod k_max"] --> a1["mesmo slot, próximo estágio"] --> af["realiza-se em m"]
   end
 </pre>
 
@@ -803,7 +803,7 @@ pelo mesmo escritor, então os dois são idênticos por construção.</p>
   <thead><tr><th>Partição de saída</th><th>Escrita quando</th><th>Colunas-chave</th></tr></thead>
   <tbody>
     <tr><td><code>simulation/anticipated_lanes/</code></td><td>um <code>post_study_stages</code> é declarado</td><td><code>thermal_id</code>, <code>delivery_date</code> (YYYYMM01), <code>deposited_decision_mw</code>, <code>carried_committed_mw</code></td></tr>
-    <tr><td><code>simulation/in_transit/</code></td><td>um arco de tempo de viagem é declarado</td><td><code>hydro_id</code> (jusante), <code>lag</code> (defasagem de maturação, base 1), <code>in_transit_volume_hm3</code>, <code>delayed_arrival_hm3</code></td></tr>
+    <tr><td><code>simulation/in_transit/</code></td><td>um arco de tempo de viagem é declarado</td><td><code>hydro_id</code> (jusante), <code>lag</code> (defasagem de realização, base 1), <code>in_transit_volume_hm3</code>, <code>delayed_arrival_hm3</code></td></tr>
     <tr><td><code>simulation/transit_seed/</code></td><td>um arco de tempo de viagem é declarado</td><td><code>scenario_id</code>, <code>hydro_id</code> (montante), <code>start_date</code>, <code>end_date</code>, <code>value_m3s</code></td></tr>
     <tr><td><code>simulation/inflow_lags/</code></td><td>qualquer hidrelétrica presente</td><td><code>hydro_id</code>, <code>lag_index</code> (0 = mais recente), <code>inflow_m3s</code></td></tr>
   </tbody>
@@ -820,7 +820,7 @@ possa alinhar as dimensões por identidade:</p>
   <li><code>HydroInflowLag</code> — uma defasagem (lag) AR de afluência (subíndice = ordem do lag, base 1).</li>
   <li><code>AnticipatedThermalState</code> — um slot do buffer de compromisso antecipado (subíndice = slot
   do buffer, entidade = a usina térmica).</li>
-  <li><code>HydroTransitBucket</code> — um balde de água em trânsito (subíndice = defasagem de maturação,
+  <li><code>HydroTransitBucket</code> — um balde de água em trânsito (subíndice = defasagem de realização,
   entidade = a hidrelétrica de jusante).</li>
 </ul>
 <p>Cada slot também carrega um <code>delivery_date</code> (YYYYMMDD, dia fixado em <code>01</code> para as
