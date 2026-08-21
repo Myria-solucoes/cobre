@@ -13,8 +13,8 @@
 //! miss is the expected case, not a boundary the current study is
 //! incompatible with. Anticipated slots dispatch on `delivery_date` and the
 //! caller-supplied `target_delivery_intervals`: `SENTINEL` (pre-fan-out
-//! padding) always defaults to `Zero`; a live, dated POST-HORIZON lane (dated
-//! WITH a resolved interval) fans out against the source's own anticipated
+//! padding) always defaults to `Zero`; a live, dated post-study-targeted ring
+//! slot (dated WITH a resolved interval) fans out against the source's own anticipated
 //! months by calendar overlap — full coverage by priced source months yields
 //! [`RebindOp::Blend`] (the `÷H_M` distribute), a boundary-edge slot straddling
 //! into unpriced time yields [`RebindOp::Renormalize`] (anti-deflation over the
@@ -336,14 +336,15 @@ fn resolve_transit_bucket(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usiz
 /// is an IN-STUDY ring slot — a commitment delivered WITHIN the current
 /// horizon (e.g. a matured commitment fished at the terminal stage, or a
 /// `K = 0` sub-stage-lead delivery self-delivered there) — and resolves to
-/// `Zero`: the terminal boundary FCF prices only post-horizon obligations, so
+/// `Zero`: the terminal boundary FCF prices only post-study obligations, so
 /// a within-horizon delivery, already discharged inside the study, contributes
-/// nothing. Post-horizon lanes read their `delivery_date` and their
-/// `target_interval` from the SAME destination-stage index into 1:1-length
-/// vectors ([`build_stage_entity_delivery_intervals`] mirrors
-/// [`build_stage_entity_manifest`]), so a post-horizon lane is always
+/// nothing. A post-study-targeted ring slot derives its `delivery_date` and its
+/// `target_interval` from the SAME modular delivery stage
+/// ([`build_stage_entity_delivery_intervals`] mirrors
+/// [`build_stage_entity_manifest`], each dating the slot at its modular delivery
+/// stage), so a post-study-targeted ring slot is always
 /// `dated ⟺ Some(interval)`; a `None` interval on a dated slot therefore marks
-/// the in-study ring uniquely, never a failed post-horizon resolution. Two
+/// the in-study ring uniquely, never a failed post-study resolution. Two
 /// wrong-but-compiling alternatives: [`RebindOp::Reject`] here aborts a
 /// legitimate boundary load the moment any anticipated thermal delivers
 /// in-horizon (a sub-stage lead at the terminal stage — the K=0 case); fanning
@@ -1037,7 +1038,7 @@ mod tests {
     }
 
     /// Given a source manifest with one monthly anticipated slot and a
-    /// target lane slot whose interval lies fully inside that month, when
+    /// target ring slot whose interval lies fully inside that month, when
     /// `build_rebind` runs, then it resolves to `Blend` with a single term
     /// weighted `overlap/H_M`.
     #[test]
@@ -1065,7 +1066,7 @@ mod tests {
         );
     }
 
-    /// Given a target lane slot spanning one week fully inside a priced
+    /// Given a target ring slot spanning one week fully inside a priced
     /// source month, when `build_rebind` runs, then it resolves to `Blend`
     /// with a fractional `overlap/H_M` weight.
     #[test]
@@ -1092,7 +1093,7 @@ mod tests {
         }
     }
 
-    /// Given a target lane slot whose interval straddles a priced month and
+    /// Given a target ring slot whose interval straddles a priced month and
     /// an unpriced one, when `build_rebind` runs, then it resolves to
     /// `Renormalize` with a single covered term scaled to the full slot —
     /// never an implicit `0.0` deflation term for the uncovered days.
@@ -1137,7 +1138,7 @@ mod tests {
         );
     }
 
-    /// Given a target lane slot whose interval falls in a month the source
+    /// Given a target ring slot whose interval falls in a month the source
     /// carries no anticipated slot for, when `build_rebind` runs, then it
     /// resolves to `Zero` — no covered month, nothing to reconcile to.
     #[test]
@@ -1154,8 +1155,8 @@ mod tests {
     /// Given a live, dated anticipated target slot whose
     /// `target_delivery_intervals` entry is `None` — the shape of an IN-STUDY
     /// ring slot (a within-horizon delivery, e.g. a `K = 0` sub-stage-lead
-    /// thermal maturing at the terminal stage), never a post-horizon lane
-    /// (those are always dated ⟺ interval) — when `build_rebind` runs, then it
+    /// thermal maturing at the terminal stage), never a post-study-targeted ring
+    /// slot (those are always dated ⟺ interval) — when `build_rebind` runs, then it
     /// resolves to `Zero`: the terminal boundary prices no within-horizon
     /// delivery. It must never reject (which would abort a legitimate load) and
     /// never fan out against the source months (which would wrongly `Blend`).
@@ -1246,7 +1247,7 @@ mod tests {
     }
 
     /// Given a source with one monthly anticipated slot and a target with two
-    /// lane slots exactly tiling that month, when `build_reconciliation_report`
+    /// ring slots exactly tiling that month, when `build_reconciliation_report`
     /// runs over the resulting `Blend` ops, then the anticipated family's
     /// `fan_out` equals the target slot count, `straddling`/`default_zero` are
     /// `0`, and the coverage line renders the expected shape.
@@ -1288,7 +1289,7 @@ mod tests {
         );
     }
 
-    /// Given a target lane slot straddling a priced month and an unpriced one
+    /// Given a target ring slot straddling a priced month and an unpriced one
     /// (a `Renormalize` op), when `build_reconciliation_report` runs, then the
     /// anticipated family's `straddling` includes that slot and it is also
     /// counted in `fan_out`.

@@ -852,19 +852,23 @@ additionally scaled by `H_w / Σ_covered overlap`, so the covered months' price
 density replicates across the uncovered span instead of deflating the boundary FCF
 with an implicit `0.0` term. No covered month yields `Zero`.
 
-Only a POST-HORIZON lane fans out. A dated target slot with NO resolved delivery
-interval is an IN-STUDY ring slot — a commitment delivered WITHIN the current
-horizon (a matured commitment fished at the terminal stage, or a `K = 0`
-sub-stage-lead delivery self-delivered there) — and resolves to `Zero`: the
-terminal boundary FCF prices only post-horizon obligations, so a within-horizon
-delivery, already discharged inside the study, contributes nothing. This is
-sound BECAUSE a post-horizon lane reads its `delivery_date` and its
-`target_interval` from the SAME destination-stage index into 1:1-length vectors
-(`build_stage_entity_manifest` and `build_stage_entity_delivery_intervals` walk
-in lockstep, `post_study_calendar_stages` mapping stages 1:1), so a post-horizon
-lane is always `dated ⟺ Some(interval)`; a `None` interval on a dated slot
-therefore marks the in-study ring uniquely, never a failed post-horizon
-resolution. Two wrong-but-compiling alternatives: `RebindOp::Reject` here (the
+Only a post-study-targeted ring slot fans out. A dated target slot with NO
+resolved delivery interval is an IN-STUDY ring slot — a commitment delivered
+WITHIN the current horizon (a matured commitment fished at the terminal stage, or
+a `K = 0` sub-stage-lead delivery self-delivered there) — and resolves to `Zero`:
+the terminal boundary FCF prices only post-study obligations, so a within-horizon
+delivery, already discharged inside the study, contributes nothing. This is sound
+BECAUSE a ring slot's `delivery_date` and its target interval are BOTH derived
+from the SAME modular delivery target at the same stage — the manifest recovers
+`(slot, plant)` from a ring column via `slot_lane_at` (the exact inverse of
+`out_col`/`in_col`) and dates the slot at its modular delivery stage
+(`build_stage_entity_manifest`), while the companion
+`build_terminal_anticipated_delivery_intervals` derives the interval from that
+same target — so a slot dated onto a post-study stage always carries
+`Some(interval)` and a slot dated onto an in-study stage always carries `None`:
+`dated ⟺ Some(interval)` holds by construction, and a `None` interval on a dated
+slot marks the in-study ring uniquely, never a failed post-study resolution. Two
+wrong-but-compiling alternatives: `RebindOp::Reject` here (the
 retired behavior) aborts a legitimate boundary load the moment any anticipated
 thermal delivers in-horizon (the K=0-at-terminal case — the manifest DELIBERATELY
 dates a matures-this-stage slot, pinned by
@@ -890,8 +894,10 @@ Read: `policy/reconcile.rs` (`resolve_anticipated`, `build_rebind`, `rebind_cut`
 `decode_month_anchor`, `overlap_hours`, the `Blend`/`Renormalize` variants),
 `setup/mod.rs` (`year_month_day_anchor`), `setup/accessors.rs`
 (`build_terminal_anticipated_delivery_intervals`, the target-interval companion),
-`policy/policy_load.rs` (`load_boundary_cuts` threads the target delivery
-intervals). Pinned by the `hm_distribute_conservation` fixtures in
+`policy/policy_export.rs` (`build_stage_entity_manifest`, dating each ring slot at
+its modular delivery stage via `slot_lane_at`), `policy/policy_load.rs`
+(`load_boundary_cuts` threads the target delivery intervals). Pinned by the
+`hm_distribute_conservation` fixtures in
 `tests/anticipated_core.rs` (coeff ratio equals `H_w / H_M`, invariant to the
 delivery stage's hours), the `Blend`/`Renormalize` `rebind_cut` unit tests (both
 apply identical mechanics, distinction is only the weight),
@@ -1113,11 +1119,27 @@ the coefficient, so a second path double-counts or misaligns it.
 The two carriers reach that live terminal state through a LOAD-BEARING asymmetry
 that must not be flattened into one shared keep-live helper:
 
-- **Thermal is additive and inert by default.** Its post-horizon lanes are an
-  appended block `fill_anticipated_slot_columns` holds open `(-inf, inf)` at
-  every stage, terminal included. No post-horizon commitment is ever created
-  without an injected boundary, so the open block perturbs nothing for a study
-  that loads none — it is inert until a boundary fills it.
+- **Thermal is the single anticipated ring's own reachable slots, NOT a
+  `config.policy.boundary`-gated appendage.** A post-study-targeted slot is one of
+  the ring's own slots, held open `(-inf, inf)` by `fill_anticipated_slot_columns`
+  whenever reachable — the `freeze_masked_columns` reachability geometry over the
+  whole `anticipated_slot_row_pos`, never a boundary-conditional appended block. Its
+  EXISTENCE is gated on the study declaring a `post_study_stages.json` calendar (the
+  only thing that extends the delivery axis past the horizon:
+  `delivery_stage_count = n_delivery.max(n_stages)`, so
+  `build_anticipated_slot_row_pos` gates reachability on `m < n_delivery`, not
+  `m < n_stages`) plus the plant's own lead reaching the slot — never on a loaded
+  boundary. With no post-study calendar the axis is study-only and every
+  `m >= n_stages` slot is masked `[0, 0]`, none created (End-of-horizon masking
+  above). This is the re-derived form of the asymmetry, NOT its collapse: water
+  gates terminal live-STATE on `config.policy.boundary` presence; anticipated gates
+  post-study slot EXISTENCE on a declared `post_study_stages.json` plus lead reach.
+  Applying water's `config.policy.boundary` gate to the anticipated ring — masking a
+  reachable post-study slot `[0, 0]` unless a boundary is loaded — is the
+  wrong-but-compiling alternative: a legitimate `min_mw == max_mw` replay deck with
+  no boundary then loses the state slot its declared post-study commitment is
+  carried in, and the generic `β·state` projection already owns that slot's
+  coefficient whether or not a boundary fills the FCF.
 - **Water is the ring's own capped slots and is NOT inert.** Its terminal state
   is the bucket ring's own horizon-capped deep-lag slots, which
   `horizon_cap_active` masks `[0, 0]` at the terminal (Terminal credit deferred
@@ -1159,8 +1181,9 @@ Read: `lp/indexer/state_space.rs` (`StateRegion::cut_enabled`),
 `every_bucket_dim_projects_including_deep_terminal_lags` (every bucket dim, the
 deep-lag terminal slots included, appears exactly once in the cut-state
 projection with no entity-type or per-stage gate) and
-`commitment_hold_post_horizon_joins_the_projection` (the thermal post-horizon
-lanes join the same projection), both in `lp/indexer/cut_state_projection.rs`.
+`commitment_hold_post_study_target_joins_the_projection` (the single anticipated
+ring's post-study-targeted slots join the same projection), both in
+`lp/indexer/cut_state_projection.rs`.
 
 ### Terminal credit deferred
 
@@ -1302,9 +1325,13 @@ shift `slot_k^out − slot_{k+1}^in = 0` (`emit_shift_rows`, whose `−1` lands 
 NEXT slot): a commitment does not migrate slots stage-to-stage — it is held at its
 delivery-target residue until it matures. The water travel-time ring keeps
 `emit_shift_rows`, because its physics genuinely shift; only the anticipated family
-carries. `build_anticipated_slot_row_pos` covers only STRICTLY FUTURE, not-yet-due
-slots; the commitment maturing THIS stage is always fished (see the always-fish
-contract below), never carried here.
+carries. `build_anticipated_slot_row_pos` covers the ring window `{t+1 .. t+k_max}`
+— the strictly-future, not-yet-due delivery targets, a contiguous run over which
+the modular key `m mod k_max` is injective
+(`modular_slot_key_is_injective_on_the_carried_in_flight_set`), so the same-slot
+hold never collides two in-flight commitments onto one slot; the commitment
+maturing THIS stage is always fished (see the always-fish contract below), never
+carried here.
 
 The deposit / latch pins a plant's fresh decision into the slot of its OWN delivery
 target, `slot^out = decision_col` (`slot = delivery_stage mod k_max`), via the
@@ -1315,21 +1342,27 @@ shared skeleton's deposit primitive (`DeliveryRing::emit_deposit`, `+1` on
 the `+1`/`−1` structural coefficients on each side do the carry/deposit, never the
 bounds.
 
-Masking is ASYMMETRIC across the merged region. The in-study slots keep the
-two-sided reachability masking the shared skeleton always ships together: a masked
-position (`build_anticipated_slot_row_pos`'s per-slot `None`) gets NO definition
-row (the row-cap side) AND a frozen `[0, 0]` outgoing column
+Masking is reachability masking over the ENTIRE ring — there is no separate
+appended block with a rule of its own. Every position keeps the two-sided
+reachability masking the shared skeleton always ships together: a masked position
+(`build_anticipated_slot_row_pos`'s per-slot `None`) gets NO definition row (the
+row-cap side) AND a frozen `[0, 0]` outgoing column
 (`DeliveryRing::freeze_masked_columns`, the column-freeze side, over the open
 signed `(-inf, inf)` reachable bound a committed MW value needs) in the SAME pass;
 wiring only one side leaves either a dangling row on a frozen column or a free
-column with no defining constraint, both wrong-but-compiling. The trailing
-post-horizon lanes are NOT masked — `freeze_masked_columns` is retired for them
-(`fill_anticipated_slot_columns` keeps them open `(-inf, inf)` at EVERY stage,
-terminal included) so the boundary FCF prices the carried state (`β·x`) while the
-decision column books the delivery-anchored post-study fuel
-(`fill_commitment_decision_columns`, fuel-exclusive β so the two do not
-double-count). Freezing a post-horizon lane `[0, 0]` would zero a commitment the
-terminal boundary must carry.
+column with no defining constraint, both wrong-but-compiling.
+`fill_anticipated_slot_columns` applies `freeze_masked_columns` over the WHOLE
+`anticipated_slot_row_pos`: a reachable post-study-targeted slot is open
+`(-inf, inf)` because it is NOT masked (its `row_pos` is `Some`), never because it
+is exempt from freezing, and the boundary FCF then prices its carried state
+directly through the generic `β·state` projection (Delivery-family right-boundary
+pricing above). The surviving masking asymmetry is anticipated-vs-water, stated at
+the shared skeleton's "Masked terminal slot" contrast (an anticipated masked slot
+never held a value), not a per-slot freeze exemption here. Treating any slot as
+freeze-exempt — the retired appended-block rule — is the wrong-but-compiling
+alternative: a masked (unreachable) slot left open `(-inf, inf)` with no definition
+row is a free, undefined state column the projection still prices, an
+out-of-nowhere commitment value.
 
 The policy manifest resolves a ring column back to `(slot, plant)` via
 `DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col`, never a
@@ -1382,7 +1415,7 @@ manifest delivery-anchor regressions
 `anticipated_slot_delivery_anchor_past_horizon_is_sentinel`,
 `anticipated_slot_padding_beyond_own_lead_is_sentinel`).
 
-### In-study maturity always fishes; carry-to-terminal is the post-horizon lane's alone
+### In-study maturity always fishes; carry-to-terminal is the post-study-targeted ring slot's alone
 
 The in-study maturity arm ALWAYS fishes. For every in-study delivery maturing this
 stage (`build_anticipated_fishing_row_pos`'s `Some`, driven by
@@ -1406,13 +1439,14 @@ plant's own lead defines `k_max`, so no other plant reaches deeper): two definit
 rows on one `out_col` pin a freshly-costed decision to a stale carried value, a
 release-silent LP corruption surfacing as a false `Infeasible` or a silent
 zero-commit (the guarding `debug_assert` is compiled out of release).
-Carry-to-terminal is owned SOLELY by the post-horizon lane family
-(`fill_commitment_post_horizon_entries`), never the maturity arm. The always-fish
-`+h_b`/`−H` coefficient shape is exactly the pre-migration one; only its slot
-addressing is modular (`stage_idx mod k_max`, via `commitment_hold_in_study_offset`).
+Carry-to-terminal is owned SOLELY by the ring's interior-carry rows
+(`DeliveryRing::emit_carry_rows`, routed by `fill_anticipated_slot_definition_entries`),
+never the maturity arm. The always-fish `+h_b`/`−H` coefficient shape is exactly
+the pre-migration one; only its slot addressing is modular (`stage_idx mod k_max`,
+via `commitment_hold_in_study_offset`).
 
 Read: `lp/builder/entries.rs` (`fill_anticipated_fishing_entries`,
-`fill_commitment_post_horizon_entries`), `lp/builder/layout.rs`
+`fill_anticipated_slot_definition_entries`), `lp/builder/layout.rs`
 (`build_anticipated_fishing_row_pos`), `lp/builder/columns.rs`
 (`fill_anticipated_columns`). Pinned by `fishing_rows_always_active_stage_zero`
 (every plant gets a fishing row regardless of activity, coupling on the maturing
@@ -1424,35 +1458,42 @@ fished, not carried, across the pre-horizon stages).
 
 ### End-of-horizon masking is exact, never a dropped commitment
 
-Unlike the water ring's Terminal credit deferred subsection, no in-study
-anticipated commitment is ever discarded at the horizon boundary — none is
-created there in the first place. `is_anticipated_decision_active`/
-`is_anticipated_decision_active_for_delivery` gate a decision column's
-existence on the strict clause `stage_idx + K_i < n_stages`;
-`PointResolution::decider` itself has a fixed domain `m in [0, n_stages)`, so
-no code path ever computes a commitment targeting a delivery past the
-horizon and then truncates it. `build_anticipated_slot_row_pos`'s per-slot
-`None` (no carry row) and `fill_anticipated_slot_columns`'s frozen
-`[0, 0]` outgoing column, at a slot whose delivery target
-`m = stage_idx + depth + 1 >= n_stages` (`depth in 0..k_max`), are therefore
-always vacuous: the masked slot is provably zero for every valid
-configuration, never a real value the model declines to route anywhere. A
-commissioning-inactive in-study delivery is likewise pinned to `0` — not by
-masking but by the always-fish arm reading a dormant slot's `in_col` of `0`
-(the always-fish contract above) — so it too loses nothing of value. This
-differs in kind from water's masking: a masked bucket discards a genuine
-non-zero `k_d`-weighted release share deposited every stage regardless of the
-arc's travel time — an admitted target-stage imprecision — while the
+Unlike the water ring's Terminal credit deferred subsection, no anticipated
+commitment — in-study or post-study-targeted — is ever discarded at the
+delivery-axis boundary; none is created past it in the first place.
+`is_anticipated_decision_active_for_delivery` gates a decision column's
+existence on the strict clause `stage_idx + K_i < n_delivery`, against the
+EXTENDED delivery calendar (`n_delivery = StateSpace::delivery_stage_count`, the
+study stages plus the `post_study_stages.json` continuation), not merely
+`n_stages`; `PointResolution::decider` has the matching domain
+`m in [0, n_delivery)`, so no code path ever computes a commitment targeting a
+delivery past the extended axis and then truncates it. A post-study-targeted
+delivery (`m` in `[n_stages, n_delivery)`) is CREATED and rides the ring, priced
+through the boundary FCF — masking is exact at `n_delivery`, not `n_stages`.
+`build_anticipated_slot_row_pos`'s per-slot `None` (no carry row) and
+`fill_anticipated_slot_columns`'s frozen `[0, 0]` outgoing column, at a slot
+whose delivery target `m = stage_idx + depth + 1 >= n_delivery`
+(`depth in 0..k_max`), are therefore always vacuous: the masked slot is provably
+zero for every valid configuration, never a real value the model declines to
+route anywhere. A commissioning-inactive in-study delivery is likewise pinned to
+`0` — not by masking but by the always-fish arm reading a dormant slot's
+`in_col` of `0` (the always-fish contract above) — so it too loses nothing of
+value. This differs in kind from water's masking: a masked bucket discards a
+genuine non-zero `k_d`-weighted release share deposited every stage regardless
+of the arc's travel time — an admitted target-stage imprecision — while the
 anticipated gate prevents the decision from ever existing. Crediting a masked
-slot as if it held a dropped commitment would introduce value the model
-never computed, for a delivery stage that does not exist.
-Read: `lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active`,
-`is_anticipated_decision_active_for_delivery`), `lead_time/mod.rs`
-(`PointResolution::decider`), `lp/builder/layout.rs`
+slot as if it held a dropped commitment would introduce value the model never
+computed, for a delivery target past the extended delivery axis `n_delivery`.
+Read: `lp/indexer/anticipated_gate.rs`
+(`is_anticipated_decision_active_for_delivery`), `lead_time/mod.rs`
+(`PointResolution::decider`), `lp/indexer/state_space.rs`
+(`StateSpace::delivery_stage_count`), `lp/builder/layout.rs`
 (`build_anticipated_slot_row_pos`), `lp/builder/columns.rs`
 (`fill_anticipated_slot_columns`). Pinned by
-`a1c_lead_stages_is_pure_index_shift`'s empty-`decision_sets`-past-horizon
-assertion.
+`is_anticipated_decision_active_for_delivery_strict_extended_bound` (the strict
+`< n_delivery` gate on the extended axis; `<=` would admit a delivery at
+`n_delivery`) and `a1c_lead_stages_is_pure_index_shift`'s
+empty-`decision_sets`-past-the-delivery-bound assertion.
 
 ### In-LP anticipated ring: single-decider deposit & `K = 0` exclusion
 
@@ -1546,8 +1587,8 @@ base is safe here only because a load-time rule rejects a `block_id` bound row
 on an anticipated thermal — see `cobre-io`'s
 `check_block_id_on_anticipated_thermal`),
 `thermal_bounds(thermal_idx, delivery_stage).cost_per_mwh` for its cost,
-`total_hours_per_stage[delivery_stage]` and
-`cumulative_discount_factors[delivery_stage]` for its present-value objective,
+`delivery_total_hours[delivery_stage]` and
+`delivery_cumulative_discount_factors[delivery_stage]` for its present-value objective,
 and `is_anticipated_decision_active_for_delivery` (the plant's window at
 `delivery_stage`) for its dormancy — each at the plant's own genuine delivery
 stage, never at `stage_idx`. The delivered commitment is a hard equality with
@@ -1639,3 +1680,28 @@ named, not absorbed). `anticipated_commitment_at_cap_survives_ring_carry` does
 NOT pin this contract and must never be mistaken for it: a seed exactly at the cap
 carries zero drift, never reaches the reconciliation, and stays green with the
 guard deleted — an at-cap-only suite is what let this regression ship.
+
+### Post-study delivery without a boundary carries zero value, never a reject
+
+The anticipated analog of water's `t_v > horizon` seed boundary (Delivery-family
+right-boundary pricing above): a plant whose decider anchors an in-study decision
+to a delivery target `m >= n_stages` — a post-study-targeted delivery — in a study
+that declares NO `config.policy.boundary` carries ZERO terminal value. The ring
+slot still exists and joins the `β·state` projection, but the terminal boundary FCF
+it would price against is empty, so `β·state` contributes nothing. This is a
+ratified scope boundary, NOT a reject: a `min_mw == max_mw` replay deck is a
+legitimate use of a fixed post-study profile with no boundary, and rejecting it
+would abort a valid study. Setup emits exactly ONE advisory naming every affected
+plant (`setup::warn_on_boundary_absent_post_study_delivery`, once at setup on the
+same `tracing::warn!` channel as the `K = 0` advisory, but a DISTINCT condition —
+`warn_on_sub_stage_lead` fires on a sub-stage lead resolving `c(m) = m`, this one on
+a post-study target with no boundary; do not conflate them). Hard-rejecting instead
+of warning is the wrong-but-compiling alternative: it turns a legitimate
+no-boundary replay deck into a spurious setup failure. Silence is the opposite
+failure — it hides a modelling error where the user expected the commitment valued
+against a real future.
+Read: `setup/mod.rs` (`warn_on_boundary_absent_post_study_delivery`,
+`warn_on_sub_stage_lead`). Pinned by
+`warn_on_boundary_absent_post_study_delivery_fires_once_when_boundary_absent` and
+`warn_on_boundary_absent_post_study_delivery_silent_when_boundary_present`
+(`setup/tests.rs`).

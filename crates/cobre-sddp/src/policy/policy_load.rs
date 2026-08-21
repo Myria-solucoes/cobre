@@ -2752,6 +2752,88 @@ mod tests {
         );
     }
 
+    /// The ring-format checkpoint consequence, pinned as a pair. A lane-era
+    /// checkpoint's state vector carried a retired trailing-lane block on top
+    /// of the anticipated ring, so its `state_dimension` is WIDER (ring
+    /// `A·k_max` plus the lane's `W`) than a current-version layout. Loaded as
+    /// `FullFcf` (resume/warm-start) it rejects at the unconditional
+    /// `state_dimension` gate — the intended clean break. The SAME slot layout
+    /// boundary-injected at equal width but with its slots repositioned (a
+    /// positional match would fail: the storage and ring slots no longer line
+    /// up) reconciles by identity (storage) and by date (the anticipated slots
+    /// fan onto the current ring by calendar overlap) and loads, so boundary
+    /// injection across the version boundary is unaffected.
+    #[test]
+    fn lane_era_wider_checkpoint_rejects_full_fcf_but_boundary_injection_reconciles() {
+        let march = 20_260_301;
+        let april = 20_260_401;
+        let lane_era = vec![
+            storage_slot(1),
+            anticipated_slot(9, 0, march),
+            anticipated_slot(9, 1, april),
+        ];
+
+        let current_narrow = vec![storage_slot(1), anticipated_slot(9, 0, march)];
+        let full_fcf = validate_policy_load::<FullFcf>(
+            &psm(lane_era.len() as u32, 12, &lane_era),
+            &psm(current_narrow.len() as u32, 12, &current_narrow),
+        );
+        assert!(
+            matches!(full_fcf, Err(SddpError::Validation(_))),
+            "a lane-era (wider) checkpoint must reject under FullFcf: {full_fcf:?}"
+        );
+        let msg = full_fcf.unwrap_err().to_string();
+        assert!(
+            msg.contains("state_dimension"),
+            "the FullFcf reject must name the state_dimension gate: {msg}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_checkpoint_with_manifest(
+            tmp.path(),
+            1,
+            lane_era.len() as u32,
+            &[10.0, 20.0],
+            &lane_era,
+        );
+
+        let current_reordered = vec![
+            anticipated_slot(9, 0, april),
+            storage_slot(1),
+            anticipated_slot(9, 1, march),
+        ];
+        let target_intervals = vec![
+            Some((ymd(2026, 4, 1), ymd(2026, 5, 1))),
+            None,
+            Some((ymd(2026, 3, 1), ymd(2026, 4, 1))),
+        ];
+
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            current_reordered.len() as u32,
+            &current_reordered,
+            &target_intervals,
+            None,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        )
+        .expect("the same lane-era source must load under BoundaryInjection by identity + date");
+
+        assert_eq!(cuts.len(), 2, "both boundary cuts must load");
+        assert!(
+            cuts.report().reconciled,
+            "the load must run the identity + date reconcile path, not the absent-manifest skip"
+        );
+        for cut in cuts.iter() {
+            assert_eq!(
+                cut.coefficients.len(),
+                current_reordered.len(),
+                "each reconciled cut spans the current state vector"
+            );
+        }
+    }
+
     /// An empty manifest on either side cannot be verified by slot identity:
     /// `validate_policy_load` falls back to the `state_dimension` check alone,
     /// returning `Ok` with one warning.

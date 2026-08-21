@@ -6,7 +6,10 @@
 //!
 //! Also covers transit-bucket (identity match copies, a miss defaults to
 //! `0.0`), sentinel-dated-anticipated default-`0.0`, and the dated-anticipated
-//! date-driven fan-out (`÷H_M` `Blend`, coverage-`Renormalize`).
+//! date-driven fan-out (`÷H_M` `Blend`, coverage-`Renormalize`) — including a
+//! ring-sourced post-study slot reconciling bit-identically to the
+//! pre-switchover shape, and an in-study ring slot (no resolved interval)
+//! defaulting to `Zero`.
 
 #![allow(
     clippy::unwrap_used,
@@ -654,4 +657,104 @@ fn boundary_injection_report_empty_manifest_is_unreconciled() {
         report.summary_line()
     );
     assert!(report.detail_lines().is_empty());
+}
+
+/// Given a monthly-priced source (April 2026, `π_M = 300.0`) and a current
+/// terminal manifest whose ring-residue `subindex` values (100/101) tag a
+/// post-study-targeted provenance, when `load_boundary_cuts` fans one
+/// fully-covered lane and one lane straddling into unpriced (post-study) time,
+/// then the coefficients equal the `Blend` (`π_M · overlap/H_M`, the same value
+/// `boundary_injection_dated_anticipated_fan_out_matrix` asserts for a 7-day
+/// lane) and `Renormalize` (`π_M · H_w/H_M`) values — reconcile keys on
+/// `delivery_date`, never the ring `subindex`, so ring provenance reconciles
+/// identically to the retired lane shape.
+#[test]
+fn boundary_injection_ring_sourced_post_study_fan_out_matches_pre_switchover() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source_manifest = vec![
+        storage_slot(1),
+        dated_anticipated_slot(9, 0, 20_260_401),
+        sentinel_anticipated_slot(9, 1),
+    ];
+    write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0, 0.0]);
+
+    let current = vec![
+        storage_slot(1),
+        dated_anticipated_slot(9, 100, 20_260_401),
+        dated_anticipated_slot(9, 101, 20_260_401),
+    ];
+    let intervals = vec![
+        None,
+        Some((ymd(2026, 4, 1), ymd(2026, 4, 8))),
+        Some((ymd(2026, 4, 22), ymd(2026, 5, 8))),
+    ];
+
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        3,
+        &current,
+        &intervals,
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("a ring-sourced post-study dated fan-out must load");
+
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients[0], 10.0,
+        "the storage slot still copies its identity-matched coefficient"
+    );
+
+    let h_m = 30.0 * 24.0;
+    let expected_blend = 300.0 * (7.0 * 24.0) / h_m;
+    assert!(
+        (cuts[0].coefficients[1] - expected_blend).abs() < expected_blend.abs() * 1e-9,
+        "fully-covered ring lane must Blend to π_M · overlap/H_M = {expected_blend}, got {}",
+        cuts[0].coefficients[1]
+    );
+    let expected_renorm = 300.0 * (16.0 * 24.0) / h_m;
+    assert!(
+        (cuts[0].coefficients[2] - expected_renorm).abs() < expected_renorm.abs() * 1e-9,
+        "straddling ring lane must Renormalize to π_M · H_w/H_M = {expected_renorm}, got {}",
+        cuts[0].coefficients[2]
+    );
+}
+
+/// Given a current terminal manifest carrying a dated ring slot whose
+/// `delivery_date` resolves NO interval — an in-study ring slot (a
+/// within-horizon delivery, e.g. a `K = 0` self-delivery) — when
+/// `load_boundary_cuts` runs, then that slot reconciles to `0.0`, not a reject
+/// and not a blend, even though the source carries a month whose date would
+/// overlap it if it were wrongly fanned out. The integration mirror of the unit
+/// pin `build_rebind_dated_in_study_ring_slot_with_no_interval_yields_zero`.
+#[test]
+fn boundary_injection_dated_in_study_ring_slot_with_no_interval_yields_zero() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source_manifest = vec![storage_slot(1), dated_anticipated_slot(9, 0, 20_260_401)];
+    write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0]);
+
+    let current = vec![storage_slot(1), dated_anticipated_slot(9, 0, 20_260_401)];
+    let intervals = vec![None, None];
+
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        2,
+        &current,
+        &intervals,
+        None,
+        1_000_000.0,
+        &mut |_| {},
+    )
+    .expect("an in-study ring slot with no interval must load, defaulting to 0.0");
+
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients,
+        vec![10.0, 0.0],
+        "a dated ring slot with no resolved interval is an in-study delivery: it defaults \
+         to 0.0, never fans out against the overlapping source month"
+    );
 }

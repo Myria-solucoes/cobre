@@ -402,6 +402,31 @@ parked.
 
 **Trigger.** Per-block delivery work on anticipated commitments.
 
+### Pre-study-decided, post-study-delivered anticipated commitments (no carrier)
+
+**What it is.** A commitment decided at a **pre-study** stage that delivers into a
+**post-study** stage has no carrier on the anticipated delivery axis: the ring's
+slots key on delivery-target residue over in-study decision stages, so a pre-study
+decider has no in-study stage to latch from and the commitment cannot be
+represented. This is a ratified scope boundary, not a defect — the extended
+delivery axis (`build_extended_delivery_axis`,
+`crates/cobre-io/src/validation/semantic/thermal.rs`) carries in-study **and**
+post-study delivery _targets_, but only in-study _deciders_. `post_study_reach`
+classifies such a target as `no_carrier`, and `check_post_study_stages`
+hard-rejects it as a `BusinessRuleViolation` naming the plant and post-study stage
+index(es), advising the user to shorten the lead so the decision falls within the
+study horizon — surfaced, never silently mis-modelled (the same posture as the
+water ring's `t_v > horizon` seed boundary in `.claude/rules/sddp.md` §
+"Delivery-family right-boundary pricing"). Pinned by
+`test_pre_study_decided_post_study_delivery_rejected`
+(`crates/cobre-io/src/validation/semantic/thermal.rs`). Lifting it requires a
+pre-study carrier on the extended axis for a pre-study decider to deposit into.
+
+**Owner.** The setup / SDDP owner (the I/O owner owns the validation surface).
+
+**Trigger.** A study requires a commitment decided before its horizon yet delivered
+after it — the extended axis gains a pre-study carrier.
+
 ### Stage-calendar crate home
 
 **What it is.** The stage-calendar / season-cast machinery (`StageCalendar`,

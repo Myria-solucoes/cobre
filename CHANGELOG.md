@@ -9,6 +9,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-21
+
+### Added
+
+- **A post-horizon anticipated thermal commitment is now declared in
+  `post_study_stages.json` and carried on the anticipated-commitment ring.**
+  `post_study_stages.json` gains a `thermal_bounds[]` table — one
+  `{thermal_id, post_study_stage_index, cost_per_mwh, min_mw, max_mw}` row per
+  post-study delivery cell — and this file is the sole surface for declaring a
+  commitment whose delivery lands past the study horizon. A delivery decided
+  inside the study but maturing after it now rides the same ring as an in-study
+  delivery, over a delivery axis extended across the post-study calendar,
+  instead of a separate carrier; its generation is bounded, costed, and priced
+  against the extended horizon.
+
+### Changed
+
+- **BREAKING — a policy checkpoint written by an earlier release for a study
+  that carries post-study anticipated deliveries is rejected when loaded for
+  warm-start or resume.** Moving a post-study delivery onto the ring changes the
+  anticipated-commitment ring's state dimension and its per-slot manifest
+  identity, so such a checkpoint no longer matches the current layout and fails
+  the state-dimension check with a named error. There is no in-place upgrade —
+  retrain to produce a current-version checkpoint. A checkpoint from a study
+  with no post-study anticipated deliveries is unchanged and still loads, and a
+  terminal boundary future cost function injected from a checkpoint reconciles
+  by entity identity and date, so boundary injection across the version boundary
+  is unaffected.
+
+- **A post-study delivery is now commissioning-gated at its own delivery
+  stage.** The delivery-anchored commissioning gate extends over the post-study
+  calendar through a continued stage-id sequence, so a plant whose service
+  window ends inside the study is inactive post-horizon and can no longer be
+  committed to a post-horizon delivery. The previous post-horizon surface
+  applied no commissioning gate at that stage, so a plant exiting inside the
+  study could still be committed post-horizon; a decommissioned plant committing
+  post-horizon generation is now the modeling error the gate catches.
+
+- **The anticipated-commitment ring is sized from full in-flight occupancy,
+  including pre-study seeds.** Ring depth now counts every carried delivery in
+  flight at a stage — a pre-study-seeded commitment included — instead of a
+  quantity that structurally excluded pre-study occupancy. This is
+  byte-identical on every well-behaved calendar and on every shipped case, but a
+  study whose ring was previously under-sized — a physical-lead plant with more
+  pre-study commitments in flight than the old depth counted — gets a wider
+  state vector, a different checkpoint, and different, correct results: the old
+  depth silently under-sized the ring and pinned a freshly-costed decision onto
+  a carried seed.
+
+- **Two carrier-absent configurations are now rejected at load instead of
+  silently mis-modeled.** An anticipated thermal whose lead reaches a post-study
+  stage for which `post_study_stages.json` declares no `thermal_bounds[]` cell
+  is rejected, naming the plant and the post-study stage — where the previous
+  surface dropped the delivery with only a log warning. A commitment decided at
+  a pre-study stage whose delivery lands past the horizon has no ring slot to
+  carry it and is rejected, naming the plant.
+
+### Removed
+
+- **BREAKING — `initial_conditions.json`'s `future_anticipated_deliveries[]` is
+  removed.** A post-horizon delivery is declared in `post_study_stages.json`
+  (see above), now the sole post-horizon declaration surface. An
+  `initial_conditions.json` still carrying `future_anticipated_deliveries[]` is
+  rejected by the file's deny-unknown-fields contract; move each entry to a
+  `post_study_stages.json` `thermal_bounds[]` row.
+
+### Fixed
+
+- **An anticipated thermal whose lead reaches the full study horizon no longer
+  panics the LP build.** Such a plant produced an empty commitment ring while
+  still emitting a commitment-maturity row, and the maturity fill divided by the
+  zero ring depth and aborted the run — validation passed, so the crash surfaced
+  only at run time. Sizing the ring from full occupancy keeps a carried
+  delivery's depth positive, and the maturity fill is now gated on a positive
+  ring depth, so the divide is unreachable by construction.
+
+### Migration
+
+Moving a study from 0.14 to 0.15:
+
+1. **Retrain.** A policy checkpoint from an earlier release for a study that
+   carries post-study anticipated deliveries fails to load for warm-start or
+   resume (a state-dimension mismatch); there is no in-place upgrade. Boundary
+   injection is unaffected — a terminal boundary future cost function still
+   loads across the version boundary.
+2. **Re-declare post-horizon deliveries.** Move every `initial_conditions.json`
+   `future_anticipated_deliveries[]` entry to a `post_study_stages.json`
+   `thermal_bounds[]` row keyed by `(thermal_id, post_study_stage_index)`,
+   supplying `cost_per_mwh`, `min_mw`, and `max_mw`. A cell missing for a plant
+   whose lead reaches that post-study stage now fails the load, naming the plant
+   and stage.
+
 ## [0.14.3] - 2026-08-19
 
 ### Added
