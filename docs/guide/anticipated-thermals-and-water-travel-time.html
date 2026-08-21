@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anticipated Thermals &amp; Water Travel Time — Cobre Primer</title>
+
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]']] },
+    svg: { fontCache: 'global' }
+  };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral', flowchart: { htmlLabels: true, curve: 'basis' } });
+</script>
+
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1b1f24;
+    --muted: #5a6470;
+    --accent: #1f6feb;
+    --accent-soft: #ddeaff;
+    --rule: #e3e8ee;
+    --code-bg: #f4f6f8;
+    --card: #ffffff;
+    --note-bg: #eef5ff;
+    --note-bd: #1f6feb;
+    --warn-bg: #fff6e9;
+    --warn-bd: #d98a1a;
+    --table-head: #f2f5f8;
+    --table-stripe: #fafbfc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1419;
+      --fg: #dbe2ea;
+      --muted: #93a1b0;
+      --accent: #6fb0ff;
+      --accent-soft: #10233d;
+      --rule: #232b34;
+      --code-bg: #171d24;
+      --card: #f7f9fb;
+      --note-bg: #10233d;
+      --note-bd: #4f8cff;
+      --warn-bg: #2b2211;
+      --warn-bd: #d98a1a;
+      --table-head: #171d24;
+      --table-stripe: #131920;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 17px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 0 20px 6rem;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  header.doc {
+    padding: 3.2rem 0 1.6rem;
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 2rem;
+  }
+  .chip {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 0.25em 0.7em;
+    border-radius: 999px;
+    margin-bottom: 1rem;
+  }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 0.2rem 0 0.6rem; letter-spacing: -0.01em; }
+  .lede { color: var(--muted); font-size: 1.06rem; margin: 0.4rem 0 0; }
+  h2 {
+    font-size: 1.5rem;
+    margin: 2.8rem 0 0.9rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--rule);
+    letter-spacing: -0.01em;
+  }
+  h3 { font-size: 1.16rem; margin: 1.9rem 0 0.6rem; }
+  h4 { font-size: 1.02rem; margin: 1.4rem 0 0.4rem; color: var(--muted); }
+  p { margin: 0.8rem 0; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; }
+  a:hover { border-bottom-color: var(--accent); }
+  strong { font-weight: 700; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: 0.35rem 0; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.86em;
+    background: var(--code-bg);
+    padding: 0.12em 0.4em;
+    border-radius: 5px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 9px;
+    padding: 0.95rem 1.1rem;
+    overflow-x: auto;
+    line-height: 1.5;
+    font-size: 0.86rem;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .toc {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 1rem 1.3rem;
+    margin: 1.5rem 0 2rem;
+  }
+  .toc h4 { margin: 0 0 0.5rem; color: var(--fg); }
+  .toc ol { margin: 0; }
+  .table-scroll { overflow-x: auto; margin: 1.2rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+  th, td { text-align: left; padding: 0.55rem 0.8rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { background: var(--table-head); font-weight: 700; }
+  tbody tr:nth-child(even) { background: var(--table-stripe); }
+  .admon {
+    border-left: 4px solid var(--note-bd);
+    background: var(--note-bg);
+    border-radius: 0 8px 8px 0;
+    padding: 0.85rem 1.1rem;
+    margin: 1.4rem 0;
+  }
+  .admon.warn { border-left-color: var(--warn-bd); background: var(--warn-bg); }
+  .admon .tag { font-weight: 700; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); display: block; margin-bottom: 0.25rem; }
+  .mermaid {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 1.1rem;
+    margin: 1.4rem 0;
+    text-align: center;
+    overflow-x: auto;
+  }
+  mjx-container[display="true"] { overflow-x: auto; overflow-y: hidden; padding: 0.3rem 0; }
+  figcaption { color: var(--muted); font-size: 0.85rem; text-align: center; margin-top: 0.4rem; }
+  footer { margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.86rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <span class="chip">Cobre Primer</span>
+  <h1>Anticipated thermals &amp; water travel time</h1>
+  <p class="lede">A first-timer's guide to how cobre models two time-delayed delivery phenomena —
+  thermal generation committed a lead time ahead, and water that takes travel time to flow downstream.
+  Assumes you know SDDP, but are new to cobre.</p>
+</header>
+
+<p>Ordinary SDDP dispatch assumes a decision you make in stage \(t\) takes effect in stage \(t\).
+Two physical realities break that assumption, and cobre handles both with one shared mechanism.
+This page builds them up from the problem, through the math, to the files you edit and read. For the
+symbol-by-symbol correctness contracts, read the companion reference,
+<code>docs/design/anticipated-thermals-and-water-travel-time.md</code>, after this.</p>
+
+<p style="color:var(--muted);font-size:0.9rem">
+Equations are rendered with MathJax; diagrams with Mermaid. Stage indices are <strong>0-based</strong>
+(\(t = 0, 1, \dots, T-1\)); \(T\) is the number of study stages.</p>
+
+<div class="toc">
+  <h4>Contents</h4>
+  <ol>
+    <li><a href="#why">Why these two features exist</a></li>
+    <li><a href="#idea">The one idea: a lagged-delivery ring</a></li>
+    <li><a href="#anticipated">Anticipated thermal generation</a></li>
+    <li><a href="#water">Water travel time</a></li>
+    <li><a href="#differ">How the two features differ</a></li>
+    <li><a href="#files">Bridge to the cobre files</a></li>
+  </ol>
+</div>
+
+<h2 id="why">1. Why these two features exist</h2>
+
+<p>The only thing that couples one stage to the next in a plain hydrothermal model is
+<strong>reservoir storage</strong> — the classic state variable carried forward as \(\hat{v}\) and
+priced by the future-cost cuts. Two physical realities add more coupling:</p>
+
+<ul>
+  <li><strong>Fuel lead time (anticipated thermals).</strong> An LNG plant (originally
+  <em>Gás Natural Liquefeito</em>, GNL), a long-haul coal contract, or any plant whose fuel must be
+  ordered ahead cannot decide <em>now</em> to generate <em>now</em>. The committed quantity must be
+  locked a lead time ahead of the stage where the energy is delivered.</li>
+  <li><strong>Water travel time.</strong> Water released upstream does not teleport downstream. On a
+  long reach it takes hours or days to arrive, often spanning stage boundaries. The release happens
+  now; the downstream inflow arrives later.</li>
+</ul>
+
+<p>Both are the <em>same shape of problem</em>: a quantity is produced at one stage and realized at a
+later stage, and the amount in between must be remembered. In SDDP, "something that couples stages and
+must be remembered" becomes <strong>state</strong>. So each feature adds state — through one shared
+mechanism.</p>
+
+<pre class="mermaid">
+flowchart LR
+  D["Produced at stage t: decide / release"] --> S["Held as state, advances one slot per stage"]
+  S --> R["Realized at stage m: delivered / arrives"]
+</pre>
+
+<h2 id="idea">2. The one idea: a lagged-delivery ring</h2>
+
+<h3>2.1 How cobre carries SDDP state (the "fishing" trick)</h3>
+
+<p>SDDP cuts approximate the future-cost function \(V_t(x)\) with hyperplanes</p>
+
+\[ \theta \;\ge\; \alpha + \pi^{\top}\hat{x}, \]
+
+<p>where \(\hat{x}\) is the incoming state and \(\pi\) the subgradient. Cobre realizes this without a
+state-fixing <em>constraint row</em>. Instead, each incoming-state coordinate is its own LP column,
+pinned by equal bounds:</p>
+
+\[ \underline{x} \;=\; \overline{x} \;=\; \hat{x} \qquad\text{(the value carried from stage } t-1). \]
+
+<p>The cut coefficient \(\pi\) for that coordinate is then the <strong>reduced cost</strong> of the
+pinned column (divided by a fixed per-column prescaler, with no sign change). This is cobre's version
+of SDDP.jl "fishing": fix the incoming state, solve, read the price off the pinned column.</p>
+
+<pre class="mermaid">
+flowchart LR
+  prev["stage t-1 outgoing state x_t"] --> pin["stage t incoming column pinned: lo = hi = x-hat"]
+  pin --> rc["reduced cost of the pinned column"]
+  rc --> beta["cut coefficient on x-hat"]
+</pre>
+
+<p><strong>Everything below reuses exactly this machinery.</strong> A new feature adds state
+coordinates; each is an outgoing column (resolved to its cut coefficient by identity) and a pinned
+incoming column. Nothing about the cut algorithm changes.</p>
+
+<h3>2.2 The ring</h3>
+
+<p>The in-flight amount lives in a <strong>ring of state slots</strong> — a small carousel of
+\(k_{\max}\) slots. Each stage, the slot that matures this stage is consumed, the survivors advance one
+step, and a fresh amount is deposited for future delivery. That carousel is a single code primitive,
+<code>DeliveryRing</code>, and <strong>both features are instances of it</strong>. A ring is a dense
+grid of \(n_{\text{lanes}} \times \text{depth}\) columns with an outgoing block (contributes to state
+and cuts) and an incoming block (pinned). Its column address is</p>
+
+\[ \operatorname{out\_col}(s, \ell) \;=\; \texttt{out\_block.start} + s\,n_{\text{lanes}} + \ell
+   \qquad(\text{slot-major, lane-minor}). \]
+
+<p>The ring emits four kinds of structural rows; each feature uses a subset:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Ring operation</th><th>What it emits</th><th>Used by</th></tr></thead>
+  <tbody>
+    <tr><td><code>emit_shift_rows</code></td><td>\(\operatorname{out}[s] = \operatorname{in}[s+1]\) — advance to next slot</td><td><strong>water</strong></td></tr>
+    <tr><td><code>emit_carry_rows</code></td><td>\(\operatorname{out}[s] = \operatorname{in}[s]\) — hold in the same slot</td><td><strong>anticipated</strong></td></tr>
+    <tr><td><code>emit_deposit</code></td><td>latch a decision column into a slot</td><td>anticipated</td></tr>
+    <tr><td><code>freeze_masked_columns</code></td><td>pin unreachable slots to \([0,0]\)</td><td>both</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The single most important difference: <strong>water shifts</strong> (physical mass moves one slot
+closer to arrival each stage), while <strong>anticipated holds</strong> (a commitment sits in the slot
+of its delivery target and waits). We see why in §5.</p>
+
+<h3>2.3 Where the state lives</h3>
+
+<p>Both rings sit inside one contiguous state vector, in a fixed region order. With \(N\) hydros, \(L\)
+AR-inflow lags, \(B\) water buckets, and \(A\) anticipated plants over ring depth \(k_{\max}\):</p>
+
+<pre><code>[0,        N)          storage             — outgoing storage volumes
+[N,        N(1+L))     inflow_lags         — AR lag variables
+[N(1+L),   +B)         transit_buckets_out — WATER ring (outgoing)
+[+B,       +S)         commit_out          — ANTICIPATED ring (outgoing), S = A·k_max
+                       z_inflow            — realized inflow (auxiliary, not state)
+                       storage_in          — incoming storage      (pinned)
+                       transit_buckets_in  — WATER ring (incoming)  (pinned)
+                       commit_in           — ANTICIPATED ring (incoming, pinned)
+                       theta               — future-cost variable θ</code></pre>
+
+<p>so the total state dimension is</p>
+
+\[ n_{\text{state}} \;=\; N(1 + L) \;+\; B \;+\; A\,k_{\max}. \]
+
+<p>With no travel-time arc the bucket region collapses to width \(0\); with no anticipated plant the
+commitment region collapses to width \(0\) — and the whole layout reproduces the pre-feature bytes
+exactly. That "collapses to nothing when unused" property is why turning a feature <em>off</em> changes
+nothing.</p>
+
+<h2 id="anticipated">3. Anticipated thermal generation</h2>
+
+<h3>3.1 The setup</h3>
+
+<p>A thermal plant declares a <strong>lead</strong> — how far ahead the commitment must be locked — in
+one of two mutually-exclusive ways:</p>
+
+<ul>
+  <li><strong><code>lead_stages</code></strong> — an integer count of stages (\(\ge 1\)). The calendar
+  is never consulted; a decision for delivery stage \(m\) is made at stage \(m - \ell\).</li>
+  <li><strong><code>lead_time_hours</code></strong> — a physical duration in hours, resolved against
+  the actual stage calendar (the same clock a water arc uses).</li>
+</ul>
+
+<p>Call the resolved per-plant lead \(K_i\) (in stages). If a physical lead is shorter than the
+decision stage's own duration, it resolves to \(K_i = 0\) — no lead at all, and the plant is dispatched
+as an ordinary thermal that stage (with a one-line advisory, never an error). The per-stage thermal
+decision therefore <strong>splits into two coupled quantities</strong>: the <strong>commitment</strong>
+\(d\) (a MW value decided at the decision stage) and the <strong>delivered generation</strong> \(g_b\)
+per block \(b\) (forced to equal the matured commitment at the delivery stage).</p>
+
+<h3>3.2 From lead to ring slot</h3>
+
+<p>The lead resolves to a <strong>decider</strong> \(c(m)\): the stage at which the commitment for
+delivery stage \(m\) is decided, indexed on an <strong>extended delivery axis</strong>
+\([0, n_{\text{delivery}})\) that can run past the study horizon (§3.5):</p>
+
+<ul>
+  <li><code>lead_stages</code>: \(c(m) = m - \ell\).</li>
+  <li><code>lead_time_hours</code>: end-anchored — \(c(m)\) is the stage containing
+  \(\operatorname{stage\_end}(m) - (\text{lead hours})\). End-anchoring is what lets a sub-stage lead
+  resolve to \(c(m) = m\), the \(K_i = 0\) case.</li>
+  <li>\(c(m) = \varnothing\) means the decider is <em>before</em> the study — a pre-study commitment
+  (§3.4).</li>
+</ul>
+
+<p>The ring depth \(k_{\max}\) is the <strong>maximum number of commitments simultaneously in
+flight</strong>, across all plants and stages — not merely the lead. Each delivery target is placed
+into the ring by its <strong>residue</strong>:</p>
+
+\[ \operatorname{slot}(m) \;=\; m \bmod k_{\max}. \]
+
+<p>This is safe because at any stage \(t\) the commitments still in flight target the \(k_{\max}\)
+consecutive stages \(\{t+1, \dots, t+k_{\max}\}\) — \(k_{\max}\) consecutive integers have \(k_{\max}\)
+distinct residues, so no two collide. The state region is \(S = A\,k_{\max}\) (one lane per anticipated
+plant, \(k_{\max}\) slots deep).</p>
+
+<pre class="mermaid">
+flowchart TB
+  subgraph ring["one plant's ring, k_max = 3"]
+    direction LR
+    s0["slot 0"]
+    s1["slot 1"]
+    s2["slot 2"]
+  end
+  m3["delivery m = 3"] -->|3 mod 3 = 0| s0
+  m4["delivery m = 4"] -->|4 mod 3 = 1| s1
+  m5["delivery m = 5"] -->|5 mod 3 = 2| s2
+</pre>
+
+<h3>3.3 The three LP row families</h3>
+
+<p>The whole commitment mechanism is three families of equality rows over the anticipated ring. Take a
+plant with <code>lead_stages = 2</code> that decides at stage 1 for delivery at stage 3:</p>
+
+<pre class="mermaid">
+flowchart LR
+  subgraph S1["stage 1: decide, c(3)=1"]
+    dep["deposit: latch commitment d"]
+  end
+  subgraph S2["stage 2: in flight"]
+    hold["hold: same slot"]
+  end
+  subgraph S3["stage 3: deliver m=3"]
+    fish["fish: generation = matured commitment"]
+  end
+  dep --> hold --> fish
+</pre>
+
+<ol>
+  <li><strong>Deposit</strong> (<code>emit_deposit</code>): the fresh decision pins the slot of its own
+  delivery target,
+  \[ \operatorname{out\_col}(m \bmod k_{\max}) \;-\; d \;=\; 0. \]</li>
+  <li><strong>Hold</strong> (<code>emit_carry_rows</code>): an in-flight, not-yet-due commitment is
+  pinned to the <em>same</em> slot's incoming column,
+  \[ \operatorname{out}[s] \;-\; \operatorname{in}[s] \;=\; 0. \]
+  It does not migrate; it waits in its delivery-residue slot until it matures.</li>
+  <li><strong>Fish</strong> (maturity): at the delivery stage the per-block generation is tied to the
+  matured commitment,
+  \[ \sum_b h_b\,g_b \;-\; H\cdot\operatorname{in\_col}(m \bmod k_{\max}) \;=\; 0,
+     \qquad H = \sum_b h_b, \]
+  converting MW to MWh. This row <strong>reads</strong> <code>commit_in</code> and never writes
+  <code>commit_out</code>, so the same stage's fresh deposit (which writes <code>commit_out</code>)
+  cannot collide with it. It fires for <em>every</em> maturing delivery: a plant not yet commissioned
+  never deposited, so its incoming slot is \(0\) and the row harmlessly pins that generation to
+  \(0\).</li>
+</ol>
+
+<p><strong>Cost and bounds are read at the delivery stage, not the decision stage.</strong> The
+committed MW for delivery stage \(m\) enters the objective as</p>
+
+\[ c_i(m)\; H_m\; \delta_m\; d_i, \]
+
+<p>with \(c_i(m)\) the unit fuel cost (\$/MWh) at the delivery stage, \(H_m\) its total hours, and
+\(\delta_m\) the NPV discount to that stage. The plant's per-block generation columns carry <em>no</em>
+objective cost — the fuel is booked once on the commitment column, so nothing is double-charged. The
+commitment column's bounds \([\,\underline{G}_i(m),\, \overline{G}_i(m)\,]\) and its commissioning gate
+also come from stage \(m\).</p>
+
+<h3>3.4 Seeding the leading stages</h3>
+
+<p>If a plant has lead \(K_i\), the first \(K_i\) study stages are delivered by commitments decided
+<em>before</em> the study began. Those are supplied as <strong><code>past_anticipated_commitments</code></strong>
+— dated MW windows that tile the leading delivery stages. They seed the stage-0 ring directly and are
+<strong>sunk cost</strong>: they constrain leading-stage generation but never enter the objective.</p>
+
+<h3>3.5 Delivering past the horizon (post-study stages)</h3>
+
+<p>A commitment decided late in the study can target a stage <em>after</em> the horizon. To price and
+bound such a delivery, the study declares <strong><code>post_study_stages.json</code></strong>: a short
+continuation calendar plus, per \((\text{thermal}, \text{post-study stage})\), a <code>cost_per_mwh</code>
+/ <code>min_mw</code> / <code>max_mw</code>. This <strong>extends the delivery axis</strong> to</p>
+
+\[ n_{\text{delivery}} \;=\; T \;+\; n_{\text{post}}. \]
+
+<p>The key point: a post-horizon delivery is <strong>not</strong> a special separate structure. It is
+one of the ring's own slots — the slot its residue \(m \bmod k_{\max}\) resolves to — held open and
+priced through the same generic \(\beta\!\cdot\! x\) cut projection as every other slot. With no
+<code>post_study_stages.json</code>, the axis is study-only (\(n_{\text{delivery}} = T\)), and any slot
+targeting \(m \ge T\) is unreachable and frozen to \([0,0]\). The <strong>decision-existence gate</strong>
+is a single inequality on the extended axis:</p>
+
+\[ \text{a decision is active} \quad\Longleftrightarrow\quad \text{delivery\_stage} \;<\; n_{\text{delivery}}. \]
+
+<div class="admon warn">
+  <span class="tag">Note for readers of older material</span>
+  Earlier cobre (and the currently-published methodology pages) modeled this with a Markov-1
+  <em>shift</em> ring, a <code>future_anticipated_deliveries[]</code> input, and a separate block of
+  "post-horizon lanes." All three are <strong>retired</strong>. The current model is the residue-keyed
+  <em>hold</em> ring described above, with <code>post_study_stages.json</code> as the sole post-horizon
+  surface. If you see <code>future_anticipated_deliveries</code> anywhere, it is stale.
+</div>
+
+<h2 id="water">4. Water travel time</h2>
+
+<h3>4.1 The setup</h3>
+
+<p>By default, water released this stage reaches the downstream reservoir <em>this</em> stage. When the
+reach is long, a plant declares a <strong><code>travel_time_hours</code></strong> on its main cascade
+arc (the arc to its <code>downstream_id</code>), and the release is delivered a number of stages later
+instead. Only the main cascade arc delays; diversion and pumping transfers stay instantaneous. Travel
+time absent, <code>null</code>, or \(0\) means no arc, no state added.</p>
+
+<h3>4.2 From travel time to k-weights</h3>
+
+<p>Here is the subtlety a "shift by \(\lceil t_v / \text{stage} \rceil\) stages" mental model gets
+wrong: a stage is a <em>duration</em>, and a release is spread over it, so the arriving water rarely
+lands neatly in one future stage — it <strong>spreads across several</strong>, weighted by overlap.
+Take a release spread uniformly over the current stage (duration \(h_t\)), delay it by the travel time
+\(t_v\), and intersect the arrival window \([t_v,\, t_v + h_t)\) with each future stage window
+\([S_d,\, S_{d+1})\) (boundaries counted from the release stage). The fraction landing \(d\) steps ahead
+is the <strong>k-weight</strong>:</p>
+
+\[ k_d \;=\; \frac{\big|\; [\,t_v,\; t_v + h_t)\;\cap\;[\,S_d,\; S_{d+1})\;\big|}{h_t}, \]
+
+<p>with two properties that make it a conservation law, not an approximation:</p>
+
+\[ \sum_d k_d \;=\; 1 \qquad\text{(every released drop is accounted for),} \]
+
+<p>and \(k_0\) is the <strong>same-stage share</strong> — delivered onto the downstream water balance
+directly, with no bucket needed.</p>
+
+<p><strong>Worked example.</strong> Stages are 720 h (30 days) each. A plant has \(t_v = 900\) h
+(37.5 days). A release spread over the current stage arrives over \([900,\,1620)\) hours from the stage
+start:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Arrives \(d\) stages later</th><th>Overlap with \([900, 1620)\)</th><th>\(k_d\)</th></tr></thead>
+  <tbody>
+    <tr><td>\(d = 1\) &nbsp;(720 – 1440 h)</td><td>\([900, 1440)\) → 540 h</td><td>\(0.750\)</td></tr>
+    <tr><td>\(d = 2\) &nbsp;(1440 – 2160 h)</td><td>\([1440, 1620)\) → 180 h</td><td>\(0.250\)</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>So three-quarters of this stage's release arrives one stage later and one-quarter two stages later;
+nothing arrives the same stage (\(k_0 = 0\)).</p>
+
+<pre class="mermaid">
+xychart-beta
+  title "k-weights for t_v = 900 h on 720 h stages"
+  x-axis "arrives d stages later" [0, 1, 2]
+  y-axis "share of release" 0 --> 1
+  bar [0, 0.75, 0.25]
+</pre>
+
+<p>The number of bucket slots a plant needs is <em>measured</em>, not assumed: it is the deepest lag any
+of its arcs reaches on the actual stage calendar (folding in the extra depth a pre-study release history
+may still be draining). Confluent arcs into one downstream plant collapse into <strong>one</strong>
+aggregated bucket block.</p>
+
+<h3>4.3 The buckets in flight</h3>
+
+<p>Everything except the same-stage share \(k_0\) goes into <strong>in-transit buckets</strong> — one
+<code>DeliveryRing</code> per downstream plant (\(n_{\text{lanes}} = 1\)). A bucket holds a volume
+(hm³) maturing some number of stages out. Each stage the ring <strong>shifts</strong>: every in-flight
+bucket moves one lag closer to arrival, and the bucket maturing this stage drops into the downstream
+water balance.</p>
+
+<pre class="mermaid">
+flowchart LR
+  rel["upstream release o = q + s at stage t"] -->|k_0 share| bal["downstream balance, same stage"]
+  rel -->|k_1, k_2 shares| bkt["in-transit buckets"]
+  bkt -->|shift one lag per stage| mat["matures to downstream inflow"]
+</pre>
+
+<ul>
+  <li><strong>The release column feeds both</strong> the same-stage balance (\(k_0\)) and the buckets
+  (\(k_1, \dots\)). It is not a separate once-per-stage transaction; conservation
+  (\(\sum_d k_d = 1\)) holds per release.</li>
+  <li><strong>A maturing bucket is already a volume</strong>, so it enters the downstream balance with a
+  plain \(-1\) coefficient — no travel-time rescaling at arrival. (Under chronological blocks the
+  arriving volume is spread over the arrival stage's blocks by a fixed arrival density that also sums to
+  1.)</li>
+</ul>
+
+<h3>4.4 Seeding: the pre-study release history</h3>
+
+<p>Because a study's first stages receive water released <em>before</em> the study began, the buckets
+must be seeded. That is <strong><code>past_defluences</code></strong> — windowed pre-study release
+records (m³/s). They must cover the whole in-transit span \((0, t_v]\) before the study start,
+contiguously; a gap is a hard error (there is no fallback seed). A follow-on run re-seeds itself from
+the <code>transit_seed</code> output (§6) so a chained simulation is faithful.</p>
+
+<h2 id="differ">5. How the two features differ</h2>
+
+<p>They share the ring skeleton, the one contiguous state region, the out-by-identity / in-pinned column
+resolution, the two-sided masking, and the dual sign convention. They differ in a handful of call-site
+choices:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Aspect</th><th>Water travel time</th><th>Anticipated thermal</th></tr></thead>
+  <tbody>
+    <tr><td>Ring instances</td><td>one per downstream plant (\(n_{\text{lanes}} = 1\))</td><td>one dense ring (\(n_{\text{lanes}}\) = #anticipated plants)</td></tr>
+    <tr><td>Transition</td><td><strong>shift</strong> (\(s \to s+1\))</td><td><strong>hold</strong> (same slot)</td></tr>
+    <tr><td>Slot key</td><td>lag = distance still in flight</td><td>delivery-target residue \(m \bmod k_{\max}\)</td></tr>
+    <tr><td>What gets deposited</td><td>a \(k_d\)-weighted share of a release</td><td>a single decision commitment</td></tr>
+    <tr><td>Depth sizing</td><td>measured overlap of the arrival window</td><td>max simultaneous in-flight commitments</td></tr>
+    <tr><td>Reachable column bound</td><td>\([0, \infty)\) — a volume</td><td>\((-\infty, \infty)\) — a signed MW value</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The deepest difference is <strong>shift vs hold</strong>. Water physically <em>moves</em>: a drop
+released now is one stage closer to arrival next stage, so its bucket shifts slot. A thermal commitment
+does <em>not</em> move: it is pinned to the slot of the stage it will be delivered in and waits there —
+holding the same slot — until that stage arrives. Same carousel, opposite motion.</p>
+
+<pre class="mermaid">
+flowchart TB
+  subgraph W["water: SHIFT"]
+    direction LR
+    w2["lag 2"] --> w1["lag 1"] --> w0["matures"]
+  end
+  subgraph A["anticipated: HOLD"]
+    direction LR
+    a0["slot m mod k_max"] --> a1["same slot, next stage"] --> af["matures at m"]
+  end
+</pre>
+
+<p>There is a matching asymmetry at the horizon's edge (the design reference covers it in full): a
+masked water bucket at the terminal drops a <em>genuine</em> end-of-horizon release share (a deliberate,
+bounded imprecision), whereas a masked anticipated slot is <em>provably</em> empty (no commitment ever
+targets it). And "keeping terminal state live" is gated differently — water needs a loaded terminal
+boundary (<code>policy.boundary</code>), while anticipated keys on whether a
+<code>post_study_stages.json</code> delivery target exists.</p>
+
+<h2 id="files">6. Bridge to the cobre files</h2>
+
+<p>This maps everything above to the files you edit and read. Field names and locations are the current
+(post-retirement) surface.</p>
+
+<pre class="mermaid">
+flowchart LR
+  in1["thermals.json: anticipated_config"] --> eng
+  in2["post_study_stages.json"] --> eng
+  in3["hydros.json: travel_time_hours + downstream_id"] --> eng
+  in4["initial_conditions.json: seeds"] --> eng
+  eng["cobre engine"] --> out1["simulation/anticipated_lanes"]
+  eng --> out2["simulation/in_transit"]
+  eng --> out3["simulation/transit_seed"]
+  eng --> out4["policy checkpoint entities"]
+</pre>
+
+<h3>6.1 Inputs — what turns each feature on</h3>
+
+<p><strong>Anticipated thermal</strong> — in <code>system/thermals.json</code>, on a plant:</p>
+<pre><code>{
+  "id": 1,
+  "cost_per_mwh": 120.0,
+  "generation": { "min_mw": 0.0, "max_mw": 150.0 },
+  "anticipated_config": { "lead_time_hours": 1000.0 }   // OR { "lead_stages": 2 }
+}</code></pre>
+<p><code>anticipated_config</code> is optional; absent = ordinary thermal. Supply exactly one of
+<code>lead_time_hours</code> (finite \(> 0\)) or <code>lead_stages</code> (integer \(\ge 1\)) — both
+keys or neither is a parse error.</p>
+
+<p><strong>Post-horizon delivery</strong> — <code>post_study_stages.json</code> at the case-directory
+root:</p>
+<pre><code>{
+  "stages": [
+    { "start_date": "2024-07-01", "duration_hours": 744.0 }
+  ],
+  "thermal_bounds": [
+    { "thermal_id": 1, "post_study_stage_index": 0,
+      "cost_per_mwh": 120.0, "min_mw": 0.0, "max_mw": 150.0 }
+  ]
+}</code></pre>
+<p><code>stages[]</code> is the post-study calendar (no <code>end_date</code>; derived).
+<code>thermal_bounds[]</code> gives the price and bounds a post-horizon delivery is charged and
+constrained against. <code>min_mw == max_mw</code> pins a fixed post-study profile — a legitimate
+replay deck.</p>
+
+<p><strong>Water travel time</strong> — in <code>system/hydros.json</code>, on the upstream plant:</p>
+<pre><code>{ "id": 0, "downstream_id": 1, "travel_time_hours": 48.0 }</code></pre>
+<p>Both <code>downstream_id</code> and a strictly-positive <code>travel_time_hours</code> are required
+for an arc; absent / <code>null</code> / <code>0</code> means instantaneous.</p>
+
+<p><strong>Seeds</strong> — in <code>initial_conditions.json</code>:</p>
+<ul>
+  <li><code>past_anticipated_commitments[]</code>: <code>{ thermal_id, start_date, end_date, value_mw }</code>
+  — pre-study commitments delivering into the leading stages (sunk cost).</li>
+  <li><code>past_defluences[]</code>: <code>{ hydro_id, start_date, end_date, value_m3s }</code> —
+  pre-study releases seeding the in-transit buckets (<code>end_date</code> is exclusive).</li>
+</ul>
+
+<div class="admon warn">
+  <span class="tag">Retired</span>
+  <code>initial_conditions.future_anticipated_deliveries[]</code> no longer exists — the input rejects
+  it (unknown field). Its role is now <code>post_study_stages.json</code>.
+</div>
+
+<h3>6.2 Outputs — what each feature writes</h3>
+
+<p>Simulation results are Hive-partitioned Parquet under
+<code>&lt;output&gt;/simulation/&lt;name&gt;/scenario_id=NNNN/data.parquet</code>, sharing the
+<code>(scenario_id, stage_id, node_id)</code> key prefix. The CLI and the Python bindings write these
+through the same writer, so the two are identical by construction.</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Output partition</th><th>Written when</th><th>Key columns</th></tr></thead>
+  <tbody>
+    <tr><td><code>simulation/anticipated_lanes/</code></td><td>a <code>post_study_stages</code> is declared</td><td><code>thermal_id</code>, <code>delivery_date</code> (YYYYMM01), <code>deposited_decision_mw</code>, <code>carried_committed_mw</code></td></tr>
+    <tr><td><code>simulation/in_transit/</code></td><td>a travel-time arc is declared</td><td><code>hydro_id</code> (downstream), <code>lag</code> (1-based maturity), <code>in_transit_volume_hm3</code>, <code>delayed_arrival_hm3</code></td></tr>
+    <tr><td><code>simulation/transit_seed/</code></td><td>a travel-time arc is declared</td><td><code>scenario_id</code>, <code>hydro_id</code> (upstream), <code>start_date</code>, <code>end_date</code>, <code>value_m3s</code></td></tr>
+    <tr><td><code>simulation/inflow_lags/</code></td><td>any hydro present</td><td><code>hydro_id</code>, <code>lag_index</code> (0 = most recent), <code>inflow_m3s</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>6.3 In the trained policy</h3>
+
+<p>The policy checkpoint records each state coordinate as a typed entity slot (<code>policy.fbs</code>,
+<code>EntityType</code>), so a loaded boundary or a warm start can line the dimensions up by identity:</p>
+<ul>
+  <li><code>HydroStorage</code> — reservoir storage.</li>
+  <li><code>HydroInflowLag</code> — an AR inflow lag (subindex = 1-based lag order).</li>
+  <li><code>AnticipatedThermalState</code> — an anticipated commitment ring slot (subindex = ring slot,
+  entity = the thermal plant).</li>
+  <li><code>HydroTransitBucket</code> — an in-transit water bucket (subindex = maturity lag, entity =
+  the downstream hydro).</li>
+</ul>
+<p>Each slot also carries a <code>delivery_date</code> (YYYYMMDD, day pinned to <code>01</code> for the
+month-granular anticipated anchors), so cross-study boundary reconciliation can join deliveries by
+date.</p>
+
+<footer>
+  <p><strong>Where to go next.</strong> The companion reference,
+  <code>docs/design/anticipated-thermals-and-water-travel-time.md</code>, states the same mechanisms as
+  correctness contracts — the exact masking rules, drift reconciliation, the fan-out and \(K = 0\)
+  gates, and terminal-boundary pricing — each pinned to a named regression test. A minimal runnable deck
+  lives at <code>examples/deterministic/d55-post-study-anticipated-lanes/</code>.</p>
+</footer>
+
+</div>
+</body>
+</html>

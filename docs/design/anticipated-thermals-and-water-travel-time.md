@@ -13,6 +13,10 @@ correctness contracts live in `.claude/rules/sddp.md` (§ "Water travel time" an
 "Anticipated thermal commitments"), which this document summarizes but does not
 replace.
 
+> New to these features? Start with the primer,
+> [`../guide/anticipated-thermals-and-water-travel-time.md`](../guide/anticipated-thermals-and-water-travel-time.md)
+> (contextualization, worked examples, diagrams), then return here for the contracts.
+
 ---
 
 ## 0. The unifying idea
@@ -305,9 +309,11 @@ on two separate surfaces:
   **sole** post-study declaration surface: an ordered post-study calendar
   segment plus a per-`(thermal, post-study stage)` `cost_per_mwh`/`min_mw`/`max_mw`
   an in-study decision delivering past the horizon is priced and bounded against.
-  It extends the delivery axis (`build_extended_delivery_axis`) to `n_delivery =
-n_stages + n_post`; with it absent the axis is study-only and no lead can reach a
-  post-study stage. `min_mw == max_mw` pins a fixed post-study profile (a
+  It extends the delivery axis to `n_delivery = n_stages + n_post` — the runtime
+  axis is built by `delivery_stage_durations` in `resolve_anticipated_commitments_core`
+  (`build_extended_delivery_axis` is the separate cobre-io _validation_ axis used
+  for the reach check below); with it absent the axis is study-only and no lead can
+  reach a post-study stage. `min_mw == max_mw` pins a fixed post-study profile (a
   legitimate replay deck).
 
 Validation (`crates/cobre-io/src/validation/semantic/thermal.rs`): the
@@ -510,8 +516,10 @@ ring-native re-derivation rather than collapsing into one rule. On the masked sl
 the water ring _discards a real end-of-horizon release share_ (a documented
 target-stage imprecision, safe only because a finite horizon's terminal value is
 zero), whereas an anticipated masked slot is _provably_ vacuous — no commitment
-ever targets it, because the decision-existence gate keys on the extended delivery
-axis `[0, n_delivery)` and a masked slot is unreachable. On the terminal live-state
+ever targets it, because the decision-existence gate —
+`is_anticipated_decision_active_for_delivery`, the production entry point (the
+constant-lead `is_anticipated_decision_active` wrapper is test-only) — keys on the
+extended delivery axis `[0, n_delivery)` and a masked slot is unreachable. On the terminal live-state
 gate: un-masking the water ring's horizon-capped deep-lag slots re-enables their
 definition rows, deposit share, and outgoing columns — a live LP change — so it
 **must** be gated on `config.policy.boundary` presence, keeping a no-boundary study
