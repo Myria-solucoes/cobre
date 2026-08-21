@@ -291,6 +291,55 @@ That is the one rule that decides whether a commitment exists at all.
 
 ---
 
+### 3.6 Worked examples: NEWAVE and DECOMP calendars
+
+The two lead modes behave identically on a uniform calendar but diverge once stage
+lengths vary. The two calendars you meet in practice are NEWAVE-style **monthly**
+stages (real months vary 28–31 days, i.e. 672–744 h; we idealize them to 720 h
+here) and DECOMP-style **operative weeks** (Saturday–Friday, 168 h) followed by a
+final monthly stage.
+
+#### Example A — `lead_stages` on a uniform monthly calendar
+
+A plant with `lead_stages = 2` on monthly stages (each month 720 h). The decider
+ignores the calendar — `c(m) = m − 2` — so the depth is `k_max = 2` and every
+delivery lands in slot `m mod 2`. The first two deliveries are pre-study seeds; from
+stage 0 on, each stage deposits the decision for two stages ahead and fishes the
+delivery maturing now:
+
+| Stage `t` | Fishes `m = t` (reads `commit_in`, slot `t mod 2`) | Deposits `m = t+2` (writes `commit_out`, slot `(t+2) mod 2`) |
+| --------- | -------------------------------------------------- | ------------------------------------------------------------ |
+| 0         | `m=0` — pre-study seed, slot 0                     | `m=2` → slot 0                                               |
+| 1         | `m=1` — pre-study seed, slot 1                     | `m=3` → slot 1                                               |
+| 2         | `m=2`, slot 0                                      | `m=4` → slot 0                                               |
+| 3         | `m=3`, slot 1                                      | `m=5` → slot 1                                               |
+
+At each stage the fish and the deposit touch the **same** slot index
+(`(t+2) mod 2 = t mod 2`) — harmless because the fish reads `commit_in` while the
+deposit writes `commit_out` (§3.3).
+
+#### Example B — `lead_time_hours` vs. `lead_stages` on a DECOMP calendar
+
+A DECOMP-style calendar: four operative weeks (Saturday–Friday, 168 h each), then a
+final month (720 h). The stage-boundary hours from the study start are
+`0, 168, 336, 504, 672, 1392` — stages `t0…t3` are weeks, `t4` is the month. Compare
+two plants that both mean "two units of lead": one with `lead_stages = 2`, the other
+with `lead_time_hours = 336` (two operative weeks). The physical lead is end-anchored
+— `c(m)` is the stage containing `end(m) − 336`:
+
+| Delivery `m` | Stage      | `lead_stages = 2` | `lead_time_hours = 336`           |
+| ------------ | ---------- | ----------------- | --------------------------------- |
+| `m = 2`      | week `t2`  | `c = 0` (lead 2)  | `c = 0` (lead 2)                  |
+| `m = 3`      | week `t3`  | `c = 1` (lead 2)  | `c = 1` (lead 2)                  |
+| `m = 4`      | month `t4` | `c = 2` (lead 2)  | `c = 4` — `K = 0`, self-delivered |
+
+In the uniform weekly region the two modes agree (two weeks = two stages). At the
+month they **diverge**: `lead_stages` still counts two stages back (delivery `m=4`
+decided in week `t2`), but `lead_time_hours` sees that 336 h is shorter than the
+720 h month, so the decision for `t4` falls _inside_ `t4` — the `K = 0` case,
+dispatched as an ordinary thermal that stage (§3.2). This is why a physical lead is
+calendar-aware and a stage-count lead is not.
+
 ## 4. Water travel time
 
 ### 4.1 The setup
@@ -387,6 +436,49 @@ fallback seed). A follow-on run re-seeds itself from the `transit_seed` output (
 so a chained simulation is faithful.
 
 ---
+
+### 4.5 Worked examples: uniform vs. varying calendars
+
+#### Example C — a short travel time on a uniform monthly calendar
+
+Take `t_v = 300 h` on 720 h months. The arrival window is `[300, 1020)`, so part of
+the release arrives the **same** stage:
+
+| Arrives `d` stages later | Overlap with `[300, 1020)` | `k_d`   |
+| ------------------------ | -------------------------- | ------- |
+| `d = 0` (0 – 720 h)      | `[300, 720)` → 420 h       | `0.583` |
+| `d = 1` (720 – 1440 h)   | `[720, 1020)` → 300 h      | `0.417` |
+
+So 58.3 % arrives the same stage (`k_0`, straight into the balance, no bucket) and
+41.7 % one stage later (one bucket) — unlike the §4.2 example (`t_v = 900 h`), where
+nothing arrived the same stage.
+
+#### Example D — the same travel time, weekly vs. monthly destination (DECOMP)
+
+On the DECOMP calendar (weeks of 168 h, then a 720 h month), the k-weights depend on
+the length of the **destination** stages. Take `t_v = 200 h`.
+
+**Released in a middle week** (destinations are also weeks, 168 h), arrival window
+`[200, 368)` from the release-stage start:
+
+| Arrives `d` stages later | Overlap with `[200, 368)` | `k_d`   |
+| ------------------------ | ------------------------- | ------- |
+| `d = 1` (168 – 336 h)    | `[200, 336)` → 136 h      | `0.810` |
+| `d = 2` (336 – 504 h)    | `[336, 368)` → 32 h       | `0.190` |
+
+**Released in the last week before the month** (destination is the 720 h month,
+whose window starts 168 h after the release-stage start):
+
+| Arrives `d` stages later     | Overlap with `[200, 368)` | `k_d`   |
+| ---------------------------- | ------------------------- | ------- |
+| `d = 1` (month, 168 – 888 h) | `[200, 368)` → 168 h      | `1.000` |
+
+The same travel time `t_v = 200 h` produces **two** buckets (0.810 / 0.190) when the
+water arrives into short weekly stages, but a **single** bucket (1.000) when it
+arrives into the long monthly stage — because the k-weights measure overlap against
+the destination stage lengths, not a fixed lag count. (A release inside the final
+month itself would mature after the horizon, and its share is dropped unless a
+terminal boundary is loaded — §5.)
 
 ## 5. How the two features differ
 

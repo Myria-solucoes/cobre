@@ -468,6 +468,65 @@ decisão</strong> é uma única desigualdade no eixo estendido:</p>
   <code>future_anticipated_deliveries</code> em algum lugar, está desatualizado.
 </div>
 
+<h3>3.6 Exemplos resolvidos: calendários NEWAVE e DECOMP</h3>
+
+<p>Os dois modos de antecedência se comportam de forma idêntica em um calendário uniforme, mas divergem
+quando os comprimentos dos estágios variam. Os dois calendários que você encontra na prática são os
+estágios <strong>mensais</strong> do NEWAVE (meses reais variam de 28 a 31 dias, ou seja, 672–744 h;
+aqui os idealizamos como 720 h) e as <strong>semanas operativas</strong> do DECOMP (sábado a sexta,
+168 h) seguidas de um estágio mensal final.</p>
+
+<h4>Exemplo A — <code>lead_stages</code> em um calendário mensal uniforme</h4>
+
+<p>Uma usina com <code>lead_stages = 2</code> em estágios mensais (cada mês com 720 h). O decisor ignora
+o calendário — \(c(m) = m - 2\) — então a profundidade é \(k_{\max} = 2\) e toda entrega cai no slot
+\(m \bmod 2\). As duas primeiras entregas são decididas antes do estudo (sementes pré-estudo); do
+estágio 0 em diante, cada estágio deposita a decisão para dois estágios à frente e pesca ("fishing") a
+entrega que matura agora:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Estágio \(t\)</th><th>Pesca \(m = t\) — lê <code>commit_in</code>, slot \(t \bmod 2\)</th><th>Deposita \(m = t+2\) — escreve <code>commit_out</code>, slot \((t{+}2)\bmod 2\)</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>\(m=0\) — semente pré-estudo, slot 0</td><td>\(m=2\) → slot 0</td></tr>
+    <tr><td>1</td><td>\(m=1\) — semente pré-estudo, slot 1</td><td>\(m=3\) → slot 1</td></tr>
+    <tr><td>2</td><td>\(m=2\), slot 0</td><td>\(m=4\) → slot 0</td></tr>
+    <tr><td>3</td><td>\(m=3\), slot 1</td><td>\(m=5\) → slot 1</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Repare que, em cada estágio, a pesca e o depósito tocam o <em>mesmo</em> índice de slot
+(\((t{+}2)\bmod 2 = t \bmod 2\)) — inofensivo, pois a pesca lê <code>commit_in</code> enquanto o depósito
+escreve <code>commit_out</code> (§3.3).</p>
+
+<h4>Exemplo B — <code>lead_time_hours</code> vs. <code>lead_stages</code> em um calendário DECOMP</h4>
+
+<p>Agora um calendário no estilo DECOMP: quatro semanas operativas (sábado a sexta, 168 h cada) e então
+um mês final (720 h). As horas das fronteiras de estágio a partir do início do estudo são
+\(0, 168, 336, 504, 672, 1392\) — os estágios \(t_0 \dots t_3\) são semanas, \(t_4\) é o mês. Compare
+duas usinas que ambas significam "duas unidades de antecedência": uma com <code>lead_stages = 2</code>, a
+outra com <code>lead_time_hours = 336</code> (duas semanas operativas). A antecedência física é ancorada
+no fim — \(c(m)\) é o estágio que contém \(e_m - 336\), onde \(e_m\) é o tempo de fim do estágio \(m\):</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Entrega \(m\)</th><th>Estágio</th><th><code>lead_stages = 2</code></th><th><code>lead_time_hours = 336</code></th></tr></thead>
+  <tbody>
+    <tr><td>\(m = 2\)</td><td>semana \(t_2\)</td><td>\(c = 0\) (2 estágios)</td><td>\(c = 0\) (2 estágios)</td></tr>
+    <tr><td>\(m = 3\)</td><td>semana \(t_3\)</td><td>\(c = 1\) (2 estágios)</td><td>\(c = 1\) (2 estágios)</td></tr>
+    <tr><td>\(m = 4\)</td><td>mês \(t_4\)</td><td>\(c = 2\) (2 estágios)</td><td>\(c = 4\) — \(K = 0\), autoentregue</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Na região semanal uniforme os dois modos concordam (duas semanas = dois estágios). No mês eles
+<strong>divergem</strong>: <code>lead_stages</code> ainda conta dois estágios para trás (a entrega
+\(m=4\) é decidida na semana \(t_2\)), mas <code>lead_time_hours</code> percebe que 336 h é menor que o
+mês de 720 h, então a decisão para \(t_4\) cai <em>dentro</em> de \(t_4\) — o caso \(K = 0\), despachada
+como térmica comum naquele estágio (§3.2). É exatamente por isso que uma antecedência física é ciente do
+calendário e uma antecedência em contagem de estágios não é.</p>
+
 <h2 id="water">4. Tempo de viagem da água</h2>
 
 <h3>4.1 O cenário</h3>
@@ -564,6 +623,62 @@ defluência pré-estudo em janelas (m³/s). Eles precisam cobrir todo o interval
 antes do início do estudo, de forma contígua; um vão é um erro fatal (não há semente de reserva). Uma
 rodada subsequente re-semeia a si mesma a partir da saída <code>transit_seed</code> (§6), de modo que uma
 simulação encadeada seja fiel.</p>
+
+<h3>4.5 Exemplos resolvidos: calendários uniformes vs. variáveis</h3>
+
+<h4>Exemplo C — um tempo de viagem curto em um calendário mensal uniforme</h4>
+
+<p>Tome \(t_v = 300\) h em meses de 720 h. A janela de chegada é \([300, 1020)\), então parte da
+defluência chega no <em>mesmo</em> estágio:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Chega \(d\) estágios depois</th><th>Sobreposição com \([300, 1020)\)</th><th>\(k_d\)</th></tr></thead>
+  <tbody>
+    <tr><td>\(d = 0\) &nbsp;(0 – 720 h)</td><td>\([300, 720)\) → 420 h</td><td>\(0{,}583\)</td></tr>
+    <tr><td>\(d = 1\) &nbsp;(720 – 1440 h)</td><td>\([720, 1020)\) → 300 h</td><td>\(0{,}417\)</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Assim, 58,3 % chega no mesmo estágio (\(k_0\), direto no balanço, sem balde) e 41,7 % um estágio
+depois (um balde) — diferente do exemplo da §4.2 (\(t_v = 900\) h), onde nada chegava no mesmo estágio.</p>
+
+<h4>Exemplo D — o mesmo tempo de viagem, destino semanal vs. mensal (DECOMP)</h4>
+
+<p>No calendário DECOMP (semanas de 168 h, depois um mês de 720 h), os pesos k dependem do comprimento
+dos estágios de <em>destino</em>. Tome \(t_v = 200\) h e compare dois pontos de liberação.</p>
+
+<p><strong>Liberada numa semana intermediária</strong> (os destinos também são semanas, 168 h). Janela de
+chegada \([200, 368)\) a partir do início do estágio de liberação:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Chega \(d\) estágios depois</th><th>Sobreposição com \([200, 368)\)</th><th>\(k_d\)</th></tr></thead>
+  <tbody>
+    <tr><td>\(d = 1\) &nbsp;(168 – 336 h)</td><td>\([200, 336)\) → 136 h</td><td>\(0{,}810\)</td></tr>
+    <tr><td>\(d = 2\) &nbsp;(336 – 504 h)</td><td>\([336, 368)\) → 32 h</td><td>\(0{,}190\)</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><strong>Liberada na última semana antes do mês</strong> (o destino é o mês de 720 h, cuja janela
+começa 168 h após o início do estágio de liberação):</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Chega \(d\) estágios depois</th><th>Sobreposição com \([200, 368)\)</th><th>\(k_d\)</th></tr></thead>
+  <tbody>
+    <tr><td>\(d = 1\) &nbsp;(mês, 168 – 888 h)</td><td>\([200, 368)\) → 168 h</td><td>\(1{,}000\)</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>O mesmo tempo de viagem \(t_v = 200\) h produz <em>dois</em> baldes (0,810 / 0,190) quando a água
+chega em estágios semanais curtos, mas um <em>único</em> balde (1,000) quando chega no longo estágio
+mensal — porque os pesos k medem a sobreposição contra os comprimentos dos estágios de destino, não uma
+contagem fixa de defasagens. (Uma liberação dentro do próprio mês final maturaria após o horizonte, e sua
+parcela é descartada a menos que uma fronteira terminal seja carregada — §5.)</p>
 
 <h2 id="differ">5. Como os dois recursos diferem</h2>
 
