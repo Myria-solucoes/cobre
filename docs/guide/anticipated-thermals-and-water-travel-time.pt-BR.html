@@ -175,7 +175,7 @@ As equações são renderizadas com MathJax; os diagramas com Mermaid. Os índic
   <h4>Conteúdo</h4>
   <ol>
     <li><a href="#why">Por que estes dois recursos existem</a></li>
-    <li><a href="#idea">A ideia central: um anel de entrega defasada</a></li>
+    <li><a href="#idea">A ideia central: um buffer circular de entrega defasada</a></li>
     <li><a href="#anticipated">Geração térmica antecipada</a></li>
     <li><a href="#water">Tempo de viagem da água</a></li>
     <li><a href="#differ">Como os dois recursos diferem</a></li>
@@ -212,7 +212,7 @@ flowchart LR
   S --> R["Realizado no estágio m: entregue / chega"]
 </pre>
 
-<h2 id="idea">2. A ideia central: um anel de entrega defasada</h2>
+<h2 id="idea">2. A ideia central: um buffer circular de entrega defasada</h2>
 
 <h3>2.1 Como o cobre carrega o estado do SDDP (o truque do "fishing")</h3>
 
@@ -244,13 +244,13 @@ flowchart LR
 coordenadas de estado; cada uma é uma coluna de saída (resolvida ao seu coeficiente de corte por
 identidade) e uma coluna de entrada fixada. Nada no algoritmo de cortes muda.</p>
 
-<h3>2.2 O anel</h3>
+<h3>2.2 O buffer circular</h3>
 
-<p>O montante em trânsito vive em um <strong>anel de slots de estado</strong> — um pequeno carrossel de
+<p>O montante em trânsito vive em um <strong>buffer circular de slots de estado</strong> — um pequeno carrossel de
 \(k_{\max}\) slots. A cada estágio, o slot que matura neste estágio é consumido, os sobreviventes
 avançam um passo, e um montante novo é depositado para entrega futura. Esse carrossel é uma única
 primitiva de código, <code>DeliveryRing</code>, e <strong>ambos os recursos são instâncias dela</strong>.
-Um anel é uma grade densa de \(n_{\text{faixas}} \times \text{prof}\) colunas (\(n_{\text{faixas}}\) é o
+Um buffer circular é uma grade densa de \(n_{\text{faixas}} \times \text{prof}\) colunas (\(n_{\text{faixas}}\) é o
 número de faixas e \(\text{prof} = k_{\max}\) o número de slots), com um bloco de saída (contribui ao
 estado e aos cortes) e um bloco de entrada (fixado). A coluna do slot \(s\), faixa \(\ell\) no bloco de
 saída é</p>
@@ -263,13 +263,13 @@ o índice da faixa, e \(o_{\text{start}}\) o deslocamento onde o bloco de saída
 (o código chama esse endereço de <code>out_col</code>, calculado a partir de <code>out_block.start</code>).
 A coluna de entrada \(x^{\text{in}}_{s,\ell}\) é endereçada do mesmo modo a partir do seu próprio início.</p>
 
-<p>O anel emite quatro tipos de linhas estruturais; cada recurso usa um subconjunto (escreva
+<p>O buffer emite quatro tipos de linhas estruturais; cada recurso usa um subconjunto (escreva
 \(x^{\text{out}}_{s}\) e \(x^{\text{in}}_{s}\) para as colunas de saída e de entrada-fixada do slot
 \(s\)):</p>
 
 <div class="table-scroll">
 <table>
-  <thead><tr><th>Operação do anel</th><th>O que emite</th><th>Usada por</th></tr></thead>
+  <thead><tr><th>Operação do buffer</th><th>O que emite</th><th>Usada por</th></tr></thead>
   <tbody>
     <tr><td><code>emit_shift_rows</code></td><td>\(x^{\text{out}}_{s} = x^{\text{in}}_{s+1}\) — avança para o próximo slot</td><td><strong>água</strong></td></tr>
     <tr><td><code>emit_carry_rows</code></td><td>\(x^{\text{out}}_{s} = x^{\text{in}}_{s}\) — retém no mesmo slot</td><td><strong>antecipada</strong></td></tr>
@@ -285,18 +285,18 @@ no slot do seu estágio de entrega e espera). Vemos por quê na §5.</p>
 
 <h3>2.3 Onde o estado vive</h3>
 
-<p>Ambos os anéis ficam dentro de um único vetor de estado contíguo, em uma ordem fixa de regiões. Com
+<p>Ambos os buffers ficam dentro de um único vetor de estado contíguo, em uma ordem fixa de regiões. Com
 \(N\) hidrelétricas, \(L\) defasagens (lags) AR de afluência, \(B\) baldes de água e \(A\) usinas
-antecipadas sobre a profundidade de anel \(k_{\max}\):</p>
+antecipadas sobre a profundidade de buffer \(k_{\max}\):</p>
 
 <pre><code>[0,        N)          storage             — volumes de armazenamento de saída
 [N,        N(1+L))     inflow_lags         — variáveis de defasagem (lag) AR
-[N(1+L),   +B)         transit_buckets_out — anel de ÁGUA (saída)
-[+B,       +S)         commit_out          — anel ANTECIPADO (saída), S = A·k_max
+[N(1+L),   +B)         transit_buckets_out — buffer de ÁGUA (saída)
+[+B,       +S)         commit_out          — buffer ANTECIPADO (saída), S = A·k_max
                        z_inflow            — afluência realizada (auxiliar, não é estado)
                        storage_in          — armazenamento de entrada  (fixado)
-                       transit_buckets_in  — anel de ÁGUA (entrada)     (fixado)
-                       commit_in           — anel ANTECIPADO (entrada, fixado)
+                       transit_buckets_in  — buffer de ÁGUA (entrada)     (fixado)
+                       commit_in           — buffer ANTECIPADO (entrada, fixado)
                        theta               — variável de custo futuro θ</code></pre>
 
 <p>logo, a dimensão total do estado é</p>
@@ -331,7 +331,7 @@ acopladas</strong>: o <strong>compromisso</strong> \(d\) (um valor em MW decidid
 e a <strong>geração entregue</strong> \(g_b\) por patamar \(b\) (forçada a igualar o compromisso maturado
 no estágio de entrega).</p>
 
-<h3>3.2 Da antecedência ao slot do anel</h3>
+<h3>3.2 Da antecedência ao slot do buffer</h3>
 
 <p>A antecedência resolve para um <strong>decisor</strong> \(c(m)\): o estágio em que o compromisso para
 o estágio de entrega \(m\) é decidido, indexado em um <strong>eixo de entrega estendido</strong>
@@ -348,21 +348,21 @@ o estágio de entrega \(m\) é decidido, indexado em um <strong>eixo de entrega 
   pré-estudo (§3.4).</li>
 </ul>
 
-<p>A profundidade do anel \(k_{\max}\) é o <strong>número máximo de compromissos simultaneamente em
+<p>A profundidade do buffer \(k_{\max}\) é o <strong>número máximo de compromissos simultaneamente em
 aberto</strong>, entre todas as usinas e estágios — não apenas a antecedência. Cada alvo de entrega é
-colocado no anel pelo seu <strong>resíduo</strong>:</p>
+colocado no buffer pelo seu <strong>resíduo</strong>:</p>
 
 \[ \operatorname{slot}(m) \;=\; m \bmod k_{\max}, \]
 
-<p>onde \(\operatorname{slot}(m)\) é o slot do anel que o estágio de entrega \(m\) ocupa e \(k_{\max}\) a
-profundidade do anel. Isto é seguro porque em qualquer estágio \(t\) os compromissos ainda em aberto têm
+<p>onde \(\operatorname{slot}(m)\) é o slot do buffer que o estágio de entrega \(m\) ocupa e \(k_{\max}\) a
+profundidade do buffer. Isto é seguro porque em qualquer estágio \(t\) os compromissos ainda em aberto têm
 como alvo os \(k_{\max}\) estágios consecutivos \(\{t+1, \dots, t+k_{\max}\}\) — \(k_{\max}\) inteiros
 consecutivos têm \(k_{\max}\) resíduos distintos, então nenhum colide. A região de estado é
 \(S = A\,k_{\max}\) (uma faixa por usina antecipada, \(k_{\max}\) slots de profundidade).</p>
 
 <pre class="mermaid">
 flowchart TB
-  subgraph ring["anel de uma usina, k_max = 3"]
+  subgraph ring["buffer de uma usina, k_max = 3"]
     direction LR
     s0["slot 0"]
     s1["slot 1"]
@@ -375,7 +375,7 @@ flowchart TB
 
 <h3>3.3 As três famílias de linhas do PL</h3>
 
-<p>Todo o mecanismo de compromisso são três famílias de linhas de igualdade sobre o anel antecipado.
+<p>Todo o mecanismo de compromisso são três famílias de linhas de igualdade sobre o buffer antecipado.
 Tome uma usina com <code>lead_stages = 2</code> que decide no estágio 1 para entrega no estágio 3:</p>
 
 <pre class="mermaid">
@@ -431,7 +431,7 @@ estágio \(m\).</p>
 <p>Se uma usina tem antecedência \(K_i\), os primeiros \(K_i\) estágios do estudo são entregues por
 compromissos decididos <em>antes</em> de o estudo começar. Estes são fornecidos como
 <strong><code>past_anticipated_commitments</code></strong> — janelas de MW datadas que ladrilham os
-estágios de entrega iniciais. Elas semeiam diretamente o anel do estágio 0 e são <strong>custo
+estágios de entrega iniciais. Elas semeiam diretamente o buffer do estágio 0 e são <strong>custo
 afundado</strong>: restringem a geração dos estágios iniciais mas nunca entram na função objetivo.</p>
 
 <h3>3.5 Entregando além do horizonte (estágios pós-estudo)</h3>
@@ -448,7 +448,7 @@ entrega</strong> para</p>
 declarados.</p>
 
 <p>O ponto-chave: uma entrega pós-horizonte <strong>não</strong> é uma estrutura separada especial. É um
-dos slots do próprio anel — o slot para o qual seu resíduo \(m \bmod k_{\max}\) resolve — mantido aberto
+dos slots do próprio buffer — o slot para o qual seu resíduo \(m \bmod k_{\max}\) resolve — mantido aberto
 e precificado pela mesma projeção genérica de corte \(\beta\!\cdot\! x\) que todos os outros slots. Sem
 <code>post_study_stages.json</code>, o eixo é só do estudo (\(n_{\text{delivery}} = T\)), e qualquer slot
 com alvo \(m \ge T\) é inalcançável e congelado em \([0,0]\). O <strong>gate de existência da
@@ -460,10 +460,10 @@ decisão</strong> é uma única desigualdade no eixo estendido:</p>
 
 <div class="admon warn">
   <span class="tag">Nota para leitores de material antigo</span>
-  O cobre mais antigo (e as páginas de metodologia atualmente publicadas) modelavam isto com um anel de
+  O cobre mais antigo (e as páginas de metodologia atualmente publicadas) modelavam isto com um buffer de
   <em>deslocamento</em> Markov-1, uma entrada <code>future_anticipated_deliveries[]</code>, e um bloco
   separado de "faixas pós-horizonte" (post-horizon lanes). Os três foram <strong>aposentados</strong>. O
-  modelo atual é o anel de <em>retenção</em> indexado por resíduo descrito acima, com
+  modelo atual é o buffer de <em>retenção</em> indexado por resíduo descrito acima, com
   <code>post_study_stages.json</code> como a única superfície pós-horizonte. Se você vir
   <code>future_anticipated_deliveries</code> em algum lugar, está desatualizado.
 </div>
@@ -535,7 +535,7 @@ confluentes em uma mesma usina de jusante colapsam em <strong>um</strong> bloco 
 
 <p>Tudo, exceto a parcela do mesmo estágio \(k_0\), vai para <strong>baldes em trânsito</strong> — um
 <code>DeliveryRing</code> por usina de jusante (\(n_{\text{faixas}} = 1\)). Um balde guarda um volume
-(hm³) que matura alguns estágios adiante. A cada estágio o anel <strong>desloca</strong>: cada balde em
+(hm³) que matura alguns estágios adiante. A cada estágio o buffer <strong>desloca</strong>: cada balde em
 trânsito move-se uma defasagem para mais perto da chegada, e o balde que matura neste estágio cai na
 linha de balanço hídrico de jusante.</p>
 
@@ -567,7 +567,7 @@ simulação encadeada seja fiel.</p>
 
 <h2 id="differ">5. Como os dois recursos diferem</h2>
 
-<p>Eles compartilham o esqueleto do anel, a única região de estado contígua, a resolução de coluna
+<p>Eles compartilham o esqueleto do buffer, a única região de estado contígua, a resolução de coluna
 saída-por-identidade / entrada-fixada, o mascaramento de dois lados, e a convenção de sinal do dual.
 Diferem em um punhado de escolhas locais de chamada:</p>
 
@@ -575,7 +575,7 @@ Diferem em um punhado de escolhas locais de chamada:</p>
 <table>
   <thead><tr><th>Aspecto</th><th>Tempo de viagem da água</th><th>Térmica antecipada</th></tr></thead>
   <tbody>
-    <tr><td>Instâncias do anel</td><td>uma por usina de jusante (\(n_{\text{faixas}} = 1\))</td><td>um anel denso (\(n_{\text{faixas}}\) = nº de usinas antecipadas)</td></tr>
+    <tr><td>Instâncias do buffer</td><td>uma por usina de jusante (\(n_{\text{faixas}} = 1\))</td><td>um buffer denso (\(n_{\text{faixas}}\) = nº de usinas antecipadas)</td></tr>
     <tr><td>Transição</td><td><strong>deslocamento</strong> (\(s \to s+1\))</td><td><strong>retenção</strong> (mesmo slot)</td></tr>
     <tr><td>Chave do slot</td><td>defasagem = distância ainda em trânsito</td><td>resíduo do alvo de entrega \(m \bmod k_{\max}\)</td></tr>
     <tr><td>O que é depositado</td><td>uma parcela ponderada por \(k_d\) de uma defluência</td><td>um único compromisso de decisão</td></tr>
@@ -703,8 +703,8 @@ possa alinhar as dimensões por identidade:</p>
 <ul>
   <li><code>HydroStorage</code> — armazenamento de reservatório.</li>
   <li><code>HydroInflowLag</code> — uma defasagem (lag) AR de afluência (subíndice = ordem do lag, base 1).</li>
-  <li><code>AnticipatedThermalState</code> — um slot do anel de compromisso antecipado (subíndice = slot
-  do anel, entidade = a usina térmica).</li>
+  <li><code>AnticipatedThermalState</code> — um slot do buffer de compromisso antecipado (subíndice = slot
+  do buffer, entidade = a usina térmica).</li>
   <li><code>HydroTransitBucket</code> — um balde de água em trânsito (subíndice = defasagem de maturação,
   entidade = a hidrelétrica de jusante).</li>
 </ul>
