@@ -78,6 +78,12 @@ So the defect is specific to `n_post < n_stages`.
 Either removes the silent wrong answer; (1) additionally makes the configuration
 usable rather than rejected.
 
+Candidate (1), generalized to
+`k_max = max(occupancy_max, n_none_in_study)` in the ring's own index space, is
+adopted by the fixed-post-horizon-commitments proposal
+([`anticipated-fixed-post-horizon-commitments.md`](anticipated-fixed-post-horizon-commitments.md)
+§5); this record closes when that design ships.
+
 ## Invariant to pin with a regression test
 
 For any anticipated `LeadTime` plant, every delivery window cobre-io requires

@@ -1,10 +1,11 @@
 # Representing DECOMP anticipated dispatch with fidelity — problem statement
 
-**Status: Design brief (problem statement).** This document describes the situation
-and the goal only. It states what must be represented, how cobre models it today,
-the constraints confirmed by executed verification on v0.15.0, and the fidelity
-gaps that remain. It deliberately proposes **no** solution — the design is
-owner-led and will be written separately.
+**Status: Design brief (problem statement) — answered.** This document describes
+the situation and the goal only. It states what must be represented, how cobre
+models it today, the constraints confirmed by executed verification on v0.15.0,
+and the fidelity gaps that remain. It deliberately proposes **no** solution; the
+design that answers it is
+[`anticipated-fixed-post-horizon-commitments.md`](anticipated-fixed-post-horizon-commitments.md).
 
 Two options are **out of scope** by owner decision and are not to be revisited
 here: extending the study horizon (adding study stages), and lifting the E2 scope
