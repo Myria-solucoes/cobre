@@ -171,7 +171,11 @@ with `slot = r_i(m) mod k_max` replacing `m mod k_max` at every ring
 addressing site (deposit targeting, the slot row-position sweep, fishing's
 in-study arm — where it is the identity — and the manifest's modular dating).
 Because class 4 is a single contiguous run at a fixed position (§2), the
-excision is one per-plant integer subtraction, not a table.
+excision is one per-plant integer subtraction, not a table — and it is owned
+as two pure methods on the plant's own point resolution (the forward map and
+its inverse), derived from data the resolution already carries. No new type,
+no new state: a new parallel structure would re-introduce the
+foreign-index-space alignment problem the excision exists to remove.
 
 The ring depth becomes `k_max = max(occupancy_max, n_none_in_study)` in excised
 space — the second term is the incoming-state window at stage 0 (every seed
@@ -297,9 +301,10 @@ Fixed commitments are scenario- and stage-independent constants, so they never
 enter the per-scenario anticipated-lanes partition (which is built from solver
 primals and would repeat the constant per scenario while forcing its non-null
 columns nullable). They get a **run-level table** instead — one row per plant ×
-fixed window (dates, MW, a fixed source marker), written once per run by both
-writers — the CLI and the Python bindings — under the workspace's output
-parity rule.
+fixed window (dates, MW), written once per run by both writers — the CLI and
+the Python bindings — under the workspace's output parity rule. The table holds
+only fixed rows, so no source-marker column is needed: the file is the marker,
+and decided post-study deliveries keep their existing per-scenario report.
 
 ## 9. Verification plan
 
