@@ -436,17 +436,17 @@ pub struct SimulationGenericViolationResult {
     pub slack_cost: f64,
 }
 
-/// Post-horizon commitment lane result for one declared window, one terminal
-/// scenario.
+/// Post-horizon commitment lane result for one resolved post-study lane, one
+/// terminal scenario.
 ///
 /// Corresponds to one row in the `anticipated_lanes` output schema, keyed
 /// `(thermal_id, delivery_date)` — distinct from the per-plant
 /// [`SimulationThermalResult::anticipated_committed_mw`]/
 /// [`SimulationThermalResult::anticipated_decision_mw`] columns, which stay
-/// unchanged. Emitted once per lane, at the window's own in-study decider
+/// unchanged. Emitted once per lane, at the lane's own in-study decider
 /// stage — the only stage whose LP carries both the decision column and this
 /// snapshot of the ring's carried state. Absent for a study with no
-/// `future_anticipated_deliveries`.
+/// `post_study_stages`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationAnticipatedLaneResult {
     /// Stage index (0-based) — the lane's own in-study decider stage.

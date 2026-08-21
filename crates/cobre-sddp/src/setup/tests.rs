@@ -19,8 +19,8 @@ use cobre_core::{
     ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_core::{
-    ContractType, EnergyContract, EntityId, FutureAnticipatedDelivery, HorizonGraph,
-    HydroPastDefluence, InitialConditions, PostStudyStage, PostStudyStages, SystemBuilder,
+    ContractType, EnergyContract, EntityId, HorizonGraph, HydroPastDefluence, InitialConditions,
+    PostStudyStage, PostStudyStages, SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
         hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -2425,7 +2425,6 @@ fn minimal_system_2_hydros_with_history(
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("minimal_system_2_hydros_with_history: valid")
@@ -2902,7 +2901,6 @@ fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = staggered_dates_system_2_hydros(1, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3218,7 +3216,6 @@ fn build_initial_state_seeds_filling_storage() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3252,7 +3249,6 @@ fn build_initial_state_filling_empty_pit_is_zero() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 1, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3279,7 +3275,6 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let baseline_system = filling_system_2_hydros(1, 0, baseline_ic);
     let baseline = build_initial_state(&baseline_system, &study_dims, &layout, &[0.0; 4]);
@@ -3293,7 +3288,6 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let state = build_initial_state(&system, &study_dims, &layout, &[0.0; 4]);
@@ -3323,7 +3317,6 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3770,7 +3763,6 @@ fn system_with_anticipated_thermals(
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_anticipated_thermals: valid")
@@ -4037,7 +4029,6 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_two_anticipated_thermals_staggered_dates: valid");
@@ -6326,9 +6317,9 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
 /// Like [`minimal_system`] but the thermal carries `anticipated_config` and each
 /// stage's block runs for the matching `stage_hours` entry. `k_max_bounds`
 /// widens the thermal stage-bounds axis for delivery-stage padding.
-/// `future_anticipated_deliveries`/`post_study_stages` thread straight onto the
-/// built system for post-horizon commitment-window fixtures; empty/`None`
-/// reproduces the pre-existing thermal-only system every other caller wants.
+/// `post_study_stages` threads straight onto the built system for post-horizon
+/// commitment-window fixtures; `None` reproduces the pre-existing thermal-only
+/// system every other caller wants.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -6339,7 +6330,6 @@ fn minimal_system_with_anticipated(
     stage_hours: &[f64],
     anticipated_config: AnticipatedConfig,
     k_max_bounds: usize,
-    future_anticipated_deliveries: Vec<FutureAnticipatedDelivery>,
     post_study_stages: Option<PostStudyStages>,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
@@ -6576,10 +6566,7 @@ fn minimal_system_with_anticipated(
         .load_models(load_models)
         .bounds(bounds)
         .penalties(penalties)
-        .initial_conditions(InitialConditions {
-            future_anticipated_deliveries,
-            ..Default::default()
-        })
+        .initial_conditions(InitialConditions::default())
         .post_study_stages(post_study_stages)
         .build()
         .expect("minimal_system_with_anticipated: valid")
@@ -6593,7 +6580,6 @@ fn minimal_system_with_anticipated_lead_stages(
         &vec![744.0; n_stages],
         AnticipatedConfig::LeadStages(lead_stages),
         lead_stages as usize,
-        Vec::new(),
         None,
     )
 }
@@ -6711,7 +6697,6 @@ fn test_anticipated_resolve_point_pmo_calendar() {
         &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
         AnticipatedConfig::LeadTime(720.0),
         6,
-        Vec::new(),
         None,
     );
     let (resolution, _) = super::resolve_anticipated_commitments(&system);
@@ -6735,13 +6720,8 @@ fn test_anticipated_resolve_point_pmo_calendar() {
 /// None, Some(0)]`.
 #[test]
 fn lead_time_three_stage_lead_resolves_a_pre_study_prefix() {
-    let system = minimal_system_with_anticipated(
-        &[100.0; 4],
-        AnticipatedConfig::LeadTime(350.0),
-        1,
-        Vec::new(),
-        None,
-    );
+    let system =
+        minimal_system_with_anticipated(&[100.0; 4], AnticipatedConfig::LeadTime(350.0), 1, None);
     let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
     let point = &resolution.per_plant[0];
 
@@ -6757,13 +6737,8 @@ fn lead_time_three_stage_lead_resolves_a_pre_study_prefix() {
 /// resolves a ring too narrow to hold the true in-flight set.
 #[test]
 fn ring_depth_counts_pre_study_occupancy() {
-    let system = minimal_system_with_anticipated(
-        &[100.0; 4],
-        AnticipatedConfig::LeadTime(350.0),
-        1,
-        Vec::new(),
-        None,
-    );
+    let system =
+        minimal_system_with_anticipated(&[100.0; 4], AnticipatedConfig::LeadTime(350.0), 1, None);
     let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
 
     assert_eq!(resolution.k_max, 3);
@@ -6794,7 +6769,6 @@ fn test_anticipated_resolve_point_fanout_calendar() {
         &[720.0, 168.0, 168.0, 168.0, 168.0, 168.0],
         AnticipatedConfig::LeadTime(720.0),
         6,
-        Vec::new(),
         None,
     );
     let (resolution, _) = super::resolve_anticipated_commitments(&system);
@@ -7346,7 +7320,6 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_travel_time_arc: valid")
@@ -8054,7 +8027,6 @@ fn test_anticipated_resolve_point_k0_uniform_calendar() {
         &[744.0, 744.0, 744.0, 744.0],
         AnticipatedConfig::LeadTime(720.0),
         0,
-        Vec::new(),
         None,
     );
     let (resolution, lead_stages) = super::resolve_anticipated_commitments(&system);
@@ -8089,7 +8061,6 @@ fn resolve_anticipated_commitments_warns_on_k0_sub_stage_lead() {
         &[744.0, 744.0, 744.0, 744.0],
         AnticipatedConfig::LeadTime(720.0),
         0,
-        Vec::new(),
         None,
     );
 
@@ -8150,7 +8121,6 @@ fn warn_on_sub_stage_lead_emits_once_per_self_delivered_stage() {
         &[168.0, 168.0, 168.0, 744.0],
         AnticipatedConfig::LeadTime(200.0),
         0,
-        Vec::new(),
         None,
     );
 
@@ -8209,7 +8179,6 @@ fn resolve_anticipated_commitments_core_reports_the_extended_delivery_width() {
         &[744.0, 744.0],
         AnticipatedConfig::LeadStages(1),
         1,
-        Vec::new(),
         Some(post_study),
     );
 
@@ -8231,7 +8200,6 @@ fn resolve_anticipated_commitments_core_matches_study_only_width_without_post_st
         &[744.0, 744.0, 744.0],
         AnticipatedConfig::LeadStages(1),
         1,
-        Vec::new(),
         None,
     );
 
@@ -8261,7 +8229,6 @@ fn warn_on_boundary_absent_post_study_delivery_fires_once_when_boundary_absent()
         &[744.0, 744.0],
         AnticipatedConfig::LeadStages(1),
         1,
-        Vec::new(),
         Some(post_study),
     );
     let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
@@ -8303,7 +8270,6 @@ fn warn_on_boundary_absent_post_study_delivery_silent_when_boundary_present() {
         &[744.0, 744.0],
         AnticipatedConfig::LeadStages(1),
         1,
-        Vec::new(),
         Some(post_study),
     );
     let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
@@ -8336,7 +8302,6 @@ fn lead_time_fanout_rejected_at_setup() {
         &[744.0, 168.0, 168.0],
         AnticipatedConfig::LeadTime(900.0),
         2,
-        Vec::new(),
         None,
     );
 
@@ -8574,7 +8539,6 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("two-thermal fan-out system: valid")

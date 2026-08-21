@@ -5,14 +5,13 @@
 //! hydros, one bus, one anticipated thermal, two study stages matching
 //! their real calendar span.
 //!
-//! - `inert_regression` — a study declaring neither
-//!   `future_anticipated_deliveries` nor `post_study_stages` behaves as if
-//!   the post-horizon machinery were absent (purely additive).
+//! - `inert_regression` — a study declaring no `post_study_stages` behaves as
+//!   if the post-horizon machinery were absent (purely additive).
 //! - `fcf_prices_committed_mw` — the reported lower bound responds to the
 //!   outstanding committed MW by `beta*x`, in contrast to the frozen
 //!   `beta*0` baseline.
 //! - `left_right_symmetry` — a LEFT (`past_anticipated_commitments`, fished
-//!   in-study) and a RIGHT (`future_anticipated_deliveries`,
+//!   in-study) and a RIGHT (a post-study-targeted delivery,
 //!   held-to-terminal + FCF-priced) commitment of the same magnitude
 //!   transport that magnitude identically: value-conservation +
 //!   mechanism-parity, never objective/`final_lb` bit-identity — the two
@@ -139,8 +138,7 @@ fn stages() -> Vec<cobre_core::temporal::Stage> {
 
 /// The RIGHT fixture's declared post-study stage: `[study_end(), study_end()
 /// + 30 days)`, pinned to `v` (`min_mw == max_mw`) — the ring's post-study
-/// bound now comes SOLELY from `post_study_stages.json`'s own table, never a
-/// `future_anticipated_deliveries` window's interval.
+/// bound comes SOLELY from `post_study_stages.json`'s own table.
 fn post_study_stages(v: f64) -> PostStudyStages {
     PostStudyStages {
         stages: vec![PostStudyStage {
@@ -275,7 +273,7 @@ fn build_system_right(with_window: bool, v: f64) -> System {
 /// LEFT boundary: the calendar reflection of [`build_system_right`] — a
 /// `LeadStages(1)` thermal whose ONE leading delivery stage (stage 0) is
 /// seeded via `past_anticipated_commitments` to `v`, instead of a
-/// `future_anticipated_deliveries` window past the horizon.
+/// post-study-targeted delivery past the horizon.
 fn build_system_left(v: f64) -> System {
     let bus = make_bus(BUS_ID, BusSpec::default());
     let thermal = make_thermal(
@@ -524,10 +522,9 @@ fn ring_pin(setup: &StudySetup, x: f64) -> Vec<f64> {
 // ── A dormant post-horizon carrier is structurally and numerically inert ──
 
 mod inert_regression {
-    //! A study declaring neither `future_anticipated_deliveries` nor
-    //! `post_study_stages` behaves as if the post-horizon machinery were
-    //! absent. The pre-declaration OUTPUT golden is delegated to the tier-1
-    //! parity golden `parity_hash_d34` (both backends) and the shift-to-hold
+    //! A study declaring no `post_study_stages` behaves as if the post-horizon
+    //! machinery were absent. The pre-declaration OUTPUT golden is delegated to
+    //! the tier-1 parity golden `parity_hash_d34` (both backends) and the shift-to-hold
     //! byte-stability verdict `k1_byte_stability_verdict` — this module pins
     //! only that the dormant machinery introduces no nondeterminism of its
     //! own, never a new golden.

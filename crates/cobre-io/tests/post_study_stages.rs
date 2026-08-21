@@ -1,10 +1,14 @@
-//! Integration tests for the standalone `post_study_stages.json` boundary input:
-//! the `System` flow (present → `Some`, absent → `None`, additive), the semantic
-//! rejection paths (contiguity, first-start, coverage, missing bound, empty
-//! intersection), and declaration-order invariance — all through the public
-//! `cobre_io::load_case` pipeline.
+//! Integration tests for the standalone `post_study_stages.json` boundary input,
+//! the sole post-horizon surface: the `System` flow (present → `Some`, absent →
+//! `None`, additive), the semantic rejection paths (contiguity, first-start,
+//! Rule 1 missing bound cell, Rule 2 E2 no-carrier, lead-exceeds-horizon), and
+//! declaration-order invariance — all through the public `cobre_io::load_case`
+//! pipeline. Post-study deliveries are driven by an anticipated thermal whose
+//! `LeadTime` reaches the post-study calendar, not by a declared window.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::path::Path;
 
 use cobre_io::load_case;
 use tempfile::TempDir;
@@ -12,22 +16,45 @@ use tempfile::TempDir;
 mod helpers;
 use helpers::{make_minimal_case, write_file};
 
-/// `initial_conditions.json` carrying one `future_anticipated_deliveries` window.
-fn initial_conditions_with_delivery(
-    delivery_start: &str,
-    delivery_end: &str,
-    min: f64,
-    max: f64,
-) -> String {
-    format!(
-        r#"{{
-          "storage": [],
-          "filling_storage": [],
-          "future_anticipated_deliveries": [
-            {{ "thermal_id": 86, "delivery_start": "{delivery_start}", "delivery_end": "{delivery_end}", "min_mw": {min}, "max_mw": {max} }}
+/// Write a `system/thermals.json` declaring thermal 86 as an anticipated
+/// `LeadTime` plant on bus 1.
+fn write_anticipated_thermal_86(root: &Path, lead_time_hours: f64) {
+    write_file(
+        root,
+        "system/thermals.json",
+        &format!(
+            r#"{{
+          "thermals": [
+            {{
+                "id": 86,
+                "name": "T_ANT",
+                "operational_start_date": "2024-01-01",
+                "bus_id": 1,
+                "cost_per_mwh": 10.0,
+                "generation": {{ "min_mw": 0.0, "max_mw": 300.0 }},
+                "anticipated_config": {{ "lead_time_hours": {lead_time_hours} }}
+            }}
           ]
         }}"#
-    )
+        ),
+    );
+}
+
+/// Write an `initial_conditions.json` whose single `past_anticipated_commitments`
+/// window tiles the leading study stage (id 0, `[2024-01-01, 2024-02-01)`) at
+/// 0 MW — the bijection every anticipated thermal needs.
+fn write_ic_with_past_commitment(root: &Path) {
+    write_file(
+        root,
+        "initial_conditions.json",
+        r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_anticipated_commitments": [
+            { "thermal_id": 86, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 }
+          ]
+        }"#,
+    );
 }
 
 // ── present → System.post_study_stages Some, both collections sorted ──────
@@ -133,114 +160,41 @@ fn test_non_contiguous_stages_rejected() {
     );
 }
 
-// ── future_anticipated_deliveries but no post_study_stages → Err ──────────
+// ── anticipated lead exceeds the horizon with no post_study → Err ─────────
 
 #[test]
-fn test_delivery_without_post_study_rejected() {
+fn test_lead_exceeds_horizon_without_post_study_rejected() {
     let dir = TempDir::new().unwrap();
     make_minimal_case(&dir);
-    write_file(
-        dir.path(),
-        "initial_conditions.json",
-        &initial_conditions_with_delivery("2024-02-01", "2024-03-01", 0.0, 350.0),
-    );
+    // LeadTime 1440h (60 days) exceeds the single 744h study stage; with no
+    // post_study_stages.json declared, the plant can never deliver.
+    write_anticipated_thermal_86(dir.path(), 1440.0);
+    write_ic_with_past_commitment(dir.path());
     // No post_study_stages.json written.
 
     let msg = load_case(dir.path()).unwrap_err().to_string();
     assert!(
-        msg.contains("no post_study_stages.json") && msg.contains("Thermal 86"),
-        "error should name the unanchored delivery, got: {msg}"
+        msg.contains("can never deliver within the study horizon") && msg.contains("Thermal 86"),
+        "error should name the lead-exceeds-horizon rejection, got: {msg}"
     );
 }
 
-// ── delivery window not covered exactly (over-reach) → Err ────────────────
+// ── lead reaches a post-study stage with no bound cell → Err (Rule 1) ──────
 
 #[test]
-fn test_delivery_overreaches_post_study_horizon_rejected() {
+fn test_missing_post_study_bound_cell_rejected() {
     let dir = TempDir::new().unwrap();
     make_minimal_case(&dir);
-    write_file(
-        dir.path(),
-        "initial_conditions.json",
-        &initial_conditions_with_delivery("2024-02-01", "2024-04-01", 0.0, 350.0),
-    );
-    // Only one post-study stage [2024-02-01, 2024-03-01): the delivery reaches past it.
+    // LeadTime 744h: decided at study stage 0, delivered into post-study stage 0.
+    write_anticipated_thermal_86(dir.path(), 744.0);
+    write_ic_with_past_commitment(dir.path());
+    // Post-study stage 0 is reached, but no bound cell is declared for it.
     write_file(
         dir.path(),
         "post_study_stages.json",
         r#"{
           "stages": [ { "start_date": "2024-02-01", "duration_hours": 696.0 } ],
-          "thermal_bounds": [
-            { "thermal_id": 86, "post_study_stage_index": 0, "cost_per_mwh": 210.0, "min_mw": 0.0, "max_mw": 350.0 }
-          ]
-        }"#,
-    );
-
-    let msg = load_case(dir.path()).unwrap_err().to_string();
-    assert!(
-        msg.contains("outside the post-study horizon") && msg.contains("2024-02-01"),
-        "error should name the over-reaching delivery, got: {msg}"
-    );
-}
-
-// ── delivery window spanning ≥2 whole post-study stages → Err ─────────────
-
-#[test]
-fn test_delivery_spanning_multiple_post_study_stages_rejected() {
-    let dir = TempDir::new().unwrap();
-    make_minimal_case(&dir);
-    // [2024-02-01, 2024-04-01) covers BOTH post-study stages at 1.0 — a single
-    // commitment resolves to exactly one destination stage, so this is rejected.
-    write_file(
-        dir.path(),
-        "initial_conditions.json",
-        &initial_conditions_with_delivery("2024-02-01", "2024-04-01", 0.0, 300.0),
-    );
-    write_file(
-        dir.path(),
-        "post_study_stages.json",
-        r#"{
-          "stages": [
-            { "start_date": "2024-02-01", "duration_hours": 696.0 },
-            { "start_date": "2024-03-01", "duration_hours": 744.0 }
-          ],
-          "thermal_bounds": [
-            { "thermal_id": 86, "post_study_stage_index": 0, "cost_per_mwh": 210.0, "min_mw": 0.0, "max_mw": 350.0 },
-            { "thermal_id": 86, "post_study_stage_index": 1, "cost_per_mwh": 220.0, "min_mw": 0.0, "max_mw": 350.0 }
-          ]
-        }"#,
-    );
-
-    let msg = load_case(dir.path()).unwrap_err().to_string();
-    assert!(
-        msg.contains("spans 2 post-study stages") && msg.contains("exactly one"),
-        "error should name the multi-stage span, got: {msg}"
-    );
-}
-
-// ── covered stage has no PostStudyThermalBound{t, j} → Err naming (t, j) ──
-
-#[test]
-fn test_missing_bound_for_covered_stage_rejected() {
-    let dir = TempDir::new().unwrap();
-    make_minimal_case(&dir);
-    write_file(
-        dir.path(),
-        "initial_conditions.json",
-        &initial_conditions_with_delivery("2024-02-01", "2024-03-01", 0.0, 350.0),
-    );
-    // Delivery covers stage index 0, but the only bound is for index 1.
-    write_file(
-        dir.path(),
-        "post_study_stages.json",
-        r#"{
-          "stages": [
-            { "start_date": "2024-02-01", "duration_hours": 696.0 },
-            { "start_date": "2024-03-01", "duration_hours": 744.0 }
-          ],
-          "thermal_bounds": [
-            { "thermal_id": 86, "post_study_stage_index": 1, "cost_per_mwh": 210.0, "min_mw": 0.0, "max_mw": 350.0 }
-          ]
+          "thermal_bounds": []
         }"#,
     );
 
@@ -249,80 +203,50 @@ fn test_missing_bound_for_covered_stage_rejected() {
         msg.contains("no thermal_bounds entry")
             && msg.contains("thermal_id 86")
             && msg.contains("post_study_stage_index 0"),
-        "error should name the missing (thermal, stage) cell, got: {msg}"
+        "error should name the missing (thermal, stage) bound cell, got: {msg}"
     );
 }
 
-// ── empty commitment∩capability intersection → Err ───────────────────────
+// ── a pre-study-decided post-study delivery has no carrier → Err (Rule 2/E2) ─
 
 #[test]
-fn test_empty_commitment_capability_intersection_rejected() {
+fn test_pre_study_decided_post_study_delivery_rejected() {
     let dir = TempDir::new().unwrap();
     make_minimal_case(&dir);
-    // Commitment interval [400, 500] cannot intersect capability [0, 350].
-    write_file(
-        dir.path(),
-        "initial_conditions.json",
-        &initial_conditions_with_delivery("2024-02-01", "2024-03-01", 400.0, 500.0),
-    );
+    // LeadTime 1440h: post-study stage 0 (Feb) is decided pre-study (no carrier),
+    // while post-study stage 1 (Mar) is decided in-study, so the lead-cap is
+    // satisfied and the E2 rejection is isolated to stage 0.
+    write_anticipated_thermal_86(dir.path(), 1440.0);
+    write_ic_with_past_commitment(dir.path());
     write_file(
         dir.path(),
         "post_study_stages.json",
         r#"{
-          "stages": [ { "start_date": "2024-02-01", "duration_hours": 696.0 } ],
+          "stages": [
+            { "start_date": "2024-02-01", "duration_hours": 696.0 },
+            { "start_date": "2024-03-01", "duration_hours": 744.0 }
+          ],
           "thermal_bounds": [
-            { "thermal_id": 86, "post_study_stage_index": 0, "cost_per_mwh": 210.0, "min_mw": 0.0, "max_mw": 350.0 }
+            { "thermal_id": 86, "post_study_stage_index": 1, "cost_per_mwh": 220.0, "min_mw": 0.0, "max_mw": 350.0 }
           ]
         }"#,
     );
 
     let msg = load_case(dir.path()).unwrap_err().to_string();
     assert!(
-        msg.contains("do not intersect") && msg.contains("Thermal 86"),
-        "error should name the unsatisfiable commitment, got: {msg}"
+        msg.contains("has no carrier") && msg.contains("Thermal 86"),
+        "error should name the pre-study-decided post-study delivery, got: {msg}"
     );
 }
 
-// ── A valid covered delivery loads cleanly ────────────────────────────────────
+// ── A valid reached delivery loads cleanly ────────────────────────────────────
 
 #[test]
 fn test_valid_covered_delivery_loads() {
     let dir = TempDir::new().unwrap();
     make_minimal_case(&dir);
-    // Thermal 86 must itself be an anticipated thermal (`anticipated_config`
-    // set) for `future_anticipated_deliveries` to resolve to it; the minimal
-    // case's `thermals.json` is otherwise empty.
-    write_file(
-        dir.path(),
-        "system/thermals.json",
-        r#"{
-          "thermals": [
-            {
-                "id": 86,
-                "name": "T_ANT",
-                "operational_start_date": "2024-01-01",
-                "bus_id": 1,
-                "cost_per_mwh": 10.0,
-                "generation": { "min_mw": 0.0, "max_mw": 300.0 },
-                "anticipated_config": { "lead_time_hours": 744.0 }
-            }
-          ]
-        }"#,
-    );
-    write_file(
-        dir.path(),
-        "initial_conditions.json",
-        r#"{
-          "storage": [],
-          "filling_storage": [],
-          "past_anticipated_commitments": [
-            { "thermal_id": 86, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 }
-          ],
-          "future_anticipated_deliveries": [
-            { "thermal_id": 86, "delivery_start": "2024-02-01", "delivery_end": "2024-03-01", "min_mw": 0.0, "max_mw": 300.0 }
-          ]
-        }"#,
-    );
+    write_anticipated_thermal_86(dir.path(), 744.0);
+    write_ic_with_past_commitment(dir.path());
     write_file(
         dir.path(),
         "post_study_stages.json",
@@ -335,7 +259,7 @@ fn test_valid_covered_delivery_loads() {
     );
 
     let system = load_case(dir.path())
-        .unwrap_or_else(|e| panic!("a covered, intersecting delivery must load, got: {e}"));
+        .unwrap_or_else(|e| panic!("a reached, bounded delivery must load, got: {e}"));
     assert!(system.post_study_stages().is_some());
 }
 

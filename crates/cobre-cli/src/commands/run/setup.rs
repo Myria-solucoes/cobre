@@ -1149,7 +1149,6 @@ mod tests {
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
-                future_anticipated_deliveries: vec![],
             })
             .build()
             .expect("AR(0) declared-lag-history fixture: valid system");

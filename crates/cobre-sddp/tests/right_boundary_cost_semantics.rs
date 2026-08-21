@@ -103,7 +103,7 @@ fn stages() -> Vec<cobre_core::temporal::Stage> {
 /// `POST_STUDY_HOURS` (720h) — the post-study target `m` (`DECIDER_STAGE + 1`
 /// modular reach) resolves into, so `min_k`/`max_k` alone bound and cost the
 /// decision column (`post_study_stages.json`'s table is the sole post-horizon
-/// bound surface — no `future_anticipated_deliveries` interval to intersect).
+/// bound surface).
 fn post_study_stages(min_k: f64, max_k: f64) -> PostStudyStages {
     PostStudyStages {
         stages: vec![PostStudyStage {
@@ -368,7 +368,7 @@ mod byte_identity_without_commitment {
     /// (dormant `[0, 0]`, zero objective); with one declared, that same
     /// column books the real post-study fuel cost.
     #[test]
-    fn no_future_anticipated_deliveries_resolves_zero_commitment_windows() {
+    fn no_post_study_destination_resolves_zero_commitment_windows() {
         let with_setup = build_setup_in_code(build_system(true, 20.0, 80.0), &config());
         let without_setup = build_setup_in_code(build_system(false, 0.0, 0.0), &config());
 

@@ -24,8 +24,8 @@
 //! The `in_transit/` partition is present only when the system declares a
 //! travel-time arc; a non-travel-time study writes no such directory or file.
 //! The `anticipated_lanes/` partition is present only when the system
-//! declares a `future_anticipated_deliveries` window; without one, no such
-//! directory or file is written.
+//! declares post-study stages; without them, no such directory or file is
+//! written.
 //!
 //! ## Circular-dependency mitigation
 //!
@@ -648,14 +648,13 @@ impl SimulationParquetWriter {
             std::fs::create_dir_all(sim_dir.join("violations/generic"))
                 .map_err(|e| OutputError::io(sim_dir.join("violations/generic"), e))?;
         }
-        // Gate on a declared post-horizon commitment window, not on thermal count:
-        // a study with no `future_anticipated_deliveries` must emit no
-        // `anticipated_lanes` directory (byte-neutral).
-        let declares_post_horizon_commitment = !system
-            .initial_conditions()
-            .future_anticipated_deliveries
-            .is_empty();
-        if declares_post_horizon_commitment {
+        // Gate on declared post-study stages, not on thermal count: a study with
+        // no post-study stages must emit no `anticipated_lanes` directory
+        // (byte-neutral).
+        let declares_post_study = system
+            .post_study_stages()
+            .is_some_and(|ps| !ps.stages.is_empty());
+        if declares_post_study {
             std::fs::create_dir_all(sim_dir.join("anticipated_lanes"))
                 .map_err(|e| OutputError::io(sim_dir.join("anticipated_lanes"), e))?;
         }

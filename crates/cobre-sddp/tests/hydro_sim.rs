@@ -2756,11 +2756,10 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
     use cobre_core::scenario::InflowModel;
     use cobre_core::temporal::{Block, Stage};
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, FutureAnticipatedDelivery,
-        HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStorage, InitialConditions,
-        LineBlockBounds, PostStudyStage, PostStudyStages, PostStudyThermalBound,
-        PumpingBlockBounds, ResolvedBounds, System, SystemBuilder, ThermalBlockBounds,
-        ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, HydroBlockBounds,
+        HydroPastDefluence, HydroStageBounds, HydroStorage, InitialConditions, LineBlockBounds,
+        PostStudyStage, PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds,
+        System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::{
         BoundaryPolicy, Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -2869,22 +2868,9 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
             .collect()
     }
 
-    /// The one declared post-horizon window: the 30-day month beginning at
-    /// the study end, resolving (via [`DELTA_HOURS`]) to a stage-0 decider and
-    /// (via the post-study calendar below) to post-study destination stage 0.
-    fn future_delivery() -> FutureAnticipatedDelivery {
-        FutureAnticipatedDelivery {
-            thermal_id: THERMAL_ID,
-            delivery_start: study_end(),
-            delivery_end: study_end() + Duration::days(30),
-            min_mw: 0.0,
-            max_mw: 100.0,
-        }
-    }
-
-    /// The one declared post-study stage: the exact span [`future_delivery`]
-    /// targets, so `StageCalendar::resolve_window` covers it at destination
-    /// index 0.
+    /// The one declared post-study stage: the span the anticipated
+    /// `LeadTime(DELTA_HOURS)` thermal's post-study-targeted delivery resolves
+    /// onto, so `StageCalendar::resolve_window` covers it at destination index 0.
     fn post_study_stages() -> PostStudyStages {
         PostStudyStages {
             stages: vec![PostStudyStage {
@@ -3066,7 +3052,6 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
                 end_date: study_start(),
                 value_m3s: 50.0,
             }],
-            future_anticipated_deliveries: vec![future_delivery()],
             ..Default::default()
         };
 

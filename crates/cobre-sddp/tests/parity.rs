@@ -2155,7 +2155,6 @@ mod water_travel_time_no_arc_byte_identity {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()

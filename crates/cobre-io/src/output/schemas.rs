@@ -288,8 +288,8 @@ pub(crate) fn transit_seed_schema() -> Schema {
 /// Schema for `simulation/anticipated_lanes/` — post-horizon commitment lane
 /// results, keyed `(thermal_id, delivery_date)`.
 ///
-/// One row per declared window per terminal scenario, written only when the
-/// system declares a `future_anticipated_deliveries` window.
+/// One row per resolved post-study commitment lane per terminal scenario,
+/// written only when the system declares `post_study_stages`.
 pub(crate) fn anticipated_lanes_schema() -> Schema {
     let mut fields = simulation_row_prefix();
     fields.extend([

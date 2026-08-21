@@ -41,10 +41,10 @@ use chrono::NaiveDate;
 use cobre_core::entities::thermal::AnticipatedConfig;
 use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, StageStateConfig, Transition};
 use cobre_core::{
-    BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, FutureAnticipatedDelivery,
-    HorizonGraph, HydroBlockBounds, HydroStageBounds, InitialConditions, LineBlockBounds,
-    PostStudyStage, PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds,
-    System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, HorizonGraph,
+    HydroBlockBounds, HydroStageBounds, InitialConditions, LineBlockBounds, PostStudyStage,
+    PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds, System,
+    SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_io::{
     FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord,
@@ -132,21 +132,9 @@ fn stages() -> Vec<cobre_core::temporal::Stage> {
     ]
 }
 
-/// The one declared post-horizon window: the 30-day month beginning at the
-/// study end, resolving (via [`DELTA_HOURS`]) to a stage-0 decider and (via the
-/// post-study calendar below) to post-study destination stage 0.
-fn future_delivery() -> FutureAnticipatedDelivery {
-    FutureAnticipatedDelivery {
-        thermal_id: THERMAL_ID,
-        delivery_start: study_end(),
-        delivery_end: study_end() + chrono::TimeDelta::days(30),
-        min_mw: 0.0,
-        max_mw: 100.0,
-    }
-}
-
-/// The one declared post-study stage: the EXACT span [`future_delivery`]
-/// targets, so `StageCalendar::resolve_window` covers it at destination index 0.
+/// The one declared post-study stage: the span the anticipated
+/// `LeadTime(DELTA_HOURS)` thermal's post-study-targeted delivery resolves onto,
+/// so `StageCalendar::resolve_window` covers it at destination index 0.
 fn post_study_stages() -> PostStudyStages {
     PostStudyStages {
         stages: vec![PostStudyStage {
@@ -291,9 +279,9 @@ fn two_leaf_fan_graph() -> HorizonGraph {
     }
 }
 
-/// `with_window` toggles the single post-horizon commitment window plus its
-/// covering `post_study_stages`; `fanned` toggles the two-leaf terminal fan
-/// (chain otherwise).
+/// `with_window` toggles the covering `post_study_stages` — which the
+/// anticipated `LeadTime(DELTA_HOURS)` thermal resolves a post-study-targeted
+/// delivery onto; `fanned` toggles the two-leaf terminal fan (chain otherwise).
 fn build_system(with_window: bool, fanned: bool) -> System {
     let bus = make_bus(BUS_ID, BusSpec::default());
     let thermal = make_thermal(
@@ -307,22 +295,13 @@ fn build_system(with_window: bool, fanned: bool) -> System {
             ..Default::default()
         },
     );
-    let initial_conditions = InitialConditions {
-        future_anticipated_deliveries: if with_window {
-            vec![future_delivery()]
-        } else {
-            Vec::new()
-        },
-        ..Default::default()
-    };
-
     let mut builder = SystemBuilder::new()
         .buses(vec![bus])
         .thermals(vec![thermal])
         .stages(stages())
         .bounds(bounds())
         .penalties(penalties())
-        .initial_conditions(initial_conditions);
+        .initial_conditions(InitialConditions::default());
     if with_window {
         builder = builder.post_study_stages(Some(post_study_stages()));
     }

@@ -11,8 +11,8 @@ use cobre_core::temporal::{
     Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
 use cobre_core::{
-    AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, FutureAnticipatedDelivery,
-    PostStudyStages, PostStudyThermalBound, Thermal, VariableRef,
+    AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, PostStudyStages, Thermal,
+    VariableRef,
 };
 use cobre_stochastic::season_cast::{DatedWindow, StageCalendar};
 
@@ -43,15 +43,14 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 ///    plant can never deliver within the study horizon. `LeadTime` rejects
 ///    `delta_hours` exceeding the summed study-stage durations (strict `>`, so
 ///    a delivery landing exactly on the final stage is accepted) only for a
-///    thermal with no `future_anticipated_deliveries` window: a thermal that
-///    also carries one legitimately needs a lead reaching past the remaining
-///    horizon, since that commitment is decided in-study but delivered
-///    post-horizon — its decider resolves end-anchored against the delivery
-///    window's own end, not against the study horizon (the solver crate's own
-///    resolution; `cobre-io` is upstream and cannot depend on it, so this is a
-///    targeted exemption, not a re-implementation of that resolution). A
-///    commissioning window IS supported and composes with the lookahead via
-///    the shifted decision gate; these checks validate the LEAD itself,
+///    thermal whose lead reaches NO declared post-study stage: a thermal whose
+///    extended lead reaches a post-study stage legitimately delivers
+///    post-horizon (decided in-study, delivered post-horizon), so it is exempt.
+///    Whether the lead reaches a post-study stage is resolved by
+///    `post_study_reach` over the concatenated study + post-study calendar —
+///    computed independently of the solver crate's resolver (`cobre-io` is
+///    upstream and cannot depend on it). A commissioning window IS supported and
+///    composes with the lookahead; these checks validate the LEAD itself,
 ///    independent of any window.
 /// 2. **Past-commitments registry bijection** with
 ///    `ic.past_anticipated_commitments`: each anticipated thermal has at least
@@ -74,12 +73,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     let n_stages = study_stage_ids.len();
     let study_durations = study_stage_durations(data);
 
-    let thermals_with_future_delivery: HashSet<EntityId> = data
-        .initial_conditions
-        .future_anticipated_deliveries
-        .iter()
-        .map(|delivery| delivery.thermal_id)
-        .collect();
+    let extended_axis = build_extended_delivery_axis(data);
 
     for thermal in &data.thermals {
         let Some(ref cfg) = thermal.anticipated_config else {
@@ -89,9 +83,12 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
 
         if let AnticipatedConfig::LeadTime(delta_hours) = *cfg {
             let total_horizon_hours: f64 = study_durations.iter().sum();
-            if delta_hours > total_horizon_hours
-                && !thermals_with_future_delivery.contains(&thermal.id)
-            {
+            let reaches_post_study = extended_axis.as_ref().is_some_and(|axis| {
+                !post_study_reach(*cfg, axis, (thermal.entry_stage_id, thermal.exit_stage_id))
+                    .carried
+                    .is_empty()
+            });
+            if delta_hours > total_horizon_hours && !reaches_post_study {
                 let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_time");
                 ctx.add_error(
                     ErrorKind::BusinessRuleViolation,
@@ -226,40 +223,6 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     }
 }
 
-/// Layer 5a — rejects a `future_anticipated_deliveries` entry whose
-/// `thermal_id` does not resolve to a thermal with `anticipated_config:
-/// Some(_)`; the delivery-side mirror of the `past_anticipated_commitments`
-/// bijection in [`check_anticipated_thermals`]. Without it, a dangling or
-/// non-anticipated `thermal_id` can satisfy every post-study coverage/bound
-/// check in `check_post_study_stages` while resolving to no commitment at
-/// all.
-pub(super) fn check_future_delivery_thermal_is_anticipated(
-    data: &ParsedData,
-    ctx: &mut ValidationContext,
-) {
-    let anticipated_ids: HashSet<EntityId> = data
-        .thermals
-        .iter()
-        .filter(|t| t.anticipated_config.is_some())
-        .map(|t| t.id)
-        .collect();
-
-    for delivery in &data.initial_conditions.future_anticipated_deliveries {
-        if !anticipated_ids.contains(&delivery.thermal_id) {
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "initial_conditions.json",
-                Some(delivery_entity(delivery)),
-                format!(
-                    "Thermal {}: referenced in future_anticipated_deliveries but is not an \
-                     anticipated thermal (anticipated_config is None or thermal does not exist)",
-                    delivery.thermal_id.0
-                ),
-            );
-        }
-    }
-}
-
 /// Advisory (`ModelQuality`): a `lead_stages`-configured thermal whose active
 /// window — decision stage `t` through delivery `t + lead_stages`, `t` ranging
 /// over the plant's commissioning window and the delivery side clamped to the
@@ -338,16 +301,20 @@ fn study_stage_durations(data: &ParsedData) -> Vec<f64> {
         .collect()
 }
 
-/// Calendar-derived count of leading pre-study-committed delivery stages:
-/// `LeadStages(l)` clamps `l` to `n_stages`; `LeadTime(delta)` counts the
-/// leading study stages whose stage-end cumulative hours are `<= delta`
-/// (tie-inclusive). Both deciders are monotonic in stage-end cumulative hours,
-/// so the pre-study run is always the leading prefix `0..k`. Computed
-/// independently of the solver crate's point-commitment resolver (cobre-io is
-/// upstream and cannot depend on it), mirroring `check_defluence_coverage`'s
-/// own calendar walk (`validation/semantic/travel_time.rs`). Do not shortcut
-/// `LeadTime` to a stage count from a window length — on a non-uniform calendar
-/// the cumulative-hours walk and a bare length diverge.
+/// Calendar-derived count of leading pre-study-committed delivery stages (the
+/// study-only prefix `past_anticipated_commitments` must tile): `LeadStages(l)`
+/// clamps `l` to `n_stages`; `LeadTime(delta)` counts the leading study stages
+/// whose stage-end cumulative hours are `<= delta` (tie-inclusive). Both
+/// deciders are monotonic in stage-end cumulative hours, so the pre-study run is
+/// always the leading prefix `0..k`. The delivery-anchored reach INTO the
+/// post-study calendar is resolved by `post_study_reach`/`extended_deciders`
+/// over the concatenated study + post-study calendar; this count stays
+/// study-only. Computed independently of the solver crate's point-commitment
+/// resolver (cobre-io is upstream and cannot depend on it), mirroring
+/// `check_defluence_coverage`'s own calendar walk
+/// (`validation/semantic/travel_time.rs`). Do not shortcut `LeadTime` to a stage
+/// count from a window length — on a non-uniform calendar the cumulative-hours
+/// walk and a bare length diverge.
 fn lead_delivery_stage_count(
     mode: AnticipatedConfig,
     study_durations: &[f64],
@@ -367,6 +334,143 @@ fn lead_delivery_stage_count(
             }
             count
         }
+    }
+}
+
+/// The concatenated study + post-study delivery axis: extended per-stage
+/// durations (hours) and the continued stage-id sequence, both length
+/// `n_stages + n_post`. `None` when the study declares no `post_study_stages`,
+/// so the delivery axis is the study axis and no lead can reach post-study.
+///
+/// Durations use each post-study stage's raw `duration_hours` and the ids
+/// continue the study sequence (`max_study_id + 1 ..`), matching the solver's
+/// own extended-axis concatenation and delivery-stage id sequence so the reach
+/// resolved here and the ring the solver builds agree on which post-study stage
+/// each delivery lands in.
+struct ExtendedDeliveryAxis {
+    /// Per-delivery-stage total hours, study durations then post-study durations.
+    durations: Vec<f64>,
+    /// Per-delivery-stage id, study ids then the continued post-study sequence.
+    stage_ids: Vec<i32>,
+    /// In-study (decision) stage count — the `[0, n_stages)` decision prefix.
+    n_stages: usize,
+}
+
+/// Build the concatenated delivery axis, or `None` when `post_study_stages` is
+/// absent. See `ExtendedDeliveryAxis` for the concatenation contract.
+fn build_extended_delivery_axis(data: &ParsedData) -> Option<ExtendedDeliveryAxis> {
+    let post_study = data.post_study_stages.as_ref()?;
+    let study_durations = study_stage_durations(data);
+    let n_stages = study_durations.len();
+    let study_ids: Vec<i32> = data
+        .stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let max_study_id = study_ids.last().copied().unwrap_or(-1);
+    let durations: Vec<f64> = study_durations
+        .iter()
+        .copied()
+        .chain(post_study.stages.iter().map(|s| s.duration_hours))
+        .collect();
+    let stage_ids: Vec<i32> = study_ids
+        .into_iter()
+        .chain(
+            (0..post_study.stages.len())
+                .map(|j| max_study_id + 1 + i32::try_from(j).unwrap_or(i32::MAX)),
+        )
+        .collect();
+    Some(ExtendedDeliveryAxis {
+        durations,
+        stage_ids,
+        n_stages,
+    })
+}
+
+/// Delivery-anchored decider `c(m)` for each delivery stage `m` over the
+/// concatenated calendar, mirroring the solver's `resolve_decider_*`:
+/// `LeadStages(l)` shifts by a bare stage count (`c(m) = m − l`); `LeadTime(δ)`
+/// anchors at the delivery stage's cumulative end (`c(m)` = the stage containing
+/// `end_m − δ`, boundary ties resolving to the earlier stage). `None` is a
+/// pre-study (initial-conditions) decider. Computed independently of the solver
+/// crate's `resolve_point` (cobre-io is upstream and cannot depend on it). Do
+/// not shortcut `LeadTime` to a bare window length — on a non-uniform calendar
+/// the cumulative-hours walk and a bare length diverge.
+fn extended_deciders(mode: AnticipatedConfig, durations: &[f64]) -> Vec<Option<usize>> {
+    let n_delivery = durations.len();
+    match mode {
+        AnticipatedConfig::LeadStages(lead_stages) => {
+            let lead = lead_stages as usize;
+            (0..n_delivery).map(|m| m.checked_sub(lead)).collect()
+        }
+        AnticipatedConfig::LeadTime(delta_hours) => {
+            let mut boundaries = Vec::with_capacity(n_delivery + 1);
+            let mut cumulative = 0.0_f64;
+            boundaries.push(cumulative);
+            for &duration in durations {
+                cumulative += duration;
+                boundaries.push(cumulative);
+            }
+            (0..n_delivery)
+                .map(|m| {
+                    let target = boundaries[m + 1] - delta_hours;
+                    boundaries
+                        .partition_point(|&boundary| boundary < target)
+                        .checked_sub(1)
+                })
+                .collect()
+        }
+    }
+}
+
+/// Per-plant classification of the post-study deliveries an anticipated plant's
+/// lead reaches. `carried` = post-study stage indices `j` reached from an
+/// in-study, commissioning-active decision (a carrier — each needs a
+/// `PostStudyThermalBound(thermal_id, j)`); `no_carrier` = post-study stage
+/// indices whose delivery is decided pre-study (the E2 no-carrier edge: a
+/// pre-study decider for a post-study target has no carrier on the delivery axis).
+struct PostStudyReach {
+    /// Post-study stage indices reached from an in-study, active decision.
+    carried: Vec<usize>,
+    /// Post-study stage indices decided pre-study (E2 no-carrier).
+    no_carrier: Vec<usize>,
+}
+
+/// Classify plant `window`'s post-study deliveries over `axis` from its extended
+/// decider. The commissioning gate keys on the DELIVERY stage's continued id
+/// (`axis.stage_ids[m]`), uniformly at every delivery stage — a plant whose
+/// `exit_stage_id` lies inside the study is inactive for every later delivery,
+/// study or post-study — mirroring the solver's own delivery-anchored gate.
+fn post_study_reach(
+    mode: AnticipatedConfig,
+    axis: &ExtendedDeliveryAxis,
+    window: (Option<i32>, Option<i32>),
+) -> PostStudyReach {
+    let (entry, exit) = window;
+    let deciders = extended_deciders(mode, &axis.durations);
+    let mut carried = Vec::new();
+    let mut no_carrier = Vec::new();
+    // `j` (the enumerate index over the post-study suffix) IS the post-study stage
+    // index; `stage_ids[n_stages..]` and `deciders[n_stages..]` are the same length.
+    for (j, (&stage_id, decider)) in axis.stage_ids[axis.n_stages..]
+        .iter()
+        .zip(&deciders[axis.n_stages..])
+        .enumerate()
+    {
+        if !commissioning_active(entry, exit, stage_id) {
+            continue;
+        }
+        match decider {
+            Some(c) if *c < axis.n_stages => carried.push(j),
+            None => no_carrier.push(j),
+            Some(_) => {}
+        }
+    }
+    PostStudyReach {
+        carried,
+        no_carrier,
     }
 }
 
@@ -666,44 +770,29 @@ pub(super) fn check_thermal_bounds_override_stage_range(
     }
 }
 
-/// Layer 5a — validates the standalone `post_study_stages.json` boundary input
-/// against the study calendar and the study's `future_anticipated_deliveries`.
+/// Layer 5a — validates the standalone `post_study_stages.json` boundary input,
+/// the sole post-horizon surface, against the study calendar.
 ///
 /// Rejects unless:
 /// - (a) the post-study stages are date-contiguous and the first `start_date`
 ///   equals the study horizon end (`study_stages.last().end_date`);
-/// - (b) every `future_anticipated_deliveries` window is covered exactly
-///   (coverage `1.0` per touched stage, no over-reach past the post-study
-///   horizon) by the post-study stages, via the shared [`StageCalendar`];
-/// - (c) a `PostStudyThermalBound` exists for every referenced
-///   `(thermal_id, post_study_stage)` (finiteness / `min_mw <= max_mw` are the
-///   reader's contract);
-/// - (d) the commitment interval `[min_mw, max_mw]` (from
-///   `future_anticipated_deliveries`) and the capability `[min_mw, max_mw]`
-///   (from the `PostStudyThermalBound`) intersect — else the committed amount
-///   is unsatisfiable within capability.
+/// - **Rule 1 (missing bound cell)** — every post-study stage index `j` an
+///   anticipated thermal's extended lead reaches (from an in-study,
+///   commissioning-active decision, resolved by `post_study_reach`) has a
+///   `PostStudyThermalBound(thermal_id, j)`. A missing cell is the sole surface's
+///   analogue of the retired lane subsystem's silent `[0, 0]` degradation
+///   (finiteness / `min_mw <= max_mw` remain the reader's parse-layer contract).
+/// - **Rule 2 (E2 no-carrier)** — no post-study delivery is decided at a
+///   pre-study stage: a pre-study decider for a post-study target has no carrier
+///   on the delivery axis and cannot be represented.
 ///
-/// Each failure is a `BusinessRuleViolation` naming the offending
-/// `(thermal_id, delivery_start)` (or the offending post-study stage for (a)).
-/// A study with no `post_study_stages.json` but a non-empty
-/// `future_anticipated_deliveries` is rejected: every delivery is unanchored.
+/// Each failure is a `BusinessRuleViolation` naming the offending plant (and the
+/// post-study stage, for Rule 1 / for (a)). No rule short-circuits another; a
+/// study without `post_study_stages.json` is validated in
+/// [`check_anticipated_thermals`] (a `lead > horizon` plant with no post-study
+/// stages is a hard reject there).
 pub(super) fn check_post_study_stages(data: &ParsedData, ctx: &mut ValidationContext) {
-    let deliveries = &data.initial_conditions.future_anticipated_deliveries;
-
     let Some(post_study) = data.post_study_stages.as_ref() else {
-        for delivery in deliveries {
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "post_study_stages.json",
-                Some(delivery_entity(delivery)),
-                format!(
-                    "Thermal {}: future_anticipated_deliveries window [{}, {}) has no \
-                     post_study_stages.json to resolve against; declare a post-study boundary \
-                     calendar covering it.",
-                    delivery.thermal_id.0, delivery.delivery_start, delivery.delivery_end
-                ),
-            );
-        }
         return;
     };
 
@@ -715,31 +804,57 @@ pub(super) fn check_post_study_stages(data: &ParsedData, ctx: &mut ValidationCon
         .map(|s| s.end_date);
 
     let (calendar_stages, well_formed) = build_post_study_calendar(post_study, study_end, ctx);
-    if !well_formed {
+    if !well_formed || calendar_stages.is_empty() {
         return;
     }
 
-    if deliveries.is_empty() || calendar_stages.is_empty() {
+    let Some(axis) = build_extended_delivery_axis(data) else {
         return;
-    }
+    };
 
-    let calendar = StageCalendar::new(&calendar_stages);
-    let horizon_end = calendar_stages[calendar_stages.len() - 1].end_date;
-    let bounds: HashMap<(EntityId, usize), &PostStudyThermalBound> = post_study
+    let bound_cells: HashSet<(EntityId, usize)> = post_study
         .thermal_bounds
         .iter()
-        .map(|b| ((b.thermal_id, b.post_study_stage_index), b))
+        .map(|b| (b.thermal_id, b.post_study_stage_index))
         .collect();
 
-    for delivery in deliveries {
-        check_delivery_coverage(
-            delivery,
-            &calendar,
-            &calendar_stages,
-            horizon_end,
-            &bounds,
-            ctx,
-        );
+    for thermal in &data.thermals {
+        let Some(cfg) = thermal.anticipated_config else {
+            continue;
+        };
+        let reach = post_study_reach(cfg, &axis, (thermal.entry_stage_id, thermal.exit_stage_id));
+        let entity_str = format!("thermals[id={}].anticipated_config", thermal.id.0);
+
+        for &j in &reach.carried {
+            if !bound_cells.contains(&(thermal.id, j)) {
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "post_study_stages.json",
+                    Some(&entity_str),
+                    format!(
+                        "Thermal {}: anticipated lead reaches post-study stage index {j}, but \
+                         post_study_stages.json has no thermal_bounds entry for (thermal_id {}, \
+                         post_study_stage_index {j}).",
+                        thermal.id.0, thermal.id.0
+                    ),
+                );
+            }
+        }
+
+        if !reach.no_carrier.is_empty() {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "post_study_stages.json",
+                Some(&entity_str),
+                format!(
+                    "Thermal {}: a commitment decided at a pre-study stage delivers into \
+                     post-study stage index(es) {:?}; a pre-study-decided, post-study-delivered \
+                     commitment has no carrier on the delivery axis. Shorten the lead so the \
+                     decision falls within the study horizon.",
+                    thermal.id.0, reach.no_carrier
+                ),
+            );
+        }
     }
 }
 
@@ -831,129 +946,6 @@ fn build_post_study_calendar(
     (calendar_stages, well_formed)
 }
 
-/// Check one `future_anticipated_deliveries` window against the post-study
-/// calendar: invariant (b) coverage, (c) bound existence, and (d) the
-/// commitment∩capability intersection.
-#[allow(clippy::float_cmp)] // whole-day post-study spans keep each coverage fraction bit-exact (mirrors coverage's own contract)
-fn check_delivery_coverage(
-    delivery: &FutureAnticipatedDelivery,
-    calendar: &StageCalendar,
-    calendar_stages: &[Stage],
-    horizon_end: NaiveDate,
-    bounds: &HashMap<(EntityId, usize), &PostStudyThermalBound>,
-    ctx: &mut ValidationContext,
-) {
-    let first_start = calendar_stages[0].start_date;
-    if delivery.delivery_start < first_start || delivery.delivery_end > horizon_end {
-        ctx.add_error(
-            ErrorKind::BusinessRuleViolation,
-            "post_study_stages.json",
-            Some(delivery_entity(delivery)),
-            format!(
-                "Thermal {}: future_anticipated_deliveries window [{}, {}) reaches outside the \
-                 post-study horizon [{}, {}); every delivery must fall within the declared \
-                 post-study stages.",
-                delivery.thermal_id.0,
-                delivery.delivery_start,
-                delivery.delivery_end,
-                first_start,
-                horizon_end
-            ),
-        );
-        return;
-    }
-
-    let window = DatedWindow {
-        start_date: delivery.delivery_start,
-        end_date: delivery.delivery_end,
-    };
-    let coverage = calendar.coverage(&window);
-    let mut covered: Vec<usize> = Vec::new();
-    let mut aligned = true;
-    for (stage_index, fraction) in coverage.iter().enumerate() {
-        if *fraction == 1.0 {
-            covered.push(stage_index);
-        } else if *fraction != 0.0 {
-            aligned = false;
-        }
-    }
-
-    if !aligned || covered.is_empty() {
-        ctx.add_error(
-            ErrorKind::BusinessRuleViolation,
-            "post_study_stages.json",
-            Some(delivery_entity(delivery)),
-            format!(
-                "Thermal {}: future_anticipated_deliveries window [{}, {}) is not covered exactly \
-                 (1.0) by the post-study stages; align the window to whole post-study stage \
-                 boundaries.",
-                delivery.thermal_id.0, delivery.delivery_start, delivery.delivery_end
-            ),
-        );
-        return;
-    }
-
-    if covered.len() != 1 {
-        ctx.add_error(
-            ErrorKind::BusinessRuleViolation,
-            "post_study_stages.json",
-            Some(delivery_entity(delivery)),
-            format!(
-                "Thermal {}: future_anticipated_deliveries window [{}, {}) spans {} post-study \
-                 stages; a delivery window must resolve to exactly one post-study stage \
-                 (multi-stage delivery is not supported).",
-                delivery.thermal_id.0,
-                delivery.delivery_start,
-                delivery.delivery_end,
-                covered.len()
-            ),
-        );
-        return;
-    }
-
-    for stage_index in covered {
-        match bounds.get(&(delivery.thermal_id, stage_index)) {
-            None => ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "post_study_stages.json",
-                Some(delivery_entity(delivery)),
-                format!(
-                    "Thermal {}: future_anticipated_deliveries window [{}, {}) delivers into \
-                     post-study stage index {stage_index}, but post_study_stages.json has no \
-                     thermal_bounds entry for (thermal_id {}, post_study_stage_index \
-                     {stage_index}).",
-                    delivery.thermal_id.0,
-                    delivery.delivery_start,
-                    delivery.delivery_end,
-                    delivery.thermal_id.0
-                ),
-            ),
-            Some(bound) => {
-                let lower = delivery.min_mw.max(bound.min_mw);
-                let upper = delivery.max_mw.min(bound.max_mw);
-                if lower > upper {
-                    ctx.add_error(
-                        ErrorKind::BusinessRuleViolation,
-                        "post_study_stages.json",
-                        Some(delivery_entity(delivery)),
-                        format!(
-                            "Thermal {}: future_anticipated_deliveries commitment interval \
-                             [{}, {}] and post-study stage index {stage_index} capability \
-                             [{}, {}] do not intersect; the committed amount is unsatisfiable \
-                             within capability.",
-                            delivery.thermal_id.0,
-                            delivery.min_mw,
-                            delivery.max_mw,
-                            bound.min_mw,
-                            bound.max_mw
-                        ),
-                    );
-                }
-            }
-        }
-    }
-}
-
 /// Post-study stage end date: `start_date` advanced by `duration_hours` rounded
 /// to whole days. `None` only on calendar overflow.
 #[allow(clippy::cast_possible_truncation)] // a validated finite positive duration yields a small non-negative day count
@@ -994,15 +986,6 @@ fn make_calendar_stage(
     }
 }
 
-/// Canonical `(thermal_id, delivery_start)` entity label for a post-study
-/// delivery diagnostic.
-fn delivery_entity(delivery: &FutureAnticipatedDelivery) -> String {
-    format!(
-        "thermal_id={}, delivery_start={}",
-        delivery.thermal_id.0, delivery.delivery_start
-    )
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -1016,8 +999,8 @@ fn delivery_entity(delivery: &FutureAnticipatedDelivery) -> String {
 mod tests {
     use cobre_core::temporal::{Block, PolicyGraphType, Stage};
     use cobre_core::{
-        AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, FutureAnticipatedDelivery,
-        HorizonGraph, Thermal,
+        AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, HorizonGraph, PostStudyStage,
+        PostStudyStages, PostStudyThermalBound, Thermal,
     };
 
     use chrono::{NaiveDate, TimeDelta};
@@ -1025,8 +1008,8 @@ mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use super::{
-        check_anticipated_thermals, check_future_delivery_thermal_is_anticipated,
-        lead_delivery_stage_count,
+        ExtendedDeliveryAxis, build_extended_delivery_axis, check_anticipated_thermals,
+        check_post_study_stages, extended_deciders, lead_delivery_stage_count, post_study_reach,
     };
     use crate::stages::StagesData;
     use crate::validation::schema::ParsedData;
@@ -1182,6 +1165,58 @@ mod tests {
         )
     }
 
+    /// Build a `PostStudyStages` whose calendar is date-contiguous from the study
+    /// horizon end (`stage_boundaries(study_durations)` last date), one stage per
+    /// `post_durations` entry; `bounds` is a slice of
+    /// `(thermal_id, post_study_stage_index, min_mw, max_mw)`.
+    fn post_study_from(
+        study_durations: &[f64],
+        post_durations: &[f64],
+        bounds: &[(i32, usize, f64, f64)],
+    ) -> PostStudyStages {
+        let boundaries = stage_boundaries(study_durations);
+        let mut cursor = boundaries[study_durations.len()];
+        let mut stages = Vec::with_capacity(post_durations.len());
+        for &hours in post_durations {
+            stages.push(PostStudyStage {
+                start_date: cursor,
+                duration_hours: hours,
+            });
+            cursor += TimeDelta::days((hours / 24.0) as i64);
+        }
+        let thermal_bounds = bounds
+            .iter()
+            .map(|&(thermal_id, j, min_mw, max_mw)| PostStudyThermalBound {
+                thermal_id: EntityId::from(thermal_id),
+                post_study_stage_index: j,
+                cost_per_mwh: 100.0,
+                min_mw,
+                max_mw,
+            })
+            .collect();
+        PostStudyStages {
+            stages,
+            thermal_bounds,
+        }
+    }
+
+    /// [`make_data_anticipated_with_durations`] with a `post_study_stages`
+    /// attached.
+    fn data_with_post_study(
+        thermals: Vec<Thermal>,
+        durations_hours: &[f64],
+        past_anticipated_commitments: Vec<AnticipatedCommitmentHistory>,
+        post_study: PostStudyStages,
+    ) -> ParsedData {
+        let mut data = make_data_anticipated_with_durations(
+            thermals,
+            durations_hours,
+            past_anticipated_commitments,
+        );
+        data.post_study_stages = Some(post_study);
+        data
+    }
+
     // ── AC-1: valid anticipated thermal — returns Ok(()) ─────────────────────
 
     /// Given a valid anticipated thermal (lead_stages=2, n_stages=5, no entry/exit,
@@ -1322,72 +1357,6 @@ mod tests {
         assert!(
             msg.contains("not an anticipated thermal"),
             "message should contain 'not an anticipated thermal', got: {msg}"
-        );
-    }
-
-    // ── Delivery-side mirror: future_anticipated_deliveries thermal must be
-    //    anticipated (check_future_delivery_thermal_is_anticipated) ──────────
-
-    /// Given a `future_anticipated_deliveries` entry (plus its matching
-    /// `post_study_stages` bound row shape) for a thermal that exists but
-    /// carries `anticipated_config: None`, `check_future_delivery_thermal_is_anticipated`
-    /// rejects it, naming the thermal — the delivery-side mirror of
-    /// [`test_history_entry_for_non_anticipated_thermal_error`].
-    #[test]
-    fn test_future_delivery_for_non_anticipated_thermal_rejected() {
-        let thermal = make_thermal(1, 0.0, 500.0); // NOT anticipated
-        let mut data = make_data_anticipated(vec![thermal], 1, vec![]);
-        data.initial_conditions.future_anticipated_deliveries = vec![FutureAnticipatedDelivery {
-            thermal_id: EntityId::from(1),
-            delivery_start: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
-            delivery_end: NaiveDate::from_ymd_opt(2024, 6, 8).unwrap(),
-            min_mw: 0.0,
-            max_mw: 300.0,
-        }];
-        let mut ctx = ValidationContext::new();
-        check_future_delivery_thermal_is_anticipated(&data, &mut ctx);
-        assert!(ctx.has_errors());
-        let errors = ctx.errors();
-        let relevant: Vec<_> = errors
-            .iter()
-            .filter(|e| e.kind == ErrorKind::BusinessRuleViolation)
-            .collect();
-        assert_eq!(
-            relevant.len(),
-            1,
-            "expected exactly one BusinessRuleViolation, got: {errors:?}"
-        );
-        let msg = &relevant[0].message;
-        assert!(
-            msg.contains("Thermal 1"),
-            "message should contain 'Thermal 1', got: {msg}"
-        );
-        assert!(
-            msg.contains("not an anticipated thermal"),
-            "message should contain 'not an anticipated thermal', got: {msg}"
-        );
-    }
-
-    /// The same delivery, but the referenced thermal carries `anticipated_config:
-    /// Some(_)`: `check_future_delivery_thermal_is_anticipated` produces no error —
-    /// the previously-valid path is unchanged.
-    #[test]
-    fn test_future_delivery_for_anticipated_thermal_accepted() {
-        let thermal = make_anticipated_thermal(1, 1, None, None);
-        let mut data = make_data_anticipated(vec![thermal], 1, vec![]);
-        data.initial_conditions.future_anticipated_deliveries = vec![FutureAnticipatedDelivery {
-            thermal_id: EntityId::from(1),
-            delivery_start: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
-            delivery_end: NaiveDate::from_ymd_opt(2024, 6, 8).unwrap(),
-            min_mw: 0.0,
-            max_mw: 300.0,
-        }];
-        let mut ctx = ValidationContext::new();
-        check_future_delivery_thermal_is_anticipated(&data, &mut ctx);
-        assert!(
-            !ctx.has_errors(),
-            "an anticipated thermal's future delivery must not be rejected, got: {:?}",
-            ctx.errors()
         );
     }
 
@@ -1569,25 +1538,20 @@ mod tests {
     // ── Post-horizon delivery exemption from the lead-horizon cap ────────────
 
     /// Given a `LeadTime(delta_hours)` thermal whose `delta_hours` strictly
-    /// exceeds the summed study-stage durations, when the thermal also carries
-    /// a `future_anticipated_deliveries` window (decided in-study, delivered
+    /// exceeds the summed study-stage durations, when the study declares a
+    /// post-study stage its extended lead reaches (decided in-study, delivered
     /// post-horizon), then no `BusinessRuleViolation` naming "lead_time exceeds
-    /// study horizon" is produced — the direct regression for the lead-cap bug.
+    /// study horizon" is produced — the re-keyed lead-cap exemption.
     #[test]
-    fn test_lead_time_exceeding_horizon_with_future_delivery_lead_cap_accepted() {
+    fn test_lead_time_exceeding_horizon_with_reachable_post_study_accepted() {
         let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
         let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
-        let mut data = make_data_anticipated_with_durations(vec![thermal], &durations, vec![]);
-        let horizon_end = stage_boundaries(&durations)[durations.len()];
-        data.initial_conditions.future_anticipated_deliveries = vec![FutureAnticipatedDelivery {
-            thermal_id: EntityId::from(1),
-            delivery_start: horizon_end,
-            delivery_end: horizon_end + TimeDelta::days(7),
-            min_mw: 0.0,
-            max_mw: 500.0,
-        }];
+        // A 60-day post-study stage: the 3000h lead, decided at study stage 3,
+        // delivers into post-study stage 0.
+        let post_study = post_study_from(&durations, &[1440.0], &[(1, 0, 0.0, 500.0)]);
+        let data = data_with_post_study(vec![thermal], &durations, vec![], post_study);
         let mut ctx = ValidationContext::new();
-        validate_semantic_hydro_thermal(&data, &mut ctx);
+        check_anticipated_thermals(&data, &mut ctx);
         let errors = ctx.errors();
         let lead_cap_errors: Vec<_> = errors
             .iter()
@@ -1598,27 +1562,26 @@ mod tests {
             .collect();
         assert!(
             lead_cap_errors.is_empty(),
-            "a post-horizon-delivery thermal must be exempt from the lead-horizon cap, got: {errors:?}"
+            "a thermal whose lead reaches a declared post-study stage must be exempt from the \
+             lead-horizon cap, got: {errors:?}"
         );
     }
 
-    /// Given the same over-horizon `LeadTime` thermal as above but with NO
-    /// `future_anticipated_deliveries` window, the lead-horizon cap still
-    /// rejects it: the exemption is scoped to a thermal that genuinely
-    /// delivers post-horizon, never a blanket relaxation of the cap.
+    /// Given the same over-horizon `LeadTime` thermal but with NO post-study
+    /// stages declared, the lead-horizon cap still rejects it: the exemption is
+    /// scoped to a study that declares a reachable post-study stage, never a
+    /// blanket relaxation of the cap.
     #[test]
-    fn test_lead_time_exceeding_horizon_without_future_delivery_still_rejected() {
+    fn test_lead_time_exceeding_horizon_without_post_study_still_rejected() {
         let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
         let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
         let data = make_data_anticipated_with_durations(vec![thermal], &durations, vec![]);
         assert!(
-            data.initial_conditions
-                .future_anticipated_deliveries
-                .is_empty(),
-            "fixture must carry no future delivery window"
+            data.post_study_stages.is_none(),
+            "fixture must declare no post-study stages"
         );
         let mut ctx = ValidationContext::new();
-        validate_semantic_hydro_thermal(&data, &mut ctx);
+        check_anticipated_thermals(&data, &mut ctx);
         let errors = ctx.errors();
         let relevant: Vec<_> = errors
             .iter()
@@ -1634,37 +1597,302 @@ mod tests {
         );
     }
 
-    /// Given a `LeadTime` thermal exceeding the horizon with a matching
-    /// `future_anticipated_deliveries` window AND `past_anticipated_commitments`
-    /// tiling every leading study stage at 0 MW (the pre-study-decided
-    /// placeholder for its whole in-study life, since `lead_delivery_stage_count`
+    /// Given a `LeadTime` thermal exceeding the horizon whose extended lead
+    /// reaches a declared post-study stage AND `past_anticipated_commitments`
+    /// tiling every leading study stage at 0 MW (`lead_delivery_stage_count`
     /// resolves to `n_stages` whenever `delta_hours` exceeds the horizon),
     /// `check_anticipated_thermals` validates end-to-end with no errors: the
-    /// lead-cap exemption composes cleanly with the full-tiling coverage
+    /// re-keyed lead-cap exemption composes cleanly with the full-tiling coverage
     /// contract.
     #[test]
     fn test_post_horizon_delivery_thermal_tiling_all_study_stages_validates() {
         let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
         let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
-        let mut data = make_data_anticipated_with_durations(
+        let post_study = post_study_from(&durations, &[1440.0], &[(1, 0, 0.0, 500.0)]);
+        let data = data_with_post_study(
             vec![thermal],
             &durations,
             commitments_on(1, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &durations),
+            post_study,
         );
-        let horizon_end = stage_boundaries(&durations)[durations.len()];
-        data.initial_conditions.future_anticipated_deliveries = vec![FutureAnticipatedDelivery {
-            thermal_id: EntityId::from(1),
-            delivery_start: horizon_end,
-            delivery_end: horizon_end + TimeDelta::days(7),
-            min_mw: 0.0,
-            max_mw: 500.0,
-        }];
         let mut ctx = ValidationContext::new();
         check_anticipated_thermals(&data, &mut ctx);
         assert!(
             !ctx.has_errors(),
             "a post-horizon-delivery thermal tiling every leading study stage must validate \
              cleanly through check_anticipated_thermals, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    // ── The concatenated-calendar walk: extended_deciders / post_study_reach ──
+
+    /// `extended_deciders` mirrors the solver's `resolve_point` on the PMO
+    /// calendar (weekly-then-monthly), producing the same delivery-anchored
+    /// decider shape `[None×4, Some(3), Some(4), Some(5)]` — the fixture pins
+    /// cobre-io's independent walk to the solver's resolution shape.
+    #[test]
+    fn test_extended_deciders_lead_time_pmo_matches_solver_resolution() {
+        let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0];
+        let deciders = extended_deciders(AnticipatedConfig::LeadTime(720.0), &durations);
+        assert_eq!(
+            deciders,
+            vec![None, None, None, None, Some(3), Some(4), Some(5)]
+        );
+    }
+
+    /// `extended_deciders` for `LeadStages(l)` is a bare stage shift `c(m) = m − l`
+    /// (calendar never consulted), independent of the (non-uniform) durations.
+    #[test]
+    fn test_extended_deciders_lead_stages_is_bare_shift() {
+        let durations = [168.0, 720.0, 168.0, 720.0, 168.0, 720.0];
+        let deciders = extended_deciders(AnticipatedConfig::LeadStages(2), &durations);
+        assert_eq!(
+            deciders,
+            vec![None, None, Some(0), Some(1), Some(2), Some(3)]
+        );
+    }
+
+    /// Uniform post-study durations: an over-horizon lead splits the post-study
+    /// deliveries into an E2 pre-study-decided prefix (`no_carrier`) and an
+    /// in-study-decided suffix (`carried`). Two study stages (ids 0,1) plus two
+    /// continued post-study stages (ids 2,3); `LeadTime(2500)` on a `720`h
+    /// calendar decides post-study stage 0 pre-study and post-study stage 1 at
+    /// study stage 0.
+    #[test]
+    fn test_post_study_reach_uniform_splits_carried_and_e2() {
+        let axis = ExtendedDeliveryAxis {
+            durations: vec![720.0, 720.0, 720.0, 720.0],
+            stage_ids: vec![0, 1, 2, 3],
+            n_stages: 2,
+        };
+        let reach = post_study_reach(AnticipatedConfig::LeadTime(2500.0), &axis, (None, None));
+        assert_eq!(reach.carried, vec![1]);
+        assert_eq!(reach.no_carrier, vec![0]);
+    }
+
+    /// Non-uniform post-study durations: `LeadTime(1000)` on a `[168,720|720,720]`
+    /// extended calendar reaches post-study stage 0 from an in-study decision
+    /// (study stage 1) and no E2 prefix.
+    #[test]
+    fn test_post_study_reach_non_uniform_reaches_first_post_study_stage() {
+        let axis = ExtendedDeliveryAxis {
+            durations: vec![168.0, 720.0, 720.0, 720.0],
+            stage_ids: vec![0, 1, 2, 3],
+            n_stages: 2,
+        };
+        let reach = post_study_reach(AnticipatedConfig::LeadTime(1000.0), &axis, (None, None));
+        assert_eq!(reach.carried, vec![0]);
+        assert!(reach.no_carrier.is_empty());
+    }
+
+    /// The commissioning gate keys on the DELIVERY stage's continued id: an
+    /// `exit_stage_id` that decommissions the plant at a post-study id drops the
+    /// later post-study delivery from `carried`, even though its in-study decider
+    /// exists (mirrors the solver's delivery-anchored gate).
+    #[test]
+    fn test_post_study_reach_commissioning_gate_drops_decommissioned_delivery() {
+        let axis = ExtendedDeliveryAxis {
+            durations: vec![720.0, 720.0, 720.0, 720.0],
+            stage_ids: vec![0, 1, 2, 3],
+            n_stages: 2,
+        };
+        // exit=3 decommissions the plant at continued post-study id 3, so the
+        // delivery at delivery stage 3 (post-study index 1) is inactive.
+        let reach = post_study_reach(AnticipatedConfig::LeadTime(2500.0), &axis, (None, Some(3)));
+        assert!(
+            reach.carried.is_empty(),
+            "the post-study-index-1 delivery is commissioning-inactive, got: {:?}",
+            reach.carried
+        );
+        assert_eq!(reach.no_carrier, vec![0]);
+    }
+
+    /// A study with no `post_study_stages` yields no delivery axis, so nothing
+    /// reaches post-study — the `None` return the lead-cap reject keys on.
+    #[test]
+    fn test_extended_delivery_axis_absent_without_post_study() {
+        let data =
+            make_data_anticipated(vec![make_anticipated_thermal(1, 2, None, None)], 3, vec![]);
+        assert!(build_extended_delivery_axis(&data).is_none());
+    }
+
+    /// `build_extended_delivery_axis` concatenates the study durations/ids with
+    /// the post-study durations and the continued id sequence
+    /// (`max_study_id + 1 ..`).
+    #[test]
+    fn test_extended_delivery_axis_concatenates_and_continues_ids() {
+        let durations = [720.0, 720.0];
+        let post_study = post_study_from(&durations, &[696.0, 744.0], &[]);
+        let data = data_with_post_study(
+            vec![make_anticipated_thermal(1, 1, None, None)],
+            &durations,
+            commitments_on(1, &[0.0], &durations),
+            post_study,
+        );
+        let Some(axis) = build_extended_delivery_axis(&data) else {
+            panic!("post-study declared, so the axis must build");
+        };
+        assert_eq!(axis.n_stages, 2);
+        assert_eq!(axis.durations, vec![720.0, 720.0, 696.0, 744.0]);
+        assert_eq!(axis.stage_ids, vec![0, 1, 2, 3]);
+    }
+
+    // ── Rule 1 (missing bound cell) and Rule 2 (E2 no-carrier) ────────────────
+
+    /// Rule 1 failing fixture: an anticipated thermal whose extended lead reaches
+    /// post-study stage 0 with no `PostStudyThermalBound(id, 0)` is rejected,
+    /// naming the plant and the stage.
+    #[test]
+    fn test_missing_post_study_bound_cell_rejected() {
+        let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
+        let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
+        // Post-study stage 0 is reached (see the exemption test) but no bound cell
+        // is declared for it.
+        let post_study = post_study_from(&durations, &[1440.0], &[]);
+        let data = data_with_post_study(
+            vec![thermal],
+            &durations,
+            commitments_on(1, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &durations),
+            post_study,
+        );
+        let mut ctx = ValidationContext::new();
+        check_post_study_stages(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("no thermal_bounds entry")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one missing-bound-cell rejection, got: {errors:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("Thermal 1") && msg.contains("post_study_stage_index 0"),
+            "message should name the plant and post-study stage 0, got: {msg}"
+        );
+    }
+
+    /// Rule 1 passing sibling: adding the `PostStudyThermalBound(1, 0)` cell makes
+    /// the reached delivery valid — no missing-bound-cell rejection.
+    #[test]
+    fn test_present_post_study_bound_cell_accepted() {
+        let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
+        let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
+        let post_study = post_study_from(&durations, &[1440.0], &[(1, 0, 0.0, 500.0)]);
+        let data = data_with_post_study(
+            vec![thermal],
+            &durations,
+            commitments_on(1, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &durations),
+            post_study,
+        );
+        let mut ctx = ValidationContext::new();
+        check_post_study_stages(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "a reached delivery with its bound cell present must not be rejected, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 2 (E2) failing fixture: a `LeadTime` lead so long its FIRST post-study
+    /// delivery is decided at a pre-study stage (no carrier) is rejected, naming
+    /// the plant. `[720,720|720,720]` with `LeadTime(2500)` decides post-study
+    /// stage 0 pre-study.
+    #[test]
+    fn test_pre_study_decided_post_study_delivery_rejected() {
+        let thermal = make_lead_time_anticipated_thermal(1, 2500.0, None, None);
+        let durations = [720.0, 720.0];
+        // Both post-study stages present with bound cells so the ONLY rejection is
+        // the E2 no-carrier one for post-study stage 0.
+        let post_study = post_study_from(
+            &durations,
+            &[720.0, 720.0],
+            &[(1, 0, 0.0, 500.0), (1, 1, 0.0, 500.0)],
+        );
+        let data = data_with_post_study(
+            vec![thermal],
+            &durations,
+            commitments_on(1, &[0.0, 0.0], &durations),
+            post_study,
+        );
+        let mut ctx = ValidationContext::new();
+        check_post_study_stages(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation && e.message.contains("has no carrier")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one E2 no-carrier rejection, got: {errors:?}"
+        );
+        assert!(
+            relevant[0].message.contains("Thermal 1"),
+            "message should name the plant, got: {}",
+            relevant[0].message
+        );
+    }
+
+    /// Rule 2 (E2) passing sibling: shortening the lead so every post-study
+    /// delivery is decided in-study removes the E2 rejection. `LeadTime(800)` on
+    /// the same calendar decides post-study stage 0 at study stage 0.
+    #[test]
+    fn test_in_study_decided_post_study_delivery_accepted() {
+        let thermal = make_lead_time_anticipated_thermal(1, 800.0, None, None);
+        let durations = [720.0, 720.0];
+        let post_study = post_study_from(
+            &durations,
+            &[720.0, 720.0],
+            &[(1, 0, 0.0, 500.0), (1, 1, 0.0, 500.0)],
+        );
+        let data = data_with_post_study(
+            vec![thermal],
+            &durations,
+            commitments_on(1, &[0.0], &durations),
+            post_study,
+        );
+        let mut ctx = ValidationContext::new();
+        check_post_study_stages(&data, &mut ctx);
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("has no carrier")),
+            "an in-study-decided post-study delivery must not trigger the E2 reject, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Invariant (a) is retained: a post-study calendar whose first stage does not
+    /// start at the study horizon end is still rejected.
+    #[test]
+    fn test_post_study_calendar_anchor_still_enforced() {
+        let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
+        let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
+        let mut post_study = post_study_from(&durations, &[1440.0], &[(1, 0, 0.0, 500.0)]);
+        // Shift the anchor a day past the study horizon end.
+        post_study.stages[0].start_date += TimeDelta::days(1);
+        let data = data_with_post_study(
+            vec![thermal],
+            &durations,
+            commitments_on(1, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &durations),
+            post_study,
+        );
+        let mut ctx = ValidationContext::new();
+        check_post_study_stages(&data, &mut ctx);
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("post-study calendar must begin exactly")),
+            "invariant (a) anchor check must still fire, got: {:?}",
             ctx.errors()
         );
     }

@@ -1,11 +1,11 @@
 //! Post-study boundary calendar and per-cell thermal cost/bounds.
 //!
-//! An in-study GNL commitment delivered after the dispatch horizon
-//! ([`FutureAnticipatedDelivery`](crate::FutureAnticipatedDelivery)) has no
+//! An in-study GNL commitment delivered after the dispatch horizon has no
 //! dispatched stage to anchor its delivery-stage hours, fuel cost, or generation
-//! bounds against. [`PostStudyStages`] is the standalone boundary input carrying
-//! an ordered post-horizon calendar segment plus a per-`(thermal, post-study
-//! stage)` cost/bounds table those deliveries resolve into by date.
+//! bounds against. `post_study_stages.json` is the sole post-horizon surface:
+//! [`PostStudyStages`] is the standalone boundary input carrying an ordered
+//! post-horizon calendar segment plus a per-`(thermal, post-study stage)`
+//! cost/bounds table those commitments resolve into by date.
 //!
 //! The dispatch horizon is untouched: post-study stages are never dispatched and
 //! never a [`Stage`](crate::temporal::Stage) in `system.stages()` — they are a
@@ -62,9 +62,10 @@ pub struct PostStudyStage {
 ///
 /// `post_study_stage_index` indexes into [`PostStudyStages::stages`]. The
 /// `[min_mw, max_mw]` interval is the plant's delivery capability at that
-/// post-study stage; a post-study delivery's own committed
-/// `[min_mw, max_mw]` interval must intersect it (enforced by the `cobre-io`
-/// semantic validator).
+/// post-study stage — the sole post-horizon bound surface, directly costing
+/// and bounding the delivery with no separate committed interval to reconcile
+/// against. The `cobre-io` semantic validator rejects a post-study stage an
+/// anticipated thermal's lead reaches with no such cell declared.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PostStudyThermalBound {

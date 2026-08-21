@@ -1269,7 +1269,6 @@ fn fan_or_chain_system_ext(
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
 
     SystemBuilder::new()

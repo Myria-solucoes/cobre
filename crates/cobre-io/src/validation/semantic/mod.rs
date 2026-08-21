@@ -62,8 +62,8 @@
 //! |44 | Sum of unit group minima (`min_turbined_m3s`, `min_generation_mw`, checked independently) must reach the plant's own declared value — the flipped direction of rule 41: rule 41 caps `Σ group max ≤ plant max`, this floors `Σ group min ≥ plant min`; checked against the entity declaration only, never against per-stage resolved bounds | `system/hydros.json` | `InvalidValue` |
 //! |45 | `hydro_unit_group_bounds` row `max_turbined_m3s`/`max_generation_mw` must not exceed that GROUP's own declared value (checked independently) — the group-axis mirror of rule 43, which checks the plant's own declared value instead | `constraints/hydro_unit_group_bounds.parquet` | `InvalidValue` |
 //! |46 | `hydro_bounds` row `min_diversion_m3s` set for a hydro declaring no `diversion` channel (the channel is pinned `[0, 0]` with none declared, making a positive floor infeasible); cross-row/cross-source min/max inversion is deliberately out of scope for this rule | `constraints/hydro_bounds.parquet` | `InvalidValue` |
-//! |47 | Post-study boundary (`post_study_stages.json`): stages date-contiguous with first `start_date` at the study horizon end; every `future_anticipated_deliveries` window covered exactly (`1.0`) by them with a `PostStudyThermalBound` per referenced `(thermal, stage)` whose capability intersects the commitment interval | `post_study_stages.json` | `BusinessRuleViolation` |
-//! |48 | `future_anticipated_deliveries` entry's `thermal_id` resolves to a thermal with `anticipated_config` set — the delivery-side mirror of rule 15's bijection | `initial_conditions.json` | `BusinessRuleViolation` |
+//! |47 | Post-study boundary (`post_study_stages.json`), the sole post-horizon surface: stages date-contiguous with first `start_date` at the study horizon end (a); a `PostStudyThermalBound` for every post-study stage an anticipated thermal's extended lead reaches from an in-study, commissioning-active decision (Rule 1); no post-study delivery decided at a pre-study stage — such an E2 delivery has no carrier on the delivery axis (Rule 2) | `post_study_stages.json` | `BusinessRuleViolation` |
+//! |48 | *(retired — number never reused)* | — | — |
 //!
 //! A hydro unit group bounds row's `block_id` range and duplicate-row keying
 //! are covered by rules 35 and 36 above; a row referencing a non-existent
@@ -166,7 +166,6 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_hydro_unit_groups(data, ctx);
     thermal::check_thermal_generation_bounds(data, ctx);
     thermal::check_anticipated_thermals(data, ctx);
-    thermal::check_future_delivery_thermal_is_anticipated(data, ctx);
     thermal::check_anticipated_cadence_transition(data, ctx);
     thermal::check_thermal_bounds_override_stage_range(data, ctx);
     thermal::check_post_study_stages(data, ctx);

@@ -6104,7 +6104,6 @@ mod chronological_telescoping {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -6833,7 +6832,6 @@ mod chronological_attribution {
             // these tests inspect LP structure and state dimension, never a
             // seeded value.
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
