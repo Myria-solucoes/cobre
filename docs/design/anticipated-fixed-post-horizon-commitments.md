@@ -130,6 +130,11 @@ The validation matrix for an anticipated plant's windows becomes:
 - **V4 (extended).** `check_committed_value_bounds` applies to the post-horizon
   windows exactly as to the in-study ones: finite, within the plant's declared
   `[min_generation_mw, max_generation_mw]` envelope tolerance.
+- **V5 (new).** A non-zero fixed value must lie inside the plant's
+  commissioning window at its delivery stage, mirroring the in-study seed rule
+  (`check_seed_within_window`): a plant whose window closes cannot deliver
+  after it, so a non-zero value there is a modelling error, never a foldable
+  constant. Explicit 0 MW tiling windows stay legal on inactive stages.
 - **Rule 1 (unchanged).** Class-3 stages still require their
   `PostStudyThermalBound` cells; class-4 stages require none (no decision
   exists to bound).
@@ -250,15 +255,18 @@ Mechanics, inside `load_boundary_cuts` alongside `build_rebind`/`rebind_cut`:
 · factor` — O(fold terms) per cut, once at load, zero hot-path cost.
 - **Frame contract:** the fold reads the cut's coefficients in the same frame
   `rebind_cut` reads them, and lands on the intercept before the intercept's
-  own load transforms (the cost-scale division and the discount-ratio
-  rescale) are applied — the folded term is future cost exactly like the rest
-  of the intercept and must ride every intercept transform with it.
+  own load transforms (both applied by `rescale_cut_records_for_load`: the
+  cost-scale division and the legacy-ratio rescale) — the folded term is
+  future cost exactly like the rest of the intercept and must ride every
+  intercept transform with it.
 - A fixed window overlapping no source month contributes nothing (the source
   does not price those dates) — mirroring `RebindOp::Zero`, never an error.
 - With no `config.policy.boundary` declared there is no fold target: the fixed
-  values are inert, and the existing single-shot advisory
-  (`warn_on_boundary_absent_post_study_delivery`) already names the affected
-  plants. Never a reject.
+  values are inert, never a reject. The single-shot advisory
+  (`warn_on_boundary_absent_post_study_delivery`) widens to also name a plant
+  declaring a **non-zero** fixed value with no boundary — the user presumably
+  expected it priced. All-zero tilings (the mandatory stub) stay silent: a
+  zero value is provably inert, so warning on it would be noise.
 
 No new state, no new rows, no interaction with `Renormalize` (class-3 slot
 intervals and class-4 windows partition the post-study calendar, so a live
@@ -284,8 +292,13 @@ their real delivery dates, distinguishable from decided deliveries (a source
 marker: decided vs fixed), with the values echoed from the input — the
 analogue of the `*` rows DECOMP's `relgnl` re-prints. In-study surfaces
 (`anticipated_committed_mw`, the carried ring-slot readings) are unchanged.
-Whatever file carries the post-study delivery report gains the fixed rows in
-both writers — the CLI and the Python bindings — under the workspace's output
+
+Fixed commitments are scenario- and stage-independent constants, so they never
+enter the per-scenario anticipated-lanes partition (which is built from solver
+primals and would repeat the constant per scenario while forcing its non-null
+columns nullable). They get a **run-level table** instead — one row per plant ×
+fixed window (dates, MW, a fixed source marker), written once per run by both
+writers — the CLI and the Python bindings — under the workspace's output
 parity rule.
 
 ## 9. Verification plan
@@ -304,14 +317,15 @@ Regressions to pin at implementation, each named for the contract it guards:
 - **Fold analytics:** a boundary checkpoint with hand-authored anticipated
   coefficients loads against declared fixed windows and the cut intercepts
   move by the hand-computed `Σ coeff · (overlap/H_M) · v` — including a
-  no-overlap window contributing zero, and composition with the cost-scale
-  and discount-ratio intercept transforms.
+  no-overlap window contributing zero, and composition with
+  `rescale_cut_records_for_load`'s intercept transforms.
 - **Byte-neutrality:** with no fixed window declared (`g_i = 0`), existing
   goldens and parity baselines are bit-identical (the excision is the
   identity; the fold vector is empty).
 - **Validation matrix:** V2 rejects an untiled fixed window naming the
   post-study stages; V3 rejects a window covering a class-3 stage; V4 rejects
-  an out-of-envelope fixed value; the E2 reject message is retired.
+  an out-of-envelope fixed value; V5 rejects a non-zero fixed value outside
+  the plant's commissioning window; the E2 reject message is retired.
 - **No-boundary inertness:** fixed values with no boundary leave every LP and
   every output cost untouched and fire the existing advisory once.
 
