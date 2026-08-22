@@ -1307,6 +1307,22 @@ windows of the same plant is rejected earlier, at parse time, by the shared
 windowed-record validator that also serves `past_defluences` and
 `recent_observations`.
 
+A single window may not STRADDLE the study horizon — `start_date < horizon_end
+< end_date`, spanning the in-study prefix (class 2) and the post-horizon fixed
+set (class 4) in one record — because the two are semantically distinct
+(in-study deliveries mature in an LP stage; post-horizon ones never enter the
+ring and are priced by the boundary fold), and the downstream class-4 selectors
+key on `start_date >= horizon_end`, so a straddling record would be silently
+dropped from the fold and the outputs. `check_no_straddling_commitment_window`
+rejects it with a `BusinessRuleViolation` instructing the author to split the
+coverage into two windows at `horizon_end`; the boundary cases (`end_date ==
+horizon_end`, purely in-study; `start_date == horizon_end`, purely post-horizon)
+are legal. This makes "no window straddles the horizon" an enforced precondition
+the class-4 date selectors rely on, not an assumed one. Pinned by
+`test_straddling_commitment_window_rejected` and
+`test_horizon_split_commitment_window_pair_loads_cleanly`
+(`crates/cobre-io/tests/post_study_stages.rs`).
+
 The in-study half is calendar-derived, computed independently of the solver
 crate's point-commitment resolver (`cobre-io` is upstream and cannot depend on
 it): `LeadStages(l)` clamps to `min(l, n_stages)`; `LeadTime(delta)` counts the

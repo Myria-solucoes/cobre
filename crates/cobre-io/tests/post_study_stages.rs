@@ -430,6 +430,72 @@ fn test_declaration_order_invariance_through_system() {
     );
 }
 
+// ── horizon-straddle guard: reject a straddle, accept a split pair ───────
+
+/// A single `past_anticipated_commitments` window whose span crosses the
+/// study horizon end (2024-02-01, [`make_minimal_case`]'s single 744h stage)
+/// is rejected: the window cannot deliver both in-study and post-study
+/// coverage, and the rejection names the plant and the offending window's
+/// dates.
+#[test]
+fn test_straddling_commitment_window_rejected() {
+    let dir = TempDir::new().unwrap();
+    make_minimal_case(&dir);
+    write_anticipated_thermal_86(dir.path(), 744.0);
+    write_ic_with_commitments(dir.path(), &[("2024-01-15", "2024-02-15", 0.0)]);
+
+    let msg = load_case(dir.path()).unwrap_err().to_string();
+    assert!(
+        msg.contains("straddles the study horizon"),
+        "expected the horizon-straddle rejection, got: {msg}"
+    );
+    assert!(
+        msg.contains("Thermal 86") && msg.contains("2024-01-15") && msg.contains("2024-02-15"),
+        "expected the message to name the plant and the offending window's dates, got: {msg}"
+    );
+}
+
+/// The same overall span as
+/// [`test_straddling_commitment_window_rejected`], but declared as two
+/// windows split exactly at the horizon end (2024-02-01): one ending there
+/// (purely in-study) and one starting there (purely post-study). Both
+/// boundary-exact windows are accepted by the straddle guard, and — tiling
+/// the leading study stage and the pre-study-decided post-study stage — the
+/// deck loads cleanly end to end. Pins the guard's off-by-one boundary,
+/// independent of `test_pre_study_decided_post_study_delivery_loads_when_tiled`'s
+/// V2-tiling rationale.
+#[test]
+fn test_horizon_split_commitment_window_pair_loads_cleanly() {
+    let dir = TempDir::new().unwrap();
+    make_minimal_case(&dir);
+    write_anticipated_thermal_86(dir.path(), 1440.0);
+    write_ic_with_commitments(
+        dir.path(),
+        &[
+            ("2024-01-01", "2024-02-01", 0.0),
+            ("2024-02-01", "2024-03-01", 0.0),
+        ],
+    );
+    write_file(
+        dir.path(),
+        "post_study_stages.json",
+        r#"{
+          "stages": [
+            { "start_date": "2024-02-01", "duration_hours": 696.0 },
+            { "start_date": "2024-03-01", "duration_hours": 744.0 }
+          ],
+          "thermal_bounds": [
+            { "thermal_id": 86, "post_study_stage_index": 1, "cost_per_mwh": 220.0, "min_mw": 0.0, "max_mw": 350.0 }
+          ]
+        }"#,
+    );
+
+    let system = load_case(dir.path()).unwrap_or_else(|e| {
+        panic!("a horizon-split commitment window pair must load cleanly, got: {e}")
+    });
+    assert!(system.post_study_stages().is_some());
+}
+
 // ── V2: fixed post-horizon windows must tile the class-4 stages ──────────
 
 /// A `LeadTime` of 5040h over the 4×720h study calendar (2880h total) decides

@@ -54,7 +54,18 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 ///    commissioning window IS supported and
 ///    composes with the lookahead; these checks validate the LEAD itself,
 ///    independent of any window.
-/// 2. **Past-commitments registry bijection** with
+/// 2. **Horizon-straddle guard** — see `check_no_straddling_commitment_window`:
+///    a `past_anticipated_commitments` window whose `[start_date, end_date)`
+///    span crosses the study horizon end (`start_date < horizon_end &&
+///    end_date > horizon_end`) is rejected, since it is unrepresentable by
+///    either (3)'s study-side bijection or `check_post_study_stages`'s
+///    post-study tiling and today silently prices its post-horizon tail at
+///    zero. A window ending exactly at, or starting exactly at, the horizon is
+///    accepted (purely in-study / purely post-study — two semantically
+///    distinct coverages, so a straddling declaration must be split in two).
+///    Gates (3)-(5) for the offending plant, since a straddling window's
+///    coverage numbers are meaningless.
+/// 3. **Past-commitments registry bijection** with
 ///    `ic.past_anticipated_commitments`: each anticipated thermal has at least
 ///    one commitment window, each window references an anticipated thermal, and
 ///    the plant's windows tile its leading `lead_delivery_stage_count` delivery
@@ -62,8 +73,8 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 ///    horizon) via the shared [`StageCalendar`] resolver — a hard gate, no
 ///    fallback (the "Pre-study anticipated commitments: calendar-derived
 ///    coverage" contract).
-/// 3. **Committed-value generation bounds** — see `check_committed_value_bounds`.
-/// 4. **Seed-vs-window consistency** — see `check_seed_within_window`.
+/// 4. **Committed-value generation bounds** — see `check_committed_value_bounds`.
+/// 5. **Seed-vs-window consistency** — see `check_seed_within_window`.
 pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut ValidationContext) {
     // Study stages (id >= 0) are the contiguous suffix of the id-sorted stage
     // list; pre-study stages (negative IDs) are never delivery targets.
@@ -74,6 +85,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
     let n_stages = study_stage_ids.len();
     let study_durations = study_stage_durations(data);
+    let horizon_end = study_stages.last().map(|s| s.end_date);
 
     let extended_axis = build_extended_delivery_axis(data);
 
@@ -179,6 +191,11 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
                 );
             }
             Some(records) => {
+                if let Some(horizon_end) = horizon_end
+                    && !check_no_straddling_commitment_window(thermal_id, records, horizon_end, ctx)
+                {
+                    continue;
+                }
                 let Some(calendar) = calendar.as_ref() else {
                     continue;
                 };
@@ -556,6 +573,45 @@ fn classify_deliveries(
         beyond_reach,
         commissioning_inactive,
     }
+}
+
+/// Horizon-straddle guard (item 2 of [`check_anticipated_thermals`]): rejects
+/// every window in `records` whose `[start_date, end_date)` span crosses
+/// `horizon_end` (`start_date < horizon_end && end_date > horizon_end`) — a
+/// single window cannot deliver both in-study and post-study coverage, and
+/// left unchecked the post-study tail is silently priced at zero rather than
+/// rejected. A window ending exactly at `horizon_end` (purely in-study) or
+/// starting exactly at it (purely post-study) is accepted; the two are
+/// semantically distinct coverages and must be declared as separate windows
+/// split at the horizon. Returns whether every window passed, gating the
+/// bijection/bounds/seed checks the caller runs next for this plant.
+fn check_no_straddling_commitment_window(
+    thermal_id: EntityId,
+    records: &[&AnticipatedCommitmentHistory],
+    horizon_end: NaiveDate,
+    ctx: &mut ValidationContext,
+) -> bool {
+    let mut valid = true;
+    let entity_str = format!("thermals[id={}].anticipated_config", thermal_id.0);
+    for record in records {
+        if record.start_date < horizon_end && record.end_date > horizon_end {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "initial_conditions.json",
+                Some(&entity_str),
+                format!(
+                    "Thermal {}: past_anticipated_commitments window [{}, {}) straddles the \
+                     study horizon end ({horizon_end}); a single window may not cover both \
+                     in-study and post-study delivery. Declare two windows split at the \
+                     horizon instead: one ending at {horizon_end} for the in-study coverage, \
+                     one starting at {horizon_end} for the post-study coverage.",
+                    thermal_id.0, record.start_date, record.end_date
+                ),
+            );
+            valid = false;
+        }
+    }
+    valid
 }
 
 /// A thermal's commitment windows must tile its leading `k_i` delivery stages
@@ -976,7 +1032,10 @@ pub(super) fn check_thermal_bounds_override_stage_range(
 /// post-study stage(s), for Rule 1 / V2 / V3 / V5 / for (a)). No rule short-circuits
 /// another; a study without `post_study_stages.json` is validated in
 /// [`check_anticipated_thermals`] (a `lead > horizon` plant with no post-study
-/// stages is a hard reject there).
+/// stages is a hard reject there). A `past_anticipated_commitments` window
+/// straddling the study horizon is also rejected there, before this
+/// function's coverage rules run, so V2/V3 may assume no window straddles the
+/// horizon end.
 pub(super) fn check_post_study_stages(data: &ParsedData, ctx: &mut ValidationContext) {
     let Some(post_study) = data.post_study_stages.as_ref() else {
         return;
