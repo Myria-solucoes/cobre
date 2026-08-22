@@ -85,15 +85,10 @@ mod deck_smoke {
 
     use std::path::PathBuf;
 
+    use cobre_io::StateFamily;
     use cobre_sddp::indexer::StateDim;
 
     use crate::common::fresh_setup_with;
-
-    /// `EntityType::AnticipatedThermalState`'s raw discriminant
-    /// (`schemas/policy.fbs`); mirrors `cobre_sddp::policy_export`'s own
-    /// same-named constant, which is private to its module and so
-    /// unreachable from here.
-    const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 
     /// The GNL plant's cobre thermal id in the converted deck.
     const DECK_THERMAL_ID: i32 = 94;
@@ -132,7 +127,7 @@ mod deck_smoke {
 
         let manifest = setup.build_terminal_entity_manifest(&system);
         let ring_slot = manifest.iter().enumerate().find(|(_, slot)| {
-            slot.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            slot.entity_type == StateFamily::AnticipatedThermalState.code()
                 && slot.entity_id == DECK_THERMAL_ID
                 && slot.delivery_date >= 20_260_501
         });
@@ -180,16 +175,12 @@ mod anticipated_fanout_readback {
     use chrono::NaiveDate;
     use cobre_io::{
         EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge, ManifestNode,
-        PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+        PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload, StateFamily,
         write_policy_checkpoint,
     };
     use cobre_sddp::load_boundary_cuts;
 
     use crate::common::fresh_setup_with;
-
-    /// Mirrors `deck_smoke`'s same-named constant (`EntityType::AnticipatedThermalState`'s
-    /// raw discriminant, `schemas/policy.fbs`); private to `cobre_sddp::policy_export`.
-    const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 
     /// SANTA CRUZ's cobre thermal id in the converted deck.
     const DECK_THERMAL_ID: i32 = 86;
@@ -232,7 +223,7 @@ mod anticipated_fanout_readback {
 
     fn anticipated_source_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_type: StateFamily::AnticipatedThermalState.code(),
             entity_id: thermal_id,
             subindex: ring_slot,
             was_active: true,
@@ -329,7 +320,7 @@ mod anticipated_fanout_readback {
             .iter()
             .enumerate()
             .filter(|(_, slot)| {
-                slot.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+                slot.entity_type == StateFamily::AnticipatedThermalState.code()
                     && slot.entity_id == DECK_THERMAL_ID
                     && post_study_anchors.contains(&slot.delivery_date)
             })

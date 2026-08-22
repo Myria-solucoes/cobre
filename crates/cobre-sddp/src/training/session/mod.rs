@@ -847,14 +847,36 @@ where
             },
         );
 
-        // The enumerated forward's exact bound is either the risk-neutral `Σ w·c`
-        // (effective `Expectation`) or the NESTED risk-adjusted recursion over the
-        // enumerated tree (uniform effective `CVaR`); the sampled forward keeps the
-        // statistical Welford path. `sync_forward` owns all three estimators, so no
-        // second gather or post-hoc override is needed. Weights/costs are read off
-        // the `Traversal` resolved once at training start (`TrainingSession::new`).
+        let sync_result = self.sync_forward_bound(&forward_result)?;
+
+        emit(
+            self.runtime.event_sender(),
+            TrainingEvent::ForwardSyncComplete {
+                iteration,
+                global_ub_mean: sync_result.global_ub_mean,
+                global_ub_std: sync_result.global_ub_std,
+                sync_time_ms: sync_result.sync_time_ms,
+            },
+        );
+
+        Ok((forward_result, sync_result, fwd_solve_time_ms))
+    }
+
+    /// Aggregate this rank's forward-pass upper bound across ranks, selecting the
+    /// estimator from the traversal and effective risk measure: `Statistical` for
+    /// a sampled forward, the risk-neutral `Exact` `Σ w·c` or the nested-risk
+    /// recursion for an enumerated one. `sync_forward` owns all three estimators;
+    /// weights/costs are read off the `Traversal` resolved once at training start.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the `allgatherv` failure from [`sync_forward`].
+    fn sync_forward_bound(
+        &mut self,
+        forward_result: &ForwardResult,
+    ) -> Result<SyncResult, SddpError> {
         let global_n = self.ranks.num_total_forward_passes;
-        let sync_result = if let Traversal::Enumerated(plan) = self.fwd_state.traversal() {
+        if let Traversal::Enumerated(plan) = self.fwd_state.traversal() {
             debug_assert_eq!(
                 plan.paths.weight.len(),
                 global_n,
@@ -868,13 +890,13 @@ where
                     .ub_path_weights
                     .extend_from_slice(&plan.paths.weight);
                 sync_forward(
-                    &forward_result,
+                    forward_result,
                     self.comm,
                     global_n,
                     ForwardBound::Exact {
                         path_weights: &self.scratch.ub_path_weights,
                     },
-                )?
+                )
             } else {
                 // Uniform effective CVaR: gather per-path per-stage costs and apply
                 // the nested risk recursion (the end-of-horizon `Σ w·c` cannot
@@ -888,38 +910,26 @@ where
                         .push(self.scratch.records[i].stage_cost);
                 }
                 sync_forward(
-                    &forward_result,
+                    forward_result,
                     self.comm,
                     global_n,
                     ForwardBound::NestedRisk {
                         path_stage_costs: &self.scratch.ub_stage_costs,
-                        plan,
+                        topology: &plan.nested_ub_topology,
                         cumulative_discounts: self.stage_ctx.cumulative_discount_factors,
                         risk_measure: ub_measure,
                         num_stages,
                     },
-                )?
+                )
             }
         } else {
             sync_forward(
-                &forward_result,
+                forward_result,
                 self.comm,
                 global_n,
                 ForwardBound::Statistical,
-            )?
-        };
-
-        emit(
-            self.runtime.event_sender(),
-            TrainingEvent::ForwardSyncComplete {
-                iteration,
-                global_ub_mean: sync_result.global_ub_mean,
-                global_ub_std: sync_result.global_ub_std,
-                sync_time_ms: sync_result.sync_time_ms,
-            },
-        );
-
-        Ok((forward_result, sync_result, fwd_solve_time_ms))
+            )
+        }
     }
 
     /// Run the backward pass for one iteration.

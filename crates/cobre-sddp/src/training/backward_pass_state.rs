@@ -3789,13 +3789,13 @@ mod tests {
         // Deliberately corrupt: the trunk node's parent should be `Some(root)`;
         // recording `None` instead makes root's own successor check fail.
         // `paths` is irrelevant here — `run_enumerated_backward` never reads it.
-        let bad_plan = EnumeratedPlan {
-            paths: EnumeratedForwardPaths {
+        let bad_plan = EnumeratedPlan::from_parts(
+            EnumeratedForwardPaths {
                 leaf: Vec::new(),
                 weight: Vec::new(),
             },
-            parent: vec![None, None, Some(trunk), Some(trunk), Some(trunk)].into(),
-        };
+            vec![None, None, Some(trunk), Some(trunk), Some(trunk)].into(),
+        );
         let traversal = Traversal::Enumerated(bad_plan);
 
         let mut enumerated_state = EnumeratedForwardScratch::default();

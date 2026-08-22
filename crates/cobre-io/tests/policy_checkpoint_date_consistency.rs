@@ -10,13 +10,9 @@
 
 use cobre_io::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
-    PolicyCheckpointMetadata, ProducerBlock, StageCutsPayload, read_policy_checkpoint,
+    PolicyCheckpointMetadata, ProducerBlock, StageCutsPayload, StateFamily, read_policy_checkpoint,
     write_policy_checkpoint,
 };
-
-const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
-const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
-const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
 
 fn slot(entity_type: u8, entity_id: i32, subindex: u32, delivery_date: i32) -> EntitySlot {
     EntitySlot {
@@ -73,7 +69,7 @@ fn write_fixture(dir: &std::path::Path, pool_id: u32, manifest: &[EntitySlot]) {
 fn malformed_month_delivery_date_rejected_naming_slot() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [slot(
-        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+        StateFamily::AnticipatedThermalState.code(),
         7,
         0,
         20_261_305,
@@ -96,8 +92,8 @@ fn malformed_month_delivery_date_rejected_naming_slot() {
 fn hydro_transit_bucket_decreasing_dates_rejected_naming_pool_and_subindex() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [
-        slot(ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, 42, 0, 20_260_601),
-        slot(ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, 42, 1, 20_260_501),
+        slot(StateFamily::HydroTransitBucket.code(), 42, 0, 20_260_601),
+        slot(StateFamily::HydroTransitBucket.code(), 42, 1, 20_260_501),
     ];
     write_fixture(dir.path(), 3, &manifest);
 
@@ -118,13 +114,13 @@ fn well_formed_monotone_checkpoint_accepted_manifest_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [
         slot(
-            ENTITY_TYPE_HYDRO_STORAGE,
+            StateFamily::HydroStorage.code(),
             1,
             0,
             ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         ),
-        slot(ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, 42, 0, 20_260_501),
-        slot(ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, 42, 1, 20_260_601),
+        slot(StateFamily::HydroTransitBucket.code(), 42, 0, 20_260_501),
+        slot(StateFamily::HydroTransitBucket.code(), 42, 1, 20_260_601),
     ];
     write_fixture(dir.path(), 1, &manifest);
 
@@ -147,25 +143,25 @@ fn fully_sentinel_legacy_checkpoint_accepted() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [
         slot(
-            ENTITY_TYPE_HYDRO_STORAGE,
+            StateFamily::HydroStorage.code(),
             1,
             0,
             ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         ),
         slot(
-            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            StateFamily::AnticipatedThermalState.code(),
             7,
             0,
             ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         ),
         slot(
-            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            StateFamily::AnticipatedThermalState.code(),
             7,
             1,
             ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         ),
         slot(
-            ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+            StateFamily::HydroTransitBucket.code(),
             42,
             0,
             ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
@@ -185,10 +181,20 @@ fn anticipated_thermal_state_non_monotone_dates_accepted() {
     // At a stage where `t mod k_max != 0`, a correctly-produced modular-residue
     // subindex sequence decreases (subindex 0 delivers later than subindex 1).
     // Rejecting this would be a false positive on real data — see
-    // `ENTITY_TYPE_HYDRO_TRANSIT_BUCKET`'s doc in `checkpoint.rs`.
+    // `StateFamily::HydroTransitBucket`'s doc in `checkpoint.rs`.
     let manifest = [
-        slot(ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, 1, 0, 20_260_601),
-        slot(ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, 1, 1, 20_260_501),
+        slot(
+            StateFamily::AnticipatedThermalState.code(),
+            1,
+            0,
+            20_260_601,
+        ),
+        slot(
+            StateFamily::AnticipatedThermalState.code(),
+            1,
+            1,
+            20_260_501,
+        ),
     ];
     write_fixture(dir.path(), 1, &manifest);
 

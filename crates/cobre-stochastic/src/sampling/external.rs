@@ -543,6 +543,11 @@ pub fn standardize_external_ncs(
 /// );
 /// assert!(result.is_ok());
 /// ```
+// Rationale: `implicit_hasher` wants a `<S: BuildHasher>` generic, but every
+// caller passes a default-`RandomState` `HashSet` and the membership test is
+// hasher-agnostic — declaration-order invariance rides the ordered `entity_ids`
+// slice, not this set — so the concrete type is deliberate.
+#[allow(clippy::implicit_hasher)]
 pub fn validate_external_library(
     library: &ExternalScenarioLibrary,
     entity_ids: &[EntityId],

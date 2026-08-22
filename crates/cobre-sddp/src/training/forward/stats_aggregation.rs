@@ -10,13 +10,13 @@
 
 use std::time::Instant;
 
-use cobre_comm::Communicator;
+use cobre_comm::{Communicator, per_rank_counts, prefix_displs};
 use cobre_core::WelfordAccumulator;
 
 use super::{ForwardResult, SyncResult};
 use crate::error::SddpError;
 use crate::risk_measure::{RiskMeasure, RiskMeasureScratch};
-use crate::setup::node_graph::{EnumeratedPlan, NodePos, TypedVec};
+use crate::setup::node_graph::NestedUbTopology;
 // Rationale: imported solely so the `[run_forward_pass]` intra-doc link in
 // `sync_forward`'s rustdoc resolves; the function lives in the parent `mod.rs`.
 #[cfg(any(test, feature = "test-support"))]
@@ -45,8 +45,8 @@ pub enum ForwardBound<'a> {
         /// This rank's per-path per-stage raw immediate costs, `num_stages` per
         /// path in canonical path order.
         path_stage_costs: &'a [f64],
-        /// The enumerated tree the recursion walks.
-        plan: &'a EnumeratedPlan,
+        /// The enumerated tree's precomputed reduction structure.
+        topology: &'a NestedUbTopology,
         /// Per-stage cumulative discount factors.
         cumulative_discounts: &'a [f64],
         /// The uniform effective measure applied at every node.
@@ -115,27 +115,20 @@ pub fn sync_forward<C: Communicator>(
 
     // Per-rank path counts derived arithmetically from the total, so no
     // preliminary communication round is needed.
-    let base = total_forward_passes / num_ranks;
-    let remainder = total_forward_passes % num_ranks;
-    let path_counts: Vec<usize> = (0..num_ranks)
-        .map(|r| base + usize::from(r < remainder))
-        .collect();
+    let path_counts = per_rank_counts(total_forward_passes, num_ranks);
 
     // NestedRisk gathers per-path-per-stage costs and recurses over the enumerated
     // tree; it needs neither the path-total gather nor the reduction below.
     if let ForwardBound::NestedRisk {
         path_stage_costs,
-        plan,
+        topology,
         cumulative_discounts,
         risk_measure,
         num_stages,
     } = bound
     {
         let stage_counts: Vec<usize> = path_counts.iter().map(|&c| c * num_stages).collect();
-        let mut stage_displs = vec![0usize; num_ranks];
-        for r in 1..num_ranks {
-            stage_displs[r] = stage_displs[r - 1] + stage_counts[r - 1];
-        }
+        let stage_displs = prefix_displs(&stage_counts);
         let global_stage_n = stage_counts.iter().sum::<usize>();
         let mut global = vec![0.0_f64; global_stage_n];
         debug_assert_eq!(
@@ -147,9 +140,7 @@ pub fn sync_forward<C: Communicator>(
         );
         comm.allgatherv(path_stage_costs, &mut global, &stage_counts, &stage_displs)?;
         let ub = nested_ub_recursion(
-            &plan.parent,
-            &plan.paths.leaf,
-            &plan.paths.weight,
+            topology,
             &global,
             num_stages,
             cumulative_discounts,
@@ -165,10 +156,7 @@ pub fn sync_forward<C: Communicator>(
         });
     }
 
-    let mut displs = vec![0usize; num_ranks];
-    for r in 1..num_ranks {
-        displs[r] = displs[r - 1] + path_counts[r - 1];
-    }
+    let displs = prefix_displs(&path_counts);
     let global_n = path_counts.iter().sum::<usize>();
     debug_assert_eq!(
         global_n, total_forward_passes,
@@ -236,7 +224,8 @@ pub fn sync_forward<C: Communicator>(
 }
 
 /// Nested backward risk recursion over the enumerated scenario tree, on the
-/// gathered `global_path_stage_costs` (path-major, `num_stages` per path).
+/// gathered `global_path_stage_costs` (path-major, `num_stages` per path), using
+/// the plan's precomputed [`NestedUbTopology`].
 ///
 /// `Ṽ(n) = cum_d[stage(n)]·c(n) + ρ_children(Ṽ(child))`, `ρ` = `risk_measure`
 /// over each node's children weighted by their conditional probabilities. The
@@ -246,74 +235,40 @@ pub fn sync_forward<C: Communicator>(
 /// the nested lower bound. Reduces to the risk-neutral `Σ wᵢ·cᵢ` under
 /// `Expectation` (nesting is linear there).
 pub(crate) fn nested_ub_recursion(
-    parent: &TypedVec<NodePos, Option<NodePos>>,
-    leaf: &[NodePos],
-    weight: &[f64],
+    topology: &NestedUbTopology,
     global_path_stage_costs: &[f64],
     num_stages: usize,
     cumulative_discounts: &[f64],
     risk_measure: RiskMeasure,
 ) -> f64 {
-    let n_nodes = parent.len();
-    // Per-node cumulative-discounted immediate cost (idempotent across paths
-    // sharing a node), marginal probability (Σ over paths through the node, in
-    // canonical path order for rank-invariance), and stage.
+    let n_nodes = topology.node_stage.len();
+    // Per-node cumulative-discounted immediate cost from this iteration's gathered
+    // costs, read through each node's representative path (idempotent across paths
+    // sharing the node). The tree structure itself is precomputed on the plan.
     let mut node_cost = vec![0.0_f64; n_nodes];
-    let mut node_prob = vec![0.0_f64; n_nodes];
-    let mut node_stage = vec![0_usize; n_nodes];
-    let mut seq: Vec<NodePos> = Vec::with_capacity(num_stages);
-    for (p, &leaf_node) in leaf.iter().enumerate() {
-        seq.clear();
-        let mut cur = Some(leaf_node);
-        while let Some(node) = cur {
-            seq.push(node);
-            cur = parent[node];
-        }
-        seq.reverse();
-        debug_assert_eq!(
-            seq.len(),
-            num_stages,
-            "root→leaf path must visit exactly one node per stage"
-        );
-        let w = weight[p];
-        for (t, &node) in seq.iter().enumerate() {
-            let cum_d = cumulative_discounts.get(t).copied().unwrap_or(1.0);
-            node_cost[node.0] = cum_d * global_path_stage_costs[p * num_stages + t];
-            node_prob[node.0] += w;
-            node_stage[node.0] = t;
-        }
+    for node in 0..n_nodes {
+        let t = topology.node_stage[node];
+        let cum_d = cumulative_discounts.get(t).copied().unwrap_or(1.0);
+        node_cost[node] =
+            cum_d * global_path_stage_costs[topology.node_path[node] * num_stages + t];
     }
 
-    // Children in canonical node-position order so the tail-selection tie-break in
-    // `evaluate_risk` is deterministic.
-    let mut children: Vec<Vec<NodePos>> = vec![Vec::new(); n_nodes];
-    let mut roots: Vec<NodePos> = Vec::new();
-    for node in (0..n_nodes).map(NodePos) {
-        match parent[node] {
-            Some(p) => children[p.0].push(node),
-            None => roots.push(node),
-        }
-    }
-
-    // Value nodes deepest-stage first, so a node's children are valued before it.
-    let mut order: Vec<NodePos> = (0..n_nodes).map(NodePos).collect();
-    order.sort_by(|&a, &b| node_stage[b.0].cmp(&node_stage[a.0]));
     let mut value = vec![0.0_f64; n_nodes];
     let mut child_vals: Vec<f64> = Vec::new();
     let mut child_probs: Vec<f64> = Vec::new();
     // One CVaR-weight scratch reused across every interior node's risk evaluation.
     let mut risk_scratch = RiskMeasureScratch::new();
-    for node in order {
-        let kids = &children[node.0];
+    for &node in &topology.valuation_order {
+        let kids = &topology.children[node.0];
         let v_future = if kids.is_empty() {
             0.0
         } else {
             child_vals.clear();
             child_probs.clear();
-            let p_node = node_prob[node.0];
+            let p_node = topology.node_prob[node.0];
             for &c in kids {
                 child_vals.push(value[c.0]);
-                child_probs.push(node_prob[c.0] / p_node);
+                child_probs.push(topology.node_prob[c.0] / p_node);
             }
             risk_measure.evaluate_risk_into(&child_vals, &child_probs, &mut risk_scratch)
         };
@@ -322,11 +277,15 @@ pub(crate) fn nested_ub_recursion(
 
     // A single root under the one initial state is the norm; a defensive
     // multi-root graph reduces over the roots by their marginals.
-    if let [only] = roots.as_slice() {
+    if let [only] = topology.roots.as_slice() {
         value[only.0]
     } else {
-        let root_vals: Vec<f64> = roots.iter().map(|r| value[r.0]).collect();
-        let root_probs: Vec<f64> = roots.iter().map(|r| node_prob[r.0]).collect();
+        let root_vals: Vec<f64> = topology.roots.iter().map(|r| value[r.0]).collect();
+        let root_probs: Vec<f64> = topology
+            .roots
+            .iter()
+            .map(|r| topology.node_prob[r.0])
+            .collect();
         risk_measure.evaluate_risk_into(&root_vals, &root_probs, &mut risk_scratch)
     }
 }

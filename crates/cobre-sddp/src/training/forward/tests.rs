@@ -1447,7 +1447,7 @@ fn sync_forward_exact_single_path_returns_cost_with_zero_ci() {
 #[test]
 fn nested_ub_recursion_is_nested_not_end_of_horizon() {
     use super::stats_aggregation::nested_ub_recursion;
-    use crate::setup::node_graph::{NodePos, TypedVec};
+    use crate::setup::node_graph::{NestedUbTopology, NodePos, TypedVec};
 
     // parent map: 0=root; 1,2 = stage-1 children of 0; 3,4 = leaves of 1; 5,6 = leaves of 2.
     let parent: TypedVec<NodePos, Option<NodePos>> = vec![
@@ -1471,12 +1471,13 @@ fn nested_ub_recursion_is_nested_not_end_of_horizon() {
         0.0, 100.0, 100.0, // path via leaf 6 (bad stage-1, bad leaf)
     ];
     let cum_d = [1.0_f64, 1.0, 1.0];
+    let topology = NestedUbTopology::new(&parent, &leaf, &weight);
 
     let cvar = RiskMeasure::CVaR {
         alpha: 0.5,
         lambda: 1.0,
     };
-    let nested = nested_ub_recursion(&parent, &leaf, &weight, &global, 3, &cum_d, cvar);
+    let nested = nested_ub_recursion(&topology, &global, 3, &cum_d, cvar);
     assert!(
         (nested - 200.0).abs() < 1e-12,
         "nested pure CVaR_0.5 must be 200.0, got {nested}"
@@ -1496,15 +1497,7 @@ fn nested_ub_recursion_is_nested_not_end_of_horizon() {
     );
 
     // Expectation collapses the recursion to the plain probability-weighted total.
-    let expectation = nested_ub_recursion(
-        &parent,
-        &leaf,
-        &weight,
-        &global,
-        3,
-        &cum_d,
-        RiskMeasure::Expectation,
-    );
+    let expectation = nested_ub_recursion(&topology, &global, 3, &cum_d, RiskMeasure::Expectation);
     assert!(
         (expectation - 75.0).abs() < 1e-12,
         "Expectation must collapse to Σ wᵢ·total = 75.0, got {expectation}"

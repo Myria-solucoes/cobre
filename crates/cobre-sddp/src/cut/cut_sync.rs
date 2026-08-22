@@ -19,7 +19,7 @@
 //!
 //! [`cut::wire`]: crate::cut::wire
 
-use cobre_comm::Communicator;
+use cobre_comm::{Communicator, per_rank_counts, prefix_displs};
 
 use crate::{
     FutureCostFunction, SddpError,
@@ -179,18 +179,11 @@ impl CutSyncBuffers {
         let max_record_size = cut_wire_size(n_state);
         let send_cap = max_cuts_per_rank * max_record_size;
 
-        let base = total_forward_passes / num_ranks;
-        let remainder = total_forward_passes % num_ranks;
-        let per_rank_cuts: Vec<usize> = (0..num_ranks)
-            .map(|r| base + usize::from(r < remainder))
-            .collect();
+        let per_rank_cuts = per_rank_counts(total_forward_passes, num_ranks);
         let recv_cap: usize = per_rank_cuts.iter().sum::<usize>() * max_record_size;
 
         let counts: Vec<usize> = per_rank_cuts.iter().map(|&c| c * max_record_size).collect();
-        let mut displs = vec![0usize; num_ranks];
-        for r in 1..num_ranks {
-            displs[r] = displs[r - 1] + counts[r - 1];
-        }
+        let displs = prefix_displs(&counts);
 
         Self {
             send_buf: vec![0u8; send_cap],

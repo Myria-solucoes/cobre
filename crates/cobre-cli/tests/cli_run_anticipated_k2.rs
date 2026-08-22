@@ -9,12 +9,9 @@ use std::process::Command;
 
 use arrow::array::{Array, BooleanArray, Float64Array, Int32Array};
 use assert_cmd::prelude::*;
-use cobre_io::{EntitySlot, deserialize_stage_cuts};
+use cobre_io::{EntitySlot, StateFamily, deserialize_stage_cuts};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
-
-/// Raw `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 
 fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
@@ -460,7 +457,7 @@ fn cli_run_k2_populates_anticipated_columns_and_manifest() {
     let anticipated_slots: Vec<&EntitySlot> = stage_cuts
         .entity_manifest
         .iter()
-        .filter(|slot| slot.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE)
+        .filter(|slot| slot.entity_type == StateFamily::AnticipatedThermalState.code())
         .collect();
 
     assert_eq!(

@@ -58,11 +58,7 @@ impl RankDistribution {
     /// Return a vector of length `num_ranks` where index `r` holds the number
     /// of forward passes assigned to rank `r`.
     pub(crate) fn actual_per_rank(&self, total_forward_passes: usize) -> Vec<usize> {
-        let base_fwd = total_forward_passes / self.num_ranks;
-        let remainder_fwd = total_forward_passes % self.num_ranks;
-        (0..self.num_ranks)
-            .map(|r| base_fwd + usize::from(r < remainder_fwd))
-            .collect()
+        cobre_comm::per_rank_counts(total_forward_passes, self.num_ranks)
     }
 }
 

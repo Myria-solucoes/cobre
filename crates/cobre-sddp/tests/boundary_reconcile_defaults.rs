@@ -28,24 +28,15 @@ use chrono::NaiveDate;
 use cobre_io::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
     ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload,
-    write_policy_checkpoint,
+    StateFamily, write_policy_checkpoint,
 };
 use cobre_sddp::{
     BoundaryInjection, FullFcf, PolicyStageManifest, load_boundary_cuts, validate_policy_load,
 };
 
-/// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
-/// `EntityType::HydroInflowLag` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
-/// `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
-/// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
-
 fn storage_slot(id: i32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+        entity_type: StateFamily::HydroStorage.code(),
         entity_id: id,
         subindex: 0,
         was_active: true,
@@ -55,7 +46,7 @@ fn storage_slot(id: i32) -> EntitySlot {
 
 fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+        entity_type: StateFamily::HydroInflowLag.code(),
         entity_id: id,
         subindex: lag_depth,
         was_active: true,
@@ -65,7 +56,7 @@ fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
 
 fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+        entity_type: StateFamily::HydroTransitBucket.code(),
         entity_id: downstream_hydro_id,
         subindex: lag,
         was_active: true,
@@ -75,7 +66,7 @@ fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
 
 fn sentinel_anticipated_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+        entity_type: StateFamily::AnticipatedThermalState.code(),
         entity_id: thermal_id,
         subindex: ring_slot,
         was_active: true,
@@ -85,7 +76,7 @@ fn sentinel_anticipated_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
 
 fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+        entity_type: StateFamily::AnticipatedThermalState.code(),
         entity_id: thermal_id,
         subindex: ring_slot,
         was_active: true,
