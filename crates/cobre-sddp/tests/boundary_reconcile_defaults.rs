@@ -293,6 +293,47 @@ fn boundary_injection_transit_bucket_defaults_to_zero() {
     );
 }
 
+/// Given a boundary SOURCE that prices a transit-bucket arc the current study's
+/// topology does not model (same state dimension, mismatched bucket identity),
+/// when the `BoundaryInjection` load runs, then the source coupling is dropped
+/// (its coefficient discarded) BUT the load succeeds and emits a warning naming
+/// the dropped family and slot — the previously-silent C17 source-drop is now
+/// visible. The target's own transit slot still defaults to `0.0`.
+#[test]
+fn boundary_injection_dropped_source_transit_coupling_warns_and_loads() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![storage_slot(1), transit_bucket_slot(2, 1)];
+    write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
+
+    let current = vec![storage_slot(1), transit_bucket_slot(9, 1)];
+    let mut warnings: Vec<String> = Vec::new();
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        2,
+        &current,
+        &no_intervals(current.len()),
+        &[],
+        None,
+        1_000_000.0,
+        &mut |w| warnings.push(w.to_string()),
+    )
+    .expect("a dropped source coupling must warn, never reject");
+
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients,
+        vec![10.0, 0.0],
+        "the target's own unmatched transit slot still defaults to 0.0"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("transit-bucket") && w.contains("id 2")),
+        "the dropped source transit-bucket coupling must be surfaced: {warnings:?}"
+    );
+}
+
 /// Given a current terminal manifest with a sentinel-dated anticipated slot
 /// and a source carrying no counterpart, when the `BoundaryInjection` load
 /// runs, then it succeeds and the anticipated coefficient defaults to `0.0`,

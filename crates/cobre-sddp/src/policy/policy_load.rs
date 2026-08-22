@@ -28,8 +28,9 @@ use cobre_solver::{Basis, BasisStatus};
 use crate::SddpError;
 use crate::cut::pool::CutPool;
 use crate::policy::reconcile::{
-    BoundaryReconciliationReport, build_boundary_fold, build_rebind, build_reconciliation_report,
-    decode_month_anchor, overlap_hours, rebind_cut,
+    BoundaryReconciliationReport, RebindOp, build_boundary_fold, build_rebind,
+    build_reconciliation_report, decode_month_anchor, dropped_source_positions, overlap_hours,
+    rebind_cut,
 };
 use crate::setup::{BoundaryStateRequirements, NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
@@ -809,6 +810,7 @@ pub fn load_boundary_cuts(
         for record in &mut records {
             record.coefficients = rebind_cut(record, &rebind);
         }
+        warn_dropped_source_couplings(&stage_result.entity_manifest, &rebind, on_warning);
         build_reconciliation_report(
             &stage_result.entity_manifest,
             current_manifest,
@@ -820,6 +822,57 @@ pub fn load_boundary_cuts(
     };
 
     Ok(ValidatedBoundaryCuts { records, report })
+}
+
+/// Human-readable label for a source slot's state family, for the dropped-coupling
+/// warning below.
+fn family_label(family: Option<StateFamily>) -> &'static str {
+    match family {
+        Some(StateFamily::HydroStorage) => "hydro-storage",
+        Some(StateFamily::HydroInflowLag) => "inflow-lag",
+        Some(StateFamily::AnticipatedThermalState) => "anticipated-thermal",
+        Some(StateFamily::HydroTransitBucket) => "transit-bucket",
+        None => "other",
+    }
+}
+
+/// Warn — never reject — when a boundary SOURCE cut couples a state slot the current
+/// study does not model, so its coefficient is dropped during reconciliation. A
+/// superset source (more plants/arcs than this study declares) drops legitimately,
+/// so this is informational and the load proceeds; it exists to make the drop
+/// visible rather than silent (the transit-bucket family is the motivating case, but
+/// the drop is family-blind). Rejecting would break a legitimate superset boundary,
+/// and no widening path can fabricate a slot the study's topology never declared.
+fn warn_dropped_source_couplings(
+    source: &[EntitySlot],
+    rebind: &[RebindOp],
+    on_warning: &mut dyn FnMut(&str),
+) {
+    let dropped = dropped_source_positions(source.len(), rebind);
+    if dropped.is_empty() {
+        return;
+    }
+    let mut by_family: std::collections::BTreeMap<&'static str, (usize, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for pos in dropped {
+        if let Some(slot) = source.get(pos) {
+            let entry = by_family.entry(family_label(slot.family())).or_default();
+            entry.0 += 1;
+            if entry.1.len() < 5 {
+                entry.1.push(format!(
+                    "(id {}, subindex {})",
+                    slot.entity_id, slot.subindex
+                ));
+            }
+        }
+    }
+    for (label, (count, examples)) in by_family {
+        on_warning(&format!(
+            "boundary policy prices {count} {label} state slot(s) this study does not model \
+             (e.g. {}); their coupling is dropped",
+            examples.join(", ")
+        ));
+    }
 }
 
 /// Auto-resolve an absent `policy.boundary.source_stage`: decode each source
