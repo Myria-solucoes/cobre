@@ -28,8 +28,7 @@ use crate::ReduceOp;
 /// Backend selector passed by the caller to [`create_communicator`].
 ///
 /// [`BackendKind::Mpi`] and [`BackendKind::Local`] force a backend;
-/// [`BackendKind::Auto`] detects one from the launch environment. No
-/// configuration environment variable participates in the choice.
+/// [`BackendKind::Auto`] detects one from the launch environment.
 ///
 /// # Examples
 ///
@@ -57,8 +56,8 @@ pub enum BackendKind {
 /// Enum dispatch (not `Box<dyn>`) because [`crate::Communicator`] carries
 /// generic methods that make it non-object-safe; dispatch overhead is negligible
 /// against the MPI collective or LP solve it wraps. `CommBackend: Send + Sync`
-/// because all inner backends are. Only present in `mpi` builds; no-feature
-/// builds use [`crate::LocalBackend`] directly.
+/// because all inner backends are. No-feature builds use [`crate::LocalBackend`]
+/// directly.
 #[cfg(feature = "mpi")]
 pub enum CommBackend {
     /// MPI backend powered by ferrompi.
@@ -206,10 +205,8 @@ pub fn available_backends() -> Vec<String> {
 /// Returns `true` if any MPI launcher environment variable is present (checked
 /// via `var_os`, so non-UTF-8 values still count).
 ///
-/// These are set by the launcher (`mpiexec`/`mpirun`/`srun`) as a runtime fact
-/// about how the process was started, not a configuration channel. Always
-/// compiled (no cfg gate) so it is testable in no-feature builds, where it is
-/// unused outside tests — hence the dead-code allow.
+/// Always compiled (no cfg gate) so it is testable in no-feature builds, where
+/// it is unused outside tests — hence the dead-code allow.
 #[cfg_attr(not(feature = "mpi"), allow(dead_code))]
 fn mpi_launch_detected() -> bool {
     const MPI_ENV_VARS: [&str; 6] = [
@@ -225,10 +222,8 @@ fn mpi_launch_detected() -> bool {
         .any(|var| std::env::var_os(var).is_some())
 }
 
-/// Auto-detect the backend from the launch environment: the MPI backend when an
-/// MPI launcher is detected (so a run started under `mpiexec`/`mpirun`/`srun`
-/// distributes without an explicit `--comm-backend mpi`), otherwise the local
-/// backend.
+/// So a run started under `mpiexec`/`mpirun`/`srun` distributes without an
+/// explicit `--comm-backend mpi`.
 #[cfg(feature = "mpi")]
 fn auto_detect() -> Result<CommBackend, BackendError> {
     if mpi_launch_detected() {
@@ -238,12 +233,6 @@ fn auto_detect() -> Result<CommBackend, BackendError> {
 }
 
 /// Construct the active communication backend (no-feature build).
-///
-/// When the `mpi` feature is not compiled in, `kind` selects:
-///
-/// - [`BackendKind::Local`] or [`BackendKind::Auto`] → `Ok(LocalBackend)`
-///   (auto-detect can only resolve to local with no MPI compiled in)
-/// - [`BackendKind::Mpi`] → `Err(BackendError::BackendNotAvailable)`
 ///
 /// # Errors
 ///
@@ -267,7 +256,6 @@ fn auto_detect() -> Result<CommBackend, BackendError> {
 #[cfg(not(feature = "mpi"))]
 pub fn create_communicator(kind: BackendKind) -> Result<LocalBackend, BackendError> {
     match kind {
-        // No MPI compiled in, so auto-detect can only resolve to local.
         BackendKind::Local | BackendKind::Auto => Ok(LocalBackend),
         BackendKind::Mpi => Err(BackendNotAvailable {
             requested: "mpi".to_string(),
@@ -277,13 +265,6 @@ pub fn create_communicator(kind: BackendKind) -> Result<LocalBackend, BackendErr
 }
 
 /// Construct the active communication backend (MPI build).
-///
-/// When the `mpi` feature is compiled in, `kind` selects the [`CommBackend`]:
-///
-/// - [`BackendKind::Mpi`] → `CommBackend::Mpi(FerrompiBackend::new()?)`
-/// - [`BackendKind::Local`] → `CommBackend::Local(LocalBackend)`
-/// - [`BackendKind::Auto`] → the MPI backend when an MPI launcher is detected,
-///   otherwise the local backend
 ///
 /// # Errors
 ///
@@ -362,7 +343,7 @@ mod tests {
 
     /// MPI build: [`BackendKind::Auto`] resolves to the local backend when no
     /// MPI launcher is present. `cargo test` does not run under `mpiexec`, so
-    /// no launcher variable is set; the guard skips the case a launcher is.
+    /// no launcher variable is set; the guard skips the case where one is.
     #[test]
     #[cfg(feature = "mpi")]
     fn test_create_communicator_mpi_auto_local_without_launcher() {
@@ -440,7 +421,6 @@ mod tests {
             assert_send_sync::<CommBackend>();
         }
 
-        /// `CommBackend::Local` delegates `rank()` → 0 and `size()` → 1.
         #[test]
         fn test_comm_backend_local_rank_size() {
             let backend = CommBackend::Local(LocalBackend);
@@ -448,14 +428,12 @@ mod tests {
             assert_eq!(backend.size(), 1);
         }
 
-        /// `CommBackend::Local` delegates `barrier()` → `Ok(())`.
         #[test]
         fn test_comm_backend_local_barrier() {
             let backend = CommBackend::Local(LocalBackend);
             assert!(backend.barrier().is_ok());
         }
 
-        /// `CommBackend::Local` delegates `allreduce` with identity-copy semantics.
         #[test]
         fn test_comm_backend_local_allreduce() {
             let backend = CommBackend::Local(LocalBackend);
@@ -465,7 +443,6 @@ mod tests {
             assert_eq!(recv, [1.0, 2.0, 3.0]);
         }
 
-        /// `CommBackend::Local` delegates `allgatherv` with identity-copy semantics.
         #[test]
         fn test_comm_backend_local_allgatherv() {
             let backend = CommBackend::Local(LocalBackend);
@@ -475,7 +452,6 @@ mod tests {
             assert_eq!(recv, [7.0, 8.0, 9.0]);
         }
 
-        /// `CommBackend::Local` delegates `broadcast` as a no-op for root 0.
         #[test]
         fn test_comm_backend_local_broadcast() {
             let backend = CommBackend::Local(LocalBackend);
@@ -484,9 +460,7 @@ mod tests {
             assert_eq!(buf, [1.0, 2.0]);
         }
 
-        /// `CommBackend::Local` delegates `SharedMemoryProvider` methods correctly.
-        ///
-        /// Covers: `create_shared_region`, `split_local`, `is_leader`.
+        /// Covers `create_shared_region`, `split_local`, `is_leader`.
         #[cfg(feature = "shared-memory")]
         #[test]
         fn test_comm_backend_local_shared_memory() {

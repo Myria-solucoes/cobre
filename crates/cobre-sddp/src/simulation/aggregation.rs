@@ -102,7 +102,6 @@ pub fn aggregate_simulation<C: Communicator>(
     let num_ranks = comm.size();
     let n_local = local_costs.len();
 
-    // Per-rank scenario counts give the displacement layout for the data gather.
     #[allow(clippy::cast_possible_truncation)]
     let counts_send = [n_local as u64];
     let mut counts_recv = vec![0u64; num_ranks];
@@ -223,9 +222,6 @@ fn resolve_weights(weighting: SimulationWeighting<'_>, n: usize) -> Vec<f64> {
 }
 
 /// Sample standard deviation (Bessel-corrected) of `costs` around `mean`.
-///
-/// Returns `0.0` for `costs.len() <= 1` (no variance with a single
-/// observation, or none).
 fn compute_std(costs: &[f64], mean: f64) -> f64 {
     let n = costs.len();
     if n <= 1 {
@@ -242,7 +238,7 @@ fn compute_std(costs: &[f64], mean: f64) -> f64 {
 /// `weights` (canonical gathered order, summing to `1.0`).
 ///
 /// No Bessel correction: unlike [`compute_std`], a census is an exhaustive
-/// population, not a sample. Returns `0.0` for `costs.len() <= 1`.
+/// population, not a sample.
 fn compute_weighted_std(costs: &[f64], weights: &[f64], mean: f64) -> f64 {
     if costs.len() <= 1 {
         return 0.0;
@@ -292,8 +288,6 @@ mod tests {
         }
     }
 
-    // ── AC1: Uniform weighted mean matches RiskMeasure::Expectation ───────────
-
     #[test]
     fn aggregate_uniform_mean_matches_risk_measure_expectation() {
         let local_costs = vec![
@@ -318,8 +312,6 @@ mod tests {
         );
         assert_eq!(summary.n_scenarios, 3);
     }
-
-    // ── AC3: Census weighting seam on synthetic weights ────────────────────────
 
     #[test]
     fn aggregate_census_weighted_mean() {
@@ -412,8 +404,6 @@ mod tests {
         assert_eq!(gathered, vec![(0, 100.0, None)]);
     }
 
-    // ── AC5: struct-shape / no hard-coded 0.0 ──────────────────────────────────
-
     #[test]
     fn aggregate_summary_carries_exactly_three_fields() {
         let local_costs = vec![(0u32, 999.0, zero_cats())];
@@ -436,8 +426,6 @@ mod tests {
         assert_eq!(n_scenarios, 1);
     }
 
-    // ── AC2 (part): removed symbols do not exist ───────────────────────────────
-    //
     // A grep-asserted inspection test: `compute_cvar`, `CVAR_ALPHA`,
     // `compute_local_min_max`, `pack_category_costs`, `compute_category_stats`,
     // `N_CATEGORIES`, and `CATEGORY_NAMES` are not just unreferenced but ABSENT
@@ -468,8 +456,8 @@ mod tests {
         }
     }
 
-    // ── AC4 (unit-level repeat check; the rank/thread-shape gate lives in
-    //    tests/mpi_wire.rs::simulation_aggregation_determinism) ────────────────
+    // ── Unit-level repeat check; the rank/thread-shape gate lives in
+    //    tests/mpi_wire.rs::simulation_aggregation_determinism ────────────────
 
     #[test]
     fn aggregate_mean_std_bit_identical_across_repeated_calls() {

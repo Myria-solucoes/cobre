@@ -644,7 +644,7 @@ table StageStates {
     );
 }
 
-// ─── Schema neutrality (0.14 value-function artifact) ────────────────────────
+// ─── Schema neutrality (value-function artifact) ─────────────────────────────
 
 /// The published schema speaks affine-piece vocabulary: no standalone `Cut`
 /// table, no `state_at_generation` field, no live (non-deprecated)
@@ -676,7 +676,7 @@ fn schema_carries_no_algorithm_vocabulary() {
     );
 }
 
-/// The 0.14 `EntitySlot` change: id 4 is a burned `deprecated` placeholder, the
+/// `EntitySlot`: id 4 is a burned `deprecated` placeholder, the
 /// `YYYYMMDD` `delivery_date` sits at id 5, and the artifact declares the
 /// `CBVF` `file_identifier` plus a `file_extension`. A text inspection of
 /// `schemas/policy.fbs`.
@@ -703,7 +703,7 @@ fn schema_burns_delivery_anchor_and_declares_file_identifier() {
 
 // ─── EntitySlot delivery_date (id: 5) round-trip + forward-compat ─────────────
 
-/// §E6 round-trip: an `EntitySlot` carrying a non-sentinel `delivery_date`
+/// Round-trip: an `EntitySlot` carrying a non-sentinel `delivery_date`
 /// survives the hand-rolled writer → hand-rolled reader path, and the same
 /// buffer decodes through `flatc` with the date at slot id 5.
 #[test]
@@ -757,7 +757,7 @@ fn entity_slot_delivery_date_round_trips() {
     );
 }
 
-/// §E6 forward-compat (the schema-evolution half of the reject-role for the
+/// Forward-compat (the schema-evolution half of the reject-role for the
 /// `FlatBuffers` `policy/codec.rs` row; the identifier rejection is the codec
 /// unit test): a buffer written against a pre-`id:5` `EntitySlot` schema (no
 /// `delivery_date` field) must deserialize with every slot's date at the

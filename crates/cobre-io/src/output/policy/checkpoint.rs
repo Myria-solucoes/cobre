@@ -295,10 +295,8 @@ pub fn read_policy_checkpoint(path: &Path) -> Result<PolicyCheckpoint, OutputErr
 
     let meta_path = path.join("metadata.json");
     let meta_bytes = std::fs::read(&meta_path).map_err(|e| OutputError::io(&meta_path, e))?;
-    // Check the `format_version` marker FIRST — off a minimal probe that ignores
-    // every other field — so a pre-marker 0.13 artifact (which also lacks the
-    // newer required fields) is rejected by the marker with a named error, never
-    // an opaque missing-field parse error, and before any `.bin` is parsed.
+    // Probe format_version before full deserialization, so a pre-marker artifact
+    // rejects with a named error, not an opaque missing-field parse failure.
     let probe: FormatVersionProbe = serde_json::from_slice(&meta_bytes)
         .map_err(|e| OutputError::serialization("policy_metadata", e.to_string()))?;
     if probe.format_version != FORMAT_VERSION {

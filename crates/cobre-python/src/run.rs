@@ -1188,9 +1188,6 @@ pub(crate) fn apply_training_policy_mode(
 
         let completed = u64::from(checkpoint.metadata.producer.completed_iterations);
 
-        // The pre-replacement (cold-path) FCF already carries the per-pool
-        // arrays `new_per_pool` derived for this study; the resume path
-        // reuses them verbatim rather than substituting a scalar.
         let pool_state_dimensions: Vec<usize> =
             setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
         let visit_bounds: Vec<u64> = setup
@@ -1199,7 +1196,6 @@ pub(crate) fn apply_training_policy_mode(
             .iter()
             .map(|p| u64::from(p.visit_stride))
             .collect();
-        // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
@@ -1211,9 +1207,6 @@ pub(crate) fn apply_training_policy_mode(
         .map_err(|e| format!("resume FCF construction error: {e}"))?;
         setup.replace_fcf(warm_fcf);
         setup.set_start_iteration(completed);
-        // Seed the warm-start basis store so iteration 1's cut-loaded LPs
-        // warm-start. Empty bases (checkpoint written without `store_basis`) leave
-        // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
             let basis_cache = build_basis_cache_from_checkpoint(
                 &checkpoint.stage_bases,

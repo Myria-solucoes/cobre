@@ -1870,10 +1870,9 @@ mod tests {
 
     #[test]
     fn build_report_value_missing_training_is_err() {
-        // The error path now routes through `crate::errors::convert_error`, which
+        // This error path routes through `crate::errors::convert_error`, which
         // attaches the GIL (`Python::attach`) to build the typed exception, so the
-        // interpreter must be initialized first (mirrors the GIL-bound test
-        // scaffolding elsewhere in this crate).
+        // interpreter must be initialized first.
         Python::initialize();
         let dir = TempDir::new().unwrap();
         // No training/metadata.json written.

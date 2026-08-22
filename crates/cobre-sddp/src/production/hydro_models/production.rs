@@ -173,7 +173,7 @@ pub fn resolve_production_models_from_artifacts(
     // canonical-order flatten as `export_rows`. Empty unless the opt-in is on.
     let mut fpha_deviation_point_rows: Vec<FphaDeviationPointRow> = Vec::new();
 
-    // Determinism (D5): `par_iter().collect()` reassembles the fits in canonical
+    // Determinism: `par_iter().collect()` reassembles the fits in canonical
     // hydro order regardless of thread scheduling, then the SEQUENTIAL flatten
     // below preserves `(hydro_id, stage_id, plane_id)` export ordering bit-for-bit.
     // Collecting into a shared `Mutex<Vec>`, pushing rows from worker threads, or
@@ -199,7 +199,7 @@ pub fn resolve_production_models_from_artifacts(
             )
         })
         .collect::<Result<Vec<_>, SddpError>>()?;
-    // This SEQUENTIAL flatten is the D5 ordering anchor for the parallel fit above:
+    // This SEQUENTIAL flatten is the ordering anchor for the parallel fit above:
     // it concatenates export rows, deviation-point rows, and deviations in canonical
     // hydro then stage order, and emits the `tracing::warn!` here (not from a worker)
     // so the carried vectors and the warning order are declaration-order invariant.
@@ -403,7 +403,7 @@ fn resolve_downstream_level(
 /// inflow history. Feeds the lateral-secant `S_max = 2·mean`; the `0.0` case maps
 /// to the `2 × max_turbined` fallback in `resolve_s_max`.
 ///
-/// # Determinism (D5)
+/// # Determinism
 ///
 /// A single sequential pass over `System::inflow_history()` in its stored
 /// canonical order. A partitioned-then-reduced parallel accumulator would reorder
@@ -510,7 +510,7 @@ type FittedCacheEntry<'a> = (
 /// `study_stages` order) and appends export rows, per-distinct-fit diagnostics,
 /// and (opt-in) per-point rows in canonical `(stage_id, …)` order.
 ///
-/// ## Contract — the dedup key MUST include the downstream level (Voice 1)
+/// ## Contract — the dedup key MUST include the downstream level
 ///
 /// The key is `(FphaColumnLayout, Option<u64>)`: the config paired with the
 /// resolved `downstream_level_m` as `f64::to_bits`. Keying on the

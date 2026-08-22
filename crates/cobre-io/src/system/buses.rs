@@ -34,8 +34,8 @@
 //!
 //! Penalty resolution uses `resolve_bus_deficit_segments` and
 //! `resolve_bus_excess_cost` for the global → entity penalty cascade.
-//! The bus-level `excess_cost` has no entity-level override in the JSON schema
-//! (SS1 spec): it always comes from the global default.
+//! The bus-level `excess_cost` has no entity-level override in the JSON schema:
+//! it always comes from the global default.
 //!
 //! Cross-reference validation (e.g., checking that bus IDs are referenced by
 //! thermals, lines, hydros) is deferred to Layer 3.
@@ -259,8 +259,8 @@ fn convert_buses(
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id so this parser's output is deterministic regardless of file row
-    // order (declaration-order invariance); id is the builder's canonical tiebreak.
+    // Sort by id: output must not depend on file row order (declaration-order
+    // invariance).
     buses.sort_by_key(|b| b.id.0);
     Ok(buses)
 }

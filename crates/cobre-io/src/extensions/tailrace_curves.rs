@@ -91,23 +91,19 @@ pub struct TailraceCurveRow {
     pub outflow_min_m3s: f64,
     /// Segment upper validity bound (m³/s). Non-negative, `>= outflow_min_m3s`.
     pub outflow_max_m3s: f64,
-    /// Degree-0 polynomial coefficient. Any sign.
+    /// Degree-0 polynomial coefficient.
     pub coefficient_0: f64,
-    /// Degree-1 polynomial coefficient. Any sign.
+    /// Degree-1 polynomial coefficient.
     pub coefficient_1: f64,
-    /// Degree-2 polynomial coefficient. Any sign.
+    /// Degree-2 polynomial coefficient.
     pub coefficient_2: f64,
-    /// Degree-3 polynomial coefficient. Any sign.
+    /// Degree-3 polynomial coefficient.
     pub coefficient_3: f64,
-    /// Degree-4 polynomial coefficient. Any sign.
+    /// Degree-4 polynomial coefficient.
     pub coefficient_4: f64,
 }
 
 /// Parse `system/tailrace_curves.parquet` and return a sorted segment table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by
-/// `(hydro_id, family_id, segment_id)` ascending.
 ///
 /// # Errors
 ///
@@ -233,8 +229,6 @@ pub fn parse_tailrace_curves(path: &Path) -> Result<Vec<TailraceCurveRow>, LoadE
     Ok(rows)
 }
 
-/// Extract a column as [`Int32Array`] by name, returning [`LoadError::SchemaError`]
-/// if the column is absent or has the wrong Arrow type.
 fn extract_int32_column<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
@@ -259,8 +253,6 @@ fn extract_int32_column<'a>(
         })
 }
 
-/// Extract a column as [`Float64Array`] by name, returning [`LoadError::SchemaError`]
-/// if the column is absent or has the wrong Arrow type.
 fn extract_float64_column<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
@@ -285,9 +277,6 @@ fn extract_float64_column<'a>(
         })
 }
 
-/// Validate that a `f64` value is non-negative and finite, returning a
-/// [`LoadError::SchemaError`] with the field path `"tailrace_curves[N].column_name"`
-/// if the check fails.
 fn validate_non_negative(
     value: f64,
     row_idx: usize,
@@ -305,9 +294,6 @@ fn validate_non_negative(
     }
 }
 
-/// Validate that a `f64` value is finite, returning a [`LoadError::SchemaError`]
-/// with the field path `"tailrace_curves[N].column_name"` if the check fails.
-///
 /// Sign is unconstrained: the higher-degree tailrace coefficients are routinely
 /// negative, so this gate rejects only NaN and the infinities.
 fn validate_finite(

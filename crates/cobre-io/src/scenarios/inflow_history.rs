@@ -61,10 +61,6 @@ const LEGACY_LAYOUT_MESSAGE: &str = "scenarios/inflow_history.parquet uses the l
 
 /// Parse `scenarios/inflow_history.parquet` and return a sorted row table.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// and per-hydro constraints, then returns all rows sorted by
-/// `(hydro_id, start_date)` ascending.
-///
 /// # Errors
 ///
 /// | Condition                                          | Error variant              |

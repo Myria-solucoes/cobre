@@ -140,13 +140,9 @@ fn mark_own_paths(
 }
 
 /// One worker's claim loop over a stage's node units — the simulation analog
-/// of `training::forward::enumerated::enumerated_stage_worker`. Installs each
-/// claimed node's incoming state (the initial state via
-/// [`reset_scenario_state`] at a root, or the parent visit's `out_state`/
-/// `accum` from the arena otherwise), draws its noise, solves via
-/// [`solve_simulation_stage`], and writes the outcome into a reused
-/// worker-local capture slot for the caller's sequential, canonical-order
-/// scatter. Returns the count of slots this worker filled (`captures[..count]`).
+/// of `training::forward::enumerated::enumerated_stage_worker`. Returns the
+/// count of slots filled (`captures[..count]`), consumed by the caller's
+/// canonical-order [`canonical_scatter`].
 ///
 /// # Errors
 ///
@@ -355,10 +351,10 @@ fn run_sweep<S: SolverInterface + Send>(
     Ok(lp_solves)
 }
 
-/// Re-expand the per-node arena into per-path output rows: for each owned
-/// leaf, ascending, walk its canonical node sequence, copy each stage's
-/// `arena[node].result` (exact by the determinacy lemma — a node's solved
-/// outcome is path-independent), and stream the assembled scenario result.
+/// Re-expand the per-node arena into per-path output rows: each owned leaf's
+/// canonical node sequence reuses `arena[node].result` directly — exact by
+/// the determinacy lemma (a node's solved outcome is path-independent) — and
+/// streams the assembled scenario result.
 ///
 /// # Errors
 ///
@@ -414,15 +410,9 @@ fn re_expand(
     Ok((costs, stats))
 }
 
-/// Execute the enumerated all-paths census simulation on this rank.
-///
-/// Mirrors `run_enumerated_forward` step-for-step: own-set marking
-/// ([`mark_own_paths`]), a stage-synchronous node-parallel solve sweep
-/// ([`run_sweep`], each distinct `on_my_paths` node solved exactly once), then
-/// a sequential per-path re-expansion ([`re_expand`]) that streams every owned
-/// leaf's result. Every ancestor of an owned leaf is owned and solved locally
-/// from this rank's own arena — no cross-rank state exchange occurs at any
-/// world size.
+/// Execute the enumerated all-paths census simulation on this rank. Every
+/// ancestor of an owned leaf is owned and solved locally from this rank's own
+/// arena — no cross-rank state exchange occurs at any world size.
 ///
 /// # Errors
 ///
@@ -497,8 +487,8 @@ where
         );
     }
 
-    // Sanctioned memory micro-opt: children no longer read these once the
-    // sweep is done, and the arena's `result`s stay resident through re-expansion.
+    // Sanctioned drop, not dead code: out_state/accum are unread after the
+    // sweep; the arena's `result`s stay resident through re-expansion.
     for visit in scratch.arena.iter_mut().flatten() {
         visit.out_state = Vec::new();
         visit.accum = AccumSnapshot::default();

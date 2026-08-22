@@ -27,6 +27,10 @@
 //! declares post-study stages; without them, no such directory or file is
 //! written.
 //!
+//! Every record's `node_id` below is the declared node visited at that stage —
+//! the degenerate per-stage id on a chain — and must never be gated on whether
+//! the system declared `nodes[]`.
+//!
 //! ## Circular-dependency mitigation
 //!
 //! The crate-local [`ScenarioWritePayload`] mirrors the caller's result layout
@@ -68,8 +72,7 @@ use crate::output::schemas::{
 pub struct CostWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level aggregates.
     pub block_id: Option<u32>,
@@ -131,8 +134,7 @@ pub struct CostWriteRecord {
 pub struct HydroWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -205,8 +207,7 @@ pub struct HydroWriteRecord {
 pub struct ThermalWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -231,8 +232,7 @@ pub struct ThermalWriteRecord {
 pub struct ExchangeWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -253,8 +253,7 @@ pub struct ExchangeWriteRecord {
 pub struct BusWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -275,8 +274,7 @@ pub struct BusWriteRecord {
 pub struct PumpingWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -297,8 +295,7 @@ pub struct PumpingWriteRecord {
 pub struct ContractWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -319,8 +316,7 @@ pub struct ContractWriteRecord {
 pub struct NonControllableWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -343,8 +339,7 @@ pub struct NonControllableWriteRecord {
 pub struct InflowLagWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Hydro plant entity ID.
     pub hydro_id: i32,
@@ -360,8 +355,7 @@ pub struct InflowLagWriteRecord {
 pub struct TransitBucketWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Downstream hydro plant entity ID the arc feeds.
     pub hydro_id: i32,
@@ -395,8 +389,7 @@ pub struct TransitSeedWriteRecord {
 pub struct HydroBusWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -415,8 +408,7 @@ pub struct HydroBusWriteRecord {
 pub struct GenericViolationWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -434,8 +426,7 @@ pub struct GenericViolationWriteRecord {
 pub struct AnticipatedLaneWriteRecord {
     /// Stage index (0-based) — the lane's own in-study decider stage.
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Thermal unit entity ID owning this lane.
     pub thermal_id: i32,
@@ -452,8 +443,7 @@ pub struct AnticipatedLaneWriteRecord {
 pub struct StageWritePayload {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Cost breakdown records for this stage.
     pub costs: Vec<CostWriteRecord>,

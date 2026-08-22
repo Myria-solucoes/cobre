@@ -25,8 +25,7 @@ pub struct HighsProfile {
     /// `1`=Devex, `2`=`SteepestEdge`).
     pub simplex_dual_edge_weight_strategy: i32,
     /// `HiGHS` `simplex_scale_strategy` (`0`=Off, `1`=Choose, `2`=Curtis–Reid,
-    /// `4`=Equilibration). The cobre prescaler already normalizes matrix
-    /// entries, so the default is `0` (off).
+    /// `4`=Equilibration); see `default_options()` for why the default is `0`.
     pub simplex_scale_strategy: i32,
     /// `HiGHS` `simplex_price_strategy` (`0`=Col, `1`=Row, `2`=`RowHyperSparse`,
     /// `3`=`RowSparse`).

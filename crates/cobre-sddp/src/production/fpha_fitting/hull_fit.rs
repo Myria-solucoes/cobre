@@ -88,7 +88,7 @@ fn build_cloud(pf: &ProductionFunction, bounds: &FittingBounds) -> Vec<[f64; 3]>
 
 /// Convert an upper-envelope facet to a plane `generation = γ₀ + γ_V·V + γ_Q·Q`.
 ///
-/// # Sign contract (Voice 1)
+/// # Sign contract
 ///
 /// `convex_hull_3d` returns each facet as `nx·V + ny·Q + nz·generation + offset = 0`
 /// with an OUTWARD unit normal. An upper-envelope facet — one that bounds the
@@ -118,7 +118,7 @@ fn facet_to_plane(facet: &Hyperplane3d) -> RawPlane {
 
 /// Fit upper-envelope FPHA planes from the production cloud via convex hull.
 ///
-/// # Upper-envelope selection (Voice 1)
+/// # Upper-envelope selection
 ///
 /// A hull facet is part of the concave over-approximation iff its outward normal
 /// has a POSITIVE `generation` component (`nz > EPS_NZ`): such a facet bounds the cloud
@@ -156,7 +156,7 @@ pub(crate) fn fit_hull_planes(
         .map(facet_to_plane)
         .collect();
 
-    // Run-of-river γ_V = 0 contract (Voice 1). The facet γ_V from the synthesized
+    // Run-of-river γ_V = 0 contract. The facet γ_V from the synthesized
     // two-sample V axis is a near-zero residual, not a real storage gradient; snap
     // it to exactly 0.0 so `Coef.Vutil = 0` holds. Leaving the noisy γ_V (the
     // forbidden alternative) would emit a spurious storage slope and feed roundoff

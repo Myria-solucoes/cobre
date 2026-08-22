@@ -2410,7 +2410,7 @@ mod tests {
 
     // ── build_season_stage_map ─────────────────────────────────────────────
 
-    /// AC-035-4: 3 stages with season IDs → map entries {0 => 0, 1 => 0, 2 => 1}.
+    /// 3 stages with season IDs → map entries {0 => 0, 1 => 0, 2 => 1}.
     #[test]
     fn test_build_season_stage_map_basic() {
         let json = r#"{
@@ -2450,14 +2450,14 @@ mod tests {
         assert_eq!(map[&2], 1);
     }
 
-    /// AC-035-5: empty stages slice → empty map.
+    /// Empty stages slice → empty map.
     #[test]
     fn test_build_season_stage_map_empty() {
         let map = build_season_stage_map(&[]);
         assert!(map.is_empty());
     }
 
-    /// AC-035-6: stages without season_id → empty map.
+    /// Stages without season_id → empty map.
     #[test]
     fn test_build_season_stage_map_none_season_ids() {
         let json = r#"{

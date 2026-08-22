@@ -1016,13 +1016,10 @@ mod anticipated_two_plants_smoke {
             .state_at_capture
             .as_slice();
 
-        // HOLD (carry, not shift): a not-yet-matured commitment is held in its
-        // OWN modular slot across forward stages, never shifted to a lower slot.
         // Plant 1 (K=4, id 5) holds its delivery-3 commitment in slot `3 mod 4 = 3`
         // across stages 0-2, maturing only at stage 3, so the SAME slot carries the
         // same value across the consecutive forward-outgoing captures bc[1] (stage
-        // 0) and bc[2] (stage 1). Under the retired shift geometry this invariant
-        // instead read `slot 1 @ stage t == slot 0 @ stage t+1`.
+        // 0) and bc[2] (stage 1).
         let plant1 = 1_usize;
         let slot3_p1 = ant_start + 3 * n_anticipated + plant1;
         assert!(

@@ -155,8 +155,7 @@ fn extract_field_from_serde_msg(msg: &str) -> String {
 }
 
 /// Post-deserialization validation that the mandatory `forward_passes` and
-/// `stopping_rules` fields are present, and that the scenario-selection axis is
-/// well-formed on both phases.
+/// `stopping_rules` fields are present.
 pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadError> {
     if config.resolve_forward_passes().is_none() {
         return Err(LoadError::SchemaError {
@@ -543,7 +542,7 @@ mod tests {
         f
     }
 
-    /// AC-1: minimal config returns Ok with correct forward_passes and all
+    /// Minimal config returns Ok with correct forward_passes and all
     /// optional sections at their default values.
     #[test]
     fn test_parse_minimal_config() {
@@ -588,7 +587,7 @@ mod tests {
         );
     }
 
-    /// AC-2: missing `training.selection` (no forward-pass count) → SchemaError
+    /// Missing `training.selection` (no forward-pass count) → SchemaError
     /// with field name.
     #[test]
     fn test_missing_forward_passes() {
@@ -607,7 +606,7 @@ mod tests {
         }
     }
 
-    /// AC-2 variant: missing `training.stopping_rules` → SchemaError.
+    /// Missing `training.stopping_rules` → SchemaError.
     #[test]
     fn test_missing_stopping_rules() {
         let f = write_config(
@@ -625,7 +624,7 @@ mod tests {
         }
     }
 
-    /// AC-3: nonexistent file → IoError with matching path.
+    /// Nonexistent file → IoError with matching path.
     #[test]
     fn test_nonexistent_file() {
         let path = std::path::Path::new("/nonexistent/path/config.json");
@@ -638,7 +637,7 @@ mod tests {
         }
     }
 
-    /// AC-4: full config with all sections → Ok with non-default values.
+    /// Full config with all sections → Ok with non-default values.
     #[test]
     fn test_parse_full_config() {
         let json = r#"{
@@ -732,7 +731,7 @@ mod tests {
         assert!(cfg.exports.stochastic);
     }
 
-    /// AC-5: invalid JSON syntax → ParseError.
+    /// Invalid JSON syntax → ParseError.
     #[test]
     fn test_invalid_json_syntax() {
         let f = write_config(r#"{"training": {not valid json}}"#);
@@ -965,7 +964,7 @@ mod tests {
         );
     }
 
-    /// AC-035-1: `config.json` without `"estimation"` section → all three defaults applied.
+    /// `config.json` without `"estimation"` section → all three defaults applied.
     #[test]
     fn test_estimation_config_defaults() {
         let f = write_config(
@@ -980,7 +979,7 @@ mod tests {
         assert_eq!(cfg.estimation.min_observations_per_season, 30);
     }
 
-    /// AC-035-2: `"order_selection": "fixed"` is now a hard parse error.
+    /// `"order_selection": "fixed"` is now a hard parse error.
     #[test]
     fn test_estimation_config_order_selection_fixed_rejected() {
         let f = write_config(
@@ -996,7 +995,7 @@ mod tests {
         );
     }
 
-    /// AC-035-2b: `"order_selection": "pacf"` deserializes to `Pacf` with no warning.
+    /// `"order_selection": "pacf"` deserializes to `Pacf` with no warning.
     #[test]
     fn test_estimation_config_order_selection_pacf() {
         let f = write_config(
@@ -1014,7 +1013,7 @@ mod tests {
         assert_eq!(cfg.estimation.min_observations_per_season, 15);
     }
 
-    /// AC-035-3: unknown `order_selection` value → `LoadError::SchemaError` with
+    /// Unknown `order_selection` value → `LoadError::SchemaError` with
     /// message containing `"unknown variant"`.
     #[test]
     fn test_estimation_config_unknown_order_selection() {
@@ -1731,7 +1730,7 @@ mod tests {
             .collect()
     }
 
-    /// AC-1: scalar override sets the value and leaves sibling `training` fields intact.
+    /// A scalar override sets the value and leaves sibling `training` fields intact.
     #[test]
     fn with_overrides_sets_scalar_and_preserves_siblings() {
         let base = base_value(OVERRIDE_BASE_CONFIG);
@@ -1753,7 +1752,7 @@ mod tests {
         ));
     }
 
-    /// AC-2: an array override deserializes into the expected typed vector.
+    /// An array override deserializes into the expected typed vector.
     #[test]
     fn with_overrides_accepts_array_value() {
         let base = base_value(OVERRIDE_BASE_CONFIG);
@@ -1771,7 +1770,7 @@ mod tests {
         ));
     }
 
-    /// AC-3: a typo key produces SchemaError whose message contains "unknown field".
+    /// A typo key produces SchemaError whose message contains "unknown field".
     #[test]
     fn with_overrides_typo_key_is_schema_error() {
         let base = base_value(OVERRIDE_BASE_CONFIG);
@@ -1790,7 +1789,7 @@ mod tests {
         }
     }
 
-    /// AC-4: deep-merge into a nested object does not clobber sibling keys.
+    /// Deep-merge into a nested object does not clobber sibling keys.
     #[test]
     fn with_overrides_deep_merge_preserves_nested_sibling() {
         let base = base_value(OVERRIDE_BASE_CONFIG);
@@ -1803,7 +1802,7 @@ mod tests {
         assert_eq!(cfg.policy.checkpointing.enabled, Some(true));
     }
 
-    /// AC-5: an override that clears a required field fails post-merge validation —
+    /// An override that clears a required field fails post-merge validation —
     /// the override pipeline runs `validate_config`, not just type-checking.
     #[test]
     fn with_overrides_invalid_value_fails_validation() {

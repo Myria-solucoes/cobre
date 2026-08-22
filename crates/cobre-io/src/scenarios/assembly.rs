@@ -49,7 +49,7 @@ use crate::scenarios::{
 ///
 /// When `stats` is empty (regardless of whether `coefficients` or
 /// `annual_components` are non-empty), the function returns an empty `Vec`
-/// without error. The P7 estimation path (`UserArHistoryStats`) loads AR
+/// without error. The `UserArHistoryStats` estimation path loads AR
 /// coefficients independently via `parse_inflow_ar_coefficients` and does not
 /// route them through this function.
 ///

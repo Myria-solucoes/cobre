@@ -128,10 +128,8 @@ mod tests {
         let exit = Some(5);
         assert_eq!(filling_phase(None, entry, exit, 0), Phase::PreFilling);
         assert_eq!(filling_phase(None, entry, exit, 1), Phase::PreFilling);
-        // First commissioned stage: straight to Operating, no Filling.
         assert_eq!(filling_phase(None, entry, exit, 2), Phase::Operating);
         assert_eq!(filling_phase(None, entry, exit, 4), Phase::Operating);
-        // exit is half-open: stage_id == exit is decommissioned (dormant again).
         assert_eq!(filling_phase(None, entry, exit, 5), Phase::PreFilling);
         assert_eq!(filling_phase(None, entry, exit, 9), Phase::PreFilling);
     }
@@ -159,14 +157,10 @@ mod tests {
     fn three_phases_at_exact_boundaries() {
         let f = config(2);
         let entry = Some(4);
-        // PreFilling: start_stage_id > 0 and stage_id < start_stage_id.
         assert_eq!(filling_phase(Some(&f), entry, None, 0), Phase::PreFilling);
         assert_eq!(filling_phase(Some(&f), entry, None, 1), Phase::PreFilling);
-        // Filling: start_stage_id <= stage_id < entry. stage_id == start.
         assert_eq!(filling_phase(Some(&f), entry, None, 2), Phase::Filling);
-        // stage_id == entry - 1 (last Filling stage).
         assert_eq!(filling_phase(Some(&f), entry, None, 3), Phase::Filling);
-        // Operating: stage_id == entry (first Operating stage).
         assert_eq!(filling_phase(Some(&f), entry, None, 4), Phase::Operating);
         assert_eq!(filling_phase(Some(&f), entry, None, 5), Phase::Operating);
     }
@@ -214,8 +208,8 @@ mod tests {
         // Filling lifecycle (start 2, entry 4): inactive in PreFilling and Filling,
         // active from entry.
         let f = config(2);
-        assert!(!hydro_operating_active(Some(&f), Some(4), None, 0)); // PreFilling
-        assert!(!hydro_operating_active(Some(&f), Some(4), None, 3)); // Filling
-        assert!(hydro_operating_active(Some(&f), Some(4), None, 4)); // Operating
+        assert!(!hydro_operating_active(Some(&f), Some(4), None, 0));
+        assert!(!hydro_operating_active(Some(&f), Some(4), None, 3));
+        assert!(hydro_operating_active(Some(&f), Some(4), None, 4));
     }
 }

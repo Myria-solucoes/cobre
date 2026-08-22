@@ -132,7 +132,8 @@ pub struct StageRowSelectionRecord {
 /// simulation runner.
 ///
 /// The enum has 16 variants: 11 per-iteration events (one per lifecycle step)
-/// and 5 lifecycle events (emitted once per training or simulation run).
+/// and 5 lifecycle events (emitted once per training or simulation run). Every
+/// per-iteration variant's `iteration` field is 1-based.
 ///
 /// ## Per-iteration events (steps 1–7 + 4a + 4b + 4c + per-worker)
 ///
@@ -164,7 +165,7 @@ pub enum TrainingEvent {
     // ── Per-iteration events ─────────────────────────────────────────────────
     /// Forward pass completed for this iteration on the local rank.
     ForwardPassComplete {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Number of forward scenarios evaluated on this rank.
         scenarios: u32,
@@ -179,7 +180,7 @@ pub enum TrainingEvent {
     /// Forward synchronization (allreduce) completed: the global reduction of
     /// local bound estimates across all participating ranks.
     ForwardSyncComplete {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Global upper bound mean after allreduce.
         global_ub_mean: f64,
@@ -192,7 +193,7 @@ pub enum TrainingEvent {
     /// Backward pass completed: the full backward sweep that generates new rows
     /// for each stage.
     BackwardPassComplete {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Number of new rows generated across all stages.
         rows_generated: u32,
@@ -221,7 +222,7 @@ pub enum TrainingEvent {
     /// Policy row synchronization (allgatherv) completed: new rows from all ranks
     /// gathered and distributed to every rank.
     PolicySyncComplete {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Number of rows distributed to all ranks via allgatherv.
         rows_distributed: u32,
@@ -238,7 +239,7 @@ pub enum TrainingEvent {
     /// Only emitted when `should_run(iteration)` is `true`; skipped entirely on
     /// non-selection iterations.
     PolicySelectionComplete {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Number of rows deactivated across all stages.
         rows_deactivated: u32,
@@ -259,7 +260,7 @@ pub enum TrainingEvent {
     /// when it is `None`. Not gated by `check_frequency` — the budget is a hard
     /// cap maintained at all times.
     PolicyBudgetEnforcementComplete {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Total number of rows evicted across all stages in this iteration.
         rows_evicted: u32,
@@ -272,7 +273,7 @@ pub enum TrainingEvent {
     /// Template freeze completed: per-stage frozen templates rebuilt from the
     /// current active row set, consumed by the *next* iteration's passes.
     PolicyTemplateFreezeComplete {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Number of stages for which frozen templates were rebuilt.
         stages_processed: u32,
@@ -285,7 +286,7 @@ pub enum TrainingEvent {
     /// Convergence check completed: all configured stopping rules evaluated for
     /// the current iteration.
     ConvergenceUpdate {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Current lower bound (non-decreasing across iterations).
         lower_bound: f64,
@@ -303,7 +304,7 @@ pub enum TrainingEvent {
     ///
     /// Only emitted when `iteration % checkpoint_interval == 0`.
     CheckpointComplete {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Filesystem path where the checkpoint was written.
         checkpoint_path: String,
@@ -314,7 +315,7 @@ pub enum TrainingEvent {
     /// Full iteration summary with aggregated timings, emitted as the final
     /// per-iteration event.
     IterationSummary {
-        /// Iteration number (1-based).
+        /// Iteration number.
         iteration: u64,
         /// Current lower bound.
         lower_bound: f64,

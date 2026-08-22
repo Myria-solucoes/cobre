@@ -90,25 +90,15 @@ use crate::{error::SddpError, setup::node_graph::StageIdx, trajectory::Trajector
 /// ```
 #[derive(Debug, Clone)]
 pub struct ExchangeBuffers {
-    /// Send buffer: this rank's state vectors packed contiguously.
+    // Buffer shapes and roles (send_buf, recv_buf, counts, displs, n_state,
+    // local_count, num_ranks) are the "Buffer layout" table above — not
+    // repeated per field.
     send_buf: Vec<f64>,
-
-    /// Receive buffer: all ranks' state vectors in rank-major order.
     recv_buf: Vec<f64>,
-
-    /// Per-rank element count for `allgatherv`.
     counts: Vec<usize>,
-
-    /// Per-rank displacement for `allgatherv`.
     displs: Vec<usize>,
-
-    /// Length of each state vector.
     n_state: usize,
-
-    /// Number of local scenarios (forward passes per rank, padded to the max).
     local_count: usize,
-
-    /// Total number of MPI ranks.
     num_ranks: usize,
 
     /// Actual forward pass count per rank (may be less than `local_count` for

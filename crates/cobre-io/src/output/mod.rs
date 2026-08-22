@@ -434,7 +434,6 @@ impl SimulationOutput {
             .collect();
         partitions_written.sort();
 
-        // First present cost: producer feeds the rank-0 authoritative aggregate first.
         let cost = outputs.iter().find_map(|o| o.cost.clone());
 
         let solve_stats = merge_simulation_solve_stats(outputs);

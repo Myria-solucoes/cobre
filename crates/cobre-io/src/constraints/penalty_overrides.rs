@@ -1412,9 +1412,8 @@ mod tests {
         assert!(rows.is_empty());
     }
 
-    /// AC: Parquet file containing the 5 directional override columns is
-    /// parsed correctly into the matching struct fields — previously these were
-    /// hardcoded to `None` regardless of file content.
+    /// A Parquet file containing the 5 directional override columns parses each
+    /// into its matching struct field.
     #[test]
     fn test_hydro_directional_columns_parsed() {
         let schema = Arc::new(Schema::new(vec![

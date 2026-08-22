@@ -910,7 +910,7 @@ fn test_postcard_round_trip() {
     );
 }
 
-// ── hydro_bus_generation output shape (item 8) ────────────────────────────────
+// ── hydro_bus_generation output shape ─────────────────────────────────────────
 
 /// Every non-essential column at a plausible value; only the caller-chosen
 /// `turbined_m3s`/`generation_mw` are load-bearing for the shape assertions
@@ -1322,7 +1322,7 @@ fn test_single_bus_hydro_bus_generation_output_shape() {
     );
 }
 
-// ── block-axis bound-row validation message shape (item 7, block axis) ──────
+// ── block-axis bound-row validation message shape ────────────────────────────
 
 /// Writes `constraints/thermal_bounds.parquet` at `dir` from explicit rows —
 /// shared by the three block-axis rejection tests below.

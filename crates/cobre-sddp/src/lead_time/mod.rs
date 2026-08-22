@@ -45,8 +45,7 @@ pub struct SpreadResolution {
 }
 
 /// The shared arrival window: a uniform release over the anchor stage
-/// `[0, h_anchor)` delayed by `travel_time_hours`, i.e.
-/// `[travel_time_hours, travel_time_hours + h_anchor)`.
+/// `[0, h_anchor)` delayed by `travel_time_hours`.
 fn arrival_window(travel_time_hours: f64, h_anchor: f64) -> (f64, f64) {
     (travel_time_hours, travel_time_hours + h_anchor)
 }

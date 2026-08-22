@@ -194,11 +194,6 @@ struct RawScheduleEntry {
 
 /// Parse `scenarios/correlation.json` and return a [`CorrelationModel`].
 ///
-/// Reads the JSON file at `path`, deserializes it through intermediate raw types,
-/// validates all matrix invariants and schedule profile references, then converts
-/// and returns a [`CorrelationModel`] with profiles in deterministic [`BTreeMap`]
-/// order.
-///
 /// When the file is absent, use the [`super::load_correlation`] wrapper which
 /// accepts `Option<&Path>` and returns `Ok(CorrelationModel::default())`.
 ///

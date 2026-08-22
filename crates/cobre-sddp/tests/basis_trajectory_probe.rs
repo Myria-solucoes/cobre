@@ -246,7 +246,6 @@ fn classify_stage_rows(
         RowFamily::GenericConstraint,
     );
 
-    // Rows [base_row_count .. total_rows) stay `CutRow` — the initial fill.
     fam
 }
 

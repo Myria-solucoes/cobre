@@ -316,7 +316,6 @@ mod tests {
         // 2 hydros, monthly history 1990–2010 (252 rows each), 12 study stages,
         // max_par_order = 2. Expected: years 1991–2010 (20 windows).
         //
-        // Under the new convention, window_year Y means study starts at year Y.
         // For window y, the algorithm needs:
         //   lags  → (y-1, season 10), (y-1, season 11)
         //   study → (y,   season 0) … (y,   season 11)
@@ -437,7 +436,6 @@ mod tests {
         // hydro1 has full data 1990–2010.
         // hydro2 is missing all of 2006.
         //
-        // Under the new convention, window_year Y means study starts at year Y.
         // Window y=2006 requires (2005, seasons 10/11) and (2006, seasons 0..11).
         // hydro2 has no 2006 data → window 2006 must be excluded.
         let hydro1 = EntityId(1);
@@ -657,7 +655,6 @@ mod tests {
         // One hydro, quarterly data from 1990-2010, 4 quarterly stages,
         // max_par_order = 1.
         //
-        // Under the new convention, window_year Y means study starts at year Y.
         // Window sequence for y (1 lag + 4 study quarters):
         //   lag  → (y-1, season 3) [Q4=Oct]
         //   study → (y,   season 0..3) [Q1-Q4]
@@ -688,9 +685,8 @@ mod tests {
 
     #[test]
     fn test_none_season_map_backward_compat() {
-        // Passing None must fall back to month0() for season ID resolution.
-        // Under the new convention, window_year Y means study starts at year Y,
-        // so lags are sought at year Y-1.
+        // Passing None must fall back to month0() for season ID resolution;
+        // lags are sought at year Y-1 relative to the window's study-start year.
         let hydro1 = EntityId(1);
         let mut history = monthly_history(hydro1, 1990, 2010);
         history.extend(monthly_history(EntityId(2), 1990, 2010));

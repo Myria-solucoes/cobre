@@ -218,7 +218,7 @@ pub struct StudySetup {
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     pub scenario_libraries: ScenarioLibraries,
 
-    /// The runtime node graph (F7): node identity/order, the `node → pool`
+    /// The runtime node graph: node identity/order, the `node → pool`
     /// map, and per-node Ω views/out-edges. Absent `nodes[]` this is the
     /// byte-exact chain degeneracy. Reached through
     /// [`crate::context::TrainingContext::node_graph`] on the hot path.

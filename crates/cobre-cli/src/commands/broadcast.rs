@@ -35,7 +35,6 @@ pub(crate) enum BroadcastStoppingRule {
         iterations: u64,
         tolerance: f64,
     },
-    /// Mirrors [`StoppingRule::Gap`].
     Gap {
         /// Absolute gap tolerance, canonical R$.
         tolerance: Option<f64>,
@@ -107,7 +106,6 @@ pub(crate) struct BroadcastConfig {
     pub(crate) cut_activity_tolerance: f64,
     /// When `false`, all ranks skip training and proceed to simulation (or exit).
     pub(crate) training_enabled: bool,
-    /// Policy initialization mode.
     pub(crate) policy_mode: PolicyMode,
     /// Whether the visited-states archive is allocated for export.
     pub(crate) export_states: bool,
@@ -117,7 +115,6 @@ pub(crate) struct BroadcastConfig {
     /// Scenario source for the training forward pass, broadcast so non-root
     /// ranks build the stochastic context with matching sampling schemes.
     pub(crate) training_source: ScenarioSource,
-    /// Scenario source for the post-training simulation forward pass.
     pub(crate) simulation_source: ScenarioSource,
     /// Backward-pass solver profile override (`training.solver.backward`),
     /// resolved identically on every rank by
@@ -695,8 +692,6 @@ mod tests {
     // BroadcastStoppingRule tests
     // ------------------------------------------------------------------
 
-    /// Postcard round-trip for the `BroadcastStoppingRule::Gap` arm — the
-    /// mirror `BroadcastStoppingRule`'s doc comment exists for.
     #[test]
     fn broadcast_stopping_rule_gap_round_trips_via_postcard() {
         let original = BroadcastStoppingRule::Gap {
@@ -785,7 +780,6 @@ mod tests {
         assert!(decoded.boundary_present);
     }
 
-    /// Postcard serialization round-trip for `BroadcastConfig`.
     #[test]
     fn broadcast_config_roundtrips_via_postcard() {
         use cobre_core::scenario::{SamplingScheme, ScenarioSource};

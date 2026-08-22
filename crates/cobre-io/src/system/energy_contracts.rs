@@ -140,9 +140,6 @@ pub(crate) struct RawContractLimits {
 /// is deterministic regardless of file row order (declaration-order invariance);
 /// the builder applies the same id as its `(operational_start_date, id)` tiebreak.
 ///
-/// Note: `price_per_mwh` is not validated as positive — export contracts
-/// legitimately carry negative prices (revenue).
-///
 /// # Errors
 ///
 /// | Condition                                     | Error variant              |
@@ -264,8 +261,8 @@ fn convert_contracts(raw: RawContractFile, path: &Path) -> Result<Vec<EnergyCont
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id so this parser's output is deterministic regardless of file row
-    // order (declaration-order invariance); id is the builder's canonical tiebreak.
+    // Sort by id: output must not depend on file row order (declaration-order
+    // invariance).
     contracts.sort_by_key(|c| c.id.0);
     Ok(contracts)
 }

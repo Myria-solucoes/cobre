@@ -12,7 +12,7 @@ use super::tailrace::TailraceFamilies;
 /// Source of the tailrace elevation `tailrace_level(outflow)` the production
 /// function reads.
 ///
-/// # Contract — the `Entity` arm is the inert fallback (Voice 1)
+/// # Contract — the `Entity` arm is the inert fallback
 ///
 /// A plant without a `tailrace_curves` table resolves to [`TailraceSource::Entity`]
 /// and must fit bit-for-bit to the same planes as before the families path

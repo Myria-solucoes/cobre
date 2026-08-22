@@ -227,9 +227,9 @@ pub fn load_noise_openings(path: Option<&Path>) -> Result<Vec<NoiseOpeningRow>, 
 
 /// All assembled scenario pipeline data for one case directory.
 ///
-/// Produced by [`load_scenarios`] after loading and assembling all eight
-/// scenario files. Each field maps directly to the corresponding field in
-/// [`cobre_core::System`].
+/// Produced by [`load_scenarios`] after loading and assembling every scenario
+/// file present in the manifest. Each field maps directly to the corresponding
+/// field in [`cobre_core::System`].
 ///
 /// Optional collections are empty `Vec`s when the corresponding file is absent
 /// from the manifest. [`correlation`] is [`CorrelationModel::default()`] when

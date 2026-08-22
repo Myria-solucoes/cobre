@@ -50,9 +50,9 @@ pub(crate) struct OpeningOutcome {
     pub(crate) outcome: BackwardOutcome,
 }
 
-/// Resolve the per-stage opening-block size `B_s`: the caller-configured
-/// size clamped to `n_openings`, or half the openings (rounded up) when unset.
-/// Never a function of worker or rank count.
+/// Resolves the per-stage opening-block size `B_s`. Never a function of worker
+/// or rank count — by-node determinism (sddp.md) requires the block boundaries
+/// to be fixed independent of parallelism.
 pub(crate) fn resolve_block_size(
     n_openings: usize,
     node_block_size: Option<NonZeroUsize>,
@@ -123,7 +123,7 @@ pub(crate) fn hardest_first_block_order(
 /// of entries this worker recorded into its own
 /// `ws.backward_accum.opening_outcomes_buf[..outcome_count]`, which
 /// [`by_node_finish`] resolves back through `workspaces[worker_index]`.
-// Rationale: mirrors `process_stage_backward`'s disjoint-borrow argument list;
+// Rationale: mirrors `process_by_scenario_backward`'s disjoint-borrow argument list;
 // too_many_lines is the claim loop's single sequential region (LP load, warm-chain
 // solve, dual extraction, pivot accumulation, outcome recording) — splitting it
 // would scatter state the next step in the same loop iteration reads.

@@ -41,14 +41,12 @@ pub const RULE_GAP: &str = "gap";
 /// Rule name for the graceful-shutdown stopping rule.
 pub const RULE_GRACEFUL_SHUTDOWN: &str = "graceful_shutdown";
 
-/// Guarded denominator for the RELATIVE gap: the LOWER bound's magnitude, floored
-/// at `1.0`. Both the reported gap ([`crate::ConvergenceMonitor::gap`]) and the
-/// [`StoppingRule::Gap`] relative arm divide by this, so the two never disagree on
-/// what "relative gap" means — it is normalized by the lower bound, never the
-/// upper. The `1.0` floor bounds the ratio when the lower bound is near zero
-/// (startup, or a zero-cost study); the canonical-R$ lower bound is far larger
-/// than `1.0` once gap-checking matters, so the floor only guards that degenerate
-/// case.
+/// Guarded denominator for the RELATIVE gap: `|lower_bound|` floored at `1.0`.
+/// Both the reported gap ([`crate::ConvergenceMonitor::gap`]) and the
+/// [`StoppingRule::Gap`] relative arm divide by this — normalized by the LOWER
+/// bound, never the upper, so the two never disagree on what "relative gap"
+/// means. The floor only matters near startup / a zero-cost study; a converged
+/// lower bound is far larger than `1.0`.
 pub(crate) fn relative_gap_denominator(lower_bound: f64) -> f64 {
     lower_bound.abs().max(1.0_f64)
 }

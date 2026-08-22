@@ -52,8 +52,7 @@ use std::path::Path;
 
 use crate::LoadError;
 
-/// Load `constraints/thermal_bounds.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/thermal_bounds.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -74,8 +73,7 @@ pub fn load_thermal_bounds(path: Option<&Path>) -> Result<Vec<ThermalBoundsRow>,
     }
 }
 
-/// Load `constraints/hydro_bounds.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/hydro_bounds.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -96,8 +94,7 @@ pub fn load_hydro_bounds(path: Option<&Path>) -> Result<Vec<HydroBoundsRow>, Loa
     }
 }
 
-/// Load `constraints/line_bounds.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/line_bounds.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -118,8 +115,7 @@ pub fn load_line_bounds(path: Option<&Path>) -> Result<Vec<LineBoundsRow>, LoadE
     }
 }
 
-/// Load `constraints/pumping_bounds.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/pumping_bounds.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -140,8 +136,7 @@ pub fn load_pumping_bounds(path: Option<&Path>) -> Result<Vec<PumpingBoundsRow>,
     }
 }
 
-/// Load `constraints/contract_bounds.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/contract_bounds.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -162,8 +157,7 @@ pub fn load_contract_bounds(path: Option<&Path>) -> Result<Vec<ContractBoundsRow
     }
 }
 
-/// Load `constraints/penalty_overrides_bus.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/penalty_overrides_bus.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -186,8 +180,7 @@ pub fn load_penalty_overrides_bus(
     }
 }
 
-/// Load `constraints/penalty_overrides_line.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/penalty_overrides_line.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -210,8 +203,7 @@ pub fn load_penalty_overrides_line(
     }
 }
 
-/// Load `constraints/penalty_overrides_hydro.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/penalty_overrides_hydro.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -234,8 +226,7 @@ pub fn load_penalty_overrides_hydro(
     }
 }
 
-/// Load `constraints/penalty_overrides_ncs.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/penalty_overrides_ncs.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -258,8 +249,7 @@ pub fn load_penalty_overrides_ncs(
     }
 }
 
-/// Load `constraints/generic_constraints.json` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/generic_constraints.json` (optional file; see the module doc).
 ///
 /// `name_to_id` maps parameter definition names to their [`EntityId`].
 /// Pass `&HashMap::new()` when no parameters have been loaded; expressions that
@@ -296,8 +286,7 @@ pub fn load_generic_constraints(
     }
 }
 
-/// Load `constraints/generic_constraint_bounds.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/generic_constraint_bounds.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -320,8 +309,7 @@ pub fn load_generic_constraint_bounds(
     }
 }
 
-/// Load `constraints/ncs_bounds.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/ncs_bounds.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///
@@ -342,8 +330,7 @@ pub fn load_ncs_bounds(path: Option<&Path>) -> Result<Vec<NcsBoundsRow>, LoadErr
     }
 }
 
-/// Load `constraints/hydro_unit_group_bounds.parquet` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
+/// Load `constraints/hydro_unit_group_bounds.parquet` (optional file; see the module doc).
 ///
 /// # Errors
 ///

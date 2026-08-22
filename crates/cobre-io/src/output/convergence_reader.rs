@@ -13,18 +13,18 @@ use super::error::OutputError;
 /// summed across iterations or taken from the final row.
 #[derive(Debug, Clone)]
 pub struct ConvergenceSummary {
-    /// Total number of LP solves summed across all iterations.
+    /// LP solves summed across all iterations.
     pub total_lp_solves: u64,
-    /// Total wall-clock time summed across all iterations (milliseconds).
+    /// Wall-clock time summed across all iterations (milliseconds).
     pub total_time_ms: u64,
-    /// Lower bound value from the final iteration (0.0 when no rows).
+    /// Lower bound from the final iteration.
     pub final_lower_bound: f64,
-    /// Upper bound estimate from the final iteration (0.0 when no rows).
+    /// Upper bound estimate from the final iteration.
     pub final_upper_bound: f64,
-    /// Standard deviation of the upper bound from the final iteration (0.0 when no
-    /// rows or the bound is exact, where the column is NULL).
+    /// Standard deviation of the final-iteration upper bound; `0.0` when the
+    /// bound is exact (the source column is NULL there).
     pub final_upper_bound_std: f64,
-    /// Relative gap from the final iteration, or `None` when no rows or gap was undefined.
+    /// Relative gap from the final iteration; `None` when undefined.
     pub final_gap_percent: Option<f64>,
 }
 
@@ -113,7 +113,6 @@ pub fn read_initial_gap_percent(path: &Path) -> Option<f64> {
     None
 }
 
-/// Extract an `Int64` column from `batch` by name, returning a schema error on failure.
 fn get_i64_column<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -133,7 +132,6 @@ fn get_i64_column<'a>(
         })
 }
 
-/// Extract a `Float64` column from `batch` by name, returning a schema error on failure.
 fn get_f64_column<'a>(
     batch: &'a RecordBatch,
     name: &str,

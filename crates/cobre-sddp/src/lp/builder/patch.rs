@@ -207,9 +207,9 @@ impl PatchBuffer {
         }
     }
 
-    /// Fill `N*(1+L) + n_buckets + A*K + W` equality column-bound patches
-    /// pinning incoming state: storage, AR lags, travel-time buckets,
-    /// anticipated state, and the terminal commitment block.
+    /// Fill `N*(1+L) + n_buckets + A*K` equality column-bound patches
+    /// pinning incoming state: storage, AR lags, travel-time buckets, and
+    /// anticipated state.
     ///
     /// The single owner of the column-bound region: iterates
     /// [`StateSpace::state_to_lp_incoming_column`] over every state-vector index

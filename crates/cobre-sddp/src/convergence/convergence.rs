@@ -98,7 +98,7 @@ impl ConvergenceMonitor {
         self.iteration_count += 1;
         self.lower_bound_history.push(lb);
 
-        // Move the vec into MonitorState without cloning, then restore it.
+        // avoid cloning the growing history vec; restored below
         let history = std::mem::take(&mut self.lower_bound_history);
         let state = MonitorState {
             iteration: self.iteration_count,
@@ -282,7 +282,6 @@ mod tests {
         monitor.set_shutdown();
         let (stop, results) = monitor.update(100.0, &default_sync());
         assert!(stop, "should stop after shutdown signal");
-        // GracefulShutdown is results[0]
         assert!(
             results[0].triggered,
             "GracefulShutdown result must be triggered"
@@ -370,7 +369,6 @@ mod tests {
         );
     }
 
-    /// AC: IterationLimit(3) in Any mode triggers at the third update.
     #[test]
     fn ac_iteration_limit_triggers_at_third_call() {
         let rule_set = StoppingRuleSet {
@@ -392,7 +390,6 @@ mod tests {
         assert_eq!(results[0].rule_name, "iteration_limit");
     }
 
-    /// AC: gap formula uses |LB| denominator; with UB=110, LB=100 → gap=10/100.
     #[test]
     fn ac_gap_formula_with_ub_110_lb_100() {
         let mut monitor =
@@ -416,7 +413,6 @@ mod tests {
         );
     }
 
-    /// AC: `set_shutdown` causes `GracefulShutdown` to trigger on next update.
     #[test]
     fn ac_set_shutdown_triggers_graceful_shutdown_rule() {
         let rule_set = StoppingRuleSet {
@@ -430,12 +426,10 @@ mod tests {
         monitor.set_shutdown();
         let (stop, results) = monitor.update(100.0, &default_sync());
         assert!(stop);
-        // GracefulShutdown is at index 0
         assert!(results[0].triggered);
         assert_eq!(results[0].rule_name, "graceful_shutdown");
     }
 
-    /// AC: `lower_bound` and `iteration_count` track correctly after 2 updates.
     #[test]
     fn ac_lb_and_iteration_count_track_correctly() {
         let mut monitor =

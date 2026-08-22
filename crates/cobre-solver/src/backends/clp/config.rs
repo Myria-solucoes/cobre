@@ -23,8 +23,7 @@ pub struct ClpProfile {
     /// perturbation (required for deterministic re-solves); CLP's own default
     /// `100` requests automatic perturbation.
     pub perturbation: i32,
-    /// CLP scaling mode (`Clp_scaling`). `0` disables scaling (the cobre
-    /// prescaler already normalizes matrix entries).
+    /// CLP scaling mode (`Clp_scaling`). `0` disables scaling.
     pub scaling: i32,
     /// Primal feasibility tolerance (`Clp_setPrimalTolerance`).
     pub primal_feasibility_tolerance: f64,

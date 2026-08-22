@@ -420,10 +420,8 @@ impl SolverInterface for HighsSolver {
                 basis.col_status.len(),
                 self.num_cols
             );
-            // An undersized row basis cannot be padded soundly — a BASIC pad is
-            // wrong for inequality-row slacks — so reject it (recoverable; caller
-            // falls back to a cold solve). Runs before `basis_offered` increments:
-            // a rejected basis was never offered.
+            // Runs before `basis_offered` increments: a rejected basis was never
+            // offered.
             if basis.row_status.len() < self.num_rows {
                 self.stats.basis_consistency_failures += 1;
                 return Err(SolverError::BasisRowCountMismatch {
@@ -441,9 +439,7 @@ impl SolverInterface for HighsSolver {
                 *dst = status.to_highs_code();
             }
 
-            // Undersized is rejected above, so `basis_rows >= lp_rows`: copy the
-            // exact rows and truncate any oversized tail (the solver ignores
-            // entries beyond `num_rows`).
+            // Undersized is rejected above, so `basis_rows >= lp_rows` here.
             let basis_rows = basis.row_status.len();
             let lp_rows = self.num_rows;
             let copy_len = basis_rows.min(lp_rows);

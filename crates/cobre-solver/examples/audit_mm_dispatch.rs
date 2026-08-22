@@ -53,7 +53,7 @@ fn splitmix64(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Build a `rows × cols` row-major matrix of f64 values in roughly `[-1.5, 0.5]`,
+/// Build a `rows × cols` row-major matrix of f64 values in `[-0.5, 0.5)`,
 /// seeded deterministically from `seed`.
 fn fill_matrix(rows: usize, cols: usize, seed: u64) -> Vec<f64> {
     let mut state = seed;

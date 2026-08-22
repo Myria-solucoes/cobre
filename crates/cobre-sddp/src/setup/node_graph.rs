@@ -2901,9 +2901,9 @@ mod tests {
     }
 
     /// `SimulationWeighting::Census` is derivable ONLY from an enumerated
-    /// traversal — the estimator-integrity fix (U3): a sampled traversal must
-    /// resolve to `Uniform`, never `Census`, regardless of what weights a
-    /// caller might otherwise be tempted to supply beside it.
+    /// traversal: a sampled traversal must resolve to `Uniform`, never
+    /// `Census`, regardless of what weights a caller might otherwise be
+    /// tempted to supply beside it.
     #[test]
     fn simulation_weighting_census_underivable_from_sampled_traversal() {
         use crate::simulation::SimulationWeighting;

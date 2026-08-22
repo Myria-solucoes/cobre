@@ -14,7 +14,6 @@ mod no_feature_factory {
         assert_eq!(backend.size(), 1);
     }
 
-    /// `BackendKind::Auto` resolves to the local backend with no MPI compiled in.
     #[test]
     fn test_factory_no_feature_auto_is_local() {
         let backend = create_communicator(BackendKind::Auto).expect("auto -> local");

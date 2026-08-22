@@ -111,7 +111,6 @@ pub(crate) fn convex_hull_3d(points: &[[f64; 3]]) -> Result<Vec<Hyperplane3d>, H
         return Err(HullError::NonFiniteInput);
     }
 
-    // Canonical sort-in (the determinism contract above).
     let mut sorted: Vec<[f64; 3]> = points.to_vec();
     sorted.sort_by(|a, b| {
         a[0].total_cmp(&b[0])
@@ -199,8 +198,7 @@ pub(crate) fn convex_hull_3d(points: &[[f64; 3]]) -> Result<Vec<Hyperplane3d>, H
         }
     }
 
-    // Canonical sort-out (the determinism contract above); qhull's normals are
-    // finite, so total_cmp observes only finite values here too.
+    // qhull's normals are finite, so total_cmp observes only finite values here too.
     facets.sort_by(|a, b| {
         a.normal[0]
             .total_cmp(&b.normal[0])
@@ -358,7 +356,6 @@ mod tests {
     fn shuffled_input_yields_bit_identical_facets() {
         let baseline = convex_hull_3d(&TETRA).expect("baseline hull");
 
-        // Same cloud, different point order.
         let shuffled = [
             [0.0, 0.0, 1.0],
             [0.0, 0.0, 0.0],

@@ -123,8 +123,6 @@ fn test_highs_load_model_short_col_lower_panics() {
     solver.load_model(&template);
 }
 
-// Exercises a `debug_assert*` length guard, which is elided in release
-// builds; restrict to debug so the panic actually fires.
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "row_scale")]
@@ -335,16 +333,11 @@ fn test_highs_solve_preserves_stats() {
         stats.success_count, 1,
         "success_count must be 1 after one successful solve"
     );
-    // HiGHS may solve a small equality-only LP entirely via presolve (0
-    // simplex iterations); `total_iterations` is `u64`, so any value is
-    // valid by type.
     let _ = stats.total_iterations;
 }
 
-/// The first solve must complete and report an `iterations` value.
-/// `HiGHS` may solve a small equality-only LP entirely via presolve (0
-/// simplex iterations); the iterations field is `u64` so any value is
-/// valid by type.
+/// The first solve must complete and report an `iterations` value (any `u64`
+/// is valid — see `test_highs_solve_statistics_increment` for why).
 #[test]
 fn test_highs_solve_iterations_positive() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -371,9 +364,8 @@ fn test_highs_solve_time_positive() {
 }
 
 /// After one solve, `statistics()` must report `solve_count==1`,
-/// `success_count==1`, and `failure_count==0`. `HiGHS` may solve a small
-/// equality-only LP entirely via presolve (0 simplex iterations); the
-/// `total_iterations` field is `u64` so any value is valid by type.
+/// `success_count==1`, and `failure_count==0` (`total_iterations` is not
+/// asserted — see `test_highs_solve_statistics_increment` for why).
 #[test]
 fn test_highs_solve_statistics_single() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -729,15 +721,11 @@ fn test_solve_warm_start_rejects_inconsistent_basis() {
 /// `interpret_terminal_status` calls `self.terminal_status_dual_scratch.resize(num_rows, 0.0)`;
 /// we verify here that repeated `resize` calls grow but never shrink capacity.
 ///
-/// The LP: 3-column, 2-row SS1.1 fixture. After `load_model`, `num_rows=2` and
-/// `num_cols=3`. We simulate two scratch-buffer resize cycles and verify capacity
-/// is monotonically non-decreasing.
 #[test]
 fn interpret_terminal_status_reuses_scratch() {
     let template = make_fixture_stage_template();
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
 
-    // Verify that scratch fields start empty (Vec::new() in constructor).
     assert_eq!(
         solver.terminal_status_dual_scratch.capacity(),
         0,
@@ -749,7 +737,6 @@ fn interpret_terminal_status_reuses_scratch() {
         "primal scratch must start with capacity 0 (Vec::new() in constructor)"
     );
 
-    // Load model to establish num_rows=2 and num_cols=3.
     solver.load_model(&template);
 
     // Simulate what interpret_terminal_status does in UNBOUNDED_OR_INFEASIBLE branch:
@@ -807,10 +794,6 @@ fn interpret_terminal_status_reuses_scratch() {
 // limits never fire. A 5-variable, 4-constraint "larger_lp" is required.
 #[allow(clippy::doc_markdown)]
 mod research_tests {
-    // LP used: 3-variable, 2-constraint fixture from SS1.1 (same as other tests).
-    // This LP requires at least 2 simplex iterations, so iteration_limit=1 will
-    // produce ITERATION_LIMIT.
-
     // ─── Helper: load the SS1.1 LP onto an existing HiGHS handle ────────────
     //
     // 3 columns (x0, x1, x2), 2 equality rows, 3 non-zeros.
@@ -958,7 +941,7 @@ mod research_tests {
     /// time_limit=0.0 is always exceeded by wall-clock time before any pivot.
     ///
     /// Observed: run_status=WARNING (1), model_status=TIME_LIMIT (13).
-    /// Confirmed in HiGHS check/TestQpSolver.cpp line 1083-1085.
+    /// Confirmed in HiGHS's `check/TestQpSolver.cpp`.
     #[test]
     fn test_research_time_limit_zero_triggers_time_limit_status() {
         use crate::ffi;
@@ -998,8 +981,8 @@ mod research_tests {
     /// Uses the 5-variable, 4-constraint LP with presolve disabled so that
     /// the crash phase does not solve it, and the iteration limit check fires.
     ///
-    /// Confirmed pattern from HiGHS check/TestLpSolversIterations.cpp
-    /// lines 145-165: iteration_limit=0 -> HighsStatus::kWarning +
+    /// Confirmed pattern from HiGHS's `check/TestLpSolversIterations.cpp`:
+    /// iteration_limit=0 -> HighsStatus::kWarning +
     /// HighsModelStatus::kIterationLimit, iteration count = 0.
     #[test]
     fn test_research_iteration_limit_zero_triggers_iteration_limit_status() {
@@ -1245,7 +1228,7 @@ mod research_tests {
     /// `UNBOUNDED_OR_INFEASIBLE` probe branch.
     ///
     /// Note: `HIGHS_MODEL_STATUS_UNBOUNDED_OR_INFEASIBLE` (9) is returned only by
-    /// IPM (`IpxWrapper.cpp:317`) when it detects dual infeasibility, or when
+    /// IPM (`IpxWrapper.cpp`) when it detects dual infeasibility, or when
     /// `allow_unbounded_or_infeasible=true` is set with presolve=on. Neither
     /// condition occurs in the default `HighsSolver` configuration, so the
     /// `UNBOUNDED_OR_INFEASIBLE` branch serves as a safe fallback for retry paths
@@ -1319,13 +1302,12 @@ mod research_tests {
     }
 
     /// A warm-started solve can FALSELY report INFEASIBLE on numerically hard LPs;
-    /// `solve_inner` now treats an initial INFEASIBLE as retryable so the
-    /// escalation's level-0 cold restart re-solves from a cleared basis before the
-    /// verdict is trusted. This test pins both halves of that contract on a
-    /// *genuinely* infeasible LP (the case a cold restart cannot rescue): the
-    /// result is still `Err(Infeasible)`, AND the escalation actually ran
-    /// (`retry_count >= 1`, i.e. a cold-restart confirmation was attempted) rather
-    /// than the verdict being trusted immediately as it was before the fix.
+    /// `solve_inner` treats an initial INFEASIBLE as retryable so the escalation's
+    /// level-0 cold restart re-solves from a cleared basis before the verdict is
+    /// trusted. This test pins both halves of that contract on a *genuinely*
+    /// infeasible LP (the case a cold restart cannot rescue): the result is still
+    /// `Err(Infeasible)`, AND the escalation actually ran (`retry_count >= 1`,
+    /// i.e. a cold-restart confirmation was attempted).
     #[test]
     fn infeasible_initial_solve_runs_cold_restart_before_terminating() {
         use crate::SolverInterface;

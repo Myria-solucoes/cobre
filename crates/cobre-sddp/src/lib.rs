@@ -49,51 +49,38 @@ pub mod training;
 pub mod validate_phases;
 pub mod workspace;
 
-// Re-export shim: exposes `workspace::context` at `cobre_sddp::context` for the
-// `crate::context::` call sites.
+// The `pub use` shims below re-expose selected cluster sub-modules at their
+// crate-root paths for raw-path callers (tests, benches, or internal
+// `crate::`-prefixed references) that the curated re-exports further down do
+// not cover; each shim's own comment states only what is unique to it.
 pub use workspace::context;
 
-// Re-export shims for `solve::solver_phase` / `solve::stage_solve` at their
-// crate-root paths. `stage_solve` stays `pub(crate)` — no external consumer.
+// `stage_solve` stays `pub(crate)` — no external consumer.
 pub use solve::solver_phase;
 pub(crate) use solve::stage_solve;
 
-// Re-export shim: exposes `risk_measure` / `stopping_rule` at their crate-root
-// paths for integration tests that import them by qualified path.
 pub use convergence::{risk_measure, stopping_rule};
 
-// Re-export shims exposing the `cut/` cluster modules at their crate-root paths
-// for external (bench/test) and internal `crate::`-prefixed consumers.
 pub use cut::{basis_reconstruct, cut_selection, cut_sync, dcs};
 
-// Re-export shims exposing the `lp/` cluster at crate-root paths: `indexer` and
-// `lp_builder` (alias of `lp::builder`) for external and internal consumers;
-// `generic_constraints` stays `pub(crate)`.
+// `lp_builder` aliases `lp::builder`; `generic_constraints` stays `pub(crate)`.
 pub use lp::builder as lp_builder;
 pub(crate) use lp::generic_constraints;
 pub use lp::indexer;
 
-// Re-export shim exposing the `policy/` cluster modules at crate-root paths for
-// raw-path callers the curated re-exports below do not cover.
 pub use policy::{orchestration, policy_export, resolved_parameters, scaling_report};
 
-// Re-export shim exposing the `production/` cluster modules at crate-root paths
-// for raw-path callers the curated re-exports below do not cover.
 // `hydro_models::prepare_hydro_models_from_artifacts` is intentionally absent
 // from the curated re-export — this shim is its sole resolution path.
 // `fpha_fitting` stays `pub(crate)`.
 pub(crate) use production::fpha_fitting;
 pub use production::{energy_conversion, hydro_models};
 
-// Re-export shim exposing the `stochastic/` cluster modules at crate-root paths
-// for raw-path callers the curated re-exports below do not cover. `noise` and
-// `stochastic_summary` stay `pub(crate)`.
+// `noise` and `stochastic_summary` stay `pub(crate)`.
 pub use stochastic::inflow_method;
 pub(crate) use stochastic::{noise, stochastic_summary};
 
-// Re-export shim exposing the `training/` pass modules at crate-root paths for
-// the internal `crate::`-prefixed references the curated re-exports below do not
-// cover. `forward` and `lower_bound` stay `pub`; the rest are `pub(crate)`.
+// `forward` and `lower_bound` stay `pub`; the rest are `pub(crate)`.
 pub(crate) use training::{
     backward, backward_pass_state, forward_pass_state, rank_reconcile, state_exchange, trajectory,
     visited_states,
@@ -101,14 +88,14 @@ pub(crate) use training::{
 pub use training::{forward, lower_bound};
 
 // Test/tooling-only re-export: exposes `BackwardPassState`/`BackwardPassInputs`
-// to downstream integration tests driving the backward pass directly (e.g. the opening-block scheduler
-// scratch capacity/sizing assertions) without widening the crate's production
-// public API. Never reachable outside `test`/`test-support` builds.
+// to downstream integration tests driving the backward pass directly, without
+// widening the crate's production public API. Never reachable outside
+// `test`/`test-support` builds.
 #[cfg(any(test, feature = "test-support"))]
 pub use training::backward_pass_state::{BackwardPassInputs, BackwardPassState};
 
 // Re-export shim: aliases `training::session` at `crate::training_session` for
-// the `crate::training_session::` references in `training/forward_pass_state.rs`.
+// the internal `crate::training_session::` references.
 pub(crate) use training::session as training_session;
 
 // ── config ────────────────────────────────────────────────────────────────────

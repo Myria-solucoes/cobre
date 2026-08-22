@@ -13,8 +13,6 @@ use super::production::ProductionFunction;
 
 /// Relative mean-absolute-deviation above which a fit is flagged to the operator.
 ///
-/// # Rationale (Voice 2)
-///
 /// A heuristic alarm, not a hard error. Raising it hides real misfits; lowering it
 /// floods well-fit reservoirs with noise.
 const WARN_RELATIVE_THRESHOLD: f64 = 0.05;
@@ -79,14 +77,14 @@ impl FphaFitDeviation {
 /// Measure the deviation of the emitted FPHA over-approximation from the exact
 /// production function over the spill = 0 fit grid.
 ///
-/// # Contract — compare the MIN envelope, the one the LP consumes (Voice 1)
+/// # Contract — compare the MIN envelope, the one the LP consumes
 ///
 /// The fitted value is the pointwise **min** over `planes`, not the max (the LP
 /// binds on the minimum). Measuring the max envelope is the wrong-but-compiling
 /// alternative — it reports the deviation of a surface the LP never sees,
 /// spuriously alarming a faithful fit. Mirrors `super::alpha::compute_alpha_fpha`.
 ///
-/// # Contract — spillage = 0, lateral = 0 only (Voice 1)
+/// # Contract — spillage = 0, lateral = 0 only
 ///
 /// Both envelope and exact `FPH` are evaluated at `s = 0`; the `s_points` axis is
 /// not iterated, as the cloud build and α regression also ignore it. At `s = 0`

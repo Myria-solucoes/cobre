@@ -705,7 +705,7 @@ mod tests {
     // Level1 value-based kernel tests
     // -----------------------------------------------------------------------
 
-    /// AC1: pool with 3 cuts (intercepts [1,5,3], coeff all 0), state [0.0].
+    /// Pool with 3 cuts (intercepts [1,5,3], coeff all 0), state [0.0].
     /// Level1 `tie_tolerance=0.0` → cut 1 (value 5) survives; cuts 0,2 deactivated.
     #[test]
     fn level1_deactivates_dominated_cuts_at_state() {
@@ -728,7 +728,7 @@ mod tests {
         );
     }
 
-    /// AC2: pool with 3 cuts (intercepts [5,5,3]), state [0.0].
+    /// Pool with 3 cuts (intercepts [5,5,3]), state [0.0].
     /// Level1 tie_tolerance=1e-10 → cuts 0 and 1 both survive (tie kept).
     #[test]
     fn level1_retains_tied_cuts() {
@@ -800,7 +800,6 @@ mod tests {
         assert!(deact.deactivation_indices().is_empty());
     }
 
-    /// AC6: empty `visited_states` returns empty for Level1.
     #[test]
     fn level1_empty_states_returns_empty() {
         let strategy = CutSelectionStrategy::Level1 {
@@ -820,7 +819,7 @@ mod tests {
     // Lml1 value-based kernel tests
     // -----------------------------------------------------------------------
 
-    /// AC3: same pool as AC2 (intercepts [5,5,3]), state [0.0].
+    /// Same pool as `level1_retains_tied_cuts` (intercepts [5,5,3]), state [0.0].
     /// Lml1 tie_tolerance=1e-10 → only cut 0 (the oldest by slot) survives.
     #[test]
     fn lml1_only_oldest_survives_at_each_state() {
@@ -945,7 +944,6 @@ mod tests {
         );
     }
 
-    /// AC6: empty `visited_states` returns empty for Lml1.
     #[test]
     fn lml1_empty_states_returns_empty() {
         let strategy = CutSelectionStrategy::Lml1 {
@@ -1148,7 +1146,6 @@ mod tests {
     // Reactivation tests
     // -----------------------------------------------------------------------
 
-    /// AC4: inactive cut achieves max at a trial point → Reactivate entry emitted.
     #[test]
     fn level1_reactivates_inactive_cut_at_max() {
         let strategy = CutSelectionStrategy::Level1 {
@@ -1210,7 +1207,6 @@ mod tests {
         );
     }
 
-    /// AC5: all populated cuts from current iteration → empty result.
     #[test]
     fn select_returns_empty_when_all_cuts_from_current_iteration() {
         let strategy = CutSelectionStrategy::Level1 {
@@ -1606,7 +1602,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Dominated algorithm tests (SS1.3 conformance + aggressiveness ordering)
+    // Dominated algorithm tests (conformance + aggressiveness ordering)
     // -----------------------------------------------------------------------
 
     /// Build a `CutPool` with known coefficients, intercepts, and metadata
@@ -1622,7 +1618,6 @@ mod tests {
         let state_dim = coefficients[0].len();
         let mut pool = CutPool::new(n, state_dim, 1, 0);
         for i in 0..n {
-            // Use add_cut to advance populated_count correctly.
             pool.add_cut(NodeId(0), 0, i as u32, intercepts[i], &coefficients[i]);
         }
         pool.replace_selection(metadata, active);
@@ -1643,7 +1638,7 @@ mod tests {
         (0..n).map(|_| default_meta_at(iter)).collect()
     }
 
-    /// SS1.3 test 1: 5 cuts, 3 states (1D). Cuts 0,3,4 dominated at all states.
+    /// 5 cuts, 3 states (1D). Cuts 0,3,4 dominated at all states.
     #[test]
     fn dominated_select_deactivate_dominated() {
         let strategy = CutSelectionStrategy::Dominated {
@@ -1667,7 +1662,7 @@ mod tests {
         assert_eq!(deact.deactivation_indices(), vec![0, 3, 4]);
     }
 
-    /// SS1.3 test 2: cut dominated at 2/3 states but tied at 1 -> retained.
+    /// Cut dominated at 2/3 states but tied at 1 -> retained.
     #[test]
     fn dominated_select_partial_domination_retained() {
         let strategy = CutSelectionStrategy::Dominated {
@@ -1694,7 +1689,7 @@ mod tests {
         );
     }
 
-    /// SS1.3 test 3: cut 2 (constant 2) never achieves max → deactivated.
+    /// Cut 2 (constant 2) never achieves max → deactivated.
     #[test]
     fn dominated_select_none_dominated_when_all_achieve_max() {
         let strategy = CutSelectionStrategy::Dominated {
@@ -1719,7 +1714,6 @@ mod tests {
         );
     }
 
-    /// SS1.3 test 4: empty `visited_states` returns empty set.
     #[test]
     fn dominated_select_empty_states() {
         let strategy = CutSelectionStrategy::Dominated {
@@ -1772,7 +1766,6 @@ mod tests {
         );
     }
 
-    /// SS1.3 test 6: cut from current iteration excluded from deactivation.
     #[test]
     fn dominated_select_current_iteration_excluded() {
         let strategy = CutSelectionStrategy::Dominated {
@@ -1796,10 +1789,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AC6 set-inclusion property: Level1_selected ⊇ Lml1_selected
+    // Set-inclusion property: Level1_selected ⊇ Lml1_selected
     // -----------------------------------------------------------------------
 
-    /// AC6 (set-inclusion form): every cut that Lml1 keeps must also be kept by
+    /// Every cut that Lml1 keeps must also be kept by
     /// Level1 — i.e., every slot in Lml1's deactivation list also appears in
     /// Level1's deactivation list.  The existing aggressiveness ordering test
     /// only checks that `|deact_L1|` <= `|deact_Lml1|`; this test directly verifies
@@ -1860,7 +1853,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AC3 variant: Dominated epsilon-tolerance test
+    // Dominated epsilon-tolerance test
     // -----------------------------------------------------------------------
 
     /// A cut 1e-7 below max everywhere survives with epsilon=1e-6 but is

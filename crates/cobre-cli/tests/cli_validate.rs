@@ -83,7 +83,6 @@ const LINES_JSON: &str = r#"{ "lines": [] }"#;
 const HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 const THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
 
-/// Build a minimal valid case directory in `dir`.
 fn make_valid_case(dir: &TempDir) {
     let root = dir.path();
     write_file(root, "config.json", CONFIG_JSON);
@@ -495,9 +494,8 @@ fn write_boundary_case(dir: &Path, hydro_id: i64) {
     );
 }
 
-/// Run `cobre run` on `dir` and assert it succeeds, materializing a real
-/// policy checkpoint at `dir/output/policy` — the checkpoint boundary tests
-/// point `policy.boundary.path` at.
+/// Materializes the policy checkpoint at `dir/output/policy` that the
+/// boundary tests point `policy.boundary.path` at.
 fn run_case(dir: &Path) {
     cobre()
         .args(["run", dir.to_str().unwrap()])
@@ -523,7 +521,7 @@ fn append_boundary_policy(dir: &Path, boundary_policy_dir: &Path) {
 
 /// A compatible boundary (the case's own just-produced checkpoint) prints the
 /// one-line reconciliation summary and exits 0, without a solve. The per-family
-/// breakdown moved behind `RUST_LOG=debug`, so it is absent from default stdout.
+/// breakdown is gated behind `RUST_LOG=debug`, so it is absent from default stdout.
 #[test]
 fn boundary_report_summary_prints_and_exits_0() {
     let dir = TempDir::new().unwrap();
@@ -542,8 +540,6 @@ fn boundary_report_summary_prints_and_exits_0() {
 /// A RELATIVE `policy.boundary.path` resolves against the CASE (input) directory,
 /// not the run's output directory: `"output/policy"` points at
 /// `case_dir/output/policy` (the just-produced checkpoint) and validate exits 0.
-/// The retired output-relative resolution looked under `case_dir/output/output/policy`
-/// and could not find it.
 #[test]
 fn boundary_relative_path_resolves_against_case_dir_not_output_dir() {
     let dir = TempDir::new().unwrap();

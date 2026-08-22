@@ -722,7 +722,7 @@ mod tests {
         );
     }
 
-    // ── New tests for AC1–AC3, AC6 ────────────────────────────────────────────
+    // ── Version byte and record-tag tests ─────────────────────────────────────
 
     #[test]
     fn serialize_cut_writes_version_at_offset_zero() {

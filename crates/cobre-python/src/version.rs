@@ -39,7 +39,6 @@ pub fn version_info(py: Python<'_>) -> PyResult<Py<PyAny>> {
             cobre_solver::active_solver_version()
         ),
     )?;
-    // This crate never initializes MPI, so the backend is always local.
     dict.set_item("comm", "local")?;
     dict.set_item("zstd", "enabled")?;
     dict.set_item(

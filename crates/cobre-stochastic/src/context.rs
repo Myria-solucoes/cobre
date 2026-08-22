@@ -973,7 +973,7 @@ mod tests {
 
         // A non-positive-definite matrix: rho > 1 is invalid.
         let n = 2usize;
-        let rho = 2.0_f64; // off-diagonal > 1 -- not PD.
+        let rho = 2.0_f64;
         let matrix: Vec<Vec<f64>> = (0..n)
             .map(|i| (0..n).map(|j| if i == j { 1.0 } else { rho }).collect())
             .collect();
@@ -1562,7 +1562,6 @@ mod tests {
         )
         .unwrap();
 
-        // Dimensions must match expectations for a 2-hydro, 3-stage, BF=3 system.
         assert_eq!(ctx.dim(), 2, "dim should be 2 (2 hydros, no load buses)");
         assert_eq!(ctx.n_stages(), 3, "n_stages should be 3");
         assert_eq!(ctx.base_seed(), 42, "base_seed should be 42");
@@ -1650,14 +1649,12 @@ mod tests {
             4,
             "stage 0 must have 4 openings (user-supplied)"
         );
-        // Verify values come from the user-supplied tree.
         assert_eq!(
             ctx.opening_tree().opening(0, 0),
             &[99.0_f64, 99.0],
             "opening values must match user-supplied data"
         );
 
-        // par_lp, correlation, and normal_lp must still be built from the system.
         assert_eq!(
             ctx.par().n_hydros(),
             2,

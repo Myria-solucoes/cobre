@@ -29,15 +29,15 @@ pub(crate) struct FittingBounds {
     /// Number of spillage grid points (>= 2). Validated but not a fitting axis:
     /// the cloud and α regression fix `s = 0` and the lateral secant sweeps its
     /// own `S_max` sample, so no step builds a spillage grid axis.
-    // Intent/Seam: read by no fitting step; kept so the
-    // `spillage_discretization_points` config field round-trips. The allow
-    // re-fires if a spillage-axis consumer is reintroduced.
+    // Read by no fitting step; kept so the `spillage_discretization_points`
+    // config field round-trips. The allow re-fires if a spillage-axis consumer
+    // is reintroduced.
     #[allow(dead_code)]
     pub n_spillage_points: usize,
     /// Parsed plane-count ceiling (>= 1). No longer drives fitting: the hull fitter
     /// emits exactly the upper-envelope facets and there is no greedy selector to cap.
-    // Intent/Seam: read by no fitting step; kept so the config field round-trips
-    // and a future trimming pass can consume it. The allow re-fires when that
+    // Read by no fitting step; kept so the config field round-trips and a
+    // future trimming pass can consume it. The allow re-fires when that
     // reader lands.
     #[allow(dead_code)]
     pub max_planes_per_hydro: usize,

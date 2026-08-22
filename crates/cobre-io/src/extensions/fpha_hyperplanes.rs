@@ -106,10 +106,6 @@ pub struct FphaHyperplaneRow {
 
 /// Parse `system/fpha_hyperplanes.parquet` and return a sorted FPHA coefficient table.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(hydro_id, stage_id, plane_id)` ascending.
-/// Null `stage_id` values sort before any non-null stage.
-///
 /// # Errors
 ///
 /// | Condition                                     | Error variant              |

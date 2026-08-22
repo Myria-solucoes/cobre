@@ -435,7 +435,7 @@ pub(super) fn build_single_stage_template(
         }
     }
 
-    // Sort each column's entries by row index (CSC invariant).
+    // CSC invariant: each column's entries must be row-sorted.
     for col_entry_vec in &mut col_entries {
         col_entry_vec.sort_unstable_by_key(|&(row, _)| row);
     }
@@ -568,7 +568,7 @@ fn collect_load_bus_indices(
 /// The `v_in` contribution propagates through the LP via the matrix coefficient
 /// `-gamma_v/2` on the incoming-storage column; when `v_in` is pinned by that
 /// column's bounds its value automatically enters the FPHA constraint
-/// right-hand side.  No changes to the backward pass or cut extraction are needed.
+/// right-hand side.
 ///
 /// Returns `Ok` with empty templates for a system with zero stages.  All
 /// entity counts may be zero (valid for degenerate test systems).

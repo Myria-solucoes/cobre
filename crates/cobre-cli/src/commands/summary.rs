@@ -75,7 +75,6 @@ pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
     let metadata: TrainingMetadata =
         read_training_metadata(&training_metadata_path).map_err(CliError::from)?;
 
-    // convergence.parquet optional: any read error falls back to a zero-valued summary.
     let convergence_path = output_dir.join("training/convergence.parquet");
     let convergence = read_convergence_summary(&convergence_path)
         .unwrap_or_else(|_| convergence_fallback(&metadata));

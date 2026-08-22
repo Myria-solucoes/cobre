@@ -7,7 +7,7 @@
 //! (never wall-clock). Both arms are pure functions of the input slice and its
 //! order — identical input ordering and rank count yield bit-identical output.
 //!
-//! # Origin-plane invariant (Voice 1)
+//! # Origin-plane invariant
 //!
 //! The plane through the origin (`γ₀ = 0 ∧ γ_V = 0`, zero power at zero turbining)
 //! is NEVER merged: averaging it into a neighbour would shift the zero-generation
@@ -34,7 +34,7 @@ pub(super) const ORIGIN_EPS: f64 = 1e-9;
 
 /// The angle-test normal of a plane: `n = (γ_V, γ_Q, −1)`.
 ///
-/// # Contract — orientation only, in `(V, Q, generation)` (Voice 1)
+/// # Contract — orientation only, in `(V, Q, generation)`
 ///
 /// `γ_S` (the lateral-secant slope on a separate axis) and `γ₀` (the offset, not
 /// the orientation) are EXCLUDED: folding either into the normal is the
@@ -49,7 +49,7 @@ fn plane_normal(plane: &RawPlane) -> [f64; 3] {
 ///
 /// `θ = arccos( clamp(n₁·n₂ / (‖n₁‖·‖n₂‖), −1, 1) )`, converted to degrees.
 ///
-/// # Contract — clamp the cosine before `arccos` (Voice 1)
+/// # Contract — clamp the cosine before `arccos`
 ///
 /// Roundoff can push the cosine ratio just past `±1`, making `arccos` return `NaN`
 /// and silently corrupting the `θ < tolerance` comparison; clamping to `[−1, 1]`
@@ -68,7 +68,7 @@ fn angle_deg(a: &RawPlane, b: &RawPlane) -> f64 {
 /// The mean hyperplane of two planes: the component-wise arithmetic mean of all
 /// four coefficients.
 ///
-/// # Contract — sign-preservation (Voice 1)
+/// # Contract — sign-preservation
 ///
 /// The mean of two `validate_fitted_planes`-valid planes is itself valid (the mean
 /// of two non-negatives is non-negative for `γ_V`/`γ_Q`; of two non-positives is
@@ -104,13 +104,13 @@ pub(super) fn is_origin_plane(plane: &RawPlane) -> bool {
 /// re-merge with the following candidate (the greedy cascade); the origin plane is
 /// always pushed unmerged.
 ///
-/// # Contract — element-for-element function of the input order (Voice 1 / D5)
+/// # Contract — element-for-element function of the input order
 ///
 /// The sweep walks `planes` in its EXISTING canonical post-dedup order and never
 /// re-sorts, so the output is an element-for-element function of the input order
 /// (declaration-order bit-determinism). Callers must pass the canonical order.
 ///
-/// # Contract — `should_merge` is keyed on the ORIGINAL slot indices (Voice 1)
+/// # Contract — `should_merge` is keyed on the ORIGINAL slot indices
 ///
 /// `should_merge(tail_slot, cand_slot, …)` receives 0-based indices in the
 /// ORIGINAL pre-merge slice, NOT positions in the growing `out` Vec. A merged tail
@@ -185,7 +185,7 @@ fn grid_max_gh(pf: &ProductionFunction, grid: &GridParams) -> f64 {
 
 /// Derive a pair's canonical PRNG seed from a STABLE identity.
 ///
-/// # Contract — pure-identity seed, NO clock/thread/rank (Voice 1 / D5)
+/// # Contract — pure-identity seed, NO clock/thread/rank
 ///
 /// The seed is a pure function of the plant, the stage/entry identity, and the two
 /// planes' ORIGINAL slot indices — it reads no wall clock, thread id, or MPI rank,
@@ -216,14 +216,14 @@ fn pair_seed(hydro_id: i32, entry_level_bits: u64, tail_slot: usize, candidate_s
 /// whether the normalised mean-squared generation difference falls below the
 /// tolerance: `δ = EQM / generation²_max < tolerance_pct / 100`.
 ///
-/// # Contract — sequential `Σ d²` in canonical sample order (Voice 1 / D5)
+/// # Contract — sequential `Σ d²` in canonical sample order
 ///
 /// The squared differences accumulate in a single sequential loop over the PRNG
 /// draw order; a parallel / partitioned reduction would reorder the additions and
 /// break bit-determinism across rank counts. The PRNG is freshly seeded from
 /// `seed` each call, so the same seed reproduces the same `Σ d²` bit-for-bit.
 ///
-/// # Contract — `δ` is a fraction; `tolerance_pct` is a percent (Voice 1)
+/// # Contract — `δ` is a fraction; `tolerance_pct` is a percent
 ///
 /// `δ = EQM / generation²_max` is a dimensionless fraction, so the comparison
 /// normalises: `δ < tolerance_pct / 100.0`. Comparing against the raw

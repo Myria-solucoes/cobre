@@ -934,13 +934,11 @@ mod tests {
         );
 
         let data = data.unwrap();
-        // Required fields are populated.
         assert_eq!(
             data.buses.len(),
             1,
             "expected 1 bus parsed from valid buses.json"
         );
-        // Optional fields are empty when absent.
         assert!(
             data.non_controllable_sources.is_empty(),
             "non_controllable_sources should be empty when file absent"

@@ -71,7 +71,6 @@ use std::path::Path;
 /// ```
 /// use cobre_io::extensions::load_hydro_geometry;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_hydro_geometry(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -94,7 +93,6 @@ pub fn load_hydro_geometry(path: Option<&Path>) -> Result<Vec<HydroGeometryRow>,
 /// ```
 /// use cobre_io::extensions::load_production_models;
 ///
-/// // No file present — empty configs, no plane reduction.
 /// let file = load_production_models(None).expect("no file is fine");
 /// assert!(file.configs.is_empty());
 /// assert!(file.plane_reduction.is_none());
@@ -117,7 +115,6 @@ pub fn load_production_models(path: Option<&Path>) -> Result<ProductionModelFile
 /// ```
 /// use cobre_io::extensions::load_fpha_hyperplanes;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_fpha_hyperplanes(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -141,7 +138,6 @@ pub fn load_fpha_hyperplanes(path: Option<&Path>) -> Result<Vec<FphaHyperplaneRo
 /// ```
 /// use cobre_io::extensions::load_hydro_energy_productivity;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_hydro_energy_productivity(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -165,7 +161,6 @@ pub fn load_hydro_energy_productivity(
 /// ```
 /// use cobre_io::extensions::load_tailrace_curves;
 ///
-/// // No file present — returns empty vec.
 /// let rows = load_tailrace_curves(None).expect("no file is fine");
 /// assert!(rows.is_empty());
 /// ```
@@ -181,8 +176,6 @@ pub fn load_tailrace_curves(path: Option<&Path>) -> Result<Vec<TailraceCurveRow>
 mod tests {
     use super::*;
 
-    /// `load_production_models(None)` returns an empty file (no configs, no
-    /// reduction) without I/O.
     #[test]
     fn test_load_production_models_none_returns_empty() {
         let file = load_production_models(None).unwrap();
@@ -196,28 +189,24 @@ mod tests {
         );
     }
 
-    /// `load_fpha_hyperplanes(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_fpha_hyperplanes_none_returns_empty() {
         let result = load_fpha_hyperplanes(None).unwrap();
         assert!(result.is_empty(), "expected empty vec for None path");
     }
 
-    /// `load_hydro_geometry(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_hydro_geometry_none_returns_empty() {
         let result = load_hydro_geometry(None).unwrap();
         assert!(result.is_empty(), "expected empty vec for None path");
     }
 
-    /// `load_hydro_energy_productivity(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_hydro_energy_productivity_none_returns_empty() {
         let result = load_hydro_energy_productivity(None).unwrap();
         assert!(result.is_empty(), "expected empty vec for None path");
     }
 
-    /// `load_tailrace_curves(None)` returns `Ok(Vec::new())` without I/O.
     #[test]
     fn test_load_tailrace_curves_none_returns_empty() {
         let result = load_tailrace_curves(None).unwrap();

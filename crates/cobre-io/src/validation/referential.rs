@@ -1598,8 +1598,7 @@ mod tests {
     }
 
     /// A hydro whose unit group's `bus_id` equals its own (also nonexistent)
-    /// plant `bus_id` is rejected — the distinctness clause that used to
-    /// suppress this case is gone. Exactly one `InvalidReference` is
+    /// plant `bus_id` is rejected. Exactly one `InvalidReference` is
     /// reported and it names the unit group, not the plant.
     #[test]
     fn test_hydro_group_bus_equals_invalid_plant_bus_is_rejected() {

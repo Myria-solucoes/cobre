@@ -264,16 +264,13 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
                 scenario,
             } => solver_error_infeasible(py, &message, *stage, *iteration, *scenario),
             SddpError::Simulation(_) => new_leaf_err(py, &SIMULATION_ERROR, &message),
-            // Total arm: every other SddpError is RuntimeError-shaped, mapping to
-            // SolverError with the three structured attributes None.
             _other => solver_error_plain(py, &message),
         },
         ErrorSource::Message(msg) => message_prefix_to_pyerr(py, &msg),
     }
 }
 
-/// Map a string-prefixed run/study message to its typed class. Every message
-/// string is passed through unchanged.
+/// Map a string-prefixed run/study message to its typed class.
 fn message_prefix_to_pyerr(py: Python<'_>, msg: &str) -> PyErr {
     if msg.starts_with("output write error") || msg.starts_with("policy checkpoint error") {
         case_io_error(py, msg)
@@ -394,7 +391,6 @@ mod tests {
             "expected cobre.errors.{}, got {value:?}",
             leaf.name
         );
-        // The qualified name must read `cobre.errors.<Name>`.
         let qualname: String = class
             .getattr("__module__")
             .expect("__module__")

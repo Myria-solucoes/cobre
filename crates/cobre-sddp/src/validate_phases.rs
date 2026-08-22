@@ -51,11 +51,6 @@ pub enum PrepPhase {
 /// * `file_label` — a short relative path pointing to the file most likely
 ///   responsible for the error, suitable for user-facing diagnostics.
 ///
-/// # Arguments
-///
-/// * `phase` — which preparation phase produced the error.
-/// * `err` — the [`SddpError`] returned by that phase.
-///
 /// # Returns
 ///
 /// `(kind, file_label)` where both are `'static str` references.

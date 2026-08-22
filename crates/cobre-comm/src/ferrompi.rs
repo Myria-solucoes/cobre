@@ -49,8 +49,7 @@ pub struct FerrompiBackend {
     /// The `MPI_COMM_WORLD` communicator handle for inter-node collectives.
     world: ferrompi::Communicator,
 
-    /// Intra-node communicator (`MPI_Comm_split_type`) for `is_leader`; present
-    /// only with the `shared-memory` feature.
+    /// Intra-node communicator (`MPI_Comm_split_type`) for `is_leader`.
     #[cfg(feature = "shared-memory")]
     shared: Option<ferrompi::Communicator>,
 
@@ -69,8 +68,8 @@ pub struct FerrompiBackend {
 //   1. `new` constructs `Mpi` on the calling thread.
 //   2. The backend is the sole owner of `Mpi` until drop, so single-ownership
 //      bars any other thread from calling `MPI_Finalize` (via `Mpi::drop`).
-//   3. The training loop is ThreadLevel::Funneled — all MPI calls come from the
-//      same (main) thread that constructed this struct.
+//   3. Initialization uses `ThreadLevel::Funneled`, so all MPI calls must come
+//      from the same thread that constructed this struct.
 // All collective communication goes through `ferrompi::Communicator`, which is
 // already Send + Sync (an integer handle into a C-side table).
 unsafe impl Send for FerrompiBackend {}
@@ -204,7 +203,6 @@ impl crate::TopologyProvider for FerrompiBackend {
 /// `FerrompiBackend::split_local` inside [`crate::traits::LocalCommKind::Ferrompi`].
 ///
 /// Implements [`crate::LocalCommunicator`] only, not full [`crate::Communicator`].
-/// Only available with the `shared-memory` Cargo feature.
 #[cfg(feature = "shared-memory")]
 pub struct FerrompiLocalComm(ferrompi::Communicator);
 

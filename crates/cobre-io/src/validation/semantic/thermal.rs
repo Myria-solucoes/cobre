@@ -1608,7 +1608,7 @@ mod tests {
         data
     }
 
-    // ── AC-1: valid anticipated thermal — returns Ok(()) ─────────────────────
+    // ── AC-1: valid anticipated thermal — no errors ──────────────────────────
 
     /// Given a valid anticipated thermal (lead_stages=2, n_stages=5, no entry/exit,
     /// two all-zero commitment windows tiling stages 0..2), semantic validation
@@ -1626,7 +1626,7 @@ mod tests {
         );
     }
 
-    // ── LeadTime: no longer gated `NotImplemented` ────────────────────────────
+    // ── LeadTime coverage ─────────────────────────────────────────────────────
 
     /// Given an otherwise-valid `LeadTime`-configured thermal on the
     /// weekly-then-monthly PMO calendar (calendar-covered commitments), when
@@ -1685,7 +1685,8 @@ mod tests {
     // ── AC-2: missing history entry ───────────────────────────────────────────
 
     /// Given an anticipated thermal with no matching entry in
-    /// past_anticipated_commitments, returns Err with thermal_id and "missing".
+    /// past_anticipated_commitments, a `BusinessRuleViolation` names the
+    /// thermal id and "missing".
     #[test]
     fn test_missing_history_entry_error() {
         let thermal = make_anticipated_thermal(1, 2, None, None);
@@ -1726,7 +1727,8 @@ mod tests {
     // ── AC-3: history entry for non-anticipated thermal ───────────────────────
 
     /// Given a history entry whose thermal_id references a thermal with
-    /// anticipated_config == None, returns Err with "not an anticipated thermal".
+    /// anticipated_config == None, a `BusinessRuleViolation` names "not an
+    /// anticipated thermal".
     #[test]
     fn test_history_entry_for_non_anticipated_thermal_error() {
         // thermal 1 is NOT anticipated
@@ -1920,7 +1922,7 @@ mod tests {
 
     // ── AC-6: lead_stages exceeds study horizon ───────────────────────────────
 
-    /// Given lead_stages=10 and n_stages=5, returns Err with
+    /// Given lead_stages=10 and n_stages=5, a `BusinessRuleViolation` names
     /// "lead_stages exceeds study horizon".
     #[test]
     fn test_lead_stages_exceeds_study_horizon_error() {

@@ -102,7 +102,7 @@ pub fn build_fpha_deviation_point_rows(
 /// [`cobre_io::DeviationSummary`] in `training/metadata.json`. `None` on an empty
 /// slice (the metadata section is then omitted).
 ///
-/// # Determinism — first-seen wins on a relative tie (Voice 1 / D5)
+/// # Determinism — first-seen wins on a relative tie
 ///
 /// The worst-entry scan uses strict `>`, so a tie resolves to the canonical-first
 /// entry (`entries` arrives in canonical `(hydro, stage)` order). `>=` would flip

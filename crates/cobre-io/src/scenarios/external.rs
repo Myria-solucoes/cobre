@@ -65,10 +65,6 @@ pub use cobre_core::scenario::{ExternalLoadRow, ExternalNcsRow, ExternalScenario
 
 /// Parse `scenarios/external_inflow_scenarios.parquet` and return a sorted row table.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(stage_id, scenario_id, hydro_id)`
-/// ascending.
-///
 /// # Errors
 ///
 /// | Condition                                            | Error variant              |
@@ -183,10 +179,6 @@ pub fn parse_external_inflow_scenarios(path: &Path) -> Result<Vec<ExternalScenar
 
 /// Parse `scenarios/external_load_scenarios.parquet` and return a sorted row table.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(stage_id, scenario_id, bus_id)`
-/// ascending.
-///
 /// # Errors
 ///
 /// | Condition                                            | Error variant              |
@@ -300,10 +292,6 @@ pub fn parse_external_load_scenarios(path: &Path) -> Result<Vec<ExternalLoadRow>
 }
 
 /// Parse `scenarios/external_ncs_scenarios.parquet` and return a sorted row table.
-///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(stage_id, scenario_id, ncs_id)`
-/// ascending.
 ///
 /// # Errors
 ///

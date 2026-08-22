@@ -42,11 +42,8 @@ pub struct StageSpec {
     pub season_id: Option<usize>,
     /// Load blocks, sorted by index.
     pub blocks: Vec<Block>,
-    /// Block formulation mode.
     pub block_mode: BlockMode,
-    /// Per-stage state-variable flags.
     pub state_config: StageStateConfig,
-    /// Per-stage risk measure.
     pub risk_config: StageRiskConfig,
     /// Per-stage scenario source (branching factor and noise method).
     pub scenario_config: ScenarioSourceConfig,
@@ -112,9 +109,7 @@ pub fn make_stage(
 /// [`make_hydro`].
 #[derive(Clone)]
 pub struct HydroSpec {
-    /// Human-readable plant name.
     pub name: String,
-    /// Date the plant enters service.
     pub operational_start_date: NaiveDate,
     /// Bus receiving this plant's generation.
     pub bus_id: EntityId,
@@ -126,25 +121,18 @@ pub struct HydroSpec {
     pub entry_stage_id: Option<i32>,
     /// Decommissioning stage; None = never retired.
     pub exit_stage_id: Option<i32>,
-    /// Minimum operational storage / dead volume (hm³).
+    /// Minimum operational storage — dead volume.
     pub min_storage_hm3: f64,
-    /// Maximum operational storage (hm³).
     pub max_storage_hm3: f64,
-    /// Minimum total outflow (m³/s).
     pub min_outflow_m3s: f64,
-    /// Maximum total outflow (m³/s); None = unbounded.
+    /// Maximum outflow; None = unbounded.
     pub max_outflow_m3s: Option<f64>,
-    /// Production function model selector.
     pub generation_model: HydroGenerationModel,
-    /// Minimum turbined flow (m³/s).
     pub min_turbined_m3s: f64,
-    /// Maximum turbined flow (m³/s).
     pub max_turbined_m3s: f64,
     /// Specific productivity (MW per (m³/s)·m); None = not supplied.
     pub specific_productivity_mw_per_m3s_per_m: Option<f64>,
-    /// Minimum electrical generation (MW).
     pub min_generation_mw: f64,
-    /// Maximum electrical generation (MW).
     pub max_generation_mw: f64,
     /// Turbine groups partitioning the plant's generation envelope.
     pub unit_groups: Vec<HydroUnitGroup>,
@@ -156,7 +144,7 @@ pub struct HydroSpec {
     pub efficiency: Option<EfficiencyModel>,
     /// Monthly evaporation coefficients (mm/month); None = no evaporation.
     pub evaporation_coefficients_mm: Option<[f64; 12]>,
-    /// Monthly reference storage volumes for evaporation linearization (hm³).
+    /// Monthly reference storage volumes for evaporation linearization.
     pub evaporation_reference_volumes_hm3: Option<[f64; 12]>,
     /// Diversion channel configuration; None = no channel.
     pub diversion: Option<DiversionChannel>,
@@ -288,9 +276,7 @@ pub fn make_hydro(
 /// [`make_bus`].
 #[derive(Clone)]
 pub struct BusSpec {
-    /// Human-readable bus name.
     pub name: String,
-    /// Date the bus enters service.
     pub operational_start_date: NaiveDate,
     /// Deficit cost segments, ordered by ascending cost.
     pub deficit_segments: Vec<DeficitSegment>,
@@ -335,9 +321,7 @@ pub fn make_bus(
 /// [`make_thermal`].
 #[derive(Clone)]
 pub struct ThermalSpec {
-    /// Human-readable plant name.
     pub name: String,
-    /// Date the plant enters service.
     pub operational_start_date: NaiveDate,
     /// Bus receiving this plant's generation.
     pub bus_id: EntityId,
@@ -347,9 +331,7 @@ pub struct ThermalSpec {
     pub exit_stage_id: Option<i32>,
     /// Marginal cost of generation ($/MWh).
     pub cost_per_mwh: f64,
-    /// Minimum electrical generation (MW).
     pub min_generation_mw: f64,
-    /// Maximum electrical generation (MW).
     pub max_generation_mw: f64,
     /// Anticipated dispatch configuration; None = no anticipation lag.
     pub anticipated_config: Option<AnticipatedConfig>,

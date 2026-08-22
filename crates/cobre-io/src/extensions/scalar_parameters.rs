@@ -151,10 +151,6 @@ pub(crate) struct ScalarParameterJsonEntry {
 /// Parse `constraints/generic_parameters.json` and return a fully-assembled,
 /// sorted parameter vector.
 ///
-/// Reads the JSON file at `path`, validates all entries against the rejection
-/// rules documented in this module, and returns a `Vec<ScalarParameter>` sorted
-/// ascending by `id.0`.
-///
 /// # Errors
 ///
 /// | Condition                                     | Error variant                  |
@@ -244,9 +240,6 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
 }
 
 /// Load `constraints/generic_parameters.json` relative to `case_dir`.
-///
-/// Resolves the path as `case_dir.join("constraints/generic_parameters.json")` and
-/// delegates to [`parse_scalar_parameters_json`].
 ///
 /// # Errors
 ///
@@ -753,11 +746,9 @@ mod tests {
 
     #[test]
     fn scalar_parameters_json_rejects_non_finite_value() {
-        // JSON does not natively support NaN or Infinity; serde_json will fail
-        // to parse them from JSON syntax.  We instead test with a constant kind
-        // whose value is provided as a special string that serde_json rejects.
-        // For coverage of the runtime check (in case a future JSON extension
-        // passes NaN through), we test the internal conversion function directly.
+        // JSON syntax cannot express NaN, so serde_json can never hand a NaN to
+        // this path. To cover the runtime check anyway (in case a future JSON
+        // extension passes NaN through), we call the conversion function directly.
         let result = convert_constant(
             0,
             &ScalarParameterJsonEntry {

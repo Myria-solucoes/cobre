@@ -1273,7 +1273,6 @@ mod tests {
 
     #[test]
     fn test_scratch_buffers_zero_downstream_par_order_empty_buffers() {
-        // AC: downstream_par_order=0 → all downstream fields are zero/empty.
         let scratch = ScratchBuffers::new(WorkspaceSizing {
             hydro_count: 5,
             max_par_order: 2,
@@ -1302,7 +1301,6 @@ mod tests {
 
     #[test]
     fn test_scratch_buffers_nonzero_downstream_par_order_allocates_correctly() {
-        // AC: downstream_par_order=2, hydro_count=3 → lengths 3 and 6, all 0.0.
         let scratch = ScratchBuffers::new(WorkspaceSizing {
             hydro_count: 3,
             max_par_order: 2,
@@ -1335,7 +1333,6 @@ mod tests {
 
     #[test]
     fn test_workspace_pool_propagates_downstream_par_order() {
-        // AC: WorkspacePool propagates downstream_par_order=2, hydro_count=3.
         let pool = WorkspacePool::new(
             0,
             2,
@@ -1580,8 +1577,6 @@ mod tests {
 
     #[test]
     fn test_basis_store_holds_captured_basis() {
-        // AC: BasisStore after migration holds Option<CapturedBasis>, not Option<Basis>.
-        // slot set, slot read, default None holds for all 15 cells.
         let mut store = BasisStore::new(3, 5);
         // All 15 slots start as None.
         for s in 0..3 {
@@ -1954,9 +1949,6 @@ mod tests {
     /// Round-trip verification that `to_broadcast_payload` emits
     /// `BASIS_BROADCAST_WIRE_VERSION` at offset 1 of the `i32_buf` (immediately
     /// after the presence sentinel).
-    ///
-    /// AC1 + AC5: the constant is referenced by the pack method; the unpacked
-    /// basis matches the input field-by-field.
     #[test]
     fn to_broadcast_payload_emits_version_byte() {
         use super::BASIS_BROADCAST_WIRE_VERSION;
@@ -2020,8 +2012,6 @@ mod tests {
     /// v1 format) and assert that `try_from_broadcast_payload` returns
     /// `Err(SddpError::Validation)` whose message contains
     /// `"unsupported wire version 1"`.
-    ///
-    /// AC2: stale-version peer detection.
     #[test]
     fn try_from_broadcast_payload_rejects_wrong_version() {
         use crate::SddpError;
@@ -2079,8 +2069,6 @@ mod tests {
 
     /// A `None` payload (sentinel `0_i32`) returns `Ok(None)` and advances the
     /// i32 cursor by exactly 1 — the version byte is never consumed.
-    ///
-    /// AC3: version byte is absent on the `None` path.
     #[test]
     fn try_from_broadcast_payload_none_does_not_consume_version_byte() {
         // Build a buffer that starts with a 0 sentinel followed by sentinel=1
@@ -2202,9 +2190,6 @@ mod tests {
     /// Roundtrip a basis whose `state_at_capture` has the
     /// `N*(1+L) + n_anticipated*k_max` layout introduced by the
     /// anticipated-thermals feature, with numerically distinct regions.
-    ///
-    /// AC-1, AC-2: pack then unpack; assert bit-equality of the full
-    /// state slice and of the anticipated sub-slice.
     #[test]
     fn test_captured_basis_round_trip_includes_anticipated_state() {
         // Layout: N=2 hydros, L=1 PAR lag, n_anticipated=1, k_max=2.
@@ -2280,8 +2265,6 @@ mod tests {
     /// `state_at_capture` length field in the wire payload equals `n_state`
     /// for three layouts (`n_anticipated=0` baseline, `n_anticipated` > 0 small,
     /// and a larger realistic layout).
-    ///
-    /// AC-3, AC-4, AC-5: introspect `i32_buf` positions.
     #[test]
     fn test_captured_basis_state_at_capture_length_is_recorded_correctly() {
         // Layout 1: small with anticipated.
@@ -2307,13 +2290,13 @@ mod tests {
         //   [4] = row_len = 3
         //   [5] = base_row_count = 2
         //   [6] = cut_slot_count = 0
-        //   [7] = state_len = 6   <-- AC-3
+        //   [7] = state_len = 6
         assert_eq!(
             i32_buf[7], 6_i32,
             "state_at_capture length field must be 6 for N=2 L=1 A=1 K=2"
         );
 
-        // Layout 2: n_state == 0 boundary case (AC-4).
+        // Layout 2: n_state == 0 boundary case.
         let empty_state = CapturedBasis {
             basis: Basis {
                 col_status: vec![BasisStatus::Basic],
@@ -2332,7 +2315,7 @@ mod tests {
             "state_at_capture length field must be 0 for empty state"
         );
 
-        // Layout 3: larger realistic layout N=3 L=2 A=2 K_max=3 (AC-5).
+        // Layout 3: larger realistic layout N=3 L=2 A=2 K_max=3.
         // n_state = 3 * (1+2) + 2 * 3 = 9 + 6 = 15.
         let large_state: Vec<f64> = (0..15).map(|i| f64::from(i) * 10.0).collect();
         let large = CapturedBasis {

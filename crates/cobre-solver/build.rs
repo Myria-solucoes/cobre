@@ -1,18 +1,10 @@
-//! Build script for cobre-solver.
-//!
-//! This script:
-//! 1. Checks that the `HiGHS` git submodule is initialized at `crates/cobre-solver/vendor/HiGHS/`
-//! 2. Builds `HiGHS` from source using the `cmake` crate (static library)
-//! 3. Compiles the thin C wrapper (`csrc/highs_wrapper.c`) via `cc`
-//! 4. Links the built `HiGHS` static library and the C++ standard library
-//! 5. When the `clp` feature is enabled, builds the vendored COIN-OR
-//!    superbuild (`CoinUtils` + `Clp`) as static libraries via the `cmake` crate,
-//!    links them in dependency order (`Clp` before `CoinUtils`), and compiles the
-//!    thin C wrapper (`csrc/clp_wrapper.c`) via `cc`
+//! Build script for cobre-solver: builds the vendored `HiGHS` (`highs` feature,
+//! default) and/or `CLP` (`clp` feature) solver libraries via `cmake`, then
+//! compiles their thin C wrappers via `cc`.
 
 // Build scripts routinely use expect/panic for unrecoverable configuration
 // errors. Allow these lints here since there is no caller to propagate errors to.
-// `too_many_lines` is allowed because `main` now drives two optional vendored
+// `too_many_lines` is allowed because `main` drives two optional vendored
 // solver builds (HiGHS + CLP) sequentially; splitting it would scatter the
 // shared target-env setup without improving clarity.
 #![allow(
@@ -33,12 +25,8 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
-    // ---------------------------------------------------------------------
-    // HiGHS backend, gated behind the `highs` feature (on by default).
-    // Exactly one LP backend is built: a `--no-default-features --features clp`
-    // build skips this block entirely, and enabling both `highs` and `clp` is
+    // Exactly one LP backend may be enabled; enabling both `highs` and `clp` is
     // rejected at compile time (see the `compile_error!` in `lib.rs`).
-    // ---------------------------------------------------------------------
     if env::var("CARGO_FEATURE_HIGHS").is_ok() {
         println!("cargo:rerun-if-changed=csrc/highs_wrapper.c");
         println!("cargo:rerun-if-changed=csrc/highs_wrapper.h");
@@ -65,15 +53,14 @@ fn main() {
             .define("HIGHS_NO_DEFAULT_THREADS", "ON")
             .define("BUILD_TESTING", "OFF")
             .define("BUILD_EXAMPLES", "OFF")
-            // Ensure HighsInt is 32-bit (matching the i32 types in our FFI bindings).
-            // The _Static_assert in highs_wrapper.c catches this at compile time,
-            // but setting the flag here prevents any mismatch from the cmake build.
+            // Must stay 32-bit to match the i32 types in the FFI bindings;
+            // highs_wrapper.c's _Static_assert also catches a mismatch, but this
+            // flag prevents the cmake build from ever producing one.
             .define("HIGHSINT64", "OFF")
-            // Disable zlib in HiGHS. HiGHS uses zlib only for reading compressed
-            // .mps.gz/.lp.gz files via Highs_readModel(). Cobre constructs all LPs
-            // programmatically via the C API and never uses file-based model I/O.
-            // Disabling zlib eliminates a system dependency that causes
-            // cross-compilation failures in the Python wheel CI.
+            // HiGHS uses zlib only for Highs_readModel() (.mps.gz/.lp.gz); Cobre
+            // builds every LP programmatically via the C API and never reads model
+            // files, so disabling it drops a system dependency that otherwise
+            // breaks cross-compilation in the Python wheel CI.
             .define("CMAKE_DISABLE_FIND_PACKAGE_ZLIB", "ON");
 
         // On MSVC, use static CRT to avoid requiring vcruntime140.dll in the wheel.
@@ -109,8 +96,7 @@ fn main() {
 
         println!("cargo:rustc-link-lib=static=highs");
 
-        // Link the C++ standard library.
-        // MSVC links it automatically — no explicit directive needed.
+        // MSVC links the C++ runtime automatically; no explicit directive needed.
         if target_env != "msvc" {
             if target_os == "macos" {
                 println!("cargo:rustc-link-lib=c++");
@@ -135,26 +121,22 @@ fn main() {
             .warnings(true)
             .extra_warnings(true);
 
-        // Treat HiGHS headers as system includes so that their warnings
-        // (unused-parameter on setHotStart/freezeBasis/unfreezeBasis inlines) do
-        // not surface while we keep full warning coverage on our own wrappers.
-        // MSVC lacks -isystem; fall back to -I and accept the vendor noise there.
+        // Treat HiGHS headers as system includes so their warnings don't surface
+        // while we keep full warning coverage on our own wrappers. MSVC lacks
+        // -isystem; fall back to -I and accept the vendor noise there.
         add_system_or_include(&mut build, target_env == "msvc", &highs_include);
         add_system_or_include(&mut build, target_env == "msvc", &highs_include_highs);
 
         // MSVC: link against static CRT (`/MT`) to match the static-CRT HiGHS
-        // build above. Without this the cc-compiled wrappers default to the
-        // dynamic CRT (`/MD`) and the linker rejects the mixed runtime objects
-        // (`LNK2038: 'RuntimeLibrary' mismatch MT_StaticRelease vs
-        // MD_DynamicRelease`). cargo-dist Windows builds happen to set
-        // `+crt-static` via `RUSTFLAGS`, which the cc crate honours, but the
-        // PyO3/maturin Python wheel build does not — so an explicit override
-        // is required for the wheel to link.
+        // build above — otherwise the cc-compiled wrappers default to dynamic
+        // CRT (`/MD`) and the linker rejects the mismatch (`LNK2038`).
+        // cargo-dist sets `+crt-static` via `RUSTFLAGS` (which `cc` honours),
+        // but the PyO3/maturin wheel build does not, so this override is
+        // required there.
         if target_env == "msvc" {
             build.static_crt(true);
         }
 
-        // GCC/Clang-specific warning suppression.
         if target_env != "msvc" {
             build.flag("-Wno-unused-function");
         }
@@ -193,17 +175,10 @@ fn main() {
         build_cpp.compile("highs_wrapper_cpp");
     }
 
-    // ---------------------------------------------------------------------
-    // CLP backend (optional, gated behind the `clp` feature).
-    //
     // Cargo exposes feature activation to build scripts via the
     // CARGO_FEATURE_<NAME> environment variable, so this entire block is
     // skipped — and the default build artifact stays byte-identical — unless
-    // `--features clp` is active. It mirrors the HiGHS block above: build the
-    // vendored COIN-OR superbuild (CoinUtils + Clp) as static libraries in
-    // Release via the cmake crate, then compile the thin C wrapper
-    // (csrc/clp_wrapper.c) via cc, mirroring the HiGHS wrapper.
-    // ---------------------------------------------------------------------
+    // `--features clp` is active.
     if env::var("CARGO_FEATURE_CLP").is_ok() {
         println!("cargo:rerun-if-changed=csrc/clp_wrapper.c");
         println!("cargo:rerun-if-changed=csrc/clp_wrapper.h");
@@ -267,7 +242,7 @@ fn main() {
             clp_dst.join("lib64").display()
         );
 
-        // MSVC cmake may place libraries in a configuration subdirectory.
+        // Same MSVC subdirectory quirk as the HiGHS build above.
         if target_env == "msvc" {
             println!(
                 "cargo:rustc-link-search=native={}",
@@ -280,8 +255,7 @@ fn main() {
         println!("cargo:rustc-link-lib=static=Clp");
         println!("cargo:rustc-link-lib=static=CoinUtils");
 
-        // Link the C++ standard library (CoinUtils/Clp are C++). Mirror the
-        // HiGHS target-OS/env logic: MSVC links it automatically.
+        // Mirror the HiGHS target-OS/env logic: MSVC links it automatically.
         if target_env != "msvc" {
             if target_os == "macos" {
                 println!("cargo:rustc-link-lib=c++");

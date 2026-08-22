@@ -129,14 +129,6 @@ impl Communicator for Rank0Of2 {
     }
 }
 
-/// Build a [`StudySetup`] for a case directory.
-///
-/// The caller's `prepare_hydro_models` has already folded the productivity
-/// override into `hydro_models`. This helper re-loads `case_dir`'s
-/// `CaseArtifacts` (a second full parse) for `scalar_parameters`, because
-/// `StudyParams::into_construction_config` never carries them — every setup
-/// caller must patch them in itself (cobre-cli via MPI broadcast,
-/// cobre-python directly).
 /// Resolve the boundary-inferred inflow-lag depth for a test case, tolerating a
 /// placeholder boundary path: a test that installs a fake `policy.boundary` and
 /// injects cuts manually must not trigger a read of the missing checkpoint.
@@ -151,6 +143,14 @@ pub fn boundary_inflow_lag_depth(case_dir: &Path, config: &Config) -> Option<u32
         .flatten()
 }
 
+/// Build a [`StudySetup`] for a case directory.
+///
+/// The caller's `prepare_hydro_models` has already folded the productivity
+/// override into `hydro_models`. This helper re-loads `case_dir`'s
+/// `CaseArtifacts` (a second full parse) for `scalar_parameters`, because
+/// `StudyParams::into_construction_config` never carries them — every setup
+/// caller must patch them in itself (cobre-cli via MPI broadcast,
+/// cobre-python directly).
 pub fn build_setup_for_case(
     case_dir: &Path,
     config: &Config,

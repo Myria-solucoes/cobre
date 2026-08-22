@@ -530,10 +530,10 @@ mod tests {
     #[test]
     fn cvar_aggregate_cut_pure_cvar_selects_worst() {
         let outcomes = vec![
-            outcome(10.0, 10.0), // cheapest
+            outcome(10.0, 10.0),
             outcome(20.0, 20.0),
             outcome(30.0, 30.0),
-            outcome(40.0, 40.0), // most expensive
+            outcome(40.0, 40.0),
         ];
         let probs = vec![0.25; 4];
         let rm = RiskMeasure::CVaR {
@@ -547,8 +547,8 @@ mod tests {
     #[test]
     fn cvar_aggregate_cut_with_coefficients() {
         let outcomes = vec![
-            outcome_with_coeffs(10.0, 10.0, vec![1.0, 0.0]), // cheapest
-            outcome_with_coeffs(20.0, 20.0, vec![0.0, 1.0]), // expensive
+            outcome_with_coeffs(10.0, 10.0, vec![1.0, 0.0]),
+            outcome_with_coeffs(20.0, 20.0, vec![0.0, 1.0]),
         ];
         let probs = vec![0.5, 0.5];
         let rm = RiskMeasure::CVaR {
@@ -646,7 +646,7 @@ mod tests {
             alpha: 0.5,
             lambda: 0.8,
         };
-        let copied = rm; // Copy leaves `rm` usable below.
+        let copied = rm;
         assert_eq!(copied, rm);
         assert_ne!(copied, RiskMeasure::Expectation);
         let debug_str = format!("{rm:?}");
@@ -700,11 +700,9 @@ mod tests {
         ];
         let weights = vec![0.5, 0.3, 0.2];
 
-        // Reference: aggregate_cut (which calls aggregate_weighted)
         let (ref_intercept, ref_coeffs) =
             RiskMeasure::Expectation.aggregate_cut(&outcomes, &weights);
 
-        // Under test: aggregate_weighted_into
         let mut intercept_out = 0.0_f64;
         let mut coefficients_out = vec![0.0_f64; 3];
         aggregate_weighted_into(
@@ -855,18 +853,15 @@ mod tests {
         ];
         let probs = vec![0.25; 4];
 
-        // Reference: allocating aggregate_cut for CVaR
         let rm = RiskMeasure::CVaR {
             alpha: 0.5,
             lambda: 1.0,
         };
         let (ref_intercept, _) = rm.aggregate_cut(&outcomes, &probs);
 
-        // Under test: _into variant drives the same greedy allocation
         let mut scratch = RiskMeasureScratch::new();
         compute_cvar_weights_into(&outcomes, &probs, 0.5, 1.0, &mut scratch);
 
-        // mu weights produce the same intercept when applied
         let weighted_intercept: f64 = outcomes
             .iter()
             .zip(scratch.mu.iter())
@@ -876,7 +871,6 @@ mod tests {
             (weighted_intercept - ref_intercept).abs() < 1e-10,
             "into variant must produce identical weighted result: got {weighted_intercept}, expected {ref_intercept}"
         );
-        // Weights sum to 1
         let weight_sum: f64 = scratch.mu.iter().sum();
         assert!(
             (weight_sum - 1.0).abs() < 1e-10,
@@ -886,9 +880,6 @@ mod tests {
 
     #[test]
     fn risk_measure_cvar_aggregate_cut_into_reuses_scratch() {
-        // Call aggregate_cut_into twice with the same RiskMeasureScratch and assert:
-        // (1) identical results on both calls
-        // (2) scratch.mu.capacity() is non-decreasing (no shrink)
         use super::RiskMeasureScratch;
 
         let outcomes = vec![

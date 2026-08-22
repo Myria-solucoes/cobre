@@ -4,7 +4,7 @@
 //! (`training::forward::enumerated`). Both claim units from a shared atomic
 //! counter in any order, then scatter each worker's captures into a shared
 //! arena in ascending `(worker, item)` order so the result is independent of
-//! claim order (sddp.md "By-node scheduler is warm-start-only"). Only these
+//! claim order and worker count. Only these
 //! two narrow, genuinely-identical primitives live here — the claim loop
 //! BODIES and the scatter-item WRITES stay at each caller, since their
 //! borrow shapes and per-item work differ.
@@ -39,15 +39,9 @@ impl ClaimCursor {
 }
 
 /// Ascending `(worker, item)` pairs over each worker's own claimed-item
-/// count — the canonical scatter order that makes cut/arena aggregation
-/// independent of claim order and worker count. `counts[w]` is worker `w`'s
-/// own item count (already resolved from its own `Result`, since the two
-/// callers resolve the first worker error differently — `by_node_finish`
-/// eagerly, the enumerated engine via a `collect::<Result<Vec<_>, _>>()?`);
-/// this borrows `counts` and owns nothing, so it allocates no scratch of its
-/// own. Each caller supplies its own per-item write (the arena addressing and
-/// copied fields differ between `by_node_finish` and the enumerated engine's
-/// post-region scatter) — this owns only the shared traversal.
+/// count — the canonical scatter order that keeps cut/arena aggregation
+/// independent of claim order and worker count. Returns a lazy iterator over
+/// the borrowed `counts` slice, allocating no scratch of its own.
 pub(crate) fn canonical_scatter(counts: &[usize]) -> impl Iterator<Item = (usize, usize)> + '_ {
     counts
         .iter()

@@ -212,10 +212,9 @@ impl DecomposedCorrelation {
             factors.insert(profile_name.clone(), group_factors);
         }
 
-        // Estimated correlation matrices are routinely indefinite, and clipping to the
-        // nearest PSD factor is the standard remedy — a diagnostic, not a warning.
-        // `largest_negative_magnitude` is what distinguishes round-off from a
-        // meaningfully indefinite input.
+        // Indefinite input is routine here, not exceptional — log at debug, not
+        // warn; `largest_negative_magnitude` separates round-off from a
+        // meaningfully indefinite matrix.
         if clip_matrices_affected > 0 {
             tracing::debug!(
                 matrices_affected = clip_matrices_affected,

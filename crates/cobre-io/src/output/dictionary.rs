@@ -448,8 +448,8 @@ fn unit_for(file: &str, column: &str) -> &'static str {
 // per-schema divergence.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn description_for(file: &str, column: &str) -> &'static str {
-    // The simulation-row axis prefix carries one description each, uniform across
-    // every entity file and paths.parquet.
+    // scenario_id/node_id return here regardless of file; a (file, column) arm
+    // for either name below is unreachable.
     match column {
         "scenario_id" => return "0-based scenario identifier",
         "node_id" => return "Declared node id visited at this stage",

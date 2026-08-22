@@ -21,7 +21,7 @@ use crate::lead_time::{SpreadResolution, resolve_arrival_density_at, resolve_spr
 ///
 /// `n_buckets == 0` exactly when the system declares no travel-time arc
 /// (`travel_time_hours` absent, `0.0`, or missing a `downstream_id`).
-// Voice 4: no production read site consumes these fields yet — the state layout
+// No production read site consumes these fields yet — the state layout
 // (sizing/ordering) and the per-stage LP fill (bucket-row gating) will.
 // `#[allow(dead_code)]` refires once those readers land.
 #[allow(dead_code)]

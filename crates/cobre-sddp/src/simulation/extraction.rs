@@ -809,7 +809,6 @@ fn extract_hydro_no_turbine(
 ) -> SimulationHydroResult {
     let ctx = HydroStageContext::new(view, spec, lookup, h);
 
-    // Per-block slacks aggregated to stage-level as an hours-weighted average.
     let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
         if spec.study_dims.has_operational_violations {
             let grid = spec.block_grid();
