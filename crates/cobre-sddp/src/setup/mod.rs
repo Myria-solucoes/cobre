@@ -66,9 +66,8 @@ pub use node_graph::{
     OpeningSource, StageIdx, Traversal, TypedVec,
 };
 pub use params::{
-    BoundaryStateRequirements, ConstructionConfig, DEFAULT_COST_SCALE_FACTOR,
-    DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, SimulationEnumeratedRequest,
-    StudyParams,
+    BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES,
+    DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, SimulationEnumeratedRequest, StudyParams,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
@@ -364,7 +363,7 @@ impl StudySetup {
     /// (`resolve_boundary_state_requirements`, an I/O read the caller performs),
     /// not from any config knob; [`BoundaryStateRequirements::none`] sizes the lag
     /// block from the PAR model alone. The MPI broadcast path carries the same
-    /// value on `ConstructionConfig::boundary` for non-root ranks.
+    /// value on `StudyParams::boundary` for non-root ranks.
     ///
     /// # Errors
     ///
@@ -388,11 +387,10 @@ impl StudySetup {
         let simulation_source = config
             .simulation_scenario_source(sentinel_path)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
-        let config = params.into_construction_config();
         Self::from_broadcast_params(
             system,
             stochastic,
-            config,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,
@@ -421,12 +419,12 @@ impl StudySetup {
     pub fn from_broadcast_params(
         system: &System,
         mut stochastic: StochasticContext,
-        config: ConstructionConfig,
+        config: StudyParams,
         hydro_models: PrepareHydroModelsResult,
         training_source: &ScenarioSource,
         simulation_source: &ScenarioSource,
     ) -> Result<Self, SddpError> {
-        let ConstructionConfig {
+        let StudyParams {
             seed,
             forward_passes,
             training_enumerated,

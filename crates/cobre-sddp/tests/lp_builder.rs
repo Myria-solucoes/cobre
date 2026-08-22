@@ -90,7 +90,7 @@ mod extraction_nonuniform_block_bases {
 
         let params = StudyParams::from_config(&config_with_sim)
             .expect("StudyParams::from_config must succeed");
-        let construction = params.into_construction_config();
+        let construction = params;
 
         let sentinel = Path::new("config.json");
         let training_source = config_with_sim

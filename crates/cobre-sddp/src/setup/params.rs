@@ -1,4 +1,4 @@
-//! `StudyParams`, `ConstructionConfig`, and associated constants.
+//! `StudyParams` and associated constants.
 
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Simulation's `enumerated`-selection declaration, carried on
-/// [`StudyParams`]/[`ConstructionConfig`] until the node graph resolves
+/// [`StudyParams`] until the node graph resolves
 /// [`StudyParams::n_scenarios`] (config load holds no graph to derive the
 /// count from). A plain externally-tagged enum carrying no
 /// `#[serde(tag = ...)]`, so it round-trips over the MPI broadcast wire
@@ -167,6 +167,14 @@ pub struct StudyParams {
     /// [`StudySetup::new_with_boundary_requirements`](super::StudySetup::new_with_boundary_requirements)
     /// (local) or the broadcast carrier (MPI), before any consumer reads it.
     pub boundary: BoundaryStateRequirements,
+    /// Whether the visited-states archive is allocated for export
+    /// (`config.exports.states`). Overridable post-construction via
+    /// [`StudySetup::set_export_states`](super::StudySetup::set_export_states).
+    pub export_states: bool,
+    /// Loaded `constraints/generic_parameters.json` entries; empty out of
+    /// [`Self::from_config`] (they are loaded from disk artifacts, not `Config`)
+    /// and patched by each setup caller before `from_broadcast_params`.
+    pub scalar_parameters: Vec<ScalarParameter>,
 }
 
 impl StudyParams {
@@ -328,118 +336,11 @@ impl StudyParams {
             // resolve_boundary_state_requirements owns both facts; no config knob
             // feeds them, so from_config leaves the placeholder for the caller to patch.
             boundary: BoundaryStateRequirements::none(),
+            export_states: config.exports.states,
+            // Loaded from disk artifacts, not Config; each setup caller patches it.
+            scalar_parameters: Vec::new(),
         })
     }
-
-    /// Convert into a [`ConstructionConfig`] for [`StudySetup::from_broadcast_params`](super::StudySetup::from_broadcast_params).
-    ///
-    /// Sets `export_states = false`; callers should use
-    /// [`StudySetup::set_export_states`](super::StudySetup::set_export_states) to enable state export after construction.
-    #[must_use]
-    pub fn into_construction_config(self) -> ConstructionConfig {
-        ConstructionConfig {
-            seed: self.seed,
-            forward_passes: self.forward_passes,
-            training_enumerated: self.training_enumerated,
-            stopping_rule_set: self.stopping_rule_set,
-            n_scenarios: self.n_scenarios,
-            simulation_enumerated: self.simulation_enumerated,
-            io_channel_capacity: self.io_channel_capacity,
-            policy_path: self.policy_path,
-            inflow_method: self.inflow_method,
-            cut_selection: self.cut_selection,
-            cut_activity_tolerance: self.cut_activity_tolerance,
-            budget: self.budget,
-            export_states: false,
-            scalar_parameters: Vec::new(),
-            training_solver_backward: self.training_solver_backward,
-            training_solver_forward: self.training_solver_forward,
-            simulation_solver: self.simulation_solver,
-            backward_scheduler: self.backward_scheduler,
-            cost_scale_factor: self.cost_scale_factor,
-            boundary: self.boundary,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ConstructionConfig
-// ---------------------------------------------------------------------------
-
-/// Scalar and config parameters bundled for [`StudySetup::from_broadcast_params`](super::StudySetup::from_broadcast_params).
-///
-/// Groups parameters to reduce argument count. Construct via
-/// [`StudyParams::into_construction_config`] from a [`Config`],
-/// or populate fields directly from a broadcast config.
-#[derive(Debug, Clone)]
-pub struct ConstructionConfig {
-    /// Random seed for noise generation.
-    pub seed: u64,
-    /// Number of forward-pass trajectories per training iteration. A
-    /// placeholder ([`DEFAULT_FORWARD_PASSES`]) when [`Self::training_enumerated`]
-    /// is `true`, until [`StudySetup::from_broadcast_params`](super::StudySetup::from_broadcast_params)
-    /// resolves the derived count from the node graph.
-    pub forward_passes: u32,
-    /// `true` when `training.selection = enumerated` is declared — the setup
-    /// layer re-resolves [`Self::forward_passes`] from the node graph once it
-    /// exists (config load holds no graph to derive the count from).
-    pub training_enumerated: bool,
-    /// Stopping rule set (rules + mode) governing when training halts.
-    pub stopping_rule_set: StoppingRuleSet,
-    /// Number of simulation scenarios (0 if simulation is disabled, or a
-    /// placeholder while [`Self::simulation_enumerated`] is
-    /// [`SimulationEnumeratedRequest::Enumerated`], until the node graph
-    /// resolves the derived count).
-    pub n_scenarios: u32,
-    /// `simulation.selection`'s resolution — the setup layer re-resolves
-    /// [`Self::n_scenarios`] from the node graph once it exists when this is
-    /// [`SimulationEnumeratedRequest::Enumerated`].
-    pub simulation_enumerated: SimulationEnumeratedRequest,
-    /// Buffer capacity for the simulation output channel.
-    pub io_channel_capacity: usize,
-    /// Policy directory path string.
-    pub policy_path: String,
-    /// Inflow non-negativity enforcement method.
-    pub inflow_method: InflowNonNegativityMethod,
-    /// Optional cut selection strategy (`None` means cut selection is disabled).
-    pub cut_selection: Option<CutSelectionStrategy>,
-    /// Minimum dual multiplier for a cut to count as binding (`0.0` if unset).
-    pub cut_activity_tolerance: f64,
-    /// Maximum number of active cuts per stage (hard cap on LP size).
-    ///
-    /// `None` means no cap is enforced. Derived from
-    /// `config.training.cut_selection.max_active_per_stage`.
-    pub budget: Option<u32>,
-    /// Whether the caller wants the visited-states archive for export.
-    ///
-    /// When `true`, the archive is allocated during training regardless of the
-    /// cut selection strategy. Defaults to `false`; set based on
-    /// `exports.states`.
-    pub export_states: bool,
-    /// Loaded `constraints/generic_parameters.json` entries, or empty when the file is
-    /// absent or the manifest flag `constraints_generic_parameters_json` is `false`.
-    /// Consumed by `build_resolved_parameters` to populate the per-`(parameter_id,
-    /// stage_idx)` lookup table used by the LP builder.
-    pub scalar_parameters: Vec<ScalarParameter>,
-    /// Backward-pass solver profile override (`training.solver.backward`).
-    pub training_solver_backward: Option<PhaseSolverProfileConfig>,
-    /// Forward-pass solver profile override (`training.solver.forward`).
-    pub training_solver_forward: Option<PhaseSolverProfileConfig>,
-    /// Simulation solver profile override (`simulation.solver`).
-    pub simulation_solver: Option<PhaseSolverProfileConfig>,
-    /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
-    /// carrying the opening-block size when the `by_node` method is
-    /// selected.
-    pub backward_scheduler: BackwardScheduler,
-    /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
-    /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
-    /// time — one value per study.
-    pub cost_scale_factor: f64,
-    /// Boundary-derived state-space requirements: the inflow-lag depth widening
-    /// `L_state` (`resolve_state_layout`) and the boundary-present flag gating
-    /// the water-bucket terminal mask (`build_transit_bucket_topology`). Resolved
-    /// once and carried identically on every rank.
-    pub boundary: BoundaryStateRequirements,
 }
 
 #[cfg(test)]
@@ -729,17 +630,16 @@ mod tests {
         }
     }
 
-    /// `from_config` leaves `boundary` at the `none()` placeholder; the resolver
+    /// `from_config` leaves `boundary` at the `none()` placeholder and
+    /// `scalar_parameters` empty; the resolver
     /// (`resolve_boundary_state_requirements`) owns both boundary facts and the
-    /// caller patches the resolved value in.
+    /// caller patches the resolved value + the disk-loaded scalar parameters in.
     #[test]
     fn from_config_leaves_boundary_requirements_none() {
         let params = StudyParams::from_config(&base_test_config()).expect("base config is valid");
         assert!(!params.boundary.is_present());
         assert_eq!(params.boundary.inflow_lag_depth(), None);
-        let construction = params.into_construction_config();
-        assert!(!construction.boundary.is_present());
-        assert_eq!(construction.boundary.inflow_lag_depth(), None);
+        assert!(params.scalar_parameters.is_empty());
     }
 
     /// `BoundaryStateRequirements` derives both facts together: `present(depth)`

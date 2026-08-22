@@ -427,7 +427,7 @@ mod self_reproducibility_regression {
 
         let params = StudyParams::from_config(&config_with_sim)
             .expect("StudyParams::from_config must succeed");
-        let construction = params.into_construction_config();
+        let construction = params;
 
         let mut setup = StudySetup::from_broadcast_params(
             &system,
@@ -2399,7 +2399,7 @@ mod water_travel_time_no_arc_byte_identity {
 
         let params =
             StudyParams::from_config(&config).expect("StudyParams::from_config must succeed");
-        let construction = params.into_construction_config();
+        let construction = params;
 
         StudySetup::from_broadcast_params(
             &system,

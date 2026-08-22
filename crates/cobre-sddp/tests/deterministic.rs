@@ -8274,7 +8274,7 @@ mod enumerated_external {
         DEFAULT_COST_SCALE_FACTOR, InflowNonNegativityMethod, SimulationScenarioResult,
         StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
         hydro_models::PrepareHydroModelsResult,
-        setup::{ConstructionConfig, SimulationEnumeratedRequest},
+        setup::{SimulationEnumeratedRequest, StudyParams},
     };
     use cobre_solver::ActiveSolver;
     use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
@@ -8527,8 +8527,8 @@ mod enumerated_external {
     fn construction_config(
         backward_scheduler: cobre_io::config::BackwardScheduler,
         n_scenarios: u32,
-    ) -> ConstructionConfig {
-        ConstructionConfig {
+    ) -> StudyParams {
+        StudyParams {
             seed: 42,
             forward_passes: 1,
             training_enumerated: true,

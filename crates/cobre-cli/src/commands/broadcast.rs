@@ -132,7 +132,7 @@ pub(crate) struct BroadcastConfig {
     pub(crate) cost_scale_factor: f64,
     /// Boundary-derived state requirements, resolved on rank 0
     /// (`resolve_boundary_state_requirements`) and set after `from_config`, then
-    /// broadcast so every rank rebuilds the identical `ConstructionConfig`: the
+    /// broadcast so every rank rebuilds the identical `StudyParams`: the
     /// inflow-lag depth widens `L_state` in `resolve_state_layout` and the
     /// present flag gates the water-bucket terminal mask before
     /// `inject_boundary_cuts` runs.

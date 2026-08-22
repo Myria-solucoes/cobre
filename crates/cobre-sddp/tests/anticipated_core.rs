@@ -5497,7 +5497,7 @@ mod anticipated_convergence_slow {
         InflowNonNegativityMethod, StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
         TrainingOutcome,
         hydro_models::PrepareHydroModelsResult,
-        setup::{ConstructionConfig, SimulationEnumeratedRequest},
+        setup::{SimulationEnumeratedRequest, StudyParams},
     };
     use cobre_solver::ActiveSolver;
     use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
@@ -5847,7 +5847,7 @@ mod anticipated_convergence_slow {
             mode: StoppingMode::Any,
         };
 
-        let config = ConstructionConfig {
+        let config = StudyParams {
             seed: tree_seed,
             forward_passes: FORWARD_PASSES,
             training_enumerated: false,

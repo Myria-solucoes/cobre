@@ -152,9 +152,9 @@ pub fn boundary_requirements(case_dir: &Path, config: &Config) -> BoundaryStateR
 /// The caller's `prepare_hydro_models` has already folded the productivity
 /// override into `hydro_models`. This helper re-loads `case_dir`'s
 /// `CaseArtifacts` (a second full parse) for `scalar_parameters`, because
-/// `StudyParams::into_construction_config` never carries them — every setup
-/// caller must patch them in itself (cobre-cli via MPI broadcast,
-/// cobre-python directly).
+/// `StudyParams::from_config` leaves them empty (they load from disk artifacts,
+/// not `Config`) — every setup caller must patch them in itself (cobre-cli via
+/// MPI broadcast, cobre-python directly).
 pub fn build_setup_for_case(
     case_dir: &Path,
     config: &Config,
@@ -170,8 +170,8 @@ pub fn build_setup_for_case(
         .simulation_scenario_source(sentinel)
         .expect("simulation_scenario_source must parse");
 
-    let params = StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
-    let mut construction = params.into_construction_config();
+    let mut construction =
+        StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
     construction.boundary = boundary_requirements(case_dir, config);
     construction.scalar_parameters = cobre_io::load_case_with_artifacts(case_dir)
         .expect("load_case_with_artifacts must succeed")

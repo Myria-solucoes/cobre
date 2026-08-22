@@ -38,7 +38,7 @@ use cobre_sddp::{
     build_hydro_model_summary, prepare_hydro_models, prepare_stochastic,
     resolve_boundary_state_requirements,
     setup::{
-        ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic,
+        StudyParams, build_ncs_factor_entries, load_load_factors_for_stochastic,
         study_stage_noise_group_ids, widen_lag_state_depth,
     },
 };
@@ -608,7 +608,7 @@ fn build_study_setup(
     let training_solver_backward = bcast_config.training_solver_backward.take();
     let training_solver_forward = bcast_config.training_solver_forward.take();
     let simulation_solver = bcast_config.simulation_solver.take();
-    let config = ConstructionConfig {
+    let config = StudyParams {
         seed: bcast_config.seed,
         forward_passes: bcast_config.forward_passes,
         training_enumerated: bcast_config.training_enumerated,

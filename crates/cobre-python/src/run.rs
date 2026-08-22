@@ -955,11 +955,11 @@ pub(crate) fn build_study_setup(
     let simulation_source = config
         .simulation_scenario_source(&case_dir.join("config.json"))
         .map_err(|e| format!("scenario source error: {e}"))?;
-    let params = StudyParams::from_config(&config).map_err(|e| e.to_string())?;
-    let mut construction = params.into_construction_config();
+    let mut construction = StudyParams::from_config(&config).map_err(|e| e.to_string())?;
     construction.boundary = boundary_requirements;
     construction.scalar_parameters = artifacts.scalar_parameters;
-    let mut setup = StudySetup::from_broadcast_params(
+    // export_states is captured by StudyParams::from_config from config.exports.states.
+    let setup = StudySetup::from_broadcast_params(
         &system,
         result.stochastic,
         construction,
@@ -968,7 +968,6 @@ pub(crate) fn build_study_setup(
         &simulation_source,
     )
     .map_err(|e| e.to_string())?;
-    setup.set_export_states(config.exports.states);
 
     let mut provenance_report = build_provenance_report(
         estimation_path,

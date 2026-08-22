@@ -284,7 +284,7 @@ where
 
     let params =
         StudyParams::from_config(&config_with_sim).expect("StudyParams::from_config must succeed");
-    let construction = params.into_construction_config();
+    let construction = params;
 
     let mut setup = StudySetup::from_broadcast_params(
         &system,

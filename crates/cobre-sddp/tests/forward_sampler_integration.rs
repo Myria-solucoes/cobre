@@ -41,7 +41,7 @@ use cobre_core::{
 use cobre_sddp::{
     InflowNonNegativityMethod, StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
     hydro_models::PrepareHydroModelsResult,
-    setup::{ConstructionConfig, SimulationEnumeratedRequest},
+    setup::{SimulationEnumeratedRequest, StudyParams},
 };
 use cobre_solver::ActiveSolver;
 use cobre_stochastic::{
@@ -532,7 +532,7 @@ fn run_programmatic(
         mode: StoppingMode::Any,
     };
 
-    let config = ConstructionConfig {
+    let config = StudyParams {
         seed: 42,
         forward_passes,
         training_enumerated: false,
@@ -877,7 +877,7 @@ fn run_with_setup(
         mode: StoppingMode::Any,
     };
 
-    let config = ConstructionConfig {
+    let config = StudyParams {
         seed: 42,
         forward_passes,
         training_enumerated: false,
