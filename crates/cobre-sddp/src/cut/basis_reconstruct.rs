@@ -91,15 +91,12 @@ pub struct ReconstructionTarget {
 
 /// Counters returned by [`reconstruct_basis`].
 ///
-/// `preserved + new_tight + new_slack` equals the cut-row count of the target LP
+/// `preserved + new_slack` equals the cut-row count of the target LP
 /// (the number of items the iterator yielded).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReconstructionStats {
     /// Cut rows whose slot was found in the stored basis; status copied directly.
     pub preserved: u32,
-    /// Always zero with slot-identity classification; kept for telemetry
-    /// stability against downstream consumers.
-    pub new_tight: u32,
     /// Cut rows whose slot was absent from the stored basis; each seeded BASIC.
     pub new_slack: u32,
 }
@@ -203,6 +200,12 @@ pub fn reconstruct_basis_uniform_basic(
 /// Copy column statuses from the stored basis into `out`, resized to
 /// `target.num_cols` (padded with [`BasisStatus::Basic`] if wider).
 fn reconstruct_col_statuses(stored: &CapturedBasis, target: ReconstructionTarget, out: &mut Basis) {
+    debug_assert!(
+        stored.basis.col_status.len() <= target.num_cols,
+        "stored basis wider than target LP: col_status.len() {} > num_cols {}",
+        stored.basis.col_status.len(),
+        target.num_cols,
+    );
     out.col_status.clear();
     out.col_status.extend_from_slice(&stored.basis.col_status);
     out.col_status.resize(target.num_cols, BasisStatus::Basic);
@@ -408,7 +411,6 @@ mod tests {
             stats,
             ReconstructionStats {
                 preserved: 0,
-                new_tight: 0,
                 new_slack: 3,
             },
         );
@@ -445,7 +447,6 @@ mod tests {
             stats,
             ReconstructionStats {
                 preserved: 2,
-                new_tight: 0,
                 new_slack: 0,
             },
         );
@@ -487,7 +488,6 @@ mod tests {
             stats,
             ReconstructionStats {
                 preserved: 2,
-                new_tight: 0,
                 new_slack: 3,
             },
             "preserved={{10, 30}}, new_slack={{25, 45, 50}}",

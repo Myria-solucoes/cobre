@@ -25,7 +25,7 @@ pub mod workspace;
 // allow to `cfg(not(test))` keeps the warning live should a non-test caller land.
 pub use context::{StageContext, TrainingContext};
 pub use workspace::{
-    BASIS_BROADCAST_WIRE_VERSION, BasisStore, BasisStoreSliceMut, CapturedBasis, ScratchBuffers,
+    BASIS_BROADCAST_FORMAT_TAG, BasisStore, BasisStoreSliceMut, CapturedBasis, ScratchBuffers,
     SolverWorkspace, WorkspacePool, WorkspaceSizing,
 };
 #[cfg_attr(not(test), allow(unused_imports))]

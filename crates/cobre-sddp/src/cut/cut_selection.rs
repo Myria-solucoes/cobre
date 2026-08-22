@@ -115,18 +115,6 @@ impl CutActivityUpdates {
             reactivations: vec![],
         }
     }
-
-    /// Return the slots to deactivate.
-    #[must_use]
-    pub fn deactivation_indices(&self) -> Vec<u32> {
-        self.updates.clone()
-    }
-
-    /// Return the slots to reactivate.
-    #[must_use]
-    pub fn reactivation_indices(&self) -> Vec<u32> {
-        self.reactivations.clone()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +250,7 @@ impl CutSelectionStrategy {
     /// pool.add_cut(NodeId(0), 1, 0, 2.0, &[2.0]);
     /// // Empty visited_states returns empty updates.
     /// let deact = strategy.select(&pool, &[], 10);
-    /// assert!(deact.deactivation_indices().is_empty());
+    /// assert!(deact.updates.is_empty());
     /// ```
     #[must_use]
     pub fn select(
@@ -719,13 +707,10 @@ mod tests {
         pool.add_cut(NodeId(0), 2, 0, 3.0, &[0.0]);
         // All from iteration 1, current_iteration=10 → all eligible.
         let deact = strategy.select(&pool, &[0.0], 10);
-        let mut deact_idx = deact.deactivation_indices();
+        let mut deact_idx = deact.updates;
         deact_idx.sort_unstable();
         assert_eq!(deact_idx, vec![0, 2], "cuts 0 and 2 must be deactivated");
-        assert!(
-            deact.reactivation_indices().is_empty(),
-            "no reactivations expected"
-        );
+        assert!(deact.reactivations.is_empty(), "no reactivations expected");
     }
 
     /// Pool with 3 cuts (intercepts [5,5,3]), state [0.0].
@@ -742,11 +727,11 @@ mod tests {
         pool.add_cut(NodeId(0), 2, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
         assert_eq!(
-            deact.deactivation_indices(),
+            deact.updates,
             vec![2],
             "only cut 2 (value 3) is deactivated; ties 0 and 1 kept"
         );
-        assert!(deact.reactivation_indices().is_empty());
+        assert!(deact.reactivations.is_empty());
     }
 
     /// Level1 retains all cuts when two have equal max values.
@@ -763,7 +748,7 @@ mod tests {
         pool.add_cut(NodeId(0), 1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[1.0], 10);
         assert!(
-            deact.deactivation_indices().is_empty(),
+            deact.updates.is_empty(),
             "no cuts deactivated when all tied at max"
         );
     }
@@ -784,7 +769,7 @@ mod tests {
         pool.add_cut(NodeId(0), 1, 0, 3.0, &[0.0]);
         pool.add_cut(NodeId(0), 2, 0, 2.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
-        let mut deact_idx = deact.deactivation_indices();
+        let mut deact_idx = deact.updates;
         deact_idx.sort_unstable();
         assert_eq!(deact_idx, vec![0, 2]);
     }
@@ -797,7 +782,7 @@ mod tests {
         };
         let pool = CutPool::new(0, 1, 1, 0);
         let deact = strategy.select(&pool, &[], 10);
-        assert!(deact.deactivation_indices().is_empty());
+        assert!(deact.updates.is_empty());
     }
 
     #[test]
@@ -811,8 +796,8 @@ mod tests {
         pool.add_cut(NodeId(0), 1, 0, 5.0, &[0.0]);
         pool.add_cut(NodeId(0), 2, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[], 10);
-        assert!(deact.deactivation_indices().is_empty());
-        assert!(deact.reactivation_indices().is_empty());
+        assert!(deact.updates.is_empty());
+        assert!(deact.reactivations.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -832,14 +817,14 @@ mod tests {
         pool.add_cut(NodeId(0), 1, 0, 5.0, &[0.0]);
         pool.add_cut(NodeId(0), 2, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
-        let mut deact_idx = deact.deactivation_indices();
+        let mut deact_idx = deact.updates;
         deact_idx.sort_unstable();
         assert_eq!(
             deact_idx,
             vec![1, 2],
             "cuts 1 and 2 deactivated; only oldest (cut 0) at max survives"
         );
-        assert!(deact.reactivation_indices().is_empty());
+        assert!(deact.reactivations.is_empty());
     }
 
     /// Lml1 with two trial points selecting different oldest cuts.
@@ -858,11 +843,11 @@ mod tests {
         pool.add_cut(NodeId(0), 2, 0, 0.5, &[0.0]); // constant 0.5 (never at max)
         let deact = strategy.select(&pool, &[0.0, 1.0], 10);
         assert_eq!(
-            deact.deactivation_indices(),
+            deact.updates,
             vec![2],
             "only cut 2 (never at max) deactivated"
         );
-        assert!(deact.reactivation_indices().is_empty());
+        assert!(deact.reactivations.is_empty());
     }
 
     /// Lml1: single eligible cut → `n_eligible` < 2 → empty.
@@ -875,7 +860,7 @@ mod tests {
         // Only 1 eligible cut → n_eligible < 2 → returns empty.
         let pool = make_pool(&[make_meta(0, 5)], &[true]);
         let deact = strategy.select(&pool, &[0.0], 20);
-        assert!(deact.deactivation_indices().is_empty());
+        assert!(deact.updates.is_empty());
     }
 
     /// Lml1 with two eligible cuts at the same value: oldest (slot 0) retained.
@@ -891,7 +876,7 @@ mod tests {
         let deact = strategy.select(&pool, &[0.0], 10);
         // Both tied → oldest (cut 0) selected → cut 1 deactivated.
         assert_eq!(
-            deact.deactivation_indices(),
+            deact.updates,
             vec![1],
             "cut 1 deactivated; cut 0 (oldest) retained"
         );
@@ -910,7 +895,7 @@ mod tests {
         pool.add_cut(NodeId(0), 1, 0, 4.0, &[0.0]);
         pool.add_cut(NodeId(0), 2, 0, 5.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
-        let mut deact_idx = deact.deactivation_indices();
+        let mut deact_idx = deact.updates;
         deact_idx.sort_unstable();
         assert_eq!(
             deact_idx,
@@ -938,7 +923,7 @@ mod tests {
         pool.add_cut(NodeId(0), 2, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0, 2.0], 10);
         assert_eq!(
-            deact.deactivation_indices(),
+            deact.updates,
             vec![0],
             "only cut 0 (never at max) deactivated"
         );
@@ -954,8 +939,8 @@ mod tests {
         pool.add_cut(NodeId(0), 0, 0, 5.0, &[0.0]);
         pool.add_cut(NodeId(0), 1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[], 10);
-        assert!(deact.deactivation_indices().is_empty());
-        assert!(deact.reactivation_indices().is_empty());
+        assert!(deact.updates.is_empty());
+        assert!(deact.reactivations.is_empty());
     }
 
     /// A cut with lower value is deactivated.
@@ -971,7 +956,7 @@ mod tests {
         pool.add_cut(NodeId(0), 0, 0, 1.0, &[0.0]);
         pool.add_cut(NodeId(0), 1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 10);
-        assert!(deact.deactivation_indices().contains(&0));
+        assert!(deact.updates.contains(&0));
     }
 
     /// Lml1 deactivates a cut that is never oldest-at-max.
@@ -987,7 +972,7 @@ mod tests {
         pool.add_cut(NodeId(0), 0, 0, 5.0, &[0.0]);
         pool.add_cut(NodeId(0), 1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[0.0], 20);
-        assert!(deact.deactivation_indices().contains(&1));
+        assert!(deact.updates.contains(&1));
     }
 
     #[test]
@@ -1036,7 +1021,7 @@ mod tests {
         let deact = CutActivityUpdates::deactivations_only(2, vec![0, 3, 7]);
         let cloned = deact.clone();
         assert_eq!(cloned.stage_index, 2);
-        assert_eq!(cloned.deactivation_indices(), vec![0, 3, 7]);
+        assert_eq!(cloned.updates, vec![0, 3, 7]);
         assert!(!format!("{deact:?}").is_empty());
     }
 
@@ -1075,7 +1060,7 @@ mod tests {
         pool.set_iteration_generated_for_test(2, 5);
         let deact = strategy.select(&pool, &[0.0], 10);
         assert_eq!(
-            deact.deactivation_indices(),
+            deact.updates,
             vec![1],
             "only the older cut (slot 1) should be deactivated; \
              the current-iteration cut (slot 0) must be spared"
@@ -1103,7 +1088,7 @@ mod tests {
         // Only 1 cut, from current iteration (not eligible) → n_eligible = 0 < 2 → empty.
         let deact = strategy.select(&pool, &[0.0], 10);
         assert!(
-            deact.deactivation_indices().is_empty(),
+            deact.updates.is_empty(),
             "current-iteration cut must not be deactivated"
         );
     }
@@ -1133,7 +1118,7 @@ mod tests {
         pool.add_cut(NodeId(0), 3, 0, 3.0, &[0.0]);
         pool.add_cut(NodeId(0), 4, 0, 1.0, &[1.0]);
         let deact = strategy.select_for_stage(&pool, &[0.0, 1.0], 2, 10, 0);
-        let mut deact_idx = deact.deactivation_indices();
+        let mut deact_idx = deact.updates;
         deact_idx.sort_unstable();
         assert_eq!(
             deact_idx,
@@ -1166,11 +1151,11 @@ mod tests {
 
         let result = strategy.select(&pool, &[0.0], 10);
         assert_eq!(
-            result.reactivation_indices(),
+            result.reactivations,
             vec![0],
             "inactive cut 0 (at max) must be reactivated"
         );
-        let mut deact_idx = result.deactivation_indices();
+        let mut deact_idx = result.updates;
         deact_idx.sort_unstable();
         assert_eq!(
             deact_idx,
@@ -1196,12 +1181,12 @@ mod tests {
 
         let result = strategy.select(&pool, &[0.0], 10);
         assert_eq!(
-            result.reactivation_indices(),
+            result.reactivations,
             vec![0],
             "inactive cut 0 (oldest at max) must be reactivated"
         );
         assert_eq!(
-            result.deactivation_indices(),
+            result.updates,
             vec![1],
             "active cut 1 (younger at max) must be deactivated"
         );
@@ -1223,10 +1208,10 @@ mod tests {
         pool.set_iteration_generated_for_test(2, 10);
         let result = strategy.select(&pool, &[0.0], 10);
         assert!(
-            result.deactivation_indices().is_empty(),
+            result.updates.is_empty(),
             "no activity changes when all cuts from current iteration"
         );
-        assert!(result.reactivation_indices().is_empty());
+        assert!(result.reactivations.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -1264,10 +1249,10 @@ mod tests {
         let result = strategy.select(&pool, &[0.0], 10);
         // Warm-start slot 0 must not appear in deactivations.
         assert!(
-            !result.deactivation_indices().contains(&0),
+            !result.updates.contains(&0),
             "warm-start slot 0 must not be deactivated"
         );
-        let mut deact_idx = result.deactivation_indices();
+        let mut deact_idx = result.updates;
         deact_idx.sort_unstable();
         assert_eq!(deact_idx, vec![1, 2]);
     }
@@ -1300,12 +1285,12 @@ mod tests {
         };
         let deact = strategy.select_for_stage(&pool, &[0.0], 1, 5, 0);
         assert_eq!(
-            deact.deactivation_indices(),
+            deact.updates,
             vec![2],
             "only slot 2 (active, below max) deactivated"
         );
         assert!(
-            deact.reactivation_indices().is_empty(),
+            deact.reactivations.is_empty(),
             "slot 0 (inactive, below max) must not be reactivated"
         );
     }
@@ -1421,16 +1406,16 @@ mod tests {
         let deact_dom = dom.select(&pool, &states, 11);
 
         assert!(
-            deact_l1.deactivation_indices().len() <= deact_lml1.deactivation_indices().len(),
+            deact_l1.updates.len() <= deact_lml1.updates.len(),
             "Level1 ({}) should deactivate <= LML1 ({})",
-            deact_l1.deactivation_indices().len(),
-            deact_lml1.deactivation_indices().len()
+            deact_l1.updates.len(),
+            deact_lml1.updates.len()
         );
         assert!(
-            deact_lml1.deactivation_indices().len() <= deact_dom.deactivation_indices().len(),
+            deact_lml1.updates.len() <= deact_dom.updates.len(),
             "LML1 ({}) should deactivate <= Dominated ({})",
-            deact_lml1.deactivation_indices().len(),
-            deact_dom.deactivation_indices().len()
+            deact_lml1.updates.len(),
+            deact_dom.updates.len()
         );
     }
 
@@ -1441,17 +1426,6 @@ mod tests {
         assert_eq!(updates.updates.len(), 3);
         assert_eq!(updates.updates, vec![0, 1, 2]);
         assert!(updates.reactivations.is_empty());
-    }
-
-    #[test]
-    fn cut_activity_updates_deactivation_indices_returns_updates() {
-        let updates = CutActivityUpdates {
-            stage_index: 0,
-            updates: vec![0, 2],
-            reactivations: vec![],
-        };
-        assert_eq!(updates.deactivation_indices(), vec![0, 2]);
-        assert!(updates.reactivation_indices().is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -1659,7 +1633,7 @@ mod tests {
         );
         let states: Vec<f64> = vec![0.0, 1.0, 3.0];
         let deact = strategy.select(&pool, &states, 10);
-        assert_eq!(deact.deactivation_indices(), vec![0, 3, 4]);
+        assert_eq!(deact.updates, vec![0, 3, 4]);
     }
 
     /// Cut dominated at 2/3 states but tied at 1 -> retained.
@@ -1684,7 +1658,7 @@ mod tests {
         let states: Vec<f64> = vec![0.0, 1.0, 3.0];
         let deact = strategy.select(&pool, &states, 10);
         assert!(
-            deact.deactivation_indices().is_empty(),
+            deact.updates.is_empty(),
             "cut 0 achieves max at x=0 and x=1, must not be deactivated"
         );
     }
@@ -1708,7 +1682,7 @@ mod tests {
         let states: Vec<f64> = vec![0.0, 1.0, 3.0];
         let deact = strategy.select(&pool, &states, 10);
         assert_eq!(
-            deact.deactivation_indices(),
+            deact.updates,
             vec![2],
             "only cut 2 (constant 2) should be dominated"
         );
@@ -1728,7 +1702,7 @@ mod tests {
         );
         let deact = strategy.select(&pool, &[], 10);
         assert!(
-            deact.deactivation_indices().is_empty(),
+            deact.updates.is_empty(),
             "empty visited_states must produce empty deactivation set"
         );
     }
@@ -1755,12 +1729,12 @@ mod tests {
         // cut1: inactive, not selected → no change.
         // cut2: inactive, selected → reactivated.
         assert_eq!(
-            deact.deactivation_indices(),
+            deact.updates,
             vec![0],
             "active cut 0 (below max) must be deactivated"
         );
         assert_eq!(
-            deact.reactivation_indices(),
+            deact.reactivations,
             vec![2],
             "inactive cut 2 (at max) must be reactivated"
         );
@@ -1783,7 +1757,7 @@ mod tests {
         let states: Vec<f64> = vec![0.0, 1.0];
         let deact = strategy.select(&pool, &states, 10);
         assert!(
-            deact.deactivation_indices().is_empty(),
+            deact.updates.is_empty(),
             "cut from current iteration must not be deactivated even if dominated"
         );
     }
@@ -1838,16 +1812,16 @@ mod tests {
 
         // Set-inclusion: every slot Lml1 deactivates must also be deactivated by Level1.
         // Equivalently: the Level1 survivor set is a superset of the Lml1 survivor set.
-        for slot in deact_lml1.deactivation_indices() {
+        for &slot in &deact_lml1.updates {
             assert!(
-                deact_l1.deactivation_indices().contains(&slot),
+                deact_l1.updates.contains(&slot),
                 "slot {slot} deactivated by Lml1 but not by Level1; \
                  Level1_selected must be a superset of Lml1_selected"
             );
         }
         // Sanity: Level1 must not deactivate more than it could (count check too).
         assert!(
-            deact_l1.deactivation_indices().len() <= deact_lml1.deactivation_indices().len(),
+            deact_l1.updates.len() <= deact_lml1.updates.len(),
             "Level1 must deactivate <= Lml1"
         );
     }
@@ -1883,7 +1857,7 @@ mod tests {
         };
         let deact_loose = dom_loose.select(&pool, &states, 10);
         assert!(
-            deact_loose.deactivation_indices().is_empty(),
+            deact_loose.updates.is_empty(),
             "cut1 (1e-7 below max) must survive when epsilon=1e-6"
         );
 
@@ -1894,7 +1868,7 @@ mod tests {
         };
         let deact_strict = dom_strict.select(&pool, &states, 10);
         assert_eq!(
-            deact_strict.deactivation_indices(),
+            deact_strict.updates,
             vec![1],
             "cut1 (1e-7 below max) must be deactivated when epsilon=0"
         );
@@ -1924,10 +1898,10 @@ mod tests {
         // n_eligible = 1 (only slot 1). Guard returns empty.
         let result = strategy.select(&pool, &[0.0], 10);
         assert!(
-            result.deactivation_indices().is_empty(),
+            result.updates.is_empty(),
             "single eligible cut must not trigger any deactivations"
         );
-        assert!(result.reactivation_indices().is_empty());
+        assert!(result.reactivations.is_empty());
     }
 
     // -----------------------------------------------------------------------

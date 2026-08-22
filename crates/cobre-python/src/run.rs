@@ -82,7 +82,6 @@ use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::build_deviation_summary;
 use cobre_sddp::build_evaporation_model_rows;
 use cobre_sddp::build_fixed_delivery_rows;
-use cobre_sddp::build_fpha_deviation_point_rows;
 use cobre_sddp::build_generic_constraint_echo_rows;
 use cobre_sddp::delta_to_stats_row;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
@@ -643,7 +642,7 @@ pub(crate) fn write_fpha_deviation_points_if_any(
     if !config.exports.fpha_deviation_points {
         return Ok(());
     }
-    let rows = build_fpha_deviation_point_rows(&setup.hydro_models);
+    let rows = setup.hydro_models.fpha_deviation_point_rows.as_slice();
     if !rows.is_empty() {
         let deviation_points_path = output_dir
             .join("hydro_models")

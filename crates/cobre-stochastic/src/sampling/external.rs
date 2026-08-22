@@ -13,7 +13,6 @@
 //! [`solve_par_noise`]: crate::par::evaluate::solve_par_noise
 
 use std::collections::HashSet;
-use std::hash::BuildHasher;
 
 use cobre_core::{
     EntityId,
@@ -544,10 +543,10 @@ pub fn standardize_external_ncs(
 /// );
 /// assert!(result.is_ok());
 /// ```
-pub fn validate_external_library<S: BuildHasher>(
+pub fn validate_external_library(
     library: &ExternalScenarioLibrary,
     entity_ids: &[EntityId],
-    row_entity_ids: &HashSet<EntityId, S>,
+    row_entity_ids: &HashSet<EntityId>,
     rows_per_stage: &[usize],
     n_stages: usize,
     forward_passes: u32,

@@ -385,7 +385,8 @@ pub struct PrepareHydroModelsResult {
     /// `training/metadata.json`; an empty vector yields no metadata section.
     pub fpha_fit_deviations: Vec<FphaFitDeviationEntry>,
     /// Per-sampled-point computed-FPHA deviations, one row per `(hydro, stage, V, Q)`
-    /// grid point at spillage = 0. Empty unless the run opts in via
+    /// grid point at spillage = 0, already in canonical `(hydro_id, stage_id, grid)`
+    /// order — consumers must not re-sort. Empty unless the run opts in via
     /// `config.exports.fpha_deviation_points`; the write site emits
     /// `hydro_models/fpha_deviation_points.parquet` only for a non-empty vector.
     pub fpha_deviation_point_rows: Vec<FphaDeviationPointRow>,

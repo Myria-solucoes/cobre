@@ -39,11 +39,9 @@ mod production;
 mod summary;
 mod types;
 
-pub use evaporation::{resolve_evaporation_models, resolve_evaporation_models_from_artifacts};
-pub use export::{
-    build_deviation_summary, build_evaporation_model_rows, build_fpha_deviation_point_rows,
-};
-pub use production::{resolve_production_models, resolve_production_models_from_artifacts};
+pub use evaporation::resolve_evaporation_models_from_artifacts;
+pub use export::{build_deviation_summary, build_evaporation_model_rows};
+pub use production::resolve_production_models_from_artifacts;
 pub use summary::build_hydro_model_summary;
 
 /// Wall-clock split of the two hydro-model fitting steps run by
@@ -74,8 +72,8 @@ pub use types::{
 ///
 /// # Errors
 ///
-/// Propagates errors from [`resolve_production_models`] and
-/// [`resolve_evaporation_models`].
+/// Propagates errors from [`resolve_production_models_from_artifacts`] and
+/// [`resolve_evaporation_models_from_artifacts`].
 pub fn prepare_hydro_models(
     system: &System,
     case_dir: &Path,

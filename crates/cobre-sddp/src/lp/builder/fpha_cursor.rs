@@ -11,22 +11,11 @@ use super::layout::{StageLayout, TemplateBuildCtx};
 pub(super) struct FphaVisit {
     /// The plant this cell belongs to; owns the plant-level storage/spillage columns.
     pub(super) plant: HydroSys,
-    /// The plant's position among FPHA plants (`fpha_hydro_indices`).
-    // Rationale: rounds out the visit's identity; the current two consumers
-    // (`fill_fpha_entries`, `fill_fpha_rows`) resolve everything through
-    // `cell`/`cell_local`/`row` instead.
-    #[allow(dead_code)]
-    pub(super) local_idx: FphaLocal,
     /// The visited cell, in [`crate::indexer::HydroCellIndex`]'s own indexing.
     pub(super) cell: HydroCell,
     /// The cell's FPHA-cell-local index; resolves its own generation column.
     pub(super) cell_local: FphaCellLocal,
     pub(super) blk: BlockIdx,
-    /// Position within this plant's plane list at this stage.
-    // Rationale: rounds out the visit's identity; the current two consumers key
-    // off `row` directly rather than the plane position within it.
-    #[allow(dead_code)]
-    pub(super) plane_idx: usize,
     /// LP row for this `(cell, block, plane)` triple.
     pub(super) row: usize,
 }
@@ -96,11 +85,9 @@ pub(super) fn for_each_fpha_plane<F>(
                     visit(
                         FphaVisit {
                             plant: h,
-                            local_idx,
                             cell,
                             cell_local,
                             blk,
-                            plane_idx: p_idx,
                             row,
                         },
                         plane,

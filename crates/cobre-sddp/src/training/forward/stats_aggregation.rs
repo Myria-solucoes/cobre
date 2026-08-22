@@ -19,6 +19,7 @@ use crate::risk_measure::RiskMeasure;
 use crate::setup::node_graph::{EnumeratedPlan, NodePos, TypedVec};
 // Rationale: imported solely so the `[run_forward_pass]` intra-doc link in
 // `sync_forward`'s rustdoc resolves; the function lives in the parent `mod.rs`.
+#[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 use super::run_forward_pass;
 

@@ -1423,7 +1423,6 @@ mod hybrid_reconstruction {
             stats,
             ReconstructionStats {
                 preserved: 2,
-                new_tight: 0,
                 new_slack: 3,
             },
             "preserved={{10, 30}} (2), new_slack={{25, 45, 50}} (3)",
@@ -1464,7 +1463,6 @@ mod hybrid_reconstruction {
             stats,
             ReconstructionStats {
                 preserved: 3,
-                new_tight: 0,
                 new_slack: 0,
             },
         );
@@ -1498,7 +1496,6 @@ mod hybrid_reconstruction {
             stats,
             ReconstructionStats {
                 preserved: 0,
-                new_tight: 0,
                 new_slack: 3,
             },
         );

@@ -4873,11 +4873,11 @@ mod tests {
         };
         let tr = &setup.scenario_libraries.training;
         let training_ctx = TrainingContext {
-            horizon: &setup.methodology.horizon,
+            horizon: &setup.horizon,
             state: &setup.stage_data.state,
             cut_state_layouts: &setup.stage_data.cut_state_layouts,
             study_dims: &setup.stage_data.study_dims,
-            inflow_method: &setup.methodology.inflow_method,
+            inflow_method: &setup.inflow_method,
             stochastic: &setup.stochastic,
             initial_state: &setup.initial_state,
             inflow_scheme: tr.inflow_scheme,

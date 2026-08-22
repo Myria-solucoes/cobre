@@ -53,7 +53,7 @@ pub(crate) struct IterationScratch {
     /// Reusable scratch buffers for `freeze_rows_into_template` (count/emit-pass temporaries).
     pub(crate) freeze_scratch: FreezeScratch,
     /// Per-path probability weights for the exact upper-bound reduction, filled
-    /// only on an enumerated forward. Empty (unallocated) on the sampled path.
+    /// only on an enumerated forward; empty on the sampled path.
     pub(crate) ub_path_weights: Vec<f64>,
     /// Per-path per-stage immediate costs (this rank's paths, path-major) fed to
     /// the nested risk-adjusted upper bound. Filled only on an enumerated forward
@@ -176,8 +176,8 @@ impl IterationScratch {
             lb_scratch,
             lb_noise_scratch,
             freeze_scratch,
-            ub_path_weights: Vec::new(),
-            ub_stage_costs: Vec::new(),
+            ub_path_weights: Vec::with_capacity(max_local_fwd),
+            ub_stage_costs: Vec::with_capacity(max_local_fwd * num_stages),
             terminal_has_boundary_cuts: false,
             fwd_stats_pack_local: Vec::new(),
             fwd_stats_pack_global: Vec::new(),

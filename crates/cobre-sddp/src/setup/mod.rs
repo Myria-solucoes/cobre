@@ -52,7 +52,6 @@ use crate::solve::solver_phase::{Phase, validate_phase_solver_config};
 use crate::stochastic::noise_key::build_noise_key_table;
 mod accessors;
 pub(crate) mod bucket_topology;
-pub(crate) mod methodology_config;
 pub mod node_graph;
 mod orchestration;
 pub mod params;
@@ -101,6 +100,7 @@ use crate::{
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
     indexer::{AnticipatedLocal, CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
+    inflow_method::InflowNonNegativityMethod,
     lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution, SpreadResolution},
     lp_builder::{M3S_TO_HM3, build_stage_templates},
     risk_measure::RiskMeasure,
@@ -275,8 +275,10 @@ pub struct StudySetup {
     /// [`crate::solve::solver_phase::SolverProfiles::hardest_first_claim_order`]).
     pub(crate) hardest_first_claim_order: bool,
 
-    /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
-    pub(crate) methodology: methodology_config::MethodologyConfig,
+    /// Study horizon mode (finite vs. infinite-horizon approximation).
+    pub(crate) horizon: HorizonMode,
+    /// Inflow non-negativity enforcement method.
+    pub(crate) inflow_method: InflowNonNegativityMethod,
 
     /// Derived per-hydro PAR lag-slot and accumulator seeds ([`derive_inflow_seeds`]),
     /// applied to the stage-0 lag block and to every trajectory start in the
@@ -786,10 +788,8 @@ impl StudySetup {
             forward_profile,
             backward_scheduler,
             hardest_first_claim_order: true,
-            methodology: methodology_config::MethodologyConfig {
-                horizon,
-                inflow_method,
-            },
+            horizon,
+            inflow_method,
             derived_inflow_seeds,
             downstream_par_order,
             energy_conversion,

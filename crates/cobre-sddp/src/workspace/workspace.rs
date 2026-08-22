@@ -74,7 +74,7 @@ pub struct CapturedBasis {
 /// captures no basis by design (a captured basis would describe the frozen
 /// layout, not the DCS resident subset — see `StageOpeningSolver::solve_lazy`),
 /// so there the field is never part of a consumed warm-start.
-pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 2;
+pub const BASIS_BROADCAST_FORMAT_TAG: i32 = 2;
 
 /// Widens [`BasisStatus::to_discriminant_code`] to the `i32` the broadcast payload
 /// carries; that method is the single owner of the numeric mapping (injective, so
@@ -133,7 +133,7 @@ impl CapturedBasis {
     ///
     /// Pushes the following into `i32_buf` in order:
     /// - `1_i32` sentinel (present)
-    /// - [`BASIS_BROADCAST_WIRE_VERSION`] as `i32` (wire version)
+    /// - [`BASIS_BROADCAST_FORMAT_TAG`] as `i32` (format tag)
     /// - `node_id` as `i32` (the generating/capture node — self-describing
     ///   header, so the decode side no longer fills it positionally)
     /// - `col_status.len()` as `i32`
@@ -153,7 +153,7 @@ impl CapturedBasis {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn to_broadcast_payload(&self, i32_buf: &mut Vec<i32>, f64_buf: &mut Vec<f64>) {
         i32_buf.push(1_i32);
-        i32_buf.push(BASIS_BROADCAST_WIRE_VERSION);
+        i32_buf.push(BASIS_BROADCAST_FORMAT_TAG);
         i32_buf.push(self.node_id.0);
         i32_buf.push(self.basis.col_status.len() as i32);
         i32_buf.push(self.basis.row_status.len() as i32);
@@ -179,14 +179,14 @@ impl CapturedBasis {
     ///
     /// Returns `Ok(None)` when the sentinel read is `0` (no basis
     /// for this stage). Returns `Ok(Some(captured))` when the
-    /// sentinel is `1`, the version matches [`BASIS_BROADCAST_WIRE_VERSION`],
+    /// sentinel is `1`, the format tag matches [`BASIS_BROADCAST_FORMAT_TAG`],
     /// and the payload is complete.
     ///
     /// # Layout (`Some` path)
     ///
     /// Reads from `i32_buf` in order:
     /// - `1_i32` sentinel (present)
-    /// - [`BASIS_BROADCAST_WIRE_VERSION`] as `i32` (wire version)
+    /// - [`BASIS_BROADCAST_FORMAT_TAG`] as `i32` (format tag)
     /// - `node_id` as `i32` (the generating/capture node, read straight into
     ///   the reconstructed [`CapturedBasis::node_id`])
     /// - `col_status.len()` as `i32`
@@ -204,9 +204,9 @@ impl CapturedBasis {
     ///
     /// Returns `SddpError::Validation` if the `i32_buf` or
     /// `f64_buf` is truncated at any of the bounded reads
-    /// (sentinel, version, `node_id` + five length fields, `col_status`,
-    /// `row_status`, `cut_row_slots`, `state_at_capture`), or if the version
-    /// field does not match [`BASIS_BROADCAST_WIRE_VERSION`]. The error message
+    /// (sentinel, format tag, `node_id` + five length fields, `col_status`,
+    /// `row_status`, `cut_row_slots`, `state_at_capture`), or if the format-tag
+    /// field does not match [`BASIS_BROADCAST_FORMAT_TAG`]. The error message
     /// names the affected stage and the expected vs. available byte count.
     #[allow(
         clippy::cast_possible_truncation,
@@ -235,7 +235,7 @@ impl CapturedBasis {
             return Ok(None);
         }
 
-        // Version byte is present only on the Some path, after the sentinel.
+        // Format tag is present only on the Some path, after the sentinel.
         if *i32_cursor >= i32_buf.len() {
             return Err(Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading version at stage {stage}"
@@ -243,10 +243,10 @@ impl CapturedBasis {
         }
         let version = i32_buf[*i32_cursor];
         *i32_cursor += 1;
-        if version != BASIS_BROADCAST_WIRE_VERSION {
+        if version != BASIS_BROADCAST_FORMAT_TAG {
             return Err(Validation(format!(
                 "try_from_broadcast_payload: unsupported wire version {version} at stage \
-                 {stage} (expected {BASIS_BROADCAST_WIRE_VERSION})"
+                 {stage} (expected {BASIS_BROADCAST_FORMAT_TAG})"
             )));
         }
 
@@ -1947,11 +1947,11 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// Round-trip verification that `to_broadcast_payload` emits
-    /// `BASIS_BROADCAST_WIRE_VERSION` at offset 1 of the `i32_buf` (immediately
+    /// `BASIS_BROADCAST_FORMAT_TAG` at offset 1 of the `i32_buf` (immediately
     /// after the presence sentinel).
     #[test]
     fn to_broadcast_payload_emits_version_byte() {
-        use super::BASIS_BROADCAST_WIRE_VERSION;
+        use super::BASIS_BROADCAST_FORMAT_TAG;
 
         let original = CapturedBasis {
             basis: Basis {
@@ -1982,8 +1982,8 @@ mod tests {
         assert_eq!(i32_buf[0], 1_i32, "offset 0 must be the presence sentinel");
         // Offset 1 must be the wire version.
         assert_eq!(
-            i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
-            "offset 1 must be BASIS_BROADCAST_WIRE_VERSION"
+            i32_buf[1], BASIS_BROADCAST_FORMAT_TAG,
+            "offset 1 must be BASIS_BROADCAST_FORMAT_TAG"
         );
 
         // Full round-trip must return a bit-equal CapturedBasis.
@@ -2284,7 +2284,7 @@ mod tests {
         small.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
         // i32_buf layout (Some path):
         //   [0] = 1 (sentinel)
-        //   [1] = BASIS_BROADCAST_WIRE_VERSION = 2
+        //   [1] = BASIS_BROADCAST_FORMAT_TAG = 2
         //   [2] = node_id = 0
         //   [3] = col_len = 4
         //   [4] = row_len = 3
@@ -2467,11 +2467,11 @@ mod tests {
         );
     }
 
-    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 2: widening the anticipated
+    /// Locks `BASIS_BROADCAST_FORMAT_TAG` at 2: widening the anticipated
     /// ring does not bump the wire version.
     #[test]
     fn test_basis_broadcast_wire_version_stays_stable_with_state_out_column() {
-        use super::BASIS_BROADCAST_WIRE_VERSION;
+        use super::BASIS_BROADCAST_FORMAT_TAG;
 
         // Representative basis with enough col_status entries to include the
         // anticipated-ring columns.
@@ -2492,7 +2492,7 @@ mod tests {
 
         // i32_buf layout per workspace.rs to_broadcast_payload:
         //   [0]: sentinel (1)
-        //   [1]: BASIS_BROADCAST_WIRE_VERSION
+        //   [1]: BASIS_BROADCAST_FORMAT_TAG
         //   [2]: node_id
         //   [3]: col_status.len()
         //   [4]: row_status.len()
@@ -2502,11 +2502,11 @@ mod tests {
         //   [8..]: col_status elements, then row_status, then cut_row_slots
         assert_eq!(i32_buf[0], 1, "sentinel must be 1");
         assert_eq!(
-            i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
-            "wire version field must equal BASIS_BROADCAST_WIRE_VERSION (= 2)"
+            i32_buf[1], BASIS_BROADCAST_FORMAT_TAG,
+            "wire version field must equal BASIS_BROADCAST_FORMAT_TAG (= 2)"
         );
         assert_eq!(
-            BASIS_BROADCAST_WIRE_VERSION, 2,
+            BASIS_BROADCAST_FORMAT_TAG, 2,
             "broadcast wire-format version constant must remain stable across releases"
         );
 

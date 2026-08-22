@@ -8,7 +8,6 @@
 //! energy-conversion derivation, and the computed-FPHA export rows.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use rayon::prelude::*;
 
@@ -25,7 +24,6 @@ use cobre_io::extensions::{
     SeasonConfig, SelectionMode, StageRange, build_hydro_reference_volumes_resolved,
 };
 
-use super::load_artifacts_for_hydro_models;
 use super::types::{
     FphaFitDeviationEntry, FphaPlane, ProductionModelSet, ProductionModelSource,
     ResolvedProductionModel,
@@ -40,7 +38,7 @@ use crate::fpha_fitting::{
 };
 // ── FPHA production model resolution ─────────────────────────────────────────
 
-/// Return type for [`resolve_production_models`]. Export rows are non-empty only
+/// Return type for [`resolve_production_models_from_artifacts`]. Export rows are non-empty only
 /// when at least one hydro uses `source: "computed"`; this function never does I/O.
 type ResolveProductionResult = (
     ProductionModelSet,
@@ -52,13 +50,14 @@ type ResolveProductionResult = (
     Vec<FphaDeviationPointRow>,
 );
 
-/// Resolve per-hydro per-stage production models from the case directory.
+/// Resolve per-hydro per-stage production models from a pre-parsed
+/// [`cobre_io::CaseArtifacts`] bundle.
 ///
-/// `hydro_production_models.json` is optional; absent it, every hydro falls back
-/// to its entity [`HydroGenerationModel`]. `fpha_hyperplanes.parquet` is loaded
-/// only when some hydro is FPHA `source: "precomputed"`; `hydro_geometry.parquet`
-/// and the FPHA fitting pipeline run only when some hydro is `source: "computed"`.
-/// The provenance vector is in canonical hydro ID order.
+/// Absent a `hydro_production_models.json` entry, every hydro falls back to its
+/// entity [`HydroGenerationModel`]. `collect_deviation_points` is the run-level
+/// opt-in from `config.exports.fpha_deviation_points`: `false` leaves the
+/// deviation rows empty and the fit bit-identical (zero collection overhead). The
+/// provenance vector is in canonical hydro ID order.
 ///
 /// # Errors
 ///
@@ -73,26 +72,6 @@ type ResolveProductionResult = (
 /// | `gamma_q <= 0` for any precomputed hyperplane                   | [`SddpError::Validation`]  |
 /// | `kappa` not in `(0, 1]` for precomputed hyperplane              | [`SddpError::Validation`]  |
 /// | Zero hyperplanes for an FPHA hydro at any stage                 | [`SddpError::Validation`]  |
-/// | I/O failure loading JSON or Parquet                             | [`SddpError::Io`]          |
-pub fn resolve_production_models(
-    system: &System,
-    case_dir: &Path,
-    collect_deviation_points: bool,
-) -> Result<ResolveProductionResult, SddpError> {
-    let artifacts = load_artifacts_for_hydro_models(case_dir)?;
-    resolve_production_models_from_artifacts(system, &artifacts, collect_deviation_points)
-}
-
-/// Variant of [`resolve_production_models`] that consumes a pre-parsed
-/// [`cobre_io::CaseArtifacts`] bundle.
-///
-/// `collect_deviation_points` is the run-level opt-in from
-/// `config.exports.fpha_deviation_points`: `false` leaves the deviation rows
-/// empty and the fit bit-identical (zero collection overhead).
-///
-/// # Errors
-///
-/// Same conditions as [`resolve_production_models`].
 pub fn resolve_production_models_from_artifacts(
     system: &System,
     artifacts: &CaseArtifacts,

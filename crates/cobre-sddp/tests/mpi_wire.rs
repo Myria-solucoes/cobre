@@ -142,9 +142,9 @@ mod test_mpi_wire_format_version {
 
     use cobre_sddp::{
         SddpError,
-        cut::wire::{CUT_WIRE_VERSION, cut_wire_size, deserialize_cut, serialize_cut},
+        cut::wire::{CUT_WIRE_FORMAT_TAG, cut_wire_size, deserialize_cut, serialize_cut},
         setup::NodeId,
-        workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis},
+        workspace::{BASIS_BROADCAST_FORMAT_TAG, CapturedBasis},
     };
     use cobre_solver::BasisStatus;
 
@@ -190,8 +190,8 @@ mod test_mpi_wire_format_version {
         // the version field is at index 1, which this test corrupts below.
         assert_eq!(i32_buf[0], 1, "sentinel must be 1 (Some path)");
         assert_eq!(
-            i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
-            "version field must equal BASIS_BROADCAST_WIRE_VERSION before corruption"
+            i32_buf[1], BASIS_BROADCAST_FORMAT_TAG,
+            "version field must equal BASIS_BROADCAST_FORMAT_TAG before corruption"
         );
 
         i32_buf[1] = 1;
@@ -241,7 +241,7 @@ mod test_mpi_wire_format_version {
         );
 
         assert_eq!(
-            buf[0], CUT_WIRE_VERSION,
+            buf[0], CUT_WIRE_FORMAT_TAG,
             "serialize_cut must write the current version byte"
         );
 
@@ -269,7 +269,7 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
     //! `CapturedBasis` values across four ranks reading from the same shared buffers.
 
     use cobre_sddp::setup::NodeId;
-    use cobre_sddp::workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
+    use cobre_sddp::workspace::{BASIS_BROADCAST_FORMAT_TAG, CapturedBasis};
     use cobre_solver::BasisStatus;
 
     /// The seven canonical statuses, indexed by `(seed + i) % 7` in
@@ -370,8 +370,8 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
         // row_len, base_row_count, cut_slot_count, state_len, ...].
         assert_eq!(i32_buf[0], 1, "stage 0 sentinel must be 1");
         assert_eq!(
-            i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
-            "stage 0 version must equal BASIS_BROADCAST_WIRE_VERSION"
+            i32_buf[1], BASIS_BROADCAST_FORMAT_TAG,
+            "stage 0 version must equal BASIS_BROADCAST_FORMAT_TAG"
         );
 
         // Each rank reads independently from the same shared buffers.

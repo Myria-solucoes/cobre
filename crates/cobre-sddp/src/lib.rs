@@ -129,8 +129,7 @@ pub use generic_constraint_echo::build_generic_constraint_echo_rows;
 pub use production::hydro_models::{
     FphaFitDeviationEntry, FphaHydroDetail, HydroFitTimings, HydroModelSummary,
     PrepareHydroModelsResult, ProductionModelSource, build_deviation_summary,
-    build_evaporation_model_rows, build_fpha_deviation_point_rows, build_hydro_model_summary,
-    prepare_hydro_models,
+    build_evaporation_model_rows, build_hydro_model_summary, prepare_hydro_models,
 };
 // ── inflow_method ─────────────────────────────────────────────────────────────
 pub use stochastic::inflow_method::InflowNonNegativityMethod;
@@ -202,4 +201,4 @@ pub use training::state_exchange::ExchangeBuffers;
 // ── trajectory ────────────────────────────────────────────────────────────────
 pub use training::trajectory::TrajectoryRecord;
 // ── workspace ─────────────────────────────────────────────────────────────────
-pub use workspace::workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
+pub use workspace::workspace::{BASIS_BROADCAST_FORMAT_TAG, CapturedBasis};

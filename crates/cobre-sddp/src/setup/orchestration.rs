@@ -175,11 +175,11 @@ impl StudySetup {
 
         let tr = &self.scenario_libraries.training;
         let training_ctx = TrainingContext {
-            horizon: &self.methodology.horizon,
+            horizon: &self.horizon,
             state: &self.stage_data.state,
             cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
-            inflow_method: &self.methodology.inflow_method,
+            inflow_method: &self.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
             inflow_scheme: tr.inflow_scheme,

@@ -665,7 +665,7 @@ fn accessor_methods_return_expected_values() {
     assert_eq!(setup.stage_data.block_counts_per_stage.len(), n_stages);
     assert!(setup.loop_params.max_blocks > 0);
 
-    assert_eq!(setup.methodology.horizon.num_stages(), n_stages);
+    assert_eq!(setup.horizon.num_stages(), n_stages);
 
     assert_eq!(setup.cut_management.risk_measures.len(), n_stages);
 
@@ -738,10 +738,7 @@ fn inflow_method_reflects_config() {
     .expect("setup");
 
     assert!(
-        !matches!(
-            setup.methodology.inflow_method,
-            InflowNonNegativityMethod::None
-        ),
+        !matches!(setup.inflow_method, InflowNonNegativityMethod::None),
         "expected penalty or truncation method"
     );
 }
@@ -866,7 +863,7 @@ fn training_ctx_fields_match_study_setup() {
 
     assert_eq!(
         ctx.horizon.num_stages(),
-        setup.methodology.horizon.num_stages(),
+        setup.horizon.num_stages(),
         "horizon num_stages mismatch"
     );
     assert_eq!(

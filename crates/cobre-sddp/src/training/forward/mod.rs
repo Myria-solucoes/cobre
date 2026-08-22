@@ -107,6 +107,7 @@ pub struct SyncResult {
 ///
 /// Groups the per-iteration, per-rank scalar arguments that are forwarded
 /// from [`crate::train`] into [`run_forward_pass`].
+#[cfg(any(test, feature = "test-support"))]
 pub struct ForwardPassBatch<'a> {
     /// Number of forward-pass scenarios assigned to this rank.
     pub local_forward_passes: usize,
@@ -186,6 +187,7 @@ pub(crate) struct StageKey<'a> {
 ///
 /// - `records.len() != batch.local_forward_passes * num_stages`
 /// - `training_ctx.initial_state.len() != state.n_state`
+#[cfg(any(test, feature = "test-support"))]
 pub fn run_forward_pass<S>(
     workspaces: &mut [SolverWorkspace<S>],
     basis_store: &mut BasisStore,

@@ -76,6 +76,29 @@ register whose milestone is a decision, not an implementation trigger, so it
 is a stronger candidate for removal than the others here if that decision goes
 against wiring it.
 
+### Shared-memory communicator trait hierarchy (`cobre-comm`, `shared-memory` feature)
+
+**What it is.** `crates/cobre-comm` defines a shared-memory provider abstraction —
+`SharedMemoryProvider`, its `SharedRegion<T>` GAT, `LocalCommunicator`, the
+`LocalCommKind` dispatch enum, and `HeapRegion<T>` — behind the `shared-memory`
+feature, together with the live `MPI_Comm_split_type(SHARED)` call in
+`FerrompiBackend::split_local`. No consumer outside `cobre-comm` uses any of it
+yet: both the `LocalBackend` and the MPI `FerrompiBackend` currently resolve
+`Region<T>` to the same per-rank `HeapRegion<T>` (a private `Vec<T>`), so the
+seam is wired end-to-end but delivers no cross-rank shared memory until a
+consumer and a real `MPI_Win_allocate_shared`-backed `SharedRegion` land.
+
+**Owner.** The comm / HPC-distribution owner.
+
+**Consuming milestone.** Intra-node deduplication of the two largest read-only
+per-rank datasets — the historical/scenario library and the cut archive — so
+ranks sharing a node hold one node-shared copy instead of one copy per rank,
+backed by `MPI_Win_allocate_shared`. When the first such consumer lands,
+`SharedRegion` is designed against ferrompi's real window allocation and the
+`HeapRegion` fallback stops being the only resolution; until then the hierarchy
+stays reserved rather than removed, per the "unwired config is reserved, not
+dead" rule.
+
 ## Verified NOT reserved
 
 `historical_years` (`cobre_core::scenario::ScenarioSource`,
@@ -591,20 +614,25 @@ internal types unified only at the config boundary.
 
 #### MPI-ephemeral wire-version bytes on same-binary broadcast formats
 
-**What it is.** Two broadcast formats — the cut wire (`CUT_WIRE_VERSION`) and the
-captured-basis payload (`BASIS_BROADCAST_WIRE_VERSION`) — carry a disk-style
-version byte on an all-ranks broadcast where every rank runs the same binary, so
-a cross-version mismatch cannot occur in one run; the byte's real value is a
-corruption tripwire, not a version negotiator. The simulation exchange
-(version-free, length-prefixed all-gather) is the honest counter-example. A
-third such format — a resolved-parameters broadcast envelope — previously fit
-this pattern but was **removed outright as dead code** (it had no production
-caller), so the pattern now spans two live formats, not three. Target: reframe
-the two as fixed magic / format tags, or document a real persisted-format intent.
+**What it is.** Two broadcast formats — the cut wire (`CUT_WIRE_FORMAT_TAG`) and the
+captured-basis payload (`BASIS_BROADCAST_FORMAT_TAG`) — carry a fixed leading tag
+byte on an all-ranks broadcast where every rank runs the same binary, so a
+cross-version mismatch cannot occur in one run; the byte is a corruption
+tripwire, not a version negotiator. The simulation exchange (version-free,
+length-prefixed all-gather) is the honest counter-example. A third such format —
+a resolved-parameters broadcast envelope — previously fit this pattern but was
+**removed outright as dead code** (it had no production caller). **Reframed
+2026-08-22:** the two constants were renamed from `*_WIRE_VERSION` to
+`*_FORMAT_TAG`, and the cut-wire module doc's version-compatibility framing (bump
+discipline, no-compat-shim, redeploy-on-upgrade) was rewritten as a format-tag
+guard. Residual (not debt): the two constants stay `pub` because the `mpi_wire.rs`
+integration test consumes them, and the runtime reject diagnostics keep their
+"version" wording, pinned by the reject tests.
 
 **Owner.** The comm / I/O owner.
 
-**Trigger.** The next wire-format change.
+**Trigger.** The next wire-format change, if the `pub` exposure or the diagnostic
+wording is revisited.
 
 ### Byte-neutral consolidations — already executed
 

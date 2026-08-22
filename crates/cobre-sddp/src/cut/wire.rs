@@ -7,8 +7,8 @@
 //!
 //! ## Wire format — cut records only
 //!
-//! Every record is a single cut record. Byte 0 is the version byte (must
-//! equal `CUT_WIRE_VERSION`). Byte 13 is `RECORD_TAG_CUT = 0` (zeroed
+//! Every record is a single cut record. Byte 0 is the format-tag byte (must
+//! equal `CUT_WIRE_FORMAT_TAG`). Byte 13 is `RECORD_TAG_CUT = 0` (zeroed
 //! padding; reserved for future tag dispatch).
 //!
 //! ### Cut record byte layout
@@ -18,7 +18,7 @@
 //! ```text
 //! Offset  Size  Field
 //! ------  ----  -----
-//!  0       1   version             (u8)
+//!  0       1   format_tag          (u8)
 //!  1- 4    4   slot_index          (u32, native-endian)
 //!  5- 8    4   iteration           (u32, native-endian)
 //!  9-12    4   forward_pass_index  (u32, native-endian)
@@ -35,11 +35,13 @@
 //! generating nodes carry their distinct `node_id`s (pool = container, node =
 //! generator).
 //!
-//! ## Version compatibility
+//! ## Format-tag guard
 //!
-//! Receivers reject any record whose version byte does not equal
-//! `CUT_WIRE_VERSION`. No compatibility shim is provided (no v1 decode path);
-//! redeploy all nodes when upgrading.
+//! Receivers reject any record whose leading tag byte does not equal
+//! `CUT_WIRE_FORMAT_TAG`. The tag is a fixed format identifier, not a negotiated
+//! version: every rank in one run executes the same binary, so a cross-version
+//! mismatch cannot occur. The guard rejects a corrupt or misaligned `allgatherv`
+//! payload before it deserializes.
 
 use crate::SddpError;
 
@@ -47,9 +49,10 @@ use crate::SddpError;
 // Wire version and record-tag constants
 // ---------------------------------------------------------------------------
 
-/// Wire format version byte. Bump when the payload layout changes
-/// in a backward-incompatible way.
-pub const CUT_WIRE_VERSION: u8 = 2;
+/// Fixed format-tag byte at offset 0 of every cut record. A deserialize landing
+/// on a non-matching leading byte is rejected as a corrupt or misaligned payload,
+/// never a negotiated version (every rank in one run executes the same binary).
+pub const CUT_WIRE_FORMAT_TAG: u8 = 2;
 
 /// Record-tag value at offset 13 of every cut record. Zero (padding).
 pub const RECORD_TAG_CUT: u8 = 0;
@@ -131,7 +134,7 @@ pub fn serialize_cut(
         cut_wire_size(coefficients.len())
     );
 
-    buf[0] = CUT_WIRE_VERSION;
+    buf[0] = CUT_WIRE_FORMAT_TAG;
     buf[1..5].copy_from_slice(&slot_index.to_ne_bytes());
     buf[5..9].copy_from_slice(&iteration.to_ne_bytes());
     buf[9..13].copy_from_slice(&forward_pass_index.to_ne_bytes());
@@ -153,7 +156,7 @@ pub fn serialize_cut(
 /// # Errors
 ///
 /// Returns `Err(SddpError::Validation(_))` if:
-/// - The version byte does not equal [`CUT_WIRE_VERSION`]. The message
+/// - The leading tag byte does not equal [`CUT_WIRE_FORMAT_TAG`]. The message
 ///   contains `"cut_wire: unsupported version"`.
 /// - The record tag at offset 13 does not equal [`RECORD_TAG_CUT`]. The
 ///   message contains `"cut_wire: expected cut record"`.
@@ -170,7 +173,7 @@ pub fn deserialize_cut(buf: &[u8], n_state: usize) -> Result<(CutWireHeader, Vec
     );
 
     let version = buf[0];
-    if version != CUT_WIRE_VERSION {
+    if version != CUT_WIRE_FORMAT_TAG {
         return Err(SddpError::Validation(format!(
             "cut_wire: unsupported version {version}"
         )));
@@ -359,7 +362,7 @@ mod tests {
     )]
 
     use super::{
-        CUT_WIRE_VERSION, CutWireHeader, CutWireTuple, RECORD_TAG_CUT, cut_wire_size,
+        CUT_WIRE_FORMAT_TAG, CutWireHeader, CutWireTuple, RECORD_TAG_CUT, cut_wire_size,
         deserialize_cut, deserialize_cuts_from_buffer, deserialize_cuts_from_buffer_into,
         serialize_cut, serialize_cuts_to_buffer,
     };
@@ -430,7 +433,7 @@ mod tests {
 
         serialize_cut(&mut buf, 5, -13, 3, 7, 42.0, &coefficients);
 
-        assert_eq!(buf[0], CUT_WIRE_VERSION, "version at offset 0");
+        assert_eq!(buf[0], CUT_WIRE_FORMAT_TAG, "version at offset 0");
         assert_eq!(
             u32::from_ne_bytes(buf[1..5].try_into().unwrap()),
             5u32,
@@ -730,8 +733,8 @@ mod tests {
         let mut buf = vec![0u8; cut_wire_size(n_state)];
         serialize_cut(&mut buf, 5, 0, 3, 7, 42.0, &[1.0, 2.0, 3.0]);
         assert_eq!(
-            buf[0], CUT_WIRE_VERSION,
-            "version byte at offset 0 must equal CUT_WIRE_VERSION"
+            buf[0], CUT_WIRE_FORMAT_TAG,
+            "version byte at offset 0 must equal CUT_WIRE_FORMAT_TAG"
         );
         assert_eq!(
             &buf[13..17],
@@ -772,8 +775,8 @@ mod tests {
     // ── Wire-format constant + version-reject tests ──────────────────────────
 
     #[test]
-    fn wire_version_2_constant_value() {
-        assert_eq!(CUT_WIRE_VERSION, 2);
+    fn cut_wire_format_tag_value() {
+        assert_eq!(CUT_WIRE_FORMAT_TAG, 2);
     }
 
     #[test]

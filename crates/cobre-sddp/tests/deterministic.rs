@@ -8824,7 +8824,7 @@ fn cut_selection_scores_reduced_projection_in_projected_space() {
 
     let mut projected_deact = strategy
         .select_for_stage(&pool, &projected, n_trials, 10, 0)
-        .deactivation_indices();
+        .updates;
     projected_deact.sort_unstable();
 
     // Pre-fix misaligned read: stride the global buffer by the pool dim,
@@ -8833,7 +8833,7 @@ fn cut_selection_scores_reduced_projection_in_projected_space() {
     let derived_trials = global_states.len() / n_slots;
     let mut misaligned_deact = strategy
         .select_for_stage(&pool, &global_states, derived_trials, 10, 0)
-        .deactivation_indices();
+        .updates;
     misaligned_deact.sort_unstable();
 
     assert_eq!(

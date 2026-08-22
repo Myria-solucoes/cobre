@@ -6,7 +6,6 @@
 //! coefficients feed the water-balance row in the LP builder.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 use cobre_core::temporal::Stage;
@@ -14,7 +13,6 @@ use cobre_core::{EntityId, Hydro, System, month_of};
 use cobre_io::CaseArtifacts;
 use cobre_io::extensions::HydroGeometryRow;
 
-use super::load_artifacts_for_hydro_models;
 use super::types::{
     EvaporationModel, EvaporationModelSet, EvaporationReferenceSource, EvaporationSource,
     LinearizedEvaporation,
@@ -22,10 +20,11 @@ use super::types::{
 use crate::SddpError;
 // ── Evaporation model resolution ──────────────────────────────────────────────
 
-/// Resolve per-hydro linearized evaporation models from reservoir geometry.
+/// Resolve per-hydro linearized evaporation models from a pre-parsed
+/// [`cobre_io::CaseArtifacts`] bundle.
 ///
 /// Plants without `evaporation_coefficients_mm` get `EvaporationModel::None`; if
-/// no plant has them, the filesystem is never touched. Otherwise the model is a
+/// no plant has them, no geometry is consulted. Otherwise the model is a
 /// first-order Taylor linearization around the reference volume:
 ///
 /// ```text
@@ -58,36 +57,11 @@ use crate::SddpError;
 /// | Condition                                                        | Error variant             |
 /// | ---------------------------------------------------------------- | ------------------------- |
 /// | Computed slope or intercept is NaN or infinite                   | [`SddpError::Validation`] |
-/// | I/O failure loading geometry Parquet                             | [`SddpError::Io`]         |
 ///
 /// A hydro with evaporation coefficients but no usable surface-area data — no
 /// geometry rows, or every `area_km2` zero — does NOT error: evaporation is
 /// disabled for that hydro ([`EvaporationSource::DisabledNoArea`]) with a
 /// `tracing::warn!`, because zero surface area yields zero evaporation.
-// Rationale: a type alias for this three-output tuple would hide the concrete
-// types callers destructure at every call site.
-#[allow(clippy::type_complexity)]
-pub fn resolve_evaporation_models(
-    system: &System,
-    case_dir: &Path,
-) -> Result<
-    (
-        EvaporationModelSet,
-        Vec<(EntityId, EvaporationSource)>,
-        Vec<(EntityId, EvaporationReferenceSource)>,
-    ),
-    SddpError,
-> {
-    let artifacts = load_artifacts_for_hydro_models(case_dir)?;
-    resolve_evaporation_models_from_artifacts(system, &artifacts)
-}
-
-/// Variant of [`resolve_evaporation_models`] that consumes a pre-parsed
-/// [`cobre_io::CaseArtifacts`] bundle.
-///
-/// # Errors
-///
-/// Same conditions as [`resolve_evaporation_models`].
 // Rationale: a type alias for this three-output tuple would hide the concrete
 // types callers destructure at every call site.
 #[allow(clippy::type_complexity)]

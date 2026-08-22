@@ -223,7 +223,7 @@ impl StudySetup {
     /// Number of stages in the planning horizon.
     #[must_use]
     pub fn num_stages(&self) -> usize {
-        self.methodology.horizon.num_stages()
+        self.horizon.num_stages()
     }
 
     /// Build the value-function artifact's graph manifest for the current study
@@ -304,11 +304,11 @@ impl StudySetup {
     pub fn training_ctx(&self) -> TrainingContext<'_> {
         let tr = &self.scenario_libraries.training;
         TrainingContext {
-            horizon: &self.methodology.horizon,
+            horizon: &self.horizon,
             state: &self.stage_data.state,
             cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
-            inflow_method: &self.methodology.inflow_method,
+            inflow_method: &self.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
             inflow_scheme: tr.inflow_scheme,
@@ -370,13 +370,13 @@ impl StudySetup {
                 });
 
         TrainingContext {
-            horizon: &self.methodology.horizon,
+            horizon: &self.horizon,
             state: &self.stage_data.state,
             // Simulation renders stored cuts into frozen templates and the DCS LP
             // (it does not extract), so the per-pool projection threads through here.
             cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
-            inflow_method: &self.methodology.inflow_method,
+            inflow_method: &self.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
             inflow_scheme: sim.inflow_scheme,
