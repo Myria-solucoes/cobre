@@ -1430,7 +1430,7 @@ mod tests {
     /// `post_study`. With `n_decision = 4` study stages and a lead reaching 7
     /// stages ahead, [`AnticipatedResolution::resolve`] derives a ring depth
     /// `k_max = 4` and a 3-wide excised fixed post-horizon window right after
-    /// the study — the `two_plant_resolution_with_fixed_window` epic-01
+    /// the study — the `two_plant_resolution_with_fixed_window`
     /// fixture shape (`n_decision = 4, g = 3, k_max = 4`), reached here through
     /// the public resolver rather than a hand-built `PointResolution`.
     fn system_1h_1ant_4monthly_lead7(post_study: PostStudyStages) -> System {
@@ -1862,7 +1862,7 @@ mod tests {
     /// With no fixed post-horizon window (`g = 0`), `physical_target` is the
     /// identity, so `reachable_delivery_target` returns exactly
     /// `modular_delivery_target`'s ring-axis index for every reachable slot —
-    /// this ticket's byte-neutrality obligation, holding for every existing
+    /// the ring-index byte-neutrality obligation, holding for every existing
     /// (`g = 0`) deck.
     #[test]
     fn reachable_delivery_target_identity_when_no_fixed_window() {

@@ -3705,11 +3705,13 @@ mod tests {
             .unwrap()
         };
 
+        // No-fold reference: with no fixed window the intercept is just the at-rest
+        // 1000.0 carried through the marked rescale (/s), with no fold term added.
         let baseline = load(&[]);
         assert_eq!(
-            load(&[])[0].intercept.to_bits(),
             baseline[0].intercept.to_bits(),
-            "an empty window slice must be byte-neutral"
+            (1000.0_f64 / s).to_bits(),
+            "an empty window slice adds no fold term: intercept is the rescaled raw value"
         );
         // value_mw == 0.0 → build_boundary_fold skips it → empty fold.
         let all_zero = load(&[fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 0.0)]);
