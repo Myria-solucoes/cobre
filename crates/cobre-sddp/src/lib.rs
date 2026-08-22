@@ -161,7 +161,8 @@ pub use convergence::risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────
 pub use setup::{
     BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED,
-    PrepareStochasticResult, StudyParams, StudySetup, prepare_stochastic,
+    PrepareStochasticResult, StudyParams, StudySetup, build_stochastic_context_for_study,
+    prepare_stochastic,
 };
 // ── simulation ────────────────────────────────────────────────────────────────
 pub use simulation::{

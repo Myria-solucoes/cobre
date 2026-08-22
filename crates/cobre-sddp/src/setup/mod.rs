@@ -72,8 +72,8 @@ pub use params::{
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
 pub use stochastic_pipeline::{
-    PrepareStochasticResult, build_ncs_factor_entries, load_load_factors_for_stochastic,
-    prepare_stochastic, study_stage_noise_group_ids,
+    PrepareStochasticResult, build_ncs_factor_entries, build_stochastic_context_for_study,
+    load_load_factors_for_stochastic, prepare_stochastic, study_stage_noise_group_ids,
 };
 
 use std::collections::HashMap;
