@@ -539,22 +539,22 @@ not re-raise them.
 
 #### Setup config-projection sprawl + CLI non-root reconstruction
 
-**What it is.** The run configuration is re-projected through three
-near-isomorphic in-memory structs — an in-process params projection
-(`StudyParams`), a construction-config projection (`ConstructionConfig`), and a
-broadcast projection (`BroadcastConfig`) — kept in lockstep by hand, so one
-config knob touches several sites; and the CLI crate hand-rolls a mirror of the
-rank-0 stochastic pipeline for non-root ranks
-(`reconstruct_stochastic_context_non_root` /
-`rebuild_historical_library_non_root`) that must stay bit-identical across a
-crate boundary. The setup god-struct (`StudySetup`) additionally fuses immutable
-inputs, mutable run-config, and produced output. A silent MPI-vs-local
-divergence is the expensive failure mode. Target: one postcard-safe resolved-run
-config projection broadcast on the wire and consumed by both the local and
-non-root paths; a domain-crate-owned stochastic-context builder parameterized by
-reuse-vs-reread; and a lifecycle split of the god-struct into immutable inputs /
-mutable run-params / produced output. This is the audit's only structural item
-of the highest severity and the anchor of its lifecycle-modeling north star.
+**What it is (partially addressed).** The run configuration is re-projected
+through near-isomorphic in-memory structs kept in lockstep by hand, so one config
+knob touches several sites. Two sub-parts are now closed: the local params /
+construction-config projections are merged into one `StudyParams`, and the
+domain-crate-owned stochastic-context builder now exists
+(`build_stochastic_context_for_study`), so the CLI non-root path calls it instead
+of hand-mirroring the rank-0 pipeline across the crate boundary — the
+silent-MPI-vs-local-divergence hazard is retired. **What remains:** the local
+`StudyParams` and the wire `BroadcastConfig` projection are still two structs kept
+in step by hand (unifying them is the postcard non-self-describing serialization
+boundary — the non-`Serialize` stopping-rule/scheduler mirrors, `usize`/`u32`, the
+broadcast-only scenario-source fields); and the setup god-struct (`StudySetup`)
+still fuses immutable inputs, mutable run-config, and produced output. Target: one
+postcard-safe resolved-run config projection consumed by both the local and
+non-root paths, and a lifecycle split of the god-struct. This remains the anchor
+of the audit's lifecycle-modeling north star.
 
 **Owner.** The architecture owner.
 
@@ -859,27 +859,29 @@ decoder (`boundary_cut_lag_depth`), a family-specific widening
 (`reserve_boundary_inflow_lag_slots`). The anticipated family has its own
 manifest decoder (`decode_pool_anticipated_months`) and reserves post-horizon
 lanes from study config with calendar fan-out reconciliation. Transit buckets
-reserve from study arc topology with boundary-gated terminal unmasking and
-have NO widening path at all — the target-driven rebind
-(`resolve_target_slot`, `crates/cobre-sddp/src/policy/reconcile.rs`) silently
-never consults boundary bucket coupling the study's topology does not
-reserve: the same silent-drop class the inflow-lag work fixed, latent in
-another family. Each new family under this shape repeats the full channel
-(API argument + keyed cut field + reservation helper + manifest decoder +
-carrier relay + entry-point folds). The generic frame half-exists: the
+reserve from study arc topology with boundary-gated terminal unmasking and have
+NO widening path — a boundary bucket coupling the study's topology does not
+reserve is dropped during reconciliation. That drop is now SURFACED (a
+per-family load-time warning in `load_boundary_cuts` naming the dropped
+family + slot), no longer silent, so the remaining transit limitation is only
+the absent widening path — which is intentional: a study cannot fabricate a
+transit arc it never declared, and rejecting would break a legitimate superset
+boundary source. Each new family under this shape still repeats the per-family
+manifest decoder + reservation slot-body. The generic frame half-exists: the
 checkpoint manifest already self-describes every slot
 (`entity_type`/`entity_id`/`subindex`/`delivery_date` — no format change
 needed) and the load-side rebind dispatch is already family-generic in frame.
-The setup half of the target is DONE: one `BoundaryStateRequirements` derived
-once from the boundary policy (per-family summary — inflow-lag depth today)
-rides the config carriers, and the typed state-family enum (the
-untyped-primitive entry above) supplies its prerequisite vocabulary. What
-REMAINS is the writer half: a family-parameterized slot-reservation writer (the
-lag helper's internals — leading-block detection, canonical insertion, keyed
-placement — are largely family-independent) plus a family-keyed per-cut
-coefficient field, and closing the transit-bucket silent-drop gap. Per-family
-reconciliation SEMANTICS (widen vs calendar fan-out vs reject) are genuinely
-irreducible and stay per-family; the debt is the missing shared writer frame.
+The setup half of the target is DONE (one `BoundaryStateRequirements` rides the
+config carriers, on the typed state-family enum's vocabulary), and the writer's
+family-INDEPENDENT core is now extracted (`splice_reserved_state_block` owns the
+prefix/reserved/tail splice + keyed-coefficient placement + alignment guards).
+What REMAINS for a second authored family is its own reserved slot-body
+constructor and keyed per-cut coefficient field — and, for the anticipated
+family, the resolver-derived `delivery_date` the writer cannot recover from
+coefficients alone (so it needs the resolution context or an author-supplied
+date). Per-family reconciliation SEMANTICS (widen vs calendar fan-out vs reject)
+are genuinely irreducible and stay per-family; the debt is the missing
+per-family slot-body wiring, not the shared mechanism.
 
 **Owner.** The policy / setup owner.
 
