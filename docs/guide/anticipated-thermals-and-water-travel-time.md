@@ -184,9 +184,11 @@ axis** `[0, n_delivery)` that can run past the study horizon (more on that in §
 
 The ring depth `k_max` is the **maximum number of commitments simultaneously in
 flight**, across all plants and stages — not merely the lead. (On a plain
-`lead_stages` study these coincide, `k_max = maxᵢ ℓᵢ`; they diverge only when
-pre-study commitments outlive the in-study in-flight count.) Each delivery target
-is then placed into the ring by its **residue**:
+`lead_stages` study these coincide, `k_max = maxᵢ ℓᵢ`; they diverge once
+pre-study commitments outlive the in-study in-flight count — including the
+special case where a plant's own pre-study seed run is itself the deepest
+moment, before the study has fished any of them.) Each delivery target is then
+placed into the ring by its **residue**:
 
 ```
 slot(m) = m mod k_max
@@ -209,6 +211,14 @@ flowchart TB
   m4["delivery m = 4"] -->|4 mod 3 = 1| s1
   m5["delivery m = 5"] -->|5 mod 3 = 2| s2
 ```
+
+> **If the plant also has a fixed post-horizon commitment (§3.6):** that
+> delivery stage is never one of the `k_max` consecutive stages above — it is
+> excised from the ring before residues are taken, because it never occupies a
+> ring slot at all. `slot(m) = m mod k_max` is exactly the formula whenever a
+> plant declares no such commitment (the common case); with one declared, the
+> residues above are counted on the ring's **own** axis, not the raw delivery
+> axis, so the count still comes out exactly right.
 
 ### 3.3 The three LP row families
 
@@ -289,9 +299,39 @@ That is the one rule that decides whether a commitment exists at all.
 > `post_study_stages.json` as the sole post-horizon surface. If you see
 > `future_anticipated_deliveries` anywhere, it is stale.
 
+### 3.6 Fixed post-horizon commitments — what to declare
+
+Some commitments are decided **before** the study even for a delivery **after**
+the horizon — DECOMP calls this a "já-comandada" (already-committed) delivery.
+Declaring one needs no new input surface: extend the plant's
+**`past_anticipated_commitments`** windows (§3.4) past the study horizon,
+exactly like any other commitment window. Three things to keep in mind:
+
+- **A window may sit past the horizon.** The same dated-window shape
+  (`{ thermal_id, start_date, end_date, value_mw }`) that seeds the leading
+  in-study stages also covers a post-horizon delivery — there is no separate
+  field or file for it.
+- **An explicit zero is a legitimate window, not a placeholder to omit.** A
+  short stub stage right at the horizon boundary is common in practice;
+  declare it at `value_mw: 0` rather than leaving it uncovered — the
+  validation matrix (the companion design reference) treats "uncovered" and
+  "declared zero" very differently.
+- **The value is sunk — it never enters the objective.** Exactly like the
+  in-study seeds (§3.4), a fixed post-horizon value is priced only if a
+  terminal boundary policy is loaded, and only through that boundary's
+  future-cost pricing — never as a cost term in the current study's own
+  objective. Simulation output reports it at its real delivery date, the same
+  way an in-study delivery is reported.
+
+This commitment never occupies a ring slot: unlike an in-study delivery or a
+post-study delivery the study itself decides (§3.2, §3.5), a fixed
+post-horizon value is a plain declared constant the ring never carries. If you
+declare one and see no corresponding ring state for it in the policy
+checkpoint, that is expected — see §6.3.
+
 ---
 
-### 3.6 Worked examples: NEWAVE and DECOMP calendars
+### 3.7 Worked examples: NEWAVE and DECOMP calendars
 
 The two lead modes behave identically on a uniform calendar but diverge once stage
 lengths vary. The two calendars you meet in practice are NEWAVE-style **monthly**
@@ -486,14 +526,14 @@ They share the ring skeleton, the one contiguous state region, the
 out-by-identity / in-pinned column resolution, the two-sided masking, and the dual
 sign convention. They differ in a handful of call-site choices:
 
-| Aspect                 | Water travel time                        | Anticipated thermal                              |
-| ---------------------- | ---------------------------------------- | ------------------------------------------------ |
-| Ring instances         | one per downstream plant (`n_lanes = 1`) | one dense ring (`n_lanes` = #anticipated plants) |
-| Transition             | **shift** (`slot → slot+1`)              | **hold** (same slot)                             |
-| Slot key               | lag = distance still in flight           | delivery-target residue `m mod k_max`            |
-| What gets deposited    | a `k_d`-weighted share of a release      | a single decision commitment                     |
-| Depth sizing           | measured overlap of the arrival window   | max simultaneous in-flight commitments           |
-| Reachable column bound | `[0, ∞)` — a volume                      | `(−∞, ∞)` — a signed MW value                    |
+| Aspect                 | Water travel time                        | Anticipated thermal                                                      |
+| ---------------------- | ---------------------------------------- | ------------------------------------------------------------------------ |
+| Ring instances         | one per downstream plant (`n_lanes = 1`) | one dense ring (`n_lanes` = #anticipated plants)                         |
+| Transition             | **shift** (`slot → slot+1`)              | **hold** (same slot)                                                     |
+| Slot key               | lag = distance still in flight           | delivery-target residue on the **ring axis** (`ring_index(m) mod k_max`) |
+| What gets deposited    | a `k_d`-weighted share of a release      | a single decision commitment                                             |
+| Depth sizing           | measured overlap of the arrival window   | `max(occupancy_max, n_none_in_study)` per plant                          |
+| Reachable column bound | `[0, ∞)` — a volume                      | `(−∞, ∞)` — a signed MW value                                            |
 
 The deepest difference is **shift vs hold**. Water physically _moves_: a drop
 released now is one stage closer to arrival next stage, so its bucket shifts slot.

@@ -349,8 +349,12 @@ o estágio de entrega \(m\) é decidido, indexado em um <strong>eixo de entrega 
 </ul>
 
 <p>A profundidade do buffer \(k_{\max}\) é o <strong>número máximo de compromissos simultaneamente em
-aberto</strong>, entre todas as usinas e estágios — não apenas a antecedência. Cada alvo de entrega é
-colocado no buffer pelo seu <strong>resíduo</strong>:</p>
+aberto</strong>, entre todas as usinas e estágios — não apenas a antecedência. (Em um estudo com
+<code>lead_stages</code> puro, \(k_{\max}\) coincide com a própria antecedência; os dois divergem quando
+compromissos pré-estudo superam a contagem de compromissos em aberto do próprio estudo — inclusive no
+caso especial em que os valores iniciais pré-estudo de uma usina são, por si só, o momento de maior
+profundidade, antes de o estudo fazer o "fishing" de qualquer um deles.) Cada alvo de entrega é colocado
+no buffer pelo seu <strong>resíduo</strong>:</p>
 
 \[ \operatorname{slot}(m) \;=\; m \bmod k_{\max}, \]
 
@@ -372,6 +376,15 @@ flowchart TB
   m4["entrega m = 4"] -->|4 mod 3 = 1| s1
   m5["entrega m = 5"] -->|5 mod 3 = 2| s2
 </pre>
+
+<div class="admon">
+  <span class="tag">Se a usina também tiver um compromisso fixo pós-horizonte (§3.6)</span>
+  Esse estágio de entrega nunca é um dos \(k_{\max}\) estágios consecutivos acima — ele é excluído do
+  buffer antes de os resíduos serem calculados, porque nunca ocupa um slot do buffer. \(\operatorname{slot}(m) =
+  m \bmod k_{\max}\) é exatamente a fórmula sempre que uma usina não declara tal compromisso (o caso
+  comum); com um declarado, os resíduos acima são contados no eixo <strong>próprio</strong> do buffer,
+  não no eixo de entrega bruto, então a contagem ainda sai exatamente certa.
+</div>
 
 <h3>3.3 As três famílias de linhas do PL</h3>
 
@@ -468,7 +481,36 @@ decisão</strong> é uma única desigualdade no eixo estendido:</p>
   <code>future_anticipated_deliveries</code> em algum lugar, está desatualizado.
 </div>
 
-<h3>3.6 Exemplos resolvidos: calendários NEWAVE e DECOMP</h3>
+<h3>3.6 Compromissos fixos pós-horizonte — o que declarar</h3>
+
+<p>Alguns compromissos são decididos <strong>antes</strong> do estudo mesmo para uma entrega
+<strong>depois</strong> do horizonte — o que o DECOMP chama de entrega "já-comandada". Declarar um não
+exige nenhuma superfície de entrada nova: basta estender as janelas de
+<strong><code>past_anticipated_commitments</code></strong> da usina (§3.4) para além do horizonte do
+estudo, exatamente como qualquer outra janela de compromisso. Três coisas a ter em mente:</p>
+
+<ul>
+  <li><strong>Uma janela pode ficar além do horizonte.</strong> A mesma forma de janela datada
+  (<code>{ thermal_id, start_date, end_date, value_mw }</code>) que inicializa os estágios iniciais dentro
+  do estudo também cobre uma entrega pós-horizonte — não há campo ou arquivo separado para isso.</li>
+  <li><strong>Um zero explícito é uma janela legítima, não um espaço reservado a ser omitido.</strong> Um
+  curto estágio residual bem na fronteira do horizonte é comum na prática; declare-o com
+  <code>value_mw: 0</code> em vez de deixá-lo descoberto — a matriz de validação (a referência de projeto
+  complementar) trata "descoberto" e "declarado zero" de formas bem diferentes.</li>
+  <li><strong>O valor é custo afundado — nunca entra na função objetivo.</strong> Exatamente como os
+  valores iniciais dentro do estudo (§3.4), um valor fixo pós-horizonte só é precificado se uma política
+  de fronteira terminal estiver carregada, e apenas por meio da precificação de custo futuro dessa
+  fronteira — nunca como um termo de custo na função objetivo do próprio estudo atual. A saída de
+  simulação o reporta em sua data de entrega real, do mesmo modo que uma entrega dentro do estudo é
+  reportada.</li>
+</ul>
+
+<p>Este compromisso nunca ocupa um slot do buffer: diferente de uma entrega dentro do estudo ou de uma
+entrega pós-estudo que o próprio estudo decide (§3.2, §3.5), um valor fixo pós-horizonte é uma constante
+declarada simples que o buffer nunca carrega. Se você declarar um e não vir o estado de buffer
+correspondente no checkpoint de política, isso é esperado — veja §6.3.</p>
+
+<h3>3.7 Exemplos resolvidos: calendários NEWAVE e DECOMP</h3>
 
 <p>Os dois modos de antecedência se comportam de forma idêntica em um calendário uniforme, mas divergem
 quando os comprimentos dos estágios variam. Os dois calendários que você encontra na prática são os
@@ -692,9 +734,9 @@ Diferem em um punhado de escolhas locais de chamada:</p>
   <tbody>
     <tr><td>Instâncias do buffer</td><td>uma por usina de jusante (\(n_{\text{faixas}} = 1\))</td><td>um buffer denso (\(n_{\text{faixas}}\) = nº de usinas antecipadas)</td></tr>
     <tr><td>Transição</td><td><strong>deslocamento</strong> (\(s \to s+1\))</td><td><strong>retenção</strong> (mesmo slot)</td></tr>
-    <tr><td>Chave do slot</td><td>defasagem = distância ainda em trânsito</td><td>resíduo do alvo de entrega \(m \bmod k_{\max}\)</td></tr>
+    <tr><td>Chave do slot</td><td>defasagem = distância ainda em trânsito</td><td>resíduo do alvo de entrega no <strong>eixo do buffer</strong> (\(\operatorname{ring\_index}(m) \bmod k_{\max}\))</td></tr>
     <tr><td>O que é inserido</td><td>uma parcela ponderada por \(k_d\) de uma defluência</td><td>um único compromisso de decisão</td></tr>
-    <tr><td>Dimensionamento da profundidade</td><td>sobreposição medida da janela de chegada</td><td>máximo de compromissos simultâneos em aberto</td></tr>
+    <tr><td>Dimensionamento da profundidade</td><td>sobreposição medida da janela de chegada</td><td>\(\max(\text{occupancy\_max}, \text{n\_none\_in\_study})\) por usina</td></tr>
     <tr><td>Limite da coluna alcançável</td><td>\([0, \infty)\) — um volume</td><td>\((-\infty, \infty)\) — um valor de MW com sinal</td></tr>
   </tbody>
 </table>

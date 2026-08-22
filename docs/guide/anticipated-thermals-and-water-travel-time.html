@@ -340,8 +340,11 @@ delivery stage \(m\) is decided, indexed on an <strong>extended delivery axis</s
 </ul>
 
 <p>The ring depth \(k_{\max}\) is the <strong>maximum number of commitments simultaneously in
-flight</strong>, across all plants and stages — not merely the lead. Each delivery target is placed
-into the ring by its <strong>residue</strong>:</p>
+flight</strong>, across all plants and stages — not merely the lead. (On a plain <code>lead_stages</code>
+study \(k_{\max}\) coincides with the lead itself; the two diverge once pre-study commitments outlive
+the in-study in-flight count — including the special case where a plant's own pre-study seed run is
+itself the deepest moment, before the study has fished any of them.) Each delivery target is placed into
+the ring by its <strong>residue</strong>:</p>
 
 \[ \operatorname{slot}(m) \;=\; m \bmod k_{\max}, \]
 
@@ -363,6 +366,15 @@ flowchart TB
   m4["delivery m = 4"] -->|4 mod 3 = 1| s1
   m5["delivery m = 5"] -->|5 mod 3 = 2| s2
 </pre>
+
+<div class="admon">
+  <span class="tag">If the plant also has a fixed post-horizon commitment (§3.6)</span>
+  That delivery stage is never one of the \(k_{\max}\) consecutive stages above — it is excised from the
+  ring before residues are taken, because it never occupies a ring slot at all. \(\operatorname{slot}(m) =
+  m \bmod k_{\max}\) is exactly the formula whenever a plant declares no such commitment (the common
+  case); with one declared, the residues above are counted on the ring's <strong>own</strong> axis, not
+  the raw delivery axis, so the count still comes out exactly right.
+</div>
 
 <h3>3.3 The three LP row families</h3>
 
@@ -456,7 +468,35 @@ is a single inequality on the extended axis:</p>
   surface. If you see <code>future_anticipated_deliveries</code> anywhere, it is stale.
 </div>
 
-<h3>3.6 Worked examples: NEWAVE and DECOMP calendars</h3>
+<h3>3.6 Fixed post-horizon commitments — what to declare</h3>
+
+<p>Some commitments are decided <strong>before</strong> the study even for a delivery <strong>after</strong>
+the horizon — DECOMP calls this a "já-comandada" (already-committed) delivery. Declaring one needs no new
+input surface: extend the plant's <strong><code>past_anticipated_commitments</code></strong> windows
+(§3.4) past the study horizon, exactly like any other commitment window. Three things to keep in
+mind:</p>
+
+<ul>
+  <li><strong>A window may sit past the horizon.</strong> The same dated-window shape
+  (<code>{ thermal_id, start_date, end_date, value_mw }</code>) that seeds the leading in-study stages
+  also covers a post-horizon delivery — there is no separate field or file for it.</li>
+  <li><strong>An explicit zero is a legitimate window, not a placeholder to omit.</strong> A short stub
+  stage right at the horizon boundary is common in practice; declare it at <code>value_mw: 0</code>
+  rather than leaving it uncovered — the validation matrix (the companion design reference) treats
+  "uncovered" and "declared zero" very differently.</li>
+  <li><strong>The value is sunk — it never enters the objective.</strong> Exactly like the in-study seeds
+  (§3.4), a fixed post-horizon value is priced only if a terminal boundary policy is loaded, and only
+  through that boundary's future-cost pricing — never as a cost term in the current study's own
+  objective. Simulation output reports it at its real delivery date, the same way an in-study delivery is
+  reported.</li>
+</ul>
+
+<p>This commitment never occupies a ring slot: unlike an in-study delivery or a post-study delivery the
+study itself decides (§3.2, §3.5), a fixed post-horizon value is a plain declared constant the ring never
+carries. If you declare one and see no corresponding ring state for it in the policy checkpoint, that is
+expected — see §6.3.</p>
+
+<h3>3.7 Worked examples: NEWAVE and DECOMP calendars</h3>
 
 <p>The two lead modes behave identically on a uniform calendar but diverge once stage lengths vary. The
 two calendars you meet in practice are NEWAVE-style <strong>monthly</strong> stages (real months vary
@@ -675,9 +715,9 @@ choices:</p>
   <tbody>
     <tr><td>Ring instances</td><td>one per downstream plant (\(n_{\text{lanes}} = 1\))</td><td>one dense ring (\(n_{\text{lanes}}\) = #anticipated plants)</td></tr>
     <tr><td>Transition</td><td><strong>shift</strong> (\(s \to s+1\))</td><td><strong>hold</strong> (same slot)</td></tr>
-    <tr><td>Slot key</td><td>lag = distance still in flight</td><td>delivery-target residue \(m \bmod k_{\max}\)</td></tr>
+    <tr><td>Slot key</td><td>lag = distance still in flight</td><td>delivery-target residue on the <strong>ring axis</strong> (\(\operatorname{ring\_index}(m) \bmod k_{\max}\))</td></tr>
     <tr><td>What gets deposited</td><td>a \(k_d\)-weighted share of a release</td><td>a single decision commitment</td></tr>
-    <tr><td>Depth sizing</td><td>measured overlap of the arrival window</td><td>max simultaneous in-flight commitments</td></tr>
+    <tr><td>Depth sizing</td><td>measured overlap of the arrival window</td><td>\(\max(\text{occupancy\_max}, \text{n\_none\_in\_study})\) per plant</td></tr>
     <tr><td>Reachable column bound</td><td>\([0, \infty)\) — a volume</td><td>\((-\infty, \infty)\) — a signed MW value</td></tr>
   </tbody>
 </table>
