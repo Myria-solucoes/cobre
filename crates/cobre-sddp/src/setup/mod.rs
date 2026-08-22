@@ -1514,9 +1514,8 @@ fn delivery_stage_durations(mut study_durations: Vec<f64>, system: &System) -> V
 /// applies to the bucket topology, not a second advisory emission. Returns the
 /// per-plant resolution and the anticipated-local constant leads: a
 /// `LeadStages(ℓ)` plant keeps `ℓ` byte-for-byte; a `LeadTime` plant takes its
-/// per-plant max in-flight occupancy `max_t occupancy_i(t)` (NOT `depth`, which
-/// excludes pre-study occupancy) — the plant's own `k_i` reachability/padding
-/// bound the slot masking and policy manifest read.
+/// per-plant ring depth ([`PointResolution::ring_depth`]) — the plant's own
+/// `k_i` reachability/padding bound the slot masking and policy manifest read.
 ///
 /// The delivery axis is EXTENDED: `n_delivery = n_stages + n_post` while
 /// `n_decision` stays `n_stages` (decisions are only ever made in-study), so a
@@ -1573,9 +1572,13 @@ pub(crate) fn resolve_anticipated_commitments_core(
                     leadstages_decision_sets_are_singletons(point, l, n_stages),
                     "LeadStages c(m)=m−ℓ ⇒ each in-horizon C(t)={{t+ℓ}}"
                 );
+                debug_assert!(
+                    point.ring_depth() <= l,
+                    "LeadStages ring_depth must stay bounded by ℓ: returning ℓ verbatim under-sizes if a resolver change breaks this"
+                );
                 l
             }
-            LeadTime::Time(_) => point.occupancy.iter().copied().max().unwrap_or(0),
+            LeadTime::Time(_) => point.ring_depth(),
         })
         .collect();
 
@@ -2572,13 +2575,6 @@ fn build_initial_state(
         }
     }
 
-    // Anticipated ring, slot-major: `state[commit_out.start + slot *
-    // n_anticipated + local_idx]`. This IS the state-vector numbering
-    // (`StateSpace::state_to_lp_column`'s identity domain), the same
-    // `commit_out` position every other outgoing-state read uses — never
-    // `commit_in` (the relocated, incoming-only pinned block).
-    // Padding slots `[K_i, k_max)` must stay zero — the in-LP ring's row/column
-    // fill in `lp/builder` assumes it.
     if layout.n_anticipated > 0 && layout.k_max > 0 {
         debug_assert_eq!(
             study_dims.anticipated_thermal_indices.len(),
@@ -2587,8 +2583,6 @@ fn build_initial_state(
         );
         let thermals = system.thermals();
         let thermal_positions = id_to_position(thermals, |t: &Thermal| t.id.0);
-        let n_ant = layout.n_anticipated;
-        let ant_start = layout.commit_out.start;
         let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
             Some(idx) => &system.stages()[idx..],
             None => &[],
@@ -2609,8 +2603,9 @@ fn build_initial_state(
                 // Not an anticipated plant (`anticipated_config: None`) — skip.
                 continue;
             };
-            // Clamp to K_i, not k_max: a window resolving beyond it would otherwise
-            // corrupt the padding slots.
+            // A covered stage at or beyond K_i is a resolver/validator desync,
+            // unreachable through valid input — cobre-io's coverage rule rejects
+            // it before setup runs.
             let k_i = layout.anticipated_lead_stages[local_idx];
             let window = DatedWindow {
                 start_date: history.start_date,
@@ -2619,17 +2614,27 @@ fn build_initial_state(
             // coverage's whole-day-hours arithmetic keeps a full-coverage ratio
             // bit-exact (mirrors StageCalendar::covers_exactly).
             #[allow(clippy::float_cmp)]
-            for (slot, fraction) in calendar.coverage(&window).into_iter().enumerate().take(k_i) {
+            for (slot, fraction) in calendar.coverage(&window).into_iter().enumerate() {
                 if fraction == 1.0 {
-                    let off = ant_start + slot * n_ant + local_idx;
-                    state[off] = history.value_mw;
+                    if slot < k_i {
+                        let off = layout.commit_out.start
+                            + layout.commitment_hold_in_study_offset(local_idx, slot);
+                        state[off] = history.value_mw;
+                    } else {
+                        debug_assert!(
+                            false,
+                            "covered stage beyond plant's own lead: plant local_idx={local_idx}, slot={slot}, K_i={k_i}, k_max={}",
+                            layout.k_max
+                        );
+                    }
                 }
             }
             // Padding slots `[K_i, k_max)` must stay 0.0 — a non-zero value corrupts
             // the ring buffer and causes LP infeasibility.
             #[allow(clippy::float_cmp)]
             for slot in k_i..layout.k_max {
-                let off = ant_start + slot * n_ant + local_idx;
+                let off = layout.commit_out.start
+                    + layout.commitment_hold_in_study_offset(local_idx, slot);
                 debug_assert_eq!(
                     state[off], 0.0,
                     "padding slot must be zero: plant local_idx={local_idx}, slot={slot}, K_i={k_i}, k_max={}",

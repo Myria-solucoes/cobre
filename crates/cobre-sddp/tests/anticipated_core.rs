@@ -7014,3 +7014,1037 @@ mod a1c_stage_count_mode_anchor {
         );
     }
 }
+
+mod anticipated_ring_axis_regressions {
+    //! Two executed-solve regressions pinning the numeric contracts of the
+    //! gap-excised anticipated ring: ring-axis injectivity and ring-depth
+    //! sizing. Both defects are silent wrong committed values that compile and
+    //! solve, so each test trains and simulates and asserts on the fished
+    //! `anticipated_committed_mw` (and, for the sizing test, delivered energy)
+    //! — never on geometry alone.
+    //!
+    //! - **Ring-axis injectivity.** On the raw delivery axis an occupancy-sized
+    //!   `k_max = 4` collides study-stage-3's seed (delivery 3) with the first
+    //!   post-study deposit (delivery 7): `3 == 7 (mod 4)`, two definition rows
+    //!   on one outgoing column. Keyed on the ring axis — the delivery axis with
+    //!   the fixed post-horizon window (width `g`) excised — the two land on
+    //!   distinct slots, so every study stage fishes its own seed.
+    //! - **Ring-depth sizing.** `k_max = max(occupancy_max, n_none_in_study)`.
+    //!   Sizing from `occupancy` alone leaves the last pre-study seed aliased
+    //!   onto an earlier slot when few post-study deliveries recycle the ring.
+
+    use chrono::NaiveDate;
+    use cobre_core::entities::{bus::DeficitSegment, thermal::AnticipatedConfig};
+    use cobre_core::scenario::LoadModel;
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PostStudyStage, PostStudyStages,
+        PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties,
+        SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, SimulationSelection,
+        StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
+        UpperBoundEvaluationConfig,
+    };
+    use cobre_sddp::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution};
+
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal,
+    };
+    use super::common::run_simulation;
+
+    const BUS_ID: EntityId = EntityId(1);
+    const ANTICIPATED_ID: EntityId = EntityId(2);
+    const BACKUP_ID: EntityId = EntityId(3);
+    const ANTICIPATED_THERMAL_ID: i32 = 2;
+
+    // SystemBuilder sorts thermals ascending by EntityId, so id=2 (anticipated)
+    // is thermal index 0 and id=3 (backup) is index 1.
+    const THERMAL_IDX_ANTICIPATED: usize = 0;
+    const THERMAL_IDX_BACKUP: usize = 1;
+
+    /// Study calendar shared by both fixtures: three operative weeks then one
+    /// month, horizon 1152 h — the reference-deck shape and the bug doc's own.
+    const N_STUDY_STAGES: usize = 4;
+    const STUDY_DURS: [f64; N_STUDY_STAGES] = [168.0, 168.0, 168.0, 648.0];
+
+    const LOAD_MW: f64 = 500.0;
+    const ANTICIPATED_MAX_MW: f64 = 500.0;
+    const ANTICIPATED_COST: f64 = 10.0;
+    const BACKUP_MAX_MW: f64 = 1000.0;
+    const BACKUP_COST: f64 = 5000.0;
+    const DEFICIT_COST: f64 = 100_000.0;
+    const ITERATIONS: usize = 3;
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("hardcoded fixture date is valid")
+    }
+
+    /// Study-stage boundaries (five dates for four stages), each span matching
+    /// its block hours exactly so `StageCalendar` date coverage is exact:
+    /// 03-14→03-21→03-28→04-04 are 168 h weeks, 04-04→05-01 is a 648 h month.
+    fn study_boundaries() -> [NaiveDate; N_STUDY_STAGES + 1] {
+        [
+            date(2026, 3, 14),
+            date(2026, 3, 21),
+            date(2026, 3, 28),
+            date(2026, 4, 4),
+            date(2026, 5, 1),
+        ]
+    }
+
+    fn study_stages() -> Vec<Stage> {
+        let bounds = study_boundaries();
+        (0..N_STUDY_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: bounds[i],
+                        end_date: bounds[i + 1],
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: STUDY_DURS[i],
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: false,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn bus() -> cobre_core::entities::bus::Bus {
+        make_bus(
+            BUS_ID,
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: date(2026, 3, 14),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: DEFICIT_COST,
+                }],
+                excess_cost: 0.0,
+            },
+        )
+    }
+
+    fn anticipated_thermal(lead: AnticipatedConfig) -> cobre_core::entities::thermal::Thermal {
+        make_thermal(
+            ANTICIPATED_ID,
+            ThermalSpec {
+                name: "T_ant".to_string(),
+                operational_start_date: date(2026, 3, 14),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: ANTICIPATED_MAX_MW,
+                cost_per_mwh: ANTICIPATED_COST,
+                anticipated_config: Some(lead),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn backup_thermal() -> cobre_core::entities::thermal::Thermal {
+        make_thermal(
+            BACKUP_ID,
+            ThermalSpec {
+                name: "T_backup".to_string(),
+                operational_start_date: date(2026, 3, 14),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: BACKUP_MAX_MW,
+                cost_per_mwh: BACKUP_COST,
+                anticipated_config: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn load_models() -> Vec<LoadModel> {
+        (0..N_STUDY_STAGES)
+            .map(|i| LoadModel {
+                bus_id: BUS_ID,
+                stage_id: i as i32,
+                mean_mw: LOAD_MW,
+                std_mw: 0.0,
+            })
+            .collect()
+    }
+
+    /// Per-thermal generation and decision bounds over the full delivery-stage
+    /// axis (`n_stages + k_max`): the anticipated plant's generation column must
+    /// admit the largest fished seed, and the backup must cover the residual
+    /// load at every study stage.
+    fn bounds(k_max: usize) -> ResolvedBounds {
+        let mut b = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STUDY_STAGES,
+                k_max,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds::default(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        for s in 0..(N_STUDY_STAGES + k_max) {
+            *b.thermal_bounds_mut(THERMAL_IDX_ANTICIPATED, s) = ThermalStageBounds {
+                cost_per_mwh: ANTICIPATED_COST,
+            };
+            *b.thermal_block_base_mut(THERMAL_IDX_ANTICIPATED, s) = ThermalBlockBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: ANTICIPATED_MAX_MW,
+            };
+            *b.thermal_bounds_mut(THERMAL_IDX_BACKUP, s) = ThermalStageBounds {
+                cost_per_mwh: BACKUP_COST,
+            };
+            *b.thermal_block_base_mut(THERMAL_IDX_BACKUP, s) = ThermalBlockBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: BACKUP_MAX_MW,
+            };
+        }
+        b
+    }
+
+    fn penalties() -> ResolvedPenalties {
+        ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STUDY_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        )
+    }
+
+    /// One `past_anticipated_commitments` window per study stage, tiling the
+    /// study calendar with the given (distinct) seed values — the pre-study
+    /// deliveries `0..4` the ring must fish back at their own stages.
+    fn seed_windows(values: [f64; N_STUDY_STAGES]) -> Vec<AnticipatedCommitmentHistory> {
+        let dates = study_boundaries();
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, &value_mw)| AnticipatedCommitmentHistory {
+                thermal_id: ANTICIPATED_ID,
+                start_date: dates[i],
+                end_date: dates[i + 1],
+                value_mw,
+            })
+            .collect()
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: ITERATIONS as u32,
+                }]),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig {
+                enabled: true,
+                io_channel_capacity: 8,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
+                ..IoSimulationConfig::default()
+            },
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// Read the anticipated plant's fished commitment (MW) at study stage `t`
+    /// from the one-scenario simulation result.
+    fn committed_at(scenario: &cobre_sddp::SimulationScenarioResult, t: usize) -> Option<f64> {
+        scenario.stages[t]
+            .thermals
+            .iter()
+            .find(|th| th.thermal_id == ANTICIPATED_THERMAL_ID)
+            .and_then(|th| th.anticipated_committed_mw)
+    }
+
+    /// The reference-deck collision fixture. Four in-study seeds (deliveries
+    /// `0..4`) plus a seven-stage post-study calendar whose first three stages
+    /// are the fixed window (`24, 168, 168` h → `g == 3`) and whose remaining
+    /// four carry the `PostStudyThermalBound` cells study stages `0..4` decide
+    /// deliveries `7..11` into. The `LeadTime` lead is
+    /// [`COLLISION_LEAD_HOURS`].
+    const COLLISION_LEAD_HOURS: f64 = 1600.0;
+    const COLLISION_SEEDS: [f64; N_STUDY_STAGES] = [110.0, 220.0, 330.0, 440.0];
+    /// Post-study stage hours: fixed window `24, 168, 168` then the four
+    /// commitment-carrying weeks/month.
+    const COLLISION_POST_DURS: [f64; 7] = [24.0, 168.0, 168.0, 168.0, 168.0, 168.0, 648.0];
+
+    fn collision_full_calendar() -> Vec<f64> {
+        let mut cal = STUDY_DURS.to_vec();
+        cal.extend_from_slice(&COLLISION_POST_DURS);
+        cal
+    }
+
+    fn collision_post_study() -> PostStudyStages {
+        let starts = [
+            date(2026, 5, 1),
+            date(2026, 5, 2),
+            date(2026, 5, 9),
+            date(2026, 5, 16),
+            date(2026, 5, 23),
+            date(2026, 5, 30),
+            date(2026, 6, 6),
+        ];
+        let stages = starts
+            .iter()
+            .zip(COLLISION_POST_DURS)
+            .map(|(&start_date, duration_hours)| PostStudyStage {
+                start_date,
+                duration_hours,
+            })
+            .collect();
+        // The four commitment-carrying post-study stages (indices 3..7,
+        // deliveries 7..11) each cost and bound the delivery study stages
+        // 0..4 decide into; the fixed window (indices 0..3) carries no cell.
+        let thermal_bounds = (3..7)
+            .map(|post_study_stage_index| PostStudyThermalBound {
+                thermal_id: ANTICIPATED_ID,
+                post_study_stage_index,
+                cost_per_mwh: 20.0,
+                min_mw: 0.0,
+                max_mw: 200.0,
+            })
+            .collect();
+        PostStudyStages {
+            stages,
+            thermal_bounds,
+        }
+    }
+
+    fn build_collision_system() -> cobre_core::System {
+        SystemBuilder::new()
+            .buses(vec![bus()])
+            .thermals(vec![
+                anticipated_thermal(AnticipatedConfig::LeadTime(COLLISION_LEAD_HOURS)),
+                backup_thermal(),
+            ])
+            .stages(study_stages())
+            .load_models(load_models())
+            .bounds(bounds(4))
+            .penalties(penalties())
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_anticipated_commitments: seed_windows(COLLISION_SEEDS),
+                recent_observations: vec![],
+                past_defluences: vec![],
+            })
+            .post_study_stages(Some(collision_post_study()))
+            .build()
+            .expect("build_collision_system: valid system")
+    }
+
+    /// The ring's excision keeps every delivery window on its own slot, so each
+    /// study stage fishes its OWN seed and the ring depth is the true
+    /// occupancy.
+    ///
+    /// Closed form: the reference deck resolves `decider[7 + t] = Some(t)` for
+    /// `t in 0..4` (a `g == 3` fixed window at deliveries `4..7`), so the four
+    /// in-study deliveries `0..4` are pre-study seeds fished at their own
+    /// stages: `[110, 220, 330, 440]`. The occupancy is 4 (all four seeds are
+    /// in flight at stage 0), so `k_max == 4` and the anticipated state is
+    /// `n_anticipated * 4`.
+    ///
+    /// Pre-change (raw `m mod k_max`) code keys the ring on the full delivery
+    /// axis, where `3 == 7 (mod 4)`: study-stage-3's seed (delivery 3) and the
+    /// first post-study deposit (delivery 7) collide on one outgoing column —
+    /// two definition rows — so stage 3 fishes the deposited value (or the
+    /// solve reports a false `Infeasible`). Either symptom fails this test.
+    #[test]
+    fn excision_keeps_each_study_stage_fishing_its_own_seed() {
+        // Assert the resolved decider directly rather than trusting the hour
+        // value, so a fixture drift onto a different class boundary fails loudly
+        // instead of silently testing something else. S_7 = 1512 < 1600 <=
+        // 1680 = S_8 places delivery 7 (Sem 10) with study stage 0 and leaves
+        // deliveries 4..7 the fixed window (g == 3).
+        let calendar = collision_full_calendar();
+        let resolution = AnticipatedResolution::resolve(
+            &[LeadTime::Time(COLLISION_LEAD_HOURS)],
+            DeliveryAxis {
+                stage_lengths_hours: &calendar,
+                n_decision: N_STUDY_STAGES,
+                n_delivery: calendar.len(),
+            },
+        );
+        let decider = &resolution.per_plant[0].decider;
+        assert_eq!(
+            decider,
+            &vec![
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+            ],
+            "collision fixture drift: study stage t must decide delivery 7 + t \
+             (g == 3), so decider[7..11] == [Some(0), Some(1), Some(2), Some(3)]",
+        );
+        assert_eq!(
+            resolution.k_max, 4,
+            "ring depth must be the true occupancy (4), not the width-inclusive \
+             span (7)",
+        );
+
+        let config = build_config();
+        let mut setup = build_setup_in_code(build_collision_system(), &config);
+
+        // The excision must NOT pad the state with the masked fixed-window
+        // slots: the anticipated contribution is n_anticipated * 4 (true
+        // occupancy), never n_anticipated * 7 (width-inclusive span).
+        let state = setup.stage_state();
+        assert_eq!(state.n_anticipated, 1, "one anticipated plant");
+        assert_eq!(
+            state.k_max, 4,
+            "resolved k_max must be the true occupancy depth 4, not the \
+             width-inclusive span 7",
+        );
+        assert_eq!(
+            state.commit_out.len(),
+            state.n_anticipated * 4,
+            "the anticipated state dimension must be n_anticipated * 4 (true \
+             occupancy), not n_anticipated * 7 (width-inclusive span with \
+             masked fixed-window slots)",
+        );
+
+        let results = run_simulation(&mut setup, ITERATIONS);
+        assert_eq!(results.len(), 1, "one simulated scenario");
+        let scenario = &results[0];
+        assert_eq!(
+            scenario.stages.len(),
+            N_STUDY_STAGES,
+            "one record per study stage",
+        );
+
+        for (t, &seed) in COLLISION_SEEDS.iter().enumerate() {
+            let committed = committed_at(scenario, t).unwrap_or_else(|| {
+                panic!("committed_at({t}) is None; the anticipated plant did not fish its seed")
+            });
+            assert!(
+                (committed - seed).abs() < 1e-6,
+                "study stage {t} must fish its OWN seed {seed} MW, got {committed} MW. \
+                 A different value means the ring keyed on the raw delivery axis and \
+                 aliased this slot onto another delivery's commitment.",
+            );
+        }
+    }
+
+    /// The bug doc's under-sizing reproduction: four study stages
+    /// `[168, 168, 168, 648]`, one anticipated `LeadTime(1160)` thermal (lead >=
+    /// horizon, so all four deliveries are pre-study), one post-study monthly
+    /// stage, no boundary, four windows tiling the study at `100, 200, 300,
+    /// 400` MW.
+    const CLOSURE_LEAD_HOURS: f64 = 1160.0;
+    const CLOSURE_SEEDS: [f64; N_STUDY_STAGES] = [100.0, 200.0, 300.0, 400.0];
+    const CLOSURE_POST_DUR: f64 = 720.0;
+
+    fn build_closure_system() -> cobre_core::System {
+        let post_study = PostStudyStages {
+            stages: vec![PostStudyStage {
+                start_date: date(2026, 5, 1),
+                duration_hours: CLOSURE_POST_DUR,
+            }],
+            thermal_bounds: vec![],
+        };
+        SystemBuilder::new()
+            .buses(vec![bus()])
+            .thermals(vec![
+                anticipated_thermal(AnticipatedConfig::LeadTime(CLOSURE_LEAD_HOURS)),
+                backup_thermal(),
+            ])
+            .stages(study_stages())
+            .load_models(load_models())
+            .bounds(bounds(4))
+            .penalties(penalties())
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_anticipated_commitments: seed_windows(CLOSURE_SEEDS),
+                recent_observations: vec![],
+                past_defluences: vec![],
+            })
+            .post_study_stages(Some(post_study))
+            .build()
+            .expect("build_closure_system: valid system")
+    }
+
+    /// Sizing the ring `k_max = max(occupancy_max, n_none_in_study)` makes the
+    /// last pre-study seed fish its own value under `n_post < n_stages`.
+    ///
+    /// Closed form: `decider == [None, None, None, None, Some(3)]` (the single
+    /// post-study delivery decides at the last study stage), so occupancy peaks
+    /// at 3 but four seeds are simultaneously in flight at stage 0
+    /// (`n_none_in_study == 4`); `k_max == max(3, 4) == 4` gives every seed its
+    /// own slot: `[100, 200, 300, 400]`, with stage 3 delivering `400 * 648 ==
+    /// 259_200` MWh.
+    ///
+    /// Pre-change code sizes `k_max = occupancy_max = 3`, so the stage-0 seed
+    /// write drops the overflow window and `slot(m) = m mod 3` aliases delivery
+    /// 3 onto delivery 0's slot: stage 3 fishes `100` MW, delivering `100 * 648
+    /// == 64_800` MWh — a silent wrong value the energy cross-check also catches.
+    #[test]
+    fn ring_depth_covers_every_simultaneous_pre_study_seed() {
+        let calendar = {
+            let mut cal = STUDY_DURS.to_vec();
+            cal.push(CLOSURE_POST_DUR);
+            cal
+        };
+        let resolution = AnticipatedResolution::resolve(
+            &[LeadTime::Time(CLOSURE_LEAD_HOURS)],
+            DeliveryAxis {
+                stage_lengths_hours: &calendar,
+                n_decision: N_STUDY_STAGES,
+                n_delivery: calendar.len(),
+            },
+        );
+        let point = &resolution.per_plant[0];
+        assert_eq!(
+            &point.decider,
+            &vec![None, None, None, None, Some(3)],
+            "closure fixture drift: the single post-study delivery must decide at \
+             the last study stage (decider[4] == Some(3)) with four pre-study seeds",
+        );
+        assert_eq!(
+            point.occupancy.iter().copied().max(),
+            Some(3),
+            "the fixture must sit in the under-sizing regime: occupancy peaks at 3",
+        );
+        assert_eq!(
+            resolution.k_max, 4,
+            "k_max = max(occupancy_max 3, n_none_in_study 4) must widen to 4 so \
+             every simultaneous pre-study seed gets its own slot",
+        );
+
+        let config = build_config();
+        let mut setup = build_setup_in_code(build_closure_system(), &config);
+        let results = run_simulation(&mut setup, ITERATIONS);
+        assert_eq!(results.len(), 1, "one simulated scenario");
+        let scenario = &results[0];
+        assert_eq!(
+            scenario.stages.len(),
+            N_STUDY_STAGES,
+            "one record per study stage",
+        );
+
+        for (t, &seed) in CLOSURE_SEEDS.iter().enumerate() {
+            let committed = committed_at(scenario, t).unwrap_or_else(|| {
+                panic!("committed_at({t}) is None; the anticipated plant did not fish its seed")
+            });
+            assert!(
+                (committed - seed).abs() < 1e-6,
+                "study stage {t} must fish its OWN seed {seed} MW, got {committed} MW. \
+                 A wrong value here is the under-sizing alias (last stage delivers an \
+                 earlier stage's seed).",
+            );
+        }
+
+        // Energy cross-check: stage 3 delivers its own 400 MW seed over its
+        // 648 h block. The aliased pre-change value would report 100 * 648.
+        let stage3 = &scenario.stages[N_STUDY_STAGES - 1];
+        let gen_mw = stage3
+            .thermals
+            .iter()
+            .find(|th| th.thermal_id == ANTICIPATED_THERMAL_ID)
+            .map(|th| th.generation_mw)
+            .expect("anticipated thermal must appear in the stage-3 result");
+        let gen_mwh = gen_mw * STUDY_DURS[N_STUDY_STAGES - 1];
+        let expected_mwh = 400.0 * 648.0;
+        assert!(
+            (gen_mwh - expected_mwh).abs() / expected_mwh < 1e-6,
+            "stage-3 delivered energy must be {expected_mwh} MWh (400 MW * 648 h), got \
+             {gen_mwh} MWh; the pre-change alias would report {} MWh (100 MW * 648 h)",
+            100.0 * 648.0,
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Zero fixed post-horizon window: the excision is the identity map
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // When no delivery matures into a fixed post-horizon window, the ring-axis
+    // excision is the identity: `ring_index(m) == Some(m)` everywhere,
+    // `physical_target` is the identity, and `ring_depth` equals the occupancy
+    // max (the widened sizing does not grow the depth). These standing anchors
+    // pin that composed identity — across the slot encoder, the carry sweep,
+    // the deposit latch, the ring depth, and the seed walk — on two
+    // shipped-deck shapes: a study with post-study stages whose every
+    // post-study delivery is decided in-study, and a study-only system. They
+    // assert the built geometry only; the deterministic and parity suites carry
+    // the end-to-end byte-neutrality proof over the shipped decks.
+
+    const BN_PLANT_A_ID: EntityId = EntityId(20);
+    const BN_PLANT_B_ID: EntityId = EntityId(21);
+    const BN_STAGE_DUR_H: f64 = 168.0;
+    const BN_PLANT_A_LEAD_STAGES: u32 = 2;
+    /// Lead placing every post-study delivery on an in-study decider (no fixed
+    /// window) at occupancy-max depth 4 on the extended calendar.
+    const BN_WITH_POST_LEAD_HOURS: f64 = 700.0;
+    /// One-stage lead: occupancy-max depth 1, heterogeneous against the
+    /// `LeadStages(2)` plant's depth 2.
+    const BN_STUDY_ONLY_LEAD_HOURS: f64 = 250.0;
+
+    /// Four uniform 168 h study stages so every `LeadTime` decider resolves on a
+    /// regular calendar (the study-anchored dates each span exactly 168 h).
+    fn bn_uniform_study_stages() -> Vec<Stage> {
+        let starts = [
+            date(2026, 3, 14),
+            date(2026, 3, 21),
+            date(2026, 3, 28),
+            date(2026, 4, 4),
+            date(2026, 4, 11),
+        ];
+        (0..N_STUDY_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: starts[i],
+                        end_date: starts[i + 1],
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: BN_STAGE_DUR_H,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: false,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn bn_anticipated(
+        id: EntityId,
+        name: &str,
+        lead: AnticipatedConfig,
+    ) -> cobre_core::entities::thermal::Thermal {
+        make_thermal(
+            id,
+            ThermalSpec {
+                name: name.to_string(),
+                operational_start_date: date(2026, 3, 14),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: ANTICIPATED_MAX_MW,
+                cost_per_mwh: ANTICIPATED_COST,
+                anticipated_config: Some(lead),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// The two anticipated plants, id-ascending so plant A (`LeadStages`) is
+    /// anticipated-local index 0 and plant B (`LeadTime`) is index 1.
+    fn bn_thermals(lead_time_hours: f64) -> Vec<cobre_core::entities::thermal::Thermal> {
+        vec![
+            bn_anticipated(
+                BN_PLANT_A_ID,
+                "T_leadstages",
+                AnticipatedConfig::LeadStages(BN_PLANT_A_LEAD_STAGES),
+            ),
+            bn_anticipated(
+                BN_PLANT_B_ID,
+                "T_leadtime",
+                AnticipatedConfig::LeadTime(lead_time_hours),
+            ),
+        ]
+    }
+
+    fn bn_leads(lead_time_hours: f64) -> [LeadTime; 2] {
+        [
+            LeadTime::Stages(BN_PLANT_A_LEAD_STAGES),
+            LeadTime::Time(lead_time_hours),
+        ]
+    }
+
+    fn bn_resolve(leads: &[LeadTime], durations: &[f64]) -> AnticipatedResolution {
+        AnticipatedResolution::resolve(
+            leads,
+            DeliveryAxis {
+                stage_lengths_hours: durations,
+                n_decision: N_STUDY_STAGES,
+                n_delivery: durations.len(),
+            },
+        )
+    }
+
+    fn bn_with_post_study_durations() -> Vec<f64> {
+        vec![BN_STAGE_DUR_H; N_STUDY_STAGES + 2]
+    }
+
+    fn bn_study_only_durations() -> Vec<f64> {
+        vec![BN_STAGE_DUR_H; N_STUDY_STAGES]
+    }
+
+    fn bn_with_post_study_system() -> cobre_core::System {
+        let post_study = PostStudyStages {
+            stages: vec![
+                PostStudyStage {
+                    start_date: date(2026, 4, 11),
+                    duration_hours: BN_STAGE_DUR_H,
+                },
+                PostStudyStage {
+                    start_date: date(2026, 4, 18),
+                    duration_hours: BN_STAGE_DUR_H,
+                },
+            ],
+            thermal_bounds: vec![],
+        };
+        SystemBuilder::new()
+            .buses(vec![bus()])
+            .thermals(bn_thermals(BN_WITH_POST_LEAD_HOURS))
+            .stages(bn_uniform_study_stages())
+            .load_models(load_models())
+            .bounds(bounds(4))
+            .penalties(penalties())
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_anticipated_commitments: vec![],
+                recent_observations: vec![],
+                past_defluences: vec![],
+            })
+            .post_study_stages(Some(post_study))
+            .build()
+            .expect("bn_with_post_study_system: valid system")
+    }
+
+    fn bn_study_only_system() -> cobre_core::System {
+        SystemBuilder::new()
+            .buses(vec![bus()])
+            .thermals(bn_thermals(BN_STUDY_ONLY_LEAD_HOURS))
+            .stages(bn_uniform_study_stages())
+            .load_models(load_models())
+            .bounds(bounds(4))
+            .penalties(penalties())
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_anticipated_commitments: vec![],
+                recent_observations: vec![],
+                past_defluences: vec![],
+            })
+            .build()
+            .expect("bn_study_only_system: valid system")
+    }
+
+    /// Assert the resolved state geometry is the identity excision: every
+    /// plant's `ring_index` is `Some(m)`, `ring_depth` equals the occupancy max
+    /// (no widening), `k_max` is the occupancy max over both plants (computed
+    /// here, never a literal), the anticipated state is `n_anticipated * k_max`
+    /// (no masked padding), and each plant's `anticipated_lead_stages` matches
+    /// the declared stage count for the `LeadStages` plant and the occupancy max
+    /// for the `LeadTime` plant.
+    fn bn_assert_identity_geometry(
+        n_anticipated: usize,
+        k_max: usize,
+        commit_out_len: usize,
+        anticipated_lead_stages: &[usize],
+        resolution: &AnticipatedResolution,
+        leads: &[LeadTime],
+    ) {
+        assert_eq!(
+            n_anticipated, 2,
+            "both fixtures declare two anticipated plants"
+        );
+        assert_eq!(
+            resolution.per_plant.len(),
+            2,
+            "the resolution must carry both plants",
+        );
+
+        for point in &resolution.per_plant {
+            for m in 0..point.decider.len() {
+                assert_eq!(
+                    point.ring_index(m),
+                    Some(m),
+                    "ring_index must be the identity across the whole delivery range at m={m}",
+                );
+            }
+            assert_eq!(
+                point.occupancy.iter().copied().max(),
+                Some(point.ring_depth()),
+                "ring_depth must equal the occupancy max (no widening) with no fixed post-horizon window",
+            );
+        }
+
+        // A single per-plant width applied globally is invisible with one plant
+        // or two identical plants; the two leads must resolve DIFFERENT depths.
+        let depths: Vec<usize> = resolution
+            .per_plant
+            .iter()
+            .map(PointResolution::ring_depth)
+            .collect();
+        assert_ne!(
+            depths[0], depths[1],
+            "the two plants must resolve heterogeneous depths",
+        );
+
+        // The RELATION between ring_depth and occupancy is the property under
+        // test, so k_max is recomputed from occupancy here rather than pinned.
+        let expected_k_max = resolution
+            .per_plant
+            .iter()
+            .filter_map(|p| p.occupancy.iter().copied().max())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            k_max, expected_k_max,
+            "resolved k_max must equal the occupancy max over both plants",
+        );
+        assert_eq!(
+            commit_out_len,
+            n_anticipated * k_max,
+            "the anticipated state dimension must be n_anticipated * k_max (no masked padding)",
+        );
+
+        let expected_lead_stages: Vec<usize> = leads
+            .iter()
+            .zip(&resolution.per_plant)
+            .map(|(lead, point)| match lead {
+                LeadTime::Stages(l) => *l as usize,
+                LeadTime::Time(_) => point.occupancy.iter().copied().max().unwrap_or(0),
+            })
+            .collect();
+        assert_eq!(
+            anticipated_lead_stages,
+            expected_lead_stages.as_slice(),
+            "per-plant anticipated_lead_stages must be the declared count (LeadStages) or the occupancy max (LeadTime)",
+        );
+    }
+
+    /// Assert the carry-slot addressing at every study stage reproduces the
+    /// pre-excision identity formula `(stage_idx + depth + 1) % k_max`: with no
+    /// fixed post-horizon window the excision is inert (`physical_target(r) ==
+    /// r`), so the ring slot for delivery `r` is its own residue and
+    /// `ring_index` inverts it — the composed carry-sweep identity.
+    fn bn_assert_carry_slot_identity(
+        resolution: &AnticipatedResolution,
+        k_max: usize,
+        n_stages: usize,
+        n_delivery: usize,
+    ) {
+        assert!(k_max >= 1, "fixture must resolve a non-empty ring");
+        for stage_idx in 0..n_stages {
+            for depth in 0..k_max {
+                let r = stage_idx + depth + 1;
+                if r >= n_delivery {
+                    continue;
+                }
+                let slot = r % k_max;
+                for point in &resolution.per_plant {
+                    let m = point.physical_target(r);
+                    assert_eq!(
+                        m, r,
+                        "the excision must be inert at ring-axis index {r} (stage_idx={stage_idx}, depth={depth})",
+                    );
+                    assert_eq!(
+                        m % k_max,
+                        slot,
+                        "the carry slot for delivery {m} must be the pre-excision (stage_idx + depth + 1) % k_max = {slot}",
+                    );
+                    assert_eq!(
+                        point.ring_index(m),
+                        Some(m),
+                        "ring_index must invert physical_target on the identity axis",
+                    );
+                }
+            }
+        }
+    }
+
+    /// A study with post-study stages whose every post-study delivery is decided
+    /// in-study (no fixed post-horizon window) resolves an identity excision on
+    /// both plants: identity ring, occupancy-max depth, and per-plant leads.
+    #[test]
+    fn zero_gap_with_post_study_resolves_an_identity_ring_and_occupancy_depth() {
+        let leads = bn_leads(BN_WITH_POST_LEAD_HOURS);
+        let durations = bn_with_post_study_durations();
+        assert!(
+            durations.len() > N_STUDY_STAGES,
+            "fixture must extend past the study horizon",
+        );
+        let resolution = bn_resolve(&leads, &durations);
+
+        let config = build_config();
+        let setup = build_setup_in_code(bn_with_post_study_system(), &config);
+        let state = setup.stage_state();
+        bn_assert_identity_geometry(
+            state.n_anticipated,
+            state.k_max,
+            state.commit_out.len(),
+            &state.anticipated_lead_stages,
+            &resolution,
+            &leads,
+        );
+    }
+
+    /// A study-only system (no post-study stages) resolves an identity excision
+    /// on both plants — the shape most shipped decks have.
+    #[test]
+    fn zero_gap_study_only_resolves_an_identity_ring_and_occupancy_depth() {
+        let leads = bn_leads(BN_STUDY_ONLY_LEAD_HOURS);
+        let durations = bn_study_only_durations();
+        assert_eq!(
+            durations.len(),
+            N_STUDY_STAGES,
+            "study-only fixture must not extend past the study horizon",
+        );
+        let resolution = bn_resolve(&leads, &durations);
+
+        let config = build_config();
+        let setup = build_setup_in_code(bn_study_only_system(), &config);
+        let state = setup.stage_state();
+        bn_assert_identity_geometry(
+            state.n_anticipated,
+            state.k_max,
+            state.commit_out.len(),
+            &state.anticipated_lead_stages,
+            &resolution,
+            &leads,
+        );
+    }
+
+    /// Both zero-fixed-window fixtures address every study stage's carry slots by
+    /// the pre-excision identity formula `(stage_idx + depth + 1) % k_max`.
+    #[test]
+    fn zero_gap_carry_slot_addressing_matches_the_open_coded_identity_formula() {
+        let cases = [
+            (
+                bn_with_post_study_system(),
+                bn_with_post_study_durations(),
+                bn_leads(BN_WITH_POST_LEAD_HOURS),
+            ),
+            (
+                bn_study_only_system(),
+                bn_study_only_durations(),
+                bn_leads(BN_STUDY_ONLY_LEAD_HOURS),
+            ),
+        ];
+        for (system, durations, leads) in cases {
+            let resolution = bn_resolve(&leads, &durations);
+            let config = build_config();
+            let setup = build_setup_in_code(system, &config);
+            let k_max = setup.stage_state().k_max;
+            bn_assert_carry_slot_identity(&resolution, k_max, N_STUDY_STAGES, durations.len());
+        }
+    }
+}

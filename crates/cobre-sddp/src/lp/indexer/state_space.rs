@@ -42,8 +42,9 @@ use cobre_core::temporal::StageStateConfig;
 /// [`Self::n_state`]) and a separate incoming block ([`Self::commit_in`],
 /// pinned via [`Self::state_to_lp_incoming_column`]) — never one
 /// dual-purpose range shifted out-of-LP. Slots are slot-major/plant-minor,
-/// keyed delivery-target-modular (delivery target `m`'s slot is `m mod
-/// k_max`). Like the bucket block, the whole region is always cut-enabled,
+/// keyed ring-axis-modular (delivery target `m`'s slot is `r(m) mod k_max`,
+/// see [`Self::commitment_hold_in_study_offset`]). Like the bucket block,
+/// the whole region is always cut-enabled,
 /// ignoring [`StageStateConfig`] (see [`StateRegion::cut_enabled`]).
 #[derive(Debug, Clone)]
 pub struct StateSpace {
@@ -562,8 +563,10 @@ impl StateSpace {
 
     /// Encode an in-study commitment-hold position: anticipated-local plant
     /// `plant`'s offset within [`Self::commit_out`]/[`Self::commit_in`] for
-    /// delivery target `m`, keyed delivery-target-modular
-    /// (`slot(m) = m mod k_max`), slot-major/plant-minor.
+    /// delivery target `m`, keyed ring-axis-modular (`slot = r(m) mod
+    /// k_max`, `PointResolution::ring_index` owns `r`) — `m mod k_max`
+    /// alone is injective only on a contiguous run of the raw delivery axis,
+    /// which the excised fixed post-horizon window breaks — slot-major/plant-minor.
     #[must_use]
     pub(crate) fn commitment_hold_in_study_offset(&self, plant: usize, m: usize) -> usize {
         debug_assert!(
@@ -575,7 +578,20 @@ impl StateSpace {
             self.k_max > 0,
             "commitment_hold_in_study_offset requires k_max > 0"
         );
-        (m % self.k_max) * self.n_anticipated + plant
+        let r = match self.anticipated_resolution.per_plant.get(plant) {
+            Some(point) => {
+                let r = point.ring_index(m);
+                debug_assert!(
+                    r.is_some(),
+                    "delivery target {m} is inside plant {plant}'s excised fixed \
+                     post-horizon window — never a ring member, so addressing it \
+                     is a caller bug"
+                );
+                r.unwrap_or(m)
+            }
+            None => m,
+        };
+        (r % self.k_max) * self.n_anticipated + plant
     }
 
     fn storage_state_dim(&self, h: usize) -> StateDim {
@@ -1571,6 +1587,94 @@ mod tests {
             offsets, expected,
             "one period of m must biject onto the full leading in-study block"
         );
+    }
+
+    /// Two-plant [`AnticipatedResolution`] sibling to `single_plant_resolution`
+    /// (defined below): plant 0's `decider` carries a `g`-long excised fixed
+    /// post-horizon `None` run right after `n_decision` in-study entries; plant
+    /// 1's post-study suffix is entirely decided (`g == 0`). The excision input
+    /// is the `decider` itself, so no separate width parameter is threaded
+    /// through — `decision_sets`/`depth`/`occupancy` stay structurally minimal
+    /// since `commitment_hold_in_study_offset` never reads them.
+    fn two_plant_resolution_with_fixed_window(
+        n_decision: usize,
+        g: usize,
+        k_max: usize,
+    ) -> AnticipatedResolution {
+        let decider_len = n_decision + g + 1;
+        let with_window = PointResolution {
+            decider: (0..decider_len)
+                .map(|m| (m >= n_decision + g).then_some(0))
+                .collect(),
+            decision_sets: vec![Vec::new(); n_decision],
+            depth: Vec::new(),
+            occupancy: Vec::new(),
+        };
+        let without_window = PointResolution {
+            decider: (0..decider_len)
+                .map(|m| (m >= n_decision).then_some(0))
+                .collect(),
+            decision_sets: vec![Vec::new(); n_decision],
+            depth: Vec::new(),
+            occupancy: Vec::new(),
+        };
+        AnticipatedResolution {
+            per_plant: vec![with_window, without_window],
+            k_max,
+            max_fanout: 0,
+        }
+    }
+
+    /// Shared fixture for the ring-axis offset tests: `n_anticipated = 2`,
+    /// `k_max = 4`; plant 0 has a 3-wide excised fixed post-horizon window
+    /// (`n_decision = 4`, `g = 3`); plant 1 has none.
+    fn ring_axis_offset_fixture() -> StateSpace {
+        let mut idx = finalized(0, 0, 2, 4, vec![4, 4]);
+        idx.set_anticipated_resolution(two_plant_resolution_with_fixed_window(4, 3, 4));
+        idx
+    }
+
+    /// No resolution attached (`per_plant.get(plant) == None`): the excision
+    /// degrades to identity, matching the pre-excision arithmetic for every
+    /// `m`.
+    #[test]
+    fn commitment_hold_offset_is_identity_without_an_attached_resolution() {
+        let idx = finalized(0, 0, 2, 4, vec![4, 4]);
+        for m in 0..12 {
+            assert_eq!(
+                idx.commitment_hold_in_study_offset(1, m),
+                (m % 4) * 2 + 1,
+                "m={m}: no attached resolution must fall back to the raw-m identity"
+            );
+        }
+    }
+
+    /// `3 ≡ 7 mod 4` collide on the raw delivery axis, but plant 0's `g == 3`
+    /// fixed post-horizon window shifts ring-eligible `m = 7` to ring index 4,
+    /// landing on a distinct slot from `m = 3`.
+    #[test]
+    fn commitment_hold_offset_separates_the_colliding_raw_axis_residues() {
+        let idx = ring_axis_offset_fixture();
+        assert_eq!(idx.commitment_hold_in_study_offset(0, 7), 0);
+        assert_eq!(idx.commitment_hold_in_study_offset(0, 3), 6);
+    }
+
+    /// Plant 1 has no fixed window (`g == 0`): its own offset is unaffected by
+    /// sibling plant 0's excised width.
+    #[test]
+    fn commitment_hold_offset_ignores_a_sibling_plants_fixed_window() {
+        let idx = ring_axis_offset_fixture();
+        assert_eq!(idx.commitment_hold_in_study_offset(1, 7), 7);
+    }
+
+    /// `m = 5` sits inside plant 0's excised window `[4, 7)` — never a ring
+    /// member — so the `debug_assert!` fires instead of silently falling back
+    /// to the raw `m`.
+    #[test]
+    #[should_panic = "excised fixed"]
+    fn commitment_hold_offset_rejects_an_excised_delivery_target() {
+        let idx = ring_axis_offset_fixture();
+        let _ = idx.commitment_hold_in_study_offset(0, 5);
     }
 
     // ── State-dimension region accessors ────────────────────────────────────

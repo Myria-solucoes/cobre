@@ -720,10 +720,10 @@ fn migration_equivalence_point_k0_degeneracy() {
     );
 }
 
-// resolve_point's decider/decision_sets/depth stay byte-identical to a captured
-// baseline; k_max now derives from full occupancy, so this fixture's plant-0
-// LeadTime shape (leading None-run 4 > max depth 1 — the currently-under-sized
-// case) grows from the old depth-derived 2 to the true in-flight 3.
+// resolve_point's decider/decision_sets/depth/occupancy stay byte-identical to a
+// captured baseline; k_max now derives from ring_depth, so this fixture's plant-0
+// LeadTime shape (leading None-run 4 > occupancy max 3, which subtracts the seed
+// maturing at stage 0) grows from the old occupancy-derived 3 to 4.
 #[test]
 fn test_in_study_path_byte_identity_regression() {
     let stage_lengths_hours = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0];
@@ -755,9 +755,9 @@ fn test_in_study_path_byte_identity_regression() {
         },
     );
     assert_eq!(
-        anticipated.k_max, 3,
-        "k_max derives from occupancy: plant 0's leading None-run (4) exceeds its \
-         depth (1), so the ring grows to its true in-flight count"
+        anticipated.k_max, 4,
+        "k_max derives from ring_depth: plant 0's leading None-run (4) exceeds its \
+         occupancy max (3), so the ring grows to hold every simultaneous seed"
     );
     assert_eq!(
         anticipated.max_fanout, 1,
@@ -1001,6 +1001,99 @@ fn test_occupancy_excludes_none_decider_post_study_target() {
     assert_eq!(resolution.occupancy, vec![3, 3, 2]);
 }
 
+// The bug doc's reproduction shape — LeadTime(1160) over three weeks then a
+// month, plus one post-study month. The 1160 h lead resolves all four study
+// deliveries pre-study, so at stage 0 four seeds are simultaneously in flight;
+// occupancy subtracts the seed maturing at stage 0 and tops out at 3, while
+// ring_depth covers the fourth.
+#[test]
+fn ring_depth_covers_every_simultaneous_pre_study_seed() {
+    let resolution = resolve_point(
+        LeadTime::Time(1160.0),
+        DeliveryAxis {
+            stage_lengths_hours: &[168.0, 168.0, 168.0, 648.0, 648.0],
+            n_decision: 4,
+            n_delivery: 5,
+        },
+    );
+
+    assert_eq!(resolution.decider, vec![None, None, None, None, Some(3)]);
+    assert_eq!(resolution.occupancy, vec![3, 2, 1, 1]);
+    assert_eq!(resolution.occupancy.iter().copied().max(), Some(3));
+    assert_eq!(resolution.ring_depth(), 4);
+}
+
+// A uniform stage-count lead whose leading None-run never exceeds the in-flight
+// occupancy: ring_depth is inert, agreeing bit-for-bit with the occupancy max
+// the pre-fix sizing already used.
+#[test]
+fn ring_depth_equals_the_occupancy_max_when_no_seed_overflows() {
+    let resolution = resolve_point(
+        LeadTime::Stages(2),
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: 5,
+            n_delivery: 5,
+        },
+    );
+
+    assert_eq!(resolution.occupancy, vec![2, 2, 2, 1, 0]);
+    assert_eq!(
+        resolution.ring_depth(),
+        resolution.occupancy.iter().copied().max().unwrap_or(0)
+    );
+    assert_eq!(resolution.ring_depth(), 2);
+}
+
+// A plant with a fixed post-horizon window (g > 0): LeadStages(6) over three
+// decision stages and eight deliveries leaves decider[3..6] a None run — the
+// excised class-4 window, not ring occupancy. Counting the whole decider's
+// leading None run would inflate ring_depth to 6; capping at the decision axis
+// keeps it at the true depth 3.
+#[test]
+fn ring_depth_ignores_post_study_none_deciders() {
+    let resolution = resolve_point(
+        LeadTime::Stages(6),
+        DeliveryAxis {
+            stage_lengths_hours: &[],
+            n_decision: 3,
+            n_delivery: 8,
+        },
+    );
+
+    assert_eq!(
+        resolution.decider,
+        vec![None, None, None, None, None, None, Some(0), Some(1)]
+    );
+    assert_eq!(resolution.occupancy, vec![3, 3, 2]);
+    let whole_decider_leading_none = resolution
+        .decider
+        .iter()
+        .take_while(|c| c.is_none())
+        .count();
+    assert_eq!(whole_decider_leading_none, 6);
+    assert_eq!(resolution.ring_depth(), 3);
+}
+
+// AnticipatedResolution::resolve sizes k_max as the max ring_depth over plants:
+// a lead-past-horizon plant (ring_depth 4, occupancy max 3) shares the axis with
+// a shallower plant (ring_depth 2), and k_max is the deeper 4.
+#[test]
+fn resolve_sizes_k_max_from_the_deepest_plant_ring_depth() {
+    let resolution = AnticipatedResolution::resolve(
+        &[LeadTime::Time(1160.0), LeadTime::Stages(2)],
+        DeliveryAxis {
+            stage_lengths_hours: &[168.0, 168.0, 168.0, 648.0, 648.0],
+            n_decision: 4,
+            n_delivery: 5,
+        },
+    );
+
+    assert_eq!(resolution.per_plant[0].ring_depth(), 4);
+    assert_eq!(resolution.per_plant[1].ring_depth(), 2);
+    assert_eq!(resolution.k_max, 4);
+}
+
 /// The carried in-flight set at decision stage `t` as the ring actually sweeps
 /// it (`build_anticipated_slot_row_pos`): the window `m in {t+1, ..., t+k_max}`
 /// capped at `n_delivery`, restricted to deliveries that are READY
@@ -1238,6 +1331,124 @@ fn pre_study_decider_with_post_study_target_has_no_carrier() {
             "the carrier set is the occupancy set at t={t}"
         );
     }
+}
+
+// ring_index/physical_target build PointResolution literals directly rather
+// than routing through resolve_point — they are pure functions of decider
+// and decision_sets.len(), so depth/occupancy are irrelevant filler here.
+
+#[test]
+fn ring_index_is_the_identity_without_a_post_study_none_run() {
+    let point = PointResolution {
+        decider: vec![None, None, Some(0), Some(1), Some(2)],
+        decision_sets: vec![Vec::new(); 5],
+        depth: vec![0; 5],
+        occupancy: vec![0; 5],
+    };
+
+    for m in 0..5 {
+        assert_eq!(point.ring_index(m), Some(m), "m={m}");
+    }
+    for r in 0..5 {
+        assert_eq!(point.physical_target(r), r, "r={r}");
+    }
+}
+
+#[test]
+fn ring_index_excises_the_fixed_post_horizon_window() {
+    let point = PointResolution {
+        decider: vec![
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+        ],
+        decision_sets: vec![Vec::new(); 4],
+        depth: vec![0; 4],
+        occupancy: vec![0; 4],
+    };
+
+    assert_eq!(point.ring_index(3), Some(3));
+    assert_eq!(point.ring_index(4), None);
+    assert_eq!(point.ring_index(5), None);
+    assert_eq!(point.ring_index(6), None);
+    assert_eq!(point.ring_index(7), Some(4));
+    assert_eq!(point.ring_index(10), Some(7));
+}
+
+#[test]
+fn physical_target_is_the_left_inverse_of_ring_index() {
+    let point = PointResolution {
+        decider: vec![
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+        ],
+        decision_sets: vec![Vec::new(); 4],
+        depth: vec![0; 4],
+        occupancy: vec![0; 4],
+    };
+
+    for r in 0..8 {
+        assert_eq!(
+            point.ring_index(point.physical_target(r)),
+            Some(r),
+            "round-trip failed for r={r}"
+        );
+    }
+}
+
+#[test]
+fn ring_index_degrades_to_the_identity_on_a_short_decider() {
+    let empty = PointResolution {
+        decider: Vec::new(),
+        decision_sets: vec![Vec::new(); 5],
+        depth: vec![0; 5],
+        occupancy: vec![0; 5],
+    };
+    let short = PointResolution {
+        decider: vec![None, Some(0)],
+        decision_sets: vec![Vec::new(); 5],
+        depth: vec![0; 5],
+        occupancy: vec![0; 5],
+    };
+
+    for point in [&empty, &short] {
+        for m in 0..5 {
+            assert_eq!(point.ring_index(m), Some(m), "m={m}");
+        }
+        for r in 0..5 {
+            assert_eq!(point.physical_target(r), r, "r={r}");
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "contiguous")]
+fn fixed_post_horizon_width_rejects_a_non_contiguous_none_run() {
+    let point = PointResolution {
+        decider: vec![None, None, None, None, None, Some(0), None, Some(1)],
+        decision_sets: vec![Vec::new(); 4],
+        depth: vec![0; 4],
+        occupancy: vec![0; 4],
+    };
+
+    let _ = point.fixed_post_horizon_width();
 }
 
 /// A post-study decision (`decider[m] == Some(c)`, `c >= n_decision`) is not an

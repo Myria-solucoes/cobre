@@ -668,13 +668,13 @@ fn build_transit_bucket_row_pos(
     (transit_bucket_row_pos, n_reachable)
 }
 
-/// For each GLOBAL in-study commitment-hold slot (`(m mod k_max) *
+/// For each GLOBAL in-study commitment-hold slot (`(r mod k_max) *
 /// n_anticipated + plant`, modular slot-major/plant-minor — mirroring
 /// [`build_transit_bucket_row_pos`]'s role for buckets), this stage's compact
-/// row position within the future-window carry-row family, or `None` when
-/// the slot's delivery target `m = stage_idx + depth + 1` is a genuine fresh
-/// decision this stage (`decider[m] == Some(stage_idx)`, the deposit-row
-/// family `row_anticipated_state_out_def_start` owns it instead), beyond the
+/// row position within the future-window carry-row family, or `None` when the
+/// slot's physical delivery target `m` is a genuine fresh decision this stage
+/// (`decider[m] == Some(stage_idx)`, the deposit-row family
+/// `row_anticipated_state_out_def_start` owns it instead), beyond the
 /// EXTENDED delivery calendar (`m >= state.delivery_stage_count(n_stages)`),
 /// or not yet ready (`PointResolution::is_ready_at`, structural padding).
 /// Masking on the study horizon (`m >= n_stages`) instead is the
@@ -684,7 +684,19 @@ fn build_transit_bucket_row_pos(
 /// maturing EXACTLY this stage (`m == stage_idx`) is the single governing
 /// branch's fish-or-carry decision, owned by
 /// [`build_anticipated_fishing_row_pos`] and its entries-side `if`/`else` —
-/// never duplicated here. Returns the mapping and the reachable count.
+/// never duplicated here.
+///
+/// The sweep walks the RING axis, `r = stage_idx + depth + 1` — `stage_idx`
+/// is in-study, where [`PointResolution::physical_target`]'s excision is the
+/// identity, so this is exactly the ring's strictly-future window, contiguous
+/// by construction. Each plant's own physical delivery target
+/// `m = point.physical_target(r)` is resolved inside the plant loop, since
+/// the excision is per-plant. Walking the RAW delivery axis instead (a shared
+/// `m = stage_idx + depth + 1` read directly, pre-migration) is the
+/// wrong-but-compiling alternative once any plant's fixed post-horizon window
+/// excises part of the ring: `m mod k_max` is injective only over a
+/// contiguous run, which the excised window breaks. Returns the mapping and
+/// the reachable count.
 fn build_anticipated_slot_row_pos(
     state: &StateSpace,
     n_stages: usize,
@@ -703,17 +715,18 @@ fn build_anticipated_slot_row_pos(
     let mut row_pos = vec![None; n_anticipated * k_max];
     let mut n_reachable = 0_usize;
     for depth in 0..k_max {
-        let m = stage_idx + depth + 1;
-        if m >= n_delivery {
-            continue;
-        }
-        // Modular addressing (`m % k_max`) in place of the pre-migration
+        let r = stage_idx + depth + 1;
+        // Modular addressing (`r % k_max`) in place of the pre-migration
         // distance-based `depth`; `depth in 0..k_max` still enumerates
-        // exactly `k_max` consecutive `m` values, so every residue is
-        // visited exactly once — no self-collision within this sweep.
-        let slot = m % k_max;
+        // exactly `k_max` consecutive ring-axis `r` values, so every residue
+        // is visited exactly once — no self-collision within this sweep.
+        let slot = r % k_max;
         for (plant, point) in points.iter().enumerate() {
-            let is_deposit = point.decider[m] == Some(stage_idx);
+            let m = point.physical_target(r);
+            if m >= n_delivery {
+                continue;
+            }
+            let is_deposit = point.decider.get(m).copied().flatten() == Some(stage_idx);
             let is_interior = !is_deposit && point.is_ready_at(m, stage_idx);
             if is_interior {
                 row_pos[slot * n_anticipated + plant] = Some(n_reachable);

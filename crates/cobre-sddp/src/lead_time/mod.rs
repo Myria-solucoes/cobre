@@ -447,6 +447,81 @@ impl PointResolution {
             .get(m)
             .is_some_and(|c| c.is_none_or(|c| c <= t))
     }
+
+    /// The plant's ring depth: `max(max_t occupancy(t), n_none_in_study)`, where
+    /// `n_none_in_study` is the leading pre-study (`None`) decider run inside the
+    /// decision axis. Sizing from `occupancy` alone — or, worse, from `depth` —
+    /// is the wrong-but-plausible shortcut: `occupancy` subtracts the seed
+    /// maturing at stage 0, so it under-counts the one moment every simultaneous
+    /// pre-study seed is in flight (stage 0, before the first fishing), leaving
+    /// the last seed aliased onto an earlier slot. The `None` run is capped at
+    /// `decision_sets.len()` so the excised fixed-post-horizon window's `None`
+    /// entries ([`Self::ring_index`] returns `None` for them) never inflate it.
+    /// Single owner of the depth formula: [`AnticipatedResolution::resolve`] and
+    /// the setup-time per-plant `LeadTime` lead both read it.
+    #[must_use]
+    pub fn ring_depth(&self) -> usize {
+        let occupancy_max = self.occupancy.iter().copied().max().unwrap_or(0);
+        let n_none_in_study = self
+            .decider
+            .iter()
+            .take(self.decision_sets.len())
+            .take_while(|c| c.is_none())
+            .count();
+        occupancy_max.max(n_none_in_study)
+    }
+
+    /// The plant's fixed post-horizon window width `g`: the leading `None`
+    /// run of the post-study suffix `self.decider[n_decision..]`. A plain
+    /// `filter(is_none).count()` over that suffix is the wrong-but-plausible
+    /// alternative — it silently accepts a non-nondecreasing `decider` and
+    /// excises the wrong indices; the leading-run form makes the contiguity
+    /// check below cheap and the intent explicit. Recomputed on every call
+    /// rather than cached into a field, so [`Self::ring_index`] and
+    /// [`Self::physical_target`] cannot disagree about `g`.
+    fn fixed_post_horizon_width(&self) -> usize {
+        let n_decision = self.decision_sets.len();
+        let post_study = self.decider.get(n_decision..).unwrap_or(&[]);
+        let g = post_study.iter().take_while(|c| c.is_none()).count();
+        debug_assert!(
+            post_study[g..].iter().all(Option::is_some),
+            "the post-study None run must be contiguous: decider is not nondecreasing"
+        );
+        g
+    }
+
+    /// The ring-axis index of physical delivery target `m`: identity below
+    /// `n_decision`; `None` inside the excised fixed post-horizon window
+    /// `[n_decision, n_decision + g)`, which is never a ring member; shifted
+    /// left by `g` above it. Keying the ring on the raw delivery axis (`m mod
+    /// k_max`) is the wrong-but-plausible alternative — injective only on a
+    /// contiguous run, which the excised window breaks.
+    #[must_use]
+    pub fn ring_index(&self, m: usize) -> Option<usize> {
+        let n_decision = self.decision_sets.len();
+        let g = self.fixed_post_horizon_width();
+        if m < n_decision {
+            Some(m)
+        } else if m < n_decision + g {
+            None
+        } else {
+            Some(m - g)
+        }
+    }
+
+    /// The left inverse of [`Self::ring_index`] on the ring axis: identity
+    /// below `n_decision`, shifted right by `g` above it. Re-deriving the
+    /// shift at a call site instead of routing through this method risks
+    /// disagreeing with [`Self::ring_index`]'s own `g`.
+    #[must_use]
+    pub fn physical_target(&self, r: usize) -> usize {
+        let n_decision = self.decision_sets.len();
+        if r < n_decision {
+            r
+        } else {
+            r + self.fixed_post_horizon_width()
+        }
+    }
 }
 
 /// Resolve a point-commitment lag into the delivery-anchored decider, the
@@ -494,10 +569,9 @@ pub struct AnticipatedResolution {
     /// One [`PointResolution`] per anticipated plant, in anticipated-local
     /// (`anticipated_thermal_indices`) order.
     pub per_plant: Vec<PointResolution>,
-    /// Delivery-anchored ring depth `max_i max_t occupancy_i(t)` over every
-    /// plant's per-stage full in-flight occupancy — NOT `depth`, which excludes
-    /// pre-study occupancy and under-sizes the ring (see
-    /// [`PointResolution::occupancy`]); `0` with no anticipated plants.
+    /// Delivery-anchored ring depth `max_i ring_depth_i` over every plant (see
+    /// [`PointResolution::ring_depth`], the single owner of the depth formula);
+    /// `0` with no anticipated plants.
     pub k_max: usize,
     /// Fan-out width `max_i max_t |genuine C_i(t)|` (bounded by [`Self::k_max`]
     /// — a decision set's genuine members are a subset of the plant's in-flight
@@ -525,7 +599,7 @@ impl AnticipatedResolution {
             .collect();
         let k_max = per_plant
             .iter()
-            .flat_map(|resolution| resolution.occupancy.iter().copied())
+            .map(PointResolution::ring_depth)
             .max()
             .unwrap_or(0);
         let max_fanout = per_plant

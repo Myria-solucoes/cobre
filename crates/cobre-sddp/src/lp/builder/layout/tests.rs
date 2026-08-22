@@ -25,7 +25,7 @@ use crate::indexer::{
     BlockIdx, Boundary, EvapLocal, FphaCellLocal, FphaLocal, HydroCell, HydroCellIndex, HydroSys,
     LineSys, ThermalSys,
 };
-use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
+use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution};
 use crate::resolved_parameters::ResolvedParameters;
 use crate::setup::PostStudyResolved;
 use crate::test_support::{make_unit_group, state_layout};
@@ -1853,7 +1853,16 @@ fn num_rows_drops_by_n_state_with_anticipated_thermals() {
 /// real resolved axis instead).
 fn state_with_attached_resolution(k_max: usize, resolution: AnticipatedResolution) -> StateSpace {
     let n_anticipated = resolution.per_plant.len();
-    let mut state = StateSpace::new(0, 0, 0, Vec::new(), n_anticipated, k_max, vec![k_max], &[]);
+    let mut state = StateSpace::new(
+        0,
+        0,
+        0,
+        Vec::new(),
+        n_anticipated,
+        k_max,
+        vec![k_max; n_anticipated],
+        &[],
+    );
     state.set_anticipated_resolution(resolution);
     state
 }
@@ -1919,6 +1928,200 @@ fn build_anticipated_slot_row_pos_extended_axis_carries_post_study_target_m5() {
         "post-study delivery target m=5 (slot {slot}) must carry as an interior \
          position, not be masked by the retired study-horizon bound"
     );
+}
+
+// ── Ring-axis excision: per-plant physical-target mapping ────────────────
+
+/// Hand-derived pre-excision reference: `n_anticipated = 2`, `k_max = 3`,
+/// leads `[1, 2]`, 5 study stages, no attached resolution — the fallback
+/// `anticipated_resolution_for` resolves an identity delivery axis
+/// (`n_decision == n_delivery`, so `g == 0` for both plants), matching the
+/// retired raw-delivery-axis sweep exactly. Pinned per `stage_idx` as a
+/// literal, not recomputed by the ring-axis formula under test.
+#[test]
+fn anticipated_slot_row_pos_identity_axis_matches_the_recorded_pre_excision_mapping() {
+    let state = StateSpace::new(0, 0, 0, Vec::new(), 2, 3, vec![1, 2], &[]);
+
+    let expected: [(Vec<Option<usize>>, usize); 5] = [
+        (vec![None, None, None, Some(0), None, None], 1),
+        (vec![None, None, None, None, None, Some(0)], 1),
+        (vec![None, Some(0), None, None, None, None], 1),
+        (vec![None, None, None, Some(0), None, None], 1),
+        (vec![None, None, None, None, None, None], 0),
+    ];
+
+    for (stage_idx, (expected_row_pos, expected_n_reachable)) in expected.into_iter().enumerate() {
+        let (row_pos, n_reachable) = build_anticipated_slot_row_pos(&state, 5, stage_idx);
+        assert_eq!(
+            row_pos, expected_row_pos,
+            "stage_idx={stage_idx}: row_pos must match the recorded pre-excision mapping"
+        );
+        assert_eq!(
+            n_reachable, expected_n_reachable,
+            "stage_idx={stage_idx}: n_reachable must match the recorded pre-excision mapping"
+        );
+    }
+}
+
+/// Two-plant fixture: `k_max = 4`, four study stages, seven post-study stages
+/// (`n_delivery = 11`). Plant 0's decider carries a 3-wide excised fixed
+/// post-horizon window (`decider[4..7) == None`, so `g == 3`); plant 1's
+/// post-study slice is `Some` immediately (`g == 0`). `PointResolution`
+/// literals are built directly rather than through `resolve_point`, whose
+/// monotonic deciders cannot produce a `None` island bracketed by `Some` on
+/// both sides — the same pattern `lead_time::tests`'s `ring_index`/
+/// `physical_target` fixtures use.
+fn two_plant_excised_window_fixture() -> StateSpace {
+    let plant0 = PointResolution {
+        decider: vec![
+            None,
+            None,
+            None,
+            None, // m = 0..3 (in-study)
+            None,
+            None,
+            None, // m = 4..6 (excised window, g = 3)
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3), // m = 7..10
+        ],
+        decision_sets: vec![Vec::new(); 4],
+        depth: vec![0; 4],
+        occupancy: vec![0; 4],
+    };
+    let plant1 = PointResolution {
+        decider: vec![
+            None,
+            None,
+            None,
+            None, // m = 0..3 (in-study)
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+            Some(6), // m = 4..10, g = 0
+        ],
+        decision_sets: vec![Vec::new(); 4],
+        depth: vec![0; 4],
+        occupancy: vec![0; 4],
+    };
+    let resolution = AnticipatedResolution {
+        per_plant: vec![plant0, plant1],
+        k_max: 4,
+        max_fanout: 1,
+    };
+    state_with_attached_resolution(4, resolution)
+}
+
+/// At `stage_idx = 0`, ring-axis depths `0..k_max` give `r = 1, 2, 3, 4`. For
+/// `r < n_decision(4)` (`r = 1, 2, 3`) `physical_target` is the identity for
+/// both plants — both fixture deciders mark those `None` (interior carries).
+/// At `r = 4` the two plants diverge: plant 0's excised window shifts it to
+/// `m = 7`, plant 1's `g = 0` leaves it at `m = 4`. Both fixture deciders mark
+/// their own `r = 4` physical target a deposit at stage 0 (`Some(0)`).
+/// Reading the WRONG, raw ring-axis `m = 4` for plant 0 instead would hit its
+/// excised window's `None` entry (always "ready, not a deposit" — `None`
+/// never equals a deposit's `Some(stage_idx)`), producing `Some` where the
+/// correct sweep produces `None`.
+#[test]
+fn anticipated_slot_row_pos_walks_physical_targets_across_the_excised_window() {
+    let state = two_plant_excised_window_fixture();
+
+    let (row_pos, n_reachable) = build_anticipated_slot_row_pos(&state, 4, 0);
+
+    assert_eq!(
+        row_pos,
+        vec![
+            None,
+            None,
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+        ],
+        "plant 0 must be classified at its ring-shifted physical target (7), \
+         not the raw ring index (4)"
+    );
+    assert_eq!(n_reachable, 6);
+}
+
+/// The same fixture as
+/// `anticipated_slot_row_pos_walks_physical_targets_across_the_excised_window`,
+/// swept across every `stage_idx` from which ring-axis index `r = 4` is
+/// reachable (`0..=3`, `depth = 3 - stage_idx`). Plant 0's physical target at
+/// `r = 4` is `m = 7` (`decider[7] == Some(0)`): a deposit — excluded — only
+/// at `stage_idx = 0`, an interior carry at `stage_idx = 1, 2, 3`. Reading the
+/// excised window's own `m = 4` instead (`None`, forced by the `g = 3`
+/// contiguity invariant) would classify every `stage_idx` identically as an
+/// interior carry, since `None` never equals a deposit's `Some(stage_idx)` —
+/// the stage-dependent split below is possible only because the sweep reads
+/// `m = 7`, never a delivery inside the excised window `[4, 7)`.
+#[test]
+fn anticipated_slot_row_pos_gives_no_row_to_an_excised_delivery() {
+    let state = two_plant_excised_window_fixture();
+    let slot = 4 % state.k_max;
+
+    for stage_idx in 0..=3 {
+        let (row_pos, _n_reachable) = build_anticipated_slot_row_pos(&state, 4, stage_idx);
+        let plant0_at_r4 = row_pos[slot * state.n_anticipated];
+        if stage_idx == 0 {
+            assert!(
+                plant0_at_r4.is_none(),
+                "stage_idx=0: physical target 7 is a deposit, so r=4's slot must \
+                 carry no row"
+            );
+        } else {
+            assert!(
+                plant0_at_r4.is_some(),
+                "stage_idx={stage_idx}: physical target 7 is ready and not a \
+                 deposit, so r=4's slot must carry an interior-carry row"
+            );
+        }
+    }
+}
+
+/// A two-plant fixture where plant A's fixed window pushes its physical
+/// target past `n_delivery` at `depth = 1` (`k_max = 3`, two study stages,
+/// two post-study stages, `n_delivery = 4`; plant A's `g = 1` shifts
+/// `r = 3` to `m = 4 >= n_delivery`), while zero-width sibling plant B's own
+/// `r = 3` maps to `m = 3 < n_delivery` and is still classified. The mask
+/// must be evaluated per plant, after resolving each plant's own physical
+/// target — not once against the shared ring-axis `r`.
+#[test]
+fn anticipated_slot_row_pos_masks_per_plant_at_the_extended_axis_bound() {
+    let plant_a = PointResolution {
+        decider: vec![None, None, None, Some(0)],
+        decision_sets: vec![Vec::new(); 2],
+        depth: vec![0; 2],
+        occupancy: vec![0; 2],
+    };
+    let plant_b = PointResolution {
+        decider: vec![None, None, Some(0), Some(0)],
+        decision_sets: vec![Vec::new(); 2],
+        depth: vec![0; 2],
+        occupancy: vec![0; 2],
+    };
+    let resolution = AnticipatedResolution {
+        per_plant: vec![plant_a, plant_b],
+        k_max: 3,
+        max_fanout: 1,
+    };
+    let state = state_with_attached_resolution(3, resolution);
+
+    let (row_pos, n_reachable) = build_anticipated_slot_row_pos(&state, 2, 1);
+
+    assert_eq!(
+        row_pos,
+        vec![None, Some(2), None, None, Some(0), Some(1)],
+        "plant A's slot at depth=1 (physical target 4, at n_delivery=4) must be \
+         masked while plant B's own physical target (3) is still classified"
+    );
+    assert_eq!(n_reachable, 3);
 }
 
 /// Fishing-count invariance under the same extended axis as the carry test

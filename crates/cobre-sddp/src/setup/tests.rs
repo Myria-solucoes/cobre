@@ -4475,6 +4475,163 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
     );
 }
 
+/// `docs/design/anticipated-ring-undersizing.md`'s reproduction seeds: four
+/// `AnticipatedCommitmentHistory` windows tiling
+/// [`minimal_system_with_anticipated_and_commitments`]'s `[168.0, 168.0, 168.0,
+/// 648.0]`-hour calendar (`2024-01-01` cursor) at distinct values
+/// `100/200/300/400`.
+fn bug_doc_reproduction_past_commits() -> Vec<cobre_core::AnticipatedCommitmentHistory> {
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    vec![
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 1, 8).unwrap(),
+            value_mw: 100.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 8).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            value_mw: 200.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 1, 22).unwrap(),
+            value_mw: 300.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 22).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 18).unwrap(),
+            value_mw: 400.0,
+        },
+    ]
+}
+
+/// Bug doc's reproduction shape: a `LeadTime(1160.0)` thermal whose lead
+/// resolves all four study deliveries pre-study, plus one post-study month —
+/// [`resolve_anticipated_commitments_widens_lead_time_plant_lead_to_the_ring_depth`]
+/// pins `resolution.k_max == 4` and `lead_stages == [4]` for this exact shape.
+fn bug_doc_reproduction_system() -> cobre_core::System {
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 2, 18).unwrap(),
+            duration_hours: 648.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    minimal_system_with_anticipated_and_commitments(
+        &[168.0, 168.0, 168.0, 648.0],
+        AnticipatedConfig::LeadTime(1160.0),
+        4,
+        Some(post_study),
+        bug_doc_reproduction_past_commits(),
+    )
+}
+
+/// Reproduces `docs/design/anticipated-ring-undersizing.md`: when `K_i` is
+/// undersized to the occupancy max `3`, the `.take(k_i)` clamp drops the stage-3
+/// window and modular aliasing fishes stage 0's `100.0` for stage 3. With `K_i`
+/// sized to the ring depth `4`, all four leading stages seed at four distinct
+/// offsets, stage 3 holding its own `400.0`.
+#[test]
+fn initial_state_seeds_every_leading_commitment_under_the_widened_ring_depth() {
+    use super::build_initial_state;
+
+    let system = bug_doc_reproduction_system();
+    let layout = layout_with_anticipated(1, &[4]);
+
+    let state = build_initial_state(
+        &system,
+        &test_support::study_dims_for(&counts_with_anticipated(1, &[4], &[0])),
+        &layout,
+        &[],
+    );
+
+    let s = layout.commit_out.start;
+    assert_eq!(
+        state[s..s + 4],
+        [100.0, 200.0, 300.0, 400.0],
+        "all four leading stages must land at four distinct offsets"
+    );
+    assert!(
+        (state[s + 3] - 400.0).abs() < 1e-10,
+        "stage-3 slot must hold its own seed 400.0, not stage 0's aliased 100.0, got {}",
+        state[s + 3]
+    );
+}
+
+/// Same fixture as
+/// [`initial_state_seeds_every_leading_commitment_under_the_widened_ring_depth`].
+/// The ring-depth-sized `K_i` equals `k_max` for a single anticipated plant, so
+/// `[K_i, k_max)` is empty here — this pins that the encoder-driven padding
+/// loop stays a correct no-op rather than under/over-running when a plant has no
+/// padding to protect (the genuine `K_i < k_max` gap stays covered by
+/// `build_initial_state_anticipated_seed_padding_slot_stays_zero`).
+#[test]
+fn initial_state_leaves_padding_slots_zero() {
+    use super::build_initial_state;
+
+    let system = bug_doc_reproduction_system();
+    let layout = layout_with_anticipated(1, &[4]);
+    let k_i = layout.anticipated_lead_stages[0];
+
+    let state = build_initial_state(
+        &system,
+        &test_support::study_dims_for(&counts_with_anticipated(1, &[4], &[0])),
+        &layout,
+        &[],
+    );
+
+    for slot in k_i..layout.k_max {
+        let off = layout.commit_out.start + layout.commitment_hold_in_study_offset(0, slot);
+        assert_eq!(state[off], 0.0, "padding slot {slot} must be 0.0");
+    }
+}
+
+/// The seed walk's covered-stage cross-check: a layout whose `anticipated_lead_stages`
+/// is deliberately narrower than a covered stage in `past_anticipated_commitments`
+/// simulates a resolver/validator desync — never reachable through cobre-io's own
+/// coverage rule — and the `debug_assert!` guarding the silent-drop replacement
+/// fires in a debug build.
+#[test]
+#[should_panic(expected = "covered stage beyond plant's own lead")]
+fn initial_state_rejects_a_covered_stage_beyond_the_plants_own_lead() {
+    use super::build_initial_state;
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let past_commits = vec![
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 100.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 200.0,
+        },
+    ];
+    let system = system_with_anticipated_thermals(&[2], past_commits);
+    // Deliberately narrower than a resolved K_i would ever be for this
+    // fully-covered history: simulates the desync the cross-check guards.
+    let layout = layout_with_anticipated(1, &[1]);
+
+    let _ = build_initial_state(
+        &system,
+        &test_support::study_dims_for(&counts_with_anticipated(1, &[1], &[0])),
+        &layout,
+        &[],
+    );
+}
+
 #[test]
 fn historical_library_none_for_insample() {
     let system = minimal_system(2);
@@ -6314,23 +6471,42 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
     );
 }
 
+/// [`minimal_system_with_anticipated_and_commitments`] with no
+/// `past_anticipated_commitments` — the pre-existing thermal-only system every
+/// caller but the seed-walk fixtures wants.
+fn minimal_system_with_anticipated(
+    stage_hours: &[f64],
+    anticipated_config: AnticipatedConfig,
+    k_max_bounds: usize,
+    post_study_stages: Option<PostStudyStages>,
+) -> cobre_core::System {
+    minimal_system_with_anticipated_and_commitments(
+        stage_hours,
+        anticipated_config,
+        k_max_bounds,
+        post_study_stages,
+        Vec::new(),
+    )
+}
+
 /// Like [`minimal_system`] but the thermal carries `anticipated_config` and each
 /// stage's block runs for the matching `stage_hours` entry. `k_max_bounds`
 /// widens the thermal stage-bounds axis for delivery-stage padding.
 /// `post_study_stages` threads straight onto the built system for post-horizon
-/// commitment-window fixtures; `None` reproduces the pre-existing thermal-only
-/// system every other caller wants.
+/// commitment-window fixtures. `past_commits` seeds
+/// `initial_conditions.past_anticipated_commitments` directly.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::items_after_statements
 )]
-fn minimal_system_with_anticipated(
+fn minimal_system_with_anticipated_and_commitments(
     stage_hours: &[f64],
     anticipated_config: AnticipatedConfig,
     k_max_bounds: usize,
     post_study_stages: Option<PostStudyStages>,
+    past_commits: Vec<cobre_core::AnticipatedCommitmentHistory>,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -6566,10 +6742,13 @@ fn minimal_system_with_anticipated(
         .load_models(load_models)
         .bounds(bounds)
         .penalties(penalties)
-        .initial_conditions(InitialConditions::default())
+        .initial_conditions(InitialConditions {
+            past_anticipated_commitments: past_commits,
+            ..InitialConditions::default()
+        })
         .post_study_stages(post_study_stages)
         .build()
-        .expect("minimal_system_with_anticipated: valid")
+        .expect("minimal_system_with_anticipated_and_commitments: valid")
 }
 
 fn minimal_system_with_anticipated_lead_stages(
@@ -6687,10 +6866,10 @@ fn setup_leadstages_resolution_preserves_k_max_and_state_dimension() {
 /// Hand-derived: a `LeadTime(720.0)` plant on the weekly-then-monthly PMO
 /// calendar `[168,168,168,168,720,720]` resolves (end-anchored `resolve_point`)
 /// to `decider == [None,None,None,None,Some(3),Some(4)]`, `C(3) == {4}`,
-/// `C(4) == {5}`, `depth == [0,0,0,1,1,0]`. Its leading None-run (4) exceeds its
-/// max depth (1) — the currently-under-sized case — so occupancy is
-/// `[3,2,1,1,1,0]` and the occupancy-derived ring depth is 3, not the
-/// depth-derived 1.
+/// `C(4) == {5}`, `depth == [0,0,0,1,1,0]`, `occupancy == [3,2,1,1,1,0]`. Its
+/// leading None-run (4) exceeds both its max depth (1) and its max occupancy
+/// (3, which subtracts the seed maturing at stage 0), so `ring_depth` sizes the
+/// ring at 4 to hold every simultaneous pre-study seed.
 #[test]
 fn test_anticipated_resolve_point_pmo_calendar() {
     let system = minimal_system_with_anticipated(
@@ -6710,7 +6889,7 @@ fn test_anticipated_resolve_point_pmo_calendar() {
     assert_eq!(point.decision_sets[4], vec![5]);
     assert_eq!(point.depth, vec![0, 0, 0, 1, 1, 0]);
     assert_eq!(point.occupancy, vec![3, 2, 1, 1, 1, 0]);
-    assert_eq!(resolution.k_max, 3);
+    assert_eq!(resolution.k_max, 4);
 }
 
 /// Anchor: a `LeadTime(350.0)` plant on the uniform `[100.0; 4]` calendar
@@ -6744,18 +6923,20 @@ fn ring_depth_counts_pre_study_occupancy() {
     assert_eq!(resolution.k_max, 3);
 }
 
-/// `LeadStages` occupancy vs. retained per-plant lead at `ℓ == n_stages`: the
-/// occupancy-sized `k_max` tops out at `min(ℓ, n_stages − 1) == n_stages − 1`,
-/// while the per-plant lead stays `ℓ` — the two inputs `resolve_state_layout`'s
-/// `.max(anticipated_lead_stages)` clamp combines to size the ring at `ℓ`.
+/// `LeadStages` at `ℓ == n_stages` with no post-study calendar: every delivery
+/// is pre-study, so the leading None-run (`n_stages`) exceeds the occupancy max
+/// (`n_stages − 1`, which subtracts the seed maturing at stage 0). `ring_depth`
+/// sizes `k_max` at `ℓ` directly, and the per-plant lead stays `ℓ`, so the two
+/// agree without leaning on `resolve_state_layout`'s
+/// `.max(anticipated_lead_stages)` clamp.
 #[test]
-fn leadstages_clamp_restores_full_lead_when_lead_equals_horizon() {
+fn leadstages_ring_depth_covers_full_lead_when_lead_equals_horizon() {
     let n_stages = 4;
     let system =
         minimal_system_with_anticipated_lead_stages(n_stages, u32::try_from(n_stages).unwrap());
     let (resolution, lead_stages) = super::resolve_anticipated_commitments_core(&system);
 
-    assert_eq!(resolution.k_max, n_stages - 1);
+    assert_eq!(resolution.k_max, n_stages);
     assert_eq!(lead_stages, vec![n_stages]);
 }
 
@@ -6778,6 +6959,41 @@ fn test_anticipated_resolve_point_fanout_calendar() {
     assert_eq!(point.decision_sets[0].len(), 4);
     assert_eq!(point.depth, vec![4, 4, 3, 2, 1, 0]);
     assert_eq!(resolution.k_max, 4);
+}
+
+/// The bug doc's reproduction shape as a `System`: a `LeadTime(1160)` thermal
+/// whose lead resolves all four study deliveries pre-study, plus one post-study
+/// month. `resolve_anticipated_commitments_core` widens the per-plant lead to
+/// the ring depth `4` — every simultaneous pre-study seed — matching
+/// `resolution.k_max`, not the occupancy max `3` the pre-fix sizing reported.
+#[test]
+fn resolve_anticipated_commitments_widens_lead_time_plant_lead_to_the_ring_depth() {
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 2, 18).unwrap(),
+            duration_hours: 648.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated(
+        &[168.0, 168.0, 168.0, 648.0],
+        AnticipatedConfig::LeadTime(1160.0),
+        4,
+        Some(post_study),
+    );
+    let (resolution, lead_stages) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(
+        resolution.per_plant[0].occupancy.iter().copied().max(),
+        Some(3),
+        "occupancy max stays 3; ring_depth restores the fourth simultaneous seed"
+    );
+    assert_eq!(resolution.k_max, 4);
+    assert_eq!(
+        lead_stages,
+        vec![4],
+        "per-plant lead widened to ring_depth == k_max"
+    );
 }
 
 /// Assert `state` is finalized and byte-for-byte reproduces a fresh
