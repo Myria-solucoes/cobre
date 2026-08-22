@@ -15,7 +15,7 @@ use cobre_core::WelfordAccumulator;
 
 use super::{ForwardResult, SyncResult};
 use crate::error::SddpError;
-use crate::risk_measure::RiskMeasure;
+use crate::risk_measure::{RiskMeasure, RiskMeasureScratch};
 use crate::setup::node_graph::{EnumeratedPlan, NodePos, TypedVec};
 // Rationale: imported solely so the `[run_forward_pass]` intra-doc link in
 // `sync_forward`'s rustdoc resolves; the function lives in the parent `mod.rs`.
@@ -30,15 +30,29 @@ pub enum ForwardBound<'a> {
     /// Sampled forward: Welford sample mean, standard deviation, and 95% CI
     /// half-width.
     Statistical,
-    /// Enumerated forward: the exact probability-weighted `Σ wᵢ·cᵢ` over
-    /// `path_weights` (canonical order); standard deviation and CI half-width are
-    /// `0` — a deduplicated enumeration carries no sampling distribution. This is
-    /// the RISK-NEUTRAL bound; under an effective `CVaR` the session replaces it
-    /// with the nested risk-adjusted bound ([`enumerated_nested_ub`]), which the
-    /// end-of-horizon `Σ wᵢ·cᵢ` cannot represent.
+    /// Enumerated forward under a risk-neutral (effective `Expectation`) measure:
+    /// the exact probability-weighted `Σ wᵢ·cᵢ` over `path_weights` (canonical
+    /// order); standard deviation and CI half-width are `0` — a deduplicated
+    /// enumeration carries no sampling distribution.
     Exact {
         /// Per-path probability weights, one per gathered cost, in canonical order.
         path_weights: &'a [f64],
+    },
+    /// Enumerated forward under a uniform effective `CVaR`: the exact NESTED
+    /// risk-adjusted bound ([`nested_ub_recursion`]) over the enumerated tree,
+    /// which the end-of-horizon `Σ wᵢ·cᵢ` cannot represent. Std/CI are `0`.
+    NestedRisk {
+        /// This rank's per-path per-stage raw immediate costs, `num_stages` per
+        /// path in canonical path order.
+        path_stage_costs: &'a [f64],
+        /// The enumerated tree the recursion walks.
+        plan: &'a EnumeratedPlan,
+        /// Per-stage cumulative discount factors.
+        cumulative_discounts: &'a [f64],
+        /// The uniform effective measure applied at every node.
+        risk_measure: RiskMeasure,
+        /// Stages per path (the `path_stage_costs` stride).
+        num_stages: usize,
     },
 }
 
@@ -99,34 +113,81 @@ pub fn sync_forward<C: Communicator>(
     let num_ranks = comm.size();
     let my_rank = comm.rank();
 
-    // Per-rank counts/displacements derived arithmetically from the total, so no
+    // Per-rank path counts derived arithmetically from the total, so no
     // preliminary communication round is needed.
     let base = total_forward_passes / num_ranks;
     let remainder = total_forward_passes % num_ranks;
-    let counts: Vec<usize> = (0..num_ranks)
+    let path_counts: Vec<usize> = (0..num_ranks)
         .map(|r| base + usize::from(r < remainder))
         .collect();
-    let mut displs = vec![0usize; num_ranks];
-    for r in 1..num_ranks {
-        displs[r] = displs[r - 1] + counts[r - 1];
+
+    // NestedRisk gathers per-path-per-stage costs and recurses over the enumerated
+    // tree; it needs neither the path-total gather nor the reduction below.
+    if let ForwardBound::NestedRisk {
+        path_stage_costs,
+        plan,
+        cumulative_discounts,
+        risk_measure,
+        num_stages,
+    } = bound
+    {
+        let stage_counts: Vec<usize> = path_counts.iter().map(|&c| c * num_stages).collect();
+        let mut stage_displs = vec![0usize; num_ranks];
+        for r in 1..num_ranks {
+            stage_displs[r] = stage_displs[r - 1] + stage_counts[r - 1];
+        }
+        let global_stage_n = stage_counts.iter().sum::<usize>();
+        let mut global = vec![0.0_f64; global_stage_n];
+        debug_assert_eq!(
+            path_stage_costs.len(),
+            stage_counts[my_rank],
+            "rank {my_rank}: path_stage_costs length {} != expected count {}",
+            path_stage_costs.len(),
+            stage_counts[my_rank],
+        );
+        comm.allgatherv(path_stage_costs, &mut global, &stage_counts, &stage_displs)?;
+        let ub = nested_ub_recursion(
+            &plan.parent,
+            &plan.paths.leaf,
+            &plan.paths.weight,
+            &global,
+            num_stages,
+            cumulative_discounts,
+            risk_measure,
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        let sync_time_ms = start.elapsed().as_millis() as u64;
+        return Ok(SyncResult {
+            global_ub_mean: ub,
+            global_ub_std: 0.0_f64,
+            ci_95_half_width: 0.0_f64,
+            sync_time_ms,
+        });
     }
 
-    let global_n = counts.iter().sum::<usize>();
+    let mut displs = vec![0usize; num_ranks];
+    for r in 1..num_ranks {
+        displs[r] = displs[r - 1] + path_counts[r - 1];
+    }
+    let global_n = path_counts.iter().sum::<usize>();
     debug_assert_eq!(
         global_n, total_forward_passes,
         "counts sum {global_n} != total_forward_passes {total_forward_passes}",
     );
     let mut global_costs = vec![0.0_f64; global_n];
-
     debug_assert_eq!(
         local.scenario_costs.len(),
-        counts[my_rank],
+        path_counts[my_rank],
         "rank {my_rank}: scenario_costs length {} != expected count {}",
         local.scenario_costs.len(),
-        counts[my_rank],
+        path_counts[my_rank],
     );
-
-    comm.allgatherv(&local.scenario_costs, &mut global_costs, &counts, &displs)?;
+    comm.allgatherv(
+        &local.scenario_costs,
+        &mut global_costs,
+        &path_counts,
+        &displs,
+    )?;
 
     let (mean, std_dev, ci_95) = match bound {
         ForwardBound::Statistical => {
@@ -154,9 +215,12 @@ pub fn sync_forward<C: Communicator>(
             // Risk-neutral exact bound; std/CI are 0 because a deduplicated
             // enumeration has no sampling distribution — routing it through the
             // Welford accumulator as S samples would be a category error. Under an
-            // effective CVaR the session overrides this with the nested bound.
+            // effective CVaR the session selects `ForwardBound::NestedRisk` instead.
             let ub_exact = weighted_cost_reduction(&global_costs, path_weights);
             (ub_exact, 0.0_f64, 0.0_f64)
+        }
+        ForwardBound::NestedRisk { .. } => {
+            unreachable!("NestedRisk is handled by the early return above")
         }
     };
 
@@ -169,53 +233,6 @@ pub fn sync_forward<C: Communicator>(
         ci_95_half_width: ci_95,
         sync_time_ms,
     })
-}
-
-/// The exact NESTED risk-adjusted upper bound of the enumerated forward's
-/// realized costs, mirroring the per-node measure the cut/lower-bound aggregation
-/// applies (`ρ = ρ₁(c₁ + ρ₂(c₂ + … ρ_T(c_T)))`).
-///
-/// `allgatherv`s each rank's per-path per-stage RAW immediate costs
-/// (`local_path_stage_costs`, `num_stages` per path in canonical path order) into
-/// one global buffer, then recurses over the enumerated tree. Every rank runs the
-/// identical reduction in one fixed order, so the bound is bit-identical across
-/// rank and thread counts.
-///
-/// # Errors
-///
-/// Returns `Err(SddpError::Communication(_))` if the `allgatherv` fails.
-pub(crate) fn enumerated_nested_ub<C: Communicator>(
-    comm: &C,
-    local_path_stage_costs: &[f64],
-    total_forward_passes: usize,
-    num_stages: usize,
-    plan: &EnumeratedPlan,
-    cumulative_discounts: &[f64],
-    risk_measure: RiskMeasure,
-) -> Result<f64, SddpError> {
-    let num_ranks = comm.size();
-    let base = total_forward_passes / num_ranks;
-    let remainder = total_forward_passes % num_ranks;
-    let counts: Vec<usize> = (0..num_ranks)
-        .map(|r| (base + usize::from(r < remainder)) * num_stages)
-        .collect();
-    let mut displs = vec![0usize; num_ranks];
-    for r in 1..num_ranks {
-        displs[r] = displs[r - 1] + counts[r - 1];
-    }
-    let global_n = counts.iter().sum::<usize>();
-    let mut global = vec![0.0_f64; global_n];
-    comm.allgatherv(local_path_stage_costs, &mut global, &counts, &displs)?;
-
-    Ok(nested_ub_recursion(
-        &plan.parent,
-        &plan.paths.leaf,
-        &plan.paths.weight,
-        &global,
-        num_stages,
-        cumulative_discounts,
-        risk_measure,
-    ))
 }
 
 /// Nested backward risk recursion over the enumerated scenario tree, on the
@@ -253,6 +270,11 @@ pub(crate) fn nested_ub_recursion(
             cur = parent[node];
         }
         seq.reverse();
+        debug_assert_eq!(
+            seq.len(),
+            num_stages,
+            "root→leaf path must visit exactly one node per stage"
+        );
         let w = weight[p];
         for (t, &node) in seq.iter().enumerate() {
             let cum_d = cumulative_discounts.get(t).copied().unwrap_or(1.0);
@@ -279,6 +301,8 @@ pub(crate) fn nested_ub_recursion(
     let mut value = vec![0.0_f64; n_nodes];
     let mut child_vals: Vec<f64> = Vec::new();
     let mut child_probs: Vec<f64> = Vec::new();
+    // One CVaR-weight scratch reused across every interior node's risk evaluation.
+    let mut risk_scratch = RiskMeasureScratch::new();
     for node in order {
         let kids = &children[node.0];
         let v_future = if kids.is_empty() {
@@ -291,7 +315,7 @@ pub(crate) fn nested_ub_recursion(
                 child_vals.push(value[c.0]);
                 child_probs.push(node_prob[c.0] / p_node);
             }
-            risk_measure.evaluate_risk(&child_vals, &child_probs)
+            risk_measure.evaluate_risk_into(&child_vals, &child_probs, &mut risk_scratch)
         };
         value[node.0] = node_cost[node.0] + v_future;
     }
@@ -303,6 +327,6 @@ pub(crate) fn nested_ub_recursion(
     } else {
         let root_vals: Vec<f64> = roots.iter().map(|r| value[r.0]).collect();
         let root_probs: Vec<f64> = roots.iter().map(|r| node_prob[r.0]).collect();
-        risk_measure.evaluate_risk(&root_vals, &root_probs)
+        risk_measure.evaluate_risk_into(&root_vals, &root_probs, &mut risk_scratch)
     }
 }

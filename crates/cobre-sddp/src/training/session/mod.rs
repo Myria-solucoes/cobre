@@ -44,7 +44,7 @@ use crate::{
     cut::row::build_cut_row_batch_into,
     cut_selection::CutActivityUpdates,
     cut_sync::CutSyncBuffers,
-    forward::{ForwardBound, ForwardResult, SyncResult, enumerated_nested_ub, sync_forward},
+    forward::{ForwardBound, ForwardResult, SyncResult, sync_forward},
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
@@ -847,30 +847,67 @@ where
             },
         );
 
-        // Enumerated forwards reduce the exact `Σ w·c` bound over the per-path
-        // probabilities `P(ℓ) = ∏ (edge prob · opening q)`, in the canonical DFS
-        // order `sync_forward`'s gathered costs are assembled in — identical on
-        // every rank (a pure function of the graph). Sampled forwards keep the
-        // statistical Welford path untouched. The weights themselves are read
-        // straight off the `Traversal` resolved once at training start
-        // (`TrainingSession::new`) — no per-iteration path re-derivation.
+        // The enumerated forward's exact bound is either the risk-neutral `Σ w·c`
+        // (effective `Expectation`) or the NESTED risk-adjusted recursion over the
+        // enumerated tree (uniform effective `CVaR`); the sampled forward keeps the
+        // statistical Welford path. `sync_forward` owns all three estimators, so no
+        // second gather or post-hoc override is needed. Weights/costs are read off
+        // the `Traversal` resolved once at training start (`TrainingSession::new`).
         let global_n = self.ranks.num_total_forward_passes;
-        let bound = if let Some(weights) = self.fwd_state.traversal().path_weights() {
+        let sync_result = if let Traversal::Enumerated(plan) = self.fwd_state.traversal() {
             debug_assert_eq!(
-                weights.len(),
+                plan.paths.weight.len(),
                 global_n,
                 "enumerated path count must equal the resolved forward-pass count"
             );
-            self.scratch.ub_path_weights.clear();
-            self.scratch.ub_path_weights.extend_from_slice(weights);
-            ForwardBound::Exact {
-                path_weights: &self.scratch.ub_path_weights,
+            let ub_measure = uniform_effective_measure(&self.config.cut_management.risk_measures)
+                .unwrap_or(RiskMeasure::Expectation);
+            if ub_measure == RiskMeasure::Expectation {
+                self.scratch.ub_path_weights.clear();
+                self.scratch
+                    .ub_path_weights
+                    .extend_from_slice(&plan.paths.weight);
+                sync_forward(
+                    &forward_result,
+                    self.comm,
+                    global_n,
+                    ForwardBound::Exact {
+                        path_weights: &self.scratch.ub_path_weights,
+                    },
+                )?
+            } else {
+                // Uniform effective CVaR: gather per-path per-stage costs and apply
+                // the nested risk recursion (the end-of-horizon `Σ w·c` cannot
+                // represent a nested measure — it can fall below the nested LB).
+                let num_stages = self.ranks.num_stages;
+                let local_n = forward_result.scenario_costs.len();
+                self.scratch.ub_stage_costs.clear();
+                for i in 0..local_n * num_stages {
+                    self.scratch
+                        .ub_stage_costs
+                        .push(self.scratch.records[i].stage_cost);
+                }
+                sync_forward(
+                    &forward_result,
+                    self.comm,
+                    global_n,
+                    ForwardBound::NestedRisk {
+                        path_stage_costs: &self.scratch.ub_stage_costs,
+                        plan,
+                        cumulative_discounts: self.stage_ctx.cumulative_discount_factors,
+                        risk_measure: ub_measure,
+                        num_stages,
+                    },
+                )?
             }
         } else {
-            ForwardBound::Statistical
+            sync_forward(
+                &forward_result,
+                self.comm,
+                global_n,
+                ForwardBound::Statistical,
+            )?
         };
-        let mut sync_result = sync_forward(&forward_result, self.comm, global_n, bound)?;
-        self.apply_nested_cvar_ub(&forward_result, global_n, &mut sync_result)?;
 
         emit(
             self.runtime.event_sender(),
@@ -883,51 +920,6 @@ where
         );
 
         Ok((forward_result, sync_result, fwd_solve_time_ms))
-    }
-
-    /// Replace the reported upper bound with the NESTED risk-adjusted bound when
-    /// the forward is enumerated under a uniform effective `CVaR`. `sync_forward`
-    /// computes the end-of-horizon `Σ wᵢ·cᵢ`, which for a nested measure can fall
-    /// below the nested lower bound (a spurious negative gap); the recursion over
-    /// the enumerated tree restores a valid non-negative bracket. A no-op for
-    /// `Expectation`, sampled forwards, or a stage-varying measure (the last only
-    /// reachable without a `gap` rule — the admission gate rejects it otherwise).
-    ///
-    /// # Errors
-    ///
-    /// Propagates the `allgatherv` failure from [`enumerated_nested_ub`].
-    fn apply_nested_cvar_ub(
-        &mut self,
-        forward_result: &ForwardResult,
-        total_forward_passes: usize,
-        sync_result: &mut SyncResult,
-    ) -> Result<(), SddpError> {
-        let Traversal::Enumerated(plan) = self.fwd_state.traversal() else {
-            return Ok(());
-        };
-        let ub_measure = uniform_effective_measure(&self.config.cut_management.risk_measures)
-            .unwrap_or(RiskMeasure::Expectation);
-        if !matches!(ub_measure, RiskMeasure::CVaR { lambda, .. } if lambda > 0.0) {
-            return Ok(());
-        }
-        let num_stages = forward_result.stage_stats.len();
-        let local_n = forward_result.scenario_costs.len();
-        self.scratch.ub_stage_costs.clear();
-        for i in 0..local_n * num_stages {
-            self.scratch
-                .ub_stage_costs
-                .push(self.scratch.records[i].stage_cost);
-        }
-        sync_result.global_ub_mean = enumerated_nested_ub(
-            self.comm,
-            &self.scratch.ub_stage_costs,
-            total_forward_passes,
-            num_stages,
-            plan,
-            self.stage_ctx.cumulative_discount_factors,
-            ub_measure,
-        )?;
-        Ok(())
     }
 
     /// Run the backward pass for one iteration.

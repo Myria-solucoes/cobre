@@ -103,7 +103,7 @@ use crate::{
     inflow_method::InflowNonNegativityMethod,
     lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution, SpreadResolution},
     lp_builder::{M3S_TO_HM3, build_stage_templates},
-    risk_measure::RiskMeasure,
+    risk_measure::{RiskMeasure, uniform_effective_measure},
     simulation::EntityCounts,
     simulation::extraction::TransitSeedArc,
     stopping_rule::{StoppingRule, StoppingRuleSet},
@@ -2137,21 +2137,23 @@ fn reject_gap_under_effective_risk_aversion(
 /// Returns [`SddpError::Validation`] naming the first stage whose measure differs
 /// and the admitting condition (a uniform measure).
 fn reject_gap_under_nonuniform_risk(risk_measures: &[RiskMeasure]) -> Result<(), SddpError> {
-    let Some(first) = risk_measures.first().map(|m| m.effective()) else {
+    // `uniform_effective_measure` is the single owner of the uniformity predicate,
+    // so this admission gate cannot drift from the bound the session applies. The
+    // loop below runs only to name the offending stage for the diagnostic.
+    if risk_measures.is_empty() || uniform_effective_measure(risk_measures).is_some() {
+        return Ok(());
+    }
+    let first = risk_measures[0].effective();
+    let Some(stage) = risk_measures.iter().position(|m| m.effective() != first) else {
         return Ok(());
     };
-    for (stage, measure) in risk_measures.iter().enumerate() {
-        if measure.effective() != first {
-            return Err(SddpError::Validation(format!(
-                "gap stopping rule under enumerated forwards requires a uniform risk measure \
-                 across all stages; stage {stage} ({measure:?}) differs from stage 0 \
-                 ({:?}). The risk-adjusted upper bound applies one static CVaR measure to the \
-                 enumerated path costs, undefined when stages differ",
-                risk_measures[0]
-            )));
-        }
-    }
-    Ok(())
+    Err(SddpError::Validation(format!(
+        "gap stopping rule under enumerated forwards requires a uniform risk measure \
+         across all stages; stage {stage} ({:?}) differs from stage 0 ({:?}). The \
+         risk-adjusted upper bound applies one static CVaR measure to the enumerated \
+         path costs, undefined when stages differ",
+        risk_measures[stage], risk_measures[0]
+    )))
 }
 
 /// Reject a `gap` stopping rule under sampled forward selection: the exact upper
@@ -2199,16 +2201,13 @@ fn rule_is_gap(rule: &StoppingRule) -> bool {
     }
 }
 
-/// Whether `measure` is *effectively* non-expectation (risk-averse).
-/// `CVaR { lambda: 0 }` is documented-equivalent to `Expectation` (its convex
-/// weight on the tail is zero), so only a positive risk-aversion weight counts.
-/// `RiskMeasure` is destructured exhaustively (every field named, no `..`) so a
-/// new `CVaR` field or a new variant must be dispositioned here.
+/// Whether `measure` is *effectively* non-expectation (risk-averse) — i.e. its
+/// [`effective`](RiskMeasure::effective) form is not `Expectation`.
+/// `CVaR { lambda: 0 }` is documented-equivalent to `Expectation`, so only a
+/// positive risk-aversion weight counts; the variant disposition lives on
+/// `RiskMeasure::effective`, the single owner of the `lambda > 0` predicate.
 fn is_effective_non_expectation(measure: &RiskMeasure) -> bool {
-    match measure {
-        RiskMeasure::Expectation => false,
-        RiskMeasure::CVaR { alpha: _, lambda } => *lambda > 0.0,
-    }
+    measure.effective() != RiskMeasure::Expectation
 }
 
 /// Advisory (never a reject) for an asymmetric enumeration declaration: when

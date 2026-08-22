@@ -190,6 +190,20 @@ impl RiskMeasure {
     /// - `probabilities` sum to `1.0` within floating-point tolerance
     #[must_use]
     pub fn evaluate_risk(&self, costs: &[f64], probabilities: &[f64]) -> f64 {
+        let mut scratch = RiskMeasureScratch::new();
+        self.evaluate_risk_into(costs, probabilities, &mut scratch)
+    }
+
+    /// [`Self::evaluate_risk`] reusing `scratch` for the `CVaR` weight allocation;
+    /// prefer this on a hot path that evaluates many vectors (e.g. the per-node
+    /// nested upper-bound recursion), so the allocation is paid once.
+    #[must_use]
+    pub(crate) fn evaluate_risk_into(
+        &self,
+        costs: &[f64],
+        probabilities: &[f64],
+        scratch: &mut RiskMeasureScratch,
+    ) -> f64 {
         debug_assert_eq!(
             costs.len(),
             probabilities.len(),
@@ -204,10 +218,20 @@ impl RiskMeasure {
             RiskMeasure::Expectation => costs.iter().zip(probabilities).map(|(c, p)| c * p).sum(),
             RiskMeasure::CVaR { alpha, lambda } => {
                 // EAVaR = E_μ*[Z]: by the dual representation (Risk Measures SS4.2)
-                // the greedy allocation in compute_cvar_weights_from_costs is the
-                // optimal μ*, so the weighted sum below equals (1-λ)E[Z]+λCVaR_α[Z].
-                let mu = compute_cvar_weights_from_costs(costs, probabilities, *alpha, *lambda);
-                costs.iter().zip(mu.iter()).map(|(c, w)| c * w).sum()
+                // the greedy allocation in compute_cvar_weights_from_costs_into is
+                // the optimal μ*, so the weighted sum below equals (1-λ)E[Z]+λCVaR_α[Z].
+                compute_cvar_weights_from_costs_into(
+                    costs,
+                    probabilities,
+                    *alpha,
+                    *lambda,
+                    scratch,
+                );
+                costs
+                    .iter()
+                    .zip(scratch.mu.iter())
+                    .map(|(c, w)| c * w)
+                    .sum()
             }
         }
     }
@@ -329,19 +353,6 @@ fn compute_cvar_weights(
 ) -> Vec<f64> {
     let mut scratch = RiskMeasureScratch::new();
     compute_cvar_weights_into(outcomes, probabilities, alpha, lambda, &mut scratch);
-    scratch.mu
-}
-
-/// Allocating wrapper around [`compute_cvar_weights_from_costs_into`]; prefer
-/// the `_into` form on hot paths.
-fn compute_cvar_weights_from_costs(
-    costs: &[f64],
-    probabilities: &[f64],
-    alpha: f64,
-    lambda: f64,
-) -> Vec<f64> {
-    let mut scratch = RiskMeasureScratch::new();
-    compute_cvar_weights_from_costs_into(costs, probabilities, alpha, lambda, &mut scratch);
     scratch.mu
 }
 

@@ -655,9 +655,10 @@ Read: `convergence/convergence.rs`.
 
 Under an effective `CVaR` the enumerated forward's upper bound is computed by a
 NESTED backward risk recursion over the enumerated scenario tree
-(`nested_ub_recursion` / `enumerated_nested_ub` in
-`training/forward/stats_aggregation.rs`, applied in the session's
-`apply_nested_cvar_ub`): `Ṽ(n) = cum_d[stage(n)]·c(n) + ρ_children(Ṽ(child))`,
+(`nested_ub_recursion` behind the `ForwardBound::NestedRisk` arm of `sync_forward`
+in `training/forward/stats_aggregation.rs`, which the session's forward-sync
+selects for a uniform effective `CVaR`):
+`Ṽ(n) = cum_d[stage(n)]·c(n) + ρ_children(Ṽ(child))`,
 where `ρ` is the same `RiskMeasure::evaluate_risk` weighting the per-node cut /
 lower-bound aggregation applies, over each node's children weighted by their
 conditional probabilities. This mirrors the nested measure SDDP optimizes
@@ -676,11 +677,11 @@ iteration, so the gap stays non-negative and closes only at true convergence.
 
 `Expectation` (and `CVaR { lambda: 0 }`, which
 [`effective`](RiskMeasure::effective) collapses to it) leaves the bound at the
-risk-neutral compensated `Σ wᵢ·cᵢ` (`ForwardBound::Exact` in `sync_forward`) —
-byte-identical to the pre-change path, since nesting is linear under expectation
-and the session applies no override there. The override fires only for a uniform
-effective `CVaR` (`uniform_effective_measure`); a stage-varying measure (reachable
-only without a `gap` rule) falls back to the risk-neutral bound.
+risk-neutral compensated `Σ wᵢ·cᵢ`: the session selects `ForwardBound::Exact` in
+`sync_forward` there, since nesting is linear under expectation.
+`ForwardBound::NestedRisk` is selected only for a uniform effective `CVaR`
+(`uniform_effective_measure`); a stage-varying measure (reachable only without a
+`gap` rule) falls back to `ForwardBound::Exact`.
 
 **The `gap` stopping rule admits an effective `CVaR` only under enumerated
 forwards with a uniform measure.** The exact nested bound exists only when the
@@ -692,9 +693,9 @@ rejects the expectation case too); enumerated forwards defer to
 `reject_gap_under_nonuniform_risk`, which admits a uniform measure and rejects a
 stage-varying one.
 
-Read: `training/forward/stats_aggregation.rs` (`nested_ub_recursion`,
-`enumerated_nested_ub`, `ForwardBound::Exact`), `training/session/mod.rs`
-(`apply_nested_cvar_ub`), `convergence/risk_measure.rs` (`evaluate_risk`,
+Read: `training/forward/stats_aggregation.rs` (`nested_ub_recursion`, the
+`ForwardBound::{Exact, NestedRisk}` arms of `sync_forward`), `training/session/mod.rs`
+(the forward-sync bound selection), `convergence/risk_measure.rs` (`evaluate_risk`,
 `effective`, `uniform_effective_measure`), `setup/mod.rs`
 (`reject_gap_under_effective_risk_aversion`, `reject_gap_under_nonuniform_risk`).
 Pinned by `nested_ub_recursion_is_nested_not_end_of_horizon`
