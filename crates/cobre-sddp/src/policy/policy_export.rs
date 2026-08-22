@@ -408,7 +408,10 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
         }
     }
 
-    let lag_slots: Vec<EntitySlot> = (0..n)
+    // Family-specific reserved block: N HydroInflowLag slots per storage hydro,
+    // lag-major, 1-based subindex, inheriting the storage slot's was_active — the
+    // shape build_stage_entity_manifest's Lag arm emits.
+    let reserved_slots: Vec<EntitySlot> = (0..n)
         .flat_map(|lag| {
             storage_slots.iter().map(move |storage| EntitySlot {
                 entity_type: StateFamily::HydroInflowLag.code(),
@@ -420,43 +423,83 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
         })
         .collect();
 
-    let mut new_manifest = Vec::with_capacity(manifest.len() + lag_slots.len());
-    new_manifest.extend_from_slice(&manifest[..storage_count]);
-    new_manifest.extend_from_slice(&lag_slots);
-    new_manifest.extend_from_slice(&manifest[storage_count..]);
+    // Per-cut reserved coefficients: each keyed lag term at its (hydro, depth)
+    // slot in the same lag-major order, 0.0 elsewhere.
+    let reserved_cut_coefficients: Vec<Vec<f64>> = cut_inflow_lag_coefficients
+        .iter()
+        .map(|keyed| {
+            (0..n)
+                .flat_map(|lag| {
+                    storage_slots.iter().map(move |storage| {
+                        keyed
+                            .get(&storage.entity_id)
+                            .and_then(|per_depth| per_depth.get(lag))
+                            .copied()
+                            .unwrap_or(0.0)
+                    })
+                })
+                .collect()
+        })
+        .collect();
+
+    let (manifest, coefficients) = splice_reserved_state_block(
+        manifest,
+        storage_count,
+        &reserved_slots,
+        cut_coefficients,
+        &reserved_cut_coefficients,
+    )?;
+    let state_dimension = manifest.len() as u32;
+    Ok(ReservedInflowLagLayout {
+        manifest,
+        coefficients,
+        state_dimension,
+    })
+}
+
+/// Splice a reserved state block into a boundary manifest and every cut's
+/// coefficient vector at `anchor_count` — after the leading anchor block, before
+/// the tail — keeping both positionally aligned. Family-independent: the caller
+/// builds `reserved_slots` and the per-cut `reserved_cut_coefficients` for its own
+/// family (anchor detection, slot bodies, keyed placement), and this owns only the
+/// splice and the coefficient-alignment guard, so a second boundary state family
+/// reuses it unchanged. Returns the widened manifest and one extended coefficient
+/// vector per cut.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if a cut's coefficient length does not equal
+/// the input manifest length (the two must be positionally aligned before
+/// reserving).
+fn splice_reserved_state_block(
+    manifest: &[EntitySlot],
+    anchor_count: usize,
+    reserved_slots: &[EntitySlot],
+    cut_coefficients: &[Vec<f64>],
+    reserved_cut_coefficients: &[Vec<f64>],
+) -> Result<(Vec<EntitySlot>, Vec<Vec<f64>>), SddpError> {
+    let mut new_manifest = Vec::with_capacity(manifest.len() + reserved_slots.len());
+    new_manifest.extend_from_slice(&manifest[..anchor_count]);
+    new_manifest.extend_from_slice(reserved_slots);
+    new_manifest.extend_from_slice(&manifest[anchor_count..]);
 
     let mut new_coefficients = Vec::with_capacity(cut_coefficients.len());
-    for (coeffs, keyed) in cut_coefficients.iter().zip(cut_inflow_lag_coefficients) {
+    for (coeffs, reserved) in cut_coefficients.iter().zip(reserved_cut_coefficients) {
         if coeffs.len() != manifest.len() {
             return Err(SddpError::Validation(format!(
                 "cut has {} coefficients but the boundary manifest has {} slots; the two must be \
-                 positionally aligned before reserving lag slots",
+                 positionally aligned before reserving state slots",
                 coeffs.len(),
                 manifest.len()
             )));
         }
-        let lag_block = (0..n).flat_map(|lag| {
-            storage_slots.iter().map(move |storage| {
-                keyed
-                    .get(&storage.entity_id)
-                    .and_then(|per_depth| per_depth.get(lag))
-                    .copied()
-                    .unwrap_or(0.0)
-            })
-        });
-        let mut extended = Vec::with_capacity(coeffs.len() + n * storage_count);
-        extended.extend_from_slice(&coeffs[..storage_count]);
-        extended.extend(lag_block);
-        extended.extend_from_slice(&coeffs[storage_count..]);
+        let mut extended = Vec::with_capacity(coeffs.len() + reserved_slots.len());
+        extended.extend_from_slice(&coeffs[..anchor_count]);
+        extended.extend_from_slice(reserved);
+        extended.extend_from_slice(&coeffs[anchor_count..]);
         new_coefficients.push(extended);
     }
-
-    let state_dimension = new_manifest.len() as u32;
-    Ok(ReservedInflowLagLayout {
-        manifest: new_manifest,
-        coefficients: new_coefficients,
-        state_dimension,
-    })
+    Ok((new_manifest, new_coefficients))
 }
 
 /// Build the per-slot delivery INTERVAL, in LOCKSTEP with
