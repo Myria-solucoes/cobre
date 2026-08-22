@@ -4564,30 +4564,79 @@ fn initial_state_seeds_every_leading_commitment_under_the_widened_ring_depth() {
     );
 }
 
-/// Same fixture as
-/// [`initial_state_seeds_every_leading_commitment_under_the_widened_ring_depth`].
-/// The ring-depth-sized `K_i` equals `k_max` for a single anticipated plant, so
-/// `[K_i, k_max)` is empty here — this pins that the encoder-driven padding
-/// loop stays a correct no-op rather than under/over-running when a plant has no
-/// padding to protect (the genuine `K_i < k_max` gap stays covered by
-/// `build_initial_state_anticipated_seed_padding_slot_stays_zero`).
+/// A short-lead plant's padding range `[K_i, k_max)` stays zero even when a
+/// sibling plant's own lead widens the shared ring past it: plant 0 tiles
+/// every ring slot with its own seed while plant 1 covers only its own
+/// leading stage, leaving plant 1's remaining slots as genuine, non-empty
+/// padding for the encoder-driven loop to protect.
 #[test]
 fn initial_state_leaves_padding_slots_zero() {
     use super::build_initial_state;
+    use cobre_core::AnticipatedCommitmentHistory;
 
-    let system = bug_doc_reproduction_system();
-    let layout = layout_with_anticipated(1, &[4]);
-    let k_i = layout.anticipated_lead_stages[0];
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let (s2_start, s2_end) = anticipated_stage_window(2);
+    let past_commits = vec![
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 111.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 222.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s2_start,
+            end_date: s2_end,
+            value_mw: 333.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 444.0,
+        },
+    ];
+    let system = system_with_anticipated_thermals(&[3, 1], past_commits);
+    let layout = layout_with_anticipated(2, &[3, 1]);
+    let k_i_short = layout.anticipated_lead_stages[1];
+    assert!(
+        k_i_short < layout.k_max,
+        "fixture must leave a non-empty padding range to exercise"
+    );
 
     let state = build_initial_state(
         &system,
-        &test_support::study_dims_for(&counts_with_anticipated(1, &[4], &[0])),
+        &test_support::study_dims_for(&counts_with_anticipated(2, &[3, 1], &[0, 1])),
         &layout,
         &[],
     );
 
-    for slot in k_i..layout.k_max {
-        let off = layout.commit_out.start + layout.commitment_hold_in_study_offset(0, slot);
+    let s = layout.commit_out.start;
+    let plant0_seeds = [111.0, 222.0, 333.0];
+    for (slot, &expected) in plant0_seeds.iter().enumerate() {
+        let off = s + layout.commitment_hold_in_study_offset(0, slot);
+        assert!(
+            (state[off] - expected).abs() < 1e-10,
+            "plant 0 slot {slot} expected {expected}, got {}",
+            state[off]
+        );
+    }
+    let off_plant1_seed = s + layout.commitment_hold_in_study_offset(1, 0);
+    assert!(
+        (state[off_plant1_seed] - 444.0).abs() < 1e-10,
+        "plant 1 slot 0 expected 444.0, got {}",
+        state[off_plant1_seed]
+    );
+
+    for slot in k_i_short..layout.k_max {
+        let off = s + layout.commitment_hold_in_study_offset(1, slot);
         assert_eq!(state[off], 0.0, "padding slot {slot} must be 0.0");
     }
 }

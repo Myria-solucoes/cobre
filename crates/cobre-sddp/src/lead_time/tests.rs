@@ -970,7 +970,7 @@ fn test_occupancy_depth_identity_hand_computed() {
         .depth
         .iter()
         .enumerate()
-        .map(|(t, &d)| d + (n_none).saturating_sub(1).saturating_sub(t))
+        .map(|(t, &d)| d + n_none.saturating_sub(1).saturating_sub(t))
         .collect();
     assert_eq!(resolution.occupancy, expected);
     assert_eq!(resolution.occupancy, vec![3, 2, 1, 0]);

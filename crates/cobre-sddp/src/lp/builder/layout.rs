@@ -716,10 +716,9 @@ fn build_anticipated_slot_row_pos(
     let mut n_reachable = 0_usize;
     for depth in 0..k_max {
         let r = stage_idx + depth + 1;
-        // Modular addressing (`r % k_max`) in place of the pre-migration
-        // distance-based `depth`; `depth in 0..k_max` still enumerates
-        // exactly `k_max` consecutive ring-axis `r` values, so every residue
-        // is visited exactly once — no self-collision within this sweep.
+        // `depth in 0..k_max` enumerates exactly `k_max` consecutive ring-axis
+        // `r` values, so every residue is visited exactly once — no
+        // self-collision within this sweep.
         let slot = r % k_max;
         for (plant, point) in points.iter().enumerate() {
             let m = point.physical_target(r);
