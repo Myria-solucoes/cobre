@@ -13,7 +13,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Date32Builder, Float64Builder, Int32Builder, RecordBatch};
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
+
+use super::date32_days;
 
 use crate::output::atomic::write_parquet_atomic;
 use crate::output::error::OutputError;
@@ -110,13 +112,6 @@ fn build_fixed_delivery_batch(rows: &[FixedDeliveryRow]) -> Result<RecordBatch, 
         ],
     )
     .map_err(|e| OutputError::serialization("fixed_delivery", e.to_string()))
-}
-
-/// Arrow `Date32`'s native representation (days since the Unix epoch,
-/// 1970-01-01) for one calendar date.
-fn date32_days(date: NaiveDate) -> i32 {
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).map_or(0, |e| e.num_days_from_ce());
-    date.num_days_from_ce() - epoch
 }
 
 #[cfg(test)]

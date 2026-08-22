@@ -7,6 +7,8 @@
 //! it accepts aggregate result types and writes all output artifacts to the
 //! specified directory.
 
+use chrono::{Datelike, NaiveDate};
+
 pub(crate) mod atomic;
 pub mod convergence_reader;
 pub mod dictionary;
@@ -57,6 +59,13 @@ pub use stochastic::{
     write_inflow_seasonal_stats, write_load_seasonal_stats, write_noise_openings,
 };
 pub use training_writer::{TrainingParquetWriter, write_row_selection_records};
+
+/// Arrow `Date32`'s native representation (days since the Unix epoch,
+/// 1970-01-01) for one calendar date.
+pub(crate) fn date32_days(date: NaiveDate) -> i32 {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).map_or(0, |e| e.num_days_from_ce());
+    date.num_days_from_ce() - epoch
+}
 
 /// One row of convergence data for a single training iteration, written to
 /// `training/convergence.parquet`.

@@ -8712,12 +8712,12 @@ mod fixed_delivery_output {
         }
     }
 
-    /// Builds the setup the same way [`StudySetup::train`] callers do, but
-    /// also hands back the `System` — [`build_fixed_delivery_rows`] needs both
-    /// and [`StudySetup`] does not own the one it was built from.
-    fn build_setup_and_system(system: System, config: &Config) -> (StudySetup, System) {
+    /// Builds the setup the same way [`StudySetup::train`] callers do.
+    /// [`StudySetup`] does not own `system`, so callers keep their own
+    /// `&System` alongside the returned setup for [`build_fixed_delivery_rows`].
+    fn build_setup_and_system(system: &System, config: &Config) -> StudySetup {
         let stochastic = build_stochastic_context(
-            &system,
+            system,
             42,
             None,
             &[],
@@ -8731,11 +8731,9 @@ mod fixed_delivery_output {
         )
         .expect("build_stochastic_context");
 
-        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        let hydro_models = PrepareHydroModelsResult::default_from_system(system);
 
-        let setup =
-            StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new");
-        (setup, system)
+        StudySetup::new(system, config, stochastic, hydro_models).expect("StudySetup::new")
     }
 
     fn assert_row_matches_window(row: &FixedDeliveryRow, expected: &DeclaredWindow) {
@@ -8766,7 +8764,7 @@ mod fixed_delivery_output {
 
         let system = build_system(&[PLANT_HI, PLANT_LO], &[hi, lo]);
         let config = build_config();
-        let (setup, system) = build_setup_and_system(system, &config);
+        let setup = build_setup_and_system(&system, &config);
 
         let rows = build_fixed_delivery_rows(&setup, &system);
 
@@ -8781,7 +8779,7 @@ mod fixed_delivery_output {
         let hi = window_hi();
         let system = build_system(&[PLANT_LO, PLANT_HI], &[lo, hi]);
         let config = build_config();
-        let (setup, system) = build_setup_and_system(system, &config);
+        let setup = build_setup_and_system(&system, &config);
         let rows = build_fixed_delivery_rows(&setup, &system);
         assert_eq!(rows.len(), 2);
 
@@ -8801,7 +8799,7 @@ mod fixed_delivery_output {
     fn fixed_delivery_absence_is_byte_neutral_no_file_no_directory() {
         let system = build_system(&[PLANT_LO], &[]);
         let config = build_config();
-        let (setup, system) = build_setup_and_system(system, &config);
+        let setup = build_setup_and_system(&system, &config);
 
         let rows = build_fixed_delivery_rows(&setup, &system);
         assert!(rows.is_empty(), "no class-4 window declared, so no rows");
@@ -8830,11 +8828,11 @@ mod fixed_delivery_output {
         let config = build_config();
 
         let system_forward = build_system(&[PLANT_LO, PLANT_HI], &[lo, hi]);
-        let (setup_forward, system_forward) = build_setup_and_system(system_forward, &config);
+        let setup_forward = build_setup_and_system(&system_forward, &config);
         let rows_forward = build_fixed_delivery_rows(&setup_forward, &system_forward);
 
         let system_reversed = build_system(&[PLANT_HI, PLANT_LO], &[hi, lo]);
-        let (setup_reversed, system_reversed) = build_setup_and_system(system_reversed, &config);
+        let setup_reversed = build_setup_and_system(&system_reversed, &config);
         let rows_reversed = build_fixed_delivery_rows(&setup_reversed, &system_reversed);
 
         assert_eq!(rows_forward.len(), 2);

@@ -41,7 +41,9 @@ use arrow::array::{
     BooleanBuilder, Date32Builder, Float64Builder, Int8Builder, Int32Builder, RecordBatch,
 };
 
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
+
+use super::date32_days;
 use cobre_core::System;
 
 use crate::MetadataSimulationSolveStats;
@@ -1905,13 +1907,6 @@ fn build_in_transit_batch<'a>(
         ],
     )
     .map_err(|e| OutputError::serialization("in_transit", e.to_string()))
-}
-
-/// Arrow `Date32`'s native representation (days since the Unix epoch,
-/// 1970-01-01) for one calendar date.
-fn date32_days(date: NaiveDate) -> i32 {
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).map_or(0, |e| e.num_days_from_ce());
-    date.num_days_from_ce() - epoch
 }
 
 #[allow(clippy::cast_possible_wrap)]
