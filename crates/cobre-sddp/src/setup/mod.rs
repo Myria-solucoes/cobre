@@ -66,8 +66,9 @@ pub use node_graph::{
     OpeningSource, StageIdx, Traversal, TypedVec,
 };
 pub use params::{
-    ConstructionConfig, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS,
-    DEFAULT_SEED, SimulationEnumeratedRequest, StudyParams,
+    BoundaryStateRequirements, ConstructionConfig, DEFAULT_COST_SCALE_FACTOR,
+    DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, SimulationEnumeratedRequest,
+    StudyParams,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
@@ -321,6 +322,11 @@ pub struct StudySetup {
     /// [`BasisStore`](crate::workspace::BasisStore) so iteration 1's LPs warm-start.
     /// `None` for a fresh start, leaving fresh-mode behavior untouched.
     pub(crate) warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
+
+    /// Boundary-derived state requirements this study was built against, resolved
+    /// once and carried identically on every rank. The boundary-cut load path
+    /// reads its inflow-lag depth here instead of re-reading the source checkpoint.
+    pub(crate) boundary_requirements: BoundaryStateRequirements,
 }
 
 impl StudySetup {
@@ -340,30 +346,38 @@ impl StudySetup {
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
     ) -> Result<Self, SddpError> {
-        Self::new_with_inflow_lag_depth(system, config, stochastic, hydro_models, None)
+        // No case dir to read the source checkpoint, so the depth is unresolved
+        // (None); presence still follows the config, matching the boundary-mask
+        // gate an entry point resolves via `resolve_boundary_state_requirements`.
+        let boundary = if config.policy.boundary.is_some() {
+            BoundaryStateRequirements::present(0)
+        } else {
+            BoundaryStateRequirements::none()
+        };
+        Self::new_with_boundary_requirements(system, config, stochastic, hydro_models, boundary)
     }
 
-    /// [`Self::new`] with the boundary-inferred inflow-lag depth supplied
+    /// [`Self::new`] with the boundary-derived state requirements supplied
     /// explicitly.
     ///
-    /// The inflow-lag state depth is inferred from a loaded boundary policy
-    /// (`resolve_effective_inflow_lag_depth`, an I/O read the caller performs),
-    /// not from any config knob; `None` sizes the lag block from the PAR model
-    /// alone. The MPI broadcast path carries the same value on
-    /// `ConstructionConfig::inflow_lag_depth` for non-root ranks.
+    /// The requirements are resolved from a loaded boundary policy
+    /// (`resolve_boundary_state_requirements`, an I/O read the caller performs),
+    /// not from any config knob; [`BoundaryStateRequirements::none`] sizes the lag
+    /// block from the PAR model alone. The MPI broadcast path carries the same
+    /// value on `ConstructionConfig::boundary` for non-root ranks.
     ///
     /// # Errors
     ///
     /// Same as [`Self::new`].
-    pub fn new_with_inflow_lag_depth(
+    pub fn new_with_boundary_requirements(
         system: &System,
         config: &Config,
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
-        inflow_lag_depth: Option<u32>,
+        boundary: BoundaryStateRequirements,
     ) -> Result<Self, SddpError> {
         let mut params = StudyParams::from_config(config)?;
-        params.inflow_lag_depth = inflow_lag_depth;
+        params.boundary = boundary;
         // Sentinel: the scenario-source resolvers use the path only for error
         // messages and the historical-years look-up, neither exercised here with a
         // validated Config.
@@ -432,8 +446,7 @@ impl StudySetup {
             simulation_solver,
             backward_scheduler,
             cost_scale_factor,
-            inflow_lag_depth,
-            boundary_present,
+            boundary,
         } = config;
 
         // Fail fast on a backend-unsupported field before any template exists;
@@ -461,11 +474,11 @@ impl StudySetup {
         // Computed here (not inside `build_energy_and_templates`) so the one
         // `TransitBucketTopology` this constructor derives from `system` also seeds the
         // `StudySetup.transit_bucket_topology` field below, with no second call.
-        // `boundary_present` gates the terminal deep-lag mask (the Delivery-family
-        // right-boundary pricing contract) — every rank resolves it identically from
-        // the broadcast config, before `inject_boundary_cuts` runs.
+        // `boundary.is_present()` gates the terminal deep-lag mask (the
+        // Delivery-family right-boundary pricing contract) — every rank resolves it
+        // identically from the broadcast config, before `inject_boundary_cuts` runs.
         let transit_bucket_topology =
-            bucket_topology::build_transit_bucket_topology(system, boundary_present);
+            bucket_topology::build_transit_bucket_topology(system, boundary.is_present());
 
         // Resolved before the LP templates: none of the state dimensions depend on
         // the built LP, and `build_stage_templates` needs the finished `StateSpace`
@@ -475,13 +488,13 @@ impl StudySetup {
             system,
             stochastic.par(),
             &transit_bucket_topology,
-            inflow_lag_depth,
+            boundary.inflow_lag_depth(),
         )?;
         warn_on_boundary_absent_post_study_delivery(
             system,
             &anticipated_thermal_indices,
             &state_layout.anticipated_resolution,
-            boundary_present,
+            boundary.is_present(),
         );
 
         // The sole `derive_inflow_seeds` call site: every consumer (the lag block
@@ -796,6 +809,7 @@ impl StudySetup {
             hydro_min_storage_hm3,
             transit_bucket_topology,
             warm_start_basis_cache: None,
+            boundary_requirements: boundary,
         })
     }
 }

@@ -92,7 +92,7 @@ use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::resolve_boundary_source_stage;
-use cobre_sddp::resolve_effective_inflow_lag_depth;
+use cobre_sddp::resolve_boundary_state_requirements;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
@@ -916,14 +916,11 @@ pub(crate) fn build_study_setup(
 
     let config = load_effective_config(&case_dir.join("config.json"), overrides)?;
 
-    // Infer the inflow-lag state block depth from a loaded boundary policy's cuts;
-    // carried onto the construction config below so both the layout and the
-    // boundary-load reject see it. Mirrors the CLI run path.
-    let inflow_lag_depth = match config.policy.boundary.as_ref() {
-        Some(bp) => resolve_effective_inflow_lag_depth(Some(&case_dir.join(&bp.path)))
-            .map_err(|e| e.to_string())?,
-        None => None,
-    };
+    // Resolve the boundary-derived state requirements once; carried onto the
+    // construction config below so both the layout and the boundary-load reject
+    // see them. Mirrors the CLI run path.
+    let boundary_requirements =
+        resolve_boundary_state_requirements(case_dir, &config).map_err(|e| e.to_string())?;
 
     let seed = config
         .training
@@ -940,7 +937,7 @@ pub(crate) fn build_study_setup(
         &config,
         seed,
         &training_source,
-        inflow_lag_depth,
+        boundary_requirements.inflow_lag_depth(),
     )
     .map_err(|e| format!("stochastic preprocessing error: {e}"))?;
     let system = result.system;
@@ -960,7 +957,7 @@ pub(crate) fn build_study_setup(
         .map_err(|e| format!("scenario source error: {e}"))?;
     let params = StudyParams::from_config(&config).map_err(|e| e.to_string())?;
     let mut construction = params.into_construction_config();
-    construction.inflow_lag_depth = inflow_lag_depth;
+    construction.boundary = boundary_requirements;
     construction.scalar_parameters = artifacts.scalar_parameters;
     let mut setup = StudySetup::from_broadcast_params(
         &system,
@@ -1221,9 +1218,7 @@ pub(crate) fn apply_training_policy_mode(
     // replaces the entire FCF first, then boundary cuts overwrite only the
     // terminal pool.
     if let Some(ref bp) = config.policy.boundary {
-        // Resolve against the CASE dir (an external source checkpoint), never the
-        // current run's output dir; an absolute `bp.path` passes through unchanged.
-        let boundary_path = case_dir.join(&bp.path);
+        let boundary_path = bp.checkpoint_path(case_dir);
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
@@ -1242,10 +1237,10 @@ pub(crate) fn apply_training_policy_mode(
             resolved
         };
         let mut on_warning = |msg: &str| eprintln!("cobre-python: boundary cut warning: {msg}");
-        // Inferred from this boundary policy's own cuts (the depth the state layout
-        // reserved) — a defensive guard on the load, never a user error.
-        let effective_inflow_lag_depth =
-            resolve_effective_inflow_lag_depth(Some(&boundary_path)).map_err(|e| e.to_string())?;
+        // The depth the state layout already reserved (read off the constructed
+        // setup, not re-inferred from the checkpoint) — a defensive guard on the
+        // load, never a user error.
+        let effective_inflow_lag_depth = setup.boundary_requirements().inflow_lag_depth();
         let boundary_records = load_boundary_cuts(
             &boundary_path,
             source_stage,

@@ -22,7 +22,6 @@ use cobre_sddp::inject_boundary_cuts;
 use cobre_sddp::load_boundary_cuts;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::resolve_boundary_source_stage;
-use cobre_sddp::resolve_effective_inflow_lag_depth;
 use cobre_sddp::validate_policy_load;
 
 use crate::error::CliError;
@@ -234,9 +233,7 @@ pub(super) fn apply_training_policy(
     // Must run after the match: warm-start replaces the whole FCF first, then
     // boundary cuts overwrite only the terminal pool.
     if let Some(bp) = root_config.and_then(|c| c.policy.boundary.as_ref()) {
-        // Resolve against the CASE dir (an external source checkpoint), never the
-        // current run's output dir; an absolute `bp.path` passes through unchanged.
-        let boundary_path = ctx.case_dir.join(&bp.path);
+        let boundary_path = bp.checkpoint_path(&ctx.case_dir);
         // Rationale: the cast cannot truncate — `state_dimension` counts FCF
         // state variables (one per reservoir/lag), bounded by the validated study
         // dimensions and far below `u32::MAX`.
@@ -267,11 +264,10 @@ pub(super) fn apply_training_policy(
                 let _ = stderr.write_line(&format!("warning: {msg}"));
             }
         };
-        // Inferred from this boundary policy's own cuts (the same depth the state
-        // layout reserved), so the load-time depth guard is a defensive check,
-        // never a user error.
-        let effective_inflow_lag_depth =
-            resolve_effective_inflow_lag_depth(Some(&boundary_path)).map_err(CliError::from)?;
+        // The depth the state layout already reserved (read off the constructed
+        // setup, not re-inferred from the checkpoint), so the load-time depth
+        // guard is a defensive check, never a user error.
+        let effective_inflow_lag_depth = setup.boundary_requirements().inflow_lag_depth();
         let boundary_records = load_boundary_cuts(
             &boundary_path,
             source_stage,

@@ -366,9 +366,9 @@ fn compute_external_scenario_counts(
 /// loading, opening-tree library construction, and stochastic context build.
 ///
 /// `inflow_lag_depth` is the boundary-inferred lag depth (from
-/// `resolve_effective_inflow_lag_depth`), or `None` for a study with no loaded
-/// boundary; it sizes the opening-tree library's lag state to match the state
-/// layout `StudySetup` reserves.
+/// `BoundaryStateRequirements::inflow_lag_depth`), or `None` for a study with no
+/// loaded boundary; it sizes the opening-tree library's lag state to match the
+/// state layout `StudySetup` reserves.
 ///
 /// # Errors
 ///

@@ -8551,8 +8551,7 @@ mod enumerated_external {
             simulation_solver: None,
             backward_scheduler,
             cost_scale_factor: DEFAULT_COST_SCALE_FACTOR,
-            inflow_lag_depth: None,
-            boundary_present: false,
+            boundary: cobre_sddp::BoundaryStateRequirements::none(),
         }
     }
 

@@ -33,6 +33,14 @@ impl StudySetup {
         self.fcf = fcf;
     }
 
+    /// The boundary-derived state requirements this study was built against — the
+    /// boundary-cut load path reads its inflow-lag depth here rather than
+    /// re-resolving from the source checkpoint.
+    #[must_use]
+    pub fn boundary_requirements(&self) -> &super::BoundaryStateRequirements {
+        &self.boundary_requirements
+    }
+
     /// Set the starting iteration for resumed training.
     pub fn set_start_iteration(&mut self, iteration: u64) {
         self.loop_params.start_iteration = iteration;

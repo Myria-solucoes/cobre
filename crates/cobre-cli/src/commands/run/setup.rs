@@ -36,7 +36,7 @@ use cobre_sddp::reconcile_global_ok;
 use cobre_sddp::{
     EstimationReport, PrepareHydroModelsResult, PrepareStochasticResult, StudySetup,
     build_hydro_model_summary, prepare_hydro_models, prepare_stochastic,
-    resolve_effective_inflow_lag_depth,
+    resolve_boundary_state_requirements,
     setup::{
         ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic,
         study_stage_noise_group_ids, widen_lag_state_depth,
@@ -122,23 +122,17 @@ fn load_case_and_config(
     let config = parse_config(&config_path)?;
     timings.load_seconds = load_start.elapsed().as_secs_f64();
 
-    // Size the inflow-lag state block to the loaded boundary policy: its cuts fix
-    // the required depth, inferred here (rank 0, the sole reader of the case dir)
-    // and carried on the broadcast config so both the state layout and the
-    // boundary-load reject see the effective depth on every rank.
-    let inflow_lag_depth = if let Some(bp) = config.policy.boundary.as_ref() {
-        let boundary_path = args.case_dir.join(&bp.path);
-        let depth = resolve_effective_inflow_lag_depth(Some(&boundary_path))?;
-        if let (Some(d), false) = (depth, quiet) {
-            let _ = stderr.write_line(&format!("Boundary policy: inflow-lag depth {d}"));
-        }
-        depth
-    } else {
-        None
-    };
+    // Resolve the boundary-derived state requirements once (rank 0, the sole
+    // reader of the case dir) and carry them on the broadcast config, so both the
+    // state layout and the boundary-load reject see the identical requirements on
+    // every rank.
+    let boundary_requirements = resolve_boundary_state_requirements(&args.case_dir, &config)?;
+    if let (Some(d), false) = (boundary_requirements.inflow_lag_depth(), quiet) {
+        let _ = stderr.write_line(&format!("Boundary policy: inflow-lag depth {d}"));
+    }
 
     let mut bcast = BroadcastConfig::from_config(&config)?;
-    bcast.inflow_lag_depth = inflow_lag_depth;
+    bcast.boundary = boundary_requirements;
     let seed = bcast.seed;
 
     let stochastic_start = std::time::Instant::now();
@@ -148,7 +142,7 @@ fn load_case_and_config(
         &config,
         seed,
         &bcast.training_source,
-        inflow_lag_depth,
+        bcast.boundary.inflow_lag_depth(),
     )
     .map_err(CliError::from)?;
     timings.stochastic_fit_seconds = stochastic_start.elapsed().as_secs_f64();
@@ -456,8 +450,11 @@ fn reconstruct_stochastic_context_non_root(
         .map(|(ncs_id, stage_id, pairs)| (*ncs_id, *stage_id, pairs.as_slice()))
         .collect();
 
-    let opening_tree_library =
-        rebuild_historical_library_non_root(system, training_src, bcast_config.inflow_lag_depth)?;
+    let opening_tree_library = rebuild_historical_library_non_root(
+        system,
+        training_src,
+        bcast_config.boundary.inflow_lag_depth(),
+    )?;
 
     build_stochastic_context(
         system,
@@ -631,8 +628,7 @@ fn build_study_setup(
         simulation_solver,
         backward_scheduler: bcast_config.backward_scheduler.into(),
         cost_scale_factor: bcast_config.cost_scale_factor,
-        inflow_lag_depth: bcast_config.inflow_lag_depth,
-        boundary_present: bcast_config.boundary_present,
+        boundary: bcast_config.boundary.clone(),
     };
     StudySetup::from_broadcast_params(
         system,

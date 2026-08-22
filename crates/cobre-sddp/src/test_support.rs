@@ -37,6 +37,7 @@ use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
 };
 
+use crate::BoundaryStateRequirements;
 use crate::StudySetup;
 use crate::context::{StageContext, TrainingContext};
 use crate::cut::pool::CutPool;
@@ -2095,12 +2096,15 @@ fn build_external_distinct_fan_setup(
     )
     .expect("build_external_distinct_fan_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new_with_inflow_lag_depth(
+    StudySetup::new_with_boundary_requirements(
         &system,
         &config,
         stochastic,
         hydro_models,
-        inflow_lag_depth,
+        inflow_lag_depth.map_or_else(
+            BoundaryStateRequirements::none,
+            BoundaryStateRequirements::present,
+        ),
     )
     .expect("build_external_distinct_fan_setup: StudySetup::new must succeed")
 }
@@ -2503,7 +2507,7 @@ fn branching_tree_policy_graph(reversed: bool) -> HorizonGraph {
 /// pool, stage 2 (leaf level) sizes each FAN NODE's pool. Declaring stage 1
 /// `inflow_lags: true` and stage 2 `inflow_lags: false` makes the root's pool
 /// project the full storage+lag state (2 dims: 1 hydro × 1 declared lag slot,
-/// widened via the depth passed to `new_with_inflow_lag_depth` in
+/// widened via the depth passed to `new_with_boundary_requirements` in
 /// [`build_non_uniform_branching_setup`]'s config — not a fitted PAR order,
 /// which the K-fan/chain fixtures' zero-std inflow cannot normalize) while each
 /// fan node's pool projects storage only (1 dim) — and the trailing shared leaf
@@ -2536,7 +2540,7 @@ fn non_uniform_branching_stage_configs() -> [StageStateConfig; 3] {
 /// (non-binding) reservoir — Generated, `branching_factor: 1`, the
 /// oracle-compatible (`|Ω| = 1` per node) shape [`extensive_form_optimum`]
 /// requires, matching [`k_fan_system`]/[`oracle_chain_setup`]. The lag SLOT
-/// itself (`max_par_order`) comes from the depth passed to `new_with_inflow_lag_depth` in
+/// itself (`max_par_order`) comes from the depth passed to `new_with_boundary_requirements` in
 /// [`build_non_uniform_branching_setup`]'s config, not from an `ar_coefficients`
 /// declared here — the AR-normalization path this crate's inflow estimator uses
 /// rejects a zero-std series (`ar_order >= 1` needs nonzero variance to
@@ -2614,8 +2618,14 @@ fn build_non_uniform_branching_setup(
     )
     .expect("non_uniform_branching_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new_with_inflow_lag_depth(&system, &config, stochastic, hydro_models, Some(1))
-        .expect("non_uniform_branching_setup: StudySetup::new must succeed")
+    StudySetup::new_with_boundary_requirements(
+        &system,
+        &config,
+        stochastic,
+        hydro_models,
+        BoundaryStateRequirements::present(1),
+    )
+    .expect("non_uniform_branching_setup: StudySetup::new must succeed")
 }
 
 /// The `enumerated`-mode 3-stage binary tree oracle fixture: root branches into 2
@@ -3048,8 +3058,14 @@ pub fn dual_folding_setup(fold: LagFold, forward_passes: u32, max_iterations: u3
         1,
         3,
     );
-    StudySetup::new_with_inflow_lag_depth(&system, &config, stochastic, hydro_models, Some(1))
-        .expect("dual_folding_setup: StudySetup::new must succeed")
+    StudySetup::new_with_boundary_requirements(
+        &system,
+        &config,
+        stochastic,
+        hydro_models,
+        BoundaryStateRequirements::present(1),
+    )
+    .expect("dual_folding_setup: StudySetup::new must succeed")
 }
 
 // ── Deterministic-trunk + terminal-fan fixture (node-native enumerated backward) ──

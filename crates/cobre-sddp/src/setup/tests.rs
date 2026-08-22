@@ -1,6 +1,6 @@
 use super::{
-    NodeId, NodePos, PhaseLibraries, ScenarioLibraries, StudySetup, assert_external_library_widths,
-    build_contract_prices_per_stage,
+    BoundaryStateRequirements, NodeId, NodePos, PhaseLibraries, ScenarioLibraries, StudySetup,
+    assert_external_library_widths, build_contract_prices_per_stage,
 };
 use crate::SddpError;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
@@ -7159,12 +7159,12 @@ fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
     )
     .expect("stochastic context");
 
-    let setup = StudySetup::new_with_inflow_lag_depth(
+    let setup = StudySetup::new_with_boundary_requirements(
         &system,
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
-        Some(24),
+        BoundaryStateRequirements::present(24),
     )
     .expect("setup with a boundary depth exceeding the AR order");
 
@@ -7210,12 +7210,12 @@ fn resolve_state_layout_floors_declared_depth_at_ar_order() {
     )
     .expect("stochastic context");
 
-    let setup = StudySetup::new_with_inflow_lag_depth(
+    let setup = StudySetup::new_with_boundary_requirements(
         &system,
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
-        Some(1),
+        BoundaryStateRequirements::present(1),
     )
     .expect("setup with a boundary depth below the AR order");
 

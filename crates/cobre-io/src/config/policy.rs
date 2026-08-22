@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// Policy initialization mode (`config.json → policy.mode`).
 ///
@@ -50,6 +51,16 @@ pub struct BoundaryPolicy {
     /// study's terminal calendar.
     #[serde(default)]
     pub source_stage: Option<u32>,
+}
+
+impl BoundaryPolicy {
+    /// The source checkpoint directory, resolved against the CASE (input) dir —
+    /// an external source checkpoint, never the current run's output dir; an
+    /// absolute [`Self::path`] passes through unchanged.
+    #[must_use]
+    pub fn checkpoint_path(&self, case_dir: &Path) -> PathBuf {
+        case_dir.join(&self.path)
+    }
 }
 
 /// Policy directory settings (`config.json → policy`).

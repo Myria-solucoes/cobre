@@ -552,8 +552,7 @@ fn run_programmatic(
         simulation_solver: None,
         backward_scheduler: cobre_io::config::BackwardScheduler::default(),
         cost_scale_factor: cobre_sddp::DEFAULT_COST_SCALE_FACTOR,
-        inflow_lag_depth: None,
-        boundary_present: false,
+        boundary: cobre_sddp::BoundaryStateRequirements::none(),
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)
@@ -898,8 +897,7 @@ fn run_with_setup(
         simulation_solver: None,
         backward_scheduler: cobre_io::config::BackwardScheduler::default(),
         cost_scale_factor: cobre_sddp::DEFAULT_COST_SCALE_FACTOR,
-        inflow_lag_depth: None,
-        boundary_present: false,
+        boundary: cobre_sddp::BoundaryStateRequirements::none(),
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)

@@ -810,44 +810,51 @@ upper bound, the outflow-diversion exclusion, and the projection-aware
 intercept dot. The fixes are functionally correct and test-pinned; the debt
 below is structural residue of their speed.
 
-#### Boundary-derived setup context has no single owner
+#### Boundary-derived setup context has no single owner — RESOLVED
 
-**What it is.** The depth-resolution rule is single-owner
-(`boundary_policy_required_lag_depth` / `resolve_effective_inflow_lag_depth`,
+**What it is (resolved 2026-08-22).** The depth-resolution rule was
+single-owner (`boundary_policy_required_lag_depth`,
 `crates/cobre-sddp/src/policy/policy_load.rs`), but the fold — given a case
-directory and a `Config`, produce the effective depth — is open-coded, in
+directory and a `Config`, produce the effective depth — was open-coded, in
 differing shapes, at every production setup entry point (CLI run, CLI
-validate, Python run) plus a laxer test-helper copy. The resolved value rides
-three relay carriers (`StudyParams` → `BroadcastConfig` →
-`ConstructionConfig`), and `ConstructionConfig` holds two facts derived from
-the same `config.policy.boundary` filled by different owners at different
-times (`boundary_present`, pure, vs `inflow_lag_depth`, patched out-of-band)
-with nothing guarding their agreement. Two sibling smells share the fix: the
-boundary checkpoint path join (`case_dir.join(&bp.path)`) is open-coded at
+validate, Python run) plus a laxer test-helper copy. The resolved value rode
+three relay carriers (`StudyParams` → `BroadcastConfig` → `ConstructionConfig`),
+and `ConstructionConfig` held two facts derived from the same
+`config.policy.boundary` filled by different owners at different times (a pure
+boundary-present flag vs a patched-out-of-band inflow-lag depth) with nothing
+guarding their agreement. The boundary checkpoint path join was open-coded at
 every consumer — several carrying an identical warning comment, with no
-`BoundaryPolicy` accessor owning the rule — and each entry point reads and
-parses the checkpoint from disk twice (layout sizing, then boundary load), so
-the layout's depth and the load guard's depth are computed independently
-rather than being one value by construction.
+`BoundaryPolicy` accessor owning the rule — and each entry point parsed the
+checkpoint from disk twice (layout sizing, then boundary load).
+
+**Fix.** One `BoundaryStateRequirements` value (`cobre-sddp` `setup`) owns both
+boundary-derived facts — presence and inflow-lag depth — derived together, so
+they cannot disagree; one resolver (`resolve_boundary_state_requirements`,
+`crates/cobre-sddp/src/policy/policy_load.rs`) produces it, replacing all four
+open-coded folds. It rides the same three carriers as a single field rather
+than a scalar-plus-flag pair, and the constructed `StudySetup` retains it, so
+the boundary-cut load path reads the depth off the setup instead of re-parsing
+the checkpoint. `BoundaryPolicy::checkpoint_path` (`cobre-io`) owns the path
+join at every consumer. Byte-neutral: the same depth reaches
+`resolve_state_layout` and the same presence reaches the terminal-mask gate.
+The chosen shape is an opaque owning struct behind accessors (it carries an
+inflow-lag field today, but as the single owner every family flows through, not
+a bare threaded scalar); a new externally-authored state family adds a field
+and accessor here. The near-isomorphic carrier trio itself is unchanged —
+collapsing it is the setup-layer redesign above.
 
 **Owner.** The setup / config owner.
-
-**Trigger.** The setup-layer redesign (it is the config-projection sprawl's
-newest instance), or the next boundary-policy entry-point change — whichever
-lands first. **Fix-shape constraint (owner-ratified):** the resolver's output
-must be the family-generic boundary state-requirements object described in the
-per-family-channel entry below — never a struct with a lag-specific field,
-which would enshrine the very debt it fixes.
 
 #### Boundary state-family coupling channels are per-family bespoke
 
 **What it is.** The question "how does an externally-authored boundary
 future-cost function's coupling on a given state family reach the study's
 state space?" is answered by a different bespoke mechanism per family. The
-inflow-lag family threads a family-specific scalar through the Python writer
-argument and per-cut keyed field, `StudySetup::new_with_inflow_lag_depth`, all
-three config-projection carriers, every entry-point fold, a family-specific
-manifest decoder (`boundary_cut_lag_depth`), a family-specific widening
+setup channel is now unified — the resolved requirements ride the carriers as
+one generic `BoundaryStateRequirements` (the entry above) — but the WRITER and
+manifest channels are still family-specific: the inflow-lag family carries a
+Python writer argument and per-cut keyed field, a family-specific manifest
+decoder (`boundary_cut_lag_depth`), a family-specific widening
 (`widen_lag_state_depth`), and a family-specific writer helper
 (`reserve_boundary_inflow_lag_slots`). The anticipated family has its own
 manifest decoder (`decode_pool_anticipated_months`) and reserves post-horizon
@@ -863,14 +870,16 @@ carrier relay + entry-point folds). The generic frame half-exists: the
 checkpoint manifest already self-describes every slot
 (`entity_type`/`entity_id`/`subindex`/`delivery_date` — no format change
 needed) and the load-side rebind dispatch is already family-generic in frame.
-Target: one boundary state-requirements object derived once from the manifest
-(per-family summary) riding the config carriers, and a family-parameterized
-slot-reservation writer (the lag helper's internals — leading-block
-detection, canonical insertion, keyed placement — are largely
-family-independent). Per-family reconciliation SEMANTICS (widen vs calendar
-fan-out vs reject) are genuinely irreducible and stay per-family; the debt is
-the missing shared frame. The typed state-family enum (the untyped-primitive
-entry above) is this frame's prerequisite vocabulary.
+The setup half of the target is DONE: one `BoundaryStateRequirements` derived
+once from the boundary policy (per-family summary — inflow-lag depth today)
+rides the config carriers, and the typed state-family enum (the
+untyped-primitive entry above) supplies its prerequisite vocabulary. What
+REMAINS is the writer half: a family-parameterized slot-reservation writer (the
+lag helper's internals — leading-block detection, canonical insertion, keyed
+placement — are largely family-independent) plus a family-keyed per-cut
+coefficient field, and closing the transit-bucket silent-drop gap. Per-family
+reconciliation SEMANTICS (widen vs calendar fan-out vs reject) are genuinely
+irreducible and stay per-family; the debt is the missing shared writer frame.
 
 **Owner.** The policy / setup owner.
 

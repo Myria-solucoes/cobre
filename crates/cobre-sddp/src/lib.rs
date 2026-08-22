@@ -143,7 +143,7 @@ pub use policy::policy_load::{
     PolicyStageManifest, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
     build_basis_cache_from_checkpoint, compare_manifest_slot_identity, inject_boundary_cuts,
     load_boundary_cuts, rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage,
-    resolve_effective_inflow_lag_depth, validate_policy_load,
+    resolve_boundary_state_requirements, validate_policy_load,
 };
 // ── policy_export (checkpoint authoring) ─────────────────────────────────────
 pub use policy::policy_export::{ReservedInflowLagLayout, reserve_boundary_inflow_lag_slots};
@@ -160,8 +160,8 @@ pub use training::rank_reconcile::reconcile_global_ok;
 pub use convergence::risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────
 pub use setup::{
-    DEFAULT_COST_SCALE_FACTOR, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, PrepareStochasticResult,
-    StudyParams, StudySetup, prepare_stochastic,
+    BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED,
+    PrepareStochasticResult, StudyParams, StudySetup, prepare_stochastic,
 };
 // ── simulation ────────────────────────────────────────────────────────────────
 pub use simulation::{

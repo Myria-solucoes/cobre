@@ -8,8 +8,8 @@ use cobre_io::Config;
 use cobre_io::PolicyMode;
 use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
 use cobre_sddp::{
-    CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
-    StoppingRule, StoppingRuleSet, StudyParams,
+    BoundaryStateRequirements, CutSelectionStrategy, DEFAULT_MAX_ITERATIONS,
+    InflowNonNegativityMethod, StoppingMode, StoppingRule, StoppingRuleSet, StudyParams,
     setup::{
         NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         SimulationEnumeratedRequest, StageIdx, TypedVec,
@@ -80,9 +80,8 @@ impl From<BroadcastBackwardScheduler> for BackwardScheduler {
 /// Configuration snapshot broadcast from rank 0 to all ranks.
 // Rationale (struct_excessive_bools): each bool is an independent config
 // flag `StudyParams::from_config` resolves from a DIFFERENT `Config` section
-// (training selection, training enable, exports, policy.boundary); grouping
-// them into an enum or a state machine would invent a joint state no config
-// section actually declares.
+// (training selection, training enable, exports); grouping them into an enum or
+// a state machine would invent a joint state no config section actually declares.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct BroadcastConfig {
@@ -131,15 +130,13 @@ pub(crate) struct BroadcastConfig {
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
     /// resolved identically on every rank by [`StudyParams::from_config`].
     pub(crate) cost_scale_factor: f64,
-    /// Effective inflow-lag state depth, inferred on rank 0 from a loaded boundary
-    /// policy's required depth (`None` when no boundary is loaded) and set after
-    /// `from_config`. Rebuilt into `ConstructionConfig` on every rank, widening
-    /// `L_state` in `resolve_state_layout`.
-    pub(crate) inflow_lag_depth: Option<u32>,
-    /// `policy.boundary.is_some()`, resolved identically on every rank by
-    /// `StudyParams::from_config`. Gates the water-bucket terminal mask
-    /// (`build_transit_bucket_topology`) before `inject_boundary_cuts` runs.
-    pub(crate) boundary_present: bool,
+    /// Boundary-derived state requirements, resolved on rank 0
+    /// (`resolve_boundary_state_requirements`) and set after `from_config`, then
+    /// broadcast so every rank rebuilds the identical `ConstructionConfig`: the
+    /// inflow-lag depth widens `L_state` in `resolve_state_layout` and the
+    /// present flag gates the water-bucket terminal mask before
+    /// `inject_boundary_cuts` runs.
+    pub(crate) boundary: BoundaryStateRequirements,
 }
 
 impl BroadcastConfig {
@@ -223,8 +220,7 @@ impl BroadcastConfig {
             simulation_solver: params.simulation_solver,
             backward_scheduler: params.backward_scheduler.into(),
             cost_scale_factor: params.cost_scale_factor,
-            inflow_lag_depth: params.inflow_lag_depth,
-            boundary_present: params.boundary_present,
+            boundary: params.boundary,
         })
     }
 }
@@ -735,11 +731,14 @@ mod tests {
         );
     }
 
-    /// The boundary-inferred `inflow_lag_depth` (set on `BroadcastConfig` by rank
-    /// 0 after `from_config`) survives the postcard wire hop to non-root ranks.
+    /// The resolved boundary requirements — patched onto `BroadcastConfig` by
+    /// rank 0 after `from_config` (`from_config` itself leaves the `none()`
+    /// placeholder) — survive the postcard wire hop to non-root ranks as one
+    /// value carrying both the present flag and the inflow-lag depth.
     #[test]
-    fn broadcast_config_carries_inflow_lag_depth() {
+    fn broadcast_config_carries_boundary_requirements() {
         use super::BroadcastConfig;
+        use cobre_sddp::BoundaryStateRequirements;
 
         let json = r#"{
             "training": {
@@ -749,35 +748,17 @@ mod tests {
         }"#;
         let config: cobre_io::Config = serde_json::from_str(json).unwrap();
         let mut original = BroadcastConfig::from_config(&config).unwrap();
-        original.inflow_lag_depth = Some(12);
+        assert!(
+            !original.boundary.is_present(),
+            "from_config leaves the none() placeholder; the resolver owns presence"
+        );
+        original.boundary = BoundaryStateRequirements::present(12);
 
         let bytes = postcard::to_allocvec(&original).expect("postcard serialization must succeed");
         let decoded: BroadcastConfig =
             postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
-        assert_eq!(decoded.inflow_lag_depth, Some(12));
-    }
-
-    /// A present `policy.boundary` reaches `BroadcastConfig` as `boundary_present
-    /// = true` and survives the postcard wire hop.
-    #[test]
-    fn broadcast_config_carries_boundary_present() {
-        use super::BroadcastConfig;
-
-        let json = r#"{
-            "training": {
-                "selection": { "method": "sampled", "forward_passes": 4 },
-                "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }]
-            },
-            "policy": { "boundary": { "path": "unused" } }
-        }"#;
-        let config: cobre_io::Config = serde_json::from_str(json).unwrap();
-        let original = BroadcastConfig::from_config(&config).unwrap();
-        assert!(original.boundary_present);
-
-        let bytes = postcard::to_allocvec(&original).expect("postcard serialization must succeed");
-        let decoded: BroadcastConfig =
-            postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
-        assert!(decoded.boundary_present);
+        assert!(decoded.boundary.is_present());
+        assert_eq!(decoded.boundary.inflow_lag_depth(), Some(12));
     }
 
     #[test]
