@@ -35,6 +35,7 @@ use std::collections::HashMap;
 
 use chrono::Months;
 use chrono::NaiveDate;
+use cobre_core::AnticipatedCommitmentHistory;
 use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::OwnedPolicyCutRecord;
@@ -203,6 +204,55 @@ fn build_by_month_index(
             });
     }
     Ok(by_month)
+}
+
+/// The boundary intercept-fold vector `(source_pos, factor)` pricing a study's
+/// fixed post-horizon commitments, reusing [`resolve_anticipated`]'s per-month
+/// `÷H_M` distribute (`overlap_hours(w, M) / H_M`) applied to each fixed
+/// window's declared MW instead of a state dimension. A window overlapping no
+/// source month contributes nothing (mirrors [`RebindOp::Zero`], never an
+/// error), a `value_mw == 0.0` window is skipped, and only non-zero factors are
+/// emitted — an empty vector is the byte-neutral no-contribution case the
+/// intercept fold relies on, so zero-factor entries must never be emitted.
+///
+/// Determinism (D5): accumulates into a `source_pos`-indexed `Vec`, iterating
+/// `fixed_windows` and each plant's [`build_by_month_index`] records in given
+/// order; the sole map use is the `by_month` lookup, never a `HashMap`
+/// iteration.
+///
+/// # Errors
+///
+/// Propagates [`SddpError::Validation`] from [`build_by_month_index`] when a
+/// live anticipated `source` slot's `delivery_date` fails to decode.
+pub(crate) fn build_boundary_fold(
+    source: &[EntitySlot],
+    fixed_windows: &[AnticipatedCommitmentHistory],
+) -> Result<Vec<(usize, f64)>, SddpError> {
+    let by_month = build_by_month_index(source)?;
+    let mut factor = vec![0.0_f64; source.len()];
+    for window in fixed_windows {
+        if window.value_mw == 0.0 {
+            continue;
+        }
+        let key = (ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, window.thermal_id.0);
+        let Some(months) = by_month.get(&key) else {
+            continue;
+        };
+        for m in months {
+            let overlap = overlap_hours(
+                (window.start_date, window.end_date),
+                (m.month_start, m.month_end),
+            );
+            if overlap > 0.0 {
+                factor[m.source_pos] += (overlap / m.h_m) * window.value_mw;
+            }
+        }
+    }
+    Ok(factor
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, f)| f != 0.0)
+        .collect())
 }
 
 /// Build one [`RebindOp`] per `target` slot, dispatched per target slot's
@@ -758,10 +808,11 @@ mod tests {
     use super::{
         BoundaryReconciliationReport, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
         ENTITY_TYPE_HYDRO_INFLOW_LAG, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, FamilyTally, RebindOp,
-        build_rebind, build_reconciliation_report, decode_month_anchor, dropped_source_positions,
-        rebind_cut,
+        build_boundary_fold, build_rebind, build_reconciliation_report, decode_month_anchor,
+        dropped_source_positions, rebind_cut,
     };
     use crate::SddpError;
+    use cobre_core::{AnticipatedCommitmentHistory, EntityId};
     use cobre_io::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyCutRecord};
 
     fn storage_slot(id: i32) -> EntitySlot {
@@ -835,6 +886,20 @@ mod tests {
 
     fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
+    }
+
+    fn fixed_window(
+        thermal_id: i32,
+        start: NaiveDate,
+        end: NaiveDate,
+        value_mw: f64,
+    ) -> AnticipatedCommitmentHistory {
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(thermal_id),
+            start_date: start,
+            end_date: end,
+            value_mw,
+        }
     }
 
     /// Given a `source` and `target` manifest of equal shape (all storage),
@@ -1430,6 +1495,101 @@ mod tests {
         assert_eq!(
             report.summary_line(),
             format!("boundary reconciliation: {}", report.tally_clause())
+        );
+    }
+
+    /// A single fixed window one whole week fully inside a priced source month
+    /// (April, `H_M = 30·24`) folds to the hand-computed `(overlap/H_M)·value`
+    /// at the source month's own position.
+    #[test]
+    fn build_boundary_fold_single_window_yields_hand_computed_factor() {
+        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
+        let k = 1;
+        let value = 50.0;
+        let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), value)];
+
+        let fold = build_boundary_fold(&source, &windows).unwrap();
+
+        assert_eq!(fold.len(), 1);
+        assert_eq!(fold[0].0, k);
+        let expected = (7.0 * 24.0 / (30.0 * 24.0)) * value;
+        assert!(
+            (fold[0].1 - expected).abs() < expected * 1e-9,
+            "factor {} != expected {expected}",
+            fold[0].1
+        );
+    }
+
+    /// A fixed window in a month the source carries no anticipated slot for
+    /// contributes nothing — mirrors `RebindOp::Zero`, an empty fold.
+    #[test]
+    fn build_boundary_fold_no_overlapping_source_month_is_empty() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let windows = vec![fixed_window(9, ymd(2026, 5, 1), ymd(2026, 5, 8), 50.0)];
+
+        let fold = build_boundary_fold(&source, &windows).unwrap();
+
+        assert_eq!(fold, vec![]);
+    }
+
+    /// A `value_mw == 0.0` window overlapping a source month contributes
+    /// nothing, keeping the fold empty for the all-zero horizon-end stub.
+    #[test]
+    fn build_boundary_fold_zero_value_window_is_empty() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 0.0)];
+
+        let fold = build_boundary_fold(&source, &windows).unwrap();
+
+        assert_eq!(fold, vec![]);
+    }
+
+    /// Two windows overlapping the one source month accumulate into a single
+    /// emitted term at that source position — a per-position accumulation.
+    #[test]
+    fn build_boundary_fold_accumulates_windows_at_one_source_position() {
+        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
+        let k = 1;
+        let value_a = 30.0;
+        let value_b = 60.0;
+        let windows = vec![
+            fixed_window(9, ymd(2026, 4, 1), ymd(2026, 4, 8), value_a),
+            fixed_window(9, ymd(2026, 4, 20), ymd(2026, 4, 27), value_b),
+        ];
+
+        let fold = build_boundary_fold(&source, &windows).unwrap();
+
+        assert_eq!(fold.len(), 1, "one source position -> one emitted term");
+        assert_eq!(fold[0].0, k);
+        let w = 7.0 * 24.0 / (30.0 * 24.0);
+        let expected = w * value_a + w * value_b;
+        assert!(
+            (fold[0].1 - expected).abs() < expected * 1e-9,
+            "factor {} != expected sum {expected}",
+            fold[0].1
+        );
+    }
+
+    /// Reordering the fixed windows (here across two plants at distinct source
+    /// positions) never changes the emitted fold — the sole map use is a
+    /// lookup, the accumulation a `source_pos`-indexed `Vec`.
+    #[test]
+    fn build_boundary_fold_is_order_invariant() {
+        let source = vec![
+            anticipated_dated_slot(9, 0, 20_260_401),
+            anticipated_dated_slot(7, 0, 20_260_401),
+        ];
+        let w9 = fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 50.0);
+        let w7 = fixed_window(7, ymd(2026, 4, 1), ymd(2026, 4, 8), 20.0);
+
+        let fold_ab = build_boundary_fold(&source, &[w9.clone(), w7.clone()]).unwrap();
+        let fold_ba = build_boundary_fold(&source, &[w7, w9]).unwrap();
+
+        assert_eq!(fold_ab, fold_ba);
+        assert_eq!(fold_ab.len(), 2);
+        assert!(
+            fold_ab[0].0 < fold_ab[1].0,
+            "the fold is emitted ascending by source position"
         );
     }
 }

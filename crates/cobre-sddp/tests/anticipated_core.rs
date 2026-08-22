@@ -8048,3 +8048,354 @@ mod anticipated_ring_axis_regressions {
         }
     }
 }
+
+mod anticipated_no_boundary_fixed_value_inertness {
+    //! Pins `.claude/rules/sddp.md`'s "no-boundary inertness" contract: a
+    //! declared class-4 fixed post-horizon value with no `config.policy.boundary`
+    //! must never reach any LP or output cost.
+    //!
+    //! ## Fixture
+    //!
+    //! A `min_mw == max_mw` replay deck: the anticipated plant's own
+    //! delivery-stage generation column is pinned to [`REPLAY_MW`] with no
+    //! optimization freedom, so a class-4 leak into the LP would perturb
+    //! `final_lb` directly rather than being reabsorbed by unrelated slack.
+    //! Two stages, `LeadStages(1)`, no hydro, no stochastic noise, no
+    //! post-study stages, no `config.policy.boundary`. The class-4 window
+    //! starts exactly at the study horizon end (`start_date >= horizon_end`).
+    //!
+    //! Training two otherwise-identical decks that differ only in the class-4
+    //! window's `value_mw` (non-zero vs. zeroed) and comparing `final_lb`
+    //! bit-for-bit is a stronger check than a closed-form pin against a single
+    //! deck: it directly measures the fixed value's effect on the solved cost
+    //! rather than an absolute number that could coincidentally match.
+
+    use cobre_core::entities::{bus::DeficitSegment, thermal::AnticipatedConfig};
+    use cobre_core::scenario::LoadModel;
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    };
+    use cobre_io::config::TrainingSelection;
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal,
+    };
+
+    const N_STAGES: usize = 2;
+    const K_MAX: usize = 1;
+    const BLOCK_HOURS: f64 = 1.0;
+
+    /// The single in-study decision (stage 0) targets delivery at this stage.
+    const DELIVERY_STAGE: usize = 1;
+
+    /// Forced replay generation (MW): pinned `min == max` at [`DELIVERY_STAGE`],
+    /// leaving the anticipated plant zero optimization freedom.
+    const REPLAY_MW: f64 = 40.0;
+
+    /// $/MWh, booked once on the decision column.
+    const C_A: f64 = 10.0;
+
+    /// Non-zero class-4 fixed post-horizon value (MW); the study under test
+    /// declares no boundary, so this must never move `final_lb`.
+    const CLASS4_VALUE_MW: f64 = 77.0;
+
+    const ANTICIPATED_ID: EntityId = EntityId(2);
+    const BUS_ID: EntityId = EntityId(1);
+    const THERMAL_IDX_ANT: usize = 0;
+
+    /// Build the deck. `class4_value_mw` is the only input that varies between
+    /// the two trainings the test compares.
+    fn build_system(class4_value_mw: f64) -> cobre_core::System {
+        use chrono::{NaiveDate, TimeDelta};
+
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(index as i64)
+        };
+        let horizon_end = stage_date(N_STAGES);
+
+        let bus = make_bus(
+            BUS_ID,
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 1000.0,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+
+        let thermal_ant = make_thermal(
+            ANTICIPATED_ID,
+            ThermalSpec {
+                name: "T_ant".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: REPLAY_MW,
+                cost_per_mwh: C_A,
+                anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        );
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: BLOCK_HOURS,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: false,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+
+        // Load matches the forced replay exactly at the delivery stage and is
+        // zero at the decision stage — the always-active fishing row forces the
+        // anticipated column's own generation to zero there — so no backup
+        // thermal is needed to balance either stage.
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: BUS_ID,
+                stage_id: i as i32,
+                mean_mw: if i == DELIVERY_STAGE { REPLAY_MW } else { 0.0 },
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: K_MAX,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds::default(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        // `thermal_block_base` at the delivery stage sets the DECISION column's
+        // own [min, max] (delivery-anchored read); pinning it `REPLAY_MW ==
+        // REPLAY_MW` is the "min_mw == max_mw replay deck" the no-reject
+        // contract names. Every other axis slot stays permissive — the
+        // decision stage's own generation is forced to zero by the
+        // always-active fishing row regardless of its bounds.
+        let thermal_axis = N_STAGES + K_MAX;
+        for s in 0..thermal_axis {
+            *bounds.thermal_bounds_mut(THERMAL_IDX_ANT, s) =
+                ThermalStageBounds { cost_per_mwh: C_A };
+            *bounds.thermal_block_base_mut(THERMAL_IDX_ANT, s) = if s == DELIVERY_STAGE {
+                ThermalBlockBounds {
+                    min_generation_mw: REPLAY_MW,
+                    max_generation_mw: REPLAY_MW,
+                }
+            } else {
+                ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: REPLAY_MW,
+                }
+            };
+        }
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        // The class-4 window starts exactly at the horizon end — strictly past
+        // every in-study stage, so `StageCalendar::coverage` (the ring-seed read
+        // at initial-state construction) assigns it zero coverage on every
+        // in-study stage: it is structurally invisible to the ring regardless of
+        // `boundary_present`.
+        let initial_conditions = InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
+                thermal_id: ANTICIPATED_ID,
+                start_date: horizon_end,
+                end_date: horizon_end + TimeDelta::days(30),
+                value_mw: class4_value_mw,
+            }],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal_ant])
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid")
+    }
+
+    /// `PolicyConfig::default()` leaves `boundary: None`, so `boundary_present
+    /// == false` and the class-4 fold path (confined to `load_boundary_cuts`)
+    /// never runs.
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    fn train_final_lb(class4_value_mw: f64) -> f64 {
+        let system = build_system(class4_value_mw);
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        outcome.result.final_lb
+    }
+
+    /// `.claude/rules/sddp.md`'s "no-boundary inertness": a `min_mw == max_mw`
+    /// replay-shaped study with a declared non-zero class-4 fixed post-horizon
+    /// value and no boundary trains to the SAME `final_lb` as the identical
+    /// study with that value zeroed.
+    #[test]
+    fn no_boundary_nonzero_fixed_value_leaves_solved_cost_untouched() {
+        let lb_nonzero = train_final_lb(CLASS4_VALUE_MW);
+        let lb_zeroed = train_final_lb(0.0);
+
+        assert!(
+            lb_nonzero.is_finite(),
+            "final_lb must be finite; got {lb_nonzero}"
+        );
+        assert_eq!(
+            lb_nonzero.to_bits(),
+            lb_zeroed.to_bits(),
+            "a declared class-4 fixed post-horizon value with no boundary must \
+             leave the solved cost untouched: nonzero = {lb_nonzero}, zeroed = {lb_zeroed}",
+        );
+    }
+}

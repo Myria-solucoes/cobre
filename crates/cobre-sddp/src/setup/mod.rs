@@ -1627,14 +1627,18 @@ fn warn_on_sub_stage_lead(thermals: &[&Thermal], resolution: &AnticipatedResolut
 
 /// Emit a single setup-time advisory when the resolved anticipated axis
 /// carries at least one post-study-targeted delivery — a plant's decider names
-/// an in-study decision stage for some delivery target `m >= n_stages` — but
-/// the study declares no `config.policy.boundary`: that delivery prices at
-/// zero terminal value until a boundary is loaded. Never a reject: a
-/// `min_mw == max_mw` replay deck is a legitimate use of a fixed post-horizon
-/// profile with no boundary; silence would instead hide a modelling error
-/// where the user expected the commitment valued against a real future.
-/// Mirrors [`warn_on_sub_stage_lead`]'s channel and once-at-setup shape, naming
-/// every affected plant in the one emitted event.
+/// an in-study decision stage for some delivery target `m >= n_stages`
+/// (class-3), or a plant declares at least one non-zero fixed post-horizon
+/// (class-4) window in `past_anticipated_commitments` — but the study
+/// declares no `config.policy.boundary`: both price at zero terminal value
+/// until a boundary is loaded. Never a reject: a `min_mw == max_mw` replay
+/// deck is a legitimate use of a fixed post-horizon profile with no boundary;
+/// silence would instead hide a modelling error where the user expected the
+/// commitment valued against a real future. An all-zero window (including the
+/// horizon-end 0 MW stub) never qualifies — a zero value is provably inert.
+/// Mirrors [`warn_on_sub_stage_lead`]'s channel and once-at-setup shape (a
+/// distinct condition from it and from the class-3 arm, sharing only the
+/// event), naming every affected plant in the one emitted event.
 fn warn_on_boundary_absent_post_study_delivery(
     system: &System,
     anticipated_thermal_indices: &[usize],
@@ -1646,13 +1650,26 @@ fn warn_on_boundary_absent_post_study_delivery(
     }
     let n_stages = bucket_topology::study_stage_durations(system).len();
     let thermals = system.thermals();
+    let horizon_end = system
+        .stages()
+        .iter()
+        .rfind(|s| s.id >= 0)
+        .map(|s| s.end_date);
+    let past = &system.initial_conditions().past_anticipated_commitments;
+    let has_nonzero_fixed = |thermal_id: i32| -> bool {
+        horizon_end.is_some_and(|end| {
+            past.iter()
+                .any(|w| w.thermal_id.0 == thermal_id && w.start_date >= end && w.value_mw != 0.0)
+        })
+    };
     let affected: Vec<String> = anticipated_thermal_indices
         .iter()
         .zip(&resolution.per_plant)
-        .filter(|(_, point)| {
-            point.decider.get(n_stages..).is_some_and(|post_study| {
+        .filter(|&(&t_idx, point)| {
+            let class3 = point.decider.get(n_stages..).is_some_and(|post_study| {
                 post_study.iter().any(|c| c.is_some_and(|t| t < n_stages))
-            })
+            });
+            class3 || has_nonzero_fixed(thermals[t_idx].id.0)
         })
         .map(|(&t_idx, _)| format!("{} ({})", thermals[t_idx].id, thermals[t_idx].name))
         .collect();

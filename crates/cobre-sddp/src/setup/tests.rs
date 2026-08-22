@@ -8552,6 +8552,140 @@ fn warn_on_boundary_absent_post_study_delivery_silent_when_boundary_present() {
     );
 }
 
+/// A plant with NO class-3 reach (no post-study stages declared, so
+/// `decider.get(n_stages..)` is empty) that declares one non-zero class-4
+/// fixed post-horizon window (`start_date >= horizon_end`) and no boundary:
+/// exactly one advisory fires and names it.
+#[test]
+fn warn_on_boundary_absent_fires_for_nonzero_fixed_value_without_boundary() {
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let system = minimal_system_with_anticipated_and_commitments(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        None,
+        vec![AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            value_mw: 42.0,
+        }],
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, false);
+    });
+    let recorded = messages.lock().unwrap();
+    let relevant: Vec<&str> = recorded
+        .iter()
+        .filter(|msg| msg.contains("post-study-targeted delivery"))
+        .map(std::string::String::as_str)
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        1,
+        "expected exactly one boundary-absent advisory for the non-zero fixed value, got: {recorded:?}"
+    );
+    assert!(
+        relevant[0].contains("T1"),
+        "advisory must name the plant, got: {}",
+        relevant[0]
+    );
+}
+
+/// The same no-class-3-reach fixture, but the plant's only post-horizon
+/// declaration is an all-zero tiling (the mandatory horizon-end 0 MW stub):
+/// a zero value is provably inert, so no advisory fires.
+#[test]
+fn warn_on_boundary_absent_silent_for_all_zero_stub_without_boundary() {
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let system = minimal_system_with_anticipated_and_commitments(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        None,
+        vec![AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            value_mw: 0.0,
+        }],
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, false);
+    });
+    let recorded = messages.lock().unwrap();
+    assert!(
+        recorded
+            .iter()
+            .all(|msg| !msg.contains("post-study-targeted delivery")),
+        "an all-zero fixed post-horizon window must not trigger the advisory; got: {recorded:?}"
+    );
+}
+
+/// A plant hitting BOTH the class-3 condition (the `_fires_once_when_boundary_absent`
+/// fixture) AND a non-zero class-4 fixed window: the merged predicate still
+/// names it exactly once in the one emitted event, never a duplicate.
+#[test]
+fn warn_on_boundary_absent_names_dual_cause_plant_once() {
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            duration_hours: 744.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated_and_commitments(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        Some(post_study),
+        vec![AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            value_mw: 42.0,
+        }],
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, false);
+    });
+    let recorded = messages.lock().unwrap();
+    let relevant: Vec<&str> = recorded
+        .iter()
+        .filter(|msg| msg.contains("post-study-targeted delivery"))
+        .map(std::string::String::as_str)
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        1,
+        "both causes on one plant must still emit a single merged event, got: {recorded:?}"
+    );
+    assert!(
+        relevant[0].contains("1 anticipated thermal(s)"),
+        "the plant must be counted exactly once, not once per cause; got: {}",
+        relevant[0]
+    );
+    assert_eq!(
+        relevant[0].matches("T1").count(),
+        1,
+        "the plant must be named exactly once in the merged list, got: {}",
+        relevant[0]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // LeadTime fan-out — rejected at setup, not silently dropped, no panic
 // ---------------------------------------------------------------------------

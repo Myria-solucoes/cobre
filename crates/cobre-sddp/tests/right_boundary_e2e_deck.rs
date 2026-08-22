@@ -424,6 +424,7 @@ mod anticipated_fanout_readback {
             source_state_dimension,
             &id86_manifest,
             &id86_intervals,
+            &[],
             None,
             1_000_000.0,
             &mut |_| {},

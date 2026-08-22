@@ -429,9 +429,18 @@ fn inject_ring_boundary(setup: &mut StudySetup, dir: &Path, beta: f64) {
     coefficients[slot] = beta;
     write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
-    let boundary_cuts =
-        load_boundary_cuts(dir, 0, state_dimension, &[], &[], None, 1.0, &mut |_msg| {})
-            .expect("boundary cut must load");
+    let boundary_cuts = load_boundary_cuts(
+        dir,
+        0,
+        state_dimension,
+        &[],
+        &[],
+        &[],
+        None,
+        1.0,
+        &mut |_msg| {},
+    )
+    .expect("boundary cut must load");
     inject_boundary_cuts(setup, &boundary_cuts);
 }
 

@@ -41,10 +41,10 @@ use chrono::NaiveDate;
 use cobre_core::entities::thermal::AnticipatedConfig;
 use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, StageStateConfig, Transition};
 use cobre_core::{
-    BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, HorizonGraph,
-    HydroBlockBounds, HydroStageBounds, InitialConditions, LineBlockBounds, PostStudyStage,
-    PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds, System,
-    SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId,
+    HorizonGraph, HydroBlockBounds, HydroStageBounds, InitialConditions, LineBlockBounds,
+    PostStudyStage, PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds,
+    System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_io::{
     FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord,
@@ -430,9 +430,18 @@ fn inject_ring_boundary(setup: &mut cobre_sddp::StudySetup, dir: &Path) {
     coefficients[slot] = BETA;
     write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
-    let boundary_cuts =
-        load_boundary_cuts(dir, 0, state_dimension, &[], &[], None, 1.0, &mut |_msg| {})
-            .expect("boundary cut must load");
+    let boundary_cuts = load_boundary_cuts(
+        dir,
+        0,
+        state_dimension,
+        &[],
+        &[],
+        &[],
+        None,
+        1.0,
+        &mut |_msg| {},
+    )
+    .expect("boundary cut must load");
     inject_boundary_cuts(setup, &boundary_cuts);
 }
 
@@ -801,4 +810,184 @@ fn no_boundary_leaves_theta_zero_with_ring_columns_present() {
         theta.abs() < 1e-9,
         "with no boundary cut, theta must be 0 regardless of the committed MW: got {theta}"
     );
+}
+
+// ── accessor: the study's fixed post-horizon (class-4) commitment windows ──
+
+/// Second anticipated thermal, for the declaration-order-invariance fixture.
+const THERMAL_ID_B: EntityId = EntityId(3);
+/// Generation cap admitting an in-study (class-2) commitment seed.
+const CAPABILITY_MAX_MW: f64 = 100.0;
+
+/// Zero-default bounds parameterized only by `n_thermals`; the per-block
+/// thermal cap is [`CAPABILITY_MAX_MW`] so an in-study class-2 seed is
+/// admissible.
+fn bounds_for(n_thermals: usize) -> ResolvedBounds {
+    ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 0,
+            n_thermals,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: 2,
+            k_max: 1,
+        },
+        &BoundsDefaults {
+            hydro: HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 0.0,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            },
+            hydro_block: HydroBlockBounds::default(),
+            thermal: ThermalStageBounds { cost_per_mwh: 1.0 },
+            thermal_block: ThermalBlockBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: CAPABILITY_MAX_MW,
+            },
+            line_block: LineBlockBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping_block: PumpingBlockBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract_block: ContractBlockBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    )
+}
+
+/// Build an accessor-test system: each id in `thermal_ids` (given declaration
+/// order — the builder canonicalizes) is a `LeadStages(1)` anticipated thermal
+/// on the shared bus; `commitments` seeds `past_anticipated_commitments`.
+/// Independent of the ring-pricing fixtures above (its own thermal count and
+/// bounds).
+fn build_accessor_system(
+    thermal_ids: &[EntityId],
+    commitments: Vec<AnticipatedCommitmentHistory>,
+) -> System {
+    let bus = make_bus(BUS_ID, BusSpec::default());
+    let thermals: Vec<_> = thermal_ids
+        .iter()
+        .map(|&id| {
+            make_thermal(
+                id,
+                ThermalSpec {
+                    bus_id: BUS_ID,
+                    cost_per_mwh: 1.0,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: CAPABILITY_MAX_MW,
+                    anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let initial_conditions = InitialConditions {
+        past_anticipated_commitments: commitments,
+        ..Default::default()
+    };
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .thermals(thermals)
+        .stages(stages())
+        .bounds(bounds_for(thermal_ids.len()))
+        .penalties(penalties())
+        .initial_conditions(initial_conditions)
+        .build()
+        .expect("accessor fixture System must build")
+}
+
+/// An in-study (class-2) commitment window covering stage 0 for `thermal_id`.
+fn class_two_window(thermal_id: EntityId, value_mw: f64) -> AnticipatedCommitmentHistory {
+    AnticipatedCommitmentHistory {
+        thermal_id,
+        start_date: study_start(),
+        end_date: study_start() + chrono::TimeDelta::days(31),
+        value_mw,
+    }
+}
+
+/// A post-horizon (class-4) commitment window starting at the horizon end for
+/// `thermal_id`.
+fn class_four_window(thermal_id: EntityId, value_mw: f64) -> AnticipatedCommitmentHistory {
+    AnticipatedCommitmentHistory {
+        thermal_id,
+        start_date: study_end(),
+        end_date: study_end() + chrono::TimeDelta::days(30),
+        value_mw,
+    }
+}
+
+/// An anticipated thermal declaring both an in-study (class-2) and a
+/// post-horizon (class-4) commitment window: the accessor returns only the
+/// class-4 window (`start_date >= horizon_end`), omitting the class-2 one.
+#[test]
+fn terminal_fixed_post_horizon_windows_selects_only_class_four() {
+    let class_two = class_two_window(THERMAL_ID, 40.0);
+    let class_four = class_four_window(THERMAL_ID, 55.0);
+    let commitments = vec![class_two.clone(), class_four.clone()];
+
+    let setup = build_setup_in_code(
+        build_accessor_system(&[THERMAL_ID], commitments.clone()),
+        &config(),
+    );
+    let system = build_accessor_system(&[THERMAL_ID], commitments);
+
+    let windows = setup.build_terminal_fixed_post_horizon_windows(&system);
+
+    assert_eq!(
+        windows,
+        vec![class_four],
+        "only the post-horizon (class-4) window is returned"
+    );
+    assert!(
+        !windows.contains(&class_two),
+        "the in-study (class-2) window must be omitted"
+    );
+}
+
+/// Two systems differing only in the declaration order of their anticipated
+/// thermals return identical class-4 window lists (declaration-order
+/// invariance): the accessor iterates `thermals()`, which the builder sorts
+/// canonically, so the emitted order tracks canonical plant order, never the
+/// declaration order.
+#[test]
+fn terminal_fixed_post_horizon_windows_declaration_order_invariant() {
+    let commitments = vec![
+        class_four_window(THERMAL_ID, 55.0),
+        class_four_window(THERMAL_ID_B, 70.0),
+    ];
+
+    let setup_ab = build_setup_in_code(
+        build_accessor_system(&[THERMAL_ID, THERMAL_ID_B], commitments.clone()),
+        &config(),
+    );
+    let system_ab = build_accessor_system(&[THERMAL_ID, THERMAL_ID_B], commitments.clone());
+    let windows_ab = setup_ab.build_terminal_fixed_post_horizon_windows(&system_ab);
+
+    let setup_ba = build_setup_in_code(
+        build_accessor_system(&[THERMAL_ID_B, THERMAL_ID], commitments.clone()),
+        &config(),
+    );
+    let system_ba = build_accessor_system(&[THERMAL_ID_B, THERMAL_ID], commitments);
+    let windows_ba = setup_ba.build_terminal_fixed_post_horizon_windows(&system_ba);
+
+    assert_eq!(windows_ab, windows_ba, "declaration-order invariant");
+    assert_eq!(
+        windows_ab.len(),
+        2,
+        "both plants' class-4 windows are returned"
+    );
+    assert_eq!(
+        windows_ab[0].thermal_id, THERMAL_ID,
+        "canonical plant order: thermal 2 before thermal 3"
+    );
+    assert_eq!(windows_ab[1].thermal_id, THERMAL_ID_B);
 }

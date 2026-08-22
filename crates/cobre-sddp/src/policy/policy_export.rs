@@ -27,6 +27,7 @@ use cobre_io::output::policy::{
 use crate::SddpError;
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
+use crate::lead_time::PointResolution;
 use crate::lp_builder::delivery_ring::DeliveryRing;
 use crate::setup::{
     NodeGraph, NodePos, extended_delivery_stages, post_study_delivery_calendar,
@@ -43,34 +44,46 @@ pub(crate) const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 /// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
 pub(crate) const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
 
-/// The ring slot's modular delivery target `m` at study-stage index
-/// `current_stage_idx`: the next `m >= current_stage_idx` whose residue
-/// `m mod k_max` equals `slot_idx`
+/// The ring slot's RING-AXIS delivery target `r` at study-stage index
+/// `current_stage_idx`: the next `r >= current_stage_idx` whose residue
+/// `r mod k_max` equals `slot_idx`
 /// (`delta = (slot_idx + k_max − current_stage_idx mod k_max) mod k_max`,
-/// `m = current_stage_idx + delta`). Sole owner of the residue arithmetic that a
-/// ring slot's `delivery_date` ([`build_stage_entity_manifest`]) and its target
-/// interval ([`build_stage_entity_delivery_intervals`]) both derive from — a
-/// second copy of the formula is how the date and the interval start to
-/// disagree, fanning out an undated slot or zeroing a dated one.
+/// `r = current_stage_idx + delta`). The residue search runs on the ring axis;
+/// [`reachable_delivery_target`] maps `r` to the physical delivery target
+/// through [`PointResolution::physical_target`]. Sole owner of the residue
+/// arithmetic that a ring slot's `delivery_date`
+/// ([`build_stage_entity_manifest`]) and its target interval
+/// ([`build_stage_entity_delivery_intervals`]) both derive from — a second copy
+/// of the formula is how the date and the interval start to disagree, fanning
+/// out an undated slot or zeroing a dated one.
 fn modular_delivery_target(slot_idx: usize, current_stage_idx: usize, k_max: usize) -> usize {
     let delta = (slot_idx + k_max - current_stage_idx % k_max) % k_max;
     current_stage_idx + delta
 }
 
-/// The reachable ring slot's [`modular_delivery_target`], or `None` when the slot
-/// is structural padding beyond the plant's own lead (`slot_idx >= k_i`, frozen
-/// `[0, 0]`, not a real commitment even when its target still lands in-horizon).
-/// The manifest date ([`build_stage_entity_manifest`]) and the delivery interval
-/// ([`build_stage_entity_delivery_intervals`]) both compose reachability with the
-/// modular target through this one helper, so the two cannot drift apart — the
-/// `dated ⟺ Some(interval)` correspondence they document holds by construction.
+/// The reachable ring slot's PHYSICAL delivery target: [`modular_delivery_target`]'s
+/// ring-axis index mapped through [`PointResolution::physical_target`], or `None`
+/// when the slot is structural padding beyond the plant's own lead
+/// (`slot_idx >= k_i`, frozen `[0, 0]`, not a real commitment even when its
+/// target still lands in-horizon). The manifest date
+/// ([`build_stage_entity_manifest`]) and the delivery interval
+/// ([`build_stage_entity_delivery_intervals`]) both compose reachability and the
+/// physical mapping through this one helper, so the two cannot drift apart —
+/// the `dated ⟺ Some(interval)` correspondence they document holds by
+/// construction. Dating on the raw ring-axis index instead of mapping it
+/// through `physical_target` is the wrong-but-compiling alternative: it lands
+/// on the excised fixed post-horizon window's stub stage whenever a plant
+/// declares one ([`PointResolution::ring_index`]).
 fn reachable_delivery_target(
     slot_idx: usize,
     k_i: usize,
     current_stage_idx: usize,
     k_max: usize,
+    resolution: &PointResolution,
 ) -> Option<usize> {
-    (slot_idx < k_i).then(|| modular_delivery_target(slot_idx, current_stage_idx, k_max))
+    (slot_idx < k_i).then(|| {
+        resolution.physical_target(modular_delivery_target(slot_idx, current_stage_idx, k_max))
+    })
 }
 
 /// Day-01 delivery anchor of the stage `current_stage_idx + offset` against
@@ -167,10 +180,11 @@ pub fn build_stage_entity_manifest(
     let anticipated_slot = |offset: usize| -> EntitySlot {
         let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
         let plant = anticipated_thermals[plant_pos];
-        // `slot_idx` is the ring's modular residue `m mod k_max`, NOT a
-        // distance-to-maturity: the delivery stage is the next `m >= t` in that
-        // residue class (via `reachable_delivery_target`), so the slot maturing at
-        // `t` is `t mod k_max` delivering at `m = t` — matching the producer
+        // `slot_idx` is the ring's modular residue, NOT a distance-to-maturity:
+        // `reachable_delivery_target` finds the next RING-AXIS target `r >= t`
+        // in that residue class, then maps `r` to the physical delivery `m` via
+        // `PointResolution::physical_target`, so the slot maturing at `t` is
+        // `t mod k_max` delivering at `m = t` — matching the producer
         // `fill_anticipated_fishing_entries`. Dating the slot at `t + slot_idx`
         // (the retired shift-ring form) is wrong whenever `t mod k_max != 0`.
         // Reachability uses the SAME per-plant bound the LP masking itself uses
@@ -180,7 +194,14 @@ pub fn build_stage_entity_manifest(
         let k_i = global_layout.anticipated_lead_stages[plant_pos];
         let delivery_date = current_stage_idx
             .and_then(|t| {
-                reachable_delivery_target(slot_idx, k_i, t, global_layout.k_max).map(|m| (t, m))
+                reachable_delivery_target(
+                    slot_idx,
+                    k_i,
+                    t,
+                    global_layout.k_max,
+                    &global_layout.anticipated_resolution.per_plant[plant_pos],
+                )
+                .map(|m| (t, m))
             })
             .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |(t, m)| {
                 // Defensive cross-check against the resolver (the single owner
@@ -495,6 +516,7 @@ pub fn build_stage_entity_delivery_intervals(
                         k_i,
                         current_stage_idx?,
                         global_layout.k_max,
+                        &global_layout.anticipated_resolution.per_plant[plant],
                     )?;
                     m.checked_sub(n_study)
                         .and_then(|post_idx| post_study_calendar.get(post_idx))
@@ -819,7 +841,8 @@ mod tests {
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
         ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, EntitySlot, HashMap,
         build_stage_entity_delivery_intervals, build_stage_entity_manifest,
-        build_stage_states_payloads, reserve_boundary_inflow_lag_slots, year_month_day_anchor,
+        build_stage_states_payloads, modular_delivery_target, reachable_delivery_target,
+        reserve_boundary_inflow_lag_slots, year_month_day_anchor,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
@@ -1043,9 +1066,43 @@ mod tests {
         }
     }
 
+    /// `system_2h_1ant`'s single anticipated plant (`LeadStages(2)`) resolved
+    /// against its one-stage delivery axis (`n_decision = n_delivery = 1`) —
+    /// `g = 0`, so attaching it is byte-neutral for every non-dating
+    /// assertion, but every ring slot's `reachable_delivery_target` needs a
+    /// real per-plant [`PointResolution`] to index into.
+    fn single_plant_lead2_one_stage_resolution() -> AnticipatedResolution {
+        AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0],
+                n_decision: 1,
+                n_delivery: 1,
+            },
+        )
+    }
+
     /// The `N=2, L=2, A=1, k_max=2` global layout the fixture system maps onto.
     fn layout_2h_1ant() -> StateSpace {
-        test_support::state_layout_full(2, 2, 1, 2, vec![2])
+        let mut state = test_support::state_layout_full(2, 2, 1, 2, vec![2]);
+        state.set_anticipated_resolution(single_plant_lead2_one_stage_resolution());
+        state
+    }
+
+    /// The `N=2, L=2, B=2, A=1, k_max=2` global layout with two travel-time
+    /// buckets, sharing [`layout_2h_1ant`]'s attached single-plant resolution.
+    fn layout_2h_2buckets_1ant() -> StateSpace {
+        let mut state = test_support::state_layout_with_transit_buckets(
+            2,
+            2,
+            2,
+            vec![(0, 1), (1, 2)],
+            1,
+            2,
+            vec![2],
+        );
+        state.set_anticipated_resolution(single_plant_lead2_one_stage_resolution());
+        state
     }
 
     /// All-enabled projection: length 8 (2 storage + 4 lag + 2 anticipated), with
@@ -1111,15 +1168,7 @@ mod tests {
     #[test]
     fn bucket_slots_classify_as_transit_bucket_with_downstream_id_and_lag() {
         let system = system_2h_1ant((None, None), (None, None), None);
-        let global = test_support::state_layout_with_transit_buckets(
-            2,
-            2,
-            2,
-            vec![(0, 1), (1, 2)],
-            1,
-            2,
-            vec![2],
-        );
+        let global = layout_2h_2buckets_1ant();
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
@@ -1172,15 +1221,7 @@ mod tests {
             (None, None),
             Some(post_study_stages_from(post_study_start)),
         );
-        let global = test_support::state_layout_with_transit_buckets(
-            2,
-            2,
-            2,
-            vec![(0, 1), (1, 2)],
-            1,
-            2,
-            vec![2],
-        );
+        let global = layout_2h_2buckets_1ant();
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
@@ -1382,6 +1423,57 @@ mod tests {
             .post_study_stages(Some(post_study))
             .build()
             .expect("valid 3-stage lead-3 system with post-study calendar")
+    }
+
+    /// `System` with 1 hydro and 1 anticipated thermal (`LeadStages(7)`) over
+    /// four consecutive monthly stages 2024-01..2024-04 (ids 0..3), carrying
+    /// `post_study`. With `n_decision = 4` study stages and a lead reaching 7
+    /// stages ahead, [`AnticipatedResolution::resolve`] derives a ring depth
+    /// `k_max = 4` and a 3-wide excised fixed post-horizon window right after
+    /// the study — the `two_plant_resolution_with_fixed_window` epic-01
+    /// fixture shape (`n_decision = 4, g = 3, k_max = 4`), reached here through
+    /// the public resolver rather than a hand-built `PointResolution`.
+    fn system_1h_1ant_4monthly_lead7(post_study: PostStudyStages) -> System {
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 4,
+                k_max: 7,
+            },
+            &bounds_defaults(),
+        );
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![make_hydro(1, None, None)])
+            .thermals(vec![anticipated_thermal(1, 7)])
+            .stages(vec![
+                make_stage_ym(0, 0, 2024, 1),
+                make_stage_ym(1, 1, 2024, 2),
+                make_stage_ym(2, 2, 2024, 3),
+                make_stage_ym(3, 3, 2024, 4),
+            ])
+            .bounds(bounds)
+            .post_study_stages(Some(post_study))
+            .build()
+            .expect("valid 4-stage lead-7 system with post-study calendar")
+    }
+
+    /// A post-study calendar of consecutive `(year, month)` monthly stages.
+    fn post_study_stages_from_months(months: &[(i32, u32)]) -> PostStudyStages {
+        PostStudyStages {
+            stages: months
+                .iter()
+                .map(|&(year, month)| PostStudyStage {
+                    start_date: chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap(),
+                    duration_hours: 720.0,
+                })
+                .collect(),
+            thermal_bounds: Vec::new(),
+        }
     }
 
     /// An `AnticipatedThermalState` ring slot's `delivery_date` is the `YYYYMMDD`
@@ -1647,6 +1739,154 @@ mod tests {
         assert_eq!(intervals[4], None, "ring slot 2 (m=2) matures in-study");
         assert_eq!(intervals[0], None, "storage carries no interval");
         assert_eq!(intervals[1], None, "lag carries no interval");
+    }
+
+    // -- Ring-axis excision: dating maps through `physical_target` --
+
+    /// With a `g = 3` fixed post-horizon window (a `LeadStages(7)` lead over
+    /// `n_decision = 4` study stages derives `k_max = 4`), the terminal-stage
+    /// ring slots whose ring-axis residue search lands past the excised
+    /// window date at their REAL physical post-study stage — never the
+    /// excised stub the raw ring-axis index alone would name.
+    #[test]
+    fn date_ring_slots_in_excised_space_maps_through_physical_target() {
+        let post_study = post_study_stages_from_months(&[
+            (2024, 5),
+            (2024, 6),
+            (2024, 7),
+            (2024, 8),
+            (2024, 9),
+            (2024, 10),
+        ]);
+        let system = system_1h_1ant_4monthly_lead7(post_study.clone());
+
+        let resolution = AnticipatedResolution::resolve(
+            &[LeadTime::Stages(7)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 10],
+                n_decision: 4,
+                n_delivery: 10,
+            },
+        );
+        assert_eq!(
+            resolution.k_max, 4,
+            "a lead-7 plant over 4 study stages must derive ring depth k_max=4"
+        );
+        let point = &resolution.per_plant[0];
+        assert_eq!(
+            point.ring_index(4),
+            None,
+            "m=4 sits inside the excised window"
+        );
+        assert_eq!(
+            point.ring_index(5),
+            None,
+            "m=5 sits inside the excised window"
+        );
+        assert_eq!(
+            point.ring_index(6),
+            None,
+            "m=6 sits inside the excised window"
+        );
+        assert_eq!(
+            point.physical_target(4),
+            7,
+            "ring index 4 maps past the window to m=7"
+        );
+        assert_eq!(point.physical_target(5), 8);
+        assert_eq!(point.physical_target(6), 9);
+
+        let k_max = resolution.k_max;
+        let mut global = test_support::state_layout_full(1, 1, 1, k_max, vec![k_max]);
+        global.set_anticipated_resolution(resolution);
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        // Terminal study stage (index 3, 2024-04).
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 3);
+        let intervals = build_stage_entity_delivery_intervals(&system, &global, &projection, 3);
+        let calendar = post_study_calendar_stages(&post_study.stages);
+
+        // Layout N=1, L=1, A=1, k_max=4: storage j=0, lag j=1, anticipated j=2..6.
+        assert_eq!(manifest.len(), 6);
+        assert_eq!(intervals.len(), 6);
+
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(
+            manifest[2].delivery_date, 20240801,
+            "ring slot 0 (ring index 4) dates at the real physical target m=7 (2024-08), \
+             not the excised 2024-05 stub"
+        );
+        assert_eq!(
+            intervals[2],
+            Some((calendar[3].start_date, calendar[3].end_date)),
+            "the interval fans out over the same real physical stage as the date"
+        );
+
+        assert_eq!(manifest[3].subindex, 1);
+        assert_eq!(
+            manifest[3].delivery_date, 20240901,
+            "ring slot 1 (ring index 5) dates at the real physical target m=8 (2024-09), \
+             not the excised 2024-06 stub"
+        );
+        assert_eq!(
+            intervals[3],
+            Some((calendar[4].start_date, calendar[4].end_date))
+        );
+
+        assert_eq!(manifest[4].subindex, 2);
+        assert_eq!(
+            manifest[4].delivery_date, 20241001,
+            "ring slot 2 (ring index 6) dates at the real physical target m=9 (2024-10), \
+             not the excised 2024-07 stub"
+        );
+        assert_eq!(
+            intervals[4],
+            Some((calendar[5].start_date, calendar[5].end_date))
+        );
+
+        // Ring slot 3 (residue 3 == t mod k_max) matures NOW, in-study: its
+        // ring-axis target `r = 3` sits below `n_decision`, so `physical_target`
+        // is the identity and it keeps its own terminal-stage anchor with no
+        // fanned interval — `dated ⟺ Some(interval)` still pins it in-study.
+        assert_eq!(manifest[5].subindex, 3);
+        assert_eq!(
+            manifest[5].delivery_date, 20240401,
+            "ring slot 3 (ring index 3, below n_decision) matures now at the terminal stage"
+        );
+        assert_eq!(
+            intervals[5], None,
+            "an in-study-maturing slot carries no post-study interval"
+        );
+    }
+
+    /// With no fixed post-horizon window (`g = 0`), `physical_target` is the
+    /// identity, so `reachable_delivery_target` returns exactly
+    /// `modular_delivery_target`'s ring-axis index for every reachable slot —
+    /// this ticket's byte-neutrality obligation, holding for every existing
+    /// (`g = 0`) deck.
+    #[test]
+    fn reachable_delivery_target_identity_when_no_fixed_window() {
+        let resolution = AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
+        );
+        let point = &resolution.per_plant[0];
+        let k_max = resolution.k_max;
+
+        for t in 0..3 {
+            for slot_idx in 0..k_max {
+                assert_eq!(
+                    reachable_delivery_target(slot_idx, k_max, t, k_max, point),
+                    Some(modular_delivery_target(slot_idx, t, k_max)),
+                    "slot {slot_idx} at stage {t}: g=0 must be byte-neutral with the \
+                     pre-amendment ring formula"
+                );
+            }
+        }
     }
 
     // -- build_stage_states_payloads: node-vs-pool manifest indexing --

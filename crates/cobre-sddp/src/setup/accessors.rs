@@ -1,6 +1,7 @@
 //! Accessor methods and context builders for [`StudySetup`].
 
 use chrono::NaiveDate;
+use cobre_core::AnticipatedCommitmentHistory;
 use cobre_core::System;
 use cobre_core::commissioning::commissioning_active;
 use cobre_core::scenario::SamplingScheme;
@@ -171,6 +172,52 @@ impl StudySetup {
             &self.stage_data.cut_state_layouts[terminal_idx],
             stage_id,
         )
+    }
+
+    /// Build the study's fixed post-horizon (class-4) anticipated commitment
+    /// windows — declared post-study deliveries the terminal boundary FCF
+    /// prices by folding into each boundary cut's intercept — in canonical
+    /// anticipated-plant order, then per-plant ascending `start_date`.
+    ///
+    /// A window is class-4 iff its `start_date` is at or after the study
+    /// horizon end (the last study stage's `end_date`).
+    /// `past_anticipated_commitments` carries only pre-study-decided class-2
+    /// (in-study) and class-4 windows, and the calendar validation rejects any
+    /// window straddling into an in-study-decided/never-priced stage, so the
+    /// date threshold classifies unambiguously; the in-study (class-2) windows
+    /// are the ones the terminal boundary does not price and this accessor
+    /// omits.
+    ///
+    /// `system` is passed explicitly because [`StudySetup`] does not own it.
+    #[must_use]
+    pub fn build_terminal_fixed_post_horizon_windows(
+        &self,
+        system: &System,
+    ) -> Vec<AnticipatedCommitmentHistory> {
+        let Some(horizon_end) = system
+            .stages()
+            .iter()
+            .rfind(|s| s.id >= 0)
+            .map(|s| s.end_date)
+        else {
+            return Vec::new();
+        };
+        let ic = system.initial_conditions();
+        let mut windows = Vec::new();
+        for thermal in system.thermals() {
+            if thermal.anticipated_config.is_none() {
+                continue;
+            }
+            let mut plant_windows: Vec<AnticipatedCommitmentHistory> = ic
+                .past_anticipated_commitments
+                .iter()
+                .filter(|w| w.thermal_id == thermal.id && w.start_date >= horizon_end)
+                .cloned()
+                .collect();
+            plant_windows.sort_by_key(|w| w.start_date);
+            windows.extend(plant_windows);
+        }
+        windows
     }
 
     /// Number of stages in the planning horizon.

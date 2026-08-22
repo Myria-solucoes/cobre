@@ -215,6 +215,7 @@ fn reconcile_boundary(
     let state_dim = setup.fcf.state_dimension as u32;
     let current_manifest = setup.build_terminal_entity_manifest(system);
     let target_delivery_intervals = setup.build_terminal_anticipated_delivery_intervals(system);
+    let fixed_windows = setup.build_terminal_fixed_post_horizon_windows(system);
 
     let source_stage = if let Some(idx) = bp.source_stage {
         idx
@@ -240,6 +241,7 @@ fn reconcile_boundary(
         state_dim,
         &current_manifest,
         &target_delivery_intervals,
+        &fixed_windows,
         inflow_lag_depth,
         setup.stage_data.stage_templates.cost_scale_factor,
         &mut on_warning,

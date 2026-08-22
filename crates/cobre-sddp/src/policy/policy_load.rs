@@ -13,6 +13,7 @@
 //! [`FutureCostFunction::from_deserialized`]: crate::FutureCostFunction::from_deserialized
 
 use chrono::NaiveDate;
+use cobre_core::AnticipatedCommitmentHistory;
 use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::GraphManifest;
@@ -29,8 +30,8 @@ use crate::policy::policy_export::{
     ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
 };
 use crate::policy::reconcile::{
-    BoundaryReconciliationReport, build_rebind, build_reconciliation_report, decode_month_anchor,
-    overlap_hours, rebind_cut,
+    BoundaryReconciliationReport, build_boundary_fold, build_rebind, build_reconciliation_report,
+    decode_month_anchor, overlap_hours, rebind_cut,
 };
 use crate::setup::{NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
@@ -640,6 +641,17 @@ pub fn resolve_effective_inflow_lag_depth(
 /// manifest checks so the lag-depth-specific message wins over the generic
 /// `state_dimension` reject.
 ///
+/// `fixed_windows` are the current study's fixed post-horizon anticipated
+/// commitments (built via
+/// [`StudySetup::build_terminal_fixed_post_horizon_windows`](crate::StudySetup::build_terminal_fixed_post_horizon_windows)).
+/// When the manifest is verifiable,
+/// [`crate::policy::reconcile::build_boundary_fold`] folds their displacement
+/// value into each boundary cut's intercept on the RAW records, BEFORE
+/// `rescale_cut_records_for_load`, so the folded term rides both rescale
+/// transforms with the rest of the intercept; an empty fold leaves every
+/// intercept bit-identical, and an unverifiable manifest skips the fold (it
+/// shares the rebind's gate).
+///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] if:
@@ -650,6 +662,8 @@ pub fn resolve_effective_inflow_lag_depth(
 /// - The source stage's state dimension does not match `current_state_dimension`
 /// - A target storage or inflow-lag slot has no source counterpart under
 ///   identity reconciliation
+/// - A live anticipated source slot's `delivery_date` fails to decode to a real
+///   calendar month (propagated from the intercept fold, before the rebind)
 ///
 /// A dated anticipated target slot with no resolved `target_delivery_intervals`
 /// entry is NOT an error: it is an in-study ring slot (a within-horizon
@@ -661,6 +675,7 @@ pub fn load_boundary_cuts(
     current_state_dimension: u32,
     current_manifest: &[EntitySlot],
     target_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
+    fixed_windows: &[AnticipatedCommitmentHistory],
     effective_inflow_lag_depth: Option<u32>,
     loading_cost_scale_factor: f64,
     on_warning: &mut dyn FnMut(&str),
@@ -752,17 +767,39 @@ pub fn load_boundary_cuts(
     }
 
     let mut records = stage_result.cuts.clone();
+
+    let verifiable =
+        manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest, on_warning);
+
+    if verifiable {
+        // The fold reads SOURCE coefficients by source_pos and MUST run before rebind_cut
+        // replaces record.coefficients with the target-aligned vector; placed before rescale
+        // so the folded future-cost term rides both rescale transforms with the rest of the
+        // intercept.
+        let fold = build_boundary_fold(&stage_result.entity_manifest, fixed_windows)?;
+        if !fold.is_empty() {
+            for record in &mut records {
+                debug_assert_eq!(
+                    stage_result.entity_manifest.len(),
+                    record.coefficients.len(),
+                    "boundary cut coefficients are source-manifest-aligned"
+                );
+                let delta: f64 = fold
+                    .iter()
+                    .map(|&(pos, f)| record.coefficients[pos] * f)
+                    .sum();
+                record.intercept += delta;
+            }
+        }
+    }
+
     rescale_cut_records_for_load(
         &mut records,
         checkpoint.metadata.producer.cost_scale_factor,
         loading_cost_scale_factor,
     );
 
-    let report = if manifest_identity_verifiable(
-        &stage_result.entity_manifest,
-        current_manifest,
-        on_warning,
-    ) {
+    let report = if verifiable {
         let rebind = build_rebind(
             &stage_result.entity_manifest,
             current_manifest,
@@ -1006,6 +1043,7 @@ pub fn inject_boundary_cuts(setup: &mut StudySetup, boundary_cuts: &ValidatedBou
 #[allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 mod tests {
     use chrono::NaiveDate;
+    use cobre_core::{AnticipatedCommitmentHistory, EntityId};
     use cobre_io::{
         EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCheckpointMetadata,
         ProducerBlock, StageCutsPayload,
@@ -1014,9 +1052,9 @@ mod tests {
     use super::{
         BoundaryInjection, BoundaryReconciliationReport, CutPool, FullFcf, NodeId, NodePos,
         PolicyStageManifest, TypedVec, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
-        compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
-        resolve_boundary_source_stage, resolve_effective_inflow_lag_depth,
-        resolve_warm_start_counts, validate_policy_load,
+        compare_manifest_slot_identity, decode_month_anchor, inject_boundary_cuts,
+        load_boundary_cuts, overlap_hours, resolve_boundary_source_stage,
+        resolve_effective_inflow_lag_depth, resolve_warm_start_counts, validate_policy_load,
     };
     use crate::SddpError;
     use crate::test_support;
@@ -1243,6 +1281,7 @@ mod tests {
                 2,
                 &[],
                 &[],
+                &[],
                 None,
                 loading_factor,
                 &mut ignore_warnings(),
@@ -1289,6 +1328,7 @@ mod tests {
             2,
             &[],
             &[],
+            &[],
             None,
             LEGACY_COST_SCALE_FACTOR,
             &mut ignore_warnings(),
@@ -1313,6 +1353,7 @@ mod tests {
             tmp_nondefault.path(),
             0,
             2,
+            &[],
             &[],
             &[],
             None,
@@ -1511,6 +1552,7 @@ mod tests {
             10,
             &[],
             &[],
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1546,6 +1588,7 @@ mod tests {
             10,
             &[],
             &[],
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1577,6 +1620,7 @@ mod tests {
             5,
             &[],
             &[],
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1598,6 +1642,7 @@ mod tests {
             std::path::Path::new("/nonexistent/path/to/policy"),
             0,
             10,
+            &[],
             &[],
             &[],
             None,
@@ -1672,6 +1717,7 @@ mod tests {
             2,
             &current,
             &no_intervals(current.len()),
+            &[],
             Some(6),
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1712,6 +1758,7 @@ mod tests {
             2,
             &current,
             &no_intervals(current.len()),
+            &[],
             Some(12),
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1784,6 +1831,7 @@ mod tests {
             2,
             &current,
             &no_intervals(current.len()),
+            &[],
             None,
             1_000_000.0,
             &mut |m| {
@@ -1816,6 +1864,7 @@ mod tests {
             2,
             &current,
             &no_intervals(current.len()),
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1850,6 +1899,7 @@ mod tests {
             2,
             &current,
             &no_intervals(current.len()),
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -1882,6 +1932,7 @@ mod tests {
             2,
             &current,
             &no_intervals(current.len()),
+            &[],
             None,
             1_000_000.0,
             &mut |m| {
@@ -1919,6 +1970,7 @@ mod tests {
             2,
             &current,
             &no_intervals(current.len()),
+            &[],
             None,
             1_000_000.0,
             &mut |m| {
@@ -1953,6 +2005,7 @@ mod tests {
             2,
             &current,
             &no_intervals(current.len()),
+            &[],
             None,
             1_000_000.0,
             &mut |m| {
@@ -1987,6 +2040,7 @@ mod tests {
             2,
             &current,
             &no_intervals(current.len()),
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -2022,6 +2076,7 @@ mod tests {
             3,
             &current,
             &no_intervals(current.len()),
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -2119,6 +2174,7 @@ mod tests {
             2,
             &[],
             &[],
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -2149,6 +2205,7 @@ mod tests {
             tmp.path(),
             5,
             2,
+            &[],
             &[],
             &[],
             None,
@@ -2358,6 +2415,7 @@ mod tests {
             current.len() as u32,
             &current,
             &target_intervals,
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -2496,6 +2554,7 @@ mod tests {
             1,
             &[],
             &no_intervals(1),
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -2814,6 +2873,7 @@ mod tests {
             current_reordered.len() as u32,
             &current_reordered,
             &target_intervals,
+            &[],
             None,
             1_000_000.0,
             &mut ignore_warnings(),
@@ -3291,5 +3351,426 @@ mod tests {
             assert_eq!(*intercept, records[i].intercept);
             assert_eq!(coeffs, &records[i].coefficients);
         }
+    }
+
+    // ── intercept-fold wiring tests ───────────────────────────────────────────
+
+    /// One fixed post-horizon window for `thermal_id` spanning `[start, end)`.
+    fn fixed_window(
+        thermal_id: i32,
+        start: NaiveDate,
+        end: NaiveDate,
+        value_mw: f64,
+    ) -> AnticipatedCommitmentHistory {
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(thermal_id),
+            start_date: start,
+            end_date: end,
+            value_mw,
+        }
+    }
+
+    /// Write a single-stage MARKED checkpoint (`cost_scale_factor: Some(s)`)
+    /// whose one cut carries the given at-rest `intercept`/`coefficients`
+    /// (byte-for-byte, no transform here) and whose stage payload attaches
+    /// `manifest` — the fold wiring tests need a verifiable manifest, a marked
+    /// scale, and custom coefficients simultaneously, which neither
+    /// `write_checkpoint_with_scale` (empty manifest) nor
+    /// `write_checkpoint_with_manifest` (unmarked, uniform coefficients) gives.
+    fn write_marked_checkpoint_with_manifest(
+        dir: &std::path::Path,
+        intercept: f64,
+        coefficients: &[f64],
+        manifest: &[EntitySlot],
+        cost_scale_factor: f64,
+    ) {
+        let state_dimension = coefficients.len() as u32;
+        let cut = cobre_io::PolicyCutRecord {
+            cut_id: 0,
+            slot_index: 0,
+            iteration: 0,
+            forward_pass_index: 0,
+            intercept,
+            coefficients,
+            is_active: true,
+        };
+        let cuts = vec![cut];
+        let payload = StageCutsPayload {
+            stage_id: 0,
+            state_dimension,
+            capacity: 1,
+            warm_start_count: 0,
+            cuts: &cuts,
+            active_cut_indices: &[0],
+            populated_count: 1,
+            entity_manifest: manifest,
+        };
+        let metadata = PolicyCheckpointMetadata {
+            format_version: cobre_io::FORMAT_VERSION,
+            cobre_version: "0.15.0".to_string(),
+            created_at: "2026-08-22T00:00:00Z".to_string(),
+            num_stages: 1,
+            graph_manifest: chain_manifest(1),
+            producer: ProducerBlock {
+                cost_scale_factor: Some(cost_scale_factor),
+                ..producer_block()
+            },
+        };
+        cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
+    }
+
+    /// A marked source whose cut carries a known anticipated coefficient at
+    /// `source_pos = 1`, reconciled by a single fixed window fully covering the
+    /// source's March 2026 month (`overlap / H_M == 1.0`, fold vector
+    /// `[(1, value_mw)]`), folds `raw_coeff[1]·value_mw` into the intercept on
+    /// the RAW record and then rides the marked `÷s` transform: the loaded
+    /// intercept is `(raw_intercept + raw_coeff[1]·value_mw) / s`. The current
+    /// manifest's anticipated slot reconciles to `Zero` (dated, no interval), so
+    /// the fold necessarily read the SOURCE coefficient before `rebind_cut`
+    /// zeroed it.
+    #[test]
+    fn load_boundary_cuts_marked_fold_moves_intercept_by_expected_delta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw_intercept = 1000.0;
+        let raw_coefficients = [7.0, 3.0];
+        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
+        let s = 1_000_000.0;
+        write_marked_checkpoint_with_manifest(
+            tmp.path(),
+            raw_intercept,
+            &raw_coefficients,
+            &manifest,
+            s,
+        );
+
+        let current = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
+        let value_mw = 50.0;
+        let windows = vec![fixed_window(9, ymd(2026, 3, 1), ymd(2026, 4, 1), value_mw)];
+
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            &no_intervals(current.len()),
+            &windows,
+            None,
+            s,
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+
+        let expected = (raw_intercept + raw_coefficients[1] * value_mw) / s;
+        assert!(
+            (cuts[0].intercept - expected).abs() <= expected.abs().max(1.0) * 1e-9,
+            "folded intercept {} != expected {expected} (raw + raw_coeff[1]·factor, then ÷s)",
+            cuts[0].intercept
+        );
+    }
+
+    /// An empty `fixed_windows` leaves the intercept bit-identical to the
+    /// marked-rescale-only load (`raw / s`): the empty-fold guard skips the
+    /// intercept mutation entirely — no `+= 0.0`.
+    #[test]
+    fn load_boundary_cuts_empty_fixed_windows_intercept_bit_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw_intercept = 1000.0;
+        let raw_coefficients = [7.0, 3.0];
+        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
+        let s = 1_000_000.0;
+        write_marked_checkpoint_with_manifest(
+            tmp.path(),
+            raw_intercept,
+            &raw_coefficients,
+            &manifest,
+            s,
+        );
+
+        let current = vec![storage_slot(1), anticipated_slot(9, 0, 20_260_301)];
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            &no_intervals(current.len()),
+            &[],
+            None,
+            s,
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cuts[0].intercept.to_bits(),
+            (raw_intercept / s).to_bits(),
+            "an empty fold must leave the intercept bit-identical to the marked-rescale-only load"
+        );
+    }
+
+    /// An empty (unverifiable) source manifest with a non-empty `fixed_windows`
+    /// applies no fold — the fold shares the rebind's `verifiable` gate — and the
+    /// hoisted `manifest_identity_verifiable` call fires the absent-manifest
+    /// warning exactly once (a second call would double-fire it).
+    #[test]
+    fn load_boundary_cuts_unverifiable_manifest_skips_fold_and_warns_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw_intercept = 42.0;
+        write_checkpoint_with_manifest(tmp.path(), 1, 2, &[raw_intercept], &[]);
+
+        let current = storage_manifest(1, 2);
+        let windows = vec![fixed_window(9, ymd(2026, 3, 1), ymd(2026, 4, 1), 50.0)];
+        let mut warnings: Vec<String> = Vec::new();
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            &no_intervals(current.len()),
+            &windows,
+            None,
+            LEGACY_COST_SCALE_FACTOR,
+            &mut |m| warnings.push(m.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cuts[0].intercept.to_bits(),
+            raw_intercept.to_bits(),
+            "an unverifiable manifest must skip the fold, leaving the intercept bit-identical"
+        );
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the absent-manifest warning must fire exactly once (single hoisted gate): {warnings:?}"
+        );
+    }
+
+    // ── intercept-fold analytics (hand-computed deltas, both frames) ──────────
+
+    /// The `overlap(window, M) / H_M` weight a window contributes at a source
+    /// month anchor, via the SAME accessors `build_boundary_fold` uses — never a
+    /// decimal literal, so a weight that drifted together with production would
+    /// not be masked.
+    fn fold_weight(window: (NaiveDate, NaiveDate), source_anchor: i32) -> f64 {
+        let (month_start, month_end, h_m) = decode_month_anchor(source_anchor).unwrap();
+        overlap_hours(window, (month_start, month_end)) / h_m
+    }
+
+    /// MARKED frame: a source cut with anticipated coefficient `c` at a dated
+    /// month, loaded against a whole-month fixed window (weight `1.0`), moves the
+    /// intercept to `(raw_intercept + c·1·v) / s` — the folded term rides the
+    /// marked `÷s` transform.
+    #[test]
+    fn boundary_fold_marked_frame_moves_intercept_by_hand_computed_delta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let anchor = 20_260_401; // April 2026
+        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, anchor)];
+        let c = 3.0;
+        let raw_intercept = 200.0;
+        let s = 2_000_000.0;
+        write_marked_checkpoint_with_manifest(tmp.path(), raw_intercept, &[1.0, c], &manifest, s);
+
+        let (ws, we) = (ymd(2026, 4, 1), ymd(2026, 5, 1)); // whole month → weight 1.0
+        let v = 50.0;
+        let current = manifest.clone();
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            &no_intervals(current.len()),
+            &[fixed_window(9, ws, we, v)],
+            None,
+            s,
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+
+        let weight = fold_weight((ws, we), anchor);
+        let expected = (raw_intercept + c * weight * v) / s;
+        assert!(
+            (cuts[0].intercept - expected).abs() < expected.abs().max(1.0) * 1e-9,
+            "marked frame: intercept {} != (raw + c·{weight}·v) / s = {expected}",
+            cuts[0].intercept
+        );
+    }
+
+    /// LEGACY frame: the same shape written WITHOUT a cost-scale marker
+    /// (`cost_scale_factor: None`; the uniform-coefficient writer supplies
+    /// `c == 1.0`), loaded at a non-default factor, moves the intercept to
+    /// `(raw_intercept + c·1·v) · (LEGACY_COST_SCALE_FACTOR / loading_factor)` —
+    /// the folded term rides the legacy `×ratio` transform. A marked-only suite
+    /// would miss a legacy-frame sign/scale bug.
+    #[test]
+    fn boundary_fold_legacy_frame_moves_intercept_by_hand_computed_delta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let anchor = 20_260_401; // April 2026
+        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, anchor)];
+        let c = 1.0; // write_checkpoint_with_manifest writes uniform 1.0 coefficients
+        let raw_intercept = 200.0;
+        write_checkpoint_with_manifest(tmp.path(), 1, 2, &[raw_intercept], &manifest);
+
+        let (ws, we) = (ymd(2026, 4, 1), ymd(2026, 5, 1)); // whole month → weight 1.0
+        let v = 50.0;
+        let loading_factor = 3_000_000.0; // non-default → an inexact ×ratio
+        let current = manifest.clone();
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            &no_intervals(current.len()),
+            &[fixed_window(9, ws, we, v)],
+            None,
+            loading_factor,
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+
+        let weight = fold_weight((ws, we), anchor);
+        let ratio = LEGACY_COST_SCALE_FACTOR / loading_factor;
+        let expected = (raw_intercept + c * weight * v) * ratio;
+        assert!(
+            (cuts[0].intercept - expected).abs() < expected.abs().max(1.0) * 1e-9,
+            "legacy frame: intercept {} != (raw + c·{weight}·v) · ratio = {expected}",
+            cuts[0].intercept
+        );
+    }
+
+    /// A fixed window overlapping no source month contributes zero: the loaded
+    /// intercept is `to_bits()`-identical to the same load with
+    /// `fixed_windows = &[]`. Complements the builder-level no-term pin — this
+    /// pins that the LOAD path moves no intercept.
+    #[test]
+    fn boundary_fold_no_overlap_window_leaves_intercept_bit_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let anchor = 20_260_401; // April 2026
+        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, anchor)];
+        let s = 2_000_000.0;
+        write_marked_checkpoint_with_manifest(tmp.path(), 1000.0, &[1.0, 3.0], &manifest, s);
+
+        let current = manifest.clone();
+        let load = |windows: &[AnticipatedCommitmentHistory]| {
+            load_boundary_cuts(
+                tmp.path(),
+                0,
+                2,
+                &current,
+                &no_intervals(current.len()),
+                windows,
+                None,
+                s,
+                &mut ignore_warnings(),
+            )
+            .unwrap()
+        };
+
+        let baseline = load(&[]);
+        // June: disjoint from the April source month — the builder runs but emits no term.
+        let disjoint = fixed_window(9, ymd(2026, 6, 1), ymd(2026, 6, 8), 50.0);
+        let with_window = load(&[disjoint]);
+
+        assert_eq!(
+            with_window[0].intercept.to_bits(),
+            baseline[0].intercept.to_bits(),
+            "a window overlapping no source month must leave the intercept bit-identical"
+        );
+    }
+
+    /// Empty-fold byte-neutrality: an empty `fixed_windows` slice, and
+    /// (separately) a single all-zero-value window whose builder output is empty,
+    /// both leave the loaded intercept `to_bits()`-identical to the
+    /// no-fixed-window baseline.
+    #[test]
+    fn boundary_fold_empty_windows_intercept_bit_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let anchor = 20_260_401; // April 2026
+        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, anchor)];
+        let s = 2_000_000.0;
+        write_marked_checkpoint_with_manifest(tmp.path(), 1000.0, &[1.0, 3.0], &manifest, s);
+
+        let current = manifest.clone();
+        let load = |windows: &[AnticipatedCommitmentHistory]| {
+            load_boundary_cuts(
+                tmp.path(),
+                0,
+                2,
+                &current,
+                &no_intervals(current.len()),
+                windows,
+                None,
+                s,
+                &mut ignore_warnings(),
+            )
+            .unwrap()
+        };
+
+        let baseline = load(&[]);
+        assert_eq!(
+            load(&[])[0].intercept.to_bits(),
+            baseline[0].intercept.to_bits(),
+            "an empty window slice must be byte-neutral"
+        );
+        // value_mw == 0.0 → build_boundary_fold skips it → empty fold.
+        let all_zero = load(&[fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 0.0)]);
+        assert_eq!(
+            all_zero[0].intercept.to_bits(),
+            baseline[0].intercept.to_bits(),
+            "an all-zero-value window must be byte-neutral"
+        );
+    }
+
+    /// Multi-month accumulation: one fixed window overlapping TWO dated source
+    /// months for thermal 9 — each carrying a genuinely different coefficient and
+    /// month length — moves the intercept by the summed contribution
+    /// `Σ_M c_M·(overlap(w,M)/H_M)·v`, pinning `build_boundary_fold`'s
+    /// per-source-position accumulation. The distinct `c_M` catch an aliased
+    /// source position returning the wrong month's value.
+    #[test]
+    fn boundary_fold_multi_month_window_sums_contributions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let march = 20_260_301; // 31 days
+        let april = 20_260_401; // 30 days
+        let manifest = vec![
+            storage_slot(1),
+            anticipated_slot(9, 0, march),
+            anticipated_slot(9, 1, april),
+        ];
+        let c_march = 3.0;
+        let c_april = 7.0;
+        let raw_intercept = 100.0;
+        let s = 2_000_000.0;
+        write_marked_checkpoint_with_manifest(
+            tmp.path(),
+            raw_intercept,
+            &[1.0, c_march, c_april],
+            &manifest,
+            s,
+        );
+
+        let (ws, we) = (ymd(2026, 3, 25), ymd(2026, 4, 8)); // straddles March → April
+        let v = 50.0;
+        let current = manifest.clone();
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            3,
+            &current,
+            &no_intervals(current.len()),
+            &[fixed_window(9, ws, we, v)],
+            None,
+            s,
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+
+        let delta =
+            c_march * fold_weight((ws, we), march) * v + c_april * fold_weight((ws, we), april) * v;
+        let expected = (raw_intercept + delta) / s;
+        assert!(
+            (cuts[0].intercept - expected).abs() < expected.abs().max(1.0) * 1e-9,
+            "multi-month: intercept {} != (raw + Σ c_M·w_M·v) / s = {expected}",
+            cuts[0].intercept
+        );
     }
 }

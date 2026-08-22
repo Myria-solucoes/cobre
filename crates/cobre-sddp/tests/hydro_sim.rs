@@ -1214,6 +1214,7 @@ mod decomp_integration {
             state_dim,
             &current_manifest,
             &vec![None; current_manifest.len()],
+            &[],
             None,
             1_000_000.0,
             &mut |msg| warnings.push(msg.to_string()),
@@ -1306,6 +1307,7 @@ mod decomp_integration {
             state_dim,
             &current_manifest,
             &vec![None; current_manifest.len()],
+            &[],
             None,
             1_000_000.0,
             &mut |_| {},
@@ -3237,9 +3239,18 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
         coefficients[ant_slot] = BETA_ANT;
         write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
-        let boundary_cuts =
-            load_boundary_cuts(dir, 0, state_dimension, &[], &[], None, 1.0, &mut |_msg| {})
-                .expect("boundary cut must load");
+        let boundary_cuts = load_boundary_cuts(
+            dir,
+            0,
+            state_dimension,
+            &[],
+            &[],
+            &[],
+            None,
+            1.0,
+            &mut |_msg| {},
+        )
+        .expect("boundary cut must load");
         inject_boundary_cuts(setup, &boundary_cuts);
     }
 
