@@ -402,30 +402,26 @@ parked.
 
 **Trigger.** Per-block delivery work on anticipated commitments.
 
-### Pre-study-decided, post-study-delivered anticipated commitments (no carrier)
+### Pre-study-decided, post-study-delivered anticipated commitments (no carrier) — RESOLVED
 
-**What it is.** A commitment decided at a **pre-study** stage that delivers into a
-**post-study** stage has no carrier on the anticipated delivery axis: the ring's
-slots key on delivery-target residue over in-study decision stages, so a pre-study
-decider has no in-study stage to latch from and the commitment cannot be
-represented. This is a ratified scope boundary, not a defect — the extended
-delivery axis (`build_extended_delivery_axis`,
-`crates/cobre-io/src/validation/semantic/thermal.rs`) carries in-study **and**
-post-study delivery _targets_, but only in-study _deciders_. `post_study_reach`
-classifies such a target as `no_carrier`, and `check_post_study_stages`
-hard-rejects it as a `BusinessRuleViolation` naming the plant and post-study stage
-index(es), advising the user to shorten the lead so the decision falls within the
-study horizon — surfaced, never silently mis-modelled (the same posture as the
-water ring's `t_v > horizon` seed boundary in `.claude/rules/sddp.md` §
-"Delivery-family right-boundary pricing"). Pinned by
-`test_pre_study_decided_post_study_delivery_rejected`
-(`crates/cobre-io/src/validation/semantic/thermal.rs`). Lifting it requires a
-pre-study carrier on the extended axis for a pre-study decider to deposit into.
+**What it was.** A commitment decided at a **pre-study** stage that delivered
+into a **post-study** stage had no carrier on the anticipated delivery axis:
+the ring's slots keyed on delivery-target residue over in-study decision
+stages, so a pre-study decider had no in-study stage to latch from and the
+commitment could not be represented. `check_post_study_stages` hard-rejected
+it as a `BusinessRuleViolation`, advising the user to shorten the lead so the
+decision fell within the study horizon.
 
-**Owner.** The setup / SDDP owner (the I/O owner owns the validation surface).
-
-**Trigger.** A study requires a commitment decided before its horizon yet delivered
-after it — the extended axis gains a pre-study carrier.
+**Resolution.** The commitment is now representable as a **fixed post-horizon
+commitment**: a declared constant that never enters the ring (no carrier is
+needed — it is deliberately never a ring member), priced against the terminal
+boundary FCF by a constant fold into the cut intercepts, and reported at its
+real delivery date. The hard reject is retired; the input surface is the
+existing `past_anticipated_commitments` windows extended past the study
+horizon, validated by a two-sided tiling/envelope/commissioning matrix. The
+durable homes are the live spec
+[`anticipated-thermals-and-water-travel-time.md`](anticipated-thermals-and-water-travel-time.md)
+and `.claude/rules/sddp.md`'s "Anticipated thermal commitments" contracts.
 
 ### Stage-calendar crate home
 

@@ -4475,7 +4475,8 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
     );
 }
 
-/// `docs/design/anticipated-ring-undersizing.md`'s reproduction seeds: four
+/// The ring-depth under-sizing reproduction's seeds (the sizing contract lives
+/// in `.claude/rules/sddp.md`, "Ring depth sizing"): four
 /// `AnticipatedCommitmentHistory` windows tiling
 /// [`minimal_system_with_anticipated_and_commitments`]'s `[168.0, 168.0, 168.0,
 /// 648.0]`-hour calendar (`2024-01-01` cursor) at distinct values
@@ -4532,7 +4533,8 @@ fn bug_doc_reproduction_system() -> cobre_core::System {
     )
 }
 
-/// Reproduces `docs/design/anticipated-ring-undersizing.md`: when `K_i` is
+/// Reproduces the ring-depth under-sizing defect (the sizing contract in
+/// `.claude/rules/sddp.md`, "Ring depth sizing"): when `K_i` is
 /// undersized to the occupancy max `3`, the `.take(k_i)` clamp drops the stage-3
 /// window and modular aliasing fishes stage 0's `100.0` for stage 3. With `K_i`
 /// sized to the ring depth `4`, all four leading stages seed at four distinct

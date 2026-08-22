@@ -1,11 +1,15 @@
 # Fixed post-horizon anticipated commitments — design proposal
 
-**Status: Proposal (not yet implemented).** This is the design that answers the
-design brief [`decomp-anticipated-dispatch-fidelity.md`](decomp-anticipated-dispatch-fidelity.md).
-It describes target behavior in the present tense; none of it is in the tree yet.
-Three choices in it are owner-ratified and not open for re-litigation during
-implementation: the input surface (§4), the sunk-cost booking (§7), and the
-gap-excised ring indexing (§5).
+**Status: Implemented** (retained pending fold into the live spec). This is the
+design that answered the design brief for representing DECOMP anticipated
+dispatch faithfully on a fixed study-stage set — correct delivery-date
+discounting and a carrier-free post-horizon case. The behaviour below has
+shipped; the authoritative homes are the live spec
+[`anticipated-thermals-and-water-travel-time.md`](anticipated-thermals-and-water-travel-time.md)
+and the numerical/algorithm contracts in `.claude/rules/sddp.md`'s
+"Anticipated thermal commitments" section. Three choices in it were
+owner-ratified and are not open for re-litigation: the input surface (§4), the
+sunk-cost booking (§7), and the gap-excised ring indexing (§5).
 
 The brief's two out-of-scope options remain out of scope here: the study horizon
 is never extended, and no pre-study decision is ever carried through the ring
@@ -150,9 +154,10 @@ in-flight set on the raw delivery axis. In the reference deck, occupancy-sized
 `k_max = 4` puts the study-stage-3 seed (delivery 3) and the Sem 10 deposit
 (delivery 7) on the same residue (`3 ≡ 7 mod 4`) at stage 0 — two definition
 rows on one outgoing column, the same corruption class as the ring
-under-sizing defect (`anticipated-ring-undersizing.md`). The modular key
-`m mod k_max` is injective only on contiguous runs, and the raw axis is no
-longer contiguous for the ring's members.
+under-sizing defect this design closes together with the excision (the sizing
+contract now lives in `.claude/rules/sddp.md`, "Ring depth sizing"). The
+modular key `m mod k_max` is injective only on contiguous runs, and the raw
+axis is no longer contiguous for the ring's members.
 
 ### The design
 
@@ -179,9 +184,9 @@ foreign-index-space alignment problem the excision exists to remove.
 
 The ring depth becomes `k_max = max(occupancy_max, n_none_in_study)` in excised
 space — the second term is the incoming-state window at stage 0 (every seed
-present simultaneously before the first fishing), which closes the filed ring
-under-sizing defect with the same formula (`anticipated-ring-undersizing.md`,
-fix candidate 1, generalized).
+present simultaneously before the first fishing), which closes the ring
+under-sizing defect this design also fixes; the formula is now the sizing
+contract in `.claude/rules/sddp.md`, "Ring depth sizing".
 
 In excised space the in-flight set is contiguous by construction — the property
 every pinned injectivity contract rests on becomes true again rather than being
@@ -316,9 +321,10 @@ Regressions to pin at implementation, each named for the contract it guards:
 - **Excision collision regression:** the stage-3-seed vs first-deposit residue
   collision (`3 ≡ 7 mod 4` on the raw axis) solves correctly under excised
   indexing — distinct seeds, each stage fishing its own value.
-- **Under-sizing closure:** the executed reproduction in
-  `anticipated-ring-undersizing.md` (`n_post < n_stages`, distinct seeds)
-  turns green under `k_max = max(occupancy_max, n_none_in_study)`.
+- **Under-sizing closure:** the ring-depth under-sizing reproduction
+  (`initial_state_seeds_every_leading_commitment_under_the_widened_ring_depth`,
+  `n_post < n_stages`, distinct seeds) turns green under
+  `k_max = max(occupancy_max, n_none_in_study)`.
 - **Fold analytics:** a boundary checkpoint with hand-authored anticipated
   coefficients loads against declared fixed windows and the cut intercepts
   move by the hand-computed `Σ coeff · (overlap/H_M) · v` — including a
@@ -359,13 +365,14 @@ Regressions to pin at implementation, each named for the contract it guards:
 
 ## 12. Contract amendments on implementation
 
-When this ships, amend in place (never duplicate): the ring injectivity and
-slot-addressing contracts and the manifest-dating contract (the ring-axis
+This shipped by amending in place (never duplicating): the ring injectivity
+and slot-addressing contracts and the manifest-dating contract (the ring-axis
 clause, §5); the ring-sizing formula; the validation-layer statements of the
 retired E2 reject (now V2/V3); and the live spec
 `anticipated-thermals-and-water-travel-time.md` plus the first-timers guide.
-`anticipated-ring-undersizing.md` closes (its fix lands here) and is deleted
-per the maintenance convention, its residue being the sizing clause in §5.
-The design brief `decomp-anticipated-dispatch-fidelity.md` is answered by this
-document and is likewise deleted once the behavior lands, per the same
-convention.
+The ring under-sizing defect this design closes (§5) was tracked in a design
+doc that has since been deleted per the maintenance convention, its residue
+being the sizing clause in §5 and the `.claude/rules/sddp.md` sizing contract
+it amended.
+The design brief this document answered has likewise been deleted once the
+behavior landed, per the same convention.
