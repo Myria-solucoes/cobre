@@ -576,28 +576,30 @@ helpers already prove) into a crate both the CLI and Python depend on.
 
 **Trigger.** The setup-layer redesign.
 
-#### Untyped state-family primitive + colliding entity dictionaries
+#### Untyped state-family primitive + colliding entity dictionaries — RESOLVED
 
-**What it is.** The policy state slot's `entity_type` is an untyped small integer
-whose state-family dictionary lives downstream in the policy writer, while a
-second, overlapping physical-output-entity dictionary
-(`crates/cobre-io/src/output/dictionary.rs`) shares the same integer prefix with
-divergent meanings — a grep hazard and a type-safety gap (no live bug; the two
-dictionaries are used disjointly). Two later growths raise the fix's value and
-constrain its shape: the boundary-checkpoint slot-reservation path
-(`reserve_boundary_inflow_lag_slots`, `crates/cobre-sddp/src/policy/policy_export.rs`)
-is a public export consumed by the Python binding, so the untyped `u8` semantics
-now cross a public crate seam; and `crates/cobre-io/src/output/policy/checkpoint.rs`
-independently re-declares one state-family constant from the FlatBuffers schema
-for its monotonicity check — a duplicate the writer-side dictionary cannot see.
-Since `cobre-io` cannot depend on `cobre-sddp`, the typed state-family enum must
-be owned where both crates can reach it (next to the slot type in `cobre-io`),
-with the sddp-side constants retired onto it. Target: that typed enum, and
-disambiguated names for the two dictionaries.
+**What it is (resolved 2026-08-22).** The policy state slot's `entity_type` was an
+untyped small integer whose state-family dictionary lived downstream in the policy
+writer (`cobre-sddp`), was independently re-declared once in
+`crates/cobre-io/src/output/policy/checkpoint.rs`'s monotonicity check, and shared
+its `ENTITY_TYPE_*` prefix with a second, overlapping physical-output-entity
+dictionary (`crates/cobre-io/src/output/dictionary.rs`) — a grep hazard and a
+type-safety gap (no live bug; the two dictionaries were used disjointly).
+
+**Fix.** A typed `StateFamily` enum now lives in `cobre-io` next to `EntitySlot`
+(`output/policy/records.rs`) — the Rust mirror of the `EntityType` enum in
+`schemas/policy.fbs` — with `EntitySlot::family()` reading the raw byte. The
+`cobre-sddp` `ENTITY_TYPE_*` constants are retired onto it; the reconcile report's
+parallel `ReportFamily` enum collapsed to `Option<StateFamily>`; the checkpoint
+duplicate is gone; and the physical-output dictionary was renamed `OUTPUT_ENTITY_*`.
+The wire byte (`EntitySlot.entity_type: u8`) is unchanged, so the change is
+byte-neutral, and the public Python-binding seam
+(`reserve_boundary_inflow_lag_slots`) routes the family through the cobre-io type.
+Residual (not debt): standalone integration-test files keep their own local
+`const ENTITY_TYPE_* = N` wire-byte pins, which are self-contained and legitimately
+pin the on-disk contract.
 
 **Owner.** The I/O owner.
-
-**Trigger.** The next policy / output schema touch.
 
 #### Cut-selection paradigm conflation
 

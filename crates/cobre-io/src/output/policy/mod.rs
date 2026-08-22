@@ -24,7 +24,7 @@ pub use records::{
     ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
     PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
     STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
-    StageStatesReadResult,
+    StageStatesReadResult, StateFamily,
 };
 
 #[cfg(test)]

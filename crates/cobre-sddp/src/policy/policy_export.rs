@@ -22,6 +22,7 @@ use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
     OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, StageCutsPayload, StageStatesPayload,
+    StateFamily,
 };
 
 use crate::SddpError;
@@ -34,15 +35,6 @@ use crate::setup::{
     year_month_day_anchor,
 };
 use crate::training::TrainingResult;
-
-/// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
-pub(crate) const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
-/// `EntityType::HydroInflowLag` discriminant from `schemas/policy.fbs`.
-pub(crate) const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
-/// `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
-pub(crate) const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
-/// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
-pub(crate) const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
 
 /// The ring slot's RING-AXIS delivery target `r` at study-stage index
 /// `current_stage_idx`: the next `r >= current_stage_idx` whose residue
@@ -222,7 +214,7 @@ pub fn build_stage_entity_manifest(
                 delivery_anchor_at(m - t)
             });
         EntitySlot {
-            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_type: StateFamily::AnticipatedThermalState.code(),
             entity_id: plant.id.0,
             subindex: slot_idx as u32,
             was_active: commissioning_active(plant.entry_stage_id, plant.exit_stage_id, stage_id),
@@ -238,7 +230,7 @@ pub fn build_stage_entity_manifest(
             StateRegion::Storage => {
                 let hydro = &hydros[offset];
                 EntitySlot {
-                    entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+                    entity_type: StateFamily::HydroStorage.code(),
                     entity_id: hydro.id.0,
                     subindex: 0,
                     was_active: hydro_operating_active(
@@ -255,7 +247,7 @@ pub fn build_stage_entity_manifest(
                 let h = offset % n;
                 let hydro = &hydros[h];
                 EntitySlot {
-                    entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+                    entity_type: StateFamily::HydroInflowLag.code(),
                     entity_id: hydro.id.0,
                     subindex: (lag + 1) as u32,
                     was_active: hydro_operating_active(
@@ -271,7 +263,7 @@ pub fn build_stage_entity_manifest(
                 let (plant_idx, lag) = global_layout.transit_bucket_column_order[offset];
                 let hydro = &hydros[plant_idx];
                 EntitySlot {
-                    entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                    entity_type: StateFamily::HydroTransitBucket.code(),
                     entity_id: hydro.id.0,
                     subindex: lag as u32,
                     was_active: hydro_operating_active(
@@ -374,7 +366,7 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
     // lag block inserts after.
     let storage_count = manifest
         .iter()
-        .take_while(|s| s.entity_type == ENTITY_TYPE_HYDRO_STORAGE)
+        .take_while(|s| s.entity_type == StateFamily::HydroStorage.code())
         .count();
     if storage_count == 0 {
         return Err(SddpError::Validation(
@@ -385,7 +377,7 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
     }
     if manifest[storage_count..]
         .iter()
-        .any(|s| s.entity_type == ENTITY_TYPE_HYDRO_STORAGE)
+        .any(|s| s.entity_type == StateFamily::HydroStorage.code())
     {
         return Err(SddpError::Validation(
             "boundary manifest interleaves HydroStorage slots with other entity types; the \
@@ -419,7 +411,7 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
     let lag_slots: Vec<EntitySlot> = (0..n)
         .flat_map(|lag| {
             storage_slots.iter().map(move |storage| EntitySlot {
-                entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+                entity_type: StateFamily::HydroInflowLag.code(),
                 entity_id: storage.entity_id,
                 subindex: (lag + 1) as u32,
                 was_active: storage.was_active,
@@ -838,11 +830,9 @@ pub fn build_stage_states_payloads<'a>(
 )]
 mod tests {
     use super::{
-        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
-        ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, EntitySlot, HashMap,
-        build_stage_entity_delivery_intervals, build_stage_entity_manifest,
-        build_stage_states_payloads, modular_delivery_target, reachable_delivery_target,
-        reserve_boundary_inflow_lag_slots, year_month_day_anchor,
+        EntitySlot, HashMap, StateFamily, build_stage_entity_delivery_intervals,
+        build_stage_entity_manifest, build_stage_states_payloads, modular_delivery_target,
+        reachable_delivery_target, reserve_boundary_inflow_lag_slots, year_month_day_anchor,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
@@ -1120,10 +1110,10 @@ mod tests {
         assert_eq!(manifest.len(), projection.n_slots());
         assert_eq!(manifest.len(), 8);
 
-        assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(manifest[0].entity_type, StateFamily::HydroStorage.code());
         assert_eq!(manifest[0].entity_id, 1);
         assert_eq!(manifest[0].subindex, 0);
-        assert_eq!(manifest[1].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(manifest[1].entity_type, StateFamily::HydroStorage.code());
         assert_eq!(manifest[1].entity_id, 2);
         assert_eq!(manifest[1].subindex, 0);
 
@@ -1132,7 +1122,8 @@ mod tests {
             [(2, (1, 1)), (3, (2, 1)), (4, (1, 2)), (5, (2, 2))]
         {
             assert_eq!(
-                manifest[slot].entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG,
+                manifest[slot].entity_type,
+                StateFamily::HydroInflowLag.code(),
                 "slot {slot} must be an inflow-lag slot"
             );
             assert_eq!(
@@ -1148,13 +1139,13 @@ mod tests {
         // Anticipated block, slot-major (single plant, ring slots 0 and 1).
         assert_eq!(
             manifest[6].entity_type,
-            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            StateFamily::AnticipatedThermalState.code()
         );
         assert_eq!(manifest[6].entity_id, 1);
         assert_eq!(manifest[6].subindex, 0);
         assert_eq!(
             manifest[7].entity_type,
-            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            StateFamily::AnticipatedThermalState.code()
         );
         assert_eq!(manifest[7].entity_id, 1);
         assert_eq!(manifest[7].subindex, 1);
@@ -1182,7 +1173,8 @@ mod tests {
 
         for (slot, (expected_id, expected_lag)) in [(6, (1, 1)), (7, (2, 2))] {
             assert_eq!(
-                manifest[slot].entity_type, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                manifest[slot].entity_type,
+                StateFamily::HydroTransitBucket.code(),
                 "slot {slot} must be a transit-bucket slot"
             );
             assert_eq!(
@@ -1196,11 +1188,13 @@ mod tests {
         }
 
         assert_eq!(
-            manifest[5].entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG,
+            manifest[5].entity_type,
+            StateFamily::HydroInflowLag.code(),
             "buckets must follow the lag block"
         );
         assert_eq!(
-            manifest[8].entity_type, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            manifest[8].entity_type,
+            StateFamily::AnticipatedThermalState.code(),
             "buckets must precede the anticipated block"
         );
     }
@@ -1228,7 +1222,8 @@ mod tests {
 
         for slot in [6, 7] {
             assert_eq!(
-                manifest[slot].entity_type, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                manifest[slot].entity_type,
+                StateFamily::HydroTransitBucket.code(),
                 "slot {slot} must be a transit-bucket slot"
             );
             assert_eq!(
@@ -1255,19 +1250,19 @@ mod tests {
         assert!(
             manifest
                 .iter()
-                .all(|s| s.entity_type != ENTITY_TYPE_HYDRO_INFLOW_LAG),
+                .all(|s| s.entity_type != StateFamily::HydroInflowLag.code()),
             "storage-only manifest must contain no HydroInflowLag slot"
         );
-        assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
-        assert_eq!(manifest[1].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(manifest[0].entity_type, StateFamily::HydroStorage.code());
+        assert_eq!(manifest[1].entity_type, StateFamily::HydroStorage.code());
         assert_eq!(
             manifest[2].entity_type,
-            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            StateFamily::AnticipatedThermalState.code()
         );
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
             manifest[3].entity_type,
-            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            StateFamily::AnticipatedThermalState.code()
         );
         assert_eq!(manifest[3].subindex, 1);
     }
@@ -1503,12 +1498,12 @@ mod tests {
 
         // Layout N=1, L=1, A=1, k_max=2: storage j=0, lag j=1, anticipated j=2,3.
         assert_eq!(manifest.len(), 4);
-        assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(manifest[0].entity_type, StateFamily::HydroStorage.code());
         assert_eq!(
             manifest[0].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             "storage slot carries no delivery date"
         );
-        assert_eq!(manifest[1].entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG);
+        assert_eq!(manifest[1].entity_type, StateFamily::HydroInflowLag.code());
         assert_eq!(
             manifest[1].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             "inflow-lag slot carries no delivery date"
@@ -1516,7 +1511,7 @@ mod tests {
 
         assert_eq!(
             manifest[2].entity_type,
-            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            StateFamily::AnticipatedThermalState.code()
         );
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
@@ -1526,7 +1521,7 @@ mod tests {
 
         assert_eq!(
             manifest[3].entity_type,
-            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            StateFamily::AnticipatedThermalState.code()
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
@@ -1951,7 +1946,7 @@ mod tests {
     /// manifest can be traced back to the pool it came from.
     fn manifest_for_pool(pool_id: usize) -> Vec<EntitySlot> {
         vec![EntitySlot {
-            entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+            entity_type: StateFamily::HydroStorage.code(),
             entity_id: 100 + i32::try_from(pool_id).unwrap(),
             subindex: 0,
             was_active: true,
@@ -2112,7 +2107,7 @@ mod tests {
 
     fn storage_slot(id: i32, was_active: bool) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+            entity_type: StateFamily::HydroStorage.code(),
             entity_id: id,
             subindex: 0,
             was_active,
@@ -2122,7 +2117,7 @@ mod tests {
 
     fn anticipated_slot(id: i32, subindex: u32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_type: StateFamily::AnticipatedThermalState.code(),
             entity_id: id,
             subindex,
             was_active: true,
@@ -2155,14 +2150,20 @@ mod tests {
         // Manifest: 2 storage + (2 hydros × 2 depths) lag + 1 anticipated = 7.
         assert_eq!(out.state_dimension, 7);
         assert_eq!(out.manifest.len(), 7);
-        assert_eq!(out.manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
-        assert_eq!(out.manifest[1].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(
+            out.manifest[0].entity_type,
+            StateFamily::HydroStorage.code()
+        );
+        assert_eq!(
+            out.manifest[1].entity_type,
+            StateFamily::HydroStorage.code()
+        );
 
         // Lag block, lag-major: (h1,d1),(h2,d1),(h1,d2),(h2,d2); subindex = depth.
         let expected_lag = [(1, 1u32, true), (2, 1, false), (1, 2, true), (2, 2, false)];
         for (i, (id, subindex, active)) in expected_lag.into_iter().enumerate() {
             let slot = &out.manifest[2 + i];
-            assert_eq!(slot.entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG);
+            assert_eq!(slot.entity_type, StateFamily::HydroInflowLag.code());
             assert_eq!(slot.entity_id, id, "lag slot {i} hydro id");
             assert_eq!(slot.subindex, subindex, "lag slot {i} 1-based depth");
             assert_eq!(
@@ -2175,7 +2176,7 @@ mod tests {
         // Trailing anticipated slot survives unchanged, now at index 6.
         assert_eq!(
             out.manifest[6].entity_type,
-            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            StateFamily::AnticipatedThermalState.code()
         );
         assert_eq!(out.manifest[6].entity_id, 9);
 
@@ -2203,7 +2204,7 @@ mod tests {
         let max_lag_subindex = out
             .manifest
             .iter()
-            .filter(|s| s.entity_type == ENTITY_TYPE_HYDRO_INFLOW_LAG)
+            .filter(|s| s.entity_type == StateFamily::HydroInflowLag.code())
             .map(|s| s.subindex)
             .max()
             .expect("lag slots exist");

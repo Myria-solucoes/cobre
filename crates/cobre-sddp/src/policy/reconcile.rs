@@ -39,13 +39,10 @@ use cobre_core::AnticipatedCommitmentHistory;
 use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::OwnedPolicyCutRecord;
+use cobre_io::StateFamily;
 use serde::Serialize;
 
 use crate::SddpError;
-use crate::policy::policy_export::{
-    ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG, ENTITY_TYPE_HYDRO_STORAGE,
-    ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
-};
 
 /// Tolerance (hours) for treating a target slot's covered-month overlap as
 /// exactly `H_w` — the `Blend`-vs-`Renormalize` dividing line. Calendar-day
@@ -114,8 +111,9 @@ struct MonthSource {
 }
 
 /// `(entity_type, entity_id)` — the anticipated fan-out join key. A source
-/// anticipated slot's `entity_type` is always [`ENTITY_TYPE_ANTICIPATED_THERMAL_STATE`],
-/// so the first component never varies; kept for symmetry with [`SlotKey`],
+/// anticipated slot's `entity_type` is always
+/// [`StateFamily::AnticipatedThermalState`], so the first component never varies;
+/// kept for symmetry with [`SlotKey`],
 /// the identity families' join key.
 type MonthKey = (u8, i32);
 
@@ -187,7 +185,7 @@ fn build_by_month_index(
 ) -> Result<HashMap<MonthKey, Vec<MonthSource>>, SddpError> {
     let mut by_month: HashMap<MonthKey, Vec<MonthSource>> = HashMap::new();
     for (pos, slot) in source.iter().enumerate() {
-        if slot.entity_type != ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        if slot.entity_type != StateFamily::AnticipatedThermalState.code()
             || slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
         {
             continue;
@@ -234,7 +232,10 @@ pub(crate) fn build_boundary_fold(
         if window.value_mw == 0.0 {
             continue;
         }
-        let key = (ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, window.thermal_id.0);
+        let key = (
+            StateFamily::AnticipatedThermalState.code(),
+            window.thermal_id.0,
+        );
         let Some(months) = by_month.get(&key) else {
             continue;
         };
@@ -324,14 +325,14 @@ fn resolve_target_slot(
     by_month: &HashMap<MonthKey, Vec<MonthSource>>,
     target_interval: Option<(NaiveDate, NaiveDate)>,
 ) -> RebindOp {
-    match slot.entity_type {
-        ENTITY_TYPE_HYDRO_STORAGE => resolve_storage(slot, by_identity),
-        ENTITY_TYPE_HYDRO_INFLOW_LAG => resolve_inflow_lag(slot, by_identity),
-        ENTITY_TYPE_HYDRO_TRANSIT_BUCKET => resolve_transit_bucket(slot, by_identity),
-        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE => {
+    match slot.family() {
+        Some(StateFamily::HydroStorage) => resolve_storage(slot, by_identity),
+        Some(StateFamily::HydroInflowLag) => resolve_inflow_lag(slot, by_identity),
+        Some(StateFamily::HydroTransitBucket) => resolve_transit_bucket(slot, by_identity),
+        Some(StateFamily::AnticipatedThermalState) => {
             resolve_anticipated(slot, target_interval, by_month)
         }
-        _ => resolve_by_identity(i, slot, by_identity),
+        None => resolve_by_identity(i, slot, by_identity),
     }
 }
 
@@ -598,13 +599,13 @@ pub struct BoundaryReconciliationReport {
 }
 
 impl BoundaryReconciliationReport {
-    fn tally_mut(&mut self, family: ReportFamily) -> &mut FamilyTally {
+    fn tally_mut(&mut self, family: Option<StateFamily>) -> &mut FamilyTally {
         match family {
-            ReportFamily::Storage => &mut self.storage,
-            ReportFamily::InflowLag => &mut self.inflow_lag,
-            ReportFamily::TransitBucket => &mut self.transit_bucket,
-            ReportFamily::Anticipated => &mut self.anticipated,
-            ReportFamily::OtherIdentity => &mut self.other_identity,
+            Some(StateFamily::HydroStorage) => &mut self.storage,
+            Some(StateFamily::HydroInflowLag) => &mut self.inflow_lag,
+            Some(StateFamily::HydroTransitBucket) => &mut self.transit_bucket,
+            Some(StateFamily::AnticipatedThermalState) => &mut self.anticipated,
+            None => &mut self.other_identity,
         }
     }
 
@@ -684,32 +685,16 @@ impl BoundaryReconciliationReport {
     }
 }
 
-/// The five report families [`build_reconciliation_report`] tallies,
-/// dispatched by `entity_type` identically to [`resolve_target_slot`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReportFamily {
-    Storage,
-    InflowLag,
-    TransitBucket,
-    Anticipated,
-    OtherIdentity,
-}
-
-fn report_family(entity_type: u8) -> ReportFamily {
-    match entity_type {
-        ENTITY_TYPE_HYDRO_STORAGE => ReportFamily::Storage,
-        ENTITY_TYPE_HYDRO_INFLOW_LAG => ReportFamily::InflowLag,
-        ENTITY_TYPE_HYDRO_TRANSIT_BUCKET => ReportFamily::TransitBucket,
-        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE => ReportFamily::Anticipated,
-        _ => ReportFamily::OtherIdentity,
-    }
-}
-
 /// Classify one target slot's `(family, op)` into `tally`: `Copy` → COPY;
 /// `Blend`/`Renormalize` → FAN-OUT (`Renormalize` also STRADDLING); `Zero` on
 /// a sentinel-anticipated slot is a structural pad, excluded from every
 /// tally; every other `Zero` → DEFAULT-0.0.
-fn classify_op(op: &RebindOp, family: ReportFamily, slot: &EntitySlot, tally: &mut FamilyTally) {
+fn classify_op(
+    op: &RebindOp,
+    family: Option<StateFamily>,
+    slot: &EntitySlot,
+    tally: &mut FamilyTally,
+) {
     match op {
         RebindOp::Copy(_) => tally.copy += 1,
         RebindOp::Blend(_) => tally.fan_out += 1,
@@ -718,7 +703,7 @@ fn classify_op(op: &RebindOp, family: ReportFamily, slot: &EntitySlot, tally: &m
             tally.straddling += 1;
         }
         RebindOp::Zero => {
-            let sentinel_anticipated_pad = family == ReportFamily::Anticipated
+            let sentinel_anticipated_pad = family == Some(StateFamily::AnticipatedThermalState)
                 && slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
             if !sentinel_anticipated_pad {
                 tally.default_zero += 1;
@@ -766,7 +751,7 @@ pub(crate) fn build_reconciliation_report(
 
     let mut target_span = None;
     for (i, (slot, op)) in target.iter().zip(rebind).enumerate() {
-        let family = report_family(slot.entity_type);
+        let family = slot.family();
         let interval = target_delivery_intervals.get(i).copied().flatten();
         fold_span(&mut target_span, interval);
         classify_op(op, family, slot, report.tally_mut(family));
@@ -775,16 +760,14 @@ pub(crate) fn build_reconciliation_report(
 
     for pos in dropped_source_positions(source.len(), rebind) {
         if let Some(slot) = source.get(pos) {
-            report
-                .tally_mut(report_family(slot.entity_type))
-                .dropped_source += 1;
+            report.tally_mut(slot.family()).dropped_source += 1;
         }
     }
 
     let mut source_span = None;
     let mut source_month_count = 0;
     for slot in source {
-        if slot.entity_type != ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        if slot.entity_type != StateFamily::AnticipatedThermalState.code()
             || slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
         {
             continue;
@@ -806,10 +789,9 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::{
-        BoundaryReconciliationReport, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
-        ENTITY_TYPE_HYDRO_INFLOW_LAG, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, FamilyTally, RebindOp,
-        build_boundary_fold, build_rebind, build_reconciliation_report, decode_month_anchor,
-        dropped_source_positions, rebind_cut,
+        BoundaryReconciliationReport, FamilyTally, RebindOp, StateFamily, build_boundary_fold,
+        build_rebind, build_reconciliation_report, decode_month_anchor, dropped_source_positions,
+        rebind_cut,
     };
     use crate::SddpError;
     use cobre_core::{AnticipatedCommitmentHistory, EntityId};
@@ -827,7 +809,7 @@ mod tests {
 
     fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+            entity_type: StateFamily::HydroInflowLag.code(),
             entity_id: id,
             subindex: lag_depth,
             was_active: true,
@@ -837,7 +819,7 @@ mod tests {
 
     fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+            entity_type: StateFamily::HydroTransitBucket.code(),
             entity_id: downstream_hydro_id,
             subindex: lag,
             was_active: true,
@@ -847,7 +829,7 @@ mod tests {
 
     fn anticipated_sentinel_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_type: StateFamily::AnticipatedThermalState.code(),
             entity_id: thermal_id,
             subindex: ring_slot,
             was_active: true,
@@ -857,7 +839,7 @@ mod tests {
 
     fn anticipated_dated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_type: StateFamily::AnticipatedThermalState.code(),
             entity_id: thermal_id,
             subindex: ring_slot,
             was_active: true,

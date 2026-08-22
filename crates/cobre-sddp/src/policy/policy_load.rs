@@ -26,15 +26,13 @@ use cobre_solver::{Basis, BasisStatus};
 
 use crate::SddpError;
 use crate::cut::pool::CutPool;
-use crate::policy::policy_export::{
-    ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
-};
 use crate::policy::reconcile::{
     BoundaryReconciliationReport, build_boundary_fold, build_rebind, build_reconciliation_report,
     decode_month_anchor, overlap_hours, rebind_cut,
 };
 use crate::setup::{NodeId, NodePos, StudySetup, TypedVec};
 use crate::workspace::CapturedBasis;
+use cobre_io::StateFamily;
 
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -555,7 +553,7 @@ pub fn compare_manifest_slot_identity(
 fn boundary_cut_lag_depth(manifest: &[EntitySlot]) -> u32 {
     manifest
         .iter()
-        .filter(|slot| slot.entity_type == ENTITY_TYPE_HYDRO_INFLOW_LAG)
+        .filter(|slot| slot.entity_type == StateFamily::HydroInflowLag.code())
         .map(|slot| slot.subindex)
         .max()
         .unwrap_or(0)
@@ -971,7 +969,7 @@ fn decode_pool_anticipated_months(
     manifest
         .iter()
         .filter(|slot| {
-            slot.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+            slot.entity_type == StateFamily::AnticipatedThermalState.code()
                 && slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
         })
         .map(|slot| decode_month_anchor(slot.delivery_date).map(|(start, end, _)| (start, end)))

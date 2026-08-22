@@ -22,12 +22,12 @@ pub const ENTITY_SLOT_DELIVERY_DATE_SENTINEL: i32 = i32::MIN;
 
 /// One per-slot entity-identity record for a state-vector dimension.
 ///
-/// `entity_type` is the raw `EntityType` enum byte from `schemas/policy.fbs`
-/// (`0`/`1`/`2`); the dimension-class meaning of each value is owned by the
-/// calling crate, not interpreted here.
+/// `entity_type` is the raw discriminant byte of the `EntityType` enum in
+/// `schemas/policy.fbs`; [`EntitySlot::family`] reads it as the typed
+/// [`StateFamily`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntitySlot {
-    /// Raw `EntityType` enum byte.
+    /// Raw [`StateFamily`] discriminant byte; see [`EntitySlot::family`].
     pub entity_type: u8,
     /// Owning entity's id; `int32` because a sentinel id can be `-1`.
     pub entity_id: i32,
@@ -41,6 +41,54 @@ pub struct EntitySlot {
     /// semantics. Which calendar date maps to a slot is the calling crate's
     /// responsibility, as with `subindex`.
     pub delivery_date: i32,
+}
+
+/// State-vector dimension class of an [`EntitySlot`] — the typed Rust view of
+/// the `EntityType` enum in `schemas/policy.fbs`. The wire representation stays
+/// the raw [`EntitySlot::entity_type`] byte; this enum is the checked reading of
+/// it, so the discriminants MUST match the schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum StateFamily {
+    /// Reservoir storage volume (`subindex` is `0`).
+    HydroStorage = 0,
+    /// Hydro inflow AR lag (`subindex` is the 1-based AR lag order).
+    HydroInflowLag = 1,
+    /// Anticipated thermal commitment (`subindex` is the ring-buffer slot).
+    AnticipatedThermalState = 2,
+    /// Water in-transit bucket (`entity_id` is the downstream hydro, `subindex`
+    /// the maturity lag).
+    HydroTransitBucket = 3,
+}
+
+impl StateFamily {
+    /// The raw `EntityType` discriminant byte for this family.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// The family for a raw `EntityType` byte, or `None` for a discriminant no
+    /// `schemas/policy.fbs` `EntityType` variant defines.
+    #[must_use]
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::HydroStorage),
+            1 => Some(Self::HydroInflowLag),
+            2 => Some(Self::AnticipatedThermalState),
+            3 => Some(Self::HydroTransitBucket),
+            _ => None,
+        }
+    }
+}
+
+impl EntitySlot {
+    /// The typed [`StateFamily`] of this slot, or `None` when [`Self::entity_type`]
+    /// is a byte no `EntityType` variant defines.
+    #[must_use]
+    pub fn family(&self) -> Option<StateFamily> {
+        StateFamily::from_code(self.entity_type)
+    }
 }
 
 /// One affine-piece record for value-function artifact serialization.
@@ -391,4 +439,43 @@ pub struct PolicyCheckpoint {
     ///
     /// Empty when the artifact was written without visited states.
     pub stage_states: Vec<StageStatesReadResult>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, StateFamily};
+
+    #[test]
+    fn state_family_codes_match_policy_fbs_entity_type() {
+        assert_eq!(StateFamily::HydroStorage.code(), 0);
+        assert_eq!(StateFamily::HydroInflowLag.code(), 1);
+        assert_eq!(StateFamily::AnticipatedThermalState.code(), 2);
+        assert_eq!(StateFamily::HydroTransitBucket.code(), 3);
+    }
+
+    #[test]
+    fn state_family_from_code_round_trips_and_rejects_unknown() {
+        for family in [
+            StateFamily::HydroStorage,
+            StateFamily::HydroInflowLag,
+            StateFamily::AnticipatedThermalState,
+            StateFamily::HydroTransitBucket,
+        ] {
+            assert_eq!(StateFamily::from_code(family.code()), Some(family));
+        }
+        assert_eq!(StateFamily::from_code(4), None);
+        assert_eq!(StateFamily::from_code(u8::MAX), None);
+    }
+
+    #[test]
+    fn entity_slot_family_reads_the_raw_byte() {
+        let slot = EntitySlot {
+            entity_type: StateFamily::AnticipatedThermalState.code(),
+            entity_id: 7,
+            subindex: 0,
+            was_active: true,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        };
+        assert_eq!(slot.family(), Some(StateFamily::AnticipatedThermalState));
+    }
 }

@@ -18,16 +18,8 @@ use super::codec::{
 use super::records::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, FORMAT_VERSION, OwnedPolicyBasisRecord, PolicyBasisRecord,
     PolicyCheckpoint, PolicyCheckpointMetadata, StageCutsPayload, StageCutsReadResult,
-    StageStatesPayload, StageStatesReadResult,
+    StageStatesPayload, StageStatesReadResult, StateFamily,
 };
-
-/// Raw `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
-/// Its `subindex` is a maturity-lag depth, genuinely delivery-ordered. A
-/// modular delivery-target-residue `subindex` (the other calendar-shaped
-/// family) wraps across the horizon and carries no such order — enforcing
-/// monotonicity on it would reject correctly-produced, non-monotone dates, so
-/// [`check_transit_bucket_monotonicity`] never checks it.
-const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
 
 /// Whether `delivery_date` is [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] or decodes
 /// as a valid `YYYYMMDD` date.
@@ -44,9 +36,14 @@ fn is_well_formed_delivery_date(delivery_date: i32) -> bool {
     NaiveDate::from_ymd_opt(year, month, day).is_some()
 }
 
-/// Verify one pool's `HydroTransitBucket` slots (grouped by `entity_id`) carry
-/// non-sentinel `delivery_date`s that are monotone non-decreasing in `subindex`
-/// (the maturity-lag depth).
+/// Verify one pool's [`StateFamily::HydroTransitBucket`] slots (grouped by
+/// `entity_id`) carry non-sentinel `delivery_date`s that are monotone
+/// non-decreasing in `subindex` (the maturity-lag depth).
+///
+/// Only this family is checked: its `subindex` is a genuine delivery-ordered
+/// maturity depth, whereas the other calendar-shaped family's modular
+/// delivery-target-residue `subindex` wraps across the horizon, so enforcing
+/// monotonicity there would reject correctly-produced, non-monotone dates.
 ///
 /// # Errors
 ///
@@ -55,7 +52,7 @@ fn is_well_formed_delivery_date(delivery_date: i32) -> bool {
 fn check_transit_bucket_monotonicity(pool: &StageCutsReadResult) -> Result<(), OutputError> {
     let mut by_entity: BTreeMap<i32, Vec<(u32, i32)>> = BTreeMap::new();
     for slot in &pool.entity_manifest {
-        if slot.entity_type == ENTITY_TYPE_HYDRO_TRANSIT_BUCKET
+        if slot.family() == Some(StateFamily::HydroTransitBucket)
             && slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
         {
             by_entity
