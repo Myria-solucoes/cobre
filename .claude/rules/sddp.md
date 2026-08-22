@@ -1295,33 +1295,114 @@ pins that `fill_parallel_water_entries` never reads it.
 `AnticipatedCommitmentHistory` (`cobre-core`) is a windowed record —
 `{thermal_id, start_date, end_date, value_mw}`, one commitment window per
 entry, mirroring `HydroPastDefluence`'s shape — never a per-stage array
-indexed by delivery order. A plant's commitment windows must TILE its
-calendar-derived leading delivery stages EXACTLY at coverage `1.0`: no gap
-(a leading stage left uncovered) and no over-coverage (a window reaching a
-stage at or beyond the horizon); overlap between two windows of the same
-plant is rejected earlier, at parse time, by the shared windowed-record
-validator that also serves `past_defluences` and `recent_observations`. The
-leading-stage count is calendar-derived, computed independently of the
-solver crate's point-commitment resolver (`cobre-io` is upstream and cannot
-depend on it): `LeadStages(l)` clamps to `min(l, n_stages)`; `LeadTime(delta)`
-counts the leading study stages whose stage-end cumulative hours are
-`<= delta` (tie-inclusive). `check_anticipated_thermals` resolves this count,
-then hands the plant's windows to the shared `StageCalendar` resolver — the
-same calendar walk `past_defluences` coverage uses — via `covers_exactly`
-(gap detection over the leading count) and a per-stage `coverage` sum
+indexed by delivery order. A plant's commitment windows must TILE EXACTLY its
+pre-study-decided delivery set at coverage `1.0` — the calendar-derived
+leading in-study stages and, when the plant's lead reaches past the horizon,
+the post-horizon stages it ALSO decides before the study (classes 2 and 4 of
+the delivery taxonomy) — with two named failure directions: a GAP (a
+pre-study-decided stage left uncovered, in-study or post-horizon) and
+OVER-COVERAGE (a window reaching a stage the study itself decides, class 3,
+or one beyond the plant's decision reach, class 5); overlap between two
+windows of the same plant is rejected earlier, at parse time, by the shared
+windowed-record validator that also serves `past_defluences` and
+`recent_observations`.
+
+The in-study half is calendar-derived, computed independently of the solver
+crate's point-commitment resolver (`cobre-io` is upstream and cannot depend on
+it): `LeadStages(l)` clamps to `min(l, n_stages)`; `LeadTime(delta)` counts the
+leading study stages whose stage-end cumulative hours are `<= delta`
+(tie-inclusive). `check_anticipated_thermals` resolves this count, then hands
+the plant's windows to the shared `StageCalendar` resolver — the same
+calendar walk `past_defluences` coverage uses — via `covers_exactly` (gap
+detection over the leading count) and a per-stage `coverage` sum
 (over-coverage detection beyond it); either failure hard-rejects as a
 `BusinessRuleViolation`, no fallback. A count-only gate
 (`records.len() == leading_stage_count`) is a plausible-looking alternative
 that accepts the right NUMBER of windows while missing a leading stage and
 duplicating another — silently mis-covering the plant — since only per-stage
 tiling, not a count, proves every leading stage is covered exactly once.
+
+The post-horizon half mirrors this pair exactly, against
+`classify_deliveries`'s four-way partition of every post-study index
+(`fixed_post_study` = class 4, `carried` = class 3, `beyond_reach` = class 5,
+`commissioning_inactive`): `check_fixed_post_study_tiling` is V2, the gap
+check (every `fixed_post_study` index tiled at coverage `1.0`, an explicit
+`0 MW` window included); `check_post_study_window_excludes_unreachable_stages`
+is V3, the over-coverage check (no window covers a `carried` or
+`beyond_reach` index, reported as two distinct errors since the remedies are
+opposite — lengthen the lead for a `carried` miss, shorten it for a
+`beyond_reach` one). Together V2 and V3 make a plant's covered post-study
+stages EXACTLY its `fixed_post_study` class. V4 (`check_committed_value_bounds`)
+extends the SAME committed-value envelope check to post-horizon windows
+exactly as to in-study ones — no separate post-horizon envelope rule.
+
+A class-4 delivery — pre-study-decided, post-study-delivered — is
+representable as a DECLARED CONSTANT that NEVER ENTERS THE RING once its
+window tiles exactly: priced by the boundary intercept fold, reported at its
+real delivery date, with no decision column, no ring slot, and no carry row.
+The retired reject that used to fire on any window reaching past the horizon
+is gone, but the scope boundary it protected is NOT: no pre-study decision is
+EVER carried through the ring into the post-study — the fixed commitment
+bypasses the ring precisely to keep that boundary. Carrying a class-4
+delivery through the ring instead — the boundary that retired reject used to
+enforce — is the wrong-but-compiling alternative this contract still
+forbids.
+
+The DECLARATION requirement above is commissioning-FILTERED — a
+`commissioning_inactive` post-study stage needs NO declared window at all (V2
+is vacuously satisfied there) — while the RING'S OWN excision is
+decider-derived, owned by `fixed_post_horizon_width` (The ring axis subsection
+above), a different axis entirely: excision keys on `decider == None` alone;
+declaration keys on `fixed_post_study` (`decider == None` AND
+commissioning-active). Using the commissioning-filtered declaration set as
+the ring's excision source instead is the wrong-but-compiling alternative
+this split forbids: it would skip
+excising a commissioning-inactive class-4 stage (routed to
+`commissioning_inactive`, never `fixed_post_study`), leaving it a ring member
+the ring never gives a carrier to — exactly the corruption the
+commissioning-blind, decider-derived excision exists to avoid. Commissioning
+gates only WHETHER a window must be declared and WHETHER a non-zero value
+there is a modelling error — never ring membership.
+
+A non-zero fixed value covering a `commissioning_inactive` post-study stage
+is rejected (`check_fixed_commitment_within_window`, V5); an explicit `0 MW`
+window there stays legal. V5 shares its predicate with the in-study seed rule
+(`check_seed_within_window`) but not its justification: in-study, a non-zero
+value in a closed commissioning window is an LP FISHING-EQUALITY
+INFEASIBILITY (the matured generation column is pinned `[0, 0]`, so
+`0 == seed` is unsatisfiable); post-horizon there is no LP column to reject
+it — the value would instead be SILENTLY FOLDED into the terminal-boundary
+valuation and reported as a delivery from a plant not in service, a
+mispriced output with no LP backstop at all.
+
 Read: `crates/cobre-core/src/constraints/initial_conditions.rs`
 (`AnticipatedCommitmentHistory`), `crates/cobre-io/src/validation/semantic/thermal.rs`
 (`check_anticipated_thermals`, `lead_delivery_stage_count`,
-`check_commitment_coverage`), `crates/cobre-stochastic/src/season_cast/mod.rs`
+`check_commitment_coverage`, `check_post_study_stages`, `classify_deliveries`,
+`DeliveryClasses`, `check_fixed_post_study_tiling`,
+`check_post_study_window_excludes_unreachable_stages`,
+`check_committed_value_bounds`, `check_fixed_commitment_within_window`,
+`check_seed_within_window`), `crates/cobre-stochastic/src/season_cast/mod.rs`
 (`StageCalendar::covers_exactly`, `StageCalendar::coverage`).
 Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
-`test_anticipated_lead_time_coverage_pmo_calendar_under_coverage_rejected`.
+`test_anticipated_lead_time_coverage_pmo_calendar_under_coverage_rejected`
+(in-study coverage, `thermal.rs`); and, all in
+`crates/cobre-io/tests/post_study_stages.rs`:
+`test_fixed_post_horizon_windows_tiling_class_four_stages_loads` and
+`test_untiled_fixed_post_horizon_stage_rejected` (V2),
+`test_window_on_a_study_decided_post_study_stage_rejected`,
+`test_window_beyond_the_decision_reach_rejected`, and
+`test_window_confined_to_the_fixed_set_accepted` (V3),
+`test_untiled_fixed_window_and_out_of_envelope_value_both_reported` (V4),
+`test_nonzero_fixed_commitment_outside_commissioning_window_rejected`,
+`test_zero_fixed_commitment_outside_commissioning_window_accepted`, and
+`test_fixed_commitment_inside_commissioning_window_accepted` (V5),
+`test_retired_no_carrier_advice_is_absent_from_every_diagnostic` and
+`test_fixed_commitment_window_message_makes_no_infeasibility_claim` (the
+converted class-4 record carries no reject/infeasibility language),
+`test_v2_v3_v4_and_v5_violations_are_all_reported` (multi-violation), and
+`test_reference_shaped_fixed_post_horizon_deck_loads` (a reference-shaped
+deck loads clean).
 
 ### The ring axis: the delivery axis with the fixed post-horizon window excised
 
