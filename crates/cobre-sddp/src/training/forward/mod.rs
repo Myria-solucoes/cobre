@@ -10,23 +10,29 @@
 //! per-call parameter bundles ([`ForwardPassBatch`], `StageKey`), and the thin
 //! [`run_forward_pass`] shim that delegates to `ForwardPassState::run`.
 
-use std::sync::mpsc::Sender;
+use crate::{
+    cut::pool::CutPool,
+    dcs::DcsParams,
+    setup::node_graph::{NodePos, StageIdx},
+    solver_stats::SolverStatsDelta,
+};
 
-use cobre_core::TrainingEvent;
-use cobre_solver::ActiveProfile;
-use cobre_solver::{SolverInterface, StageTemplate};
-
+// Consumed only by the test-support `run_forward_pass` shim / `ForwardPassBatch`
+// below; the import gate mirrors their `cfg` so a featureless build stays clean.
+#[cfg(any(test, feature = "test-support"))]
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
-    cut::pool::CutPool,
-    dcs::DcsParams,
     error::SddpError,
-    setup::node_graph::{NodePos, StageIdx},
-    solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, SolverWorkspace},
 };
+#[cfg(any(test, feature = "test-support"))]
+use cobre_core::TrainingEvent;
+#[cfg(any(test, feature = "test-support"))]
+use cobre_solver::{ActiveProfile, SolverInterface, StageTemplate};
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::mpsc::Sender;
 
 mod basis_capture;
 mod delta_cut_batch;
