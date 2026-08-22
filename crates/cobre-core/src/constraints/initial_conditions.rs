@@ -109,10 +109,13 @@ pub struct HydroPastDefluence {
 ///
 /// `cobre-core` has no view of the entity registry or the stage calendar, so
 /// the `cobre-io` semantic validator (not `cobre-core`) enforces:
-/// - The plant's windows tile its calendar-derived leading delivery stages at
-///   coverage `1.0` — no gap, no overlap, none beyond the horizon (a hard
-///   error, no fallback; the "Pre-study anticipated commitments:
-///   calendar-derived coverage" contract).
+/// - The plant's windows tile the delivery stages it decides before the study
+///   at coverage `1.0` — no gap, no overlap. Those stages fall on both sides of
+///   the study horizon: the leading in-study stages and, when the plant's lead
+///   reaches past the horizon, the post-horizon stages it decides before the
+///   study. A window may not cover a stage the study itself decides, nor one
+///   past the plant's decision reach (a hard error, no fallback; the "Pre-study
+///   anticipated commitments: calendar-derived coverage" contract).
 /// - Every window's `value_mw` in `[min_generation_mw, max_generation_mw]` (an
 ///   out-of-bounds rate makes the covered stage's fishing equality infeasible).
 /// - `thermal_id` references a thermal whose `anticipated_config` is `Some`.

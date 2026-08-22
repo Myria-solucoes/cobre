@@ -67,9 +67,12 @@
 //!    `value_mw` is finite, and windows for the same `thermal_id` do not overlap
 //!    (adjacent ranges where `start == prev_end` are accepted). All four route
 //!    through the shared windowed-record validator.
-//! 9. Each thermal's windows tile its calendar-derived leading delivery stages
-//!    at coverage `1.0` — no gap, no overlap, none beyond the horizon — and
-//!    every `value_mw` lies within the plant's
+//! 9. Each thermal's windows tile the delivery stages it decides before the
+//!    study at coverage `1.0` — no gap, no overlap — on both sides of the study
+//!    horizon: the leading in-study stages and, when the plant's lead reaches
+//!    past the horizon, the post-horizon stages it decides before the study. A
+//!    window may not cover a stage the study itself decides or one past the
+//!    plant's decision reach. Every `value_mw` lies within the plant's
 //!    `[min_generation_mw, max_generation_mw]` bounds and, if the plant has a
 //!    commissioning window, matures inside it. All are enforced by the semantic
 //!    validator (Layer 5a); the committed values are sunk cost and do not enter
@@ -205,12 +208,14 @@ struct RawRecentObservation {
 ///
 /// A self-describing `[start_date, end_date)` window (ISO 8601, `end_date`
 /// exclusive and after `start_date`) carrying `value_mw`, the MW rate held
-/// constant over the window. A plant's windows must tile its calendar-derived
-/// leading delivery stages exactly (validated semantically). The values are
-/// sunk cost: they do not enter the study objective. Each `value_mw` must lie
-/// within the plant's `[min_generation_mw, max_generation_mw]` bounds and, if
-/// the plant has a commissioning window, mature inside it (both validated
-/// semantically).
+/// constant over the window. A plant's windows must tile the delivery stages it
+/// decides before the study exactly — those may fall on either side of the
+/// study horizon (leading in-study stages, or post-horizon stages the plant
+/// decides ahead of the study), never a stage the study itself decides
+/// (validated semantically). The values are sunk cost: they do not enter the
+/// study objective. Each `value_mw` must lie within the plant's
+/// `[min_generation_mw, max_generation_mw]` bounds and, if the plant has a
+/// commissioning window, mature inside it (both validated semantically).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
