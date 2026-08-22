@@ -285,6 +285,25 @@ pub(crate) fn transit_seed_schema() -> Schema {
     ])
 }
 
+/// Schema for `anticipated/fixed_deliveries.parquet` — the run-level echo of
+/// declared fixed post-horizon commitment windows.
+///
+/// One row per anticipated plant × fixed window, carrying the window's real
+/// delivery dates (`start_date`/`end_date` as `Date32`) and its committed
+/// `value_mw`. Unpartitioned and axis-free: the values are scenario- and
+/// stage-independent constants, so there is no `simulation_row_prefix`. No cost
+/// or energy column — a fixed commitment is never booked (the fuel was charged
+/// at the revision that decided it) — and no source marker, since the file's
+/// existence is the marker.
+pub(crate) fn fixed_delivery_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("thermal_id", DataType::Int32, false),
+        Field::new("start_date", DataType::Date32, false),
+        Field::new("end_date", DataType::Date32, false),
+        Field::new("value_mw", DataType::Float64, false),
+    ])
+}
+
 /// Schema for `simulation/anticipated_lanes/` — post-horizon commitment lane
 /// results, keyed `(thermal_id, delivery_date)`.
 ///
@@ -951,6 +970,58 @@ mod tests {
                 && schema.field_with_name("node_id").is_err(),
             "transit_seed is scenario-level; it must not carry the stage/node row prefix"
         );
+    }
+
+    #[test]
+    fn fixed_delivery_schema_field_names_and_types() {
+        let schema = fixed_delivery_schema();
+        assert_eq!(
+            field_names(&schema),
+            vec!["thermal_id", "start_date", "end_date", "value_mw"]
+        );
+        assert_eq!(field_type(&schema, "thermal_id"), DataType::Int32);
+        assert_eq!(field_type(&schema, "start_date"), DataType::Date32);
+        assert_eq!(field_type(&schema, "end_date"), DataType::Date32);
+        assert_eq!(field_type(&schema, "value_mw"), DataType::Float64);
+    }
+
+    #[test]
+    fn fixed_delivery_schema_all_non_nullable() {
+        let schema = fixed_delivery_schema();
+        for field in schema.fields() {
+            assert!(
+                !field.is_nullable(),
+                "fixed_delivery field '{}' must not be nullable",
+                field.name()
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_delivery_schema_carries_no_scenario_or_stage_axis() {
+        let schema = fixed_delivery_schema();
+        assert!(
+            schema.field_with_name("scenario_id").is_err()
+                && schema.field_with_name("stage_id").is_err(),
+            "fixed_delivery is run-level; it must not carry the scenario/stage row prefix"
+        );
+    }
+
+    #[test]
+    fn fixed_delivery_schema_carries_no_cost_or_energy_column() {
+        let schema = fixed_delivery_schema();
+        for field in schema.fields() {
+            assert!(
+                !field.name().contains("cost"),
+                "fixed_delivery must book no cost (§7): field '{}'",
+                field.name()
+            );
+            assert!(
+                !field.name().contains("energy"),
+                "fixed_delivery carries MW only: field '{}'",
+                field.name()
+            );
+        }
     }
 
     #[test]

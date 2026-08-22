@@ -81,6 +81,7 @@ use cobre_sddp::aggregate_simulation;
 use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::build_deviation_summary;
 use cobre_sddp::build_evaporation_model_rows;
+use cobre_sddp::build_fixed_delivery_rows;
 use cobre_sddp::build_fpha_deviation_point_rows;
 use cobre_sddp::build_generic_constraint_echo_rows;
 use cobre_sddp::delta_to_stats_row;
@@ -609,6 +610,22 @@ pub(crate) fn write_generic_constraint_echo_if_any(
         })?;
     }
     Ok(())
+}
+
+/// Write the run-level fixed post-horizon commitment echo.
+///
+/// Both Python write sites ([`run_via_study`] and `Study::train`) must emit this
+/// to match the CLI's `write_fixed_delivery` output (the Python-parity hard
+/// rule). The write is fully qualified, not imported, so the parity checker's
+/// `cobre_io::write_*` match sees both sides.
+pub(crate) fn write_fixed_delivery_if_any(
+    output_dir: &Path,
+    setup: &StudySetup,
+    system: &System,
+) -> Result<(), String> {
+    let rows = build_fixed_delivery_rows(setup, system);
+    cobre_io::write_fixed_delivery(output_dir, &rows)
+        .map_err(|e| format!("output write error: failed to write fixed_delivery: {e}"))
 }
 
 /// Write the per-sampled-point FPHA deviation table sidecar, when the run opted
@@ -1400,6 +1417,7 @@ pub(crate) fn run_via_study(
         write_evaporation_models_if_any(&output_dir, &setup, &system)?;
         write_fpha_deviation_points_if_any(&output_dir, &setup, &config)?;
         write_generic_constraint_echo_if_any(&output_dir, &setup, &system)?;
+        write_fixed_delivery_if_any(&output_dir, &setup, &system)?;
 
         // Propagate a captured callback exception only AFTER all training
         // artifacts are written, so a raising or Ctrl-C-stopped run still persists

@@ -29,6 +29,7 @@ pub mod config;
 pub mod convergence;
 pub mod cut;
 pub mod error;
+pub(crate) mod fixed_delivery_echo;
 pub(crate) mod gemm;
 pub(crate) mod generic_constraint_echo;
 pub mod horizon_mode;
@@ -131,6 +132,8 @@ pub use error::SddpError;
 pub use cobre_io::scenarios::estimation::{
     EstimationPath, EstimationReport, estimate_from_history,
 };
+// ── fixed_delivery_echo ───────────────────────────────────────────────────────
+pub use fixed_delivery_echo::build_fixed_delivery_rows;
 // ── forward ───────────────────────────────────────────────────────────────────
 pub use training::forward::SyncResult;
 // ── generic_constraint_echo ───────────────────────────────────────────────────

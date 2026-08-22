@@ -8399,3 +8399,445 @@ mod anticipated_no_boundary_fixed_value_inertness {
         );
     }
 }
+
+mod fixed_delivery_output {
+    //! End-to-end pins for the run-level fixed post-horizon commitment table:
+    //! accessor -> rows -> file, against a real `StudySetup`/`System`. Extends
+    //! the no-boundary class-4 fixture shape above to two anticipated plants
+    //! for the canonical-order and declaration-order-invariance regressions.
+    //! No training solve: [`build_fixed_delivery_rows`] reads only the
+    //! resolved input the setup already carries.
+
+    use chrono::{NaiveDate, TimeDelta};
+
+    use cobre_core::entities::{bus::DeficitSegment, thermal::AnticipatedConfig};
+    use cobre_core::scenario::{LoadModel, SamplingScheme};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    };
+    use cobre_io::config::TrainingSelection;
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_io::{FixedDeliveryRow, write_fixed_delivery};
+    use cobre_sddp::hydro_models::PrepareHydroModelsResult;
+    use cobre_sddp::{StudySetup, build_fixed_delivery_rows};
+    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+    use tempfile::tempdir;
+
+    use super::common::builders::{
+        BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal,
+    };
+
+    const N_STAGES: usize = 2;
+    const K_MAX: usize = 1;
+    const BLOCK_HOURS: f64 = 1.0;
+    const BUS_ID: EntityId = EntityId(1);
+
+    /// Same `operational_start_date` as [`PLANT_HI`] — declared canonically
+    /// first only by the lower id, so a fixture that declares plants/windows
+    /// in the OTHER order still probes the accessor's own `(date, id)` sort
+    /// rather than the input declaration order.
+    const PLANT_LO: EntityId = EntityId(3);
+    const PLANT_HI: EntityId = EntityId(7);
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
+    }
+
+    fn stage_date(index: usize) -> NaiveDate {
+        date(2030, 1, 1) + TimeDelta::days(index as i64)
+    }
+
+    /// A declared class-4 window, field-for-field with
+    /// [`AnticipatedCommitmentHistory`], real calendar dates well past the
+    /// study horizon (`stage_date(N_STAGES)`).
+    #[derive(Clone, Copy)]
+    struct DeclaredWindow {
+        thermal_id: EntityId,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        value_mw: f64,
+    }
+
+    fn window_lo() -> DeclaredWindow {
+        DeclaredWindow {
+            thermal_id: PLANT_LO,
+            start_date: date(2030, 4, 1),
+            end_date: date(2030, 4, 15),
+            value_mw: 88.0,
+        }
+    }
+
+    fn window_hi() -> DeclaredWindow {
+        DeclaredWindow {
+            thermal_id: PLANT_HI,
+            start_date: date(2030, 5, 1),
+            end_date: date(2030, 5, 31),
+            value_mw: 120.5,
+        }
+    }
+
+    /// Build a deck declaring exactly `thermal_ids` (each an anticipated
+    /// `LeadStages(1)` plant on the shared bus) and exactly `windows` (each a
+    /// class-4 `past_anticipated_commitments` entry), in the given order —
+    /// the caller controls declaration order to probe the accessor's own
+    /// canonicalization rather than relying on it.
+    fn build_system(thermal_ids: &[EntityId], windows: &[DeclaredWindow]) -> System {
+        let bus = make_bus(
+            BUS_ID,
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: stage_date(0),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 1000.0,
+                }],
+                excess_cost: 0.0,
+                ..Default::default()
+            },
+        );
+
+        let thermals = thermal_ids
+            .iter()
+            .map(|&id| {
+                make_thermal(
+                    id,
+                    ThermalSpec {
+                        name: format!("T{}", id.0),
+                        operational_start_date: stage_date(0),
+                        bus_id: BUS_ID,
+                        min_generation_mw: 0.0,
+                        max_generation_mw: 10.0,
+                        cost_per_mwh: 10.0,
+                        anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
+                        entry_stage_id: None,
+                        exit_stage_id: None,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: BLOCK_HOURS,
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: false,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: BUS_ID,
+                stage_id: i as i32,
+                mean_mw: 0.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let n_thermals = thermal_ids.len();
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: K_MAX,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds::default(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let thermal_axis = N_STAGES + K_MAX;
+        for idx in 0..n_thermals {
+            for s in 0..thermal_axis {
+                *bounds.thermal_bounds_mut(idx, s) = ThermalStageBounds { cost_per_mwh: 10.0 };
+                *bounds.thermal_block_base_mut(idx, s) = ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 10.0,
+                };
+            }
+        }
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let past_anticipated_commitments = windows
+            .iter()
+            .map(|w| AnticipatedCommitmentHistory {
+                thermal_id: w.thermal_id,
+                start_date: w.start_date,
+                end_date: w.end_date,
+                value_mw: w.value_mw,
+            })
+            .collect();
+
+        let initial_conditions = InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_anticipated_commitments,
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(thermals)
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// Builds the setup the same way [`StudySetup::train`] callers do, but
+    /// also hands back the `System` — [`build_fixed_delivery_rows`] needs both
+    /// and [`StudySetup`] does not own the one it was built from.
+    fn build_setup_and_system(system: System, config: &Config) -> (StudySetup, System) {
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("build_stochastic_context");
+
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+
+        let setup =
+            StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new");
+        (setup, system)
+    }
+
+    fn assert_row_matches_window(row: &FixedDeliveryRow, expected: &DeclaredWindow) {
+        assert_eq!(row.thermal_id, expected.thermal_id.0, "thermal_id");
+        assert_eq!(row.start_date, expected.start_date, "start_date");
+        assert_eq!(row.end_date, expected.end_date, "end_date");
+        assert_eq!(row.value_mw, expected.value_mw, "value_mw");
+    }
+
+    fn assert_rows_equal(a: &[FixedDeliveryRow], b: &[FixedDeliveryRow]) {
+        assert_eq!(a.len(), b.len(), "row count must match");
+        for (ra, rb) in a.iter().zip(b) {
+            assert_eq!(ra.thermal_id, rb.thermal_id, "thermal_id");
+            assert_eq!(ra.start_date, rb.start_date, "start_date");
+            assert_eq!(ra.end_date, rb.end_date, "end_date");
+            assert_eq!(ra.value_mw, rb.value_mw, "value_mw");
+        }
+    }
+
+    /// Real declared dates, verbatim (never mirror-shifted or
+    /// horizon-anchored), in canonical-plant then ascending-`start_date`
+    /// order — pinned by declaring both plants and windows in the REVERSE of
+    /// that order, so a broken canonicalization would surface here.
+    #[test]
+    fn fixed_delivery_rows_carry_declared_dates_in_canonical_order() {
+        let lo = window_lo();
+        let hi = window_hi();
+
+        let system = build_system(&[PLANT_HI, PLANT_LO], &[hi, lo]);
+        let config = build_config();
+        let (setup, system) = build_setup_and_system(system, &config);
+
+        let rows = build_fixed_delivery_rows(&setup, &system);
+
+        assert_eq!(rows.len(), 2, "one row per declared window");
+        assert_row_matches_window(&rows[0], &lo);
+        assert_row_matches_window(&rows[1], &hi);
+    }
+
+    #[test]
+    fn fixed_delivery_file_exists_after_declared_rows_are_written() {
+        let lo = window_lo();
+        let hi = window_hi();
+        let system = build_system(&[PLANT_LO, PLANT_HI], &[lo, hi]);
+        let config = build_config();
+        let (setup, system) = build_setup_and_system(system, &config);
+        let rows = build_fixed_delivery_rows(&setup, &system);
+        assert_eq!(rows.len(), 2);
+
+        let root = tempdir().expect("tempdir");
+        write_fixed_delivery(root.path(), &rows).expect("write must succeed");
+
+        let path = root
+            .path()
+            .join("anticipated")
+            .join("fixed_deliveries.parquet");
+        assert!(path.exists(), "file must exist after a non-empty write");
+    }
+
+    /// The absence check is against a concrete fact — no file, no directory —
+    /// never a `load(&[])`-vs-itself self-comparison.
+    #[test]
+    fn fixed_delivery_absence_is_byte_neutral_no_file_no_directory() {
+        let system = build_system(&[PLANT_LO], &[]);
+        let config = build_config();
+        let (setup, system) = build_setup_and_system(system, &config);
+
+        let rows = build_fixed_delivery_rows(&setup, &system);
+        assert!(rows.is_empty(), "no class-4 window declared, so no rows");
+
+        let root = tempdir().expect("tempdir");
+        write_fixed_delivery(root.path(), &rows).expect("an empty write must succeed");
+
+        let anticipated_dir = root.path().join("anticipated");
+        assert!(
+            !anticipated_dir.exists(),
+            "an empty declaration must not create the anticipated/ directory"
+        );
+        assert!(
+            !anticipated_dir.join("fixed_deliveries.parquet").exists(),
+            "an empty declaration must not write the parquet file"
+        );
+    }
+
+    /// The workspace declaration-order-invariance hard rule: two decks
+    /// differing only in the order plants and windows were declared produce
+    /// byte-identical rows, via the accessor's own canonical sort.
+    #[test]
+    fn fixed_delivery_rows_are_declaration_order_invariant() {
+        let lo = window_lo();
+        let hi = window_hi();
+        let config = build_config();
+
+        let system_forward = build_system(&[PLANT_LO, PLANT_HI], &[lo, hi]);
+        let (setup_forward, system_forward) = build_setup_and_system(system_forward, &config);
+        let rows_forward = build_fixed_delivery_rows(&setup_forward, &system_forward);
+
+        let system_reversed = build_system(&[PLANT_HI, PLANT_LO], &[hi, lo]);
+        let (setup_reversed, system_reversed) = build_setup_and_system(system_reversed, &config);
+        let rows_reversed = build_fixed_delivery_rows(&setup_reversed, &system_reversed);
+
+        assert_eq!(rows_forward.len(), 2);
+        assert_rows_equal(&rows_forward, &rows_reversed);
+    }
+}
