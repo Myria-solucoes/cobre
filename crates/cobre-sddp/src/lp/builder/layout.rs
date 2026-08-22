@@ -223,7 +223,7 @@ pub(crate) struct AnticipatedLayout {
     /// per plant with a genuine, ACTIVE decision this stage
     /// (`PointResolution::genuine_decisions_at(stage_idx).next()`, AND the
     /// delivery stage's commissioning window), pinning that decision's ring
-    /// slot (`delivery_stage mod k_max`) to its decision column. Immediately
+    /// slot (`ring_index(delivery_stage) mod k_max`) to its decision column. Immediately
     /// after `row_anticipated_fishing_start`.
     pub(crate) row_anticipated_state_out_def_start: usize,
     /// Count of genuine, active decisions this stage (`Some` count of
@@ -258,7 +258,7 @@ pub(crate) struct AnticipatedLayout {
     /// hold, `slot^out − slot^in = 0`,
     /// [`super::delivery_ring::DeliveryRing::emit_carry_rows`]): every
     /// STRICTLY FUTURE, not-yet-due in-study slot, modular-addressed
-    /// (`delivery_target mod k_max`). The commitment maturing THIS stage is
+    /// (`ring_index(delivery_target) mod k_max`). The commitment maturing THIS stage is
     /// never here even when the single governing branch selects carry over
     /// fish — that carry renders through the maturity row above instead, so
     /// this family and `row_anticipated_fishing_start` never double-book the
@@ -267,7 +267,7 @@ pub(crate) struct AnticipatedLayout {
     /// Count of future-window carrying slots this stage
     /// (`anticipated_slot_row_pos`'s `Some` count).
     pub(crate) n_anticipated_slot_definition_rows: usize,
-    /// For each GLOBAL in-study commitment-hold slot (`(m mod k_max) *
+    /// For each GLOBAL in-study commitment-hold slot (`(ring_index(m) mod k_max) *
     /// n_anticipated + plant`, modular slot-major/plant-minor —
     /// [`StateSpace::commitment_hold_in_study_offset`]'s own addressing), this
     /// stage's compact row position within the future-window carry-row

@@ -570,7 +570,7 @@ pub(super) fn fill_thermal_columns(
 /// surface. Both branches read delivery
 /// hours/discount from the EXTENDED `ctx.delivery_total_hours`/
 /// `ctx.delivery_cumulative_discount_factors` vectors and deposit into ring
-/// slot `delivery_stage mod k_max`, the ring's modular delivery-target
+/// slot `ring_index(delivery_stage) mod k_max`, the ring's modular delivery-target
 /// mapping [`crate::indexer::StateSpace::commitment_hold_in_study_offset`]
 /// addresses. A missing post-study cell — a deck error the loader rejects
 /// upstream, never reported here — degrades to the same dormant `[0, 0]`
