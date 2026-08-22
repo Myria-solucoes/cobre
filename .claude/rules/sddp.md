@@ -890,22 +890,45 @@ day-01 delivery anchor (`decode_month_anchor`, the exact inverse of
 `year_month_day_anchor`); an exact or superset match reconciles byte-for-byte
 (`Copy`). The `H_w / covered` division is guarded: `resolve_anticipated` returns
 `Zero` on `terms.is_empty()` before it can divide by a zero covered span.
+
+The constant intercept fold (`build_boundary_fold`) reuses this SAME
+`overlap/H_M` source-month weighting on a different object: a class-4 fixed
+post-horizon window's declared MW is a CONSTANT, not a state dimension, so
+`Σ_M (overlap_hours(w, M) / H_M) · v_w` sums directly into a `(source_pos,
+factor)` fold vector instead of a `Blend`/`Renormalize` op. A fixed window
+overlapping no source month contributes zero — mirroring `RebindOp::Zero`,
+never an error — and the fold's own filter drops every exact `0.0` factor
+rather than emit a zero-weighted term. `load_boundary_cuts` adds the fold onto
+each cut's RAW intercept (`record.intercept += Σ coeff[source_pos] · factor`)
+BEFORE `rescale_cut_records_for_load`'s cost-scale and legacy-ratio
+transforms, in the same source-coefficient frame `rebind_cut` reads — so the
+folded future-cost term rides both rescale transforms with the rest of the
+intercept. Folding after rescale, or reading a rescaled coefficient into the
+fold sum, is the wrong-but-compiling alternative: the transforms are not
+idempotent across that boundary, so a post-rescale fold prices the fixed
+commitment at the wrong scale.
 Read: `policy/reconcile.rs` (`resolve_anticipated`, `build_rebind`, `rebind_cut`,
-`decode_month_anchor`, `overlap_hours`, the `Blend`/`Renormalize` variants),
-`setup/mod.rs` (`year_month_day_anchor`), `setup/accessors.rs`
-(`build_terminal_anticipated_delivery_intervals`, the target-interval companion),
-`policy/policy_export.rs` (`build_stage_entity_manifest`, dating each ring slot at
-its modular delivery stage via `slot_lane_at`), `policy/policy_load.rs`
-(`load_boundary_cuts` threads the target delivery intervals). Pinned by the
-`hm_distribute_conservation` fixtures in
+`decode_month_anchor`, `overlap_hours`, `build_boundary_fold`, the
+`Blend`/`Renormalize` variants), `setup/mod.rs` (`year_month_day_anchor`),
+`setup/accessors.rs` (`build_terminal_anticipated_delivery_intervals`, the
+target-interval companion), `policy/policy_export.rs`
+(`build_stage_entity_manifest`, dating each ring slot at its modular delivery
+stage via `slot_lane_at`), `policy/policy_load.rs` (`load_boundary_cuts`
+threads the target delivery intervals and applies the fold before rescale).
+Pinned by the `hm_distribute_conservation` fixtures in
 `tests/anticipated_core.rs` (coeff ratio equals `H_w / H_M`, invariant to the
 delivery stage's hours), the `Blend`/`Renormalize` `rebind_cut` unit tests (both
 apply identical mechanics, distinction is only the weight),
 `tests/boundary_reconcile_defaults.rs` (the fan-out matrix and the superset
-bit-identity `to_bits` pin), and
+bit-identity `to_bits` pin),
 `build_rebind_dated_in_study_ring_slot_with_no_interval_yields_zero` (a dated
 target slot with no interval resolves to `Zero`, not a reject, even when a source
-month would overlap it).
+month would overlap it), and the constant intercept fold's own regressions
+`boundary_fold_marked_frame_moves_intercept_by_hand_computed_delta`,
+`boundary_fold_legacy_frame_moves_intercept_by_hand_computed_delta`,
+`boundary_fold_no_overlap_window_leaves_intercept_bit_identical`, and
+`boundary_fold_empty_windows_intercept_bit_identical`, all in
+`policy/policy_load.rs`.
 
 ## Initial-state seeding resolves IDs through a position map, never `binary_search`
 
@@ -1300,6 +1323,62 @@ Read: `crates/cobre-core/src/constraints/initial_conditions.rs`
 Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
 `test_anticipated_lead_time_coverage_pmo_calendar_under_coverage_rejected`.
 
+### The ring axis: the delivery axis with the fixed post-horizon window excised
+
+Every `m mod k_max` statement below is a RING-AXIS statement: indices are
+ring-axis indices; the ring axis is the delivery axis with the fixed
+post-horizon window excised; identity whenever no fixed window exists.
+`PointResolution::ring_index(m)` maps a physical delivery target `m` to its
+ring-axis index: `Some(m)` for `m < n_decision` (the study's decision-stage
+count, `n_stages` elsewhere in this file — in-study, identity), `None` inside
+the excised fixed post-horizon window `[n_decision, n_decision + g)` (never a
+ring member), `Some(m − g)` above it (the class-3/5 tail). `physical_target`
+is its left inverse (`r < n_decision ↦ r`, `r ↦ r + g` otherwise). `g` is the
+leading `None`-run width at the post-study end of `decider`, derived on the
+resolution alone via the private `fixed_post_horizon_width` helper
+(`take_while(is_none).count()`) — it carries NO SEPARATE STATE, so
+`ring_index` and `physical_target` cannot disagree about `g`. `g == 0` (no
+declared fixed post-horizon window) collapses both maps to the identity — the
+byte-neutrality anchor every existing deck relies on.
+
+A parallel per-plant structure that caches the excision instead of deriving it
+from `PointResolution` on demand is the forbidden alternative: it re-introduces
+the foreign-index-space alignment bug the excision exists to remove, the
+moment a second copy of `g` drifts from the resolution's own. `PointResolution`
+is the single owner of both maps — no new type, no new state, never a second
+copy.
+Read: `lead_time/mod.rs` (`PointResolution::ring_index`, `physical_target`,
+`fixed_post_horizon_width`). Pinned by
+`ring_index_is_the_identity_without_a_post_study_none_run`,
+`ring_index_excises_the_fixed_post_horizon_window`,
+`physical_target_is_the_left_inverse_of_ring_index`, and
+`ring_index_degrades_to_the_identity_on_a_short_decider`, all in
+`lead_time/tests.rs`.
+
+### Ring depth sizing: `k_max = max(occupancy_max, n_none_in_study)`
+
+The ring depth is `k_max = max(occupancy_max, n_none_in_study)`, resolved in
+ring-axis (excised) space and owned by `PointResolution::ring_depth`: the
+global `k_max = max_i ring_depth_i` (`AnticipatedResolution::resolve`) and the
+per-plant reachability bound `k_i` (`StateSpace::anticipated_lead_stages`, the
+`LeadTime` arm) both read it. The `LeadStages(l)` arm instead returns `l`
+VERBATIM — the byte-identity anchor `n_none_in_study <= l` by construction
+makes safe (`debug_assert!(ring_depth() <= l)`). Sizing from `occupancy_max`
+alone is the wrong-but-plausible under-sizing alternative this closes — the
+filed ring-depth under-sizing defect: `occupancy_max` SUBTRACTS the seed
+maturing at stage 0, so it under-counts the one moment
+every simultaneous pre-study seed is in flight (stage 0, before the first
+fishing) — the last seeded stage then silently delivers an earlier stage's MW,
+a silent-wrong-value bug that still compiles and still converges.
+Read: `lead_time/mod.rs` (`PointResolution::ring_depth`,
+`AnticipatedResolution::resolve`), `setup/mod.rs`
+(`resolve_anticipated_commitments_core`'s `LeadStages`/`LeadTime` split).
+Pinned by `ring_depth_covers_every_simultaneous_pre_study_seed`,
+`ring_depth_equals_the_occupancy_max_when_no_seed_overflows`,
+`ring_depth_ignores_post_study_none_deciders`, and
+`resolve_sizes_k_max_from_the_deepest_plant_ring_depth`, all in
+`lead_time/tests.rs`.
+
 ### In-LP anticipated ring: definition-row sign, hold carry & asymmetric masking
 
 The in-study anticipated ring is `DeliveryRing`'s other instantiation (the shared
@@ -1312,9 +1391,10 @@ There is no Rust-side shift step: the ring transition is resolved entirely by th
 definition rows below, and `current_state`/`state_at_capture` read the outgoing
 block by the same plain copy already used for storage and travel-time buckets.
 Slots are keyed by DELIVERY-TARGET RESIDUE, not by distance to maturity: delivery
-target `m`'s slot is `m mod k_max`, slot-major/plant-minor
-(`StateSpace::commitment_hold_in_study_offset(plant, m) = (m mod k_max) *
-n_anticipated + plant`).
+target `m`'s slot is `ring_index(m) mod k_max` — `m mod k_max` where the index
+is already a ring-axis index (The ring axis subsection above) —
+slot-major/plant-minor (`StateSpace::commitment_hold_in_study_offset(plant, m) =
+(ring_index(m) mod k_max) * n_anticipated + plant`).
 
 The interior transition is the same-slot HOLD identity, not a Markov-1 shift. An
 in-flight, not-yet-due slot's outgoing column is pinned to its OWN incoming column,
@@ -1327,14 +1407,15 @@ delivery-target residue until it matures. The water travel-time ring keeps
 `emit_shift_rows`, because its physics genuinely shift; only the anticipated family
 carries. `build_anticipated_slot_row_pos` covers the ring window `{t+1 .. t+k_max}`
 — the strictly-future, not-yet-due delivery targets, a contiguous run over which
-the modular key `m mod k_max` is injective
-(`modular_slot_key_is_injective_on_the_carried_in_flight_set`), so the same-slot
-hold never collides two in-flight commitments onto one slot; the commitment
+the modular key `r mod k_max` (ring-axis `r`; The ring axis subsection above) is
+injective (`modular_slot_key_is_injective_on_the_carried_in_flight_set`), so the
+same-slot hold never collides two in-flight commitments onto one slot; the commitment
 maturing THIS stage is always fished (see the always-fish contract below), never
 carried here.
 
 The deposit / latch pins a plant's fresh decision into the slot of its OWN delivery
-target, `slot^out = decision_col` (`slot = delivery_stage mod k_max`), via the
+target, `slot^out = decision_col` (`slot = ring_index(delivery_stage) mod k_max`
+— The ring axis subsection above), via the
 shared skeleton's deposit primitive (`DeliveryRing::emit_deposit`, `+1` on
 `out_col(slot, lane)`, `−1` on `decision_col`), routed by
 `fill_anticipated_state_out_def_entries`. Both row families render `[0, 0]` bounds
@@ -1367,9 +1448,14 @@ out-of-nowhere commitment value.
 The policy manifest resolves a ring column back to `(slot, plant)` via
 `DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col`, never a
 hand-rolled `offset / n_anticipated`/`offset % n_anticipated` pair — and dates it
-at its MODULAR delivery stage: the next `m >= t` in the slot's residue class
-(`delta = (slot_idx + k_max − t mod k_max) mod k_max`, `m = t + delta`), NEVER
-`t + slot_idx` (the retired shift-ring form, wrong whenever `t mod k_max != 0`).
+at its MODULAR delivery stage, reached through the RING-AXIS residue: the next
+ring-axis target `r >= t` in the slot's residue class (`delta = (slot_idx +
+k_max − t mod k_max) mod k_max`, `r = t + delta`), mapped to the physical
+delivery stage `m = physical_target(r)` (The ring axis subsection above)
+before dating. Two wrong-but-compiling alternatives: `t + slot_idx` (the
+retired shift-ring form, wrong whenever `t mod k_max != 0`), and dating the
+raw ring-axis `r` directly instead of `physical_target(r)` — it lands on the
+excised fixed post-horizon window's stub stage whenever a plant declares one.
 Reachability uses the plant's OWN `StateSpace::anticipated_lead_stages[plant]`
 bound (`slot_idx < k_i`), not a depth- or decider-only check
 (`AnticipatedResolution::decision_sets`/`depth` count only within-study-decided
@@ -1413,7 +1499,14 @@ the backward-cut coefficient-propagation regressions
 manifest delivery-anchor regressions
 (`anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`,
 `anticipated_slot_delivery_anchor_past_horizon_is_sentinel`,
-`anticipated_slot_padding_beyond_own_lead_is_sentinel`).
+`anticipated_slot_padding_beyond_own_lead_is_sentinel`). The ring-axis
+excision itself is additionally pinned by the collision/identity regressions
+`excision_keeps_each_study_stage_fishing_its_own_seed`,
+`zero_gap_with_post_study_resolves_an_identity_ring_and_occupancy_depth`, and
+`zero_gap_carry_slot_addressing_matches_the_open_coded_identity_formula`, all
+in `tests/anticipated_core.rs`, and the excised-space manifest-dating
+regression `date_ring_slots_in_excised_space_maps_through_physical_target`
+(`policy/policy_export.rs`).
 
 ### In-study maturity always fishes; carry-to-terminal is the post-study-targeted ring slot's alone
 
@@ -1423,7 +1516,9 @@ stage (`build_anticipated_fishing_row_pos`'s `Some`, driven by
 `fill_anticipated_fishing_entries` emits the must-generate coupling
 UNCONDITIONALLY — active OR commissioning-inactive alike: `+h_b` (block hours) on
 each of the plant's per-block thermal generation columns and `−H` (the stage's
-total hours) on the maturing slot's INCOMING column `in_col(stage_idx mod k_max)`.
+total hours) on the maturing slot's INCOMING column `in_col(ring_index(stage_idx)
+mod k_max)` — identity here (The ring axis subsection above): a delivery matures
+only at its own in-study stage index, always `< n_decision`.
 It reads `commit_in` and NEVER writes `commit_out`. A commissioning-inactive
 delivery was never latched — its decision column stays dormant `[0, 0]`
 (`fill_anticipated_columns`) — so its `in_col` carries `0` and this equality pins
@@ -1442,8 +1537,9 @@ zero-commit (the guarding `debug_assert` is compiled out of release).
 Carry-to-terminal is owned SOLELY by the ring's interior-carry rows
 (`DeliveryRing::emit_carry_rows`, routed by `fill_anticipated_slot_definition_entries`),
 never the maturity arm. The always-fish `+h_b`/`−H` coefficient shape is exactly
-the pre-migration one; only its slot addressing is modular (`stage_idx mod k_max`,
-via `commitment_hold_in_study_offset`).
+the pre-migration one; only its slot addressing is modular
+(`ring_index(stage_idx) mod k_max`, identity for an in-study index — The ring
+axis subsection above — via `commitment_hold_in_study_offset`).
 
 Read: `lp/builder/entries.rs` (`fill_anticipated_fishing_entries`,
 `fill_anticipated_slot_definition_entries`), `lp/builder/layout.rs`
@@ -1472,9 +1568,11 @@ delivery (`m` in `[n_stages, n_delivery)`) is CREATED and rides the ring, priced
 through the boundary FCF — masking is exact at `n_delivery`, not `n_stages`.
 `build_anticipated_slot_row_pos`'s per-slot `None` (no carry row) and
 `fill_anticipated_slot_columns`'s frozen `[0, 0]` outgoing column, at a slot
-whose delivery target `m = stage_idx + depth + 1 >= n_delivery`
-(`depth in 0..k_max`), are therefore always vacuous: the masked slot is provably
-zero for every valid configuration, never a real value the model declines to
+whose ring-axis target `r = stage_idx + depth + 1` (`depth in 0..k_max`) maps,
+through `physical_target` (The ring axis subsection above), to a physical
+delivery target `m >= n_delivery`, are therefore always vacuous: the masked
+slot is provably zero for every valid configuration, never a real value the
+model declines to
 route anywhere. A commissioning-inactive in-study delivery is likewise pinned to
 `0` — not by masking but by the always-fish arm reading a dormant slot's
 `in_col` of `0` (the always-fish contract above) — so it too loses nothing of
@@ -1501,9 +1599,10 @@ Each anticipated plant gets AT MOST ONE decision column per stage
 (`col_anticipated_decision_start + local_idx`), driven by
 `PointResolution::genuine_decisions_at(stage_idx).next()` (a `K = 0`
 self-delivery already excluded — see below). That decision deposits into its
-OWN ring slot, `slot = delivery_stage mod k_max` — computed DIRECTLY from the
-decision's own delivery stage (`fill_anticipated_state_out_def_entries`), never
-from a `depth`-derived boundary.
+OWN ring slot, `slot = ring_index(delivery_stage) mod k_max` (The ring axis
+subsection above) — computed DIRECTLY from the decision's own delivery stage
+(`fill_anticipated_state_out_def_entries`), never from a `depth`-derived
+boundary.
 
 **`depth[t]` is not the ring's per-stage occupancy boundary.** `depth[t]`
 (`PointResolution::depth`) counts only IN-STUDY decided items still in flight
@@ -1515,9 +1614,11 @@ the ring at the same stage (e.g. a constant-lead plant's stage 0), so
 wrong-but-plausible shortcut `PointResolution::is_ready_at`'s doc comment
 warns against. The correct interior/deposit/padding split is checked PER
 DELIVERY TARGET directly (`build_anticipated_slot_row_pos`): for each
-`m = stage_idx + depth + 1` (`depth in 0..k_max`), its ring slot `m mod k_max`
-is a deposit iff `decider[m] == Some(stage_idx)`, an interior carry iff
-`is_ready_at(m, stage_idx)` and not a deposit, else padding or past-horizon.
+ring-axis target `r = stage_idx + depth + 1` (`depth in 0..k_max`), ring slot
+`r mod k_max` — `ring_index(m) mod k_max` under the physical delivery target
+`m = physical_target(r)` (The ring axis subsection above) — is a deposit iff
+`decider[m] == Some(stage_idx)`, an interior carry iff `is_ready_at(m,
+stage_idx)` and not a deposit, else padding or past-horizon.
 `decider` is nondecreasing in `m`, so readiness is monotonic and the ready
 delivery targets form a contiguous prefix — the property that makes the
 per-target check well-founded without needing an aggregate boundary.
@@ -1688,7 +1789,12 @@ right-boundary pricing above): a plant whose decider anchors an in-study decisio
 to a delivery target `m >= n_stages` — a post-study-targeted delivery — in a study
 that declares NO `config.policy.boundary` carries ZERO terminal value. The ring
 slot still exists and joins the `β·state` projection, but the terminal boundary FCF
-it would price against is empty, so `β·state` contributes nothing. This is a
+it would price against is empty, so `β·state` contributes nothing. A class-4
+fixed post-horizon commitment is a different object this contract does not
+cover: never an in-study decision, excised from the ring entirely (The ring
+axis subsection above), and priced — when a boundary is declared — by the
+boundary intercept fold on the raw cut intercept, never by `β·state` (the fold
+clause in the fan-out reconciliation subsection below). This is a
 ratified scope boundary, NOT a reject: a `min_mw == max_mw` replay deck is a
 legitimate use of a fixed post-study profile with no boundary, and rejecting it
 would abort a valid study. Setup emits exactly ONE advisory naming every affected
