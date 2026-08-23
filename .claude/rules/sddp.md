@@ -808,8 +808,19 @@ Read: `lp/builder/columns.rs` (`fill_spillage_columns`). Cases: D38, D39, D42
 Every policy load — full-FCF warm-start/resume/simulation-only and terminal
 boundary-cut injection — routes through `validate_policy_load`, the single
 entry point; there is no opt-out or bypass path. Its check matrix keys off
-`PolicyLoadKind`: `state_dimension` equality is hard-rejected for both `FullFcf`
-and `BoundaryInjection`; `num_stages` equality is hard-rejected only for
+`PolicyLoadKind`: `state_dimension` equality is hard-rejected only for `FullFcf`
+(`CHECK_STATE_DIMENSION`); a `BoundaryInjection` load skips it in
+`validate_policy_load` and defers to the per-slot reconciliation in
+`load_boundary_cuts` as the authority — the C17 source-drop warning
+(`warn_dropped_source_couplings`) is what makes relaxing it safe, letting a
+NEWAVE-shaped source (no transit buckets, monthly anticipated slots) feed a
+DECOMP-shaped current study at a differing state dimension. That deferral holds
+only while the entity manifest is verifiable; an absent (empty) manifest cannot
+reconcile per-slot, so `load_boundary_cuts` falls back to a `state_dimension`
+equality guard there, rejecting an unreconcilable differing-dimension load rather
+than panicking in the fixed-length cut-pool copy (`CutPool::new_with_warm_start`'s
+`copy_from_slice`, which panics on a source-vs-current length mismatch).
+`num_stages` equality is hard-rejected only for
 `FullFcf` — a `BoundaryInjection` load skips it deliberately, since a monthly
 source study may legitimately feed a weekly+monthly current study. Per-slot
 `slot_identity` (`entity_type`, `entity_id`, `subindex`) is an EXACT positional
@@ -829,12 +840,21 @@ would falsely reject a policy whose entities genuinely match but whose scaling
 strategy or magnitude differs from the current study's — the forbidden
 alternative this contract rules out.
 Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`,
+`PolicyLoadKind::CHECK_STATE_DIMENSION`,
 `PolicyLoadKind::CHECK_SLOT_IDENTITY_EXACT`), `policy/reconcile.rs`
 (`build_rebind`, `rebind_cut`). Pinned by the `validate_policy_load_full_fcf_*`
-(FullFcf exact match, unchanged) and
+(FullFcf exact match, unchanged, including
+`validate_policy_load_full_fcf_still_rejects_differing_state_dimension`),
+`validate_policy_load_boundary_injection_allows_differing_state_dimension` and
 `validate_policy_load_boundary_injection_does_not_check_slot_identity`
-(BoundaryInjection defers to reconcile) tests, plus `policy::reconcile`'s unit
-tests and `tests/boundary_reconcile_defaults.rs`.
+(BoundaryInjection defers to reconcile), and
+`load_boundary_cuts_empty_manifest_differing_state_dimension_rejects` (the
+unverifiable-manifest `state_dimension` fallback guard) tests, plus
+`policy::reconcile`'s unit tests, `tests/boundary_reconcile_defaults.rs`, and the
+end-to-end NEWAVE→DECOMP acceptance regression
+`tests/boundary_dim_mismatch_reconcile.rs`
+(`newave_source_reconciles_into_decomp_current`,
+`newave_boundary_injected_decomp_run_converges`).
 
 ### Dated anticipated fan-out reconciliation is hour-weighted by the SOURCE month
 

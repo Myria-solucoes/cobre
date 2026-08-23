@@ -169,12 +169,16 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// Selects [`validate_policy_load`]'s check matrix (`state_dimension` is
-/// checked unconditionally for every kind). Sealed so [`FullFcf`] and
+/// Selects [`validate_policy_load`]'s check matrix. Sealed so [`FullFcf`] and
 /// [`BoundaryInjection`] are the only implementors, making a
 /// [`PolicyLoadProof<K>`] a proof of validation under exactly one real kind —
 /// never a third, uncatalogued one.
 pub trait PolicyLoadKind: sealed::Sealed {
+    /// Whether `state_dimension` equality is hard-rejected for this kind.
+    /// `false` ([`BoundaryInjection`]) defers to the per-slot reconciliation in
+    /// [`load_boundary_cuts`], which tolerates a differing source/current
+    /// dimension.
+    const CHECK_STATE_DIMENSION: bool;
     /// Whether `num_stages` equality is hard-rejected for this kind.
     const CHECK_NUM_STAGES: bool;
     /// Whether the pool count and graph-manifest identity are hard-rejected for
@@ -189,22 +193,24 @@ pub trait PolicyLoadKind: sealed::Sealed {
 }
 
 /// Full future-cost-function load (warm-start, resume, simulation-only):
-/// `num_stages`, the pool count, the graph manifest, and per-slot identity
-/// must match `current` exactly.
+/// `state_dimension`, `num_stages`, the pool count, the graph manifest, and
+/// per-slot identity must match `current` exactly.
 #[derive(Debug, Clone, Copy)]
 pub struct FullFcf;
 
 impl sealed::Sealed for FullFcf {}
 impl PolicyLoadKind for FullFcf {
+    const CHECK_STATE_DIMENSION: bool = true;
     const CHECK_NUM_STAGES: bool = true;
     const CHECK_N_POOLS: bool = true;
     const CHECK_SLOT_IDENTITY_EXACT: bool = true;
 }
 
-/// Single-stage boundary-cut injection into the terminal pool: `num_stages`,
-/// the pool count, and the graph manifest are unchecked (a monthly source may
-/// feed a weekly+monthly current study on a different graph); per-slot
-/// identity is RECONCILED, not exact-matched — [`load_boundary_cuts`] wires
+/// Single-stage boundary-cut injection into the terminal pool:
+/// `state_dimension`, `num_stages`, the pool count, and the graph manifest are
+/// unchecked (a monthly source may feed a weekly+monthly current study on a
+/// different graph at a different state dimension); per-slot identity is
+/// RECONCILED, not exact-matched — [`load_boundary_cuts`] wires
 /// [`crate::policy::reconcile::build_rebind`]/`rebind_cut` in after this
 /// validation succeeds.
 #[derive(Debug, Clone, Copy)]
@@ -212,6 +218,7 @@ pub struct BoundaryInjection;
 
 impl sealed::Sealed for BoundaryInjection {}
 impl PolicyLoadKind for BoundaryInjection {
+    const CHECK_STATE_DIMENSION: bool = false;
     const CHECK_NUM_STAGES: bool = false;
     const CHECK_N_POOLS: bool = false;
     const CHECK_SLOT_IDENTITY_EXACT: bool = false;
@@ -231,28 +238,29 @@ pub struct PolicyLoadProof<K: PolicyLoadKind> {
 }
 
 /// Validate that `source`'s state layout is compatible with `current`'s, per
-/// `K`'s check matrix: `state_dimension` equality is hard-rejected for every
-/// kind; `num_stages` equality is hard-rejected only when
-/// `K::CHECK_NUM_STAGES` ([`FullFcf`]). Per-slot identity is an EXACT
-/// positional match (delegated to [`compare_manifest_slot_identity`]) only
-/// when `K::CHECK_SLOT_IDENTITY_EXACT` ([`FullFcf`]); [`BoundaryInjection`]
-/// skips it here — its slot identity is RECONCILED separately, by
-/// [`crate::policy::reconcile::build_rebind`] in [`load_boundary_cuts`], never
-/// by this lower-level manifest check. `col_scale`/scaling is never a
-/// compatibility dimension. This is the single entry point for policy-load
-/// validation — its success is the only way to construct a
-/// [`PolicyLoadProof<K>`], so every load path routes through it.
+/// `K`'s check matrix: `state_dimension` equality is hard-rejected only when
+/// `K::CHECK_STATE_DIMENSION` ([`FullFcf`]); [`BoundaryInjection`] skips it and
+/// defers to the per-slot reconciliation in [`load_boundary_cuts`]. `num_stages`
+/// equality is hard-rejected only when `K::CHECK_NUM_STAGES` ([`FullFcf`]).
+/// Per-slot identity is an EXACT positional match (delegated to
+/// [`compare_manifest_slot_identity`]) only when `K::CHECK_SLOT_IDENTITY_EXACT`
+/// ([`FullFcf`]); [`BoundaryInjection`] skips it here — its slot identity is
+/// RECONCILED separately, by [`crate::policy::reconcile::build_rebind`] in
+/// [`load_boundary_cuts`], never by this lower-level manifest check.
+/// `col_scale`/scaling is never a compatibility dimension. This is the single
+/// entry point for policy-load validation — its success is the only way to
+/// construct a [`PolicyLoadProof<K>`], so every load path routes through it.
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] on a `state_dimension` mismatch, a
-/// `num_stages` mismatch under [`FullFcf`], or (under [`FullFcf`] only) a
-/// per-slot identity mismatch (see [`compare_manifest_slot_identity`]).
+/// Returns [`SddpError::Validation`] under [`FullFcf`] on a
+/// `state_dimension` mismatch, a `num_stages` mismatch, or a per-slot
+/// identity mismatch (see [`compare_manifest_slot_identity`]).
 pub fn validate_policy_load<K: PolicyLoadKind>(
     source: &PolicyStageManifest<'_>,
     current: &PolicyStageManifest<'_>,
 ) -> Result<PolicyLoadProof<K>, SddpError> {
-    if source.state_dimension != current.state_dimension {
+    if K::CHECK_STATE_DIMENSION && source.state_dimension != current.state_dimension {
         return Err(SddpError::Validation(format!(
             "policy state_dimension mismatch: policy has {}, current system has {} (a lag-state \
              depth mismatch is a common cause)",
@@ -772,6 +780,18 @@ pub fn load_boundary_cuts(
 
     let verifiable =
         manifest_identity_verifiable(&stage_result.entity_manifest, current_manifest, on_warning);
+
+    // Guard only the unverifiable (empty-manifest) branch: a verifiable manifest
+    // defers to per-slot reconciliation, which tolerates a differing source/current
+    // dimension — hoisting this to an unconditional check would reject that load.
+    if !verifiable && stage_result.state_dimension != current_state_dimension {
+        return Err(SddpError::Validation(format!(
+            "boundary policy state_dimension mismatch: policy has {}, current system has {} (a \
+             lag-state depth mismatch is a common cause); an absent entity manifest cannot be \
+             reconciled per-slot, so a differing state dimension cannot be resolved",
+            stage_result.state_dimension, current_state_dimension
+        )));
+    }
 
     if verifiable {
         // The fold reads SOURCE coefficients by source_pos and MUST run before rebind_cut
@@ -2119,16 +2139,17 @@ mod tests {
     }
 
     /// A policy exported WITHOUT travel-time buckets has a smaller `state_dimension`
-    /// than the bucket-aware current study, so `load_boundary_cuts` rejects on the
-    /// `state_dimension` guard before per-slot identity. Pairs with the force-on
-    /// wiring that lands separately.
+    /// (2) than the bucket-aware current study (3). That differing dimension does
+    /// not reject under a verifiable manifest: per-slot reconciliation copies
+    /// the two identity-matched storage coefficients through and resolves the
+    /// target-only transit bucket to `0.0`.
     #[test]
-    fn load_boundary_cuts_no_transit_bucket_export_dimension_mismatch_rejects() {
+    fn load_boundary_cuts_no_transit_bucket_export_reconciles_transit_bucket_to_zero() {
         let tmp = tempfile::tempdir().unwrap();
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &storage_manifest(1, 2));
 
         let current = vec![storage_slot(1), storage_slot(2), transit_bucket_slot(2, 1)];
-        let result = load_boundary_cuts(
+        let cuts = load_boundary_cuts(
             tmp.path(),
             0,
             3,
@@ -2138,17 +2159,18 @@ mod tests {
             None,
             1_000_000.0,
             &mut ignore_warnings(),
-        );
+        )
+        .expect("a differing-dimension load with a reconcilable manifest must load, not reject");
 
-        assert!(
-            result.is_err(),
-            "no-bucket export vs bucket study must reject"
-        );
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("state_dimension"),
-            "error must cite state_dimension: {msg}"
-        );
+        assert_eq!(cuts.len(), 2, "both cuts must load");
+        for cut in cuts.iter() {
+            assert_eq!(
+                cut.coefficients,
+                vec![1.0, 1.0, 0.0],
+                "storage slots copy their matched coefficients (the fixture's uniform 1.0); the \
+                 target-only transit bucket reconciles to 0.0"
+            );
+        }
     }
 
     // ── load_boundary_cuts manifest resolution (0.14 pool-keyed artifact) ─────
@@ -2780,6 +2802,44 @@ mod tests {
         );
     }
 
+    /// A differing `state_dimension` (14 vs 17) passes `BoundaryInjection`:
+    /// `validate_policy_load` does not hard-reject it there, deferring to the
+    /// per-slot reconciliation in `load_boundary_cuts`.
+    #[test]
+    fn validate_policy_load_boundary_injection_allows_differing_state_dimension() {
+        let slots = storage_manifest(1, 2);
+        let source = psm(14, 12, &slots);
+        let current = psm(17, 12, &slots);
+
+        let result = validate_policy_load::<BoundaryInjection>(&source, &current);
+
+        assert!(
+            result.is_ok(),
+            "BoundaryInjection defers a differing state_dimension to reconcile: {result:?}"
+        );
+    }
+
+    /// The same differing `state_dimension` (14 vs 17) still hard-rejects under
+    /// `FullFcf`: `CHECK_STATE_DIMENSION` stays `true` there.
+    #[test]
+    fn validate_policy_load_full_fcf_still_rejects_differing_state_dimension() {
+        let slots = storage_manifest(1, 2);
+        let source = psm(14, 12, &slots);
+        let current = psm(17, 12, &slots);
+
+        let result = validate_policy_load::<FullFcf>(&source, &current);
+
+        assert!(
+            result.is_err(),
+            "FullFcf still rejects a differing state_dimension"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("state_dimension mismatch"),
+            "message must name the state_dimension mismatch: {msg}"
+        );
+    }
+
     /// A `num_stages` mismatch is a hard reject on `FullFcf` but the identical
     /// inputs pass `BoundaryInjection` (unchecked there).
     #[test]
@@ -2968,6 +3028,38 @@ mod tests {
             report.warnings[0].contains("manifest absent"),
             "warning must flag the absent manifest: {}",
             report.warnings[0]
+        );
+    }
+
+    /// An empty source manifest cannot be reconciled per-slot, so a differing
+    /// `state_dimension` there falls back to the `state_dimension` guard: the
+    /// boundary load returns `Err(Validation)` rather than carrying source-length
+    /// coefficients into the cut-pool copy, which would panic on the mismatch.
+    #[test]
+    fn load_boundary_cuts_empty_manifest_differing_state_dimension_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_checkpoint_with_manifest(tmp.path(), 1, 2, &[10.0, 20.0], &[]);
+
+        let result = load_boundary_cuts(
+            tmp.path(),
+            0,
+            3,
+            &[],
+            &[],
+            &[],
+            None,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
+
+        assert!(
+            matches!(result, Err(SddpError::Validation(_))),
+            "an unreconcilable empty-manifest differing-dimension load must reject: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("state_dimension mismatch"),
+            "the reject must name the state_dimension mismatch: {msg}"
         );
     }
 
