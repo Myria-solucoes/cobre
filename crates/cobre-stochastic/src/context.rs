@@ -3,7 +3,13 @@
 //! [`StochasticContext`] owns the precomputed stochastic infrastructure;
 //! [`build_stochastic_context`] assembles it from a [`System`] reference.
 
-use cobre_core::{EntityId, LoadModel, System, scenario::SamplingScheme};
+use std::collections::HashMap;
+
+use cobre_core::{
+    EntityId, LoadModel, System,
+    scenario::{ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, InflowModel, SamplingScheme},
+    temporal::Stage,
+};
 
 /// Per-class sampling scheme selections for provenance tracking; each field is
 /// `None` when its class is not configured.
@@ -44,6 +50,7 @@ pub struct OpeningTreeInputs<'a> {
 use crate::{
     StochasticError,
     correlation::resolve::DecomposedCorrelation,
+    derive_external_sample_moments,
     normal::precompute::{EntityFactorEntry, PrecomputedNormal},
     par::{precompute::PrecomputedPar, validation::validate_par_parameters},
     provenance::{ComponentProvenance, StochasticProvenance},
@@ -396,6 +403,90 @@ impl StochasticContext {
     }
 }
 
+/// Under `External`, build a derived-moment [`LoadModel`] slice — one entry
+/// per `(entity, study stage)` with `mean_mw`/`std_mw` set to the sample
+/// moments [`derive_external_sample_moments`] computes over `external_rows`.
+/// Feeds [`PrecomputedNormal::build`] the SAME `(μ, σ)` pair the
+/// standardization side derives from the same rows, so the
+/// standardize/reconstruct round trip holds — both sides must keep deriving
+/// from the same rows.
+fn external_derived_load_models<R, FR>(
+    external_rows: &[R],
+    entity_ids: &[EntityId],
+    study_stages: &[Stage],
+    row_fields: FR,
+) -> Vec<LoadModel>
+where
+    FR: Fn(&R) -> (EntityId, i32, i32, f64),
+{
+    let n_entities = entity_ids.len();
+    let moments =
+        derive_external_sample_moments(external_rows, entity_ids, study_stages.len(), row_fields);
+    let mut models = Vec::with_capacity(study_stages.len() * n_entities);
+    for (stage_idx, stage) in study_stages.iter().enumerate() {
+        for (entity_idx, &bus_id) in entity_ids.iter().enumerate() {
+            let (mean, std) = moments[stage_idx * n_entities + entity_idx];
+            models.push(LoadModel {
+                bus_id,
+                stage_id: stage.id,
+                mean_mw: mean,
+                std_mw: std,
+            });
+        }
+    }
+    models
+}
+
+/// Under `External`, override each AR(0) hydro's study-stage [`InflowModel`]
+/// mean/std with sample moments derived from `system.external_scenarios()`
+/// (design doc §4.2); an AR(p > 0) hydro's models pass through unchanged
+/// (§4.3). AR(0)-ness mirrors `par_probe`'s own per-hydro classification
+/// (`PrecomputedPar::order`/`has_annual`, built from the unmodified models),
+/// so the override can never disagree with what a later `PrecomputedPar::build`
+/// itself would treat as AR(0).
+fn external_ar0_inflow_models(
+    system: &System,
+    hydro_ids: &[EntityId],
+    n_stages: usize,
+    par_probe: &PrecomputedPar,
+) -> Vec<InflowModel> {
+    let n_hydros = hydro_ids.len();
+    let moments = derive_external_sample_moments(
+        system.external_scenarios(),
+        hydro_ids,
+        n_stages,
+        |row: &ExternalScenarioRow| (row.hydro_id, row.stage_id, row.scenario_id, row.value_m3s),
+    );
+    let hydro_index: HashMap<EntityId, usize> = hydro_ids
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
+
+    system
+        .inflow_models()
+        .iter()
+        .cloned()
+        .map(|model| {
+            let Ok(stage_idx) = usize::try_from(model.stage_id) else {
+                return model;
+            };
+            let Some(&h_idx) = hydro_index.get(&model.hydro_id) else {
+                return model;
+            };
+            if stage_idx >= n_stages || par_probe.order(h_idx) != 0 || par_probe.has_annual(h_idx) {
+                return model;
+            }
+            let (mean_m3s, std_m3s) = moments[stage_idx * n_hydros + h_idx];
+            InflowModel {
+                mean_m3s,
+                std_m3s,
+                ..model
+            }
+        })
+        .collect()
+}
+
 /// Initialize the full stochastic pipeline from a [`System`] reference.
 ///
 /// Stage filtering keeps only study stages (non-negative `stage.id`). Load-bus
@@ -503,6 +594,13 @@ pub fn build_stochastic_context(
         .map(|sm| sm.seasons.len());
     let par_lp =
         PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
+    let par_lp = if schemes.inflow == Some(SamplingScheme::External) {
+        let external_models =
+            external_ar0_inflow_models(system, &hydro_ids, study_stages.len(), &par_lp);
+        PrecomputedPar::build(&external_models, &study_stages, &hydro_ids, cycle_len)?
+    } else {
+        par_lp
+    };
 
     let correlation = if dim == 0 || system.correlation().profiles.is_empty() {
         DecomposedCorrelation::empty()
@@ -538,29 +636,54 @@ pub fn build_stochastic_context(
         .max()
         .unwrap_or(0);
 
-    let normal_lp = PrecomputedNormal::build(
-        system.load_models(),
-        load_factors,
-        &study_stages,
-        &load_bus_ids,
-        max_blocks,
-    )?;
+    let normal_lp = if schemes.load == Some(SamplingScheme::External) {
+        let external_models = external_derived_load_models(
+            system.external_load_scenarios(),
+            &load_bus_ids,
+            &study_stages,
+            |row: &ExternalLoadRow| (row.bus_id, row.stage_id, row.scenario_id, row.value_mw),
+        );
+        PrecomputedNormal::build(
+            &external_models,
+            load_factors,
+            &study_stages,
+            &load_bus_ids,
+            max_blocks,
+        )?
+    } else {
+        PrecomputedNormal::build(
+            system.load_models(),
+            load_factors,
+            &study_stages,
+            &load_bus_ids,
+            max_blocks,
+        )?
+    };
 
     // The `mean_mw`/`std_mw` carried here are dimensionless availability factors,
     // not MW; the NCS noise transform applies the `max_gen` scaling.
     let ncs_normal = if ncs_entity_ids.is_empty() {
         PrecomputedNormal::default()
     } else {
-        let ncs_as_load: Vec<LoadModel> = system
-            .ncs_models()
-            .iter()
-            .map(|m| LoadModel {
-                bus_id: m.ncs_id,
-                stage_id: m.stage_id,
-                mean_mw: m.mean,
-                std_mw: m.std,
-            })
-            .collect();
+        let ncs_as_load: Vec<LoadModel> = if schemes.ncs == Some(SamplingScheme::External) {
+            external_derived_load_models(
+                system.external_ncs_scenarios(),
+                &ncs_entity_ids,
+                &study_stages,
+                |row: &ExternalNcsRow| (row.ncs_id, row.stage_id, row.scenario_id, row.value),
+            )
+        } else {
+            system
+                .ncs_models()
+                .iter()
+                .map(|m| LoadModel {
+                    bus_id: m.ncs_id,
+                    stage_id: m.stage_id,
+                    mean_mw: m.mean,
+                    std_mw: m.std,
+                })
+                .collect()
+        };
         PrecomputedNormal::build(
             &ncs_as_load,
             ncs_factors,
@@ -596,8 +719,8 @@ mod tests {
         Bus, DeficitSegment, EntityId, SystemBuilder,
         entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
         scenario::{
-            CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-            LoadModel, NcsModel, SamplingScheme,
+            CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
+            ExternalScenarioRow, InflowModel, LoadModel, NcsModel, SamplingScheme,
         },
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -1885,6 +2008,107 @@ mod tests {
             ctx.forward_seed(),
             None,
             "forward_seed() must return None when not supplied"
+        );
+    }
+
+    /// AC (Unit Test): the AR-order branch selects derived-vs-seasonal
+    /// correctly under `External` — an AR(0) hydro's PAR moments come from
+    /// the external samples, while an AR(p > 0) hydro's stay byte-identical
+    /// to the seasonal, unmodified build.
+    #[test]
+    fn external_inflow_override_applies_only_to_ar0_hydros() {
+        let hydros = vec![make_hydro(1), make_hydro(2)];
+        let stages = vec![make_stage(0, 0, 1), make_stage(1, 1, 1)];
+        // Hydro 1: AR(0), seasonal stats deliberately disagree with the
+        // external file. Hydro 2: AR(1), stats must stay untouched.
+        let inflow_models = vec![
+            make_inflow_model(1, 0, 30.0, vec![]),
+            make_inflow_model(1, 1, 30.0, vec![]),
+            make_inflow_model(2, 0, 30.0, vec![0.4]),
+            make_inflow_model(2, 1, 30.0, vec![0.4]),
+        ];
+        let external_rows = vec![
+            ExternalScenarioRow {
+                stage_id: 0,
+                scenario_id: 0,
+                hydro_id: EntityId(1),
+                value_m3s: 200.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 0,
+                hydro_id: EntityId(1),
+                value_m3s: 10.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 1,
+                hydro_id: EntityId(1),
+                value_m3s: 30.0,
+            },
+        ];
+
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(hydros)
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .correlation(identity_correlation(&[1, 2]))
+            .external_scenarios(external_rows)
+            .build()
+            .unwrap();
+
+        let seasonal_ctx = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+
+        let external_ctx = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::External),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+
+        // AR(0) hydro (canonical index 0): derived from the external samples,
+        // not the deliberately-disagreeing seasonal stats (mean=30.0 seasonal
+        // std, vs. the external file's 200.0 / 10.0 / 30.0 samples).
+        assert!((external_ctx.par().deterministic_base(0, 0) - 200.0).abs() < 1e-10);
+        assert!(external_ctx.par().sigma(0, 0).abs() < 1e-10);
+        assert!((external_ctx.par().deterministic_base(1, 0) - 20.0).abs() < 1e-10);
+        assert!((external_ctx.par().sigma(1, 0) - 10.0).abs() < 1e-10);
+
+        // AR(1) hydro (canonical index 1): byte-identical to the seasonal build.
+        assert!(
+            (external_ctx.par().deterministic_base(0, 1)
+                - seasonal_ctx.par().deterministic_base(0, 1))
+            .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (external_ctx.par().sigma(0, 1) - seasonal_ctx.par().sigma(0, 1)).abs() < f64::EPSILON
+        );
+        assert_eq!(
+            external_ctx.par().psi_slice(0, 1),
+            seasonal_ctx.par().psi_slice(0, 1)
         );
     }
 }
