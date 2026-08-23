@@ -12,8 +12,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
-    ManifestNode, PolicyBasisRecord, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
+    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
+    GraphManifest, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord, ProducerBlock,
     STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL,
     StageCutsPayload, StageStatesPayload,
 };
@@ -219,7 +219,7 @@ pub(crate) struct PyPolicyCheckpointMetadata {
     producer: PyProducerBlock,
 }
 
-impl From<PyPolicyCheckpointMetadata> for PolicyCheckpointMetadata {
+impl From<PyPolicyCheckpointMetadata> for CheckpointManifest {
     fn from(m: PyPolicyCheckpointMetadata) -> Self {
         Self {
             format_version: m.format_version,
@@ -377,7 +377,7 @@ pub fn write_policy_checkpoint(
         .map(|sc| build_stage_cuts_data(sc, reserve_depth))
         .collect::<PyResult<_>>()?;
 
-    let metadata: PolicyCheckpointMetadata = metadata.into();
+    let metadata: CheckpointManifest = metadata.into();
     let metadata_cost_scale_factor = metadata.producer.cost_scale_factor;
 
     py.detach(|| {

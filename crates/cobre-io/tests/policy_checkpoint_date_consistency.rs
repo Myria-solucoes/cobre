@@ -9,8 +9,8 @@
 )]
 
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
-    PolicyCheckpointMetadata, ProducerBlock, StageCutsPayload, StateFamily, read_policy_checkpoint,
+    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
+    GraphManifest, ProducerBlock, StageCutsPayload, StateFamily, read_policy_checkpoint,
     write_policy_checkpoint,
 };
 
@@ -24,8 +24,8 @@ fn slot(entity_type: u8, entity_id: i32, subindex: u32, delivery_date: i32) -> E
     }
 }
 
-fn metadata() -> PolicyCheckpointMetadata {
-    PolicyCheckpointMetadata {
+fn metadata() -> CheckpointManifest {
+    CheckpointManifest {
         format_version: FORMAT_VERSION,
         cobre_version: "0.13.0".to_string(),
         created_at: "2026-08-11T00:00:00Z".to_string(),

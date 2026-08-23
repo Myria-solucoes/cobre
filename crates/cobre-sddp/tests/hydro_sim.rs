@@ -120,13 +120,10 @@ mod simulation_only {
         );
 
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-        let metadata = cobre_io::PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-03-29T00:00:00Z".to_string(),
-            num_stages: n_stages as u32,
-            graph_manifest: setup.build_graph_manifest(),
-            producer: cobre_io::ProducerBlock {
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            n_stages as u32,
+            setup.build_graph_manifest(),
+            cobre_io::ProducerBlock {
                 completed_iterations: training_result.iterations as u32,
                 final_lower_bound: training_result.final_lb,
                 best_upper_bound: Some(training_result.final_ub),
@@ -140,7 +137,7 @@ mod simulation_only {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
             },
-        };
+        );
 
         write_policy_checkpoint(&policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");
@@ -1007,13 +1004,10 @@ mod decomp_integration {
         let stage_bases =
             build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-        let metadata = cobre_io::PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-04-14T00:00:00Z".to_string(),
-            num_stages: fcf.pools.len() as u32,
-            graph_manifest: setup.build_graph_manifest(),
-            producer: cobre_io::ProducerBlock {
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            fcf.pools.len() as u32,
+            setup.build_graph_manifest(),
+            cobre_io::ProducerBlock {
                 completed_iterations: result.iterations as u32,
                 final_lower_bound: result.final_lb,
                 best_upper_bound: Some(result.final_ub),
@@ -1027,7 +1021,7 @@ mod decomp_integration {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
             },
-        };
+        );
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");
     }
@@ -2786,8 +2780,8 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
         TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use cobre_io::{
-        FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord,
-        ProducerBlock, StageCutsPayload, write_policy_checkpoint,
+        GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+        write_policy_checkpoint,
     };
     use cobre_sddp::indexer::{CutStateProjection, StateDim};
     use cobre_sddp::setup::{NodeId, StageIdx};
@@ -3211,12 +3205,9 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
             node_id: 100,
             graph_stage_id: -1,
         };
-        let metadata = PolicyCheckpointMetadata {
-            format_version: FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-08-20T00:00:00Z".to_string(),
-            num_stages: 1,
-            graph_manifest: GraphManifest {
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            1,
+            GraphManifest {
                 n_pools: 1,
                 nodes: vec![ManifestNode {
                     id: 100,
@@ -3225,7 +3216,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
                 }],
                 edges: vec![],
             },
-            producer: ProducerBlock {
+            ProducerBlock {
                 completed_iterations: 0,
                 final_lower_bound: 0.0,
                 best_upper_bound: None,
@@ -3239,7 +3230,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: Some(1.0),
             },
-        };
+        );
         write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
     }
 

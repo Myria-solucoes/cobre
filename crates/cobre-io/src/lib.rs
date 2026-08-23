@@ -96,12 +96,14 @@ pub use extensions::{
     parse_production_models, parse_scalar_parameters_json,
 };
 pub use initial_conditions::parse_initial_conditions;
+pub use output::policy::codec::{deserialize_checkpoint_manifest, serialize_checkpoint_manifest};
+pub use output::policy::records::CheckpointManifest;
 pub use output::policy::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
     ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
-    PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
-    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL,
-    StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult, StateFamily,
+    PolicyCheckpoint, PolicyCutRecord, ProducerBlock, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
+    STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload,
+    StageCutsReadResult, StageStatesPayload, StageStatesReadResult, StateFamily,
     deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states,
     read_policy_checkpoint, serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
     write_policy_checkpoint,

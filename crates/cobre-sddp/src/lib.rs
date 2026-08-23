@@ -141,8 +141,9 @@ pub use lp::builder::{StageTemplates, build_stage_templates};
 pub use policy::policy_load::{
     BoundaryInjection, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind, PolicyLoadProof,
     PolicyStageManifest, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
-    build_basis_cache_from_checkpoint, compare_manifest_slot_identity, inject_boundary_cuts,
-    load_boundary_cuts, rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage,
+    build_basis_cache_from_checkpoint, checkpoint_terminal_cost_scale_factor,
+    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
+    rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage,
     resolve_boundary_state_requirements, validate_policy_load,
 };
 // ── policy_export (checkpoint authoring) ─────────────────────────────────────

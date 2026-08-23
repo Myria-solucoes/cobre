@@ -13,9 +13,8 @@ use std::process::Command;
 
 use chrono::NaiveDate;
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
-    PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload, StateFamily,
-    write_policy_checkpoint,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, PolicyCutRecord, ProducerBlock,
+    StageCutsPayload, StateFamily, write_policy_checkpoint,
 };
 use cobre_sddp::{SddpError, load_boundary_cuts, resolve_boundary_source_stage};
 use serde_json::json;
@@ -98,14 +97,11 @@ fn boundary_load_reads_cost_scale_from_bin() {
         node_id: 0,
         graph_stage_id: 0,
     };
-    let metadata = PolicyCheckpointMetadata {
-        format_version: FORMAT_VERSION,
-        cobre_version: "0.15.0".to_string(),
-        created_at: "2026-08-23T00:00:00Z".to_string(),
-        num_stages: 1,
-        graph_manifest: GraphManifest::default(),
-        producer: producer_block(),
-    };
+    let metadata = cobre_sddp::test_support::checkpoint_metadata(
+        1,
+        GraphManifest::default(),
+        producer_block(),
+    );
     write_policy_checkpoint(tmp.path(), &[payload], &[], &metadata, &[]).unwrap();
 
     let loading_factor = 2_500_000.0;
@@ -300,14 +296,11 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
         node_id: 0,
         graph_stage_id: 0,
     };
-    let metadata = PolicyCheckpointMetadata {
-        format_version: FORMAT_VERSION,
-        cobre_version: "0.15.0".to_string(),
-        created_at: "2026-08-23T00:00:00Z".to_string(),
-        num_stages: 1,
-        graph_manifest: GraphManifest::default(),
-        producer: producer_block(),
-    };
+    let metadata = cobre_sddp::test_support::checkpoint_metadata(
+        1,
+        GraphManifest::default(),
+        producer_block(),
+    );
     write_policy_checkpoint(tmp.path(), &[payload], &[], &metadata, &[]).unwrap();
 
     let pre_change_buf = build_pre_self_describing_stage_cuts_bin(0, 7.0, 3.5);
@@ -375,14 +368,11 @@ fn auto_resolver_rejects_sentinel_graph_stage_id() {
         node_id: -1,
         graph_stage_id: -1,
     };
-    let metadata = PolicyCheckpointMetadata {
-        format_version: FORMAT_VERSION,
-        cobre_version: "0.15.0".to_string(),
-        created_at: "2026-08-23T00:00:00Z".to_string(),
-        num_stages: 1,
-        graph_manifest: GraphManifest::default(),
-        producer: producer_block(),
-    };
+    let metadata = cobre_sddp::test_support::checkpoint_metadata(
+        1,
+        GraphManifest::default(),
+        producer_block(),
+    );
     write_policy_checkpoint(tmp.path(), &[payload], &[], &metadata, &[]).unwrap();
 
     let current_intervals = vec![Some((ymd(2026, 4, 1), ymd(2026, 4, 8)))];

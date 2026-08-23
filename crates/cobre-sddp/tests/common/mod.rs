@@ -140,7 +140,7 @@ pub fn boundary_requirements(case_dir: &Path, config: &Config) -> BoundaryStateR
     let Some(bp) = config.policy.boundary.as_ref() else {
         return BoundaryStateRequirements::none();
     };
-    if !bp.checkpoint_path(case_dir).join("metadata.json").exists() {
+    if !bp.checkpoint_path(case_dir).join("manifest.bin").exists() {
         return BoundaryStateRequirements::present(0);
     }
     cobre_sddp::resolve_boundary_state_requirements(case_dir, config)

@@ -43,9 +43,8 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestNode,
-    PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload, StateFamily,
-    write_policy_checkpoint,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestNode, PolicyCutRecord,
+    ProducerBlock, StageCutsPayload, StateFamily, write_policy_checkpoint,
 };
 use cobre_sddp::{inject_boundary_cuts, load_boundary_cuts};
 use cobre_solver::ActiveSolver;
@@ -167,17 +166,14 @@ fn write_source_checkpoint(
         node_id: 0,
         graph_stage_id: -1,
     };
-    let metadata = PolicyCheckpointMetadata {
-        format_version: FORMAT_VERSION,
-        cobre_version: "0.15.0".to_string(),
-        created_at: "2026-08-22T00:00:00Z".to_string(),
-        num_stages: 1,
-        graph_manifest: single_stage_manifest(),
-        producer: ProducerBlock {
+    let metadata = cobre_sddp::test_support::checkpoint_metadata(
+        1,
+        single_stage_manifest(),
+        ProducerBlock {
             cost_scale_factor,
             ..producer_block()
         },
-    };
+    );
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }
 

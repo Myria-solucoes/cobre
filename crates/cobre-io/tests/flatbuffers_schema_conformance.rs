@@ -27,12 +27,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCutRecord, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
+    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
+    GraphManifest, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    PolicyBasisRecord, PolicyCutRecord, ProducerBlock, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
     STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload,
-    StageCutsReadResult, StageStatesPayload, StageStatesReadResult, deserialize_stage_basis,
-    deserialize_stage_cuts, deserialize_stage_states, serialize_stage_basis, serialize_stage_cuts,
-    serialize_stage_states,
+    StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
+    deserialize_checkpoint_manifest, deserialize_stage_basis, deserialize_stage_cuts,
+    deserialize_stage_states, serialize_checkpoint_manifest, serialize_stage_basis,
+    serialize_stage_cuts, serialize_stage_states,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -855,6 +857,265 @@ table StageStates {
     assert_eq!(
         result.node_id, STAGE_STATES_NODE_ID_SENTINEL,
         "a pre-node_id buffer must read back node_id as the sentinel, not 0"
+    );
+}
+
+// ─── CheckpointManifest ──────────────────────────────────────────────────────
+
+/// A fully-populated manifest fixture: multi-node/multi-edge graph and a
+/// non-default producer with both `Option<f64>` provenance fields set.
+fn conformance_manifest_value() -> CheckpointManifest {
+    CheckpointManifest {
+        format_version: FORMAT_VERSION,
+        cobre_version: "9.9.9".to_string(),
+        created_at: "2026-08-23T12:00:00Z".to_string(),
+        num_stages: 60,
+        graph_manifest: GraphManifest {
+            n_pools: 3,
+            nodes: vec![
+                ManifestNode {
+                    id: 10,
+                    stage_id: 1,
+                    pool_id: 0,
+                },
+                ManifestNode {
+                    id: 11,
+                    stage_id: 2,
+                    pool_id: 2,
+                },
+            ],
+            edges: vec![ManifestEdge {
+                source_id: 10,
+                target_id: 11,
+                probability: 0.75,
+            }],
+        },
+        producer: ProducerBlock {
+            completed_iterations: 50,
+            final_lower_bound: 1234.5,
+            best_upper_bound: Some(1300.0),
+            max_iterations: 200,
+            forward_passes: 4,
+            warm_start_cuts: 7,
+            warm_start_counts: vec![3, 4],
+            rng_seed: 42,
+            total_visited_states: 999,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![
+                "parallel".to_string(),
+                "chronological".to_string(),
+            ],
+            cost_scale_factor: Some(1_000_000.0),
+        },
+    }
+}
+
+fn assert_manifest_eq(actual: &CheckpointManifest, expected: &CheckpointManifest) {
+    assert_eq!(actual.format_version, expected.format_version);
+    assert_eq!(actual.cobre_version, expected.cobre_version);
+    assert_eq!(actual.created_at, expected.created_at);
+    assert_eq!(actual.num_stages, expected.num_stages);
+
+    assert_eq!(
+        actual.graph_manifest.n_pools,
+        expected.graph_manifest.n_pools
+    );
+    assert_eq!(
+        actual.graph_manifest.nodes.len(),
+        expected.graph_manifest.nodes.len()
+    );
+    for (a, e) in actual
+        .graph_manifest
+        .nodes
+        .iter()
+        .zip(&expected.graph_manifest.nodes)
+    {
+        assert_eq!(a.id, e.id);
+        assert_eq!(a.stage_id, e.stage_id);
+        assert_eq!(a.pool_id, e.pool_id);
+    }
+    assert_eq!(
+        actual.graph_manifest.edges.len(),
+        expected.graph_manifest.edges.len()
+    );
+    for (a, e) in actual
+        .graph_manifest
+        .edges
+        .iter()
+        .zip(&expected.graph_manifest.edges)
+    {
+        assert_eq!(a.source_id, e.source_id);
+        assert_eq!(a.target_id, e.target_id);
+        assert_eq!(a.probability.to_bits(), e.probability.to_bits());
+    }
+
+    let (ap, ep) = (&actual.producer, &expected.producer);
+    assert_eq!(ap.completed_iterations, ep.completed_iterations);
+    assert_eq!(
+        ap.final_lower_bound.to_bits(),
+        ep.final_lower_bound.to_bits()
+    );
+    assert_eq!(
+        ap.best_upper_bound.map(f64::to_bits),
+        ep.best_upper_bound.map(f64::to_bits)
+    );
+    assert_eq!(ap.max_iterations, ep.max_iterations);
+    assert_eq!(ap.forward_passes, ep.forward_passes);
+    assert_eq!(ap.warm_start_cuts, ep.warm_start_cuts);
+    assert_eq!(ap.warm_start_counts, ep.warm_start_counts);
+    assert_eq!(ap.rng_seed, ep.rng_seed);
+    assert_eq!(ap.total_visited_states, ep.total_visited_states);
+    assert_eq!(ap.training_block_mode, ep.training_block_mode);
+    assert_eq!(
+        ap.training_block_mode_per_stage,
+        ep.training_block_mode_per_stage
+    );
+    assert_eq!(
+        ap.cost_scale_factor.map(f64::to_bits),
+        ep.cost_scale_factor.map(f64::to_bits)
+    );
+}
+
+/// Round-trip of the `CheckpointManifest` root in both directions: the
+/// hand-rolled writer → reader path preserves every field, `flatc` decodes the
+/// hand-rolled buffer with each field at its slot, and a `flatc`-built buffer
+/// carrying the same document decodes identically through the hand-rolled reader.
+#[test]
+fn checkpoint_manifest_round_trip() {
+    let manifest = conformance_manifest_value();
+    let buf = serialize_checkpoint_manifest(&manifest);
+
+    let hand_rolled = deserialize_checkpoint_manifest(&buf)
+        .expect("hand-rolled reader must consume its own buffer");
+    assert_manifest_eq(&hand_rolled, &manifest);
+
+    // Hand-rolled bytes → flatc decode of the CheckpointManifest root.
+    let json = flatc_decode(&buf, "CheckpointManifest");
+    assert_eq!(as_u64(&json, "format_version"), u64::from(FORMAT_VERSION));
+    assert_eq!(get(&json, "cobre_version").as_str().unwrap(), "9.9.9");
+    assert_eq!(
+        get(&json, "created_at").as_str().unwrap(),
+        "2026-08-23T12:00:00Z"
+    );
+    assert_eq!(as_u64(&json, "num_stages"), 60);
+    assert_eq!(as_u64(&json, "n_pools"), 3);
+    assert_eq!(as_u64(&json, "completed_iterations"), 50);
+    assert!((as_f64(&json, "final_lower_bound") - 1234.5).abs() < 1e-9);
+    assert!((as_f64(&json, "best_upper_bound") - 1300.0).abs() < 1e-9);
+    assert_eq!(as_u64(&json, "max_iterations"), 200);
+    assert_eq!(as_u64(&json, "forward_passes"), 4);
+    assert_eq!(as_u64(&json, "warm_start_cuts"), 7);
+    assert_eq!(get(&json, "warm_start_counts"), &json!([3, 4]));
+    assert_eq!(as_u64(&json, "rng_seed"), 42);
+    assert_eq!(as_u64(&json, "total_visited_states"), 999);
+    assert_eq!(
+        get(&json, "training_block_mode").as_str().unwrap(),
+        "parallel"
+    );
+    assert_eq!(
+        get(&json, "training_block_mode_per_stage"),
+        &json!(["parallel", "chronological"])
+    );
+    assert!((as_f64(&json, "cost_scale_factor") - 1_000_000.0).abs() < 1e-6);
+
+    let nodes = get(&json, "nodes").as_array().expect("nodes is an array");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(i64_or(&nodes[0], "id", 0), 10);
+    assert_eq!(i64_or(&nodes[0], "stage_id", 0), 1);
+    assert_eq!(u64_or(&nodes[0], "pool_id", 0), 0);
+    assert_eq!(i64_or(&nodes[1], "id", 0), 11);
+    assert_eq!(i64_or(&nodes[1], "stage_id", 0), 2);
+    assert_eq!(u64_or(&nodes[1], "pool_id", 0), 2);
+
+    let edges = get(&json, "edges").as_array().expect("edges is an array");
+    assert_eq!(edges.len(), 1);
+    assert_eq!(i64_or(&edges[0], "source_id", 0), 10);
+    assert_eq!(i64_or(&edges[0], "target_id", 0), 11);
+    assert!((as_f64(&edges[0], "probability") - 0.75).abs() < 1e-12);
+
+    // flatc-built buffer → hand-rolled reader.
+    let document = json!({
+        "format_version": FORMAT_VERSION,
+        "cobre_version": "9.9.9",
+        "created_at": "2026-08-23T12:00:00Z",
+        "num_stages": 60,
+        "n_pools": 3,
+        "nodes": [
+            {"id": 10, "stage_id": 1, "pool_id": 0},
+            {"id": 11, "stage_id": 2, "pool_id": 2}
+        ],
+        "edges": [
+            {"source_id": 10, "target_id": 11, "probability": 0.75}
+        ],
+        "completed_iterations": 50,
+        "final_lower_bound": 1234.5,
+        "best_upper_bound": 1300.0,
+        "max_iterations": 200,
+        "forward_passes": 4,
+        "warm_start_cuts": 7,
+        "warm_start_counts": [3, 4],
+        "rng_seed": 42,
+        "total_visited_states": 999,
+        "training_block_mode": "parallel",
+        "training_block_mode_per_stage": ["parallel", "chronological"],
+        "cost_scale_factor": 1_000_000.0
+    });
+    let flatc_buf = flatc_encode(&document, "CheckpointManifest");
+    let from_flatc = deserialize_checkpoint_manifest(&flatc_buf)
+        .expect("hand-rolled reader must consume flatc-built buffer");
+    assert_manifest_eq(&from_flatc, &manifest);
+}
+
+/// The `None` half of the `Option<f64>` producer contract that
+/// [`checkpoint_manifest_round_trip`] exercises only in its `Some` form:
+/// `best_upper_bound` and `cost_scale_factor` both `None` round-trip as `None`,
+/// never `Some(0.0)` — the writer omits an absent slot, the reader keeps it `None`.
+#[test]
+fn checkpoint_manifest_producer_optionals_round_trip_none() {
+    let mut manifest = conformance_manifest_value();
+    manifest.producer.best_upper_bound = None;
+    manifest.producer.cost_scale_factor = None;
+    let buf = serialize_checkpoint_manifest(&manifest);
+
+    let hand_rolled = deserialize_checkpoint_manifest(&buf)
+        .expect("hand-rolled reader must consume its own buffer");
+    assert_eq!(
+        hand_rolled.producer.best_upper_bound, None,
+        "an absent best_upper_bound must decode to None, never Some(0.0)"
+    );
+    assert_eq!(
+        hand_rolled.producer.cost_scale_factor, None,
+        "an absent cost_scale_factor must decode to None, never Some(0.0)"
+    );
+    assert_manifest_eq(&hand_rolled, &manifest);
+
+    let json = flatc_decode(&buf, "CheckpointManifest");
+    assert!(
+        json.get("best_upper_bound").is_none(),
+        "a None best_upper_bound must be absent from the buffer, not a 0.0 slot"
+    );
+    assert!(
+        json.get("cost_scale_factor").is_none(),
+        "a None cost_scale_factor must be absent from the buffer, not a 0.0 slot"
+    );
+}
+
+/// The reject-stale-version half of the dual-owned obligation: a manifest buffer
+/// whose `format_version` is not [`FORMAT_VERSION`] is rejected before any field
+/// is trusted, so a stale-version manifest never reaches a consumer.
+#[test]
+fn checkpoint_manifest_rejects_stale_format_version() {
+    let mut manifest = conformance_manifest_value();
+    let stale = FORMAT_VERSION + 1;
+    manifest.format_version = stale;
+    let buf = serialize_checkpoint_manifest(&manifest);
+
+    let err = deserialize_checkpoint_manifest(&buf)
+        .expect_err("a manifest with a stale format_version must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("format_version") && msg.contains(&stale.to_string()),
+        "rejection must name the version mismatch: {err}"
     );
 }
 

@@ -44,8 +44,8 @@ use cobre_core::{
     SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_io::{
-    FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord,
-    ProducerBlock, StageCutsPayload, write_policy_checkpoint,
+    GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+    write_policy_checkpoint,
 };
 use cobre_sddp::indexer::CutStateProjection;
 use cobre_sddp::setup::{NodeId, StageIdx};
@@ -390,12 +390,9 @@ fn write_synthetic_boundary(
         node_id: 100,
         graph_stage_id: -1,
     };
-    let metadata = PolicyCheckpointMetadata {
-        format_version: FORMAT_VERSION,
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-        created_at: "2026-08-11T00:00:00Z".to_string(),
-        num_stages: 1,
-        graph_manifest: GraphManifest {
+    let metadata = cobre_sddp::test_support::checkpoint_metadata(
+        1,
+        GraphManifest {
             n_pools: 1,
             nodes: vec![ManifestNode {
                 id: 100,
@@ -404,7 +401,7 @@ fn write_synthetic_boundary(
             }],
             edges: vec![],
         },
-        producer: ProducerBlock {
+        ProducerBlock {
             completed_iterations: 0,
             final_lower_bound: 0.0,
             best_upper_bound: None,
@@ -418,7 +415,7 @@ fn write_synthetic_boundary(
             training_block_mode_per_stage: vec![],
             cost_scale_factor: Some(1.0),
         },
-    };
+    );
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }
 

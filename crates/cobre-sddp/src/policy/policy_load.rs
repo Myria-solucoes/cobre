@@ -20,7 +20,7 @@ use cobre_io::EntitySlot;
 use cobre_io::GraphManifest;
 use cobre_io::OwnedPolicyBasisRecord;
 use cobre_io::OwnedPolicyCutRecord;
-use cobre_io::PolicyCheckpointMetadata;
+use cobre_io::PolicyCheckpoint;
 use cobre_io::STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL;
 use cobre_io::STAGE_CUTS_NODE_ID_SENTINEL;
 use cobre_io::StageCutsReadResult;
@@ -41,40 +41,6 @@ use cobre_io::StateFamily;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::Path;
-
-/// Resolve the per-POOL warm-start cut counts from a loaded policy checkpoint.
-///
-/// Returns a `Vec<u32>` of length `n_pools` for [`FutureCostFunction::new`].
-/// An empty `metadata.warm_start_counts` (old checkpoint format) broadcasts the
-/// scalar `warm_start_cuts` to every pool.
-///
-/// # Errors
-///
-/// Returns [`SddpError::Validation`] if `warm_start_counts.len() != n_pools`.
-/// `warm_start_counts` is per-pool, not per-stage — validate against the
-/// pool count, which differs from the stage count on a branching graph.
-///
-/// [`FutureCostFunction::new`]: crate::FutureCostFunction::new
-// Rationale: kept as the validated entry point for the planned checkpoint-migration
-// tool (and exercised by this module's tests); the active path consumes
-// `metadata.warm_start_counts` directly.
-#[allow(dead_code)]
-pub(crate) fn resolve_warm_start_counts(
-    metadata: &PolicyCheckpointMetadata,
-    n_pools: usize,
-) -> Result<Vec<u32>, SddpError> {
-    if metadata.producer.warm_start_counts.is_empty() {
-        Ok(vec![metadata.producer.warm_start_cuts; n_pools])
-    } else if metadata.producer.warm_start_counts.len() != n_pools {
-        Err(SddpError::Validation(format!(
-            "warm_start_counts length mismatch: checkpoint has {}, current system has {} pools",
-            metadata.producer.warm_start_counts.len(),
-            n_pools,
-        )))
-    } else {
-        Ok(metadata.producer.warm_start_counts.clone())
-    }
-}
 
 /// The constant every unmarked policy checkpoint (no `cost_scale_factor`
 /// provenance) was unconditionally scaled at. A checkpoint whose
@@ -145,6 +111,31 @@ pub fn rescale_checkpoint_cuts_for_load(
             loading_cost_scale_factor,
         );
     }
+}
+
+/// The terminal pool's (`stage_cuts.last()`) `cost_scale_factor` — the
+/// [`FullFcf`] load path's mirror of [`load_boundary_cuts`]'s own per-pool
+/// read, resolving the source cost scale to feed
+/// [`rescale_checkpoint_cuts_for_load`].
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if `checkpoint.stage_cuts` is empty or
+/// the terminal pool's `cost_scale_factor` reads `None`.
+pub fn checkpoint_terminal_cost_scale_factor(
+    checkpoint: &PolicyCheckpoint,
+) -> Result<f64, SddpError> {
+    checkpoint
+        .stage_cuts
+        .last()
+        .and_then(|stage| stage.cost_scale_factor)
+        .ok_or_else(|| {
+            SddpError::Validation(
+                "policy checkpoint predates self-describing cuts (its resolved \
+                 cuts/<pool>.bin carries no cost_scale_factor); re-export it with a current Cobre"
+                    .to_string(),
+            )
+        })
 }
 
 /// Per-side state layout fed to [`validate_policy_load`]: one manifest for the
@@ -807,19 +798,19 @@ pub fn load_boundary_cuts(
         }
     }
 
-    // `BoundaryInjection` checks neither `n_pools` nor the graph manifest, so
-    // these unchecked fields carry placeholders.
+    // `BoundaryInjection` checks neither `num_stages`, `n_pools`, nor the
+    // graph manifest, so these unchecked fields carry placeholders.
     let empty_graph = GraphManifest::default();
     let source = PolicyStageManifest {
         state_dimension: stage_result.state_dimension,
-        num_stages: checkpoint.metadata.num_stages,
+        num_stages: 0,
         n_pools: 0,
         slots: &stage_result.entity_manifest,
         graph: &empty_graph,
     };
     let current = PolicyStageManifest {
         state_dimension: current_state_dimension,
-        num_stages: checkpoint.metadata.num_stages,
+        num_stages: 0,
         n_pools: 0,
         slots: current_manifest,
         graph: &empty_graph,
@@ -1160,8 +1151,7 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{AnticipatedCommitmentHistory, EntityId};
     use cobre_io::{
-        EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCheckpointMetadata,
-        ProducerBlock, StageCutsPayload,
+        EntitySlot, GraphManifest, ManifestEdge, ManifestNode, ProducerBlock, StageCutsPayload,
     };
 
     use super::{
@@ -1169,7 +1159,7 @@ mod tests {
         FullFcf, NodeId, NodePos, PolicyStageManifest, TypedVec, ValidatedBoundaryCuts,
         boundary_policy_required_lag_depth, compare_manifest_slot_identity, decode_month_anchor,
         inject_boundary_cuts, load_boundary_cuts, overlap_hours, resolve_boundary_source_stage,
-        resolve_warm_start_counts, validate_policy_load,
+        validate_policy_load,
     };
     use crate::SddpError;
     use crate::test_support;
@@ -1322,14 +1312,8 @@ mod tests {
             })
             .collect();
 
-        let metadata = PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: "0.4.0".to_string(),
-            created_at: "2026-04-14T00:00:00Z".to_string(),
-            num_stages: n_stages,
-            graph_manifest: chain_manifest(n_stages),
-            producer: producer_block(),
-        };
+        let metadata =
+            test_support::checkpoint_metadata(n_stages, chain_manifest(n_stages), producer_block());
 
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
     }
@@ -1370,14 +1354,11 @@ mod tests {
             node_id: i32::try_from(stage_id).unwrap_or(-1),
             graph_stage_id: -1,
         };
-        let metadata = PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: "0.11.0".to_string(),
-            created_at: "2026-07-20T00:00:00Z".to_string(),
-            num_stages: stage_id + 1,
-            graph_manifest: chain_manifest(stage_id + 1),
-            producer: producer_block(),
-        };
+        let metadata = test_support::checkpoint_metadata(
+            stage_id + 1,
+            chain_manifest(stage_id + 1),
+            producer_block(),
+        );
         cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
     }
 
@@ -1594,6 +1575,50 @@ mod tests {
         for (l, o) in loaded[0].coefficients.iter().zip(&original[0]) {
             assert!((l - o * ratio).abs() < 1e-9);
         }
+    }
+
+    // ── checkpoint_terminal_cost_scale_factor unit tests ─────────────────────
+
+    use super::checkpoint_terminal_cost_scale_factor;
+
+    /// [`checkpoint_terminal_cost_scale_factor`] reads the terminal pool's own
+    /// `cost_scale_factor` from the on-disk `.bin`, never
+    /// `metadata.producer.cost_scale_factor` — `write_checkpoint_with_scale`
+    /// marks only the pool, leaving `producer_block`'s own factor at `None`, so
+    /// a correct read proves the source.
+    #[test]
+    fn full_fcf_source_cost_scale_reads_terminal_pool_from_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_checkpoint_with_scale(tmp.path(), 0, 1.0, &[1.0]);
+        let checkpoint = cobre_io::read_policy_checkpoint(tmp.path()).unwrap();
+
+        let resolved = checkpoint_terminal_cost_scale_factor(&checkpoint).unwrap();
+
+        assert_eq!(resolved, 1_000_000.0);
+    }
+
+    /// A checkpoint whose terminal pool's `cost_scale_factor` reads `None` (a
+    /// pre-self-describing `.bin`) rejects — the [`FullFcf`] mirror of
+    /// [`load_boundary_cuts`]'s own clean-break reject.
+    #[test]
+    fn full_fcf_source_cost_scale_rejects_pre_self_describing() {
+        let checkpoint = cobre_io::PolicyCheckpoint {
+            metadata: test_support::checkpoint_metadata(
+                1,
+                GraphManifest::default(),
+                producer_block(),
+            ),
+            stage_cuts: vec![pool_cuts(0, &[])],
+            stage_bases: Vec::new(),
+            stage_states: Vec::new(),
+        };
+
+        let msg = checkpoint_terminal_cost_scale_factor(&checkpoint)
+            .unwrap_err()
+            .to_string();
+
+        assert!(msg.contains("predates self-describing cuts"), "{msg}");
+        assert!(msg.contains("re-export it with a current Cobre"), "{msg}");
     }
 
     // ── load_boundary_cuts tests ──────────────────────────────────────────────
@@ -2211,14 +2236,8 @@ mod tests {
                 },
             )
             .collect();
-        let metadata = PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: "0.15.0".to_string(),
-            created_at: "2026-08-23T00:00:00Z".to_string(),
-            num_stages: 6,
-            graph_manifest: GraphManifest::default(),
-            producer: producer_block(),
-        };
+        let metadata =
+            test_support::checkpoint_metadata(6, GraphManifest::default(), producer_block());
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
     }
 
@@ -2345,14 +2364,8 @@ mod tests {
                 graph_stage_id: pool as i32,
             })
             .collect();
-        let metadata = PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: "0.14.0".to_string(),
-            created_at: "2026-08-11T00:00:00Z".to_string(),
-            num_stages: n_pools,
-            graph_manifest: chain_manifest(n_pools),
-            producer: producer_block(),
-        };
+        let metadata =
+            test_support::checkpoint_metadata(n_pools, chain_manifest(n_pools), producer_block());
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
     }
 
@@ -2546,14 +2559,8 @@ mod tests {
                 },
             )
             .collect();
-        let metadata = PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: "0.15.0".to_string(),
-            created_at: "2026-08-23T00:00:00Z".to_string(),
-            num_stages: 8,
-            graph_manifest: GraphManifest::default(),
-            producer: producer_block(),
-        };
+        let metadata =
+            test_support::checkpoint_metadata(8, GraphManifest::default(), producer_block());
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
     }
 
@@ -3035,115 +3042,6 @@ mod tests {
         );
     }
 
-    // ── resolve_warm_start_counts tests ───────────────────────────────────────
-
-    fn meta_with_counts(
-        warm_start_cuts: u32,
-        warm_start_counts: Vec<u32>,
-    ) -> PolicyCheckpointMetadata {
-        #[allow(clippy::cast_possible_truncation)]
-        let num_stages: u32 = if warm_start_counts.is_empty() {
-            3
-        } else {
-            warm_start_counts.len() as u32
-        };
-        PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: "0.4.0".to_string(),
-            created_at: "2026-04-01T00:00:00Z".to_string(),
-            num_stages,
-            graph_manifest: chain_manifest(num_stages),
-            producer: ProducerBlock {
-                warm_start_cuts,
-                warm_start_counts,
-                ..producer_block()
-            },
-        }
-    }
-
-    #[test]
-    fn resolve_warm_start_counts_new_format_returns_per_stage_counts() {
-        let meta = meta_with_counts(10, vec![10, 8, 6]);
-        let counts = resolve_warm_start_counts(&meta, 3).unwrap();
-        assert_eq!(counts, vec![10u32, 8, 6]);
-    }
-
-    #[test]
-    fn resolve_warm_start_counts_old_format_broadcasts_scalar() {
-        let meta = meta_with_counts(5, vec![]);
-        let counts = resolve_warm_start_counts(&meta, 3).unwrap();
-        assert_eq!(counts, vec![5u32, 5, 5]);
-    }
-
-    #[test]
-    fn resolve_warm_start_counts_old_format_zero_scalar_broadcasts_zeros() {
-        let meta = meta_with_counts(0, vec![]);
-        let counts = resolve_warm_start_counts(&meta, 3).unwrap();
-        assert_eq!(counts, vec![0u32, 0, 0]);
-    }
-
-    #[test]
-    fn resolve_warm_start_counts_wrong_length_returns_validation_error() {
-        let meta = meta_with_counts(5, vec![5, 5]);
-        let result = resolve_warm_start_counts(&meta, 3);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("warm_start_counts length mismatch"),
-            "error message should mention length mismatch: {msg}"
-        );
-        assert!(msg.contains('2'), "should include vector length: {msg}");
-        assert!(msg.contains('3'), "should include the pool count: {msg}");
-    }
-
-    /// `warm_start_counts` is a per-POOL field: on a branching graph the pool
-    /// count differs from the stage count, so a checkpoint whose array length
-    /// matches `n_pools` (not `num_stages`) must be accepted, and a checkpoint
-    /// whose array length matches `num_stages` (not `n_pools`) must be
-    /// rejected — asserting the check reads the caller's `n_pools` argument,
-    /// never `metadata.num_stages`.
-    #[test]
-    fn resolve_warm_start_counts_validates_against_n_pools_not_num_stages() {
-        // A 2-stage, 3-pool graph (e.g. one root pool + two branch pools
-        // sharing a stage) — `meta_with_counts` derives `num_stages` from the
-        // counts vector's own length, so override it after construction to
-        // decouple the two counts.
-        let mut meta = meta_with_counts(5, vec![10, 8, 6]);
-        meta.num_stages = 2;
-
-        let n_pools = 3;
-        let counts = resolve_warm_start_counts(&meta, n_pools)
-            .expect("length matches n_pools (3), not num_stages (2): must accept");
-        assert_eq!(counts, vec![10u32, 8, 6]);
-
-        // A caller that mistakenly passes the STAGE count (2) instead of the
-        // pool count (3) must be rejected, not silently accepted against the
-        // wrong axis.
-        let mistaken_num_stages = 2;
-        let result = resolve_warm_start_counts(&meta, mistaken_num_stages);
-        let msg = result
-            .expect_err("array length (3) disagrees with the passed count (2): must reject")
-            .to_string();
-        assert!(
-            msg.contains("pools"),
-            "the rejection must name pools, not stages: {msg}"
-        );
-    }
-
-    #[test]
-    fn resolve_warm_start_counts_single_stage_new_format() {
-        let meta = meta_with_counts(7, vec![7]);
-        let counts = resolve_warm_start_counts(&meta, 1).unwrap();
-        assert_eq!(counts, vec![7u32]);
-    }
-
-    #[test]
-    fn resolve_warm_start_counts_zero_stages_old_format_returns_empty() {
-        let meta = meta_with_counts(5, vec![]);
-        let counts = resolve_warm_start_counts(&meta, 0).unwrap();
-        assert!(counts.is_empty());
-    }
-
     // ── basis-status export+load round-trip (§E6) ─────────────────────────────
 
     /// Every one of the seven `BasisStatus` variants survives the full
@@ -3533,17 +3431,14 @@ mod tests {
             node_id: 0,
             graph_stage_id: -1,
         };
-        let metadata = PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: "0.15.0".to_string(),
-            created_at: "2026-08-22T00:00:00Z".to_string(),
-            num_stages: 1,
-            graph_manifest: chain_manifest(1),
-            producer: ProducerBlock {
+        let metadata = test_support::checkpoint_metadata(
+            1,
+            chain_manifest(1),
+            ProducerBlock {
                 cost_scale_factor: Some(cost_scale_factor),
                 ..producer_block()
             },
-        };
+        );
         cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
     }
 

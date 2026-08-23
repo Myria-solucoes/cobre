@@ -21,9 +21,7 @@ use std::sync::mpsc;
 
 use cobre_core::scenario::ScenarioSource;
 use cobre_core::{BlockMode, EntityId};
-use cobre_io::{
-    PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, write_policy_checkpoint,
-};
+use cobre_io::{PolicyCutRecord, StageCutsPayload, write_policy_checkpoint};
 use cobre_sddp::{
     SimulationWeighting, StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
     lead_time::resolve_spread, setup::prepare_stochastic,
@@ -1453,13 +1451,10 @@ fn d12_checkpoint_round_trip() {
 
     let n_stages = fcf.pools.len();
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-    let policy_metadata = PolicyCheckpointMetadata {
-        format_version: cobre_io::FORMAT_VERSION,
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-        created_at: "2026-03-16T00:00:00Z".to_string(),
-        num_stages: n_stages as u32,
-        graph_manifest: cobre_io::GraphManifest::default(),
-        producer: cobre_io::ProducerBlock {
+    let policy_metadata = cobre_sddp::test_support::checkpoint_metadata(
+        n_stages as u32,
+        cobre_io::GraphManifest::default(),
+        cobre_io::ProducerBlock {
             completed_iterations: result.iterations as u32,
             final_lower_bound: result.final_lb,
             best_upper_bound: Some(result.final_ub),
@@ -1473,7 +1468,7 @@ fn d12_checkpoint_round_trip() {
             training_block_mode_per_stage: vec![],
             cost_scale_factor: None,
         },
-    };
+    );
 
     write_policy_checkpoint(
         &policy_dir,
@@ -1500,8 +1495,8 @@ fn d12_checkpoint_round_trip() {
         "D12: checkpoint must contain at least one stage_cuts entry"
     );
 
-    let metadata_path = policy_dir.join("metadata.json");
-    assert!(metadata_path.is_file(), "D12: metadata.json must exist");
+    let manifest_path = policy_dir.join("manifest.bin");
+    assert!(manifest_path.is_file(), "D12: manifest.bin must exist");
 
     let stage_bin_path = policy_dir.join("cuts/000.bin");
     assert!(stage_bin_path.is_file(), "D12: cuts/000.bin must exist");
@@ -9228,9 +9223,8 @@ mod enumerated_checkpoint {
     use std::collections::HashSet;
 
     use cobre_io::{
-        FORMAT_VERSION, GraphManifest, PolicyCheckpointMetadata, ProducerBlock,
-        STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload, read_policy_checkpoint,
-        write_policy_checkpoint,
+        GraphManifest, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
+        read_policy_checkpoint, write_policy_checkpoint,
     };
     use cobre_sddp::policy_export::build_stage_cut_records;
     use cobre_sddp::setup::NodePos;
@@ -9374,13 +9368,10 @@ mod enumerated_checkpoint {
 
         let n_pools = fcf.pools.len();
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-        let policy_metadata = PolicyCheckpointMetadata {
-            format_version: FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-03-16T00:00:00Z".to_string(),
-            num_stages: n_pools as u32,
-            graph_manifest: GraphManifest::default(),
-            producer: ProducerBlock {
+        let policy_metadata = cobre_sddp::test_support::checkpoint_metadata(
+            n_pools as u32,
+            GraphManifest::default(),
+            ProducerBlock {
                 completed_iterations: result.iterations as u32,
                 final_lower_bound: result.final_lb,
                 best_upper_bound: Some(result.final_ub),
@@ -9394,7 +9385,7 @@ mod enumerated_checkpoint {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
             },
-        };
+        );
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         let policy_dir = tmp.path().join("policy");
@@ -9477,8 +9468,8 @@ mod water_terminal_fcf_valuation {
     use cobre_core::EntityId;
     use cobre_core::temporal::StageStateConfig;
     use cobre_io::{
-        BoundaryPolicy, FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata,
-        PolicyCutRecord, ProducerBlock, StageCutsPayload, write_policy_checkpoint,
+        BoundaryPolicy, GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
+        StageCutsPayload, write_policy_checkpoint,
     };
     use cobre_sddp::indexer::CutStateProjection;
     use cobre_sddp::setup::{NodeId, StageIdx};
@@ -9599,12 +9590,9 @@ mod water_terminal_fcf_valuation {
             node_id: 100,
             graph_stage_id: -1,
         };
-        let metadata = PolicyCheckpointMetadata {
-            format_version: FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-08-12T00:00:00Z".to_string(),
-            num_stages: 1,
-            graph_manifest: GraphManifest {
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            1,
+            GraphManifest {
                 n_pools: 1,
                 nodes: vec![ManifestNode {
                     id: 100,
@@ -9613,7 +9601,7 @@ mod water_terminal_fcf_valuation {
                 }],
                 edges: vec![],
             },
-            producer: ProducerBlock {
+            ProducerBlock {
                 completed_iterations: 0,
                 final_lower_bound: 0.0,
                 best_upper_bound: None,
@@ -9627,7 +9615,7 @@ mod water_terminal_fcf_valuation {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: Some(1.0),
             },
-        };
+        );
         write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
     }
 

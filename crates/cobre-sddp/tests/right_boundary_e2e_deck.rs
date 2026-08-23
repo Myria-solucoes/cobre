@@ -174,9 +174,8 @@ mod anticipated_fanout_readback {
 
     use chrono::NaiveDate;
     use cobre_io::{
-        EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge, ManifestNode,
-        PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload, StateFamily,
-        write_policy_checkpoint,
+        EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCutRecord, ProducerBlock,
+        StageCutsPayload, StateFamily, write_policy_checkpoint,
     };
     use cobre_sddp::load_boundary_cuts;
 
@@ -259,14 +258,11 @@ mod anticipated_fanout_readback {
             node_id: 0,
             graph_stage_id: -1,
         };
-        let metadata = PolicyCheckpointMetadata {
-            format_version: FORMAT_VERSION,
-            cobre_version: "0.14.0".to_string(),
-            created_at: "2026-08-11T00:00:00Z".to_string(),
-            num_stages: 1,
-            graph_manifest: single_stage_manifest(),
-            producer: producer_block(),
-        };
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            1,
+            single_stage_manifest(),
+            producer_block(),
+        );
         write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
     }
 

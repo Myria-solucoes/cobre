@@ -10,7 +10,7 @@ use std::path::Path;
 
 use cobre_io::EntitySlot;
 use cobre_io::output::policy::{
-    FORMAT_VERSION, PolicyCheckpointMetadata, ProducerBlock, write_policy_checkpoint,
+    CheckpointManifest, FORMAT_VERSION, ProducerBlock, write_policy_checkpoint,
 };
 use cobre_io::output::{
     OutputError, write_correlation_json, write_fitting_report, write_inflow_annual_component,
@@ -62,7 +62,7 @@ fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
 
 /// Run-derived inputs to [`write_checkpoint`] (independent of the training
 /// result). Stored in the checkpoint metadata for resume validation and
-/// reproducibility; field types match `PolicyCheckpointMetadata` widths to keep
+/// reproducibility; field types match `CheckpointManifest` widths to keep
 /// the casts at this site.
 #[derive(Debug, Clone, Copy)]
 pub struct CheckpointParams {
@@ -166,7 +166,7 @@ pub fn write_checkpoint(
     let (training_block_mode, training_block_mode_per_stage) =
         training_block_provenance(&study_modes);
 
-    let metadata = PolicyCheckpointMetadata {
+    let metadata = CheckpointManifest {
         format_version: FORMAT_VERSION,
         cobre_version: env!("CARGO_PKG_VERSION").to_string(),
         created_at: cobre_io::now_iso8601(),

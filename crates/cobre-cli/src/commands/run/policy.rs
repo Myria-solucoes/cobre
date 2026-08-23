@@ -18,6 +18,7 @@ use cobre_sddp::PolicyStageManifest;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::build_basis_cache_from_checkpoint;
+use cobre_sddp::checkpoint_terminal_cost_scale_factor;
 use cobre_sddp::inject_boundary_cuts;
 use cobre_sddp::load_boundary_cuts;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
@@ -54,9 +55,11 @@ fn load_and_validate_checkpoint(
     let mut checkpoint = read_policy_checkpoint(policy_dir).map_err(|e| CliError::Internal {
         message: format!("failed to read policy checkpoint: {e}"),
     })?;
+    let source_cost_scale_factor =
+        checkpoint_terminal_cost_scale_factor(&checkpoint).map_err(CliError::from)?;
     rescale_checkpoint_cuts_for_load(
         &mut checkpoint.stage_cuts,
-        checkpoint.metadata.producer.cost_scale_factor,
+        Some(source_cost_scale_factor),
         setup.stage_data.stage_templates.cost_scale_factor,
     );
 

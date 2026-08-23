@@ -1,8 +1,8 @@
 //! Filesystem write and read entry points for value-function artifacts.
 //!
-//! `metadata.json` is written last so its presence is the commit signal of a
+//! `manifest.bin` is written last so its presence is the commit signal of a
 //! complete artifact, and it carries the `format_version` marker the reader
-//! checks first — a pre-marker artifact is cleanly rejected before any payload
+//! checks first — an artifact without it is cleanly rejected before any payload
 //! is parsed.
 
 use std::collections::BTreeMap;
@@ -12,13 +12,14 @@ use chrono::NaiveDate;
 
 use super::super::error::OutputError;
 use super::codec::{
-    deserialize_stage_basis, deserialize_stage_cuts, deserialize_stage_states,
-    read_sorted_bin_files, serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
+    deserialize_checkpoint_manifest, deserialize_stage_basis, deserialize_stage_cuts,
+    deserialize_stage_states, read_sorted_bin_files, serialize_checkpoint_manifest,
+    serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
 };
 use super::records::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, FORMAT_VERSION, OwnedPolicyBasisRecord, PolicyBasisRecord,
-    PolicyCheckpoint, PolicyCheckpointMetadata, StageCutsPayload, StageCutsReadResult,
-    StageStatesPayload, StageStatesReadResult, StateFamily,
+    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, OwnedPolicyBasisRecord,
+    PolicyBasisRecord, PolicyCheckpoint, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
+    StageStatesReadResult, StateFamily,
 };
 
 /// Whether `delivery_date` is [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] or decodes
@@ -123,7 +124,7 @@ fn bin_file_name(id: u32) -> String {
 ///
 /// ```text
 /// path/
-///   metadata.json
+///   manifest.bin
 ///   cuts/
 ///     000.bin        (one per pool, keyed by pool id; a shared leaf pool once)
 ///     001.bin
@@ -134,7 +135,7 @@ fn bin_file_name(id: u32) -> String {
 ///     ...
 /// ```
 ///
-/// `metadata.json` is written **last**, only after every `.bin` write succeeds:
+/// `manifest.bin` is written **last**, only after every `.bin` write succeeds:
 /// its absence is how the caller detects an incomplete artifact. Partially
 /// written files are not cleaned up. An empty `stage_bases` writes no basis files
 /// (the `basis/` directory is still created).
@@ -142,14 +143,13 @@ fn bin_file_name(id: u32) -> String {
 /// # Errors
 ///
 /// - [`OutputError::IoError`] — directory creation or file write failed.
-/// - [`OutputError::SerializationError`] — JSON serialization of metadata failed.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use cobre_io::{
 ///     write_policy_checkpoint, FORMAT_VERSION, GraphManifest, PolicyBasisRecord,
-///     PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload,
+///     CheckpointManifest, PolicyCutRecord, ProducerBlock, StageCutsPayload,
 /// };
 /// use std::path::Path;
 ///
@@ -177,7 +177,7 @@ fn bin_file_name(id: u32) -> String {
 ///     node_id: 0,
 ///     graph_stage_id: 0,
 /// }];
-/// let metadata = PolicyCheckpointMetadata {
+/// let metadata = CheckpointManifest {
 ///     format_version: FORMAT_VERSION,
 ///     cobre_version: env!("CARGO_PKG_VERSION").to_string(),
 ///     created_at: "2026-03-08T00:00:00Z".to_string(),
@@ -206,7 +206,7 @@ pub fn write_policy_checkpoint(
     path: &Path,
     stage_cuts: &[StageCutsPayload<'_>],
     stage_bases: &[PolicyBasisRecord<'_>],
-    metadata: &PolicyCheckpointMetadata,
+    metadata: &CheckpointManifest,
     stage_states: &[StageStatesPayload<'_>],
 ) -> Result<(), OutputError> {
     let cuts_dir = path.join("cuts");
@@ -238,31 +238,33 @@ pub fn write_policy_checkpoint(
         }
     }
 
-    // Write metadata.json LAST — its presence is the commit signal.
-    let json = serde_json::to_string_pretty(metadata)
-        .map_err(|e| OutputError::serialization("policy_metadata", e.to_string()))?;
-    let meta_path = path.join("metadata.json");
-    std::fs::write(&meta_path, json.as_bytes()).map_err(|e| OutputError::io(&meta_path, e))?;
+    // Write manifest.bin LAST — its presence is the commit signal.
+    let manifest_buf = serialize_checkpoint_manifest(metadata);
+    let manifest_path = path.join("manifest.bin");
+    std::fs::write(&manifest_path, &manifest_buf)
+        .map_err(|e| OutputError::io(&manifest_path, e))?;
 
     Ok(())
 }
 
 /// Read a complete value-function artifact from `path`.
 ///
-/// `metadata.json` is read first and its `format_version` is checked against
-/// [`FORMAT_VERSION`] **before any `.bin` payload is parsed**: an absent or
-/// mismatched version is a named [`OutputError::SerializationError`], so a
-/// pre-marker artifact is cleanly rejected rather than read positionally.
+/// `manifest.bin` is read first and its `format_version` is checked
+/// **before any `.bin` payload is parsed**: an absent `manifest.bin`, a missing
+/// `CBVF` identifier, or a mismatched version is a named error, so an artifact
+/// this build cannot read is cleanly rejected rather than read positionally.
 ///
 /// Per-pool/-stage results are sorted by `stage_id` in the returned
 /// [`PolicyCheckpoint`].
 ///
 /// # Errors
 ///
-/// - [`OutputError::IoError`] — directory or file read failed.
-/// - [`OutputError::SerializationError`] — JSON or `FlatBuffers` parse failure,
-///   a `format_version` that is absent or not [`FORMAT_VERSION`], or a
-///   date-consistency violation caught by [`validate_checkpoint_dates`].
+/// - [`OutputError::IoError`] — directory or file read failed (a missing
+///   `manifest.bin`, i.e. a pre-`manifest.bin` artifact, included).
+/// - [`OutputError::SerializationError`] — a `FlatBuffers` parse failure, a
+///   missing `CBVF` identifier or a `format_version` mismatch (both enforced by
+///   [`deserialize_checkpoint_manifest`]), or a date-consistency violation
+///   caught by [`validate_checkpoint_dates`].
 ///
 /// # Examples
 ///
@@ -278,31 +280,12 @@ pub fn write_policy_checkpoint(
 /// # }
 /// ```
 pub fn read_policy_checkpoint(path: &Path) -> Result<PolicyCheckpoint, OutputError> {
-    #[derive(serde::Deserialize)]
-    struct FormatVersionProbe {
-        #[serde(default)]
-        format_version: u32,
-    }
-
-    let meta_path = path.join("metadata.json");
-    let meta_bytes = std::fs::read(&meta_path).map_err(|e| OutputError::io(&meta_path, e))?;
-    // Probe format_version before full deserialization, so a pre-marker artifact
-    // rejects with a named error, not an opaque missing-field parse failure.
-    let probe: FormatVersionProbe = serde_json::from_slice(&meta_bytes)
-        .map_err(|e| OutputError::serialization("policy_metadata", e.to_string()))?;
-    if probe.format_version != FORMAT_VERSION {
-        return Err(OutputError::serialization(
-            "policy_metadata",
-            format!(
-                "unsupported value-function artifact format_version: expected {FORMAT_VERSION}, \
-                 found {} (a pre-marker or other-version artifact is not readable by this build)",
-                probe.format_version
-            ),
-        ));
-    }
-
-    let metadata: PolicyCheckpointMetadata = serde_json::from_slice(&meta_bytes)
-        .map_err(|e| OutputError::serialization("policy_metadata", e.to_string()))?;
+    // Read manifest.bin FIRST: its CBVF-identifier and format_version gates
+    // reject an unreadable artifact before any payload is parsed.
+    let manifest_path = path.join("manifest.bin");
+    let manifest_bytes =
+        std::fs::read(&manifest_path).map_err(|e| OutputError::io(&manifest_path, e))?;
+    let metadata = deserialize_checkpoint_manifest(&manifest_bytes)?;
 
     let cuts_dir = path.join("cuts");
     let mut stage_cuts: Vec<StageCutsReadResult> =

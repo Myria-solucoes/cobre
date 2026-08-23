@@ -725,6 +725,31 @@ pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLo
         .expect("trivial matching manifest cannot fail validate_policy_load")
 }
 
+/// Assemble the [`CheckpointManifest`] for a checkpoint fixture:
+/// the three invariant fields (`format_version` = [`FORMAT_VERSION`],
+/// `cobre_version` matching the production writer, a fixed `created_at` no
+/// consumer reads) are filled here — the sole owner of the manifest literal for
+/// `cobre-sddp` tests — and `num_stages`/`graph_manifest`/`producer` are
+/// forwarded verbatim.
+///
+/// [`CheckpointManifest`]: cobre_io::CheckpointManifest
+/// [`FORMAT_VERSION`]: cobre_io::FORMAT_VERSION
+#[must_use]
+pub fn checkpoint_metadata(
+    num_stages: u32,
+    graph_manifest: cobre_io::GraphManifest,
+    producer: cobre_io::ProducerBlock,
+) -> cobre_io::CheckpointManifest {
+    cobre_io::CheckpointManifest {
+        format_version: cobre_io::FORMAT_VERSION,
+        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        num_stages,
+        graph_manifest,
+        producer,
+    }
+}
+
 /// Patch one stage-LP solve exactly as the production backward pass's
 /// `patch_opening_bounds` does (`training/backward/lp_setup.rs`): delegates
 /// verbatim to `StageSolvePrep::run` with the backward-opening variation

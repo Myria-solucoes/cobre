@@ -9,7 +9,7 @@
 
 /// Current on-disk value-function artifact format version.
 ///
-/// [`PolicyCheckpointMetadata::format_version`] must equal this;
+/// [`CheckpointManifest::format_version`] must equal this;
 /// [`crate::read_policy_checkpoint`] rejects any other value — and absence —
 /// with a named error before parsing any payload, so a pre-marker artifact is
 /// cleanly rejected, never read positionally.
@@ -193,7 +193,7 @@ pub struct StageCutsPayload<'a> {
     /// An empty slice means no manifest is written.
     pub entity_manifest: &'a [EntitySlot],
     /// Objective cost-scale factor the writing study resolved; the provenance
-    /// marker making each cut scale-independent at rest.
+    /// marker making each affine piece scale-independent at rest.
     pub cost_scale_factor: f64,
     /// Owning node's policy-graph id, or [`STAGE_CUTS_NODE_ID_SENTINEL`] for a
     /// shared pool.
@@ -209,7 +209,7 @@ pub struct StageCutsPayload<'a> {
 /// `pool_id` **is** the node → pool map: a node references one pool, and a
 /// reader resolves node `id`'s pieces as `pool_id`'s payload (leaf nodes sharing
 /// a pool all name the same `pool_id`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ManifestNode {
     /// Declared node id.
     pub id: i32,
@@ -220,7 +220,7 @@ pub struct ManifestNode {
 }
 
 /// One directed edge of the graph manifest, with its transition probability.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ManifestEdge {
     /// Source node id.
     pub source_id: i32,
@@ -236,7 +236,7 @@ pub struct ManifestEdge {
 /// This is the identity source the positional format never had — a reader
 /// resolves a node's payload through it (node `n`'s pieces are `pool(n)`'s
 /// payload), rather than trusting a filename.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct GraphManifest {
     /// Number of distinct pools (the pool-set size).
     pub n_pools: u32,
@@ -247,10 +247,10 @@ pub struct GraphManifest {
 }
 
 /// Producer-namespaced metadata: everything specific to how the artifact was
-/// produced (the training algorithm's own recorded state), segregated from the
-/// neutral core so a reader that does not know the producer can still read the
-/// core from the core's own vocabulary.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// produced (the training algorithm's own recorded state). Segregated from the
+/// neutral core carried on [`CheckpointManifest`], whose doc states the
+/// segregation rationale.
+#[derive(Debug, Clone)]
 pub struct ProducerBlock {
     /// Number of training iterations completed at write time.
     pub completed_iterations: u32,
@@ -270,7 +270,6 @@ pub struct ProducerBlock {
     /// When non-empty, supersedes [`warm_start_cuts`] for per-pool accuracy.
     ///
     /// [`warm_start_cuts`]: Self::warm_start_cuts
-    #[serde(default)]
     pub warm_start_counts: Vec<u32>,
     /// RNG seed used by the scenario sampler.
     ///
@@ -278,16 +277,13 @@ pub struct ProducerBlock {
     /// so resume needs only the seed — no accumulated RNG state is persisted.
     pub rng_seed: u64,
     /// Total visited states across all nodes.
-    #[serde(default)]
     pub total_visited_states: u64,
     /// Block mode the artifact was trained under: the shared lowercase mode when
     /// every study stage agrees, else `"mixed"`.
-    #[serde(default)]
     pub training_block_mode: String,
     /// Per-study-stage training block modes, in study-stage order.
     ///
     /// Populated only for mixed-mode studies.
-    #[serde(default)]
     pub training_block_mode_per_stage: Vec<String>,
     /// Objective cost-scale factor the writing study resolved
     /// (`modeling.cost_scale_factor`) — the provenance marker that makes piece
@@ -297,66 +293,32 @@ pub struct ProducerBlock {
     /// Absent when unmarked; a missing marker is interpreted as
     /// scaled-at-`1_000_000.0`, the constant every unmarked artifact was
     /// unconditionally written under.
-    #[serde(default)]
     pub cost_scale_factor: Option<f64>,
 }
 
-/// Value-function artifact metadata for resume and warm-start.
+/// Study-global checkpoint metadata carried on the `FlatBuffers`
+/// `CheckpointManifest` root at `manifest.bin`: the neutral core
+/// (`format_version`, `cobre_version`, `created_at`, `num_stages`, the
+/// [`GraphManifest`] descriptors) plus the namespaced [`ProducerBlock`]. Read
+/// first by [`crate::read_policy_checkpoint`], whose version gate rejects a
+/// stale `format_version` before any payload is parsed.
 ///
-/// Serialized to JSON (not `FlatBuffers`) because it is small, human-readable,
-/// and may be edited by operators. The neutral core (`format_version`,
-/// provenance, the stage/pool/graph descriptors) describes the artifact itself;
-/// the algorithm's own recorded state lives under the namespaced [`producer`]
-/// block, so a reader that does not know the producer reads the core from the
-/// core's own vocabulary.
+/// The neutral core describes the artifact itself; the algorithm's own recorded
+/// state lives under the namespaced [`producer`] block, so a reader that does
+/// not know the producer reads the core from the core's own vocabulary.
 ///
 /// [`producer`]: Self::producer
-///
-/// # Examples
-///
-/// ```
-/// use cobre_io::{
-///     FORMAT_VERSION, GraphManifest, PolicyCheckpointMetadata, ProducerBlock,
-/// };
-///
-/// let meta = PolicyCheckpointMetadata {
-///     format_version: FORMAT_VERSION,
-///     cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-///     created_at: "2026-03-08T00:00:00Z".to_string(),
-///     num_stages: 60,
-///     graph_manifest: GraphManifest::default(),
-///     producer: ProducerBlock {
-///         completed_iterations: 50,
-///         final_lower_bound: 1234.56,
-///         best_upper_bound: Some(1300.0),
-///         max_iterations: 200,
-///         forward_passes: 4,
-///         warm_start_cuts: 0,
-///         warm_start_counts: vec![],
-///         rng_seed: 42,
-///         total_visited_states: 0,
-///         training_block_mode: "parallel".to_string(),
-///         training_block_mode_per_stage: vec![],
-///         cost_scale_factor: None,
-///     },
-/// };
-/// let json = serde_json::to_string_pretty(&meta).unwrap();
-/// assert!(json.contains("producer"));
-/// ```
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PolicyCheckpointMetadata {
-    /// On-disk format version; must equal [`FORMAT_VERSION`] on read. Defaults to
-    /// `0` when absent (a pre-marker artifact), which the reader rejects.
-    #[serde(default)]
+#[derive(Debug, Clone)]
+pub struct CheckpointManifest {
+    /// On-disk format version; must equal [`FORMAT_VERSION`] on read.
     pub format_version: u32,
-    /// Cobre crate version that wrote this artifact.
+    /// Cobre crate version that wrote this checkpoint.
     pub cobre_version: String,
-    /// ISO 8601 timestamp when the artifact was written.
+    /// ISO 8601 timestamp when the checkpoint was written.
     pub created_at: String,
     /// Number of stages the graph manifest spans.
     pub num_stages: u32,
     /// Graph manifest: node list, edge list, node → pool map, and pool-set size.
-    #[serde(default)]
     pub graph_manifest: GraphManifest,
     /// Producer-namespaced metadata (the training algorithm's own state).
     pub producer: ProducerBlock,
@@ -454,10 +416,10 @@ pub struct StageStatesReadResult {
 }
 
 /// Complete deserialized value-function artifact returned by [`crate::read_policy_checkpoint`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PolicyCheckpoint {
-    /// Metadata read from `metadata.json`.
-    pub metadata: PolicyCheckpointMetadata,
+    /// Checkpoint manifest read from `manifest.bin`.
+    pub metadata: CheckpointManifest,
     /// Per-pool affine-piece collections, sorted by pool id.
     pub stage_cuts: Vec<StageCutsReadResult>,
     /// Per-stage solver bases, sorted by `stage_id`.

@@ -83,6 +83,7 @@ use cobre_sddp::build_deviation_summary;
 use cobre_sddp::build_evaporation_model_rows;
 use cobre_sddp::build_fixed_delivery_rows;
 use cobre_sddp::build_generic_constraint_echo_rows;
+use cobre_sddp::checkpoint_terminal_cost_scale_factor;
 use cobre_sddp::delta_to_stats_row;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::inject_boundary_cuts;
@@ -1050,9 +1051,11 @@ fn validate_loaded_policy(
     system: &System,
     setup: &StudySetup,
 ) -> Result<PolicyLoadProof<FullFcf>, String> {
+    let source_cost_scale_factor = checkpoint_terminal_cost_scale_factor(checkpoint)
+        .map_err(|e| format!("policy validation error: {e}"))?;
     rescale_checkpoint_cuts_for_load(
         &mut checkpoint.stage_cuts,
-        checkpoint.metadata.producer.cost_scale_factor,
+        Some(source_cost_scale_factor),
         setup.stage_data.stage_templates.cost_scale_factor,
     );
 

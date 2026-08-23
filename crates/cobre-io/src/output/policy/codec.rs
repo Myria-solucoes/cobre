@@ -15,8 +15,9 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 use super::super::error::OutputError;
 use super::records::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCutRecord, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
+    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
+    GraphManifest, ManifestEdge, ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
+    PolicyBasisRecord, PolicyCutRecord, ProducerBlock, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
     STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload,
     StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
 };
@@ -77,6 +78,36 @@ const STATES_FIELD_DATA: u16 = 10;
 const STATES_FIELD_ENTITY_MANIFEST: u16 = 12;
 const STATES_FIELD_NODE_ID: u16 = 14;
 
+// CheckpointManifest ids start fresh at 0; its own vtable is distinct from the
+// AffinePiece/EntitySlot vtables, so its id 4 / id 7 collide with no burned slot.
+const MANIFEST_FIELD_FORMAT_VERSION: u16 = 4;
+const MANIFEST_FIELD_COBRE_VERSION: u16 = 6;
+const MANIFEST_FIELD_CREATED_AT: u16 = 8;
+const MANIFEST_FIELD_NUM_STAGES: u16 = 10;
+const MANIFEST_FIELD_N_POOLS: u16 = 12;
+const MANIFEST_FIELD_NODES: u16 = 14;
+const MANIFEST_FIELD_EDGES: u16 = 16;
+const MANIFEST_FIELD_COMPLETED_ITERATIONS: u16 = 18;
+const MANIFEST_FIELD_FINAL_LOWER_BOUND: u16 = 20;
+const MANIFEST_FIELD_BEST_UPPER_BOUND: u16 = 22;
+const MANIFEST_FIELD_MAX_ITERATIONS: u16 = 24;
+const MANIFEST_FIELD_FORWARD_PASSES: u16 = 26;
+const MANIFEST_FIELD_WARM_START_CUTS: u16 = 28;
+const MANIFEST_FIELD_WARM_START_COUNTS: u16 = 30;
+const MANIFEST_FIELD_RNG_SEED: u16 = 32;
+const MANIFEST_FIELD_TOTAL_VISITED_STATES: u16 = 34;
+const MANIFEST_FIELD_TRAINING_BLOCK_MODE: u16 = 36;
+const MANIFEST_FIELD_TRAINING_BLOCK_MODE_PER_STAGE: u16 = 38;
+const MANIFEST_FIELD_COST_SCALE_FACTOR: u16 = 40;
+
+const MANIFEST_NODE_FIELD_ID: u16 = 4;
+const MANIFEST_NODE_FIELD_STAGE_ID: u16 = 6;
+const MANIFEST_NODE_FIELD_POOL_ID: u16 = 8;
+
+const MANIFEST_EDGE_FIELD_SOURCE_ID: u16 = 4;
+const MANIFEST_EDGE_FIELD_TARGET_ID: u16 = 6;
+const MANIFEST_EDGE_FIELD_PROBABILITY: u16 = 8;
+
 /// The coefficient vector must be created before the `start_table`/`end_table`
 /// pair — `FlatBuffers` requires nested objects to precede the enclosing table
 /// in the buffer.
@@ -112,6 +143,35 @@ fn build_entity_slot_table(
     builder.push_slot_always::<u32>(ENTITY_SLOT_FIELD_SUBINDEX, slot.subindex);
     builder.push_slot_always::<bool>(ENTITY_SLOT_FIELD_WAS_ACTIVE, slot.was_active);
     builder.push_slot_always::<i32>(ENTITY_SLOT_FIELD_DELIVERY_DATE, slot.delivery_date);
+
+    builder.end_table(tab)
+}
+
+/// Build one `ManifestNode` nested table. No inner vector, so nothing precedes
+/// the `start_table`/`end_table` pair.
+fn build_manifest_node_table(
+    builder: &mut FlatBufferBuilder<'_>,
+    node: &ManifestNode,
+) -> WIPOffset<flatbuffers::TableFinishedWIPOffset> {
+    let tab = builder.start_table();
+
+    builder.push_slot_always::<i32>(MANIFEST_NODE_FIELD_ID, node.id);
+    builder.push_slot_always::<i32>(MANIFEST_NODE_FIELD_STAGE_ID, node.stage_id);
+    builder.push_slot_always::<u32>(MANIFEST_NODE_FIELD_POOL_ID, node.pool_id);
+
+    builder.end_table(tab)
+}
+
+/// Build one `ManifestEdge` nested table.
+fn build_manifest_edge_table(
+    builder: &mut FlatBufferBuilder<'_>,
+    edge: &ManifestEdge,
+) -> WIPOffset<flatbuffers::TableFinishedWIPOffset> {
+    let tab = builder.start_table();
+
+    builder.push_slot_always::<i32>(MANIFEST_EDGE_FIELD_SOURCE_ID, edge.source_id);
+    builder.push_slot_always::<i32>(MANIFEST_EDGE_FIELD_TARGET_ID, edge.target_id);
+    builder.push_slot_always::<f64>(MANIFEST_EDGE_FIELD_PROBABILITY, edge.probability);
 
     builder.end_table(tab)
 }
@@ -305,6 +365,96 @@ pub fn serialize_stage_states(payload: &StageStatesPayload<'_>) -> Vec<u8> {
     builder.finished_data().to_vec()
 }
 
+/// Serialize a [`CheckpointManifest`] into a root `CheckpointManifest`
+/// `FlatBuffers` buffer.
+///
+/// The two `Option<f64>` provenance fields (`best_upper_bound`,
+/// `cost_scale_factor`) are written only when `Some`, so absence round-trips as
+/// `None` rather than a spurious `0.0`. Infallible: the builder only allocates
+/// and writes.
+#[must_use]
+pub fn serialize_checkpoint_manifest(manifest: &CheckpointManifest) -> Vec<u8> {
+    let graph = &manifest.graph_manifest;
+    let producer = &manifest.producer;
+
+    let estimated = 128
+        + graph.nodes.len() * 32
+        + graph.edges.len() * 40
+        + manifest.cobre_version.len()
+        + manifest.created_at.len()
+        + producer.training_block_mode.len()
+        + producer.warm_start_counts.len() * std::mem::size_of::<u32>()
+        + producer
+            .training_block_mode_per_stage
+            .iter()
+            .map(|s| s.len() + 8)
+            .sum::<usize>();
+
+    let mut builder = FlatBufferBuilder::with_capacity(estimated);
+
+    let node_offsets: Vec<WIPOffset<flatbuffers::TableFinishedWIPOffset>> = graph
+        .nodes
+        .iter()
+        .map(|n| build_manifest_node_table(&mut builder, n))
+        .collect();
+    let edge_offsets: Vec<WIPOffset<flatbuffers::TableFinishedWIPOffset>> = graph
+        .edges
+        .iter()
+        .map(|e| build_manifest_edge_table(&mut builder, e))
+        .collect();
+
+    let cobre_version = builder.create_string(&manifest.cobre_version);
+    let created_at = builder.create_string(&manifest.created_at);
+    let training_block_mode = builder.create_string(&producer.training_block_mode);
+    let per_stage_offsets: Vec<WIPOffset<&str>> = producer
+        .training_block_mode_per_stage
+        .iter()
+        .map(|s| builder.create_string(s))
+        .collect();
+
+    let nodes_vec = builder.create_vector(&node_offsets);
+    let edges_vec = builder.create_vector(&edge_offsets);
+    let warm_start_counts_vec = builder.create_vector(producer.warm_start_counts.as_slice());
+    let per_stage_vec = builder.create_vector(&per_stage_offsets);
+
+    let root = builder.start_table();
+
+    builder.push_slot_always::<u32>(MANIFEST_FIELD_FORMAT_VERSION, manifest.format_version);
+    builder.push_slot_always(MANIFEST_FIELD_COBRE_VERSION, cobre_version);
+    builder.push_slot_always(MANIFEST_FIELD_CREATED_AT, created_at);
+    builder.push_slot_always::<u32>(MANIFEST_FIELD_NUM_STAGES, manifest.num_stages);
+    builder.push_slot_always::<u32>(MANIFEST_FIELD_N_POOLS, graph.n_pools);
+    builder.push_slot_always(MANIFEST_FIELD_NODES, nodes_vec);
+    builder.push_slot_always(MANIFEST_FIELD_EDGES, edges_vec);
+    builder.push_slot_always::<u32>(
+        MANIFEST_FIELD_COMPLETED_ITERATIONS,
+        producer.completed_iterations,
+    );
+    builder.push_slot_always::<f64>(MANIFEST_FIELD_FINAL_LOWER_BOUND, producer.final_lower_bound);
+    if let Some(best) = producer.best_upper_bound {
+        builder.push_slot_always::<f64>(MANIFEST_FIELD_BEST_UPPER_BOUND, best);
+    }
+    builder.push_slot_always::<u32>(MANIFEST_FIELD_MAX_ITERATIONS, producer.max_iterations);
+    builder.push_slot_always::<u32>(MANIFEST_FIELD_FORWARD_PASSES, producer.forward_passes);
+    builder.push_slot_always::<u32>(MANIFEST_FIELD_WARM_START_CUTS, producer.warm_start_cuts);
+    builder.push_slot_always(MANIFEST_FIELD_WARM_START_COUNTS, warm_start_counts_vec);
+    builder.push_slot_always::<u64>(MANIFEST_FIELD_RNG_SEED, producer.rng_seed);
+    builder.push_slot_always::<u64>(
+        MANIFEST_FIELD_TOTAL_VISITED_STATES,
+        producer.total_visited_states,
+    );
+    builder.push_slot_always(MANIFEST_FIELD_TRAINING_BLOCK_MODE, training_block_mode);
+    builder.push_slot_always(MANIFEST_FIELD_TRAINING_BLOCK_MODE_PER_STAGE, per_stage_vec);
+    if let Some(csf) = producer.cost_scale_factor {
+        builder.push_slot_always::<f64>(MANIFEST_FIELD_COST_SCALE_FACTOR, csf);
+    }
+
+    let root_offset = builder.end_table(root);
+    builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
+
+    builder.finished_data().to_vec()
+}
+
 // ── Safe FlatBuffers wire-format helpers ─────────────────────────────────────
 //
 // All helpers return `Option` so callers can propagate truncation / corruption
@@ -463,6 +613,29 @@ fn read_u8_vector(buf: &[u8], vec_pos: usize) -> Option<Vec<u8>> {
     Some(buf[data_start..data_end].to_vec())
 }
 
+fn read_u32_vector(buf: &[u8], vec_pos: usize) -> Option<Vec<u32>> {
+    let len = read_u32_le(buf, vec_pos)? as usize;
+    let data_start = vec_pos.checked_add(4)?;
+    let data_end = data_start.checked_add(len.checked_mul(4)?)?;
+    if data_end > buf.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        out.push(read_u32_le(buf, data_start + i * 4)?);
+    }
+    Some(out)
+}
+
+/// Read a length-prefixed `FlatBuffers` UTF-8 string at `str_pos`.
+fn read_string(buf: &[u8], str_pos: usize) -> Option<String> {
+    let len = read_u32_le(buf, str_pos)? as usize;
+    let data_start = str_pos.checked_add(4)?;
+    let data_end = data_start.checked_add(len)?;
+    let bytes = buf.get(data_start..data_end)?;
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+
 /// Returns one absolute buffer position per element; each element stores a `u32`
 /// uoffset from its own position to the nested table (self-relative, not from 0).
 fn read_table_vector_positions(buf: &[u8], vec_pos: usize) -> Option<Vec<usize>> {
@@ -556,6 +729,179 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
         subindex,
         was_active,
         delivery_date,
+    })
+}
+
+// The next five helpers (`read_string_field` through `read_manifest_edges`)
+// share one absence contract: a field missing from the vtable yields an empty
+// `String`/`Vec`, never an error (graceful absence).
+
+/// Read a string field at vtable `slot`.
+fn read_string_field(
+    buf: &[u8],
+    table_pos: usize,
+    vtable_pos: usize,
+    slot: u16,
+    ctx: &str,
+) -> Result<String, OutputError> {
+    let Some(field_pos) = field_pos(buf, table_pos, vtable_pos, slot) else {
+        return Ok(String::new());
+    };
+    let str_pos = follow_uoffset(buf, field_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "invalid uoffset for string field"))?;
+    read_string(buf, str_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "string field truncated or not UTF-8"))
+}
+
+/// Read a `[uint32]` field at vtable `slot`.
+fn read_u32_vector_field(
+    buf: &[u8],
+    table_pos: usize,
+    vtable_pos: usize,
+    slot: u16,
+    ctx: &str,
+) -> Result<Vec<u32>, OutputError> {
+    let Some(field_pos) = field_pos(buf, table_pos, vtable_pos, slot) else {
+        return Ok(Vec::new());
+    };
+    let vec_pos = follow_uoffset(buf, field_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "invalid uoffset for uint32 vector"))?;
+    read_u32_vector(buf, vec_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "uint32 vector truncated or corrupt"))
+}
+
+/// Read a `[string]` field at vtable `slot`.
+fn read_string_vector_field(
+    buf: &[u8],
+    table_pos: usize,
+    vtable_pos: usize,
+    slot: u16,
+    ctx: &str,
+) -> Result<Vec<String>, OutputError> {
+    let Some(field_pos) = field_pos(buf, table_pos, vtable_pos, slot) else {
+        return Ok(Vec::new());
+    };
+    let vec_pos = follow_uoffset(buf, field_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "invalid uoffset for string vector"))?;
+    let positions = read_table_vector_positions(buf, vec_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "string vector header truncated"))?;
+    let mut out = Vec::with_capacity(positions.len());
+    for (idx, &str_pos) in positions.iter().enumerate() {
+        let entry = read_string(buf, str_pos).ok_or_else(|| {
+            OutputError::serialization(ctx, format!("string vector element {idx} truncated"))
+        })?;
+        out.push(entry);
+    }
+    Ok(out)
+}
+
+/// Read a `[ManifestNode]` field at vtable `slot`.
+fn read_manifest_nodes(
+    buf: &[u8],
+    table_pos: usize,
+    vtable_pos: usize,
+    slot: u16,
+    ctx: &str,
+) -> Result<Vec<ManifestNode>, OutputError> {
+    let Some(field_pos) = field_pos(buf, table_pos, vtable_pos, slot) else {
+        return Ok(Vec::new());
+    };
+    let vec_pos = follow_uoffset(buf, field_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "invalid uoffset for nodes vector"))?;
+    let positions = read_table_vector_positions(buf, vec_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "nodes vector header truncated"))?;
+    let mut out = Vec::with_capacity(positions.len());
+    for (idx, &node_pos) in positions.iter().enumerate() {
+        let node = deserialize_manifest_node_table(buf, node_pos).ok_or_else(|| {
+            OutputError::serialization(ctx, format!("manifest node table {idx} truncated"))
+        })?;
+        out.push(node);
+    }
+    Ok(out)
+}
+
+/// Read a `[ManifestEdge]` field at vtable `slot`.
+fn read_manifest_edges(
+    buf: &[u8],
+    table_pos: usize,
+    vtable_pos: usize,
+    slot: u16,
+    ctx: &str,
+) -> Result<Vec<ManifestEdge>, OutputError> {
+    let Some(field_pos) = field_pos(buf, table_pos, vtable_pos, slot) else {
+        return Ok(Vec::new());
+    };
+    let vec_pos = follow_uoffset(buf, field_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "invalid uoffset for edges vector"))?;
+    let positions = read_table_vector_positions(buf, vec_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "edges vector header truncated"))?;
+    let mut out = Vec::with_capacity(positions.len());
+    for (idx, &edge_pos) in positions.iter().enumerate() {
+        let edge = deserialize_manifest_edge_table(buf, edge_pos).ok_or_else(|| {
+            OutputError::serialization(ctx, format!("manifest edge table {idx} truncated"))
+        })?;
+        out.push(edge);
+    }
+    Ok(out)
+}
+
+fn deserialize_manifest_node_table(buf: &[u8], node_table_pos: usize) -> Option<ManifestNode> {
+    let vtable_pos = resolve_vtable_pos(buf, node_table_pos)?;
+
+    let id = field_pos(buf, node_table_pos, vtable_pos, MANIFEST_NODE_FIELD_ID)
+        .and_then(|p| read_i32_le(buf, p))
+        .unwrap_or(0);
+    let stage_id = field_pos(
+        buf,
+        node_table_pos,
+        vtable_pos,
+        MANIFEST_NODE_FIELD_STAGE_ID,
+    )
+    .and_then(|p| read_i32_le(buf, p))
+    .unwrap_or(0);
+    let pool_id = field_pos(buf, node_table_pos, vtable_pos, MANIFEST_NODE_FIELD_POOL_ID)
+        .and_then(|p| read_u32_le(buf, p))
+        .unwrap_or(0);
+
+    Some(ManifestNode {
+        id,
+        stage_id,
+        pool_id,
+    })
+}
+
+fn deserialize_manifest_edge_table(buf: &[u8], edge_table_pos: usize) -> Option<ManifestEdge> {
+    let vtable_pos = resolve_vtable_pos(buf, edge_table_pos)?;
+
+    let source_id = field_pos(
+        buf,
+        edge_table_pos,
+        vtable_pos,
+        MANIFEST_EDGE_FIELD_SOURCE_ID,
+    )
+    .and_then(|p| read_i32_le(buf, p))
+    .unwrap_or(0);
+    let target_id = field_pos(
+        buf,
+        edge_table_pos,
+        vtable_pos,
+        MANIFEST_EDGE_FIELD_TARGET_ID,
+    )
+    .and_then(|p| read_i32_le(buf, p))
+    .unwrap_or(0);
+    let probability = field_pos(
+        buf,
+        edge_table_pos,
+        vtable_pos,
+        MANIFEST_EDGE_FIELD_PROBABILITY,
+    )
+    .and_then(|p| read_f64_le(buf, p))
+    .unwrap_or(0.0);
+
+    Some(ManifestEdge {
+        source_id,
+        target_id,
+        probability,
     })
 }
 
@@ -890,6 +1236,147 @@ pub fn deserialize_stage_states(buf: &[u8]) -> Result<StageStatesReadResult, Out
         count,
         data,
         entity_manifest,
+    })
+}
+
+/// Deserialize a `CheckpointManifest` `FlatBuffers` buffer into an owned
+/// [`CheckpointManifest`].
+///
+/// # Errors
+///
+/// Returns [`OutputError::SerializationError`] when the buffer lacks the `CBVF`
+/// identifier, is truncated or corrupt, or carries a `format_version` other than
+/// [`FORMAT_VERSION`] (an absent version field reads as `0` and is likewise
+/// rejected), so a stale-version manifest is refused before any consumer reads it.
+pub fn deserialize_checkpoint_manifest(buf: &[u8]) -> Result<CheckpointManifest, OutputError> {
+    let ctx = "checkpoint_manifest";
+    check_file_identifier(buf, ctx)?;
+
+    let table_pos = resolve_root(buf)
+        .ok_or_else(|| OutputError::serialization(ctx, "buffer too short for root offset"))?;
+
+    let vtable_pos = resolve_vtable_pos(buf, table_pos)
+        .ok_or_else(|| OutputError::serialization(ctx, "invalid soffset_to_vtable"))?;
+
+    let format_version = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_FORMAT_VERSION)
+        .and_then(|p| read_u32_le(buf, p))
+        .unwrap_or(0);
+    if format_version != FORMAT_VERSION {
+        return Err(OutputError::serialization(
+            ctx,
+            format!(
+                "unsupported checkpoint manifest format_version {format_version}; expected {FORMAT_VERSION}"
+            ),
+        ));
+    }
+
+    let cobre_version = read_string_field(
+        buf,
+        table_pos,
+        vtable_pos,
+        MANIFEST_FIELD_COBRE_VERSION,
+        ctx,
+    )?;
+    let created_at = read_string_field(buf, table_pos, vtable_pos, MANIFEST_FIELD_CREATED_AT, ctx)?;
+
+    let num_stages = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_NUM_STAGES)
+        .and_then(|p| read_u32_le(buf, p))
+        .unwrap_or(0);
+    let n_pools = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_N_POOLS)
+        .and_then(|p| read_u32_le(buf, p))
+        .unwrap_or(0);
+
+    let nodes = read_manifest_nodes(buf, table_pos, vtable_pos, MANIFEST_FIELD_NODES, ctx)?;
+    let edges = read_manifest_edges(buf, table_pos, vtable_pos, MANIFEST_FIELD_EDGES, ctx)?;
+
+    let completed_iterations = field_pos(
+        buf,
+        table_pos,
+        vtable_pos,
+        MANIFEST_FIELD_COMPLETED_ITERATIONS,
+    )
+    .and_then(|p| read_u32_le(buf, p))
+    .unwrap_or(0);
+
+    // A plain-f64 provenance field: absent reads as 0.0, matching the intercept
+    // read. The two Option<f64> fields below stay None when absent, never 0.0.
+    let final_lower_bound = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_FINAL_LOWER_BOUND)
+        .and_then(|p| read_f64_le(buf, p))
+        .unwrap_or(0.0);
+    let best_upper_bound = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_BEST_UPPER_BOUND)
+        .and_then(|p| read_f64_le(buf, p));
+
+    let max_iterations = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_MAX_ITERATIONS)
+        .and_then(|p| read_u32_le(buf, p))
+        .unwrap_or(0);
+    let forward_passes = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_FORWARD_PASSES)
+        .and_then(|p| read_u32_le(buf, p))
+        .unwrap_or(0);
+    let warm_start_cuts = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_WARM_START_CUTS)
+        .and_then(|p| read_u32_le(buf, p))
+        .unwrap_or(0);
+    let warm_start_counts = read_u32_vector_field(
+        buf,
+        table_pos,
+        vtable_pos,
+        MANIFEST_FIELD_WARM_START_COUNTS,
+        ctx,
+    )?;
+
+    let rng_seed = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_RNG_SEED)
+        .and_then(|p| read_u64_le(buf, p))
+        .unwrap_or(0);
+    let total_visited_states = field_pos(
+        buf,
+        table_pos,
+        vtable_pos,
+        MANIFEST_FIELD_TOTAL_VISITED_STATES,
+    )
+    .and_then(|p| read_u64_le(buf, p))
+    .unwrap_or(0);
+
+    let training_block_mode = read_string_field(
+        buf,
+        table_pos,
+        vtable_pos,
+        MANIFEST_FIELD_TRAINING_BLOCK_MODE,
+        ctx,
+    )?;
+    let training_block_mode_per_stage = read_string_vector_field(
+        buf,
+        table_pos,
+        vtable_pos,
+        MANIFEST_FIELD_TRAINING_BLOCK_MODE_PER_STAGE,
+        ctx,
+    )?;
+
+    let cost_scale_factor = field_pos(buf, table_pos, vtable_pos, MANIFEST_FIELD_COST_SCALE_FACTOR)
+        .and_then(|p| read_f64_le(buf, p));
+
+    Ok(CheckpointManifest {
+        format_version,
+        cobre_version,
+        created_at,
+        num_stages,
+        graph_manifest: GraphManifest {
+            n_pools,
+            nodes,
+            edges,
+        },
+        producer: ProducerBlock {
+            completed_iterations,
+            final_lower_bound,
+            best_upper_bound,
+            max_iterations,
+            forward_passes,
+            warm_start_cuts,
+            warm_start_counts,
+            rng_seed,
+            total_visited_states,
+            training_block_mode,
+            training_block_mode_per_stage,
+            cost_scale_factor,
+        },
     })
 }
 
