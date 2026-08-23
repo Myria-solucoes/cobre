@@ -473,6 +473,11 @@ struct DeliveryClasses {
     /// `[0, k)`, since both deciders are monotonic in stage-end cumulative
     /// hours. Not yet read by a validator; reserved for the rule that will
     /// require a fixed commitment for this prefix.
+    // RATIONALE: reserved seam (see field doc) plus a live debug-only consumer —
+    // `classify_deliveries`'s `debug_assert_eq!` cross-checks it against the `None`
+    // run of `extended_deciders`, and that read compiles out in release, so the
+    // field reads as dead there. Removing it drops both the reserved seam and the
+    // consistency check.
     #[allow(dead_code)]
     leading_in_study: usize,
     /// Post-study deliveries decided at a pre-study stage — each requires a
