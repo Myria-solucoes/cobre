@@ -189,6 +189,19 @@ impl ExternalScenarioLibrary {
     }
 }
 
+/// Map each study stage's declared `Stage.id` to its 0-based position in
+/// `stages` — the declared-domain-id -> canonical-study-index resolution
+/// cobre-io's `StageIdResolver` performs for the σ=0 validator (rule 47),
+/// replicated here because `cobre-stochastic` cannot depend on `cobre-io`
+/// (`cobre-io` depends on `cobre-stochastic`). `ExternalScenarioRow`/
+/// `ExternalLoadRow`/`ExternalNcsRow`'s own `stage_id` doc is explicit that
+/// the value is a declared domain id, "not a 0-based index" — every
+/// External-row consumer below resolves through this map, never casts
+/// `stage_id as usize` directly.
+fn stage_id_to_index(stages: &[Stage]) -> std::collections::HashMap<i32, usize> {
+    stages.iter().enumerate().map(|(i, s)| (s.id, i)).collect()
+}
+
 // ---------------------------------------------------------------------------
 // standardize_external_inflow
 // ---------------------------------------------------------------------------
@@ -212,7 +225,7 @@ impl ExternalScenarioLibrary {
 /// A stage with fewer real scenarios than another stage has its raw values
 /// replicated to the library's uniform width BEFORE inversion (the same
 /// wrap-around convention [`pad_library_to_uniform`] applies to the eta
-/// output), so a later real stage's lag chain — [`run_eta_inversion`]'s
+/// output), so a later real stage's lag chain — `run_eta_inversion`'s
 /// `advance_lag_chain` step — advances through that replica, never a
 /// fabricated `0.0`: every branch descending from one earlier real scenario
 /// shares that scenario's own realized value as its lag, matching what the
@@ -295,11 +308,11 @@ pub fn standardize_external_inflow(
         .enumerate()
         .map(|(i, &id)| (id, i))
         .collect();
+    let stage_index = stage_id_to_index(stages);
 
     // raw[stage * n_scenarios * n_hydros + scenario * n_hydros + h_idx]
     let mut raw_values = vec![0.0_f64; n_stages * n_scenarios * n_hydros].into_boxed_slice();
 
-    #[allow(clippy::cast_sign_loss)]
     for row in external_rows {
         debug_assert!(
             row.stage_id >= 0,
@@ -309,14 +322,17 @@ pub fn standardize_external_inflow(
             row.scenario_id >= 0,
             "negative scenario_id in external scenario row"
         );
-        let stage_idx = row.stage_id as usize;
+        let Some(&stage_idx) = stage_index.get(&row.stage_id) else {
+            continue;
+        };
+        #[allow(clippy::cast_sign_loss)]
         let scenario_idx = row.scenario_id as usize;
         if let Some(&h_idx) = hydro_index.get(&row.hydro_id) {
-            // Defensive bound: cobre-io's A1 (exact scenario_id set) and A2
-            // (stage_id resolution) are the load-bearing guards that reject an
-            // out-of-range index at load; this keeps a stray index from writing
-            // into a neighbouring stage's realization 0 instead of being caught.
-            if stage_idx < n_stages && scenario_idx < n_scenarios {
+            // Defensive bound: cobre-io's A1 (exact scenario_id set) is the
+            // load-bearing guard that rejects an out-of-range scenario_id at
+            // load; this keeps a stray index from writing into a neighbouring
+            // stage's realization 0 instead of being caught.
+            if scenario_idx < n_scenarios {
                 raw_values[stage_idx * n_scenarios * n_hydros + scenario_idx * n_hydros + h_idx] =
                     row.value_m3s;
             }
@@ -385,7 +401,7 @@ fn standardize_external_simple<R, M, FM, FR>(
     external_rows: &[R],
     entity_ids: &[EntityId],
     models: &[M],
-    n_stages: usize,
+    stages: &[Stage],
     model_fields: FM,
     row_fields: FR,
 ) where
@@ -393,6 +409,7 @@ fn standardize_external_simple<R, M, FM, FR>(
     FR: Fn(&R) -> (EntityId, i32, i32, f64),
 {
     let n_entities = entity_ids.len();
+    let n_stages = stages.len();
     let n_scenarios = library.n_scenarios();
 
     debug_assert_eq!(
@@ -405,7 +422,7 @@ fn standardize_external_simple<R, M, FM, FR>(
     debug_assert_eq!(
         library.n_stages(),
         n_stages,
-        "library.n_stages() ({}) must equal n_stages ({})",
+        "library.n_stages() ({}) must equal stages.len() ({})",
         library.n_stages(),
         n_stages,
     );
@@ -419,30 +436,31 @@ fn standardize_external_simple<R, M, FM, FR>(
         .enumerate()
         .map(|(i, &id)| (id, i))
         .collect();
+    let stage_index = stage_id_to_index(stages);
 
     // mean_std[stage * n_entities + entity_idx]
     let mut mean_std = vec![(0.0_f64, 0.0_f64); n_stages * n_entities];
-    #[allow(clippy::cast_sign_loss)]
     for model in models {
         let (entity_id, stage_id, mean, std) = model_fields(model);
-        if let Some(&e_idx) = entity_index.get(&entity_id) {
-            let stage_idx = stage_id as usize;
-            if stage_idx < n_stages {
-                mean_std[stage_idx * n_entities + e_idx] = (mean, std);
-            }
+        if let (Some(&e_idx), Some(&stage_idx)) =
+            (entity_index.get(&entity_id), stage_index.get(&stage_id))
+        {
+            mean_std[stage_idx * n_entities + e_idx] = (mean, std);
         }
     }
 
     #[allow(clippy::cast_sign_loss)]
     for row in external_rows {
         let (entity_id, stage_id, scenario_id, value) = row_fields(row);
-        let stage_idx = stage_id as usize;
+        let Some(&stage_idx) = stage_index.get(&stage_id) else {
+            continue;
+        };
         let scenario_idx = scenario_id as usize;
         if let Some(&e_idx) = entity_index.get(&entity_id) {
-            // Defensive bound: cobre-io's A1/A2 are the load-bearing guards that
-            // reject an out-of-range index at load; this keeps a stray index from
-            // writing into a neighbouring stage's realization 0.
-            if stage_idx < n_stages && scenario_idx < n_scenarios {
+            // Defensive bound: cobre-io's A1 is the load-bearing guard that
+            // rejects an out-of-range scenario_id at load; this keeps a stray
+            // index from writing into a neighbouring stage's realization 0.
+            if scenario_idx < n_scenarios {
                 let (mean, std) = mean_std[stage_idx * n_entities + e_idx];
                 let eta = if std == 0.0 {
                     0.0
@@ -468,6 +486,14 @@ fn standardize_external_simple<R, M, FM, FR>(
 /// Output layout matches the `mean_std` table `standardize_external_simple`
 /// consumes: `moments[stage * entity_ids.len() + entity_idx]`. An
 /// `(entity, stage)` cell with no rows defaults to `(0.0, 0.0)`.
+///
+/// `row_fields`' `stage_id` MUST already be the canonical 0-based study-stage
+/// index, never the row's raw declared domain id — this reduction has no
+/// stage list to resolve one against. Every caller resolves first (this
+/// crate's `stage_id_to_index`, or the equivalent `cobre-io`
+/// `StageIdResolver`); passing a raw `ExternalScenarioRow`/`ExternalLoadRow`/
+/// `ExternalNcsRow::stage_id` directly silently mis-indexes or drops rows
+/// whenever a study's declared stage ids are not exactly `0..n_stages`.
 ///
 /// Determinism: each cell reduces its rows in ascending `(scenario_id, value)`
 /// order, never `external_rows`' declaration order, so any permutation of the
@@ -573,14 +599,14 @@ pub fn standardize_external_load(
     external_rows: &[ExternalLoadRow],
     bus_ids: &[EntityId],
     load_models: &[LoadModel],
-    n_stages: usize,
+    stages: &[Stage],
 ) {
     standardize_external_simple(
         library,
         external_rows,
         bus_ids,
         load_models,
-        n_stages,
+        stages,
         |model| (model.bus_id, model.stage_id, model.mean_mw, model.std_mw),
         |row| (row.bus_id, row.stage_id, row.scenario_id, row.value_mw),
     );
@@ -603,14 +629,14 @@ pub fn standardize_external_ncs(
     external_rows: &[ExternalNcsRow],
     ncs_ids: &[EntityId],
     ncs_models: &[NcsModel],
-    n_stages: usize,
+    stages: &[Stage],
 ) {
     standardize_external_simple(
         library,
         external_rows,
         ncs_ids,
         ncs_models,
-        n_stages,
+        stages,
         |model| (model.ncs_id, model.stage_id, model.mean, model.std),
         |row| (row.ncs_id, row.stage_id, row.scenario_id, row.value),
     );
@@ -1502,7 +1528,8 @@ mod tests {
             bus_id,
             value_mw: 240.0,
         }];
-        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 1);
+        let stages = vec![make_stage(0, 0, 0)];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, &stages);
 
         let eta = lib.eta_slice(0, 0)[0];
         assert!((eta - 1.0).abs() < 1e-10, "eta = {eta}");
@@ -1548,7 +1575,8 @@ mod tests {
                 value_mw: 99.0,
             },
         ];
-        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 2);
+        let stages = vec![make_stage(0, 0, 0), make_stage(1, 1, 0)];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, &stages);
 
         assert!(
             (lib.eta_slice(0, 0)[0] - 5.0).abs() < 1e-12,
@@ -1584,7 +1612,8 @@ mod tests {
             ncs_id,
             value: 0.7,
         }];
-        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, 1);
+        let stages = vec![make_stage(0, 0, 0)];
+        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, &stages);
 
         let eta = lib.eta_slice(0, 0)[0];
         assert!((eta - 1.0).abs() < 1e-10, "eta = {eta}");
@@ -1614,7 +1643,8 @@ mod tests {
             bus_id,
             value_mw: 0.5,
         }];
-        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 1);
+        let stages = vec![make_stage(0, 0, 0)];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, &stages);
 
         let eta = lib.eta_slice(0, 0)[0];
         assert_eq!(eta, 0.0, "eta must be 0.0 when std=0.0, got {eta}");
@@ -1640,7 +1670,8 @@ mod tests {
             ncs_id,
             value: 0.4,
         }];
-        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, 1);
+        let stages = vec![make_stage(0, 0, 0)];
+        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, &stages);
 
         let eta = lib.eta_slice(0, 0)[0];
         assert_eq!(eta, 0.0, "eta must be 0.0 when std=0.0, got {eta}");
@@ -1712,7 +1743,8 @@ mod tests {
                 value_mw: 520.0, // (520-400)/40 = 3.0
             },
         ];
-        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 2);
+        let stages = vec![make_stage(0, 0, 0), make_stage(1, 1, 0)];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, &stages);
 
         assert!((lib.eta_slice(0, 0)[0] - 1.5).abs() < 1e-10);
         assert!((lib.eta_slice(0, 0)[1] - 2.0).abs() < 1e-10);
@@ -1784,7 +1816,8 @@ mod tests {
                 value: 1.60, // (1.60-0.40)/0.40 = 3.0
             },
         ];
-        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, 2);
+        let stages = vec![make_stage(0, 0, 0), make_stage(1, 1, 0)];
+        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, &stages);
 
         assert!((lib.eta_slice(0, 0)[0] - 1.5).abs() < 1e-10);
         assert!((lib.eta_slice(0, 0)[1] - 2.0).abs() < 1e-10);

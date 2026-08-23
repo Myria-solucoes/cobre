@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use cobre_core::Hydro;
 use cobre_core::scenario::SamplingScheme;
+use cobre_core::{EntityId, Hydro};
+use cobre_stochastic::derive_external_sample_moments;
 use cobre_stochastic::par::{
     AnnualParams, ClosureRejection, check_stationarity, check_stationarity_annual,
 };
@@ -13,7 +14,7 @@ use cobre_stochastic::season_cast::{RealizedWindow, SeasonPeriodWindow, cast};
 use crate::{LoadError, StageIdResolver};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
-use super::{ENVELOPE_TOLERANCE, envelope_tolerance};
+use super::envelope_tolerance;
 
 // ── Rules 6-10: Penalty ordering ──────────────────────────────────────────────
 
@@ -561,14 +562,17 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
     let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
     let n_stages = study_ids.len();
 
+    // AR order > 0 for rule 50's inflow decision (`extract_class`): any declared
+    // lag coefficient or annual component.
+    let hydros_with_ar_dynamics: HashSet<i32> = data
+        .inflow_ar_coefficients
+        .iter()
+        .map(|r| r.hydro_id.0)
+        .chain(data.inflow_annual_components.iter().map(|r| r.hydro_id.0))
+        .collect();
+
     let mut classes: Vec<ClassExternal> = Vec::new();
     if source.inflow_scheme == SamplingScheme::External && !data.external_scenarios.is_empty() {
-        let (sigma, mean) = sigma_mean_lookup(
-            &data.inflow_seasonal_stats,
-            |r| (r.hydro_id.0, r.stage_id),
-            |r| r.std_m3s,
-            |r| r.mean_m3s,
-        );
         classes.push(extract_class(
             "inflow",
             "scenarios/external_inflow_scenarios.parquet",
@@ -578,18 +582,11 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
                 .map(|r| (r.hydro_id.0, r.stage_id, r.scenario_id, r.value_m3s)),
             &resolver,
             n_stages,
-            &sigma,
-            &mean,
+            &hydros_with_ar_dynamics,
             ctx,
         ));
     }
     if source.load_scheme == SamplingScheme::External && !data.external_load_scenarios.is_empty() {
-        let (sigma, mean) = sigma_mean_lookup(
-            &data.load_seasonal_stats,
-            |r| (r.bus_id.0, r.stage_id),
-            |r| r.std_mw,
-            |r| r.mean_mw,
-        );
         classes.push(extract_class(
             "load",
             "scenarios/external_load_scenarios.parquet",
@@ -599,18 +596,11 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
                 .map(|r| (r.bus_id.0, r.stage_id, r.scenario_id, r.value_mw)),
             &resolver,
             n_stages,
-            &sigma,
-            &mean,
+            &hydros_with_ar_dynamics,
             ctx,
         ));
     }
     if source.ncs_scheme == SamplingScheme::External && !data.external_ncs_scenarios.is_empty() {
-        let (sigma, mean) = sigma_mean_lookup(
-            &data.ncs_models,
-            |r| (r.ncs_id.0, r.stage_id),
-            |r| r.std,
-            |r| r.mean,
-        );
         classes.push(extract_class(
             "ncs",
             "scenarios/external_ncs_scenarios.parquet",
@@ -620,8 +610,7 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
                 .map(|r| (r.ncs_id.0, r.stage_id, r.scenario_id, r.value)),
             &resolver,
             n_stages,
-            &sigma,
-            &mean,
+            &hydros_with_ar_dynamics,
             ctx,
         ));
     }
@@ -633,34 +622,18 @@ pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut Vali
     }
 }
 
-/// A σ or μ lookup keyed `(entity_id, stage_id)`.
-type SigmaMeanMap = HashMap<(i32, i32), f64>;
-
-/// Builds a class's σ and μ lookups, keyed `(entity_id, stage_id)`, in one pass
-/// over `rows` — shared by [`check_external_library_coherence`]'s 3 per-class
-/// call sites.
-fn sigma_mean_lookup<T>(
-    rows: &[T],
-    key: impl Fn(&T) -> (i32, i32),
-    sigma: impl Fn(&T) -> f64,
-    mean: impl Fn(&T) -> f64,
-) -> (SigmaMeanMap, SigmaMeanMap) {
-    let mut sigma_map = HashMap::new();
-    let mut mean_map = HashMap::new();
-    for row in rows {
-        let entity_stage = key(row);
-        sigma_map.insert(entity_stage, sigma(row));
-        mean_map.insert(entity_stage, mean(row));
-    }
-    (sigma_map, mean_map)
-}
-
 /// Extract one external class, running A2 (`stage_id` resolution, rule 47), A1
-/// (exact `scenario_id` set, rule 46), and rule 50's per-class σ check as it
-/// builds the [`ClassExternal`]. `sigma_by_entity_stage` / `mean_by_entity_stage`
-/// are the class's σ / μ sources keyed `(entity_id, stage_id)` --
-/// `inflow_seasonal_stats.{std,mean}_m3s`, `load_seasonal_stats.{std,mean}_mw`,
-/// or `NcsModel.{std,mean}`, resolved by the caller per class.
+/// (exact `scenario_id` set, rule 46), and rule 50's inflow-only σ check as it
+/// builds the [`ClassExternal`]. Rule 50 no longer applies to load/NCS: under
+/// External their μ is defined by the external file itself, so there is no
+/// seasonal μ left to disagree with. For inflow, σ is derived from these SAME
+/// external cells via [`derive_external_sample_moments`] -- the reduction the
+/// engine also uses, so the validator and the engine agree on "σ = 0" --
+/// rather than from `inflow_seasonal_stats`; a constant (σ = 0) column is
+/// accepted for a hydro absent from `hydros_with_ar_dynamics` (AR(0): its
+/// deterministic base is exactly μ) and rejected for one present in it
+/// (AR(p > 0): a deterministic value would have to equal a PAR output this
+/// loader cannot compute upstream).
 fn extract_class(
     name: &'static str,
     file: &'static str,
@@ -668,14 +641,14 @@ fn extract_class(
     rows: impl Iterator<Item = (i32, i32, i32, f64)>,
     resolver: &StageIdResolver,
     n_stages: usize,
-    sigma_by_entity_stage: &HashMap<(i32, i32), f64>,
-    mean_by_entity_stage: &HashMap<(i32, i32), f64>,
+    hydros_with_ar_dynamics: &HashSet<i32>,
     ctx: &mut ValidationContext,
 ) -> ClassExternal {
     let mut cells: HashMap<(usize, i32, i32), f64> = HashMap::new();
     let mut entities: BTreeSet<i32> = BTreeSet::new();
     let mut union_by_stage: Vec<BTreeSet<i32>> = vec![BTreeSet::new(); n_stages];
     let mut entity_scen: HashMap<(usize, i32), BTreeSet<i32>> = HashMap::new();
+    let mut inflow_sample_rows: Vec<(EntityId, i32, i32, f64)> = Vec::new();
 
     for (i, (entity_id, stage_id, scenario_id, value)) in rows.enumerate() {
         // A2 (rule 47): an out-of-range stage_id is rejected through the shared
@@ -712,7 +685,30 @@ fn extract_class(
             .entry((stage_idx, entity_id))
             .or_default()
             .insert(scenario_id);
+        // A negative scenario_id is already rejected below (rule 46's
+        // out-of-range check, keyed off entity_scen, is unaffected by this
+        // filter) -- excluded here only to keep the moment reduction's own
+        // debug_assert from firing on a row this function itself flags.
+        if name == "inflow" && scenario_id >= 0 {
+            let stage_idx_i32 = i32::try_from(stage_idx).unwrap_or(i32::MAX);
+            inflow_sample_rows.push((EntityId(entity_id), stage_idx_i32, scenario_id, value));
+        }
     }
+
+    let n_entities = entities.len();
+    let inflow_moments: Vec<(f64, f64)> = if name == "inflow" {
+        let inflow_entity_ids: Vec<EntityId> = entities.iter().copied().map(EntityId).collect();
+        derive_external_sample_moments(
+            &inflow_sample_rows,
+            &inflow_entity_ids,
+            n_stages,
+            |&(entity_id, stage_idx, scenario_id, value)| {
+                (entity_id, stage_idx, scenario_id, value)
+            },
+        )
+    } else {
+        Vec::new()
+    };
 
     let mut raw_c = vec![0usize; n_stages];
     for (t, union) in union_by_stage.iter().enumerate() {
@@ -726,66 +722,24 @@ fn extract_class(
         // A1 (rule 46): every entity present at this stage must carry exactly the
         // scenario_id set {0..raw_c-1} — a set check, not a bound check, so a
         // 1-based deck (which is in-bounds below raw_c but shifted) is rejected.
-        for &e in &entities {
+        for (e_idx, &e) in entities.iter().enumerate() {
             let Some(es) = entity_scen.get(&(t, e)) else {
                 continue;
             };
 
-            // Rule 50: inflow requires σ > 0 at every (entity, stage) it covers --
-            // its PAR inversion is undefined at σ = 0. Load/NCS additionally accept
-            // σ = 0 when every external value at (entity, stage) equals μ: the
-            // deterministic column `standardize_external_simple` already maps to
-            // η = 0; a σ = 0 value that disagrees with μ is rejected by name
-            // instead of being silently coerced to μ at runtime.
-            let sigma = sigma_by_entity_stage.get(&(e, stage_id)).copied();
-            match sigma {
-                Some(s) if s > 0.0 => {}
-                Some(s) if s == 0.0 && name != "inflow" => {
-                    let mean = mean_by_entity_stage
-                        .get(&(e, stage_id))
-                        .copied()
-                        .unwrap_or(0.0);
-                    let tolerance = ENVELOPE_TOLERANCE * mean.abs().max(1.0);
-                    let mismatches: Vec<(i32, f64)> = es
-                        .iter()
-                        .filter_map(|&scenario_id| {
-                            let value = *cells.get(&(t, scenario_id, e))?;
-                            ((value - mean).abs() > tolerance).then_some((scenario_id, value))
-                        })
-                        .collect();
-                    if !mismatches.is_empty() {
-                        let detail = mismatches
-                            .iter()
-                            .map(|(scenario_id, value)| {
-                                format!("scenario_id {scenario_id} = {value}")
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        ctx.add_error(
-                            ErrorKind::BusinessRuleViolation,
-                            file,
-                            Some(format!("{name} entity {e} stage {stage_id}")),
-                            format!(
-                                "{name} external library at stage {stage_id}, entity {e}: σ = 0 \
-                                 (deterministic) requires every value to equal μ ({mean}); \
-                                 mismatched {detail}"
-                            ),
-                        );
-                    }
-                }
-                _ => {
-                    let detail = sigma.map_or_else(
-                        || "no matching std entry".to_string(),
-                        |s| format!("std = {s}"),
-                    );
+            if name == "inflow" {
+                let (_, sigma) = inflow_moments[t * n_entities + e_idx];
+                if sigma == 0.0 && hydros_with_ar_dynamics.contains(&e) {
                     ctx.add_error(
                         ErrorKind::BusinessRuleViolation,
                         file,
                         Some(format!("{name} entity {e} stage {stage_id}")),
                         format!(
-                            "{name} external library at stage {stage_id}, entity {e}: standardization \
-                             requires a positive standard deviation ({detail}); a zero or missing σ \
-                             makes eta inversion undefined"
+                            "{name} external library at stage {stage_id}, entity {e}: every \
+                             scenario value is constant (σ = 0), but this hydro's inflow follows \
+                             an autoregressive model of order > 0; a deterministic value here \
+                             would have to equal that model's own deterministic PAR output at \
+                             every stage, which this loader does not compute upstream"
                         ),
                     );
                 }
@@ -2962,16 +2916,17 @@ mod tests {
         );
     }
 
-    // ── Rule 50: external σ > 0, all-stages scope ─────────────────────────────
+    // ── Rule 50: external inflow σ = 0, all-stages scope ──────────────────────
 
-    /// Two-stage graph: stage 0 is a single-node trunk (column 0 only); stage 1
-    /// fans into two children pointing at columns 0 and 1 — the branching shape
-    /// rule 50's all-stages scope must cover identically at both positions.
-    fn trunk_and_fan_graph(hydro: i32) -> ParsedData {
+    /// Two-stage graph: stage 0 is a single-node trunk (column 0 only, always
+    /// a constant column); stage 1 fans into two children pointing at columns
+    /// 0 and 1, whose values the caller controls -- the branching shape rule
+    /// 50's all-stages scope must cover identically at both positions.
+    fn trunk_and_fan_graph(hydro: i32, fan_col0: f64, fan_col1: f64) -> ParsedData {
         let inflow = vec![
             inflow_row(hydro, 0, 0, 10.0),
-            inflow_row(hydro, 1, 0, 20.0),
-            inflow_row(hydro, 1, 1, 30.0),
+            inflow_row(hydro, 1, 0, fan_col0),
+            inflow_row(hydro, 1, 1, fan_col1),
         ];
         let mut data = external_data(vec![0, 1], inflow, vec![], vec![]);
         data.stages.policy_graph.nodes = vec![
@@ -3011,105 +2966,129 @@ mod tests {
         data
     }
 
+    /// One AR lag coefficient for `hydro` -- enough to give the hydro an AR
+    /// order > 0 for rule 50's inflow decision, which reads only the set of
+    /// hydros declaring any coefficient, not which stage it is declared at.
+    fn ar_coefficient_row(hydro: i32, stage_id: i32) -> InflowArCoefficientRow {
+        InflowArCoefficientRow {
+            hydro_id: EntityId::from(hydro),
+            stage_id,
+            lag: 1,
+            coefficient: 0.5,
+        }
+    }
+
     /// A zero σ at stage 0 — the single-node trunk every path shares — is
-    /// rejected naming the entity and the stage, even though stage 0 never
-    /// branches.
+    /// rejected for an AR(p > 0) hydro, naming the entity and the stage, even
+    /// though stage 0 never branches; the message states the real,
+    /// deterministic-PAR-output reason and never repeats the retired
+    /// "inversion is undefined" phrasing.
     #[test]
-    fn rule_50_rejects_zero_sigma_at_trunk_stage() {
-        let mut data = trunk_and_fan_graph(1);
-        data.inflow_seasonal_stats = vec![
-            InflowSeasonalStatsRow {
-                hydro_id: EntityId::from(1),
-                stage_id: 0,
-                mean_m3s: 100.0,
-                std_m3s: 0.0,
-            },
-            InflowSeasonalStatsRow {
-                hydro_id: EntityId::from(1),
-                stage_id: 1,
-                mean_m3s: 100.0,
-                std_m3s: 5.0,
-            },
-        ];
+    fn rule_50_inflow_ar_positive_zero_sigma_rejects_at_trunk_stage() {
+        let mut data = trunk_and_fan_graph(1, 20.0, 30.0);
+        data.inflow_ar_coefficients = vec![ar_coefficient_row(1, 0)];
         let ctx = run(&data);
         assert!(
             ctx.errors().iter().any(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
                     && e.message.contains("entity 1")
                     && e.message.contains("stage 0")
-                    && e.message.contains("positive standard deviation")
+                    && e.message.contains("deterministic PAR output")
             }),
-            "a zero σ at the trunk stage must be rejected naming entity and stage: {:?}",
+            "a zero σ at the trunk stage must be rejected for an AR(p > 0) hydro, naming \
+             entity and stage and stating the deterministic-PAR-output reason: {:?}",
+            error_msgs(&ctx)
+        );
+        assert!(
+            !error_msgs(&ctx)
+                .iter()
+                .any(|m| m.contains("inversion is undefined")),
+            "the rejection must not repeat the retired 'inversion is undefined' phrasing: {:?}",
             error_msgs(&ctx)
         );
     }
 
-    /// A zero σ at stage 1 — the fan — is rejected the same way, proving the
-    /// reject is not fan-only.
+    /// A zero σ at stage 1 — the fan, both columns equal-valued — is rejected
+    /// the same way for an AR(p > 0) hydro, proving the reject is not
+    /// trunk-only.
     #[test]
-    fn rule_50_rejects_zero_sigma_at_fan_stage() {
-        let mut data = trunk_and_fan_graph(1);
-        data.inflow_seasonal_stats = vec![
-            InflowSeasonalStatsRow {
-                hydro_id: EntityId::from(1),
-                stage_id: 0,
-                mean_m3s: 100.0,
-                std_m3s: 5.0,
-            },
-            InflowSeasonalStatsRow {
-                hydro_id: EntityId::from(1),
-                stage_id: 1,
-                mean_m3s: 100.0,
-                std_m3s: 0.0,
-            },
-        ];
+    fn rule_50_inflow_ar_positive_zero_sigma_rejects_at_fan_stage() {
+        let mut data = trunk_and_fan_graph(1, 20.0, 20.0);
+        data.inflow_ar_coefficients = vec![ar_coefficient_row(1, 1)];
         let ctx = run(&data);
         assert!(
             ctx.errors().iter().any(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
                     && e.message.contains("entity 1")
                     && e.message.contains("stage 1")
-                    && e.message.contains("positive standard deviation")
+                    && e.message.contains("deterministic PAR output")
             }),
-            "a zero σ at the fan stage must be rejected naming entity and stage, not \
-             only at trunk stages: {:?}",
+            "a zero σ at the fan stage must be rejected for an AR(p > 0) hydro, naming \
+             entity and stage, not only at trunk stages: {:?}",
             error_msgs(&ctx)
         );
     }
 
-    /// Inflow does NOT get the deterministic exception even when every value
-    /// equals μ -- its PAR inversion is undefined at σ = 0 regardless of the
-    /// raw values, unlike load/NCS.
+    /// An AR(0) hydro's deterministic (σ = 0) external inflow is accepted:
+    /// its deterministic base is exactly μ, so the constant external value
+    /// simply IS that base — no rule 50 error, the flip of the retired
+    /// unconditional-inflow-reject behavior.
     #[test]
-    fn rule_50_inflow_zero_sigma_rejects_even_when_value_equals_mean() {
-        let mut data = external_data(
+    fn rule_50_inflow_ar0_zero_sigma_accepted() {
+        let data = external_data(
             vec![0],
             vec![inflow_row(1, 0, 0, 100.0), inflow_row(1, 0, 1, 100.0)],
             vec![],
             vec![],
         );
-        data.inflow_seasonal_stats = vec![InflowSeasonalStatsRow {
-            hydro_id: EntityId::from(1),
-            stage_id: 0,
-            mean_m3s: 100.0,
-            std_m3s: 0.0,
-        }];
+        assert!(
+            data.inflow_ar_coefficients.is_empty(),
+            "fixture precondition: hydro 1 is AR(0)"
+        );
         let ctx = run(&data);
         assert!(
-            ctx.errors().iter().any(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("entity 1")
-                    && e.message.contains("stage 0")
-                    && e.message.contains("positive standard deviation")
-            }),
-            "inflow σ = 0 must still be rejected even when every value equals μ: {:?}",
+            !ctx.has_errors(),
+            "a σ = 0 AR(0) inflow column must be accepted: {:?}",
             error_msgs(&ctx)
         );
     }
 
-    /// A σ = 0 external NCS column whose values all equal μ is a first-class
-    /// deterministic entity (η = 0, exactly as `standardize_external_simple`
-    /// already produces at runtime) -- accepted, no rule 50 error.
+    /// An External-scheme deck with NO seasonal-stats file for that class (an
+    /// absent `load_seasonal_stats.parquet`, the file that used to be the
+    /// sole source of rule 50's load σ) validates without error —
+    /// seasonal-stats files are optional under External.
+    #[test]
+    fn external_load_deck_validates_without_error_when_seasonal_stats_absent() {
+        let load = vec![
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 0,
+                bus_id: EntityId::from(1),
+                value_mw: 50.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 1,
+                bus_id: EntityId::from(1),
+                value_mw: 50.0,
+            },
+        ];
+        let data = external_data(vec![0], vec![], load, vec![]);
+        assert!(
+            data.load_seasonal_stats.is_empty(),
+            "fixture precondition: no seasonal-stats file declared"
+        );
+        let ctx = run(&data);
+        assert!(
+            !ctx.has_errors(),
+            "an External load deck with no seasonal-stats file must validate cleanly: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    /// A σ = 0 external NCS column whose values all equal μ is accepted --
+    /// rule 50 no longer applies any σ check to NCS at all, so the seasonal μ
+    /// is irrelevant either way (see the "differs" companion below).
     #[test]
     fn rule_50_ncs_zero_sigma_accepts_when_value_equals_mean() {
         let ncs = vec![
@@ -3135,19 +3114,19 @@ mod tests {
         }];
         let ctx = run(&data);
         assert!(
-            !error_msgs(&ctx).iter().any(|m| {
-                m.contains("standard deviation") || m.contains("requires every value to equal")
-            }),
+            !ctx.has_errors(),
             "a deterministic NCS column (every value == μ) with σ = 0 must be accepted: {:?}",
             error_msgs(&ctx)
         );
     }
 
-    /// The same σ = 0 NCS column with one value diverging from μ is rejected,
-    /// naming the entity, stage, and the offending value -- the coercion
-    /// hazard rule 50 half-addressed is now a loud, precise rejection.
+    /// The same σ = 0 NCS column with one value diverging from μ is likewise
+    /// accepted: under External, NCS's μ is defined by the external file
+    /// itself, so there is no seasonal μ left to disagree with — the retired
+    /// "σ = 0 requires every value to equal μ" branch no longer applies to
+    /// load/NCS.
     #[test]
-    fn rule_50_ncs_zero_sigma_rejects_mismatched_value() {
+    fn rule_50_ncs_zero_sigma_accepts_when_value_differs_from_seasonal_mean() {
         let ncs = vec![
             ExternalNcsRow {
                 stage_id: 0,
@@ -3171,20 +3150,15 @@ mod tests {
         }];
         let ctx = run(&data);
         assert!(
-            ctx.errors().iter().any(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("entity 1")
-                    && e.message.contains("stage 0")
-                    && e.message.contains("0.9")
-            }),
-            "a σ = 0 NCS column with a value != μ must be rejected naming the mismatch: {:?}",
+            !ctx.has_errors(),
+            "a σ = 0 NCS column with a value differing from the seasonal μ must be accepted \
+             now that rule 50 no longer checks load/NCS: {:?}",
             error_msgs(&ctx)
         );
     }
 
     /// A σ = 0 external load library whose values all equal μ is accepted the
-    /// same way as NCS -- load and NCS share rule 50's deterministic-aware
-    /// branch.
+    /// same way as NCS -- rule 50 does not check load/NCS at all.
     #[test]
     fn rule_50_load_zero_sigma_accepts_when_value_equals_mean() {
         let load = vec![
@@ -3210,10 +3184,44 @@ mod tests {
         }];
         let ctx = run(&data);
         assert!(
-            !error_msgs(&ctx).iter().any(|m| {
-                m.contains("standard deviation") || m.contains("requires every value to equal")
-            }),
+            !ctx.has_errors(),
             "a deterministic load column (every value == μ) with σ = 0 must be accepted: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    /// A σ = 0 external load column with a value differing from the seasonal
+    /// μ is accepted: under External, load's μ is defined by the external
+    /// file itself, so editing `load_seasonal_stats.parquet` is no longer
+    /// required to keep a deterministic load value from being rejected.
+    #[test]
+    fn rule_50_load_zero_sigma_accepts_when_value_differs_from_seasonal_mean() {
+        let load = vec![
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 0,
+                bus_id: EntityId::from(1),
+                value_mw: 50.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 1,
+                bus_id: EntityId::from(1),
+                value_mw: 50.0,
+            },
+        ];
+        let mut data = external_data(vec![0], vec![], load, vec![]);
+        data.load_seasonal_stats = vec![LoadSeasonalStatsRow {
+            bus_id: EntityId::from(1),
+            stage_id: 0,
+            mean_mw: 999.0,
+            std_mw: 0.0,
+        }];
+        let ctx = run(&data);
+        assert!(
+            !ctx.has_errors(),
+            "a σ = 0 load column diverging from a declared seasonal μ must be accepted now \
+             that rule 50 no longer checks load: {:?}",
             error_msgs(&ctx)
         );
     }
