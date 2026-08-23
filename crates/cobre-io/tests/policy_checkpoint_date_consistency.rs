@@ -59,6 +59,9 @@ fn write_fixture(dir: &std::path::Path, pool_id: u32, manifest: &[EntitySlot]) {
         active_cut_indices: &[],
         populated_count: 0,
         entity_manifest: manifest,
+        cost_scale_factor: 1_000_000.0,
+        node_id: -1,
+        graph_stage_id: -1,
     };
     write_policy_checkpoint(dir, &[payload], &[], &metadata(), &[]).expect("fixture must write");
 }

@@ -173,6 +173,9 @@ fn bin_file_name(id: u32) -> String {
 ///     active_cut_indices: &[0],
 ///     populated_count: 1,
 ///     entity_manifest: &[],
+///     cost_scale_factor: 1_000_000.0,
+///     node_id: 0,
+///     graph_stage_id: 0,
 /// }];
 /// let metadata = PolicyCheckpointMetadata {
 ///     format_version: FORMAT_VERSION,
@@ -214,16 +217,7 @@ pub fn write_policy_checkpoint(
 
     for payload in stage_cuts {
         let file_path = cuts_dir.join(bin_file_name(payload.stage_id));
-        let buf = serialize_stage_cuts(
-            payload.stage_id,
-            payload.state_dimension,
-            payload.capacity,
-            payload.warm_start_count,
-            payload.cuts,
-            payload.active_cut_indices,
-            payload.populated_count,
-            payload.entity_manifest,
-        );
+        let buf = serialize_stage_cuts(payload);
         std::fs::write(&file_path, &buf).map_err(|e| OutputError::io(&file_path, e))?;
     }
 

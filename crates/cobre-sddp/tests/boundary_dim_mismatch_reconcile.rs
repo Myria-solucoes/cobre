@@ -59,11 +59,6 @@ use common::builders::{
 
 // ── shared source-checkpoint helpers ────────────────────────────────────────
 
-/// Loading cost-scale factor that makes `rescale_cut_records_for_load` a
-/// bit-identical no-op for a legacy (`cost_scale_factor: None`) source, so a
-/// `Copy` coefficient lands verbatim and a `Blend` weight is the only transform.
-const LEGACY_LOADING_FACTOR: f64 = 1_000_000.0;
-
 fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
 }
@@ -168,6 +163,9 @@ fn write_source_checkpoint(
         active_cut_indices: &[0],
         populated_count: 1,
         entity_manifest: manifest,
+        cost_scale_factor: cost_scale_factor.unwrap_or(1_000_000.0),
+        node_id: 0,
+        graph_stage_id: -1,
     };
     let metadata = PolicyCheckpointMetadata {
         format_version: FORMAT_VERSION,
@@ -260,7 +258,12 @@ fn newave_source_reconciles_into_decomp_current() {
     let source_manifest = newave_source_manifest();
     let source_coefficients = newave_source_coefficients();
     assert_eq!(source_manifest.len(), 15, "NEWAVE source state dimension");
-    write_source_checkpoint(tmp.path(), &source_manifest, &source_coefficients, None);
+    write_source_checkpoint(
+        tmp.path(),
+        &source_manifest,
+        &source_coefficients,
+        Some(RUN_LOADING_FACTOR),
+    );
 
     let current = decomp_current_manifest();
     let intervals = decomp_current_intervals();
@@ -278,7 +281,7 @@ fn newave_source_reconciles_into_decomp_current() {
         &intervals,
         &[],
         None,
-        LEGACY_LOADING_FACTOR,
+        RUN_LOADING_FACTOR,
         &mut |_| {},
     )
     .expect("the differing-dimension NEWAVE source must reconcile into the DECOMP current");
@@ -379,8 +382,10 @@ const RUN_TRAVEL_TIME_HOURS: f64 = 900.0;
 /// stage-0 decider, ring-sizing `k_max == 2`.
 const RUN_DELTA_HOURS: f64 = 1_500.0;
 const RUN_POST_STUDY_HOURS: f64 = 720.0;
-/// The study's cost scale (`config().modeling.cost_scale_factor`); paired with a
-/// same-scale-marked source so `rescale_cut_records_for_load` is a no-op.
+/// The neutral loading factor: paired with a same-scale-marked source so
+/// `rescale_cut_records_for_load` is a no-op — the study's own cost scale
+/// (`config().modeling.cost_scale_factor` below) and the boundary loads in
+/// both the reconcile and the run tests all share it.
 const RUN_LOADING_FACTOR: f64 = 1.0;
 
 fn run_study_start() -> NaiveDate {

@@ -130,8 +130,21 @@ pub fn write_checkpoint(
         scale_cut_records_for_export(&stage_records_internal, cost_scale_factor);
     let stage_records = borrow_cut_records(&stage_records_owned);
     let stage_active_indices = build_active_indices(&stage_records);
-    let stage_cuts =
-        build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
+    let stage_cuts = build_stage_cuts_payloads(
+        fcf,
+        &setup.node_graph,
+        &setup.study_stage_ids,
+        cost_scale_factor,
+        &stage_records,
+        &stage_active_indices,
+        &stage_manifests,
+    );
+    debug_assert!(
+        stage_cuts
+            .iter()
+            .all(|p| p.cost_scale_factor.to_bits() == cost_scale_factor.to_bits()),
+        "every pool must carry the study's single resolved cost_scale_factor"
+    );
 
     let (basis_col_u8, basis_row_u8) = convert_basis_cache(training_result);
     let stage_bases = build_stage_basis_records(

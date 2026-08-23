@@ -21,8 +21,8 @@ use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
-    OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, StageCutsPayload, StageStatesPayload,
-    StateFamily,
+    OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
+    STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload, StageStatesPayload, StateFamily,
 };
 
 use crate::SddpError;
@@ -668,17 +668,40 @@ pub fn build_active_indices(stage_records: &[Vec<PolicyCutRecord<'_>>]) -> Vec<V
         .collect()
 }
 
+/// The declared id of `pool`'s sole owning node, or [`STAGE_CUTS_NODE_ID_SENTINEL`]
+/// when more than one node shares the pool. A shared pool is never a boundary
+/// source, so its provenance node id is deliberately undefined; a single-owner
+/// pool (every non-leaf pool, and a boundary source) yields the owner's id.
+fn sole_pool_owner_node_id(node_graph: &NodeGraph, pool: usize) -> i32 {
+    let mut owner = None;
+    for (pos, node) in node_graph.nodes.iter_indexed() {
+        if node.pool_id == pool {
+            if owner.is_some() {
+                return STAGE_CUTS_NODE_ID_SENTINEL;
+            }
+            owner = Some(node_graph.node_ids[pos].0);
+        }
+    }
+    owner.unwrap_or(STAGE_CUTS_NODE_ID_SENTINEL)
+}
+
 /// Build [`StageCutsPayload`] references from pre-built records, indices, and
-/// per-stage entity manifests.
+/// per-stage entity manifests, stamping the self-describing per-pool facts.
 ///
 /// `stage_records`, `stage_active_indices`, and `stage_manifests` must have been
 /// built from the same `fcf` (via [`build_stage_cut_records`],
 /// [`build_active_indices`], and [`build_stage_entity_manifest`] per pool), so
 /// each is indexed by the same pool index. `stage_manifests[t]` carries one slot
-/// per cut-state dimension of pool `t`.
+/// per cut-state dimension of pool `t`. Each pool's `cost_scale_factor` is the
+/// study's single resolved factor, `graph_stage_id` is
+/// `study_stage_ids[node_graph.pool_stage[pool]]`, and `node_id` is the pool's
+/// sole owning node id (see [`sole_pool_owner_node_id`]).
 #[must_use]
 pub fn build_stage_cuts_payloads<'a>(
     fcf: &FutureCostFunction,
+    node_graph: &NodeGraph,
+    study_stage_ids: &[i32],
+    cost_scale_factor: f64,
     stage_records: &'a [Vec<PolicyCutRecord<'a>>],
     stage_active_indices: &'a [Vec<u32>],
     stage_manifests: &'a [Vec<EntitySlot>],
@@ -686,15 +709,21 @@ pub fn build_stage_cuts_payloads<'a>(
     fcf.pools
         .iter()
         .enumerate()
-        .map(|(stage_idx, pool)| StageCutsPayload {
-            stage_id: stage_idx as u32,
+        .map(|(pool, pool_data)| StageCutsPayload {
+            stage_id: pool as u32,
             state_dimension: fcf.state_dimension as u32,
-            capacity: pool.capacity as u32,
-            warm_start_count: pool.warm_start_count,
-            cuts: &stage_records[stage_idx],
-            active_cut_indices: &stage_active_indices[stage_idx],
-            populated_count: pool.populated() as u32,
-            entity_manifest: &stage_manifests[stage_idx],
+            capacity: pool_data.capacity as u32,
+            warm_start_count: pool_data.warm_start_count,
+            cuts: &stage_records[pool],
+            active_cut_indices: &stage_active_indices[pool],
+            populated_count: pool_data.populated() as u32,
+            entity_manifest: &stage_manifests[pool],
+            cost_scale_factor,
+            node_id: sole_pool_owner_node_id(node_graph, pool),
+            graph_stage_id: study_stage_ids
+                .get(node_graph.pool_stage[pool].0)
+                .copied()
+                .unwrap_or(STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL),
         })
         .collect()
 }

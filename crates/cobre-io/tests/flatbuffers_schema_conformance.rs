@@ -28,9 +28,11 @@ use std::process::Command;
 
 use cobre_io::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCutRecord, STAGE_STATES_NODE_ID_SENTINEL, StageCutsReadResult,
-    StageStatesPayload, StageStatesReadResult, deserialize_stage_basis, deserialize_stage_cuts,
-    deserialize_stage_states, serialize_stage_basis, serialize_stage_cuts, serialize_stage_states,
+    PolicyBasisRecord, PolicyCutRecord, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
+    STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload,
+    StageCutsReadResult, StageStatesPayload, StageStatesReadResult, deserialize_stage_basis,
+    deserialize_stage_cuts, deserialize_stage_states, serialize_stage_basis, serialize_stage_cuts,
+    serialize_stage_states,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -247,6 +249,33 @@ fn conformance_manifest() -> Vec<EntitySlot> {
 
 // ─── StageCuts ───────────────────────────────────────────────────────────────
 
+/// Serialize a `StageCuts` buffer from positional fields, defaulting the
+/// self-describing per-pool facts (their own conformance test exercises them).
+fn ser_cuts(
+    stage_id: u32,
+    state_dimension: u32,
+    capacity: u32,
+    warm_start_count: u32,
+    cuts: &[PolicyCutRecord<'_>],
+    active_cut_indices: &[u32],
+    populated_count: u32,
+    entity_manifest: &[EntitySlot],
+) -> Vec<u8> {
+    serialize_stage_cuts(&StageCutsPayload {
+        stage_id,
+        state_dimension,
+        capacity,
+        warm_start_count,
+        cuts,
+        active_cut_indices,
+        populated_count,
+        entity_manifest,
+        cost_scale_factor: 1_000_000.0,
+        node_id: -1,
+        graph_stage_id: -1,
+    })
+}
+
 #[test]
 fn stage_cuts_writer_matches_schema() {
     let coeffs_a = [1.0, 2.0, 3.0, 4.0];
@@ -273,7 +302,7 @@ fn stage_cuts_writer_matches_schema() {
     ];
     let active = [0_u32];
     let manifest = conformance_manifest();
-    let buf = serialize_stage_cuts(3, 4, 16, 0, &cuts, &active, 2, &manifest);
+    let buf = ser_cuts(3, 4, 16, 0, &cuts, &active, 2, &manifest);
 
     let json = flatc_decode(&buf, "StageCuts");
 
@@ -405,7 +434,7 @@ fn stage_cuts_reduced_dimension_writer_matches_schema() {
     }];
     let active = [0_u32];
     let manifest = reduced_storage_manifest();
-    let buf = serialize_stage_cuts(1, 2, 8, 0, &cuts, &active, 1, &manifest);
+    let buf = ser_cuts(1, 2, 8, 0, &cuts, &active, 1, &manifest);
 
     let json = flatc_decode(&buf, "StageCuts");
 
@@ -465,6 +494,191 @@ fn stage_cuts_reduced_dimension_reader_consumes_flatc_buffer() {
     }
     assert_eq!(result.entity_manifest[0].entity_id, 1);
     assert_eq!(result.entity_manifest[1].entity_id, 2);
+}
+
+/// Round-trip of the self-describing per-pool facts (`cost_scale_factor` id 8,
+/// `node_id` id 9, `graph_stage_id` id 10) in both directions: the hand-rolled
+/// writer→reader path preserves them, `flatc` decodes the hand-rolled buffer with
+/// the three at their slots, and a `flatc`-built buffer carrying them decodes
+/// identically through the hand-rolled reader.
+#[test]
+fn stage_cuts_self_describing_facts_round_trip() {
+    let coeffs = [1.0, 2.0, 3.0];
+    let cuts = [PolicyCutRecord {
+        cut_id: 5,
+        slot_index: 0,
+        iteration: 2,
+        forward_pass_index: 0,
+        intercept: 9.0,
+        coefficients: &coeffs,
+        is_active: true,
+    }];
+    let payload = StageCutsPayload {
+        stage_id: 4,
+        state_dimension: 3,
+        capacity: 8,
+        warm_start_count: 0,
+        cuts: &cuts,
+        active_cut_indices: &[0],
+        populated_count: 1,
+        entity_manifest: &[],
+        cost_scale_factor: 1_000_000.0,
+        node_id: 3,
+        graph_stage_id: 7,
+    };
+    let buf = serialize_stage_cuts(&payload);
+
+    let hand_rolled =
+        deserialize_stage_cuts(&buf).expect("hand-rolled reader must consume its own buffer");
+    assert_eq!(hand_rolled.cost_scale_factor, Some(1_000_000.0));
+    assert_eq!(hand_rolled.node_id, 3);
+    assert_eq!(hand_rolled.graph_stage_id, 7);
+
+    let json = flatc_decode(&buf, "StageCuts");
+    assert!((as_f64(&json, "cost_scale_factor") - 1_000_000.0).abs() < 1e-6);
+    assert_eq!(i64_or(&json, "node_id", -1), 3);
+    assert_eq!(i64_or(&json, "graph_stage_id", -1), 7);
+
+    let document = json!({
+        "stage_id": 4,
+        "state_dimension": 3,
+        "capacity": 8,
+        "warm_start_count": 0,
+        "populated_count": 1,
+        "active_cut_indices": [0],
+        "cuts": [
+            {
+                "piece_id": 5,
+                "slot_index": 0,
+                "iteration": 2,
+                "forward_pass_index": 0,
+                "intercept": 9.0,
+                "coefficients": [1.0, 2.0, 3.0],
+                "is_active": true
+            }
+        ],
+        "cost_scale_factor": 1_000_000.0,
+        "node_id": 3,
+        "graph_stage_id": 7
+    });
+    let flatc_buf = flatc_encode(&document, "StageCuts");
+    let from_flatc =
+        deserialize_stage_cuts(&flatc_buf).expect("hand-rolled reader must consume flatc buffer");
+    assert_eq!(from_flatc.cost_scale_factor, Some(1_000_000.0));
+    assert_eq!(from_flatc.node_id, 3);
+    assert_eq!(from_flatc.graph_stage_id, 7);
+}
+
+/// Forward-compat: a buffer built from a pre-`id:8` `StageCuts` schema (no
+/// self-describing facts) reads back `cost_scale_factor == None`, `node_id` and
+/// `graph_stage_id` at their sentinels — never a bare `0`. Mirrors
+/// `pre_node_id_stage_states_reads_as_sentinel`: flatc cannot emit a field the
+/// schema lacks, so the buffer is built from a schema that stops at
+/// `entity_manifest (id: 7)`.
+#[test]
+fn pre_self_describing_stage_cuts_reads_as_absent_and_sentinels() {
+    let schema_pre_self_describing = "
+namespace Cobre.IO.Policy;
+
+file_identifier \"CBVF\";
+
+enum EntityType : byte {
+  HydroStorage = 0,
+  HydroInflowLag = 1,
+  AnticipatedThermalState = 2,
+  HydroTransitBucket = 3,
+}
+
+table EntitySlot {
+  entity_type:EntityType (id: 0);
+  entity_id:int32 (id: 1);
+  subindex:uint32 (id: 2);
+  was_active:bool (id: 3);
+  delivery_anchor:int32 (id: 4, deprecated);
+  delivery_date:int32 (id: 5);
+}
+
+table AffinePiece {
+  piece_id:uint64 (id: 0);
+  slot_index:uint32 (id: 1);
+  iteration:uint32 (id: 2);
+  forward_pass_index:uint32 (id: 3);
+  intercept:float64 (id: 4);
+  coefficients:[float64] (id: 5);
+  is_active:bool (id: 6);
+  reserved_7:[float64] (id: 7, deprecated);
+}
+
+table StageCuts {
+  stage_id:uint32 (id: 0);
+  state_dimension:uint32 (id: 1);
+  capacity:uint32 (id: 2);
+  warm_start_count:uint32 (id: 3);
+  cuts:[AffinePiece] (id: 4);
+  active_cut_indices:[uint32] (id: 5);
+  populated_count:uint32 (id: 6);
+  entity_manifest:[EntitySlot] (id: 7);
+}
+";
+    let dir = TempDir::new().unwrap();
+    let pre_schema = dir.path().join("pre_self_describing.fbs");
+    std::fs::write(&pre_schema, schema_pre_self_describing).unwrap();
+
+    let document = json!({
+        "stage_id": 1,
+        "state_dimension": 2,
+        "capacity": 4,
+        "warm_start_count": 0,
+        "populated_count": 1,
+        "active_cut_indices": [0],
+        "cuts": [
+            {
+                "piece_id": 1,
+                "slot_index": 0,
+                "iteration": 1,
+                "forward_pass_index": 0,
+                "intercept": 1.0,
+                "coefficients": [1.0, 2.0],
+                "is_active": true
+            }
+        ],
+        "entity_manifest": [
+            {"entity_type": "HydroStorage", "entity_id": 1, "subindex": 0, "was_active": true}
+        ]
+    });
+    let json_path = dir.path().join("doc.json");
+    std::fs::write(&json_path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+    let status = flatc_command()
+        .arg("-b")
+        .arg("--root-type")
+        .arg(qualified("StageCuts"))
+        .arg("-o")
+        .arg(dir.path())
+        .arg(&pre_schema)
+        .arg(&json_path)
+        .status()
+        .expect("run flatc -b on pre-self-describing schema");
+    assert!(
+        status.success(),
+        "flatc -b on pre-self-describing schema failed"
+    );
+    let buf = std::fs::read(dir.path().join("doc.bin")).unwrap();
+
+    let result = deserialize_stage_cuts(&buf)
+        .expect("hand-rolled reader must accept pre-self-describing buffer");
+    assert_eq!(
+        result.cost_scale_factor, None,
+        "a pre-id:8 buffer must read cost_scale_factor as None, not 0.0"
+    );
+    assert_eq!(
+        result.node_id, STAGE_CUTS_NODE_ID_SENTINEL,
+        "a pre-id:8 buffer must read node_id as the sentinel, not 0"
+    );
+    assert_eq!(
+        result.graph_stage_id, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
+        "a pre-id:8 buffer must read graph_stage_id as the sentinel, not 0"
+    );
 }
 
 // ─── StageBasis ──────────────────────────────────────────────────────────────
@@ -734,7 +948,7 @@ fn entity_slot_delivery_date_round_trips() {
             delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         },
     ];
-    let buf = serialize_stage_cuts(3, 2, 8, 0, &cuts, &[0], 1, &manifest);
+    let buf = ser_cuts(3, 2, 8, 0, &cuts, &[0], 1, &manifest);
 
     let result: StageCutsReadResult =
         deserialize_stage_cuts(&buf).expect("hand-rolled reader must consume its own buffer");

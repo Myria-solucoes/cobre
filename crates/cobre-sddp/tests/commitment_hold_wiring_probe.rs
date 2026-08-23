@@ -299,6 +299,9 @@ fn sample_stage_cuts() -> Vec<StageCutsReadResult> {
         populated_count: 2,
         cuts: sample_cut_records(),
         entity_manifest: Vec::new(),
+        cost_scale_factor: None,
+        node_id: -1,
+        graph_stage_id: -1,
     }]
 }
 

@@ -16,8 +16,9 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use super::super::error::OutputError;
 use super::records::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyBasisRecord, OwnedPolicyCutRecord,
-    PolicyBasisRecord, PolicyCutRecord, STAGE_STATES_NODE_ID_SENTINEL, StageCutsReadResult,
-    StageStatesPayload, StageStatesReadResult,
+    PolicyBasisRecord, PolicyCutRecord, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
+    STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload,
+    StageCutsReadResult, StageStatesPayload, StageStatesReadResult,
 };
 
 use std::path::Path;
@@ -57,6 +58,9 @@ const STAGE_CUTS_FIELD_CUTS: u16 = 12;
 const STAGE_CUTS_FIELD_ACTIVE_CUT_INDICES: u16 = 14;
 const STAGE_CUTS_FIELD_POPULATED_COUNT: u16 = 16;
 const STAGE_CUTS_FIELD_ENTITY_MANIFEST: u16 = 18;
+const STAGE_CUTS_FIELD_COST_SCALE_FACTOR: u16 = 20;
+const STAGE_CUTS_FIELD_NODE_ID: u16 = 22;
+const STAGE_CUTS_FIELD_GRAPH_STAGE_ID: u16 = 24;
 
 const BASIS_FIELD_STAGE_ID: u16 = 4;
 const BASIS_FIELD_ITERATION: u16 = 6;
@@ -145,7 +149,7 @@ fn check_file_identifier(buf: &[u8], ctx: &str) -> Result<(), OutputError> {
 /// # Examples
 ///
 /// ```
-/// use cobre_io::{PolicyCutRecord, serialize_stage_cuts};
+/// use cobre_io::{PolicyCutRecord, StageCutsPayload, serialize_stage_cuts};
 ///
 /// let piece = PolicyCutRecord {
 ///     cut_id: 1,
@@ -156,51 +160,63 @@ fn check_file_identifier(buf: &[u8], ctx: &str) -> Result<(), OutputError> {
 ///     coefficients: &[1.0, 2.0, 3.0],
 ///     is_active: true,
 /// };
-/// let buf = serialize_stage_cuts(0, 3, 100, 0, &[piece], &[0], 1, &[]);
+/// let buf = serialize_stage_cuts(&StageCutsPayload {
+///     stage_id: 0,
+///     state_dimension: 3,
+///     capacity: 100,
+///     warm_start_count: 0,
+///     cuts: &[piece],
+///     active_cut_indices: &[0],
+///     populated_count: 1,
+///     entity_manifest: &[],
+///     cost_scale_factor: 1_000_000.0,
+///     node_id: 0,
+///     graph_stage_id: 0,
+/// });
 /// assert!(!buf.is_empty());
 /// ```
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
-pub fn serialize_stage_cuts(
-    stage_id: u32,
-    state_dimension: u32,
-    capacity: u32,
-    warm_start_count: u32,
-    cuts: &[PolicyCutRecord<'_>],
-    active_cut_indices: &[u32],
-    populated_count: u32,
-    entity_manifest: &[EntitySlot],
-) -> Vec<u8> {
+pub fn serialize_stage_cuts(payload: &StageCutsPayload<'_>) -> Vec<u8> {
     let estimated = 64
-        + cuts.len() * (96usize + state_dimension as usize * std::mem::size_of::<f64>())
-        + std::mem::size_of_val(active_cut_indices)
-        + entity_manifest.len() * 32usize;
+        + payload.cuts.len()
+            * (96usize + payload.state_dimension as usize * std::mem::size_of::<f64>())
+        + std::mem::size_of_val(payload.active_cut_indices)
+        + payload.entity_manifest.len() * 32usize;
 
     let mut builder = FlatBufferBuilder::with_capacity(estimated);
 
-    let cut_offsets: Vec<WIPOffset<flatbuffers::TableFinishedWIPOffset>> = cuts
+    let cut_offsets: Vec<WIPOffset<flatbuffers::TableFinishedWIPOffset>> = payload
+        .cuts
         .iter()
         .map(|c| build_cut_table(&mut builder, c))
         .collect();
-    let manifest_offsets: Vec<WIPOffset<flatbuffers::TableFinishedWIPOffset>> = entity_manifest
+    let manifest_offsets: Vec<WIPOffset<flatbuffers::TableFinishedWIPOffset>> = payload
+        .entity_manifest
         .iter()
         .map(|s| build_entity_slot_table(&mut builder, s))
         .collect();
 
     let cuts_vec = builder.create_vector(&cut_offsets);
-    let active_vec = builder.create_vector(active_cut_indices);
+    let active_vec = builder.create_vector(payload.active_cut_indices);
     let manifest_vec = builder.create_vector(&manifest_offsets);
 
     let root = builder.start_table();
 
-    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_STAGE_ID, stage_id);
-    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_STATE_DIMENSION, state_dimension);
-    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_CAPACITY, capacity);
-    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_WARM_START_COUNT, warm_start_count);
+    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_STAGE_ID, payload.stage_id);
+    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_STATE_DIMENSION, payload.state_dimension);
+    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_CAPACITY, payload.capacity);
+    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_WARM_START_COUNT, payload.warm_start_count);
     builder.push_slot_always(STAGE_CUTS_FIELD_CUTS, cuts_vec);
     builder.push_slot_always(STAGE_CUTS_FIELD_ACTIVE_CUT_INDICES, active_vec);
-    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_POPULATED_COUNT, populated_count);
+    builder.push_slot_always::<u32>(STAGE_CUTS_FIELD_POPULATED_COUNT, payload.populated_count);
     builder.push_slot_always(STAGE_CUTS_FIELD_ENTITY_MANIFEST, manifest_vec);
+    builder.push_slot_always::<f64>(
+        STAGE_CUTS_FIELD_COST_SCALE_FACTOR,
+        payload.cost_scale_factor,
+    );
+    builder.push_slot_always::<i32>(STAGE_CUTS_FIELD_NODE_ID, payload.node_id);
+    builder.push_slot_always::<i32>(STAGE_CUTS_FIELD_GRAPH_STAGE_ID, payload.graph_stage_id);
 
     let root_offset = builder.end_table(root);
     builder.finish(root_offset, Some(POLICY_FILE_IDENTIFIER));
@@ -555,7 +571,7 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
 /// # Examples
 ///
 /// ```
-/// use cobre_io::{PolicyCutRecord, serialize_stage_cuts, deserialize_stage_cuts};
+/// use cobre_io::{PolicyCutRecord, StageCutsPayload, serialize_stage_cuts, deserialize_stage_cuts};
 ///
 /// let piece = PolicyCutRecord {
 ///     cut_id: 7,
@@ -566,12 +582,25 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
 ///     coefficients: &[1.0, 2.0, 3.0],
 ///     is_active: true,
 /// };
-/// let buf = serialize_stage_cuts(2, 3, 100, 0, &[piece], &[0], 1, &[]);
+/// let buf = serialize_stage_cuts(&StageCutsPayload {
+///     stage_id: 2,
+///     state_dimension: 3,
+///     capacity: 100,
+///     warm_start_count: 0,
+///     cuts: &[piece],
+///     active_cut_indices: &[0],
+///     populated_count: 1,
+///     entity_manifest: &[],
+///     cost_scale_factor: 1_000_000.0,
+///     node_id: 2,
+///     graph_stage_id: 2,
+/// });
 /// let result = deserialize_stage_cuts(&buf).expect("round-trip must succeed");
 /// assert_eq!(result.stage_id, 2);
 /// assert_eq!(result.cuts.len(), 1);
 /// assert_eq!(result.cuts[0].cut_id, 7);
 /// assert_eq!(result.cuts[0].coefficients, &[1.0, 2.0, 3.0]);
+/// assert_eq!(result.cost_scale_factor, Some(1_000_000.0));
 /// ```
 pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputError> {
     let ctx = "stage_cuts";
@@ -641,6 +670,25 @@ pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputE
         ctx,
     )?;
 
+    // Absent in a pre-`id:8` buffer (FlatBuffers graceful absence): cost_scale_factor
+    // stays `None` (distinct from a real `0.0`), the two ids default to the sentinel
+    // (never a bare `0` — `0` is a valid node/stage id).
+    let cost_scale_factor = field_pos(
+        buf,
+        table_pos,
+        vtable_pos,
+        STAGE_CUTS_FIELD_COST_SCALE_FACTOR,
+    )
+    .and_then(|p| read_f64_le(buf, p));
+
+    let node_id = field_pos(buf, table_pos, vtable_pos, STAGE_CUTS_FIELD_NODE_ID)
+        .and_then(|p| read_i32_le(buf, p))
+        .unwrap_or(STAGE_CUTS_NODE_ID_SENTINEL);
+
+    let graph_stage_id = field_pos(buf, table_pos, vtable_pos, STAGE_CUTS_FIELD_GRAPH_STAGE_ID)
+        .and_then(|p| read_i32_le(buf, p))
+        .unwrap_or(STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL);
+
     Ok(StageCutsReadResult {
         stage_id,
         state_dimension,
@@ -649,6 +697,9 @@ pub fn deserialize_stage_cuts(buf: &[u8]) -> Result<StageCutsReadResult, OutputE
         populated_count,
         cuts,
         entity_manifest,
+        cost_scale_factor,
+        node_id,
+        graph_stage_id,
     })
 }
 
@@ -898,7 +949,19 @@ mod tests {
             coefficients: &coeffs,
             is_active: true,
         };
-        let mut buf = serialize_stage_cuts(0, 2, 8, 0, &[cut], &[0], 1, &[]);
+        let mut buf = serialize_stage_cuts(&StageCutsPayload {
+            stage_id: 0,
+            state_dimension: 2,
+            capacity: 8,
+            warm_start_count: 0,
+            cuts: &[cut],
+            active_cut_indices: &[0],
+            populated_count: 1,
+            entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: -1,
+            graph_stage_id: -1,
+        });
         assert_eq!(
             buf.get(4..8),
             Some(POLICY_FILE_IDENTIFIER.as_bytes()),

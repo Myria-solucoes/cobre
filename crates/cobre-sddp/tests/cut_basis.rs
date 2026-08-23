@@ -60,8 +60,16 @@ mod boundary_cuts {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
-        let stage_cuts =
-            build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
+        let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let stage_cuts = build_stage_cuts_payloads(
+            fcf,
+            &setup.node_graph,
+            &study_stage_ids,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
         let (basis_col, basis_row) = convert_basis_cache(result);
         let stage_bases =
             build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);
@@ -1543,8 +1551,16 @@ mod warm_start {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
-        let stage_cuts =
-            build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
+        let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let stage_cuts = build_stage_cuts_payloads(
+            fcf,
+            &setup.node_graph,
+            &study_stage_ids,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
         let (basis_col, basis_row) = convert_basis_cache(result);
         let stage_bases =
             build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);
@@ -2675,8 +2691,16 @@ mod range_warm_start_determinism {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
-        let stage_cuts =
-            build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
+        let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let stage_cuts = build_stage_cuts_payloads(
+            fcf,
+            &setup.node_graph,
+            &study_stage_ids,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
         let (basis_col, basis_row) = convert_basis_cache(result);
         let stage_bases =
             build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);

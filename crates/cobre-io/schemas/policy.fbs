@@ -159,6 +159,22 @@ table StageCuts {
 
   /// Per-slot entity identity. Length equals `StageCuts.state_dimension`.
   entity_manifest:[EntitySlot] (id: 7);
+
+  /// Objective cost-scale factor the writing study resolved — the provenance
+  /// marker making each cut's `coefficients`/`intercept` scale-independent at
+  /// rest. A reader yields no value (absent) for a pre-`id:8` buffer.
+  cost_scale_factor:float64 (id: 8);
+
+  /// Owning node's policy-graph id when this pool has a single owner, else `-1`
+  /// (a shared pool, which is never a boundary source). Default `-1` is also the
+  /// value a reader yields when the field is absent from a pre-`id:8` buffer.
+  node_id:int32 = -1 (id: 9);
+
+  /// Graph-stage id of the node(s) owning this pool (`pool_stage` resolved
+  /// through the study stage ids) — the boundary-resolution key. Default `-1` is
+  /// also the value a reader yields when the field is absent from a pre-`id:8`
+  /// buffer.
+  graph_stage_id:int32 = -1 (id: 10);
 }
 
 /// Root table for `policy/basis/<stage>.bin`.

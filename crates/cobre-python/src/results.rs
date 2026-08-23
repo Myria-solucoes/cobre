@@ -1512,6 +1512,9 @@ pub fn load_simulation_arrow(
 ///             "capacity": 100,
 ///             "warm_start_count": 0,
 ///             "populated_count": 50,
+///             "cost_scale_factor": 2500000.0,
+///             "node_id": 0,
+///             "graph_stage_id": 0,
 ///             "entity_manifest": [
 ///                 {
 ///                     "entity_type": 0,
@@ -1602,6 +1605,13 @@ pub fn load_policy(
         sc_dict.set_item("capacity", into_py(py, sc.capacity)?)?;
         sc_dict.set_item("warm_start_count", into_py(py, sc.warm_start_count)?)?;
         sc_dict.set_item("populated_count", into_py(py, sc.populated_count)?)?;
+
+        // Surface the self-describing stage facts so a rewrite preserves them —
+        // without node_id/graph_stage_id a genuine single-node pool collapses to
+        // the missing-key sentinel and fails boundary-cut load.
+        sc_dict.set_item("cost_scale_factor", into_py(py, sc.cost_scale_factor)?)?;
+        sc_dict.set_item("node_id", into_py(py, sc.node_id)?)?;
+        sc_dict.set_item("graph_stage_id", into_py(py, sc.graph_stage_id)?)?;
 
         // Emit the per-slot entity manifest so a loaded checkpoint round-trips
         // through `write_policy_checkpoint` (whose binding already accepts this

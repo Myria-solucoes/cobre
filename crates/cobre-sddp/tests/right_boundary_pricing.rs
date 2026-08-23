@@ -388,6 +388,9 @@ fn write_synthetic_boundary(
         active_cut_indices: &[0],
         populated_count: 1,
         entity_manifest: &[],
+        cost_scale_factor: 1_000_000.0,
+        node_id: 100,
+        graph_stage_id: -1,
     };
     let metadata = PolicyCheckpointMetadata {
         format_version: FORMAT_VERSION,

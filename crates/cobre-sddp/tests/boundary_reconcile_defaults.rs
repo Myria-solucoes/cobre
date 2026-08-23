@@ -147,6 +147,9 @@ fn write_checkpoint(dir: &std::path::Path, manifest: &[EntitySlot], coefficients
         active_cut_indices: &[0],
         populated_count: 1,
         entity_manifest: manifest,
+        cost_scale_factor: 1.0,
+        node_id: 0,
+        graph_stage_id: -1,
     };
     let metadata = PolicyCheckpointMetadata {
         format_version: FORMAT_VERSION,
@@ -178,7 +181,7 @@ fn boundary_injection_storage_lag_identity_match_succeeds() {
         &no_intervals(current.len()),
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("an identity-matching boundary must load");
@@ -209,7 +212,7 @@ fn boundary_injection_different_hydro_source_rejects_naming_hydro() {
         &no_intervals(current.len()),
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     );
 
@@ -280,7 +283,7 @@ fn boundary_injection_transit_bucket_defaults_to_zero() {
         &no_intervals(current.len()),
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a transit-only-target load must succeed via the default-zero arm");
@@ -315,7 +318,7 @@ fn boundary_injection_dropped_source_transit_coupling_warns_and_loads() {
         &no_intervals(current.len()),
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |w| warnings.push(w.to_string()),
     )
     .expect("a dropped source coupling must warn, never reject");
@@ -353,7 +356,7 @@ fn boundary_injection_sentinel_anticipated_defaults_to_zero() {
         &no_intervals(current.len()),
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a sentinel-anticipated-target load must succeed via the default-zero arm");
@@ -392,7 +395,7 @@ fn boundary_injection_target_shaped_source_reconciles_bit_identically() {
         &no_intervals(current.len()),
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a target-shaped source must load");
@@ -430,7 +433,7 @@ fn boundary_injection_transit_bucket_copies_on_identity_match() {
         &no_intervals(current.len()),
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a matching transit-bucket boundary must load");
@@ -492,7 +495,7 @@ fn boundary_injection_dated_anticipated_fan_out_matrix() {
         &intervals,
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a fully-covered dated anticipated fan-out must load");
@@ -551,7 +554,7 @@ fn boundary_injection_dated_anticipated_interior_weeks_conservation() {
         &intervals,
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a fully-covered dated anticipated fan-out must load");
@@ -601,7 +604,7 @@ fn boundary_injection_report_fan_out_matrix_coverage() {
         &intervals,
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a fully-covered dated anticipated fan-out must load");
@@ -652,7 +655,7 @@ fn boundary_injection_report_target_shaped_superset_is_copy_only() {
         &no_intervals(current.len()),
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a target-shaped source must load");
@@ -687,7 +690,7 @@ fn boundary_injection_report_empty_manifest_is_unreconciled() {
         &no_intervals(current.len()),
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("an absent manifest must still load cuts");
@@ -740,7 +743,7 @@ fn boundary_injection_ring_sourced_post_study_fan_out_matches_pre_switchover() {
         &intervals,
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a ring-sourced post-study dated fan-out must load");
@@ -790,7 +793,7 @@ fn boundary_injection_dated_in_study_ring_slot_with_no_interval_yields_zero() {
         &intervals,
         &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("an in-study ring slot with no interval must load, defaulting to 0.0");

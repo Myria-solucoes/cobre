@@ -21,6 +21,8 @@ use cobre_io::GraphManifest;
 use cobre_io::OwnedPolicyBasisRecord;
 use cobre_io::OwnedPolicyCutRecord;
 use cobre_io::PolicyCheckpointMetadata;
+use cobre_io::STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL;
+use cobre_io::STAGE_CUTS_NODE_ID_SENTINEL;
 use cobre_io::StageCutsReadResult;
 use cobre_io::read_policy_checkpoint;
 use cobre_solver::{Basis, BasisStatus};
@@ -619,7 +621,29 @@ pub fn resolve_boundary_state_requirements(
     }
 }
 
+/// A resolved boundary pool whose `cuts/<pool>.bin` predates the
+/// self-describing per-pool facts (`cost_scale_factor` reads `None`): no
+/// silent default, no `metadata.json` fallback — the checkpoint must be
+/// re-exported.
+fn boundary_predates_self_describing_cuts(boundary_path: &Path) -> SddpError {
+    SddpError::Validation(format!(
+        "boundary policy checkpoint at {} predates self-describing cuts (its resolved \
+         cuts/<pool>.bin carries no cost_scale_factor); re-export it with a current Cobre",
+        boundary_path.display()
+    ))
+}
+
 /// Load boundary cuts from the `source_stage` of a source Cobre policy checkpoint.
+///
+/// Pool resolution and the source cost scale are read entirely from the
+/// resolved pool's own `cuts/<pool>.bin` — its `graph_stage_id` and
+/// `cost_scale_factor` self-describing facts — never from `metadata.json`'s
+/// `graph_manifest`/`producer.cost_scale_factor`. A resolved pool whose
+/// `cost_scale_factor` reads `None` predates those facts and REJECTS: there is
+/// no silent default and no `metadata.json` fallback (see the resolution
+/// section of `# Errors` below). A resolved pool shared by more than one
+/// node (`node_id == STAGE_CUTS_NODE_ID_SENTINEL`) REJECTS too — a boundary
+/// source must be a single-node terminal pool.
 ///
 /// Compares the source stage's manifest against the current TERMINAL-stage
 /// manifest (`current_manifest`, built via
@@ -666,7 +690,13 @@ pub fn resolve_boundary_state_requirements(
 ///
 /// Returns [`SddpError::Validation`] if:
 /// - The checkpoint cannot be read
-/// - `source_stage` does not exist in the checkpoint
+/// - `source_stage` matches no pool's `graph_stage_id` (or, on a checkpoint
+///   where no pool carries a resolvable `graph_stage_id`, no pool's own id),
+///   or more than one pool's `graph_stage_id`
+/// - The resolved pool's `.bin` predates self-describing cuts
+///   (`cost_scale_factor` reads `None`); re-export with a current Cobre
+/// - The resolved pool is shared by more than one node (`node_id` reads the
+///   sentinel); a boundary source must be a single-node terminal pool
 /// - A cut references inflow-lag state deeper than `effective_inflow_lag_depth`
 ///   (a layout-sizing coupling regression)
 /// - The source stage's state dimension does not match `current_state_dimension`
@@ -697,49 +727,72 @@ pub fn load_boundary_cuts(
         ))
     })?;
 
-    // Resolve `source_stage` to its pool THROUGH the graph manifest (a node
-    // references one pool), rejecting a multi-node stage: boundary injection
-    // requires a single-node source and the frozen `policy.boundary` config
-    // offers no node selector. A graph-less artifact (empty manifest) falls back
-    // to keying by `source_stage` directly — the chain identity where
-    // stage == pool.
-    let manifest = &checkpoint.metadata.graph_manifest;
-    let resolved_pool: Option<u32> = if manifest.nodes.is_empty() {
-        Some(source_stage)
-    } else {
-        let source_stage_i32 = i32::try_from(source_stage).map_err(|_| {
-            SddpError::Validation(format!(
-                "boundary policy: source_stage {source_stage} overflows the stage id space"
-            ))
-        })?;
-        let mut at_stage = manifest
-            .nodes
+    // Resolve `source_stage` to its pool through each pool's own
+    // `graph_stage_id` (never `metadata.graph_manifest`), rejecting a
+    // multi-node stage: boundary injection requires a single-node source and
+    // the frozen `policy.boundary` config offers no node selector. A pool
+    // with no resolvable `graph_stage_id` at all is the .bin-level mirror of
+    // the old empty-graph-manifest fallback — but the fallback triggers only
+    // when EVERY pool in the checkpoint shares that property, so a
+    // genuinely branching checkpoint missing just one stage's pool never
+    // mis-resolves through an unrelated pool whose raw id happens to match
+    // `source_stage` numerically.
+    let source_stage_i32 = i32::try_from(source_stage).map_err(|_| {
+        SddpError::Validation(format!(
+            "boundary policy: source_stage {source_stage} overflows the stage id space"
+        ))
+    })?;
+    let graph_less = checkpoint
+        .stage_cuts
+        .iter()
+        .all(|sr| sr.graph_stage_id == STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL);
+
+    let stage_result = if graph_less {
+        checkpoint
+            .stage_cuts
             .iter()
-            .filter(|n| n.stage_id == source_stage_i32);
+            .find(|sr| sr.stage_id == source_stage)
+    } else {
+        let mut at_stage = checkpoint
+            .stage_cuts
+            .iter()
+            .filter(|sr| sr.graph_stage_id == source_stage_i32);
         let first = at_stage.next();
-        if at_stage.next().is_some() {
+        if first.is_some() && at_stage.next().is_some() {
             return Err(SddpError::Validation(format!(
                 "boundary policy: source_stage {source_stage} names a multi-node stage; boundary \
                  injection requires a single-node source"
             )));
         }
-        first.map(|n| n.pool_id)
+        first
+    }
+    .ok_or_else(|| {
+        SddpError::Validation(format!(
+            "boundary policy: source_stage {} not found in checkpoint \
+             (available pools: {:?})",
+            source_stage,
+            checkpoint
+                .stage_cuts
+                .iter()
+                .map(|sr| sr.stage_id)
+                .collect::<Vec<_>>()
+        ))
+    })?;
+
+    let Some(source_cost_scale_factor) = stage_result.cost_scale_factor else {
+        return Err(boundary_predates_self_describing_cuts(boundary_path));
     };
 
-    let stage_result = resolved_pool
-        .and_then(|pool| checkpoint.stage_cuts.iter().find(|sr| sr.stage_id == pool))
-        .ok_or_else(|| {
-            SddpError::Validation(format!(
-                "boundary policy: source_stage {} not found in checkpoint \
-                 (available pools: {:?})",
-                source_stage,
-                checkpoint
-                    .stage_cuts
-                    .iter()
-                    .map(|sr| sr.stage_id)
-                    .collect::<Vec<_>>()
-            ))
-        })?;
+    // A shared pool (more than one owning node, `node_id ==
+    // STAGE_CUTS_NODE_ID_SENTINEL`) can never be a boundary source — there is
+    // no single terminal leaf its state belongs to.
+    if stage_result.node_id == STAGE_CUTS_NODE_ID_SENTINEL {
+        return Err(SddpError::Validation(format!(
+            "boundary policy at {}: a boundary source must be a single-node terminal pool; the \
+             resolved pool is shared by multiple nodes",
+            boundary_path.display()
+        )));
+    }
 
     if let Some(reserved) = effective_inflow_lag_depth {
         let depth = boundary_cut_lag_depth(&stage_result.entity_manifest);
@@ -817,7 +870,7 @@ pub fn load_boundary_cuts(
 
     rescale_cut_records_for_load(
         &mut records,
-        checkpoint.metadata.producer.cost_scale_factor,
+        Some(source_cost_scale_factor),
         loading_cost_scale_factor,
     );
 
@@ -905,18 +958,23 @@ fn warn_dropped_source_couplings(
 /// `stage_id` field names a pool, not a graph stage — see
 /// [`cobre_io::StageCutsPayload`]'s doc); [`load_boundary_cuts`]'s
 /// `source_stage` parameter speaks graph-stage-id, so this resolver maps the
-/// winning pool back to its owning node's `stage_id` via
-/// `graph_manifest.nodes` before returning, through [`resolve_stage_id_for_pool`]
-/// (an empty manifest — the chain-degenerate artifact — has `pool_id ==
-/// stage`, so the mapping is the identity there). Returning the pool id
-/// unmapped is the reproduced defect this guards: threaded back into
+/// winning pool back to a stage id via that SAME pool's own `graph_stage_id`
+/// self-describing fact — never `metadata.graph_manifest`. A winning pool
+/// whose `graph_stage_id` is the [`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL`]
+/// (a pre-change checkpoint, or an internally unresolved stage key) REJECTS
+/// rather than falling back to the raw pool id: unlike `load_boundary_cuts`'s
+/// own graph-less fallback (licensed only when the checkpoint has no
+/// resolvable `graph_stage_id` anywhere), silently returning an unmapped pool
+/// id HERE is the reproduced defect this guards — threaded back into
 /// `load_boundary_cuts` as `source_stage` on a branching graph, it can match
-/// an unrelated node whose OWN `stage_id` happens to equal the winning pool's
-/// numeric value, silently resolving through that node to a different pool.
+/// an unrelated pool whose OWN id happens to equal the winning pool's numeric
+/// value, silently resolving to a different pool.
 ///
 /// This only PICKS a candidate; it is not a new trust boundary — a
 /// calendar-matched pool from an incompatible source still rejects once
-/// [`load_boundary_cuts`] reconciles it by storage/lag identity.
+/// [`load_boundary_cuts`] reconciles it by storage/lag identity, and a
+/// calendar-matched pool shared by more than one node still rejects there too
+/// (a boundary source must be a single-node terminal pool).
 ///
 /// # Errors
 ///
@@ -932,10 +990,10 @@ fn warn_dropped_source_couplings(
 ///   the current terminal window (advises an explicit `source_stage`).
 /// - A live anticipated source slot's `delivery_date` fails to decode to a
 ///   real calendar month.
-/// - The winning pool is owned by more than one graph node (sibling fan nodes
-///   sharing a pool — genuinely ambiguous, mirroring `load_boundary_cuts`'s
-///   own single-node-source restriction) or by none (an internal
-///   inconsistency: the pool came from `checkpoint.stage_cuts` itself).
+/// - The winning pool's own `graph_stage_id` is the sentinel (advises an
+///   explicit `source_stage`), or the pool has no entry in
+///   `checkpoint.stage_cuts` at all (an internal inconsistency: the pool id
+///   was drawn from `checkpoint.stage_cuts` itself).
 pub fn resolve_boundary_source_stage(
     boundary_path: &Path,
     current_terminal_delivery_intervals: &[Option<(NaiveDate, NaiveDate)>],
@@ -979,7 +1037,29 @@ pub fn resolve_boundary_source_stage(
         )));
     }
     if let Some(&pool) = candidates.first() {
-        return resolve_stage_id_for_pool(&checkpoint.metadata.graph_manifest, pool);
+        let stage_result = checkpoint
+            .stage_cuts
+            .iter()
+            .find(|sr| sr.stage_id == pool)
+            .ok_or_else(|| {
+                SddpError::Validation(format!(
+                    "boundary policy: pool {pool} has no entry in checkpoint.stage_cuts \
+                     (internal inconsistency)"
+                ))
+            })?;
+        if stage_result.graph_stage_id == STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL {
+            return Err(SddpError::Validation(format!(
+                "boundary policy: pool {pool} carries no resolvable graph_stage_id (a \
+                 pre-change checkpoint, or an internally unresolved stage key); set \
+                 policy.boundary.source_stage explicitly"
+            )));
+        }
+        return u32::try_from(stage_result.graph_stage_id).map_err(|_| {
+            SddpError::Validation(format!(
+                "boundary policy: pool {pool}'s graph_stage_id {} is negative",
+                stage_result.graph_stage_id
+            ))
+        });
     }
     if any_decodable {
         return Err(SddpError::Validation(
@@ -993,45 +1073,6 @@ pub fn resolve_boundary_source_stage(
          explicitly"
             .to_string(),
     ))
-}
-
-/// Map a chosen source POOL id back to [`load_boundary_cuts`]'s `source_stage`
-/// vocabulary: the `stage_id` of the graph node that owns it, resolved via
-/// `manifest.nodes` — the exact inverse of `load_boundary_cuts`'s own
-/// `source_stage -> pool` lookup. An empty `manifest` (the chain-degenerate
-/// artifact, no `nodes[]`) has `pool_id == stage` by construction, so `pool`
-/// is returned unchanged.
-///
-/// # Errors
-///
-/// Returns [`SddpError::Validation`] if more than one node owns `pool`
-/// (sibling fan nodes sharing a pool — genuinely ambiguous, mirroring
-/// `load_boundary_cuts`'s own single-node-source restriction) or if no node
-/// owns it (an internal inconsistency: `pool` was drawn from
-/// `checkpoint.stage_cuts`, so the manifest is missing a pool it wrote).
-fn resolve_stage_id_for_pool(manifest: &GraphManifest, pool: u32) -> Result<u32, SddpError> {
-    if manifest.nodes.is_empty() {
-        return Ok(pool);
-    }
-    let mut owners = manifest.nodes.iter().filter(|n| n.pool_id == pool);
-    let Some(owner) = owners.next() else {
-        return Err(SddpError::Validation(format!(
-            "boundary policy: pool {pool} has no owning node in the graph manifest \
-             (internal inconsistency)"
-        )));
-    };
-    if owners.next().is_some() {
-        return Err(SddpError::Validation(format!(
-            "boundary policy: pool {pool} is shared by more than one graph node; set \
-             policy.boundary.source_stage explicitly"
-        )));
-    }
-    u32::try_from(owner.stage_id).map_err(|_| {
-        SddpError::Validation(format!(
-            "boundary policy: pool {pool}'s owning node has a negative stage id {}",
-            owner.stage_id
-        ))
-    })
 }
 
 /// Decode `manifest`'s live (non-sentinel) `AnticipatedThermalState` slots'
@@ -1147,6 +1188,14 @@ mod tests {
     fn ignore_warnings() -> impl FnMut(&str) {
         |_| {}
     }
+
+    /// `loading_cost_scale_factor` for tests that assert raw coefficient/
+    /// intercept VALUES and don't care about cost-scale semantics: every
+    /// resolved pool is marked (`cost_scale_factor: Some(_)`), and the marked
+    /// rescale branch always divides by `loading_cost_scale_factor`
+    /// (never a no-op, even at a matching source factor), so `1.0` is the one
+    /// value that keeps a written raw value equal to its loaded value.
+    const NEUTRAL_LOADING_FACTOR: f64 = 1.0;
 
     /// A minimal producer block for artifact-writing test helpers.
     fn producer_block() -> ProducerBlock {
@@ -1267,6 +1316,9 @@ mod tests {
                 active_cut_indices: &active_indices[s],
                 populated_count: n_cuts as u32,
                 entity_manifest: manifest,
+                cost_scale_factor: 1_000_000.0,
+                node_id: s as i32,
+                graph_stage_id: -1,
             })
             .collect();
 
@@ -1284,15 +1336,15 @@ mod tests {
 
     /// Write a single-stage checkpoint whose one cut has the given at-rest
     /// `intercept`/`coefficients` (written byte-for-byte, no transform applied
-    /// here) and `metadata.cost_scale_factor` set to `cost_scale_factor`, for
-    /// [`load_boundary_cuts`] round-trip tests across differing loading
-    /// factors.
+    /// here), for [`load_boundary_cuts`] round-trip tests across differing
+    /// loading factors. The pool's own `.bin`-level `cost_scale_factor` is
+    /// always marked (`Some`) — `metadata.producer.cost_scale_factor` is not
+    /// read by the boundary path and is left at [`producer_block`]'s default.
     fn write_checkpoint_with_scale(
         dir: &std::path::Path,
         stage_id: u32,
         intercept: f64,
         coefficients: &[f64],
-        cost_scale_factor: Option<f64>,
     ) {
         let state_dimension = coefficients.len() as u32;
         let cut = cobre_io::PolicyCutRecord {
@@ -1314,6 +1366,9 @@ mod tests {
             active_cut_indices: &[0],
             populated_count: 1,
             entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: i32::try_from(stage_id).unwrap_or(-1),
+            graph_stage_id: -1,
         };
         let metadata = PolicyCheckpointMetadata {
             format_version: cobre_io::FORMAT_VERSION,
@@ -1321,10 +1376,7 @@ mod tests {
             created_at: "2026-07-20T00:00:00Z".to_string(),
             num_stages: stage_id + 1,
             graph_manifest: chain_manifest(stage_id + 1),
-            producer: ProducerBlock {
-                cost_scale_factor,
-                ..producer_block()
-            },
+            producer: producer_block(),
         };
         cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
     }
@@ -1341,13 +1393,7 @@ mod tests {
 
         for loading_factor in [500_000.0, 1_000_000.0, 2_500_000.0, 1e10] {
             let tmp = tempfile::tempdir().unwrap();
-            write_checkpoint_with_scale(
-                tmp.path(),
-                0,
-                at_rest_intercept,
-                &at_rest_coefficients,
-                Some(1_000_000.0),
-            );
+            write_checkpoint_with_scale(tmp.path(), 0, at_rest_intercept, &at_rest_coefficients);
 
             let cuts = load_boundary_cuts(
                 tmp.path(),
@@ -1378,65 +1424,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Behavioral: a legacy (no-marker) boundary checkpoint loaded at the
-    /// default factor is bit-exact; loaded at a non-default factor is
-    /// rescaled by `LEGACY_COST_SCALE_FACTOR / loading_factor`.
-    #[test]
-    fn load_boundary_cuts_legacy_checkpoint_migration() {
-        let raw_intercept = 5.0;
-        let raw_coefficients = [1.0, 2.0];
-
-        let tmp_default = tempfile::tempdir().unwrap();
-        write_checkpoint_with_scale(
-            tmp_default.path(),
-            0,
-            raw_intercept,
-            &raw_coefficients,
-            None,
-        );
-        let cuts_default = load_boundary_cuts(
-            tmp_default.path(),
-            0,
-            2,
-            &[],
-            &[],
-            &[],
-            None,
-            LEGACY_COST_SCALE_FACTOR,
-            &mut ignore_warnings(),
-        )
-        .unwrap();
-        assert_eq!(
-            cuts_default[0].intercept.to_bits(),
-            raw_intercept.to_bits(),
-            "legacy checkpoint at default factor must be bit-exact"
-        );
-
-        let tmp_nondefault = tempfile::tempdir().unwrap();
-        write_checkpoint_with_scale(
-            tmp_nondefault.path(),
-            0,
-            raw_intercept,
-            &raw_coefficients,
-            None,
-        );
-        let loading_factor = 2_000_000.0;
-        let cuts_nondefault = load_boundary_cuts(
-            tmp_nondefault.path(),
-            0,
-            2,
-            &[],
-            &[],
-            &[],
-            None,
-            loading_factor,
-            &mut ignore_warnings(),
-        )
-        .unwrap();
-        let ratio = LEGACY_COST_SCALE_FACTOR / loading_factor;
-        assert!((cuts_nondefault[0].intercept - raw_intercept * ratio).abs() < 1e-9);
     }
 
     // ── rescale_cut_records_for_load unit tests ──────────────────────────────
@@ -1628,7 +1615,7 @@ mod tests {
             &[],
             &[],
             None,
-            1_000_000.0,
+            NEUTRAL_LOADING_FACTOR,
             &mut ignore_warnings(),
         )
         .unwrap();
@@ -2120,7 +2107,7 @@ mod tests {
             &no_intervals(current.len()),
             &[],
             None,
-            1_000_000.0,
+            NEUTRAL_LOADING_FACTOR,
             &mut ignore_warnings(),
         )
         .expect(
@@ -2157,7 +2144,7 @@ mod tests {
             &no_intervals(current.len()),
             &[],
             None,
-            1_000_000.0,
+            NEUTRAL_LOADING_FACTOR,
             &mut ignore_warnings(),
         )
         .expect("a differing-dimension load with a reconcilable manifest must load, not reject");
@@ -2173,80 +2160,77 @@ mod tests {
         }
     }
 
-    // ── load_boundary_cuts manifest resolution (0.14 pool-keyed artifact) ─────
+    // ── load_boundary_cuts graph_stage_id resolution (pool id != stage id) ────
 
-    /// Write a single-pool checkpoint whose one cut pool is keyed by `pool_id`
-    /// (the payload `stage_id` field) and whose graph manifest declares the nodes
-    /// in `graph_nodes` (`(node_id, stage_id, pool_id)`) — so `load_boundary_cuts`
-    /// must resolve `source_stage` to `pool_id` THROUGH the manifest, not by a
-    /// stage == pool coincidence.
-    fn write_checkpoint_pool_keyed(
-        dir: &std::path::Path,
-        pool_id: u32,
-        graph_nodes: &[(i32, i32, u32)],
-        intercepts: &[f64],
-    ) {
-        let coefficients = vec![1.0_f64, 1.0];
-        let cuts: Vec<cobre_io::PolicyCutRecord<'_>> = intercepts
+    /// Write a checkpoint with one pool per `(pool_id, graph_stage_id,
+    /// intercepts)` entry, each pool's own `graph_stage_id` self-describing
+    /// fact set directly (never through `metadata.graph_manifest`) — so
+    /// `load_boundary_cuts` must resolve `source_stage` to a pool through that
+    /// fact alone, not by a stage == pool coincidence.
+    fn write_pools_with_graph_stage_ids(dir: &std::path::Path, pools: &[(u32, i32, &[f64])]) {
+        let coefficients = [1.0_f64, 1.0];
+        let cuts_per_pool: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> = pools
             .iter()
-            .enumerate()
-            .map(|(i, &intercept)| cobre_io::PolicyCutRecord {
-                cut_id: i as u64,
-                slot_index: i as u32,
-                iteration: 0,
-                forward_pass_index: 0,
-                intercept,
-                coefficients: &coefficients,
-                is_active: true,
+            .map(|(_, _, intercepts)| {
+                intercepts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &intercept)| cobre_io::PolicyCutRecord {
+                        cut_id: i as u64,
+                        slot_index: i as u32,
+                        iteration: 0,
+                        forward_pass_index: 0,
+                        intercept,
+                        coefficients: &coefficients,
+                        is_active: true,
+                    })
+                    .collect()
             })
             .collect();
-        let active: Vec<u32> = (0..intercepts.len() as u32).collect();
-        let payload = StageCutsPayload {
-            stage_id: pool_id,
-            state_dimension: 2,
-            capacity: intercepts.len() as u32,
-            warm_start_count: 0,
-            cuts: &cuts,
-            active_cut_indices: &active,
-            populated_count: intercepts.len() as u32,
-            entity_manifest: &[],
-        };
-        let nodes = graph_nodes
+        let active_per_pool: Vec<Vec<u32>> = pools
             .iter()
-            .map(|&(id, stage_id, pool_id)| ManifestNode {
-                id,
-                stage_id,
-                pool_id,
-            })
+            .map(|(_, _, intercepts)| (0..intercepts.len() as u32).collect())
             .collect();
-        let n_pools = graph_nodes
+        let payloads: Vec<StageCutsPayload<'_>> = pools
             .iter()
-            .map(|&(_, _, p)| p + 1)
-            .max()
-            .unwrap_or(0);
+            .zip(&cuts_per_pool)
+            .zip(&active_per_pool)
+            .map(
+                |(((pool_id, graph_stage_id, intercepts), cuts), active)| StageCutsPayload {
+                    stage_id: *pool_id,
+                    state_dimension: 2,
+                    capacity: intercepts.len() as u32,
+                    warm_start_count: 0,
+                    cuts,
+                    active_cut_indices: active,
+                    populated_count: intercepts.len() as u32,
+                    entity_manifest: &[],
+                    cost_scale_factor: 1_000_000.0,
+                    node_id: i32::try_from(*pool_id).unwrap_or(-1),
+                    graph_stage_id: *graph_stage_id,
+                },
+            )
+            .collect();
         let metadata = PolicyCheckpointMetadata {
             format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: "0.14.0".to_string(),
-            created_at: "2026-08-04T00:00:00Z".to_string(),
+            cobre_version: "0.15.0".to_string(),
+            created_at: "2026-08-23T00:00:00Z".to_string(),
             num_stages: 6,
-            graph_manifest: GraphManifest {
-                n_pools,
-                nodes,
-                edges: vec![],
-            },
+            graph_manifest: GraphManifest::default(),
             producer: producer_block(),
         };
-        cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
+        cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
     }
 
-    /// A `source_stage` naming a stage with more than one node is rejected: the
-    /// frozen `policy.boundary` config offers no node selector, so a multi-node
-    /// source is a named `SddpError::Validation` (no remedy field).
+    /// A `source_stage` matching more than one pool's own `graph_stage_id` is
+    /// rejected: the frozen `policy.boundary` config offers no pool selector,
+    /// so an ambiguous source is a named `SddpError::Validation` (no remedy
+    /// field).
     #[test]
-    fn load_boundary_cuts_multi_node_source_stage_rejects() {
+    fn load_boundary_cuts_multi_pool_source_stage_rejects() {
         let tmp = tempfile::tempdir().unwrap();
-        // Two nodes at stage 3 (ids 30, 31) → stage 3 is multi-node.
-        write_checkpoint_pool_keyed(tmp.path(), 2, &[(30, 3, 2), (31, 3, 2)], &[10.0, 20.0]);
+        // Two distinct pools (2 and 5) both self-describe graph_stage_id 3.
+        write_pools_with_graph_stage_ids(tmp.path(), &[(2, 3, &[10.0, 20.0]), (5, 3, &[99.0])]);
 
         let result = load_boundary_cuts(
             tmp.path(),
@@ -2260,7 +2244,7 @@ mod tests {
             &mut ignore_warnings(),
         );
 
-        assert!(result.is_err(), "a multi-node source_stage must reject");
+        assert!(result.is_err(), "a multi-pool source_stage must reject");
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("multi-node"),
@@ -2272,14 +2256,14 @@ mod tests {
         );
     }
 
-    /// A single-node `source_stage` resolves THROUGH the manifest to that node's
-    /// pool, even when the pool id differs from the stage id (node at stage 5 →
-    /// pool 2): the cuts loaded are pool 2's.
+    /// A `source_stage` resolves through a pool's own `graph_stage_id`, even
+    /// when the pool id differs from the stage id (pool 2 self-describes
+    /// stage 5): the cuts loaded are pool 2's.
     #[test]
-    fn load_boundary_cuts_single_node_resolves_through_manifest_to_pool() {
+    fn load_boundary_cuts_single_pool_resolves_through_graph_stage_id() {
         let tmp = tempfile::tempdir().unwrap();
-        // One node at stage 5 mapped to pool 2 (stage != pool).
-        write_checkpoint_pool_keyed(tmp.path(), 2, &[(50, 5, 2)], &[10.0, 20.0, 30.0]);
+        // Pool 2 self-describes graph_stage_id 5 (pool id != stage id).
+        write_pools_with_graph_stage_ids(tmp.path(), &[(2, 5, &[10.0, 20.0, 30.0])]);
 
         let cuts = load_boundary_cuts(
             tmp.path(),
@@ -2289,15 +2273,15 @@ mod tests {
             &[],
             &[],
             None,
-            1_000_000.0,
+            NEUTRAL_LOADING_FACTOR,
             &mut ignore_warnings(),
         )
-        .expect("single-node source must resolve through the manifest");
+        .expect("a source_stage must resolve through the pool's own graph_stage_id");
 
         assert_eq!(
             cuts.len(),
             3,
-            "must load all of pool 2's cuts, resolved from stage 5 via the manifest"
+            "must load all of pool 2's cuts, resolved from stage 5 via graph_stage_id"
         );
         let intercepts: Vec<f64> = cuts.iter().map(|c| c.intercept).collect();
         assert_eq!(intercepts, vec![10.0, 20.0, 30.0]);
@@ -2322,9 +2306,9 @@ mod tests {
     }
 
     /// Write a checkpoint with one pool per `manifests` entry (pool id ==
-    /// index, a chain-degenerate graph), each pool holding one cut sized to
-    /// its own manifest — for [`resolve_boundary_source_stage`] tests
-    /// exercising distinct per-pool anticipated calendars.
+    /// index == `graph_stage_id`, a chain-degenerate graph), each pool holding
+    /// one cut sized to its own manifest — for [`resolve_boundary_source_stage`]
+    /// tests exercising distinct per-pool anticipated calendars.
     fn write_checkpoint_with_pool_manifests(dir: &std::path::Path, manifests: &[Vec<EntitySlot>]) {
         let n_pools = manifests.len() as u32;
         let coefficients_per_pool: Vec<Vec<f64>> =
@@ -2356,6 +2340,9 @@ mod tests {
                 active_cut_indices: &active_indices,
                 populated_count: 1,
                 entity_manifest: manifest,
+                cost_scale_factor: 1_000_000.0,
+                node_id: pool as i32,
+                graph_stage_id: pool as i32,
             })
             .collect();
         let metadata = PolicyCheckpointMetadata {
@@ -2512,22 +2499,22 @@ mod tests {
         );
     }
 
-    /// Write a checkpoint from explicit `(pool_id, entity_manifest, intercept)`
-    /// pools under an explicit `graph` (never the chain-degenerate default) —
-    /// for tests where a pool id must diverge from its owning node's `stage_id`.
-    fn write_checkpoint_with_explicit_graph(
+    /// Write a checkpoint from explicit `(pool_id, graph_stage_id,
+    /// entity_manifest, intercept)` pools — each pool's own `graph_stage_id`
+    /// self-describing fact set directly, for tests where a pool id must
+    /// diverge from its own `graph_stage_id`.
+    fn write_checkpoint_with_explicit_graph_stage_ids(
         dir: &std::path::Path,
-        pools: &[(u32, Vec<EntitySlot>, f64)],
-        graph: GraphManifest,
+        pools: &[(u32, i32, Vec<EntitySlot>, f64)],
     ) {
         let coefficients_per_pool: Vec<Vec<f64>> = pools
             .iter()
-            .map(|(_, manifest, _)| vec![1.0_f64; manifest.len()])
+            .map(|(_, _, manifest, _)| vec![1.0_f64; manifest.len()])
             .collect();
         let cuts_per_pool: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> = pools
             .iter()
             .zip(&coefficients_per_pool)
-            .map(|((_, _, intercept), coeffs)| {
+            .map(|((_, _, _, intercept), coeffs)| {
                 vec![cobre_io::PolicyCutRecord {
                     cut_id: 0,
                     slot_index: 0,
@@ -2543,80 +2530,64 @@ mod tests {
         let payloads: Vec<StageCutsPayload<'_>> = pools
             .iter()
             .zip(&cuts_per_pool)
-            .map(|((pool_id, manifest, _), cuts)| StageCutsPayload {
-                stage_id: *pool_id,
-                state_dimension: manifest.len() as u32,
-                capacity: 1,
-                warm_start_count: 0,
-                cuts,
-                active_cut_indices: &active_indices,
-                populated_count: 1,
-                entity_manifest: manifest,
-            })
+            .map(
+                |((pool_id, graph_stage_id, manifest, _), cuts)| StageCutsPayload {
+                    stage_id: *pool_id,
+                    state_dimension: manifest.len() as u32,
+                    capacity: 1,
+                    warm_start_count: 0,
+                    cuts,
+                    active_cut_indices: &active_indices,
+                    populated_count: 1,
+                    entity_manifest: manifest,
+                    cost_scale_factor: 1_000_000.0,
+                    node_id: i32::try_from(*pool_id).unwrap_or(-1),
+                    graph_stage_id: *graph_stage_id,
+                },
+            )
             .collect();
-        let num_stages = graph
-            .nodes
-            .iter()
-            .map(|n| n.stage_id)
-            .max()
-            .and_then(|m| u32::try_from(m + 1).ok())
-            .unwrap_or(0);
         let metadata = PolicyCheckpointMetadata {
             format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: "0.14.0".to_string(),
-            created_at: "2026-08-11T00:00:00Z".to_string(),
-            num_stages,
-            graph_manifest: graph,
+            cobre_version: "0.15.0".to_string(),
+            created_at: "2026-08-23T00:00:00Z".to_string(),
+            num_stages: 8,
+            graph_manifest: GraphManifest::default(),
             producer: producer_block(),
         };
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
     }
 
     /// The reproduced defect: the resolver's winning POOL id (2) numerically
-    /// coincides with an unrelated DECOY node's `stage_id`, whose OWN pool (5)
-    /// carries different cuts. Returning the raw pool id (the pre-fix
-    /// behavior) makes `load_boundary_cuts` resolve `source_stage` through
-    /// the decoy node instead, silently loading the decoy's cuts (999.0)
-    /// rather than the calendar-winning pool's (777.0). The fix maps the
-    /// winning pool back through the manifest to its OWN owning node's
-    /// `stage_id` (7 — distinct from every pool id and from the decoy's
-    /// stage id), so `load_boundary_cuts` follows the correct node.
+    /// coincides with an unrelated DECOY pool's own raw id (7), and the decoy
+    /// pool's `graph_stage_id` (99) carries different cuts. Returning the raw
+    /// pool id (the pre-fix behavior) would make `load_boundary_cuts` resolve
+    /// `source_stage` through the decoy pool's numeric id instead, silently
+    /// loading the decoy's cuts (999.0) rather than the calendar-winning
+    /// pool's (777.0). The fix maps the winning pool to its OWN
+    /// `graph_stage_id` (7 — distinct from every pool id and from the decoy's
+    /// `graph_stage_id`), so `load_boundary_cuts` follows the correct pool.
     #[test]
     fn resolve_boundary_source_stage_maps_winning_pool_to_its_owning_node_stage_id() {
         let tmp = tempfile::tempdir().unwrap();
-        let winning_pool = 2;
-        let decoy_pool = 5;
+        let winning_pool: u32 = 2;
+        let winning_graph_stage_id: i32 = 7;
+        let decoy_pool: u32 = 7; // numerically equals winning_graph_stage_id
+        let decoy_graph_stage_id: i32 = 99;
 
         let winning_manifest = vec![anticipated_slot(9, 0, 20_260_301)];
         let decoy_manifest = vec![storage_slot(1)];
 
-        let graph = GraphManifest {
-            n_pools: 6,
-            nodes: vec![
-                // Decoy: `stage_id` equals the winning pool's numeric value,
-                // but owns a DIFFERENT pool.
-                ManifestNode {
-                    id: 100,
-                    stage_id: winning_pool as i32,
-                    pool_id: decoy_pool,
-                },
-                // Correct: owns the winning pool, at an unrelated stage id.
-                ManifestNode {
-                    id: 101,
-                    stage_id: 7,
-                    pool_id: winning_pool,
-                },
-            ],
-            edges: vec![],
-        };
-
-        write_checkpoint_with_explicit_graph(
+        write_checkpoint_with_explicit_graph_stage_ids(
             tmp.path(),
             &[
-                (winning_pool, winning_manifest, 777.0),
-                (decoy_pool, decoy_manifest, 999.0),
+                (
+                    winning_pool,
+                    winning_graph_stage_id,
+                    winning_manifest,
+                    777.0,
+                ),
+                (decoy_pool, decoy_graph_stage_id, decoy_manifest, 999.0),
             ],
-            graph,
         );
 
         let target = vec![Some((ymd(2026, 3, 1), ymd(2026, 4, 1)))];
@@ -2624,8 +2595,9 @@ mod tests {
             .expect("a unique calendar match must resolve");
 
         assert_eq!(
-            resolved, 7,
-            "must return the winning pool's OWNING NODE's stage id (7), not the raw pool id (2)"
+            resolved,
+            u32::try_from(winning_graph_stage_id).unwrap(),
+            "must return the winning pool's own graph_stage_id (7), not the raw pool id (2)"
         );
 
         let cuts = load_boundary_cuts(
@@ -2636,7 +2608,7 @@ mod tests {
             &no_intervals(1),
             &[],
             None,
-            1_000_000.0,
+            NEUTRAL_LOADING_FACTOR,
             &mut ignore_warnings(),
         )
         .expect("the resolved stage id must thread correctly through load_boundary_cuts");
@@ -3336,6 +3308,9 @@ mod tests {
             populated_count: slots.len() as u32,
             cuts: slots.iter().copied().map(active_cut).collect(),
             entity_manifest: Vec::new(),
+            cost_scale_factor: None,
+            node_id: -1,
+            graph_stage_id: -1,
         }
     }
 
@@ -3554,6 +3529,9 @@ mod tests {
             active_cut_indices: &[0],
             populated_count: 1,
             entity_manifest: manifest,
+            cost_scale_factor: 1_000_000.0,
+            node_id: 0,
+            graph_stage_id: -1,
         };
         let metadata = PolicyCheckpointMetadata {
             format_version: cobre_io::FORMAT_VERSION,
@@ -3660,7 +3638,9 @@ mod tests {
     /// An empty (unverifiable) source manifest with a non-empty `fixed_windows`
     /// applies no fold — the fold shares the rebind's `verifiable` gate — and the
     /// hoisted `manifest_identity_verifiable` call fires the absent-manifest
-    /// warning exactly once (a second call would double-fire it).
+    /// warning exactly once (a second call would double-fire it). The loaded
+    /// intercept is the plain marked rescale (`raw / loading_factor`) with no
+    /// fold term added, isolating the fold-skip from the mandatory rescale.
     #[test]
     fn load_boundary_cuts_unverifiable_manifest_skips_fold_and_warns_once() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3669,6 +3649,7 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let windows = vec![fixed_window(9, ymd(2026, 3, 1), ymd(2026, 4, 1), 50.0)];
+        let loading_cost_scale_factor = 1_000_000.0;
         let mut warnings: Vec<String> = Vec::new();
         let cuts = load_boundary_cuts(
             tmp.path(),
@@ -3678,15 +3659,16 @@ mod tests {
             &no_intervals(current.len()),
             &windows,
             None,
-            LEGACY_COST_SCALE_FACTOR,
+            loading_cost_scale_factor,
             &mut |m| warnings.push(m.to_string()),
         )
         .unwrap();
 
         assert_eq!(
             cuts[0].intercept.to_bits(),
-            raw_intercept.to_bits(),
-            "an unverifiable manifest must skip the fold, leaving the intercept bit-identical"
+            (raw_intercept / loading_cost_scale_factor).to_bits(),
+            "an unverifiable manifest must skip the fold, leaving the intercept equal to the \
+             plain marked rescale with no fold term added"
         );
         assert_eq!(
             warnings.len(),
@@ -3741,48 +3723,6 @@ mod tests {
         assert!(
             (cuts[0].intercept - expected).abs() < expected.abs().max(1.0) * 1e-9,
             "marked frame: intercept {} != (raw + c·{weight}·v) / s = {expected}",
-            cuts[0].intercept
-        );
-    }
-
-    /// LEGACY frame: the same shape written WITHOUT a cost-scale marker
-    /// (`cost_scale_factor: None`; the uniform-coefficient writer supplies
-    /// `c == 1.0`), loaded at a non-default factor, moves the intercept to
-    /// `(raw_intercept + c·1·v) · (LEGACY_COST_SCALE_FACTOR / loading_factor)` —
-    /// the folded term rides the legacy `×ratio` transform. A marked-only suite
-    /// would miss a legacy-frame sign/scale bug.
-    #[test]
-    fn boundary_fold_legacy_frame_moves_intercept_by_hand_computed_delta() {
-        let tmp = tempfile::tempdir().unwrap();
-        let anchor = 20_260_401; // April 2026
-        let manifest = vec![storage_slot(1), anticipated_slot(9, 0, anchor)];
-        let c = 1.0; // write_checkpoint_with_manifest writes uniform 1.0 coefficients
-        let raw_intercept = 200.0;
-        write_checkpoint_with_manifest(tmp.path(), 1, 2, &[raw_intercept], &manifest);
-
-        let (ws, we) = (ymd(2026, 4, 1), ymd(2026, 5, 1)); // whole month → weight 1.0
-        let v = 50.0;
-        let loading_factor = 3_000_000.0; // non-default → an inexact ×ratio
-        let current = manifest.clone();
-        let cuts = load_boundary_cuts(
-            tmp.path(),
-            0,
-            2,
-            &current,
-            &no_intervals(current.len()),
-            &[fixed_window(9, ws, we, v)],
-            None,
-            loading_factor,
-            &mut ignore_warnings(),
-        )
-        .unwrap();
-
-        let weight = fold_weight((ws, we), anchor);
-        let ratio = LEGACY_COST_SCALE_FACTOR / loading_factor;
-        let expected = (raw_intercept + c * weight * v) * ratio;
-        assert!(
-            (cuts[0].intercept - expected).abs() < expected.abs().max(1.0) * 1e-9,
-            "legacy frame: intercept {} != (raw + c·{weight}·v) · ratio = {expected}",
             cuts[0].intercept
         );
     }

@@ -99,8 +99,16 @@ mod simulation_only {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
-        let stage_cuts =
-            build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
+        let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let stage_cuts = build_stage_cuts_payloads(
+            fcf,
+            &setup.node_graph,
+            &study_stage_ids,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
 
         let (basis_col_u8, basis_row_u8) = convert_basis_cache(&training_result);
         let stage_bases = build_stage_basis_records(
@@ -985,8 +993,16 @@ mod decomp_integration {
         let fcf = &setup.fcf;
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
-        let stage_cuts =
-            build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, stage_manifests);
+        let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let stage_cuts = build_stage_cuts_payloads(
+            fcf,
+            &setup.node_graph,
+            &study_stage_ids,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            stage_manifests,
+        );
         let (basis_col, basis_row) = convert_basis_cache(result);
         let stage_bases =
             build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);
@@ -3191,6 +3207,9 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
             active_cut_indices: &[0],
             populated_count: 1,
             entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: 100,
+            graph_stage_id: -1,
         };
         let metadata = PolicyCheckpointMetadata {
             format_version: FORMAT_VERSION,

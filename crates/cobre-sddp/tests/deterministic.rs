@@ -1445,6 +1445,9 @@ fn d12_checkpoint_round_trip() {
             active_cut_indices: &active_indices_per_stage[stage_idx],
             populated_count: pool.populated() as u32,
             entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: i32::try_from(stage_idx).unwrap_or(-1),
+            graph_stage_id: -1,
         })
         .collect();
 
@@ -8139,7 +8142,7 @@ mod heterogeneous_visit_bound_resume {
     //! pre-fix scalar substitution (every resumed pool given `forward_passes`
     //! uniformly as its stride) silently broke.
 
-    use cobre_io::StageCutsReadResult;
+    use cobre_io::{STAGE_CUTS_NODE_ID_SENTINEL, StageCutsReadResult};
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::setup::NodeId;
     use cobre_sddp::test_support::{k_fan_setup, trivial_full_fcf_proof};
@@ -8182,6 +8185,24 @@ mod heterogeneous_visit_bound_resume {
             u32::try_from(cold.setup.num_stages()).expect("stage count fits u32"),
         );
 
+        // Mirrors `sole_pool_owner_node_id` (the production writer's
+        // algorithm in `policy_export.rs`): every pool has exactly one
+        // owning node EXCEPT the K-fan's shared terminal leaf pool, which
+        // `k` distinct leaf nodes own jointly and must therefore keep the
+        // sentinel.
+        let pool_owner_node_id = |pool: usize| -> i32 {
+            let mut owner: Option<i32> = None;
+            for (pos, node) in cold.setup.node_graph.nodes.iter_indexed() {
+                if node.pool_id == pool {
+                    if owner.is_some() {
+                        return STAGE_CUTS_NODE_ID_SENTINEL;
+                    }
+                    owner = Some(cold.setup.node_graph.node_ids[pos].0);
+                }
+            }
+            owner.unwrap_or(STAGE_CUTS_NODE_ID_SENTINEL)
+        };
+
         // A checkpoint with no warm-start cuts: this test's concern is the
         // constructor's per-pool dimension/stride threading, not cut-byte
         // fidelity (already covered by
@@ -8198,6 +8219,9 @@ mod heterogeneous_visit_bound_resume {
                 populated_count: 0,
                 cuts: Vec::new(),
                 entity_manifest: Vec::new(),
+                cost_scale_factor: None,
+                node_id: pool_owner_node_id(p),
+                graph_stage_id: -1,
             })
             .collect();
         let visit_bounds: Vec<u64> = cold_strides.iter().map(|&s| u64::from(s)).collect();
@@ -9204,8 +9228,9 @@ mod enumerated_checkpoint {
     use std::collections::HashSet;
 
     use cobre_io::{
-        FORMAT_VERSION, GraphManifest, PolicyCheckpointMetadata, ProducerBlock, StageCutsPayload,
-        read_policy_checkpoint, write_policy_checkpoint,
+        FORMAT_VERSION, GraphManifest, PolicyCheckpointMetadata, ProducerBlock,
+        STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload, read_policy_checkpoint,
+        write_policy_checkpoint,
     };
     use cobre_sddp::policy_export::build_stage_cut_records;
     use cobre_sddp::setup::NodePos;
@@ -9311,6 +9336,23 @@ mod enumerated_checkpoint {
             })
             .collect();
 
+        // Mirrors `sole_pool_owner_node_id` (the production writer's
+        // algorithm in `policy_export.rs`): every non-leaf pool has exactly
+        // one owning node; the shared leaf pool the fixture doc above
+        // names keeps the sentinel.
+        let pool_owner_node_id = |pool: usize| -> i32 {
+            let mut owner: Option<i32> = None;
+            for (pos, node) in node_graph.nodes.iter_indexed() {
+                if node.pool_id == pool {
+                    if owner.is_some() {
+                        return STAGE_CUTS_NODE_ID_SENTINEL;
+                    }
+                    owner = Some(node_graph.node_ids[pos].0);
+                }
+            }
+            owner.unwrap_or(STAGE_CUTS_NODE_ID_SENTINEL)
+        };
+
         let stage_cuts_payloads: Vec<StageCutsPayload<'_>> = fcf
             .pools
             .iter()
@@ -9324,6 +9366,9 @@ mod enumerated_checkpoint {
                 active_cut_indices: &active_indices_per_stage[pool_idx],
                 populated_count: pool.populated() as u32,
                 entity_manifest: &[],
+                cost_scale_factor: 1_000_000.0,
+                node_id: pool_owner_node_id(pool_idx),
+                graph_stage_id: -1,
             })
             .collect();
 
@@ -9550,6 +9595,9 @@ mod water_terminal_fcf_valuation {
             active_cut_indices: &[0],
             populated_count: 1,
             entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: 100,
+            graph_stage_id: -1,
         };
         let metadata = PolicyCheckpointMetadata {
             format_version: FORMAT_VERSION,

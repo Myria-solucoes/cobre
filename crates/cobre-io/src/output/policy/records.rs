@@ -137,6 +137,16 @@ pub struct PolicyBasisRecord<'a> {
 /// (forward-compatible default).
 pub const STAGE_STATES_NODE_ID_SENTINEL: i32 = -1;
 
+/// Sentinel [`StageCutsPayload::node_id`]/[`StageCutsReadResult::node_id`] value
+/// for a pool with no single owning node (a shared pool, never a boundary
+/// source) or a pre-`id:8` buffer (forward-compatible default).
+pub const STAGE_CUTS_NODE_ID_SENTINEL: i32 = -1;
+
+/// Sentinel [`StageCutsPayload::graph_stage_id`]/[`StageCutsReadResult::graph_stage_id`]
+/// value for an unresolved owning-stage key or a pre-`id:8` buffer
+/// (forward-compatible default).
+pub const STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL: i32 = -1;
+
 /// Payload for writing per-stage visited states to a value-function artifact.
 ///
 /// The `data` slice contains the flat state vectors (row-major, each of length
@@ -182,6 +192,15 @@ pub struct StageCutsPayload<'a> {
     /// Per-slot entity identity; length equals `state_dimension` when populated.
     /// An empty slice means no manifest is written.
     pub entity_manifest: &'a [EntitySlot],
+    /// Objective cost-scale factor the writing study resolved; the provenance
+    /// marker making each cut scale-independent at rest.
+    pub cost_scale_factor: f64,
+    /// Owning node's policy-graph id, or [`STAGE_CUTS_NODE_ID_SENTINEL`] for a
+    /// shared pool.
+    pub node_id: i32,
+    /// Graph-stage id of the node(s) owning this pool — the boundary-resolution
+    /// key; [`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL`] when unresolved.
+    pub graph_stage_id: i32,
 }
 
 /// One node of the value-function artifact's graph manifest: its declared id,
@@ -406,6 +425,14 @@ pub struct StageCutsReadResult {
     pub cuts: Vec<OwnedPolicyCutRecord>,
     /// Per-slot entity identity; empty when the field is absent from the buffer.
     pub entity_manifest: Vec<EntitySlot>,
+    /// Cost-scale provenance factor; `None` when absent from a pre-`id:8` buffer.
+    pub cost_scale_factor: Option<f64>,
+    /// Owning node's policy-graph id; [`STAGE_CUTS_NODE_ID_SENTINEL`] for a shared
+    /// pool or a pre-`id:8` buffer.
+    pub node_id: i32,
+    /// Graph-stage id key; [`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL`] when unresolved
+    /// or absent from a pre-`id:8` buffer.
+    pub graph_stage_id: i32,
 }
 
 /// Owned version of [`StageStatesPayload`] returned by [`crate::deserialize_stage_states`].

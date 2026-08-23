@@ -742,6 +742,9 @@ fn train_simulate_write_cycle() {
             active_cut_indices: &active_indices_per_stage[stage_idx],
             populated_count: pool.populated() as u32,
             entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: i32::try_from(stage_idx).unwrap_or(-1),
+            graph_stage_id: -1,
         })
         .collect();
 

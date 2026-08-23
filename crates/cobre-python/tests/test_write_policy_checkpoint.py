@@ -294,3 +294,76 @@ def test_write_policy_checkpoint_unplaceable_lag_coefficient_raises(
             _make_metadata(),
             inflow_lag_depth=2,
         )
+
+
+def test_write_policy_checkpoint_accepts_self_describing_stage_fields(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The binding accepts the per-stage self-describing facts (cost_scale_factor,
+    node_id, graph_stage_id) that the CLI writer emits — Python write-parity — and
+    produces a checkpoint whose read surfaces those facts again.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    stage_cuts = _make_stage_cuts()
+    stage_cuts[0]["cost_scale_factor"] = 2_500_000.0
+    stage_cuts[0]["node_id"] = 3
+    stage_cuts[0]["graph_stage_id"] = 7
+
+    cobre.write_policy_checkpoint(
+        str(tmp_path / "policy"), stage_cuts, _make_metadata()
+    )
+
+    loaded = cobre.results.load_policy(str(tmp_path))
+    stage = loaded["stage_cuts"][0]
+    assert stage["state_dimension"] == 3
+    assert len(stage["cuts"]) == 2
+    assert stage["node_id"] == 3
+    assert stage["graph_stage_id"] == 7
+    assert stage["cost_scale_factor"] == pytest.approx(2_500_000.0)
+    assert loaded["metadata"]["producer"]["cost_scale_factor"] == pytest.approx(
+        2_500_000.0
+    )
+
+
+def test_load_policy_self_describing_fields_survive_rewrite(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A non-sentinel node_id/graph_stage_id and a stage-level cost_scale_factor
+    survive a load_policy -> write_policy_checkpoint -> reload cycle — the
+    load -> edit -> write round-trip the binding advertises.
+
+    Regression: load_policy previously omitted these per-stage fields, so the
+    rewrite defaulted the missing keys back to the -1 node/graph sentinel (and
+    cost_scale_factor to None), collapsing a genuine single-node pool and
+    breaking boundary-cut load. This test fails unless load_policy surfaces them.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    stage_cuts = _make_stage_cuts()
+    stage_cuts[0]["node_id"] = 3
+    stage_cuts[0]["graph_stage_id"] = 7
+    stage_cuts[0]["cost_scale_factor"] = 7_777.0
+
+    # metadata carries no cost_scale_factor, so only the surfaced stage-level
+    # value can keep it non-None through the rewrite — isolating it from the
+    # producer-block fallback that would otherwise mask a dropped field.
+    metadata = _make_metadata(cost_scale_factor=None)
+
+    first_dir = tmp_path / "first"
+    cobre.write_policy_checkpoint(str(first_dir / "policy"), stage_cuts, metadata)
+
+    loaded = cobre.results.load_policy(str(first_dir))
+
+    second_dir = tmp_path / "second"
+    cobre.write_policy_checkpoint(
+        str(second_dir / "policy"), loaded["stage_cuts"], metadata
+    )
+    reloaded = cobre.results.load_policy(str(second_dir))
+
+    stage = reloaded["stage_cuts"][0]
+    assert stage["node_id"] == 3
+    assert stage["graph_stage_id"] == 7
+    assert stage["cost_scale_factor"] == pytest.approx(7_777.0)

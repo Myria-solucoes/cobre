@@ -23,8 +23,8 @@ pub use records::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
     ManifestNode, OwnedPolicyBasisRecord, OwnedPolicyCutRecord, PolicyBasisRecord,
     PolicyCheckpoint, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
-    STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload, StageCutsReadResult, StageStatesPayload,
-    StageStatesReadResult, StateFamily,
+    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL,
+    StageCutsPayload, StageCutsReadResult, StageStatesPayload, StageStatesReadResult, StateFamily,
 };
 
 #[cfg(test)]
@@ -55,6 +55,33 @@ mod tests {
         }
     }
 
+    /// Serialize a `StageCuts` buffer from positional fields, defaulting the
+    /// self-describing per-pool facts the codec round-trip does not exercise.
+    fn ser_cuts(
+        stage_id: u32,
+        state_dimension: u32,
+        capacity: u32,
+        warm_start_count: u32,
+        cuts: &[PolicyCutRecord<'_>],
+        active_cut_indices: &[u32],
+        populated_count: u32,
+        entity_manifest: &[EntitySlot],
+    ) -> Vec<u8> {
+        serialize_stage_cuts(&StageCutsPayload {
+            stage_id,
+            state_dimension,
+            capacity,
+            warm_start_count,
+            cuts,
+            active_cut_indices,
+            populated_count,
+            entity_manifest,
+            cost_scale_factor: 1_000_000.0,
+            node_id: -1,
+            graph_stage_id: -1,
+        })
+    }
+
     // ── serialize_stage_cuts tests ────────────────────────────────────────────
 
     #[test]
@@ -70,7 +97,7 @@ mod tests {
             is_active: true,
         };
 
-        let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1, &[]);
+        let buf = ser_cuts(0, 3, 100, 0, &[cut], &[0], 1, &[]);
 
         assert!(!buf.is_empty(), "buffer must not be empty");
         assert!(buf.len() >= 4, "buffer must have at least 4 bytes");
@@ -83,7 +110,7 @@ mod tests {
 
     #[test]
     fn serialize_stage_cuts_empty_cuts_valid_buffer() {
-        let buf = serialize_stage_cuts(0, 3, 100, 0, &[], &[], 0, &[]);
+        let buf = ser_cuts(0, 3, 100, 0, &[], &[], 0, &[]);
 
         assert!(!buf.is_empty(), "buffer must not be empty for empty cuts");
         assert!(
@@ -109,8 +136,8 @@ mod tests {
             make_cut_record(3, 2, 1, &c2),
         ];
 
-        let buf_a = serialize_stage_cuts(5, 3, 50, 0, &cuts, &[0, 1, 2], 3, &[]);
-        let buf_b = serialize_stage_cuts(5, 3, 50, 0, &cuts, &[0, 1, 2], 3, &[]);
+        let buf_a = ser_cuts(5, 3, 50, 0, &cuts, &[0, 1, 2], 3, &[]);
+        let buf_b = ser_cuts(5, 3, 50, 0, &cuts, &[0, 1, 2], 3, &[]);
 
         assert_eq!(buf_a, buf_b, "output must be byte-identical for same input");
     }
@@ -128,7 +155,7 @@ mod tests {
                 coefficients: &coefs,
                 is_active: true,
             };
-            let buf = serialize_stage_cuts(0, dim, 10, 0, &[cut], &[0], 1, &[]);
+            let buf = ser_cuts(0, dim, 10, 0, &[cut], &[0], 1, &[]);
             assert!(
                 !buf.is_empty(),
                 "buffer must not be empty for state_dimension={dim}"
@@ -341,6 +368,9 @@ mod tests {
             active_cut_indices,
             populated_count: u32::try_from(cuts.len()).unwrap(),
             entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: -1,
+            graph_stage_id: -1,
         }
     }
 
@@ -665,7 +695,7 @@ mod tests {
             is_active: true,
         };
 
-        let buf = serialize_stage_cuts(0, 3, 100, 0, &[cut], &[0], 1, &[]);
+        let buf = ser_cuts(0, 3, 100, 0, &[cut], &[0], 1, &[]);
         let result = deserialize_stage_cuts(&buf).expect("deserialization must succeed");
 
         assert_eq!(result.stage_id, 0, "stage_id must round-trip");
@@ -730,7 +760,7 @@ mod tests {
             },
         ];
 
-        let buf = serialize_stage_cuts(5, 2, 50, 1, &cuts, &[0, 2], 3, &[]);
+        let buf = ser_cuts(5, 2, 50, 1, &cuts, &[0, 2], 3, &[]);
         let result = deserialize_stage_cuts(&buf).expect("deserialization must succeed");
 
         assert_eq!(result.stage_id, 5);
@@ -758,7 +788,7 @@ mod tests {
 
     #[test]
     fn deserialize_stage_cuts_empty_cut_pool() {
-        let buf = serialize_stage_cuts(2, 10, 200, 0, &[], &[], 0, &[]);
+        let buf = ser_cuts(2, 10, 200, 0, &[], &[], 0, &[]);
         let result =
             deserialize_stage_cuts(&buf).expect("deserialization of empty cut pool must succeed");
 
@@ -782,7 +812,7 @@ mod tests {
             coefficients: &[],
             is_active: true,
         };
-        let buf = serialize_stage_cuts(0, 0, 10, 0, &[cut], &[0], 1, &[]);
+        let buf = ser_cuts(0, 0, 10, 0, &[cut], &[0], 1, &[]);
         let result =
             deserialize_stage_cuts(&buf).expect("zero-length coefficients must deserialize");
         assert_eq!(result.cuts.len(), 1);
@@ -805,7 +835,7 @@ mod tests {
             coefficients: &coefs,
             is_active: false,
         };
-        let buf = serialize_stage_cuts(3, dim, 10, 0, &[cut], &[0], 1, &[]);
+        let buf = ser_cuts(3, dim, 10, 0, &[cut], &[0], 1, &[]);
         let result =
             deserialize_stage_cuts(&buf).expect("large coefficient vector must deserialize");
         assert_eq!(result.cuts[0].coefficients.len(), dim as usize);
@@ -817,7 +847,7 @@ mod tests {
     fn deserialize_stage_cuts_truncated_buffer_returns_error() {
         let coefs = [1.0_f64, 2.0];
         let cut = make_cut_record(1, 0, 1, &coefs);
-        let full_buf = serialize_stage_cuts(0, 2, 10, 0, &[cut], &[0], 1, &[]);
+        let full_buf = ser_cuts(0, 2, 10, 0, &[cut], &[0], 1, &[]);
         // Truncate to 2 bytes — root offset itself is incomplete.
         let truncated = &full_buf[..2];
         let result = deserialize_stage_cuts(truncated);
@@ -826,7 +856,7 @@ mod tests {
 
     #[test]
     fn deserialize_stage_cuts_stage_id_nonzero() {
-        let buf = serialize_stage_cuts(59, 4, 50, 0, &[], &[], 0, &[]);
+        let buf = ser_cuts(59, 4, 50, 0, &[], &[], 0, &[]);
         let result = deserialize_stage_cuts(&buf).expect("stage_id=59 must deserialize");
         assert_eq!(result.stage_id, 59, "stage_id=59 must round-trip");
     }
@@ -876,7 +906,7 @@ mod tests {
         let cut = make_cut_record(7, 0, 1, &coefficients);
         let manifest = sample_manifest();
 
-        let buf = serialize_stage_cuts(4, 3, 100, 0, &[cut], &[0], 1, &manifest);
+        let buf = ser_cuts(4, 3, 100, 0, &[cut], &[0], 1, &manifest);
         let result = deserialize_stage_cuts(&buf).expect("manifest round-trip must succeed");
 
         assert_eq!(result.cuts.len(), 1, "cuts must still round-trip");
@@ -908,7 +938,7 @@ mod tests {
     fn stage_cuts_empty_manifest_deserializes_to_empty_vec() {
         let coefficients = [1.0_f64, 2.0];
         let cut = make_cut_record(1, 0, 1, &coefficients);
-        let buf = serialize_stage_cuts(0, 2, 10, 0, &[cut], &[0], 1, &[]);
+        let buf = ser_cuts(0, 2, 10, 0, &[cut], &[0], 1, &[]);
         let result = deserialize_stage_cuts(&buf).expect("empty manifest must deserialize");
         assert!(
             result.entity_manifest.is_empty(),
@@ -1367,6 +1397,9 @@ mod tests {
                 active_cut_indices: &[0, 1],
                 populated_count: 2,
                 entity_manifest: &[],
+                cost_scale_factor: 1_000_000.0,
+                node_id: -1,
+                graph_stage_id: -1,
             },
             StageCutsPayload {
                 stage_id: 1,
@@ -1377,6 +1410,9 @@ mod tests {
                 active_cut_indices: &[0, 1, 2],
                 populated_count: 3,
                 entity_manifest: &[],
+                cost_scale_factor: 1_000_000.0,
+                node_id: -1,
+                graph_stage_id: -1,
             },
             StageCutsPayload {
                 stage_id: 2,
@@ -1387,6 +1423,9 @@ mod tests {
                 active_cut_indices: &[0, 1, 2, 3],
                 populated_count: 4,
                 entity_manifest: &[],
+                cost_scale_factor: 1_000_000.0,
+                node_id: -1,
+                graph_stage_id: -1,
             },
         ];
 
