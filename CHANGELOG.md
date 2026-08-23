@@ -11,40 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **A deck may declare commitments decided before the study that deliver after
-  it.** `past_anticipated_commitments` windows may now extend past the study
-  horizon — the DECOMP "já-comandada" case — with no new field and no schema
-  reshape. Such a window is validated like any other: tiled at coverage 1.0
-  over every post-horizon delivery stage the plant decided before the study,
-  with an explicit `0 MW` window accepted as legitimate coverage. It is priced
-  against the terminal boundary by a constant fold into the future-cost cut
-  intercepts — a sunk cost, never an objective term — and reported at its real
-  delivery date in a run-level fixed-delivery table written by both the CLI
-  and the Python bindings.
-
-### Fixed
-
-- **The anticipated ring depth now sizes as the larger of the in-flight
-  occupancy and the pre-study seed run.** A configuration whose pre-study run
-  outlived the in-flight occupancy previously sized the ring one or more slots
-  too shallow, silently aliasing a later delivery stage's committed value onto
-  an earlier one. A configuration where the occupancy term already dominated
-  is unaffected.
-
-### Changed
-
-- **BREAKING — a policy checkpoint written by an earlier release for a study
-  whose ring depth the sizing fix above widens no longer loads.** The
-  corrected ring depth changes that study's committed-state dimension, so such
-  a checkpoint fails the state-dimension check on load and must be
-  regenerated — it encoded the wrong committed value under the old sizing. A
-  study whose pre-study run never exceeded its in-flight occupancy keeps its
-  state dimension, and its checkpoints are unaffected.
-
-## [0.15.0] - 2026-08-21
-
-### Added
-
 - **A post-horizon anticipated thermal commitment is now declared in
   `post_study_stages.json` and carried on the anticipated-commitment ring.**
   `post_study_stages.json` gains a `thermal_bounds[]` table — one
@@ -55,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delivery, over a delivery axis extended across the post-study calendar,
   instead of a separate carrier; its generation is bounded, costed, and priced
   against the extended horizon.
+
+- **A deck may declare commitments decided before the study that deliver after
+  it.** `past_anticipated_commitments` windows may now extend past the study
+  horizon — the DECOMP "já-comandada" case — with no new field and no schema
+  reshape. Such a window is validated like any other: tiled at coverage 1.0
+  over every post-horizon delivery stage the plant decided before the study,
+  with an explicit `0 MW` window accepted as legitimate coverage. It is priced
+  against the terminal boundary by a constant fold into the future-cost cut
+  intercepts — a sunk cost, never an objective term — and reported at its real
+  delivery date in a run-level fixed-delivery table written by both the CLI
+  and the Python bindings.
 
 ### Changed
 
@@ -98,6 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a pre-study stage whose delivery lands past the horizon has no ring slot to
   carry it and is rejected, naming the plant.
 
+- **BREAKING — a policy checkpoint written by an earlier release for a study
+  whose ring depth the sizing fix above widens no longer loads.** The
+  corrected ring depth changes that study's committed-state dimension, so such
+  a checkpoint fails the state-dimension check on load and must be
+  regenerated — it encoded the wrong committed value under the old sizing. A
+  study whose pre-study run never exceeded its in-flight occupancy keeps its
+  state dimension, and its checkpoints are unaffected.
+
 ### Removed
 
 - **BREAKING — `initial_conditions.json`'s `future_anticipated_deliveries[]` is
@@ -116,6 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only at run time. Sizing the ring from full occupancy keeps a carried
   delivery's depth positive, and the maturity fill is now gated on a positive
   ring depth, so the divide is unreachable by construction.
+
+- **The anticipated ring depth now sizes as the larger of the in-flight
+  occupancy and the pre-study seed run.** A configuration whose pre-study run
+  outlived the in-flight occupancy previously sized the ring one or more slots
+  too shallow, silently aliasing a later delivery stage's committed value onto
+  an earlier one. A configuration where the occupancy term already dominated
+  is unaffected.
 
 ### Migration
 
