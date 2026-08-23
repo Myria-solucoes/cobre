@@ -73,8 +73,6 @@ fn load_and_validate_checkpoint(
 
     // The terminal pool is always full-config, so its manifest witnesses every
     // state family's slot identity — a terminal-only comparison covers all stages.
-    // `state_dimension` is per-pool now (the global metadata copy is gone), so the
-    // source dimension is the terminal pool payload's own.
     let current_manifest = setup.build_terminal_entity_manifest(system);
     let checkpoint_terminal_manifest: &[EntitySlot] = checkpoint
         .stage_cuts

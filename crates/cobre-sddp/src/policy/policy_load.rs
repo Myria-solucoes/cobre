@@ -43,8 +43,14 @@ use std::ops::Deref;
 use std::path::Path;
 
 /// The constant every unmarked policy checkpoint (no `cost_scale_factor`
-/// provenance) was unconditionally scaled at. A checkpoint whose
-/// `metadata.cost_scale_factor` is `None` is interpreted under this constant.
+/// provenance) was unconditionally scaled at. A pool or checkpoint whose
+/// `cost_scale_factor` reads `None` is interpreted under this constant.
+///
+/// Reserved seam: this repo's own front ends never reach the `None`/Legacy
+/// branch — both the boundary path ([`load_boundary_cuts`]) and the [`FullFcf`]
+/// path ([`checkpoint_terminal_cost_scale_factor`]) hard-reject a `None`
+/// `cost_scale_factor` before rescale, so [`rescale_cut_records_for_load`]'s
+/// Legacy branch is reachable only by a direct library caller.
 pub const LEGACY_COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 /// Rescale one stage's cut records from their at-rest

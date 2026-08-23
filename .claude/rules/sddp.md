@@ -839,7 +839,30 @@ independent of how the LP happens to scale its column, so comparing `col_scale`
 would falsely reject a policy whose entities genuinely match but whose scaling
 strategy or magnitude differs from the current study's — the forbidden
 alternative this contract rules out.
+
+A `BoundaryInjection` reads its study-global facts from the resolved pool's own
+`cuts/<pool>.bin`, never `metadata.json`. It resolves `source_stage -> pool` by
+matching a pool's own `graph_stage_id`, and reads that pool's `cost_scale_factor`
+to feed `rescale_cut_records_for_load` — the additive `StageCuts`
+`cost_scale_factor`/`node_id`/`graph_stage_id` fields make one `cuts/<pool>.bin`
+self-describing. Three named rejects guard the boundary load: a resolved pool
+whose `cost_scale_factor` reads `None` (a pre-self-describing `.bin`) REJECTS
+(`boundary_predates_self_describing_cuts`, advising re-export), never silently
+defaulting to `LEGACY_COST_SCALE_FACTOR`; a resolved pool whose `node_id` is the
+`-1` sentinel (a shared, multi-owner pool) REJECTS — a boundary source must be a
+single-node terminal pool; and a `source_stage` matching zero or more than one
+pool REJECTS. The `FullFcf` path mirrors the `cost_scale_factor` read + `None`
+clean-break reject through `checkpoint_terminal_cost_scale_factor` (the terminal
+pool's own value). Resurrecting a read of `metadata.graph_manifest` or
+`metadata.producer.cost_scale_factor` on either load path is the
+wrong-but-compiling alternative this contract rules out: `metadata.json` is
+retired — the study-global graph, `num_stages`, and provenance now live on the
+`manifest.bin` `CheckpointManifest` root, consumed only by the `FullFcf`
+graph-identity check — so a metadata read would fail to compile or silently
+reintroduce a stale-scale bug.
+
 Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`,
+`checkpoint_terminal_cost_scale_factor`, `boundary_predates_self_describing_cuts`,
 `PolicyLoadKind::CHECK_STATE_DIMENSION`,
 `PolicyLoadKind::CHECK_SLOT_IDENTITY_EXACT`), `policy/reconcile.rs`
 (`build_rebind`, `rebind_cut`). Pinned by the `validate_policy_load_full_fcf_*`
@@ -850,11 +873,15 @@ Read: `policy/policy_load.rs` (`validate_policy_load`, `slot_identity`,
 (BoundaryInjection defers to reconcile), and
 `load_boundary_cuts_empty_manifest_differing_state_dimension_rejects` (the
 unverifiable-manifest `state_dimension` fallback guard) tests, plus
-`policy::reconcile`'s unit tests, `tests/boundary_reconcile_defaults.rs`, and the
+`policy::reconcile`'s unit tests, `tests/boundary_reconcile_defaults.rs`, the
 end-to-end NEWAVE→DECOMP acceptance regression
 `tests/boundary_dim_mismatch_reconcile.rs`
 (`newave_source_reconciles_into_decomp_current`,
-`newave_boundary_injected_decomp_run_converges`).
+`newave_boundary_injected_decomp_run_converges`), and the self-describing
+clean-break rejects in `tests/boundary_self_describing_clean_break.rs`
+(`boundary_load_reads_cost_scale_from_bin`,
+`boundary_load_rejects_pre_self_describing_checkpoint`,
+`auto_resolver_rejects_sentinel_graph_stage_id`).
 
 ### Dated anticipated fan-out reconciliation is hour-weighted by the SOURCE month
 
