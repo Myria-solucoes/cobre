@@ -4,11 +4,8 @@
 //! standardization semantics.
 
 use cobre_core::{
-    EntityId, InflowHistoryRow, Stage,
-    scenario::{
-        ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, HistoricalYears, LoadModel, NcsModel,
-        SamplingScheme,
-    },
+    EntityId, InflowHistoryRow, Stage, System,
+    scenario::{ExternalScenarioRow, HistoricalYears, LoadModel, NcsModel, SamplingScheme},
     temporal::{SeasonMap, StageLagTransition},
 };
 use cobre_io::StageIdResolver;
@@ -175,8 +172,7 @@ pub(crate) fn build_external_inflow_library(
 /// `constructor`. Feeds the SAME `(μ, σ)` pair into `standardize_external_load`
 /// / `standardize_external_ncs` that `cobre_stochastic::context` derives from
 /// the same rows for reconstruction, so the standardize/reconstruct round trip
-/// holds (design doc §3–§4.1) — the two call sites must keep deriving from the
-/// same rows.
+/// holds — the two call sites must keep deriving from the same rows.
 ///
 /// `row_fields`' `stage_id` is the row's raw declared domain id; `resolver`
 /// maps it to the canonical 0-based index `derive_external_sample_moments`
@@ -224,31 +220,26 @@ where
 
 /// Build and validate an [`ExternalScenarioLibrary`] for load.
 ///
-/// Canonical bus ID list from `load_models`, filtered by
-/// [`LoadModel::is_noise_member`] — the same authority `noise_entity_order`
-/// consumes, so a σ=0 bus keeps its noise-vector slot under the external
-/// scheme. `load_scheme` is the CALLING phase's own resolved scheme; a phase
-/// whose scheme diverges from the training-derived noise-vector width is
-/// caught by `assert_external_library_widths`, not here.
+/// Canonical bus ID list from [`System::load_noise_member_bus_ids`] — the
+/// single membership authority `noise_entity_order` and the LP template
+/// builder's `collect_load_bus_indices` also route through, so a σ=0 or
+/// seasonal-stats-absent bus keeps the same noise-vector slot everywhere.
+/// `load_scheme` is the CALLING phase's own resolved scheme; a phase whose
+/// scheme diverges from the training-derived noise-vector width is caught by
+/// `assert_external_library_widths`, not here.
 ///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on validation failure.
 pub(crate) fn build_external_load_library(
-    external_rows: &[ExternalLoadRow],
-    load_models: &[LoadModel],
+    system: &System,
     load_scheme: SamplingScheme,
     stages: &[Stage],
     forward_passes: u32,
 ) -> Result<ExternalScenarioLibrary, SddpError> {
+    let external_rows = system.external_load_scenarios();
     let n_stages = stages.len();
-    let mut bus_ids: Vec<EntityId> = load_models
-        .iter()
-        .filter(|m| m.is_noise_member(load_scheme))
-        .map(|m| m.bus_id)
-        .collect();
-    bus_ids.sort_unstable_by_key(|id| id.0);
-    bus_ids.dedup();
+    let bus_ids = system.load_noise_member_bus_ids(load_scheme);
     let n_buses = bus_ids.len();
     let row_entity_ids: std::collections::HashSet<EntityId> =
         external_rows.iter().map(|r| r.bus_id).collect();
@@ -308,21 +299,21 @@ pub(crate) fn build_external_load_library(
 
 /// Build and validate an [`ExternalScenarioLibrary`] for NCS.
 ///
-/// Uses canonical NCS ID list from `ncs_models` (all NCS entities, sorted and deduped).
+/// Canonical NCS ID list from [`System::ncs_noise_member_ids`] — this class
+/// is only ever built under `External` (the caller gates the call site), so
+/// an NCS with no `non_controllable_stats` row is still a noise member.
 ///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on validation failure.
 pub(crate) fn build_external_ncs_library(
-    external_rows: &[ExternalNcsRow],
-    ncs_models: &[NcsModel],
+    system: &System,
     stages: &[Stage],
     forward_passes: u32,
 ) -> Result<ExternalScenarioLibrary, SddpError> {
+    let external_rows = system.external_ncs_scenarios();
     let n_stages = stages.len();
-    let mut ncs_ids: Vec<EntityId> = ncs_models.iter().map(|m| m.ncs_id).collect();
-    ncs_ids.sort_unstable_by_key(|id| id.0);
-    ncs_ids.dedup();
+    let ncs_ids = system.ncs_noise_member_ids(SamplingScheme::External);
     let n_ncs = ncs_ids.len();
     let row_entity_ids: std::collections::HashSet<EntityId> =
         external_rows.iter().map(|r| r.ncs_id).collect();
@@ -379,15 +370,15 @@ pub(crate) fn build_external_ncs_library(
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        Block, BlockMode, InflowModel, NoiseMethod, ScenarioSourceConfig, StageRiskConfig,
-        StageStateConfig,
+        Block, BlockMode, ExternalLoadRow, InflowModel, NoiseMethod, ScenarioSourceConfig,
+        StageRiskConfig, StageStateConfig, SystemBuilder,
     };
     use cobre_stochastic::StochasticError;
 
     use super::{
-        EntityId, ExternalLoadRow, ExternalScenarioRow, LoadModel, PrecomputedPar, SamplingScheme,
-        SddpError, Stage, StageLagTransition, build_external_inflow_library,
-        build_external_load_library, derive_external_sample_moments,
+        EntityId, ExternalScenarioRow, LoadModel, PrecomputedPar, SamplingScheme, SddpError, Stage,
+        StageLagTransition, build_external_inflow_library, build_external_load_library,
+        derive_external_sample_moments,
     };
 
     fn single_stage(id: i32) -> Stage {
@@ -548,15 +539,14 @@ mod tests {
             scenario_id: 0,
             value_mw: 123.0,
         }];
+        let system = SystemBuilder::new()
+            .load_models(seasonal_load_models)
+            .external_load_scenarios(external_rows.clone())
+            .build()
+            .expect("system must build");
 
-        let library = build_external_load_library(
-            &external_rows,
-            &seasonal_load_models,
-            SamplingScheme::External,
-            &stages,
-            1,
-        )
-        .expect("a single-column external load library must build");
+        let library = build_external_load_library(&system, SamplingScheme::External, &stages, 1)
+            .expect("a single-column external load library must build");
 
         let moments = derive_external_sample_moments(
             &external_rows,
@@ -835,14 +825,14 @@ mod tests {
             },
         ];
 
-        let library = build_external_load_library(
-            &external_rows,
-            &seasonal_load_models,
-            SamplingScheme::External,
-            &stages,
-            1,
-        )
-        .expect("a gapped-stage-id external load deck must build, not drop every row");
+        let system = SystemBuilder::new()
+            .load_models(seasonal_load_models)
+            .external_load_scenarios(external_rows.clone())
+            .build()
+            .expect("system must build");
+
+        let library = build_external_load_library(&system, SamplingScheme::External, &stages, 1)
+            .expect("a gapped-stage-id external load deck must build, not drop every row");
 
         // Resolve the declared ids the same way the fixed engine now must:
         // gapped id 2 -> canonical position 0, gapped id 5 -> position 1.

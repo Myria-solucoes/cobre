@@ -17,6 +17,7 @@ import pytest
 
 
 VALID_CASE = "examples/1dtoy"
+D56_EXTERNAL_AUTHORITATIVE_CASE = "examples/deterministic/d56-external-authoritative"
 MISSING_CASE = "/tmp/nonexistent_cobre_case_xzy123"
 
 
@@ -45,6 +46,37 @@ def test_run_1dtoy_creates_output(tmp_path: pathlib.Path) -> None:
 
     convergence = tmp_path / "training" / "convergence.parquet"
     assert convergence.exists(), "training/convergence.parquet must exist after run()"
+
+
+def test_run_d56_external_authoritative_converges(tmp_path: pathlib.Path) -> None:
+    """run() accepts a sigma=0 External load/inflow deck with no seasonal-stats
+    twins and reaches numeric convergence (lower_bound == upper_bound), mirroring
+    the CLI's behavior on the same deck and the deck-level Rust regression
+    (`d56_external_authoritative_loads_and_converges`).
+
+    d56's config declares only an `iteration_limit` stopping rule, so the
+    returned `converged` flag (tied to the distinct `bound_stalling` stop
+    reason) stays False even at a 0% gap — this asserts the numeric
+    convergence the deck actually demonstrates instead.
+    """
+    import cobre.run  # noqa: PLC0415
+
+    result = cobre.run.run(D56_EXTERNAL_AUTHORITATIVE_CASE, output_dir=str(tmp_path))
+
+    assert result["iterations"] >= 1, "d56 training must run at least one iteration"
+
+    lower_bound = result["lower_bound"]
+    upper_bound = result["upper_bound"]
+    assert lower_bound is not None and upper_bound is not None, (
+        "d56 training must report both bounds"
+    )
+    assert abs(lower_bound - upper_bound) < 1e-6, (
+        "d56 is a sigma=0 deck: lower_bound and upper_bound must match to "
+        f"within 1e-6, got lower_bound={lower_bound} upper_bound={upper_bound}"
+    )
+
+    success_marker = tmp_path / "training" / "_SUCCESS"
+    assert success_marker.exists(), "training/_SUCCESS must exist after run()"
 
 
 def test_run_skip_simulation(tmp_path: pathlib.Path) -> None:

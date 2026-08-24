@@ -102,32 +102,23 @@ impl NoiseEntityOrder {
 /// An NCS with `std = 0` is included unconditionally: it contributes zero noise
 /// after the transform, and dropping it would shift the canonical entity order.
 ///
-/// Load-bus membership defers to [`LoadModel::is_noise_member`], the single
-/// membership authority — this fn does not re-derive the predicate. Inflow
-/// stays all-hydros and NCS stays unfiltered; only load's membership reads
-/// `schemes`. Every caller must pass the SAME resolved `schemes` (the training
-/// scenario source) so the external-library width check, the opening-tree
-/// layout, and the backward assembly all agree on which entities occupy the
-/// vector.
+/// Load and NCS membership both route through `System`'s own authority
+/// ([`System::load_noise_member_bus_ids`], [`System::ncs_noise_member_ids`]) —
+/// the single owner every LP/noise-vector site (this function, the external
+/// library builders, the LP template builder) calls rather than re-deriving
+/// membership. Every caller must pass the SAME resolved `schemes` (the
+/// training scenario source) so the external-library width check, the
+/// opening-tree layout, and the backward assembly all agree on which
+/// entities occupy the vector.
 #[must_use]
 pub fn noise_entity_order(system: &System, schemes: &ClassSchemes) -> NoiseEntityOrder {
-    let sorted_dedup = |mut ids: Vec<EntityId>| {
-        ids.sort_unstable_by_key(|id| id.0);
-        ids.dedup();
-        ids
-    };
+    let load_scheme = schemes.load.unwrap_or(SamplingScheme::InSample);
+    let ncs_scheme = schemes.ncs.unwrap_or(SamplingScheme::InSample);
 
     NoiseEntityOrder {
         hydro_ids: system.hydros().iter().map(|h| h.id).collect(),
-        load_bus_ids: sorted_dedup(
-            system
-                .load_models()
-                .iter()
-                .filter(|m| m.is_noise_member(schemes.load.unwrap_or(SamplingScheme::InSample)))
-                .map(|m| m.bus_id)
-                .collect(),
-        ),
-        ncs_entity_ids: sorted_dedup(system.ncs_models().iter().map(|m| m.ncs_id).collect()),
+        load_bus_ids: system.load_noise_member_bus_ids(load_scheme),
+        ncs_entity_ids: system.ncs_noise_member_ids(ncs_scheme),
     }
 }
 
@@ -484,19 +475,28 @@ where
 }
 
 /// Under `External`, override each AR(0) hydro's study-stage [`InflowModel`]
-/// mean/std with sample moments derived from `system.external_scenarios()`
-/// (design doc §4.2); an AR(p > 0) hydro's models pass through unchanged
-/// (§4.3). AR(0)-ness mirrors `par_probe`'s own per-hydro classification
-/// (`PrecomputedPar::order`/`has_annual`, built from the unmodified models),
-/// so the override can never disagree with what a later `PrecomputedPar::build`
-/// itself would treat as AR(0).
+/// mean/std with sample moments derived from `system.external_scenarios()`;
+/// an AR(p > 0) hydro's models pass through unchanged. AR(0)-ness mirrors
+/// `par_probe`'s own per-hydro classification (`PrecomputedPar::order`/
+/// `has_annual`, built from the unmodified models), so the override can
+/// never disagree with what a later `PrecomputedPar::build` itself would
+/// treat as AR(0).
+///
+/// A hydro/stage with no `inflow_seasonal_stats` row at all — the file is
+/// entirely absent — still classifies AR(0) under `PrecomputedPar::build`'s
+/// default (`order`/`has_annual` start at their zero value for a hydro with no
+/// models), so it is synthesized here from `moments` rather than left out:
+/// otherwise the override never fires for that hydro and `PrecomputedPar`
+/// defaults its mean/std to `0.0`, which V3.7 then rejects as a
+/// deterministic-anchor mismatch against the real external value.
 fn external_ar0_inflow_models(
     system: &System,
     hydro_ids: &[EntityId],
-    n_stages: usize,
+    study_stages: &[Stage],
     stage_index: &HashMap<i32, usize>,
     par_probe: &PrecomputedPar,
 ) -> Vec<InflowModel> {
+    let n_stages = study_stages.len();
     let n_hydros = hydro_ids.len();
     let resolved_rows = resolve_row_stages(
         system.external_scenarios(),
@@ -515,7 +515,8 @@ fn external_ar0_inflow_models(
         .map(|(i, &id)| (id, i))
         .collect();
 
-    system
+    let mut has_row = vec![false; n_stages * n_hydros];
+    let mut models: Vec<InflowModel> = system
         .inflow_models()
         .iter()
         .cloned()
@@ -526,7 +527,8 @@ fn external_ar0_inflow_models(
             let Some(&h_idx) = hydro_index.get(&model.hydro_id) else {
                 return model;
             };
-            if stage_idx >= n_stages || par_probe.order(h_idx) != 0 || par_probe.has_annual(h_idx) {
+            has_row[stage_idx * n_hydros + h_idx] = true;
+            if par_probe.order(h_idx) != 0 || par_probe.has_annual(h_idx) {
                 return model;
             }
             let (mean_m3s, std_m3s) = moments[stage_idx * n_hydros + h_idx];
@@ -536,7 +538,30 @@ fn external_ar0_inflow_models(
                 ..model
             }
         })
-        .collect()
+        .collect();
+
+    for (h_idx, &hydro_id) in hydro_ids.iter().enumerate() {
+        if par_probe.order(h_idx) != 0 || par_probe.has_annual(h_idx) {
+            continue;
+        }
+        for (stage_idx, stage) in study_stages.iter().enumerate() {
+            if has_row[stage_idx * n_hydros + h_idx] {
+                continue;
+            }
+            let (mean_m3s, std_m3s) = moments[stage_idx * n_hydros + h_idx];
+            models.push(InflowModel {
+                hydro_id,
+                stage_id: stage.id,
+                mean_m3s,
+                std_m3s,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            });
+        }
+    }
+
+    models
 }
 
 /// Initialize the full stochastic pipeline from a [`System`] reference.
@@ -648,13 +673,8 @@ pub fn build_stochastic_context(
     let par_lp =
         PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
     let par_lp = if schemes.inflow == Some(SamplingScheme::External) {
-        let external_models = external_ar0_inflow_models(
-            system,
-            &hydro_ids,
-            study_stages.len(),
-            &stage_index,
-            &par_lp,
-        );
+        let external_models =
+            external_ar0_inflow_models(system, &hydro_ids, &study_stages, &stage_index, &par_lp);
         PrecomputedPar::build(&external_models, &study_stages, &hydro_ids, cycle_len)?
     } else {
         par_lp

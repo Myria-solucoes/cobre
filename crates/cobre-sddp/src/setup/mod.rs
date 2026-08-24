@@ -1887,8 +1887,7 @@ fn build_scenario_libraries(
     let training_external_load: Option<ExternalScenarioLibrary> =
         if load_scheme == SamplingScheme::External {
             Some(scenario_libraries::build_external_load_library(
-                system.external_load_scenarios(),
-                system.load_models(),
+                system,
                 load_scheme,
                 stages,
                 forward_passes,
@@ -1900,8 +1899,7 @@ fn build_scenario_libraries(
     let training_external_ncs: Option<ExternalScenarioLibrary> =
         if ncs_scheme == SamplingScheme::External {
             Some(scenario_libraries::build_external_ncs_library(
-                system.external_ncs_scenarios(),
-                system.ncs_models(),
+                system,
                 stages,
                 forward_passes,
             )?)
@@ -1952,8 +1950,7 @@ fn build_scenario_libraries(
     let simulation_external_load: Option<ExternalScenarioLibrary> =
         if sim_load_scheme == SamplingScheme::External && sim_load_scheme != load_scheme {
             Some(scenario_libraries::build_external_load_library(
-                system.external_load_scenarios(),
-                system.load_models(),
+                system,
                 sim_load_scheme,
                 stages,
                 forward_passes,
@@ -1965,8 +1962,7 @@ fn build_scenario_libraries(
     let simulation_external_ncs: Option<ExternalScenarioLibrary> =
         if sim_ncs_scheme == SamplingScheme::External && sim_ncs_scheme != ncs_scheme {
             Some(scenario_libraries::build_external_ncs_library(
-                system.external_ncs_scenarios(),
-                system.ncs_models(),
+                system,
                 stages,
                 forward_passes,
             )?)

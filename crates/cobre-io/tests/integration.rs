@@ -22,7 +22,9 @@ use cobre_io::output::simulation_writer::{
     HydroBusWriteRecord, HydroWriteRecord, ScenarioWritePayload, SimulationParquetWriter,
     StageWritePayload, write_paths,
 };
-use cobre_io::{ParquetWriterConfig, deserialize_system, load_case, serialize_system};
+use cobre_io::{
+    ParquetWriterConfig, deserialize_system, load_case, serialize_system, validate_case,
+};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
 
@@ -1505,5 +1507,57 @@ fn test_thermal_bounds_block_id_on_stage_level_cost_column_rejected_by_load_case
         Ok(_) => panic!(
             "expected Err for a block_id on the stage-level-only cost_per_mwh column, got Ok"
         ),
+    }
+}
+
+/// Recursively copies `src` into `dst`, skipping any `output` directory —
+/// mirrors `crates/cobre-sddp/tests/deterministic.rs`'s `copy_case_dir`.
+fn copy_case_dir_into(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let file_type = entry.file_type().unwrap();
+        let src_path = entry.path();
+        if file_type.is_dir() {
+            if entry.file_name() == "output" {
+                continue;
+            }
+            copy_case_dir_into(&src_path, &dst.join(entry.file_name()));
+        } else {
+            std::fs::copy(&src_path, dst.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+/// D56 (c): copying the committed `d56-external-authoritative` deck into a
+/// `TempDir` and dropping in the committed AR(1) reject fixture as
+/// `scenarios/inflow_ar_coefficients.parquet` makes hydro 1 AR(1) while its
+/// external inflow column stays constant (sigma=0). `validate_case` rejects
+/// it naming the deterministic PAR output reason, never the retired
+/// "inversion is undefined" phrasing.
+#[test]
+fn test_d56_ar1_sigma_zero_inflow_rejected_by_validate_case() {
+    let src = Path::new("../../examples/deterministic/d56-external-authoritative");
+    let dir = TempDir::new().unwrap();
+    copy_case_dir_into(src, dir.path());
+    std::fs::copy(
+        Path::new("tests/fixtures/d56_reject_ar_coefficients.parquet"),
+        dir.path().join("scenarios/inflow_ar_coefficients.parquet"),
+    )
+    .unwrap();
+
+    match validate_case(dir.path()) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("deterministic PAR output"),
+                "message must name the deterministic PAR output reason: {msg}"
+            );
+            assert!(
+                !msg.contains("inversion is undefined"),
+                "message must not repeat the retired 'inversion is undefined' phrasing: {msg}"
+            );
+        }
+        Ok(_) => panic!("expected the AR(1) + sigma=0 external inflow deck to be rejected, got Ok"),
     }
 }

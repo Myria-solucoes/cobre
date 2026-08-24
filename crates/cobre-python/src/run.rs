@@ -1839,6 +1839,34 @@ mod tests {
         std::fs::remove_dir_all(&output_dir).ok();
     }
 
+    /// The Python load path inherits `External`-scheme moment derivation
+    /// through the shared `build_study_setup` entry point: a σ = 0 External
+    /// load/inflow deck with no seasonal-stats twins must load successfully
+    /// with no binding change in this crate.
+    #[test]
+    fn build_study_setup_succeeds_for_d56_external_authoritative() {
+        let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-python parent")
+            .parent()
+            .expect("crates parent")
+            .join("examples/deterministic/d56-external-authoritative");
+
+        let output_dir =
+            std::env::temp_dir().join(format!("cobre_py_build_study_d56_{}", std::process::id()));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+
+        let loaded = build_study_setup(&case_dir, &output_dir, None)
+            .expect("build_study_setup must succeed for d56-external-authoritative");
+
+        assert!(
+            loaded.stochastic_summary.n_hydros > 0,
+            "stochastic summary must report a non-zero hydro count"
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
     /// `apply_training_policy_mode` is Python-free: under the default
     /// `PolicyMode` (no warm-start/resume) and no boundary cuts, it must be a
     /// no-op that returns `Ok(())` and leaves the freshly built FCF untouched.

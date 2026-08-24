@@ -46,15 +46,11 @@ fn train_deterministic_case(
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let prepare_result = prepare_stochastic(
-        system,
-        case_dir,
-        &config,
-        42,
-        &ScenarioSource::default(),
-        None,
-    )
-    .expect("prepare_stochastic must succeed");
+    let training_source = config
+        .training_scenario_source(&config_path)
+        .expect("training_scenario_source must parse");
+    let prepare_result = prepare_stochastic(system, case_dir, &config, 42, &training_source, None)
+        .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 
@@ -3393,6 +3389,65 @@ fn d28_decomp_weekly_monthly_loads_and_trains() {
     assert!(
         result.iterations > 0,
         "D28: must complete at least 1 iteration"
+    );
+}
+
+/// D56: a sigma=0 External LOAD deck with no `load_seasonal_stats.parquet`
+/// twin realizes its own external value at stage 0, not a seasonal mean —
+/// the deck-level proof of
+/// `external_load_sigma_zero_reconstructs_external_value_not_seasonal_mean`
+/// (`crates/cobre-sddp/src/setup/scenario_libraries.rs`). Also confirms the
+/// deck as-authored validates with no `BusinessRuleViolation` (the
+/// seasonal-stats-optional-under-External path).
+#[test]
+fn d56_external_load_reconstructs_external_value_not_seasonal_mean() {
+    let case_dir = Path::new("../../examples/deterministic/d56-external-authoritative");
+
+    cobre_io::validate_case(case_dir)
+        .expect("d56 as-authored must validate with no BusinessRuleViolation");
+
+    let (setup, _system, _result) = run_deterministic_with_setup(case_dir);
+
+    let mean = setup.stochastic.normal().mean(0, 0);
+    let std = setup.stochastic.normal().std(0, 0);
+    let eta = setup
+        .scenario_libraries
+        .training
+        .external_load
+        .as_ref()
+        .expect("d56's load scheme is External; a training library must exist")
+        .eta_slice(0, 0)[0];
+    let realized = (mean + std * eta).max(0.0);
+
+    assert!(
+        (realized - 123.0).abs() < 1e-9,
+        "D56: stage-0 realized load must equal the external value (123.0), not a \
+         seasonal mean; got {realized}"
+    );
+}
+
+/// D56: a sigma=0 AR(0) External INFLOW deck with no
+/// `inflow_seasonal_stats.parquet` twin loads and converges (LB == UB), proving
+/// the seasonal-stats-optional-under-External path for inflow end to end.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d56_external_authoritative_loads_and_converges() {
+    let case_dir = Path::new("../../examples/deterministic/d56-external-authoritative");
+
+    let result = run_deterministic(case_dir);
+
+    assert!(
+        result.iterations >= 1,
+        "D56: must complete at least 1 iteration"
+    );
+    assert!(
+        (result.final_lb - result.final_ub).abs() < 1e-6,
+        "D56: a sigma=0 deck must converge LB == UB; lb={} ub={}",
+        result.final_lb,
+        result.final_ub
     );
 }
 

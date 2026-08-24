@@ -83,6 +83,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   study whose pre-study run never exceeded its in-flight occupancy keeps its
   state dimension, and its checkpoints are unaffected.
 
+- **Under the External sampling scheme, a class's realized values now come
+  from its external scenario file, including the deterministic (σ = 0)
+  case.** Load, NCS, and inflow validation and standardization derive their
+  mean and standard deviation from the external scenario samples themselves
+  rather than from the seasonal-statistics files, so a seasonal-stats file is
+  optional under External. A constant (σ = 0) external column is accepted for
+  load, NCS, and an AR(0) inflow model (no declared lag coefficient or annual
+  component); for an AR(p > 0) inflow model a deterministic column is still
+  rejected, and the message now states the real reason — the column would
+  have to equal that model's own deterministic output — instead of a message
+  about requiring a positive standard deviation.
+
 ### Removed
 
 - **BREAKING — `initial_conditions.json`'s `future_anticipated_deliveries[]` is

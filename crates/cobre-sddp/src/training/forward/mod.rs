@@ -1,14 +1,14 @@
 //! Forward pass execution for SDDP training.
 //!
-//! [`run_forward_pass`] simulates scenario trajectories via stage LPs with the
-//! current Future Cost Function. Outputs [`TrajectoryRecord`]s and [`ForwardResult`]
+//! `run_forward_pass` simulates scenario trajectories via stage LPs with the
+//! current Future Cost Function. Outputs `TrajectoryRecord`s and [`ForwardResult`]
 //! for the backward pass and synchronisation step. Parallelised across workers
 //! with deterministic scenario assignment; the per-scenario hot loop lives in
 //! `forward_pass_state::ForwardPassState::run`.
 //!
 //! This `mod.rs` owns the result structs ([`ForwardResult`], [`SyncResult`]), the
-//! per-call parameter bundles ([`ForwardPassBatch`], `StageKey`), and the thin
-//! [`run_forward_pass`] shim that delegates to `ForwardPassState::run`.
+//! per-call parameter bundles (`ForwardPassBatch`, `StageKey`), and the thin
+//! `run_forward_pass` shim that delegates to `ForwardPassState::run`.
 
 use crate::{
     cut::pool::CutPool,
