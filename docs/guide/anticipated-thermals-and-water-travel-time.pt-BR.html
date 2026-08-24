@@ -500,9 +500,9 @@ estudo, exatamente como qualquer outra janela de compromisso. Três coisas a ter
   <li><strong>O valor é custo afundado — nunca entra na função objetivo.</strong> Exatamente como os
   valores iniciais dentro do estudo (§3.4), um valor fixo pós-horizonte só é precificado se uma política
   de fronteira terminal estiver carregada, e apenas por meio da precificação de custo futuro dessa
-  fronteira — nunca como um termo de custo na função objetivo do próprio estudo atual. A saída de
-  simulação o reporta em sua data de entrega real, do mesmo modo que uma entrega dentro do estudo é
-  reportada.</li>
+  fronteira — nunca como um termo de custo na função objetivo do próprio estudo atual. A tabela em
+  nível de execução <code>anticipated/fixed_deliveries.parquet</code> (§6.2) o ecoa em sua data de
+  entrega real.</li>
 </ul>
 
 <p>Este compromisso nunca ocupa um slot do buffer: diferente de uma entrega dentro do estudo ou de uma
@@ -567,7 +567,272 @@ no fim — \(c(m)\) é o estágio que contém \(e_m - 336\), onde \(e_m\) é o t
 \(m=4\) é decidida na semana \(t_2\)), mas <code>lead_time_hours</code> percebe que 336 h é menor que o
 mês de 720 h, então a decisão para \(t_4\) cai <em>dentro</em> de \(t_4\) — o caso \(K = 0\), despachada
 como térmica comum naquele estágio (§3.2). É exatamente por isso que uma antecedência física é ciente do
-calendário e uma antecedência em contagem de estágios não é.</p>
+calendário e uma antecedência em contagem de estágios não é. A §3.8 percorre um deck DECOMP de GNL real,
+em que a antecedência alcança além do horizonte.</p>
+
+<h3>3.8 Exemplo resolvido: um deck DECOMP de GNL fiel</h3>
+
+<p>Tudo o que está em §3.4–§3.6 se encontra no deck que os usuários do DECOMP veem toda semana: as usinas
+de GNL de um estudo DECOMP de dois meses, precificadas no horizonte por uma função de custo futuro do
+NEWAVE. Este exemplo percorre o deck rv2 de março de 2026 de ponta a ponta — calendário, antecedência,
+arquivos, buffer, precificação na fronteira, saídas — com os números reais, para que você reconheça cada
+peça no seu próprio caso.</p>
+
+<h4>O que o DECOMP declara</h4>
+
+<p>O DECOMP mantém suas usinas GNL fora do registro térmico comum <code>CT</code>, no <code>dadgnl</code>:</p>
+<ul>
+  <li><code>TG</code> — o cadastro das usinas: código, submercado, custo de combustível por patamar
+  (<code>CVU</code>), disponibilidade e inflexibilidade.</li>
+  <li><code>NL</code> — a antecedência de despacho, em meses inteiros (1 ou 2). SANTA CRUZ e PSERGIPE I
+  declaram 2.</li>
+  <li><code>GL</code> — o despacho <strong>já comandado</strong> por revisões anteriores: um registro por
+  semana operativa, com sua data de início e MW por patamar. Neste deck, toda semana dentro do estudo está
+  comandada em 0 MW; além do horizonte, a semana 8 (2 de maio) está comandada em 0 MW e a semana 9 (9 de
+  maio) em 500 MW para SANTA CRUZ.</li>
+  <li><code>GS</code> — o calendário de semanas operativas (semanas por mês).</li>
+</ul>
+
+<p>O horizonte do DECOMP é de dois meses: o mês corrente em semanas operativas (sábado a sexta), o mês
+seguinte como um único estágio. Com antecedência de 2 meses, cada semana de março decide a <strong>mesma
+semana operativa dois meses à frente</strong> — em maio — e o mês de abril decide o restante de junho.
+Assim, nesse regime <em>toda</em> entrega dentro do estudo foi comandada antes de ele começar, e
+<em>toda</em> decisão que o estudo toma cai depois do seu próprio horizonte. É exatamente a forma para a
+qual §3.4–§3.6 foram construídas: as entregas dentro do estudo são valores iniciais, as semanas de maio já
+comandadas são compromissos fixos pós-horizonte, e as decisões do próprio estudo são carregadas até o
+estado terminal e precificadas pela fronteira do NEWAVE.</p>
+
+<h4>Passo 1 — o eixo de entrega estendido</h4>
+
+<p>O estudo rv2 vai de 14 de março a 1º de maio de 2026: três semanas operativas e o restante de abril
+(\(168 + 168 + 168 + 648 = 1152\) h). O <code>post_study_stages.json</code> continua o calendário com
+<strong>sete</strong> estágios, e a antecedência (Passo 2) classifica cada entrega \(m\) do eixo estendido em
+um de três tipos:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>\(m\)</th><th>Janela</th><th>Horas</th><th>Decidida por</th><th>Tipo</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>14 mar → 21 mar (semana)</td><td>168</td><td>antes do estudo (<code>GL</code> semana 1)</td><td>valor inicial (§3.4)</td></tr>
+    <tr><td>1</td><td>21 mar → 28 mar (semana)</td><td>168</td><td>antes do estudo (<code>GL</code> semana 2)</td><td>valor inicial</td></tr>
+    <tr><td>2</td><td>28 mar → 4 abr (semana)</td><td>168</td><td>antes do estudo (<code>GL</code> semana 3)</td><td>valor inicial</td></tr>
+    <tr><td>3</td><td>4 abr → 1º mai (restante de abril)</td><td>648</td><td>antes do estudo (<code>GL</code> semanas 4–7)</td><td>valor inicial</td></tr>
+    <tr><td>4</td><td>1º mai → 2 mai (estágio residual)</td><td>24</td><td>antes do estudo</td><td><strong>fixo</strong>, 0 MW (§3.6)</td></tr>
+    <tr><td>5</td><td>2 mai → 9 mai (<code>GL</code> semana 8)</td><td>168</td><td>antes do estudo</td><td><strong>fixo</strong>, 0 MW</td></tr>
+    <tr><td>6</td><td>9 mai → 16 mai (<code>GL</code> semana 9)</td><td>168</td><td>antes do estudo</td><td><strong>fixo</strong>, 500 MW para SANTA CRUZ</td></tr>
+    <tr><td>7</td><td>16 mai → 23 mai (semana 10)</td><td>168</td><td>estágio 0</td><td>carregada (§3.5)</td></tr>
+    <tr><td>8</td><td>23 mai → 30 mai (semana 11)</td><td>168</td><td>estágio 1</td><td>carregada</td></tr>
+    <tr><td>9</td><td>30 mai → 6 jun (semana 12)</td><td>168</td><td>estágio 2</td><td>carregada</td></tr>
+    <tr><td>10</td><td>6 jun → 30 jun (restante de junho)</td><td>576</td><td>estágio 3</td><td>carregada</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Dois detalhes de calendário passam despercebidos com facilidade. O estudo termina numa sexta-feira (1º de
+maio) enquanto a grade de semanas operativas recomeça no sábado (2 de maio): o <strong>estágio
+residual</strong> de 24 h, \(m = 4\), existe apenas para manter o eixo de entrega contíguo, e é declarado
+como uma janela explícita de 0 MW — nunca deixado descoberto. E o restante de junho é um único estágio de
+576 h: o <em>mês</em> de abril decide o <em>mês</em> de junho, em granularidade mensal, exatamente como o
+DECOMP faz.</p>
+
+<pre class="mermaid">
+flowchart LR
+  subgraph S["estudo — quatro estágios, toda entrega comandada pelo GL"]
+    direction LR
+    t0["t0<br/>14 mar"] --> t1["t1<br/>21 mar"] --> t2["t2<br/>28 mar"] --> t3["t3<br/>abril"]
+  end
+  subgraph F["fixos — já-comandadas, nunca no buffer"]
+    direction LR
+    m4["residual 1º mai<br/>0 MW"] --> m5["semana 8<br/>0 MW"] --> m6["semana 9<br/>500 MW"]
+  end
+  subgraph C["carregadas — decididas no estudo, precificadas pela fronteira"]
+    direction LR
+    m7["semana 10"] --> m8["semana 11"] --> m9["semana 12"] --> m10["restante<br/>de junho"]
+  end
+  t0 -. decide .-> m7
+  t1 -. decide .-> m8
+  t2 -. decide .-> m9
+  t3 -. decide .-> m10
+</pre>
+
+<h4>Passo 2 — a antecedência</h4>
+
+<p>"A mesma semana operativa dois meses à frente" são nove semanas operativas: a primeira entrega que o
+estudo decide (semana 10, 16 de maio) começa exatamente 63 dias após o início do estudo —
+<code>lead_time_hours: 1512.0</code>. O decisor é ancorado no fim (§3.2): \(c(m)\) é o estágio que contém
+\(e_m - 1512\), onde \(e_m\) é o fim do estágio \(m\) em horas desde o início do estudo, e um empate
+exatamente numa fronteira de estágio vai para o estágio <strong>anterior</strong>:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>\(m\)</th><th>\(e_m\)</th><th>\(e_m - 1512\)</th><th>\(c(m)\)</th></tr></thead>
+  <tbody>
+    <tr><td>6 (semana 9)</td><td>1512</td><td>0</td><td>antes do estudo — empate no início do estudo</td></tr>
+    <tr><td>7 (semana 10)</td><td>1680</td><td>168</td><td>estágio 0 — empate na fronteira \(t_0\) / \(t_1\)</td></tr>
+    <tr><td>8 (semana 11)</td><td>1848</td><td>336</td><td>estágio 1</td></tr>
+    <tr><td>9 (semana 12)</td><td>2016</td><td>504</td><td>estágio 2</td></tr>
+    <tr><td>10 (junho)</td><td>2592</td><td>1080</td><td>estágio 3</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>e todo \(m \le 5\) cai antes do estudo também. Qualquer antecedência em \([1512, 1680)\) h — pelo menos
+nove e menos de dez semanas operativas — resolve este mesmo mapeamento. Fora dela, a validação diz para
+que lado você errou:</p>
+
+<div class="admon warn">
+  <span class="tag">Curta demais (digamos 1500 h)</span>
+  A semana 9 passa a ser <em>decidida pelo estudo</em>, e a janela de 500 MW que a cobre é rejeitada —
+  <code>past_anticipated_commitments cover post-study stage index(es) [2], which the study itself decides …
+  lengthen anticipated_config's lead</code>.
+</div>
+<div class="admon warn">
+  <span class="tag">Longa demais (1680 h ou mais)</span>
+  A semana 10 passa a ser <em>decidida antes do estudo</em>, e o estágio sem janela é rejeitado —
+  <code>past_anticipated_commitments do not tile post-study stage index(es) [3] at coverage 1.0; declare the
+  fixed commitment for each</code>.
+</div>
+
+<p><code>lead_stages: 7</code> (quatro estágios do estudo mais os três estágios fixos) resolve o decisor
+idêntico, \(c(m) = m - 7\). As duas grafias diferem apenas na profundidade do buffer: uma antecedência em
+contagem de estágios mantém seu \(\ell\) como profundidade, então o buffer fica com 7 slots e três slots
+permanentemente mascarados por usina, enquanto a antecedência física o dimensiona pela ocupação medida — 4
+(Passo 4). Num calendário DECOMP, prefira <code>lead_time_hours</code>.</p>
+
+<h4>Passo 3 — os arquivos</h4>
+
+<p>O <code>stages.json</code> é o calendário comum de quatro estágios do estudo; não há nada de especial
+nele. A mecânica antecipada vive em quatro outros lugares.</p>
+
+<p><code>system/thermals.json</code> — as duas usinas GNL são entradas comuns que carregam a antecedência:</p>
+<pre><code>{
+  "id": 94,
+  "name": "SANTA CRUZ",
+  "bus_id": 0,
+  "operational_start_date": "2026-03-14",
+  "cost_per_mwh": 199.22,
+  "generation": { "min_mw": 0.0, "max_mw": 500.0 },
+  "anticipated_config": { "lead_time_hours": 1512.0 }
+}</code></pre>
+<p>(PSERGIPE I é <code>id: 95</code> na barra 2, 321,26 $/MWh, 0–1593 MW, mesma antecedência.)</p>
+
+<p><code>post_study_stages.json</code> — o calendário de continuação de sete estágios, e uma célula de
+custo/limites <strong>apenas para os estágios que o estudo decide</strong> (índices 3–6). Os estágios fixos
+0–2 guardam constantes, não decisões, então não precisam de nenhuma:</p>
+<pre><code>{
+  "stages": [
+    { "start_date": "2026-05-01", "duration_hours": 24.0 },   // 0 — estágio residual
+    { "start_date": "2026-05-02", "duration_hours": 168.0 },  // 1 — semana 8
+    { "start_date": "2026-05-09", "duration_hours": 168.0 },  // 2 — semana 9
+    { "start_date": "2026-05-16", "duration_hours": 168.0 },  // 3 — semana 10
+    { "start_date": "2026-05-23", "duration_hours": 168.0 },  // 4 — semana 11
+    { "start_date": "2026-05-30", "duration_hours": 168.0 },  // 5 — semana 12
+    { "start_date": "2026-06-06", "duration_hours": 576.0 }   // 6 — restante de junho
+  ],
+  "thermal_bounds": [
+    { "thermal_id": 94, "post_study_stage_index": 3, "cost_per_mwh": 199.22, "min_mw": 0.0, "max_mw": 500.0 },
+    { "thermal_id": 94, "post_study_stage_index": 4, "cost_per_mwh": 199.22, "min_mw": 0.0, "max_mw": 500.0 },
+    { "thermal_id": 94, "post_study_stage_index": 5, "cost_per_mwh": 199.22, "min_mw": 0.0, "max_mw": 500.0 },
+    { "thermal_id": 94, "post_study_stage_index": 6, "cost_per_mwh": 199.22, "min_mw": 0.0, "max_mw": 500.0 }
+    // … e as mesmas quatro células para a térmica 95
+  ]
+}</code></pre>
+
+<p><code>initial_conditions.json</code> — uma janela de <code>past_anticipated_commitments</code> por entrega
+decidida antes do estudo, dentro do estudo e pós-horizonte igualmente, traduzida diretamente do
+<code>GL</code>:</p>
+<pre><code>"past_anticipated_commitments": [
+  { "thermal_id": 94, "start_date": "2026-03-14", "end_date": "2026-03-21", "value_mw": 0.0 },   // valores iniciais — GL semanas 1–3 …
+  { "thermal_id": 94, "start_date": "2026-03-21", "end_date": "2026-03-28", "value_mw": 0.0 },
+  { "thermal_id": 94, "start_date": "2026-03-28", "end_date": "2026-04-04", "value_mw": 0.0 },
+  { "thermal_id": 94, "start_date": "2026-04-04", "end_date": "2026-05-01", "value_mw": 0.0 },   // … e as semanas 4–7 no estágio de abril
+  { "thermal_id": 94, "start_date": "2026-05-01", "end_date": "2026-05-02", "value_mw": 0.0 },   // fixo — o estágio residual, um zero explícito
+  { "thermal_id": 94, "start_date": "2026-05-02", "end_date": "2026-05-09", "value_mw": 0.0 },   // fixo — GL semana 8
+  { "thermal_id": 94, "start_date": "2026-05-09", "end_date": "2026-05-16", "value_mw": 500.0 }  // fixo — GL semana 9, a já-comandada
+  // … e as mesmas sete janelas, todas 0 MW, para a térmica 95
+]</code></pre>
+<p>Repare na divisão no horizonte: a janela de abril termina em <code>2026-05-01</code> e o estágio residual
+começa ali. Uma única janela <code>2026-04-04 → 2026-05-09</code> atravessaria o horizonte e é rejeitada —
+divida-a no fim do horizonte. Os 500 MW também precisam estar dentro do
+\([\text{min\_mw}, \text{max\_mw}]\) da usina (aqui, exatamente no limite).</p>
+
+<p><code>config.json</code> — a função de custo futuro do NEWAVE à qual o DECOMP se acopla, convertida em um
+checkpoint do cobre, é a fronteira terminal:</p>
+<pre><code>"policy": { "boundary": { "path": "boundary", "source_stage": 3 } }</code></pre>
+<p><code>source_stage</code> nomeia o estágio da fonte cujo pool de cortes carregar; omita-o e o carregador
+casa os estágios datados da fonte com o calendário terminal do estudo.</p>
+
+<h4>Passo 4 — o buffer</h4>
+
+<p>Por usina, no máximo quatro compromissos estão em trânsito ao mesmo tempo — no estágio 0, os três valores
+iniciais ainda não "pescados" mais a decisão da semana 10; depois, uma sequência de valores iniciais que
+encolhe, compensada por um conjunto de decisões que cresce — e a sequência de valores iniciais pré-estudo
+também tem profundidade quatro, então \(k_{\max} = \max(4, 4) = 4\) (§3.2): duas faixas, oito dimensões de
+estado antecipadas. No eixo do buffer a janela fixa \(m = 4, 5, 6\) é excluída (\(r(m) = m\) para
+\(m \le 3\), \(r(m) = m - 3\) para \(m \ge 7\)), então os resíduos se reciclam exatamente como no
+Exemplo A:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Estágio \(t\)</th><th>Fishing (lê <code>commit_in</code>)</th><th>Insere (escreve <code>commit_out</code>)</th><th>Em trânsito após \(t\)</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>\(m=0\) — valor inicial, 0 MW, slot 0</td><td>\(m=7\) (semana 10) → \(r=4\), slot 0</td><td>valores iniciais 1–3, semana 10</td></tr>
+    <tr><td>1</td><td>\(m=1\) — valor inicial, slot 1</td><td>\(m=8\) (semana 11) → \(r=5\), slot 1</td><td>valores iniciais 2–3, semanas 10–11</td></tr>
+    <tr><td>2</td><td>\(m=2\) — valor inicial, slot 2</td><td>\(m=9\) (semana 12) → \(r=6\), slot 2</td><td>valor inicial 3, semanas 10–12</td></tr>
+    <tr><td>3</td><td>\(m=3\) — valor inicial, slot 3</td><td>\(m=10\) (junho) → \(r=7\), slot 3</td><td>semanas 10–12, junho</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>O fishing de cada estágio fixa a geração da usina no seu valor inicial comandado — SANTA CRUZ não pode
+ser despachada dentro do estudo por mais barata que fosse, porque o <code>GL</code> comandou 0 MW — e a
+inserção de cada estágio é uma decisão genuína, com custo: a coluna de compromisso é limitada pela célula
+de <code>thermal_bounds</code> do estágio de entrega, cobrada pelo <code>cost_per_mwh</code> × horas daquele
+estágio, e descontada pelo fator cumulativo <strong>continuado sobre as durações reais pós-estudo</strong>
+— a decisão da semana 10 é descontada para 16 de maio e a do restante de junho para 6 de junho, não para
+o horizonte. O estado terminal são as quatro decisões pós-horizonte por usina, datadas no manifesto da
+política pelas suas âncoras mensais (<code>20260501</code> três vezes, depois <code>20260601</code>). As
+três janelas fixas nunca aparecem nele.</p>
+
+<h4>Passo 5 — precificação na fronteira</h4>
+
+<p>A função de custo futuro terminal carregada de <code>boundary/</code> é a do NEWAVE: seus slots de
+térmica antecipada são <strong>mensais</strong>, os do estudo são <strong>semanais</strong>, e os dois são
+juntados por data de calendário (§6.3). Uma semana inteiramente dentro de um mês precificado pela fonte
+recebe \(\text{sobreposição} / H_M\) do coeficiente daquele mês — a semana 10 (16–23 de maio) recebe
+\(168 / 744\) do de maio; uma semana que atravessa para um mês que a fonte não precifica é renormalizada
+sobre seu trecho coberto; um slot que nenhum mês da fonte cobre é precificado em zero. As janelas fixas
+entram na mesma junção como constantes: os 500 MW de SANTA CRUZ na semana 9 são incorporados ao intercepto
+de cada corte da fronteira como</p>
+
+\[ \text{intercepto} \;\mathrel{+}=\; \beta_{\text{mai}} \cdot \frac{168}{744} \cdot 500, \]
+
+<p>do mesmo modo que o próprio DECOMP valora uma já-comandada contra a função do NEWAVE — e nunca aparecem
+na função objetivo nem em qualquer saída de custo (custo afundado, §3.6).</p>
+
+<p>O <code>cobre validate</code> reporta a reconciliação antes de qualquer solve. Para este deck:</p>
+<pre><code>boundary reconciliation: 2184 copied, 6 fanned out, 2 defaulted to 0.0, 2 source slots dropped</code></pre>
+<p>Lendo: os 6 slots em fan-out são as três semanas de maio de cada usina; os 2 slots em zero são o restante
+de junho de cada usina — este checkpoint-fonte precifica apenas abril e maio, então a entrega de junho é
+valorada em zero, e é isso que se deve conferir sempre que uma entrega que você esperava precificada volta
+em zero; os 2 slots da fonte descartados são meses de abril nos quais nada do estudo entrega, um descarte
+benigno. <code>cobre validate --json</code> devolve a mesma contagem por família de estado. Sem nenhum
+<code>config.policy.boundary</code>, o setup avisa uma vez, nomeando SANTA CRUZ (um valor fixo não nulo) e
+as duas usinas (decisões carregadas): tudo o que é pós-horizonte é precificado com valor terminal zero.</p>
+
+<h4>Passo 6 — o que você lê de volta</h4>
+
+<ul>
+  <li><code>simulation/thermals/</code> — as linhas dentro do estudo dos ids 94 e 95 trazem
+  <code>is_anticipated = true</code> e <code>anticipated_committed_mw = 0</code>: geração fixada no comando
+  do <code>GL</code>.</li>
+  <li><code>simulation/anticipated_lanes/</code> — por cenário e estágio, a decisão inserida e sua
+  <code>delivery_date</code>: <code>20260501</code> nos estágios 0–2 (semanas 10–12), <code>20260601</code>
+  no estágio 3 (o restante de junho).</li>
+  <li><code>anticipated/fixed_deliveries.parquet</code> — em nível de execução, uma linha por janela fixa
+  ecoando a entrada, <code>(94, 2026-05-09, 2026-05-16, 500.0)</code> entre seis — a contraparte das linhas
+  com <code>*</code> que o <code>relgnl</code> do DECOMP reimprime.</li>
+</ul>
 
 <h2 id="water">4. Tempo de viagem da água</h2>
 
@@ -848,6 +1113,7 @@ pelo mesmo escritor, então os dois são idênticos por construção.</p>
     <tr><td><code>simulation/in_transit/</code></td><td>um arco de tempo de viagem é declarado</td><td><code>hydro_id</code> (jusante), <code>lag</code> (defasagem de realização, base 1), <code>in_transit_volume_hm3</code>, <code>delayed_arrival_hm3</code></td></tr>
     <tr><td><code>simulation/transit_seed/</code></td><td>um arco de tempo de viagem é declarado</td><td><code>scenario_id</code>, <code>hydro_id</code> (montante), <code>start_date</code>, <code>end_date</code>, <code>value_m3s</code></td></tr>
     <tr><td><code>simulation/inflow_lags/</code></td><td>qualquer hidrelétrica presente</td><td><code>hydro_id</code>, <code>lag_index</code> (0 = mais recente), <code>inflow_m3s</code></td></tr>
+    <tr><td><code>anticipated/fixed_deliveries.parquet</code></td><td>uma janela fixa pós-horizonte é declarada (nível de execução, um único arquivo, não por cenário)</td><td><code>thermal_id</code>, <code>start_date</code>, <code>end_date</code>, <code>value_mw</code> — uma linha por janela, ecoada da entrada</td></tr>
   </tbody>
 </table>
 </div>

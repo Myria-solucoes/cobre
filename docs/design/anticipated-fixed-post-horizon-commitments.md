@@ -92,7 +92,7 @@ faithful post-study calendar is
 | 10    | 06-06 → June end       | 3 — decided by study stage 3 |
 
 With `lead_stages = 7` (= 4 study stages + 3 fixed stages), or equivalently any
-`lead_time_hours` in `(1512, 1680]`, the existing end-anchored decider produces
+`lead_time_hours` in `[1512, 1680)`, the existing end-anchored decider produces
 exactly this mapping, and the four in-study deliveries (indices 0–3, all
 pre-study-decided) take the existing class-2 seeds. Both lead modes were
 verified arithmetically against `extended_deciders` and

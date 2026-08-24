@@ -320,8 +320,8 @@ exactly like any other commitment window. Three things to keep in mind:
   in-study seeds (§3.4), a fixed post-horizon value is priced only if a
   terminal boundary policy is loaded, and only through that boundary's
   future-cost pricing — never as a cost term in the current study's own
-  objective. Simulation output reports it at its real delivery date, the same
-  way an in-study delivery is reported.
+  objective. The run-level table `anticipated/fixed_deliveries.parquet`
+  (§6.2) echoes it at its real delivery date.
 
 This commitment never occupies a ring slot: unlike an in-study delivery or a
 post-study delivery the study itself decides (§3.2, §3.5), a fixed
@@ -378,7 +378,299 @@ month they **diverge**: `lead_stages` still counts two stages back (delivery `m=
 decided in week `t2`), but `lead_time_hours` sees that 336 h is shorter than the
 720 h month, so the decision for `t4` falls _inside_ `t4` — the `K = 0` case,
 dispatched as an ordinary thermal that stage (§3.2). This is why a physical lead is
-calendar-aware and a stage-count lead is not.
+calendar-aware and a stage-count lead is not. §3.8 walks a real DECOMP GNL deck,
+where the lead reaches past the horizon.
+
+### 3.8 Worked example: a faithful DECOMP GNL deck
+
+Everything in §3.4–§3.6 comes together in the deck DECOMP users meet every
+week: the LNG (_GNL_) plants of a two-month DECOMP study, priced at the horizon
+by a NEWAVE future-cost function. This example walks the March 2026 rv2 deck
+end to end — calendar, lead, files, ring, boundary pricing, outputs — with the
+real numbers, so you can recognize each piece in your own case.
+
+#### What DECOMP declares
+
+DECOMP keeps its GNL plants out of the ordinary `CT` thermal registry, in
+`dadgnl`:
+
+- `TG` — the plant registry: code, submarket, per-block fuel cost (`CVU`),
+  availability and inflexibility.
+- `NL` — the dispatch-anticipation lag, in whole months (1 or 2). SANTA CRUZ
+  and PSERGIPE I both declare 2.
+- `GL` — the dispatch **already commanded** by earlier revisions: one register
+  per operative week, with its start date and per-block MW. In this deck every
+  in-study week is commanded at 0 MW; past the horizon, week 8 (2 May) is
+  commanded at 0 MW and week 9 (9 May) at 500 MW for SANTA CRUZ.
+- `GS` — the operative-week calendar (weeks per month).
+
+The DECOMP horizon is two months: the current month in operative weeks
+(Saturday–Friday), the next month as one stage. Under a 2-month lag, each March
+week decides the **same operative week two months ahead** — in May — and the
+April month decides the June remainder. So in this regime _every_ delivery
+inside the study was commanded before it started, and _every_ decision the
+study makes lands after its own horizon. That is exactly the shape §3.4–§3.6
+were built for: the in-study deliveries are seeds, the already-commanded May
+weeks are fixed post-horizon commitments, and the study's own decisions are
+carried to the terminal state and priced by the NEWAVE boundary.
+
+#### Step 1 — the extended delivery axis
+
+The rv2 study runs 14 March → 1 May 2026: three operative weeks and the April
+remainder (168 + 168 + 168 + 648 h = 1152 h). `post_study_stages.json`
+continues the calendar with **seven** stages, and the lead (Step 2) sorts every
+delivery `m` on the extended axis into one of three kinds:
+
+| `m` | Window                          | Hours | Decided by                        | Kind                             |
+| --- | ------------------------------- | ----- | --------------------------------- | -------------------------------- |
+| 0   | 14 Mar → 21 Mar (week)          | 168   | before the study (`GL` week 1)    | seed (§3.4)                      |
+| 1   | 21 Mar → 28 Mar (week)          | 168   | before the study (`GL` week 2)    | seed                             |
+| 2   | 28 Mar → 4 Apr (week)           | 168   | before the study (`GL` week 3)    | seed                             |
+| 3   | 4 Apr → 1 May (April remainder) | 648   | before the study (`GL` weeks 4–7) | seed                             |
+| 4   | 1 May → 2 May (stub)            | 24    | before the study                  | **fixed**, 0 MW (§3.6)           |
+| 5   | 2 May → 9 May (`GL` week 8)     | 168   | before the study                  | **fixed**, 0 MW                  |
+| 6   | 9 May → 16 May (`GL` week 9)    | 168   | before the study                  | **fixed**, 500 MW for SANTA CRUZ |
+| 7   | 16 May → 23 May (week 10)       | 168   | stage 0                           | carried (§3.5)                   |
+| 8   | 23 May → 30 May (week 11)       | 168   | stage 1                           | carried                          |
+| 9   | 30 May → 6 Jun (week 12)        | 168   | stage 2                           | carried                          |
+| 10  | 6 Jun → 30 Jun (June remainder) | 576   | stage 3                           | carried                          |
+
+Two calendar details are easy to miss. The study ends on a Friday (1 May) while
+the operative-week grid restarts on Saturday (2 May): the 24 h **stub** `m = 4`
+exists only to keep the delivery axis contiguous, and it is declared as an
+explicit 0 MW window — never left uncovered. And the June remainder is a single
+576 h stage: the April _month_ decides the June _month_, at monthly
+granularity, exactly as DECOMP does.
+
+```mermaid
+flowchart LR
+  subgraph S["study — four stages, every delivery commanded by GL"]
+    direction LR
+    t0["t0<br/>14 Mar"] --> t1["t1<br/>21 Mar"] --> t2["t2<br/>28 Mar"] --> t3["t3<br/>April"]
+  end
+  subgraph F["fixed — já-comandadas, never in the ring"]
+    direction LR
+    m4["stub 1 May<br/>0 MW"] --> m5["week 8<br/>0 MW"] --> m6["week 9<br/>500 MW"]
+  end
+  subgraph C["carried — decided in-study, priced by the boundary"]
+    direction LR
+    m7["week 10"] --> m8["week 11"] --> m9["week 12"] --> m10["June<br/>remainder"]
+  end
+  t0 -. decides .-> m7
+  t1 -. decides .-> m8
+  t2 -. decides .-> m9
+  t3 -. decides .-> m10
+```
+
+#### Step 2 — the lead
+
+"The same operative week two months ahead" is nine operative weeks: the first
+delivery the study decides (week 10, 16 May) starts exactly 63 days after the
+study start — `lead_time_hours: 1512.0`. The decider is end-anchored (§3.2):
+`c(m)` is the stage containing `e_m − 1512`, where `e_m` is the end of stage
+`m` in hours from the study start, and a tie on a stage boundary goes to the
+**earlier** stage:
+
+| `m`         | `e_m` | `e_m − 1512` | `c(m)`                                    |
+| ----------- | ----- | ------------ | ----------------------------------------- |
+| 6 (week 9)  | 1512  | 0            | before the study — tie at the study start |
+| 7 (week 10) | 1680  | 168          | stage 0 — tie at the `t0` / `t1` boundary |
+| 8 (week 11) | 1848  | 336          | stage 1                                   |
+| 9 (week 12) | 2016  | 504          | stage 2                                   |
+| 10 (June)   | 2592  | 1080         | stage 3                                   |
+
+and every `m ≤ 5` lands before the study too. Any lead in `[1512, 1680)` h —
+at least nine and less than ten operative weeks — resolves this same mapping.
+Outside it, validation tells you which way you missed:
+
+- **Too short** (say 1500 h): week 9 becomes _study-decided_, and the 500 MW
+  window covering it is rejected — `past_anticipated_commitments cover
+post-study stage index(es) [2], which the study itself decides … lengthen
+anticipated_config's lead`.
+- **Too long** (1680 h or more): week 10 becomes _pre-study-decided_, and the
+  untiled stage is rejected — `past_anticipated_commitments do not tile
+post-study stage index(es) [3] at coverage 1.0; declare the fixed commitment
+for each`.
+
+`lead_stages: 7` (four study stages plus the three fixed stages) resolves the
+identical decider, `c(m) = m − 7`. The two spellings differ only in ring depth:
+a stage-count lead keeps its `ℓ` as the depth, so the ring is 7 deep with three
+permanently-masked slots per plant, while the physical lead sizes it at the
+measured occupancy — 4 (Step 4). On a DECOMP calendar, prefer
+`lead_time_hours`.
+
+#### Step 3 — the files
+
+`stages.json` is the ordinary four-stage study calendar; nothing about it is
+special. The anticipated machinery lives in four other places.
+
+`system/thermals.json` — the two GNL plants are ordinary entries carrying the
+lead:
+
+```jsonc
+{
+  "id": 94,
+  "name": "SANTA CRUZ",
+  "bus_id": 0,
+  "operational_start_date": "2026-03-14",
+  "cost_per_mwh": 199.22,
+  "generation": { "min_mw": 0.0, "max_mw": 500.0 },
+  "anticipated_config": { "lead_time_hours": 1512.0 },
+}
+```
+
+(PSERGIPE I is `id: 95` on bus 2, 321.26 $/MWh, 0–1593 MW, the same lead.)
+
+`post_study_stages.json` — the seven-stage continuation calendar, and a
+cost/bounds cell **only for the stages the study decides** (indices 3–6). The
+fixed stages 0–2 hold constants, not decisions, so they need none:
+
+```jsonc
+{
+  "stages": [
+    { "start_date": "2026-05-01", "duration_hours": 24.0 }, // 0 — stub
+    { "start_date": "2026-05-02", "duration_hours": 168.0 }, // 1 — week 8
+    { "start_date": "2026-05-09", "duration_hours": 168.0 }, // 2 — week 9
+    { "start_date": "2026-05-16", "duration_hours": 168.0 }, // 3 — week 10
+    { "start_date": "2026-05-23", "duration_hours": 168.0 }, // 4 — week 11
+    { "start_date": "2026-05-30", "duration_hours": 168.0 }, // 5 — week 12
+    { "start_date": "2026-06-06", "duration_hours": 576.0 }, // 6 — June remainder
+  ],
+  "thermal_bounds": [
+    {
+      "thermal_id": 94,
+      "post_study_stage_index": 3,
+      "cost_per_mwh": 199.22,
+      "min_mw": 0.0,
+      "max_mw": 500.0,
+    },
+    {
+      "thermal_id": 94,
+      "post_study_stage_index": 4,
+      "cost_per_mwh": 199.22,
+      "min_mw": 0.0,
+      "max_mw": 500.0,
+    },
+    {
+      "thermal_id": 94,
+      "post_study_stage_index": 5,
+      "cost_per_mwh": 199.22,
+      "min_mw": 0.0,
+      "max_mw": 500.0,
+    },
+    {
+      "thermal_id": 94,
+      "post_study_stage_index": 6,
+      "cost_per_mwh": 199.22,
+      "min_mw": 0.0,
+      "max_mw": 500.0,
+    },
+    // … and the same four cells for thermal 95
+  ],
+}
+```
+
+`initial_conditions.json` — one `past_anticipated_commitments` window per
+pre-study-decided delivery, in-study and post-horizon alike, translated
+straight from `GL`:
+
+```jsonc
+"past_anticipated_commitments": [
+  { "thermal_id": 94, "start_date": "2026-03-14", "end_date": "2026-03-21", "value_mw": 0.0 },   // seeds — GL weeks 1–3 …
+  { "thermal_id": 94, "start_date": "2026-03-21", "end_date": "2026-03-28", "value_mw": 0.0 },
+  { "thermal_id": 94, "start_date": "2026-03-28", "end_date": "2026-04-04", "value_mw": 0.0 },
+  { "thermal_id": 94, "start_date": "2026-04-04", "end_date": "2026-05-01", "value_mw": 0.0 },   // … and weeks 4–7 on the April stage
+  { "thermal_id": 94, "start_date": "2026-05-01", "end_date": "2026-05-02", "value_mw": 0.0 },   // fixed — the stub, an explicit zero
+  { "thermal_id": 94, "start_date": "2026-05-02", "end_date": "2026-05-09", "value_mw": 0.0 },   // fixed — GL week 8
+  { "thermal_id": 94, "start_date": "2026-05-09", "end_date": "2026-05-16", "value_mw": 500.0 }, // fixed — GL week 9, the já-comandada
+  // … and the same seven windows, all 0 MW, for thermal 95
+]
+```
+
+Note the split at the horizon: the April window ends at `2026-05-01` and the
+stub starts there. A single window `2026-04-04 → 2026-05-09` would straddle the
+horizon and is rejected — split it at the horizon end. The 500 MW must also lie
+inside the plant's `[min_mw, max_mw]` (here it sits exactly at the cap).
+
+`config.json` — the NEWAVE future-cost function DECOMP couples to, converted to
+a cobre checkpoint, is the terminal boundary:
+
+```jsonc
+"policy": { "boundary": { "path": "boundary", "source_stage": 3 } }
+```
+
+`source_stage` names the source stage whose cut pool to load; omit it and the
+loader matches the source's dated stages against the study's terminal calendar.
+
+#### Step 4 — the ring
+
+Per plant, at most four commitments are ever in flight at once — at stage 0
+the three unfished seeds plus the week-10 decision, then a shrinking seed run
+matched by a growing set of decisions — and the pre-study seed run is four deep
+as well, so `k_max = max(4, 4) = 4` (§3.2): two lanes, eight anticipated state
+dimensions. On the ring axis the fixed window `m = 4, 5, 6` is excised
+(`r(m) = m` for `m ≤ 3`, `r(m) = m − 3` for `m ≥ 7`), so the residues recycle
+exactly as in Example A:
+
+| Stage `t` | Fishes (reads `commit_in`) | Deposits (writes `commit_out`)  | In flight after `t`    |
+| --------- | -------------------------- | ------------------------------- | ---------------------- |
+| 0         | `m=0` — seed, 0 MW, slot 0 | `m=7` (week 10) → `r=4`, slot 0 | seeds 1–3, week 10     |
+| 1         | `m=1` — seed, slot 1       | `m=8` (week 11) → `r=5`, slot 1 | seeds 2–3, weeks 10–11 |
+| 2         | `m=2` — seed, slot 2       | `m=9` (week 12) → `r=6`, slot 2 | seed 3, weeks 10–12    |
+| 3         | `m=3` — seed, slot 3       | `m=10` (June) → `r=7`, slot 3   | weeks 10–12, June      |
+
+Each stage's fish pins the plant's generation to its commanded seed — SANTA
+CRUZ cannot be dispatched in-study no matter how cheap it would be, because
+`GL` commanded 0 MW — and each stage's deposit is a genuine costed decision:
+the commitment column is bounded by the delivery stage's `thermal_bounds`
+cell, charged that stage's `cost_per_mwh × hours`, and discounted by the
+cumulative factor **continued over the real post-study durations** — week 10's
+decision is discounted to 16 May and the June remainder's to 6 June, not to
+the horizon. The terminal state is the four post-horizon decisions per plant,
+dated in the policy manifest at their month anchors (`20260501` three times,
+then `20260601`). The three fixed windows never appear in it.
+
+#### Step 5 — pricing at the boundary
+
+The terminal future-cost function loaded from `boundary/` is NEWAVE's: its
+anticipated-thermal slots are **monthly**, the study's are **weekly**, and the
+two are joined by calendar date (§6.3). A week fully inside a priced source
+month takes `overlap / H_M` of that month's coefficient — week 10 (16–23 May)
+takes `168 / 744` of May's; a week straddling into a month the source does not
+price is renormalized over its covered span; a slot no source month covers
+prices at zero. The fixed windows enter the same join as constants: SANTA
+CRUZ's 500 MW in week 9 folds into every boundary cut's intercept as
+`coeff_May × (168 / 744) × 500` — the way DECOMP itself values a já-comandada
+against the NEWAVE function — and never appears in the objective or in any
+cost output (sunk, §3.6).
+
+`cobre validate` reports the reconciliation before any solve. For this deck:
+
+```
+boundary reconciliation: 2184 copied, 6 fanned out, 2 defaulted to 0.0, 2 source slots dropped
+```
+
+Reading it: the 6 fanned-out slots are the three May weeks of each plant; the
+2 defaulted slots are each plant's June remainder — this source checkpoint
+prices April and May only, so the June delivery is valued at zero, which is
+the thing to check whenever a delivery you expected priced comes back
+defaulted; the 2 dropped source slots are April months nothing in the study
+delivers into, a benign drop. `cobre validate --json` returns the same tally
+per state family. Without `config.policy.boundary` at all, setup warns once,
+naming SANTA CRUZ (a non-zero fixed value) and both plants (carried
+decisions): everything post-horizon prices at zero terminal value.
+
+#### Step 6 — what you read back
+
+- `simulation/thermals/` — the in-study rows of ids 94 and 95 carry
+  `is_anticipated = true` and `anticipated_committed_mw = 0`: generation
+  pinned to the `GL` command.
+- `simulation/anticipated_lanes/` — per scenario and stage, the deposited
+  decision and its `delivery_date`: `20260501` at stages 0–2 (weeks 10–12),
+  `20260601` at stage 3 (the June remainder).
+- `anticipated/fixed_deliveries.parquet` — run-level, one row per fixed
+  window echoing the input, `(94, 2026-05-09, 2026-05-16, 500.0)` among six —
+  the counterpart of the `*` rows DECOMP's `relgnl` re-prints.
 
 ## 4. Water travel time
 
@@ -634,12 +926,13 @@ Simulation results are Hive-partitioned Parquet under
 `(scenario_id, stage_id, node_id)` key prefix. Both the CLI and the Python bindings
 write these through the same writer, so the two are identical by construction.
 
-| Output partition                | Written when                      | Key columns                                                                                       |
-| ------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `simulation/anticipated_lanes/` | a `post_study_stages` is declared | `thermal_id`, `delivery_date` (`YYYYMM01`), `deposited_decision_mw`, `carried_committed_mw`       |
-| `simulation/in_transit/`        | a travel-time arc is declared     | `hydro_id` (downstream), `lag` (1-based maturity), `in_transit_volume_hm3`, `delayed_arrival_hm3` |
-| `simulation/transit_seed/`      | a travel-time arc is declared     | `scenario_id`, `hydro_id` (upstream), `start_date`, `end_date`, `value_m3s`                       |
-| `simulation/inflow_lags/`       | any hydro present                 | `hydro_id`, `lag_index` (0 = most recent), `inflow_m3s`                                           |
+| Output partition                       | Written when                                                                    | Key columns                                                                                       |
+| -------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `simulation/anticipated_lanes/`        | a `post_study_stages` is declared                                               | `thermal_id`, `delivery_date` (`YYYYMM01`), `deposited_decision_mw`, `carried_committed_mw`       |
+| `simulation/in_transit/`               | a travel-time arc is declared                                                   | `hydro_id` (downstream), `lag` (1-based maturity), `in_transit_volume_hm3`, `delayed_arrival_hm3` |
+| `simulation/transit_seed/`             | a travel-time arc is declared                                                   | `scenario_id`, `hydro_id` (upstream), `start_date`, `end_date`, `value_m3s`                       |
+| `simulation/inflow_lags/`              | any hydro present                                                               | `hydro_id`, `lag_index` (0 = most recent), `inflow_m3s`                                           |
+| `anticipated/fixed_deliveries.parquet` | a fixed post-horizon window is declared (run-level, one file, not per scenario) | `thermal_id`, `start_date`, `end_date`, `value_mw` — one row per window, echoed from the input    |
 
 ### 6.3 In the trained policy
 
