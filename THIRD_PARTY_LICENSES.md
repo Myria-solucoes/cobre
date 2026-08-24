@@ -3252,19 +3252,19 @@ limitations under the License.
 ## Apache License 2.0
 
 Used by:
-- cobre 0.14.3
-- cobre-cli 0.14.3
-- cobre-comm 0.14.3
-- cobre-core 0.14.3
-- cobre-emt 0.14.3
-- cobre-flow 0.14.3
-- cobre-io 0.14.3
-- cobre-mcp 0.14.3
-- cobre-sddp 0.14.3
-- cobre-solver 0.14.3
-- cobre-stochastic 0.14.3
-- cobre-tui 0.14.3
-- cobre-uc 0.14.3
+- cobre 0.15.0
+- cobre-cli 0.15.0
+- cobre-comm 0.15.0
+- cobre-core 0.15.0
+- cobre-emt 0.15.0
+- cobre-flow 0.15.0
+- cobre-io 0.15.0
+- cobre-mcp 0.15.0
+- cobre-sddp 0.15.0
+- cobre-solver 0.15.0
+- cobre-stochastic 0.15.0
+- cobre-tui 0.15.0
+- cobre-uc 0.15.0
 - android_system_properties 0.1.5
 - dhat 0.3.3
 - dyn-clone 1.0.20

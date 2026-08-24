@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-24
+
 ### Added
 
 - **A post-horizon anticipated thermal commitment is now declared in
@@ -33,7 +35,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delivery date in a run-level fixed-delivery table written by both the CLI
   and the Python bindings.
 
+- **A policy checkpoint is now self-describing.** Every study-global fact a load
+  needs — the study graph, the stage count, and the producer provenance — lives
+  in a new `policy/manifest.bin` (a FlatBuffers root written last as the commit
+  signal and read first behind a format-version gate), and each `cuts/<pool>.bin`
+  now carries its own cost-scale factor and graph identity. A checkpoint no longer
+  depends on a hand-editable `policy/metadata.json`, which is removed; the Python
+  bindings read and write the new layout with an unchanged `load_policy` dict
+  shape.
+
+- **A terminal boundary future cost function may be injected from a source study
+  whose state shape differs from the loading study's.** A boundary-injection load
+  with a legitimately different state dimension — a source with no transit buckets
+  and monthly anticipated slots feeding a differently-shaped study — now
+  reconciles per state slot by entity identity and delivery date instead of
+  rejecting on the state-dimension check. A source cut coefficient that couples a
+  state slot the loading study does not model is reported with a named warning per
+  family and the load still succeeds, where the previous surface discarded it
+  silently.
+
 ### Changed
+
+- **BREAKING — every policy checkpoint written by an earlier release must be
+  re-exported; none loads as-is.** The checkpoint format is now self-describing
+  (see Added): the study-global metadata moved from `policy/metadata.json` to
+  `policy/manifest.bin`, and each `cuts/<pool>.bin` gained the self-describing
+  cost-scale and identity fields every load path reads. A checkpoint predating
+  this format — warm-start, resume, simulation-only, or terminal boundary
+  injection alike — is rejected by name with no fallback and no in-place upgrade;
+  re-export it with this release, or retrain. This supersedes the two
+  configuration-scoped rejections below: it applies to every earlier checkpoint
+  regardless of the study's configuration.
 
 - **BREAKING — a policy checkpoint written by an earlier release for a study
   that carries post-study anticipated deliveries is rejected when loaded for
@@ -41,11 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anticipated-commitment ring's state dimension and its per-slot manifest
   identity, so such a checkpoint no longer matches the current layout and fails
   the state-dimension check with a named error. There is no in-place upgrade —
-  retrain to produce a current-version checkpoint. A checkpoint from a study
-  with no post-study anticipated deliveries is unchanged and still loads, and a
-  terminal boundary future cost function injected from a checkpoint reconciles
-  by entity identity and date, so boundary injection across the version boundary
-  is unaffected.
+  retrain to produce a current-version checkpoint. This state-dimension change is
+  a second, configuration-specific reason such a study cannot be upgraded in
+  place, on top of the universal format re-export above.
 
 - **A post-study delivery is now commissioning-gated at its own delivery
   stage.** The delivery-anchored commissioning gate extends over the post-study
@@ -81,7 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a checkpoint fails the state-dimension check on load and must be
   regenerated — it encoded the wrong committed value under the old sizing. A
   study whose pre-study run never exceeded its in-flight occupancy keeps its
-  state dimension, and its checkpoints are unaffected.
+  state dimension, though its checkpoints, like all others, still require the
+  format re-export above.
 
 - **Under the External sampling scheme, a class's realized values now come
   from its external scenario file, including the deterministic (σ = 0)
@@ -125,11 +156,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Moving a study from 0.14 to 0.15:
 
-1. **Retrain.** A policy checkpoint from an earlier release for a study that
-   carries post-study anticipated deliveries fails to load for warm-start or
-   resume (a state-dimension mismatch); there is no in-place upgrade. Boundary
-   injection is unaffected — a terminal boundary future cost function still
-   loads across the version boundary.
+1. **Re-export or retrain every policy checkpoint.** The checkpoint format is now
+   self-describing (`policy/manifest.bin` replaces `policy/metadata.json`, and
+   `cuts/<pool>.bin` carries its own cost-scale and identity fields), so a
+   checkpoint written by an earlier release is rejected by name on every load
+   path — warm-start, resume, simulation-only, and terminal boundary injection
+   alike — with no in-place upgrade. A study that carries post-study anticipated
+   deliveries, or whose corrected ring depth widens (see above), additionally
+   needs a genuine retrain, since its state dimension changed.
 2. **Re-declare post-horizon deliveries.** Move every `initial_conditions.json`
    `future_anticipated_deliveries[]` entry to a `post_study_stages.json`
    `thermal_bounds[]` row keyed by `(thermal_id, post_study_stage_index)`,
