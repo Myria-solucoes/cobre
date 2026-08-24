@@ -39,21 +39,21 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 /// Checks cross-field invariants for anticipated thermal plants.
 ///
 /// 1. **Per-plant lead horizon** — `LeadStages` rejects `K == 0` (defence in
-///    depth; parse-time also rejects it) and `K > n_stages`: either way the
-///    plant can never deliver within the study horizon. `LeadTime` rejects
-///    `delta_hours` exceeding the summed study-stage durations (strict `>`, so
-///    a delivery landing exactly on the final stage is accepted) only for a
-///    thermal whose lead reaches NO declared post-study stage: a thermal whose
-///    extended lead reaches a post-study stage — decided in-study (`carried`)
-///    or decided pre-study (`fixed_post_study`, the full-anticipation regime)
-///    — legitimately delivers post-horizon, so it is exempt. Whether the lead
-///    reaches a post-study stage is resolved by `classify_deliveries`'s
-///    `carried` and `fixed_post_study` sets over the concatenated study +
-///    post-study calendar — computed independently of the solver crate's
-///    resolver (`cobre-io` is upstream and cannot depend on it). A
-///    commissioning window IS supported and
-///    composes with the lookahead; these checks validate the LEAD itself,
-///    independent of any window.
+///    depth; parse-time also rejects it). Both `LeadStages`'s `K > n_stages`
+///    and `LeadTime`'s `delta_hours` exceeding the summed study-stage
+///    durations (strict `>`, so a delivery landing exactly on the final stage
+///    is accepted) reject only a thermal whose lead reaches NO declared
+///    post-study stage: a thermal whose extended lead reaches a post-study
+///    stage — decided in-study (`carried`) or decided pre-study
+///    (`fixed_post_study`, the full-anticipation regime) — legitimately
+///    delivers post-horizon, so it is exempt, identically for either lead
+///    mode. Whether the lead reaches a post-study stage is resolved once per
+///    thermal by `classify_deliveries`'s `carried` and `fixed_post_study`
+///    sets over the concatenated study + post-study calendar — computed
+///    independently of the solver crate's resolver (`cobre-io` is upstream
+///    and cannot depend on it) — and shared by both guards. A commissioning
+///    window IS supported and composes with the lookahead; these checks
+///    validate the LEAD itself, independent of any window.
 /// 2. **Horizon-straddle guard** — see `check_no_straddling_commitment_window`:
 ///    a `past_anticipated_commitments` window whose `[start_date, end_date)`
 ///    span crosses the study horizon end (`start_date < horizon_end &&
@@ -95,21 +95,24 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         };
         let thermal_id = thermal.id.0;
 
+        let classes = classify_deliveries(
+            *cfg,
+            extended_axis.as_ref(),
+            &study_durations,
+            n_stages,
+            (thermal.entry_stage_id, thermal.exit_stage_id),
+        );
+        // A plant reaching only fixed_post_study stages (empty carried) is
+        // the full-anticipation regime — every in-study delivery decided
+        // pre-study — and is fully representable; only beyond_reach (never
+        // included here) means the plant truly cannot deliver. Shared by
+        // both lead-mode guards below so `LeadStages` and `LeadTime` exempt
+        // an equally-reachable plant identically.
+        let reaches_post_study =
+            !classes.carried.is_empty() || !classes.fixed_post_study.is_empty();
+
         if let AnticipatedConfig::LeadTime(delta_hours) = *cfg {
             let total_horizon_hours: f64 = study_durations.iter().sum();
-            let classes = classify_deliveries(
-                *cfg,
-                extended_axis.as_ref(),
-                &study_durations,
-                n_stages,
-                (thermal.entry_stage_id, thermal.exit_stage_id),
-            );
-            // A plant reaching only fixed_post_study stages (empty carried) is
-            // the full-anticipation regime — every in-study delivery decided
-            // pre-study — and is fully representable; only beyond_reach (never
-            // included here) means the plant truly cannot deliver.
-            let reaches_post_study =
-                !classes.carried.is_empty() || !classes.fixed_post_study.is_empty();
             if delta_hours > total_horizon_hours && !reaches_post_study {
                 let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_time");
                 ctx.add_error(
@@ -142,7 +145,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
 
         let k_u = k as usize;
 
-        if k_u > n_stages {
+        if k_u > n_stages && !reaches_post_study {
             ctx.add_error(
                 ErrorKind::BusinessRuleViolation,
                 "system/thermals.json",
@@ -2183,6 +2186,130 @@ mod tests {
             "a post-horizon-delivery thermal tiling every leading study stage must validate \
              cleanly through check_anticipated_thermals, got: {:?}",
             ctx.errors()
+        );
+    }
+
+    // ── AC: the widened `LeadStages` guard matches `LeadTime` (full anticipation) ──
+
+    /// Given a `LeadStages(7)` thermal on a uniform 4×720h study horizon
+    /// (`n_stages = 4`) whose extended lead reaches only post-study stages —
+    /// three pre-study-decided (`fixed_post_study`, tiled by
+    /// `past_anticipated_commitments`) and one study-decided (`carried`,
+    /// bound by a declared `PostStudyThermalBound`) —
+    /// `validate_semantic_hydro_thermal` returns no errors: the `lead_stages`
+    /// guard now shares the `lead_time` guard's `reaches_post_study`
+    /// exemption instead of unconditionally rejecting `lead_stages >
+    /// n_stages`.
+    #[test]
+    fn full_anticipation_lead_stages_reaching_only_post_study_stages_validates() {
+        let thermal = make_anticipated_thermal(1, 7, None, None);
+        let study_durations = [720.0; 4];
+        let post_durations = [720.0; 4];
+        let post_study = post_study_from(&study_durations, &post_durations, &[(1, 3, 0.0, 500.0)]);
+        let concatenated: Vec<f64> = study_durations
+            .iter()
+            .copied()
+            .chain(post_durations[..3].iter().copied())
+            .collect();
+        let commitments = commitments_on(1, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 500.0], &concatenated);
+        let data = data_with_post_study(vec![thermal], &study_durations, commitments, post_study);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "a full-anticipation LeadStages thermal reaching only post-study stages must \
+             validate cleanly end-to-end, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Given a `LeadStages(5)` thermal on the same 4×720h study horizon whose
+    /// extended lead exceeds `n_stages` but reaches a `carried` (study-decided)
+    /// post-study stage with no declared `PostStudyThermalBound` cell, the
+    /// widened guard does not reject it (the plant IS reachable), but
+    /// `check_post_study_stages`'s Rule 1 still reports the missing bound cell:
+    /// the guard widening exempts a reachable plant from the horizon cap
+    /// without masking the genuine missing-bound defect.
+    #[test]
+    fn lead_stages_short_lead_reaching_carried_stage_without_bound_still_rejected() {
+        let thermal = make_anticipated_thermal(1, 5, None, None);
+        let study_durations = [720.0; 4];
+        let post_durations = [720.0, 720.0];
+        let post_study = post_study_from(&study_durations, &post_durations, &[]);
+        let concatenated: Vec<f64> = study_durations
+            .iter()
+            .copied()
+            .chain(post_durations[..1].iter().copied())
+            .collect();
+        let commitments = commitments_on(1, &[0.0, 0.0, 0.0, 0.0, 0.0], &concatenated);
+        let data = data_with_post_study(vec![thermal], &study_durations, commitments, post_study);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.message.contains("lead_stages exceeds study horizon")),
+            "the widened guard must not fire when the plant reaches a carried post-study \
+             stage, got: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("no thermal_bounds entry")
+                    && e.message.contains("post_study_stage_index 1")),
+            "check_post_study_stages must still reject the missing bound cell on the \
+             reached carried stage, got: {errors:?}"
+        );
+    }
+
+    /// `LeadStages(7)` and the equivalent `LeadTime(5040.0)` (`7 × 720h`) on the
+    /// identical uniform 4×720h study + 4×720h post-study calendar resolve to
+    /// the same delivery classification and both validate with no errors: the
+    /// two lead modes hit the widened horizon guard identically (AC4).
+    #[test]
+    fn lead_stages_and_lead_time_resolve_the_horizon_guard_identically() {
+        let study_durations = [720.0; 4];
+        let post_durations = [720.0; 4];
+        let values = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 500.0];
+        let concatenated: Vec<f64> = study_durations
+            .iter()
+            .copied()
+            .chain(post_durations[..3].iter().copied())
+            .collect();
+
+        let lead_stages_thermal = make_anticipated_thermal(1, 7, None, None);
+        let post_study_a =
+            post_study_from(&study_durations, &post_durations, &[(1, 3, 0.0, 500.0)]);
+        let data_a = data_with_post_study(
+            vec![lead_stages_thermal],
+            &study_durations,
+            commitments_on(1, &values, &concatenated),
+            post_study_a,
+        );
+        let mut ctx_a = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data_a, &mut ctx_a);
+        assert!(
+            !ctx_a.has_errors(),
+            "LeadStages(7) must validate cleanly, got: {:?}",
+            ctx_a.errors()
+        );
+
+        let lead_time_thermal = make_lead_time_anticipated_thermal(1, 5040.0, None, None);
+        let post_study_b =
+            post_study_from(&study_durations, &post_durations, &[(1, 3, 0.0, 500.0)]);
+        let data_b = data_with_post_study(
+            vec![lead_time_thermal],
+            &study_durations,
+            commitments_on(1, &values, &concatenated),
+            post_study_b,
+        );
+        let mut ctx_b = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data_b, &mut ctx_b);
+        assert!(
+            !ctx_b.has_errors(),
+            "the equivalent LeadTime(5040.0) must validate cleanly identically, got: {:?}",
+            ctx_b.errors()
         );
     }
 
