@@ -249,7 +249,6 @@ fn par_lp_coefficients_match_hand_computed() {
     let par = ctx.par();
     let tol = 1e-10;
 
-    // --- Hydro 1 (h_idx = 0, EntityId(1)) at stage 0 ---
     let expected_base_h1 = 70.0_f64;
     assert!(
         (par.deterministic_base(0, 0) - expected_base_h1).abs() < tol,
@@ -273,7 +272,6 @@ fn par_lp_coefficients_match_hand_computed() {
         psi_h1[0]
     );
 
-    // --- Hydro 2 (h_idx = 1, EntityId(2)) at stage 0 ---
     let expected_base_h2 = 120.0_f64;
     assert!(
         (par.deterministic_base(0, 1) - expected_base_h2).abs() < tol,

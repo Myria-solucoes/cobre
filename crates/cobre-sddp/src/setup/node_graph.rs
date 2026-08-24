@@ -1427,33 +1427,131 @@ impl Traversal {
 pub struct EnumeratedPlan {
     pub(crate) paths: EnumeratedForwardPaths,
     pub(crate) parent: TypedVec<NodePos, Option<NodePos>>,
+    /// Precomputed tree structure the nested upper-bound recursion reduces over
+    /// (children / roots / valuation order / node marginals) — pure functions of
+    /// `parent` and `paths`, resolved once here instead of every training
+    /// iteration. Boxed to keep [`Traversal::Enumerated`] lean.
+    pub(crate) nested_ub_topology: Box<NestedUbTopology>,
 }
 
 impl EnumeratedPlan {
     fn new(node_graph: &NodeGraph) -> Self {
+        Self::from_parts(
+            enumerate_forward_paths(node_graph),
+            node_graph.build_parent_map(),
+        )
+    }
+
+    /// Assemble a plan from its enumerated paths and parent map, precomputing the
+    /// nested-UB reduction topology once.
+    pub(crate) fn from_parts(
+        paths: EnumeratedForwardPaths,
+        parent: TypedVec<NodePos, Option<NodePos>>,
+    ) -> Self {
+        let nested_ub_topology =
+            Box::new(NestedUbTopology::new(&parent, &paths.leaf, &paths.weight));
         Self {
-            paths: enumerate_forward_paths(node_graph),
-            parent: node_graph.build_parent_map(),
+            paths,
+            parent,
+            nested_ub_topology,
         }
     }
 
-    /// Walk path `p`'s leaf up to its root via the single-predecessor parent
-    /// map, writing the canonical root→leaf node sequence (ascending stage)
-    /// into `out` — the single owner of this walk for both the training
-    /// enumerated forward and the census simulation driver.
+    /// Walk path `p`'s leaf up to its root, writing the canonical root→leaf node
+    /// sequence (ascending stage) into `out`.
     pub(crate) fn walk_path(&self, p: usize, num_stages: usize, out: &mut Vec<NodePos>) {
-        out.clear();
-        let mut cur = Some(self.paths.leaf[p]);
-        while let Some(node) = cur {
-            out.push(node);
-            cur = self.parent[node];
-        }
-        out.reverse();
+        walk_leaf_to_root(&self.parent, self.paths.leaf[p], out);
         debug_assert_eq!(
             out.len(),
             num_stages,
             "root→leaf path must visit exactly one node per stage"
         );
+    }
+}
+
+/// Write the canonical root→leaf node sequence (ascending stage) for the path
+/// ending at `leaf_node` into `out`, walking the single-predecessor parent map.
+/// The single owner of this walk — [`EnumeratedPlan::walk_path`] and
+/// [`NestedUbTopology::new`] both drive off it.
+pub(crate) fn walk_leaf_to_root(
+    parent: &TypedVec<NodePos, Option<NodePos>>,
+    leaf_node: NodePos,
+    out: &mut Vec<NodePos>,
+) {
+    out.clear();
+    let mut cur = Some(leaf_node);
+    while let Some(node) = cur {
+        out.push(node);
+        cur = parent[node];
+    }
+    out.reverse();
+}
+
+/// Precomputed reduction structure over an enumerated scenario tree, consumed by
+/// the nested upper-bound recursion. Every field is a pure function of the
+/// `parent` map and per-path `weight`s, so it is resolved once at plan
+/// construction rather than every training iteration; only the per-node realized
+/// costs change between iterations.
+#[derive(Debug)]
+pub struct NestedUbTopology {
+    /// Stage (root-distance) of each node.
+    pub(crate) node_stage: Vec<usize>,
+    /// A representative path index reaching each node — any path works, since a
+    /// node's immediate cost is identical on every path through it.
+    pub(crate) node_path: Vec<usize>,
+    /// Marginal probability of each node (Σ path weights through it, in canonical
+    /// path order for rank-invariance).
+    pub(crate) node_prob: Vec<f64>,
+    /// Children of each node in canonical node-position order — the tie-break the
+    /// risk measure's tail selection depends on.
+    pub(crate) children: Vec<Vec<NodePos>>,
+    /// Predecessor-free roots, canonical order.
+    pub(crate) roots: Vec<NodePos>,
+    /// Nodes deepest-stage first, so a node's children are valued before it.
+    pub(crate) valuation_order: Vec<NodePos>,
+}
+
+impl NestedUbTopology {
+    pub(crate) fn new(
+        parent: &TypedVec<NodePos, Option<NodePos>>,
+        leaf: &[NodePos],
+        weight: &[f64],
+    ) -> Self {
+        let n_nodes = parent.len();
+        let mut node_stage = vec![0_usize; n_nodes];
+        let mut node_path = vec![0_usize; n_nodes];
+        let mut node_prob = vec![0.0_f64; n_nodes];
+        let mut seq: Vec<NodePos> = Vec::new();
+        for (p, &leaf_node) in leaf.iter().enumerate() {
+            walk_leaf_to_root(parent, leaf_node, &mut seq);
+            let w = weight[p];
+            for (t, &node) in seq.iter().enumerate() {
+                node_stage[node.0] = t;
+                node_path[node.0] = p;
+                node_prob[node.0] += w;
+            }
+        }
+
+        let mut children: Vec<Vec<NodePos>> = vec![Vec::new(); n_nodes];
+        let mut roots: Vec<NodePos> = Vec::new();
+        for node in (0..n_nodes).map(NodePos) {
+            match parent[node] {
+                Some(p) => children[p.0].push(node),
+                None => roots.push(node),
+            }
+        }
+
+        let mut valuation_order: Vec<NodePos> = (0..n_nodes).map(NodePos).collect();
+        valuation_order.sort_by(|&a, &b| node_stage[b.0].cmp(&node_stage[a.0]));
+
+        Self {
+            node_stage,
+            node_path,
+            node_prob,
+            children,
+            roots,
+            valuation_order,
+        }
     }
 }
 
@@ -2901,9 +2999,9 @@ mod tests {
     }
 
     /// `SimulationWeighting::Census` is derivable ONLY from an enumerated
-    /// traversal — the estimator-integrity fix (U3): a sampled traversal must
-    /// resolve to `Uniform`, never `Census`, regardless of what weights a
-    /// caller might otherwise be tempted to supply beside it.
+    /// traversal: a sampled traversal must resolve to `Uniform`, never
+    /// `Census`, regardless of what weights a caller might otherwise be
+    /// tempted to supply beside it.
     #[test]
     fn simulation_weighting_census_underivable_from_sampled_traversal() {
         use crate::simulation::SimulationWeighting;

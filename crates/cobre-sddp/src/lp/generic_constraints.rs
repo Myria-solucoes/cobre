@@ -124,13 +124,9 @@ impl GenericResolverGeom<'_> {
 /// Used by [`resolve_variable_ref`] to translate `VariableRef` entity IDs
 /// into LP column offsets.
 pub(crate) struct EntityPositionMaps<'a> {
-    /// Hydro plant ID to position index.
     pub hydro: &'a BTreeMap<EntityId, usize>,
-    /// Thermal unit ID to position index.
     pub thermal: &'a BTreeMap<EntityId, usize>,
-    /// Bus ID to position index.
     pub bus: &'a BTreeMap<EntityId, usize>,
-    /// Line ID to position index.
     pub line: &'a BTreeMap<EntityId, usize>,
 }
 

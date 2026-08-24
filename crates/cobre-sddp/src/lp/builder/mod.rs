@@ -25,7 +25,7 @@
 //! `base_rows[stage]`, load balance when `n_load_buses > 0`,
 //! z-inflow) via `fill_forward_patches` / `fill_load_patches` /
 //! `fill_z_inflow_patches`, and the column buffer (incoming storage,
-//! AR lags, anticipated state) via `fill_col_state_patches`.
+//! AR lags, travel-time buckets, anticipated state) via `fill_col_state_patches`.
 //! The backward pass writes only the column buffer; noise comes from the fixed
 //! opening tree through `fill_forward_patches` with the opening-specific vector.
 //!
@@ -70,6 +70,7 @@ pub(crate) use scaling::{
     apply_col_scale, apply_commitment_hold_col_scale_unscale, apply_row_scale, compute_col_scale,
     compute_row_scale,
 };
+pub(crate) use template::models_from_normal;
 
 // ---------------------------------------------------------------------------
 // Shared constants

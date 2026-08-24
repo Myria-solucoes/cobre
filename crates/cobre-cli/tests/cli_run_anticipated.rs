@@ -226,7 +226,6 @@ fn read_thermals_parquet(path: &Path) -> ThermalRows {
 
 #[test]
 fn cli_run_populates_anticipated_thermal_columns() {
-    // Sanity: IDs are ascending (declaration-order invariance).
     let regular_id: i32 = 1;
     let anticipated_id: i32 = 2;
     assert!(

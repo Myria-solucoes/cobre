@@ -7,9 +7,8 @@
 //! zero hydros, one bus, one anticipated thermal declared `LeadTime` over two
 //! study stages. Its OWN in-study self-delivery (stage 1, decided at stage 0)
 //! keeps `lead_stages >= 1` alive so the in-study ring sizes
-//! non-degenerately; the ONE `future_anticipated_deliveries` window (decider
-//! stage 1) resolves into the ONE declared `post_study_stages` stage
-//! (`dest = 0`).
+//! non-degenerately; the ONE declared `post_study_stages` stage (decider
+//! stage 1) is where the ring deposits its carried commitment (`dest = 0`).
 
 #![allow(
     clippy::unwrap_used,
@@ -25,10 +24,10 @@
 use chrono::NaiveDate;
 use cobre_core::entities::thermal::AnticipatedConfig;
 use cobre_core::{
-    BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, FutureAnticipatedDelivery,
-    HydroBlockBounds, HydroStageBounds, InitialConditions, LineBlockBounds, PostStudyStage,
-    PostStudyStages, PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds, System,
-    SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+    BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, EntityId, HydroBlockBounds,
+    HydroStageBounds, InitialConditions, LineBlockBounds, PostStudyStage, PostStudyStages,
+    PostStudyThermalBound, PumpingBlockBounds, ResolvedBounds, System, SystemBuilder,
+    ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_io::ParquetWriterConfig;
 use cobre_io::config::SimulationSelection;
@@ -42,18 +41,23 @@ use common::run_simulation;
 
 const BUS_ID: EntityId = EntityId(1);
 const THERMAL_ID: EntityId = EntityId(2);
-/// `LeadTime` delta (hours): the thermal's own stage-1 self-delivery decides
-/// at stage 0 (`lead_stages == 1`), and the far post-horizon window (day
-/// ~121) decides at stage 1.
-const DELTA_HOURS: f64 = 1450.0;
+/// `LeadTime` delta (hours), resolved over the extended delivery axis whose
+/// cumulative stage boundaries are `[0, 744, 1464, 2184]` (Jan study stage,
+/// Feb study stage, then the post-study April stage). A lead in `(744, 1440]`
+/// makes the in-study delivery (`m = 1`) decide at stage 0 and the post-study
+/// delivery (`m = 2`) decide at stage 1, a single decision per stage — the
+/// single-decider shape the fan-out reject requires.
+const DELTA_HOURS: f64 = 1100.0;
 /// The window's in-study decider stage — the only stage whose LP carries both
 /// the sparse decision column and the `anticipated_lanes` row.
 const DECIDER_STAGE: u32 = 1;
 /// Fuel cost `$/MWh` at the resolved post-study cell (unused by the pinned
 /// decision fixtures below beyond keeping the LP well-posed).
 const COST_PER_MWH: f64 = 37.5;
-/// The declared window's pinned commitment (`min_c == max_c`), inside the
-/// declared post-study capability `[10, 50]`.
+/// The post-study commitment, pinned by a degenerate post-study capability
+/// (`min_k == max_k == PINNED_MW`): the ring's post-study decision column reads
+/// its bound from the post-study thermal capability, so pinning that capability
+/// leaves the LP no freedom and the deposited/carried value is deterministic.
 const PINNED_MW: f64 = 30.0;
 /// `YYYYMM01` anchor of the declared post-study destination stage
 /// (`2024-04-01`) — the expected `delivery_date` on every emitted row.
@@ -100,22 +104,9 @@ fn stages() -> Vec<cobre_core::temporal::Stage> {
     ]
 }
 
-/// The one declared post-horizon window: `[2024-04-01, 2024-05-01)`,
-/// resolving (via `DELTA_HOURS`) to decider stage [`DECIDER_STAGE`] and (via
-/// the post-study calendar below) to post-study destination stage 0.
-fn future_delivery(min_mw: f64, max_mw: f64) -> FutureAnticipatedDelivery {
-    FutureAnticipatedDelivery {
-        thermal_id: THERMAL_ID,
-        delivery_start: NaiveDate::from_ymd_opt(2024, 4, 1).expect("valid date"),
-        delivery_end: NaiveDate::from_ymd_opt(2024, 5, 1).expect("valid date"),
-        min_mw,
-        max_mw,
-    }
-}
-
 /// The one declared post-study stage: `[2024-04-01, 2024-05-01)` — 30 days
-/// (720h), the EXACT span [`future_delivery`] targets, so
-/// `StageCalendar::resolve_window` covers it at destination index 0.
+/// (720h), the EXACT span the post-study delivery (via `DELTA_HOURS`) resolves
+/// to, so `StageCalendar::resolve_window` covers it at destination index 0.
 fn post_study_stages(min_k: f64, max_k: f64) -> PostStudyStages {
     PostStudyStages {
         stages: vec![PostStudyStage {
@@ -214,10 +205,10 @@ fn penalties() -> cobre_core::resolved::ResolvedPenalties {
     )
 }
 
-/// `with_commitment` toggles the declared `future_anticipated_deliveries`
-/// window and its `post_study_stages` destination; `(min_c, max_c, min_k,
-/// max_k)` are read only when `with_commitment` is `true`.
-fn build_system(with_commitment: bool, min_c: f64, max_c: f64, min_k: f64, max_k: f64) -> System {
+/// `with_commitment` toggles the one declared `post_study_stages` stage — the
+/// re-sourced `anticipated_lanes` gate's presence predicate; `(min_k, max_k)`
+/// are read only when `with_commitment` is `true`.
+fn build_system(with_commitment: bool, min_k: f64, max_k: f64) -> System {
     let bus = make_bus(BUS_ID, BusSpec::default());
     let thermal = make_thermal(
         THERMAL_ID,
@@ -230,22 +221,13 @@ fn build_system(with_commitment: bool, min_c: f64, max_c: f64, min_k: f64, max_k
             ..Default::default()
         },
     );
-    let initial_conditions = InitialConditions {
-        future_anticipated_deliveries: if with_commitment {
-            vec![future_delivery(min_c, max_c)]
-        } else {
-            Vec::new()
-        },
-        ..Default::default()
-    };
-
     let mut builder = SystemBuilder::new()
         .buses(vec![bus])
         .thermals(vec![thermal])
         .stages(stages())
         .bounds(bounds())
         .penalties(penalties())
-        .initial_conditions(initial_conditions);
+        .initial_conditions(InitialConditions::default());
     if with_commitment {
         builder = builder.post_study_stages(Some(post_study_stages(min_k, max_k)));
     }
@@ -311,7 +293,7 @@ mod partition_row_keying {
 
     #[test]
     fn decider_stage_emits_a_row_keyed_by_thermal_and_delivery_date() {
-        let system = build_system(true, PINNED_MW, PINNED_MW, 10.0, 50.0);
+        let system = build_system(true, PINNED_MW, PINNED_MW);
         let mut setup = build_setup_in_code(system, &config(1));
 
         let results = simulate_sorted(&mut setup, 1);
@@ -361,22 +343,24 @@ mod partition_row_keying {
         }
     }
 
-    /// Per-lane extraction unit-level cross-check: the emitted row's decision
-    /// value matches the SAME decision column `StageGeometry::commitment_decision`
-    /// resolves for the decider stage's stage-0 template — the LP structural
-    /// layout the extractor's `geometry.commitment_decision_windows` addresses.
+    /// Per-lane extraction cross-check: the emitted row's deposited decision
+    /// reads the SAME in-study anticipated decision column
+    /// (`StageGeometry::anticipated_decision`, `col_anticipated_decision_start +
+    /// local`) the LP pins to the delivery-anchored commitment interval — the
+    /// column the ring deposit latches, now that the post-study delivery flows
+    /// through the anticipated ring rather than the retired lane block.
     #[test]
     fn emitted_decision_matches_the_deciders_own_decision_column_bounds() {
-        let system = build_system(true, PINNED_MW, PINNED_MW, 10.0, 50.0);
+        let system = build_system(true, PINNED_MW, PINNED_MW);
         let setup = build_setup_in_code(system, &config(1));
 
         let range = setup.stage_ctx().geometry_per_stage[DECIDER_STAGE as usize]
-            .commitment_decision
+            .anticipated_decision
             .clone();
         assert_eq!(
             range.len(),
             1,
-            "fixture declares exactly one post-horizon window deciding at this stage"
+            "fixture declares exactly one anticipated plant, so one decision column per stage"
         );
         let template = &setup.stage_ctx().templates[DECIDER_STAGE as usize];
         assert_eq!(template.col_lower[range.start], PINNED_MW);
@@ -392,7 +376,7 @@ mod per_scenario_shape {
     #[test]
     fn fanned_scenario_count_produces_one_row_per_scenario_never_collapsed() {
         const S: u32 = 3;
-        let system = build_system(true, PINNED_MW, PINNED_MW, 10.0, 50.0);
+        let system = build_system(true, PINNED_MW, PINNED_MW);
         let mut setup = build_setup_in_code(system, &config(S));
 
         let results = simulate_sorted(&mut setup, S);
@@ -432,8 +416,8 @@ mod inert_without_commitment {
     use super::*;
 
     #[test]
-    fn no_future_anticipated_deliveries_emits_no_rows_and_leaves_per_plant_columns_intact() {
-        let system = build_system(false, 0.0, 0.0, 0.0, 0.0);
+    fn no_post_study_stages_emits_no_rows_and_leaves_per_plant_columns_intact() {
+        let system = build_system(false, 0.0, 0.0);
         let mut setup = build_setup_in_code(system, &config(1));
 
         let results = simulate_sorted(&mut setup, 1);
@@ -454,14 +438,14 @@ mod inert_without_commitment {
             );
             assert!(
                 stage.thermals[0].is_anticipated,
-                "the thermal is still declared anticipated even with no post-horizon window"
+                "the thermal is still declared anticipated even with no post-study stages"
             );
         }
     }
 
     #[test]
     fn writer_creates_no_anticipated_lanes_directory() {
-        let system = build_system(false, 0.0, 0.0, 0.0, 0.0);
+        let system = build_system(false, 0.0, 0.0);
         let mut setup = build_setup_in_code(system, &config(1));
         let results = simulate_sorted(&mut setup, 1);
 
@@ -469,7 +453,7 @@ mod inert_without_commitment {
         let parquet_config = ParquetWriterConfig::default();
         let mut writer = SimulationParquetWriter::new(
             tmp.path(),
-            &build_system(false, 0.0, 0.0, 0.0, 0.0),
+            &build_system(false, 0.0, 0.0),
             &parquet_config,
         )
         .expect("SimulationParquetWriter::new must succeed");
@@ -504,11 +488,9 @@ mod shared_writer_parity {
         let parquet_config = ParquetWriterConfig::default();
 
         let write_once = |tmp_path: &std::path::Path| {
-            let system = build_system(true, PINNED_MW, PINNED_MW, 10.0, 50.0);
-            let mut setup = build_setup_in_code(
-                build_system(true, PINNED_MW, PINNED_MW, 10.0, 50.0),
-                &config(1),
-            );
+            let system = build_system(true, PINNED_MW, PINNED_MW);
+            let mut setup =
+                build_setup_in_code(build_system(true, PINNED_MW, PINNED_MW), &config(1));
             let results = simulate_sorted(&mut setup, 1);
 
             let mut writer = SimulationParquetWriter::new(tmp_path, &system, &parquet_config)

@@ -460,10 +460,6 @@ struct RawReferenceVolume {
 
 /// Parse `system/hydro_production_models.json` into a [`ProductionModelFile`].
 ///
-/// Reads the JSON file, deserializes through intermediate serde types, validates
-/// all invariants, then returns the per-hydro configs sorted by `hydro_id`
-/// ascending plus the optional file-level plane-reduction block.
-///
 /// # Errors
 ///
 /// | Condition                                                   | Error variant              |

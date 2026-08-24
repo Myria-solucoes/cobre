@@ -1,10 +1,11 @@
 //! CLP dual-sign convention probe — sign of `cobre_clp_get_row_price` for an
 //! equality row.
 //!
-//! The canonical dual-sign convention is the `HiGHS` one: row duals feed Benders
-//! cut construction without negation. CLP reports `row_price[0] == -100.0` for
-//! the equality-row fixture, the SAME sign as `HiGHS`; therefore `ClpSolver::solve`
-//! MUST not negate `cobre_clp_get_row_price`.
+//! The canonical dual-sign convention is the `HiGHS` one: row duals feed
+//! downstream cut construction without negation. CLP reports
+//! `row_price[0] == -100.0` for the equality-row fixture, the SAME sign as
+//! `HiGHS`; therefore `ClpSolver::solve` MUST not negate
+//! `cobre_clp_get_row_price`.
 
 #![cfg(all(feature = "clp", feature = "test-support"))]
 #![cfg_attr(

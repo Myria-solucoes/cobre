@@ -12,7 +12,7 @@ use super::production::ProductionFunction;
 
 /// Compute the least-squares `α_FPHA` correction factor for a raw hull envelope.
 ///
-/// # Contract — regress the MIN envelope, the one the LP consumes (Voice 1)
+/// # Contract — regress the MIN envelope, the one the LP consumes
 ///
 /// `FPHA_0` is the pointwise **min** over the raw hull planes, not the max: the LP
 /// applies `g ≤ plane_k` for every plane, so the binding cap is the minimum.
@@ -21,14 +21,14 @@ use super::production::ProductionFunction;
 /// ≈0.6·φ (a ~30–40% under-generation, invisible for run-of-river where
 /// `min == max`).
 ///
-/// # Contract — spillage = 0, lateral = 0 only (Voice 1)
+/// # Contract — spillage = 0, lateral = 0 only
 ///
 /// Both `FPHA_0` and `FPH` are evaluated at `s = 0`; the `s_points` axis is
 /// deliberately not iterated (as `super::hull_fit` build also ignores it). Folding
 /// the spillage axis into the sum pulls α toward the spill region and degrades the
 /// dominant no-spill region that governs operation.
 ///
-/// # Contract — degenerate denominator returns the neutral `α = 1.0` (Voice 1)
+/// # Contract — degenerate denominator returns the neutral `α = 1.0`
 ///
 /// `Σ FPHA_0² == 0` (all-zero-production hydro, net head ≤ 0 over the grid) leaves
 /// the ratio undefined; return `α = 1.0` rather than dividing by zero or
@@ -72,7 +72,7 @@ pub(crate) fn compute_alpha_fpha(
 
 /// Scale the whole affine function of a raw hull plane by `α`.
 ///
-/// # Contract — `α` scales every coefficient, not just the intercept (Voice 1)
+/// # Contract — `α` scales every coefficient, not just the intercept
 ///
 /// `α` multiplies `γ₀`, `γ_V`, `γ_Q`, and `γ_S` alike, since
 /// `FPHA = α·FPHA_0`. Scaling only the intercept (`α·γ₀` with raw gradients) is the

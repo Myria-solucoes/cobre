@@ -29,14 +29,8 @@ pub struct DiversionChannel {
 /// dead volume before it begins generating.
 ///
 /// A hydro carrying a `FillingConfig` (paired with [`Hydro::entry_stage_id`])
-/// passes through three phases keyed on the study `stage.id` being evaluated
-/// (the stage's own id, not [`Hydro::id`]):
-///
-/// - `PreFilling` (`start_stage_id > 0` and `id < start_stage_id`): the dam
-///   does not exist yet; the river flows past its site.
-/// - `Filling` (`start_stage_id <= id < entry_stage_id`): the reservoir impounds
-///   water toward the dead volume `min_storage_hm3` but does not yet generate.
-/// - `Operating` (`id >= entry_stage_id`): a normal plant.
+/// passes through the [`crate::commissioning::Phase`] lifecycle keyed on the
+/// study `stage.id` being evaluated (the stage's own id, not [`Hydro::id`]).
 ///
 /// The filling target is the dead volume `min_storage_hm3`; there is no separate
 /// target field. A hydro with no `FillingConfig` is Operating at every stage.

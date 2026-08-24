@@ -21,9 +21,7 @@ use std::sync::mpsc;
 
 use cobre_core::scenario::ScenarioSource;
 use cobre_core::{BlockMode, EntityId};
-use cobre_io::{
-    PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, write_policy_checkpoint,
-};
+use cobre_io::{PolicyCutRecord, StageCutsPayload, write_policy_checkpoint};
 use cobre_sddp::{
     SimulationWeighting, StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
     lead_time::resolve_spread, setup::prepare_stochastic,
@@ -48,15 +46,11 @@ fn train_deterministic_case(
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let prepare_result = prepare_stochastic(
-        system,
-        case_dir,
-        &config,
-        42,
-        &ScenarioSource::default(),
-        None,
-    )
-    .expect("prepare_stochastic must succeed");
+    let training_source = config
+        .training_scenario_source(&config_path)
+        .expect("training_scenario_source must parse");
+    let prepare_result = prepare_stochastic(system, case_dir, &config, 42, &training_source, None)
+        .expect("prepare_stochastic must succeed");
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 
@@ -1445,18 +1439,18 @@ fn d12_checkpoint_round_trip() {
             active_cut_indices: &active_indices_per_stage[stage_idx],
             populated_count: pool.populated() as u32,
             entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: i32::try_from(stage_idx).unwrap_or(-1),
+            graph_stage_id: -1,
         })
         .collect();
 
     let n_stages = fcf.pools.len();
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-    let policy_metadata = PolicyCheckpointMetadata {
-        format_version: cobre_io::FORMAT_VERSION,
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-        created_at: "2026-03-16T00:00:00Z".to_string(),
-        num_stages: n_stages as u32,
-        graph_manifest: cobre_io::GraphManifest::default(),
-        producer: cobre_io::ProducerBlock {
+    let policy_metadata = cobre_sddp::test_support::checkpoint_metadata(
+        n_stages as u32,
+        cobre_io::GraphManifest::default(),
+        cobre_io::ProducerBlock {
             completed_iterations: result.iterations as u32,
             final_lower_bound: result.final_lb,
             best_upper_bound: Some(result.final_ub),
@@ -1470,7 +1464,7 @@ fn d12_checkpoint_round_trip() {
             training_block_mode_per_stage: vec![],
             cost_scale_factor: None,
         },
-    };
+    );
 
     write_policy_checkpoint(
         &policy_dir,
@@ -1497,8 +1491,8 @@ fn d12_checkpoint_round_trip() {
         "D12: checkpoint must contain at least one stage_cuts entry"
     );
 
-    let metadata_path = policy_dir.join("metadata.json");
-    assert!(metadata_path.is_file(), "D12: metadata.json must exist");
+    let manifest_path = policy_dir.join("manifest.bin");
+    assert!(manifest_path.is_file(), "D12: manifest.bin must exist");
 
     let stage_bin_path = policy_dir.join("cuts/000.bin");
     assert!(stage_bin_path.is_file(), "D12: cuts/000.bin must exist");
@@ -3395,6 +3389,65 @@ fn d28_decomp_weekly_monthly_loads_and_trains() {
     assert!(
         result.iterations > 0,
         "D28: must complete at least 1 iteration"
+    );
+}
+
+/// D56: a sigma=0 External LOAD deck with no `load_seasonal_stats.parquet`
+/// twin realizes its own external value at stage 0, not a seasonal mean —
+/// the deck-level proof of
+/// `external_load_sigma_zero_reconstructs_external_value_not_seasonal_mean`
+/// (`crates/cobre-sddp/src/setup/scenario_libraries.rs`). Also confirms the
+/// deck as-authored validates with no `BusinessRuleViolation` (the
+/// seasonal-stats-optional-under-External path).
+#[test]
+fn d56_external_load_reconstructs_external_value_not_seasonal_mean() {
+    let case_dir = Path::new("../../examples/deterministic/d56-external-authoritative");
+
+    cobre_io::validate_case(case_dir)
+        .expect("d56 as-authored must validate with no BusinessRuleViolation");
+
+    let (setup, _system, _result) = run_deterministic_with_setup(case_dir);
+
+    let mean = setup.stochastic.normal().mean(0, 0);
+    let std = setup.stochastic.normal().std(0, 0);
+    let eta = setup
+        .scenario_libraries
+        .training
+        .external_load
+        .as_ref()
+        .expect("d56's load scheme is External; a training library must exist")
+        .eta_slice(0, 0)[0];
+    let realized = (mean + std * eta).max(0.0);
+
+    assert!(
+        (realized - 123.0).abs() < 1e-9,
+        "D56: stage-0 realized load must equal the external value (123.0), not a \
+         seasonal mean; got {realized}"
+    );
+}
+
+/// D56: a sigma=0 AR(0) External INFLOW deck with no
+/// `inflow_seasonal_stats.parquet` twin loads and converges (LB == UB), proving
+/// the seasonal-stats-optional-under-External path for inflow end to end.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d56_external_authoritative_loads_and_converges() {
+    let case_dir = Path::new("../../examples/deterministic/d56-external-authoritative");
+
+    let result = run_deterministic(case_dir);
+
+    assert!(
+        result.iterations >= 1,
+        "D56: must complete at least 1 iteration"
+    );
+    assert!(
+        (result.final_lb - result.final_ub).abs() < 1e-6,
+        "D56: a sigma=0 deck must converge LB == UB; lb={} ub={}",
+        result.final_lb,
+        result.final_ub
     );
 }
 
@@ -6104,7 +6157,6 @@ mod chronological_telescoping {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -6833,7 +6885,6 @@ mod chronological_attribution {
             // these tests inspect LP structure and state dimension, never a
             // seeded value.
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -8141,7 +8192,7 @@ mod heterogeneous_visit_bound_resume {
     //! pre-fix scalar substitution (every resumed pool given `forward_passes`
     //! uniformly as its stride) silently broke.
 
-    use cobre_io::StageCutsReadResult;
+    use cobre_io::{STAGE_CUTS_NODE_ID_SENTINEL, StageCutsReadResult};
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::setup::NodeId;
     use cobre_sddp::test_support::{k_fan_setup, trivial_full_fcf_proof};
@@ -8184,6 +8235,24 @@ mod heterogeneous_visit_bound_resume {
             u32::try_from(cold.setup.num_stages()).expect("stage count fits u32"),
         );
 
+        // Mirrors `sole_pool_owner_node_id` (the production writer's
+        // algorithm in `policy_export.rs`): every pool has exactly one
+        // owning node EXCEPT the K-fan's shared terminal leaf pool, which
+        // `k` distinct leaf nodes own jointly and must therefore keep the
+        // sentinel.
+        let pool_owner_node_id = |pool: usize| -> i32 {
+            let mut owner: Option<i32> = None;
+            for (pos, node) in cold.setup.node_graph.nodes.iter_indexed() {
+                if node.pool_id == pool {
+                    if owner.is_some() {
+                        return STAGE_CUTS_NODE_ID_SENTINEL;
+                    }
+                    owner = Some(cold.setup.node_graph.node_ids[pos].0);
+                }
+            }
+            owner.unwrap_or(STAGE_CUTS_NODE_ID_SENTINEL)
+        };
+
         // A checkpoint with no warm-start cuts: this test's concern is the
         // constructor's per-pool dimension/stride threading, not cut-byte
         // fidelity (already covered by
@@ -8200,6 +8269,9 @@ mod heterogeneous_visit_bound_resume {
                 populated_count: 0,
                 cuts: Vec::new(),
                 entity_manifest: Vec::new(),
+                cost_scale_factor: None,
+                node_id: pool_owner_node_id(p),
+                graph_stage_id: -1,
             })
             .collect();
         let visit_bounds: Vec<u64> = cold_strides.iter().map(|&s| u64::from(s)).collect();
@@ -8276,7 +8348,7 @@ mod enumerated_external {
         DEFAULT_COST_SCALE_FACTOR, InflowNonNegativityMethod, SimulationScenarioResult,
         StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
         hydro_models::PrepareHydroModelsResult,
-        setup::{ConstructionConfig, SimulationEnumeratedRequest},
+        setup::{SimulationEnumeratedRequest, StudyParams},
     };
     use cobre_solver::ActiveSolver;
     use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
@@ -8529,8 +8601,8 @@ mod enumerated_external {
     fn construction_config(
         backward_scheduler: cobre_io::config::BackwardScheduler,
         n_scenarios: u32,
-    ) -> ConstructionConfig {
-        ConstructionConfig {
+    ) -> StudyParams {
+        StudyParams {
             seed: 42,
             forward_passes: 1,
             training_enumerated: true,
@@ -8553,8 +8625,7 @@ mod enumerated_external {
             simulation_solver: None,
             backward_scheduler,
             cost_scale_factor: DEFAULT_COST_SCALE_FACTOR,
-            inflow_lag_depth: None,
-            boundary_present: false,
+            boundary: cobre_sddp::BoundaryStateRequirements::none(),
         }
     }
 
@@ -8826,7 +8897,7 @@ fn cut_selection_scores_reduced_projection_in_projected_space() {
 
     let mut projected_deact = strategy
         .select_for_stage(&pool, &projected, n_trials, 10, 0)
-        .deactivation_indices();
+        .updates;
     projected_deact.sort_unstable();
 
     // Pre-fix misaligned read: stride the global buffer by the pool dim,
@@ -8835,7 +8906,7 @@ fn cut_selection_scores_reduced_projection_in_projected_space() {
     let derived_trials = global_states.len() / n_slots;
     let mut misaligned_deact = strategy
         .select_for_stage(&pool, &global_states, derived_trials, 10, 0)
-        .deactivation_indices();
+        .updates;
     misaligned_deact.sort_unstable();
 
     assert_eq!(
@@ -9207,7 +9278,7 @@ mod enumerated_checkpoint {
     use std::collections::HashSet;
 
     use cobre_io::{
-        FORMAT_VERSION, GraphManifest, PolicyCheckpointMetadata, ProducerBlock, StageCutsPayload,
+        GraphManifest, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
         read_policy_checkpoint, write_policy_checkpoint,
     };
     use cobre_sddp::policy_export::build_stage_cut_records;
@@ -9314,6 +9385,23 @@ mod enumerated_checkpoint {
             })
             .collect();
 
+        // Mirrors `sole_pool_owner_node_id` (the production writer's
+        // algorithm in `policy_export.rs`): every non-leaf pool has exactly
+        // one owning node; the shared leaf pool the fixture doc above
+        // names keeps the sentinel.
+        let pool_owner_node_id = |pool: usize| -> i32 {
+            let mut owner: Option<i32> = None;
+            for (pos, node) in node_graph.nodes.iter_indexed() {
+                if node.pool_id == pool {
+                    if owner.is_some() {
+                        return STAGE_CUTS_NODE_ID_SENTINEL;
+                    }
+                    owner = Some(node_graph.node_ids[pos].0);
+                }
+            }
+            owner.unwrap_or(STAGE_CUTS_NODE_ID_SENTINEL)
+        };
+
         let stage_cuts_payloads: Vec<StageCutsPayload<'_>> = fcf
             .pools
             .iter()
@@ -9327,18 +9415,18 @@ mod enumerated_checkpoint {
                 active_cut_indices: &active_indices_per_stage[pool_idx],
                 populated_count: pool.populated() as u32,
                 entity_manifest: &[],
+                cost_scale_factor: 1_000_000.0,
+                node_id: pool_owner_node_id(pool_idx),
+                graph_stage_id: -1,
             })
             .collect();
 
         let n_pools = fcf.pools.len();
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-        let policy_metadata = PolicyCheckpointMetadata {
-            format_version: FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-03-16T00:00:00Z".to_string(),
-            num_stages: n_pools as u32,
-            graph_manifest: GraphManifest::default(),
-            producer: ProducerBlock {
+        let policy_metadata = cobre_sddp::test_support::checkpoint_metadata(
+            n_pools as u32,
+            GraphManifest::default(),
+            ProducerBlock {
                 completed_iterations: result.iterations as u32,
                 final_lower_bound: result.final_lb,
                 best_upper_bound: Some(result.final_ub),
@@ -9352,7 +9440,7 @@ mod enumerated_checkpoint {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
             },
-        };
+        );
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         let policy_dir = tmp.path().join("policy");
@@ -9435,8 +9523,8 @@ mod water_terminal_fcf_valuation {
     use cobre_core::EntityId;
     use cobre_core::temporal::StageStateConfig;
     use cobre_io::{
-        BoundaryPolicy, FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata,
-        PolicyCutRecord, ProducerBlock, StageCutsPayload, write_policy_checkpoint,
+        BoundaryPolicy, GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
+        StageCutsPayload, write_policy_checkpoint,
     };
     use cobre_sddp::indexer::CutStateProjection;
     use cobre_sddp::setup::{NodeId, StageIdx};
@@ -9553,13 +9641,13 @@ mod water_terminal_fcf_valuation {
             active_cut_indices: &[0],
             populated_count: 1,
             entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: 100,
+            graph_stage_id: -1,
         };
-        let metadata = PolicyCheckpointMetadata {
-            format_version: FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-08-12T00:00:00Z".to_string(),
-            num_stages: 1,
-            graph_manifest: GraphManifest {
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            1,
+            GraphManifest {
                 n_pools: 1,
                 nodes: vec![ManifestNode {
                     id: 100,
@@ -9568,7 +9656,7 @@ mod water_terminal_fcf_valuation {
                 }],
                 edges: vec![],
             },
-            producer: ProducerBlock {
+            ProducerBlock {
                 completed_iterations: 0,
                 final_lower_bound: 0.0,
                 best_upper_bound: None,
@@ -9582,7 +9670,7 @@ mod water_terminal_fcf_valuation {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: Some(1.0),
             },
-        };
+        );
         write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
     }
 
@@ -9594,9 +9682,18 @@ mod water_terminal_fcf_valuation {
         coefficients[bucket_col] = BETA;
         write_synthetic_boundary(dir, state_dimension, ALPHA, &coefficients);
 
-        let boundary_cuts =
-            load_boundary_cuts(dir, 0, state_dimension, &[], &[], None, 1.0, &mut |_msg| {})
-                .expect("boundary cut must load");
+        let boundary_cuts = load_boundary_cuts(
+            dir,
+            0,
+            state_dimension,
+            &[],
+            &[],
+            &[],
+            None,
+            1.0,
+            &mut |_msg| {},
+        )
+        .expect("boundary cut must load");
         inject_boundary_cuts(setup, &boundary_cuts);
     }
 

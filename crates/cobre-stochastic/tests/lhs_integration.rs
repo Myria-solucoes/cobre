@@ -79,7 +79,7 @@ fn make_stage_lhs(index: usize, id: i32, branching_factor: usize) -> Stage {
     }
 }
 
-/// No blocks — for direct use with `generate_opening_tree`.
+/// For direct use with `generate_opening_tree`.
 fn make_stage_lhs_no_block(index: usize, id: i32, branching_factor: usize) -> Stage {
     Stage {
         index,

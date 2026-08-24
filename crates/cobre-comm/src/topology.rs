@@ -41,8 +41,7 @@ impl ExecutionTopology {
 
     /// Hostname of the first (or only) host.
     ///
-    /// Useful for local/single-node display. Returns `"unknown"` if the host
-    /// list is empty.
+    /// Returns `"unknown"` if the host list is empty.
     #[must_use]
     pub fn leader_hostname(&self) -> &str {
         self.hosts

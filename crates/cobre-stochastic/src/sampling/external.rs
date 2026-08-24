@@ -13,7 +13,6 @@
 //! [`solve_par_noise`]: crate::par::evaluate::solve_par_noise
 
 use std::collections::HashSet;
-use std::hash::BuildHasher;
 
 use cobre_core::{
     EntityId,
@@ -190,6 +189,19 @@ impl ExternalScenarioLibrary {
     }
 }
 
+/// Map each study stage's declared `Stage.id` to its 0-based position in
+/// `stages` — the declared-domain-id -> canonical-study-index resolution
+/// cobre-io's `StageIdResolver` performs for the σ=0 validator (rule 47),
+/// replicated here because `cobre-stochastic` cannot depend on `cobre-io`
+/// (`cobre-io` depends on `cobre-stochastic`). `ExternalScenarioRow`/
+/// `ExternalLoadRow`/`ExternalNcsRow`'s own `stage_id` doc is explicit that
+/// the value is a declared domain id, "not a 0-based index" — every
+/// External-row consumer below resolves through this map, never casts
+/// `stage_id as usize` directly.
+fn stage_id_to_index(stages: &[Stage]) -> std::collections::HashMap<i32, usize> {
+    stages.iter().enumerate().map(|(i, s)| (s.id, i)).collect()
+}
+
 // ---------------------------------------------------------------------------
 // standardize_external_inflow
 // ---------------------------------------------------------------------------
@@ -205,7 +217,19 @@ impl ExternalScenarioLibrary {
 /// each `finalize_period` boundary).
 ///
 /// A `f64::NEG_INFINITY` from `solve_par_noise` (sigma=0, non-matching target)
-/// is stored as-is; V3.7 in [`validate_external_library`] rejects it.
+/// is stored as-is; V3.7 in [`validate_external_library`] rejects it for a
+/// stage's real (pre-padding) scenarios. A phantom padding slot may also hold
+/// the sentinel, harmlessly — [`pad_library_to_uniform`] overwrites it with a
+/// real replica before the library is ever read.
+///
+/// A stage with fewer real scenarios than another stage has its raw values
+/// replicated to the library's uniform width BEFORE inversion (the same
+/// wrap-around convention [`pad_library_to_uniform`] applies to the eta
+/// output), so a later real stage's lag chain — `run_eta_inversion`'s
+/// `advance_lag_chain` step — advances through that replica, never a
+/// fabricated `0.0`: every branch descending from one earlier real scenario
+/// shares that scenario's own realized value as its lag, matching what the
+/// forward pass's own state carry-over feeds a shared parent's children.
 ///
 /// # Parameters
 ///
@@ -284,11 +308,11 @@ pub fn standardize_external_inflow(
         .enumerate()
         .map(|(i, &id)| (id, i))
         .collect();
+    let stage_index = stage_id_to_index(stages);
 
     // raw[stage * n_scenarios * n_hydros + scenario * n_hydros + h_idx]
     let mut raw_values = vec![0.0_f64; n_stages * n_scenarios * n_hydros].into_boxed_slice();
 
-    #[allow(clippy::cast_sign_loss)]
     for row in external_rows {
         debug_assert!(
             row.stage_id >= 0,
@@ -298,18 +322,33 @@ pub fn standardize_external_inflow(
             row.scenario_id >= 0,
             "negative scenario_id in external scenario row"
         );
-        let stage_idx = row.stage_id as usize;
+        let Some(&stage_idx) = stage_index.get(&row.stage_id) else {
+            continue;
+        };
+        #[allow(clippy::cast_sign_loss)]
         let scenario_idx = row.scenario_id as usize;
         if let Some(&h_idx) = hydro_index.get(&row.hydro_id) {
-            // Defensive bound: cobre-io's A1 (exact scenario_id set) and A2
-            // (stage_id resolution) are the load-bearing guards that reject an
-            // out-of-range index at load; this keeps a stray index from writing
-            // into a neighbouring stage's realization 0 instead of being caught.
-            if stage_idx < n_stages && scenario_idx < n_scenarios {
+            // Defensive bound: cobre-io's A1 (exact scenario_id set) is the
+            // load-bearing guard that rejects an out-of-range scenario_id at
+            // load; this keeps a stray index from writing into a neighbouring
+            // stage's realization 0 instead of being caught.
+            if scenario_idx < n_scenarios {
                 raw_values[stage_idx * n_scenarios * n_hydros + scenario_idx * n_hydros + h_idx] =
                     row.value_m3s;
             }
         }
+    }
+
+    for (stage_idx, &raw_count) in library
+        .raw_scenarios_per_stage()
+        .iter()
+        .enumerate()
+        .take(n_stages)
+    {
+        if raw_count == 0 || raw_count >= n_scenarios {
+            continue;
+        }
+        replicate_to_uniform_width(&mut raw_values, n_scenarios, n_hydros, stage_idx, raw_count);
     }
 
     run_eta_inversion(
@@ -362,7 +401,7 @@ fn standardize_external_simple<R, M, FM, FR>(
     external_rows: &[R],
     entity_ids: &[EntityId],
     models: &[M],
-    n_stages: usize,
+    stages: &[Stage],
     model_fields: FM,
     row_fields: FR,
 ) where
@@ -370,6 +409,7 @@ fn standardize_external_simple<R, M, FM, FR>(
     FR: Fn(&R) -> (EntityId, i32, i32, f64),
 {
     let n_entities = entity_ids.len();
+    let n_stages = stages.len();
     let n_scenarios = library.n_scenarios();
 
     debug_assert_eq!(
@@ -382,7 +422,7 @@ fn standardize_external_simple<R, M, FM, FR>(
     debug_assert_eq!(
         library.n_stages(),
         n_stages,
-        "library.n_stages() ({}) must equal n_stages ({})",
+        "library.n_stages() ({}) must equal stages.len() ({})",
         library.n_stages(),
         n_stages,
     );
@@ -396,30 +436,31 @@ fn standardize_external_simple<R, M, FM, FR>(
         .enumerate()
         .map(|(i, &id)| (id, i))
         .collect();
+    let stage_index = stage_id_to_index(stages);
 
     // mean_std[stage * n_entities + entity_idx]
     let mut mean_std = vec![(0.0_f64, 0.0_f64); n_stages * n_entities];
-    #[allow(clippy::cast_sign_loss)]
     for model in models {
         let (entity_id, stage_id, mean, std) = model_fields(model);
-        if let Some(&e_idx) = entity_index.get(&entity_id) {
-            let stage_idx = stage_id as usize;
-            if stage_idx < n_stages {
-                mean_std[stage_idx * n_entities + e_idx] = (mean, std);
-            }
+        if let (Some(&e_idx), Some(&stage_idx)) =
+            (entity_index.get(&entity_id), stage_index.get(&stage_id))
+        {
+            mean_std[stage_idx * n_entities + e_idx] = (mean, std);
         }
     }
 
     #[allow(clippy::cast_sign_loss)]
     for row in external_rows {
         let (entity_id, stage_id, scenario_id, value) = row_fields(row);
-        let stage_idx = stage_id as usize;
+        let Some(&stage_idx) = stage_index.get(&stage_id) else {
+            continue;
+        };
         let scenario_idx = scenario_id as usize;
         if let Some(&e_idx) = entity_index.get(&entity_id) {
-            // Defensive bound: cobre-io's A1/A2 are the load-bearing guards that
-            // reject an out-of-range index at load; this keeps a stray index from
-            // writing into a neighbouring stage's realization 0.
-            if stage_idx < n_stages && scenario_idx < n_scenarios {
+            // Defensive bound: cobre-io's A1 is the load-bearing guard that
+            // rejects an out-of-range scenario_id at load; this keeps a stray
+            // index from writing into a neighbouring stage's realization 0.
+            if scenario_idx < n_scenarios {
                 let (mean, std) = mean_std[stage_idx * n_entities + e_idx];
                 let eta = if std == 0.0 {
                     0.0
@@ -430,6 +471,115 @@ fn standardize_external_simple<R, M, FM, FR>(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// derive_external_sample_moments
+// ---------------------------------------------------------------------------
+
+/// Derive per-`(entity, stage)` sample `(μ, σ)` over the scenario axis of
+/// external scenario rows. Population (`1/N`) divisor, matching
+/// [`SeasonalStats`](crate::par::SeasonalStats)'s convention — the
+/// population-vs-sample choice only rescales the internal η, not the
+/// standardize/reconstruct round trip.
+///
+/// Output layout matches the `mean_std` table `standardize_external_simple`
+/// consumes: `moments[stage * entity_ids.len() + entity_idx]`. An
+/// `(entity, stage)` cell with no rows defaults to `(0.0, 0.0)`.
+///
+/// `row_fields`' `stage_id` MUST already be the canonical 0-based study-stage
+/// index, never the row's raw declared domain id — this reduction has no
+/// stage list to resolve one against. Every caller resolves first (this
+/// crate's `stage_id_to_index`, or the equivalent `cobre-io`
+/// `StageIdResolver`); passing a raw `ExternalScenarioRow`/`ExternalLoadRow`/
+/// `ExternalNcsRow::stage_id` directly silently mis-indexes or drops rows
+/// whenever a study's declared stage ids are not exactly `0..n_stages`.
+///
+/// Determinism: each cell reduces its rows in ascending `(scenario_id, value)`
+/// order, never `external_rows`' declaration order, so any permutation of the
+/// same rows yields a bit-identical table (D5). A bit-identical constant cell
+/// short-circuits to `σ = 0.0` exactly and `μ` equal to the constant — the
+/// two-pass sum/variance below would otherwise round a constant column to a
+/// tiny nonzero `σ` (catastrophic cancellation).
+///
+/// # Parameters
+///
+/// - `row_fields` — yields `(entity_id, stage_id, scenario_id, value)` for one row
+///
+/// # Panics
+///
+/// Panics in debug builds if `row_fields` yields a negative `stage_id` or `scenario_id`.
+#[must_use]
+pub fn derive_external_sample_moments<R, FR>(
+    external_rows: &[R],
+    entity_ids: &[EntityId],
+    n_stages: usize,
+    row_fields: FR,
+) -> Vec<(f64, f64)>
+where
+    FR: Fn(&R) -> (EntityId, i32, i32, f64),
+{
+    let n_entities = entity_ids.len();
+    let mut moments = vec![(0.0_f64, 0.0_f64); n_stages * n_entities];
+    if n_entities == 0 || n_stages == 0 {
+        return moments;
+    }
+
+    let entity_index: std::collections::HashMap<EntityId, usize> = entity_ids
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
+
+    let mut cells: Vec<Vec<(i32, f64)>> = vec![Vec::new(); n_stages * n_entities];
+
+    #[allow(clippy::cast_sign_loss)]
+    for row in external_rows {
+        let (entity_id, stage_id, scenario_id, value) = row_fields(row);
+        debug_assert!(stage_id >= 0, "negative stage_id in external scenario row");
+        debug_assert!(
+            scenario_id >= 0,
+            "negative scenario_id in external scenario row"
+        );
+        let Some(&e_idx) = entity_index.get(&entity_id) else {
+            continue;
+        };
+        let stage_idx = stage_id as usize;
+        if stage_idx < n_stages {
+            cells[stage_idx * n_entities + e_idx].push((scenario_id, value));
+        }
+    }
+
+    for (cell_idx, cell) in cells.iter_mut().enumerate() {
+        if cell.is_empty() {
+            continue;
+        }
+        cell.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+        moments[cell_idx] = cell_population_moments(cell);
+    }
+
+    moments
+}
+
+/// Population `(μ, σ)` of one canonically-ordered `(scenario_id, value)` cell.
+#[allow(clippy::float_cmp)] // intentional bit-identical equality, not a tolerance check
+fn cell_population_moments(cell: &[(i32, f64)]) -> (f64, f64) {
+    let first = cell[0].1;
+    if cell.iter().all(|&(_, v)| v == first) {
+        return (first, 0.0);
+    }
+
+    // Rationale: cell.len() is a per-(entity, stage) scenario count, far
+    // within f64's 2^53 exact range.
+    #[allow(clippy::cast_precision_loss)]
+    let n = cell.len() as f64;
+    let mean = cell.iter().map(|&(_, v)| v).sum::<f64>() / n;
+    let variance = cell
+        .iter()
+        .map(|&(_, v)| (v - mean) * (v - mean))
+        .sum::<f64>()
+        / n;
+    (mean, variance.sqrt())
 }
 
 // ---------------------------------------------------------------------------
@@ -449,14 +599,14 @@ pub fn standardize_external_load(
     external_rows: &[ExternalLoadRow],
     bus_ids: &[EntityId],
     load_models: &[LoadModel],
-    n_stages: usize,
+    stages: &[Stage],
 ) {
     standardize_external_simple(
         library,
         external_rows,
         bus_ids,
         load_models,
-        n_stages,
+        stages,
         |model| (model.bus_id, model.stage_id, model.mean_mw, model.std_mw),
         |row| (row.bus_id, row.stage_id, row.scenario_id, row.value_mw),
     );
@@ -479,14 +629,14 @@ pub fn standardize_external_ncs(
     external_rows: &[ExternalNcsRow],
     ncs_ids: &[EntityId],
     ncs_models: &[NcsModel],
-    n_stages: usize,
+    stages: &[Stage],
 ) {
     standardize_external_simple(
         library,
         external_rows,
         ncs_ids,
         ncs_models,
-        n_stages,
+        stages,
         |model| (model.ncs_id, model.stage_id, model.mean, model.std),
         |row| (row.ncs_id, row.stage_id, row.scenario_id, row.value),
     );
@@ -515,7 +665,7 @@ pub fn standardize_external_ncs(
 /// | V3.4 | Error   | Each stage's row count must be divisible by `n_entities` (non-uniform counts allowed). |
 /// | V3.5 | Error   | Every entity ID in `row_entity_ids` must exist in `entity_ids`.          |
 /// | V3.6 | Assert  | All values in raw rows are finite (parser invariant — `debug_assert`).   |
-/// | V3.7 | Error   | No eta value in the library may be `f64::NEG_INFINITY` or `NaN`.        |
+/// | V3.7 | Error   | No eta value at a stage's real (pre-padding) scenario may be `f64::NEG_INFINITY` or `NaN`. |
 /// | V3.8 | Warning | `library.n_scenarios() < forward_passes` — log a warning.               |
 ///
 /// The caller pre-extracts `row_entity_ids` (entity IDs present in the raw rows)
@@ -544,10 +694,15 @@ pub fn standardize_external_ncs(
 /// );
 /// assert!(result.is_ok());
 /// ```
-pub fn validate_external_library<S: BuildHasher>(
+// Rationale: `implicit_hasher` wants a `<S: BuildHasher>` generic, but every
+// caller passes a default-`RandomState` `HashSet` and the membership test is
+// hasher-agnostic — declaration-order invariance rides the ordered `entity_ids`
+// slice, not this set — so the concrete type is deliberate.
+#[allow(clippy::implicit_hasher)]
+pub fn validate_external_library(
     library: &ExternalScenarioLibrary,
     entity_ids: &[EntityId],
-    row_entity_ids: &HashSet<EntityId, S>,
+    row_entity_ids: &HashSet<EntityId>,
     rows_per_stage: &[usize],
     n_stages: usize,
     forward_passes: u32,
@@ -618,9 +773,16 @@ pub fn validate_external_library<S: BuildHasher>(
     );
 
     // V3.7 — no eta may be NEG_INFINITY (the sigma=0 non-matching-target sentinel
-    // from standardize_external_inflow) or NaN (numerical failure).
+    // from standardize_external_inflow) or NaN (numerical failure). Bounded to
+    // `raw_scenarios_per_stage` (each stage's REAL scenario count), never
+    // `library.n_scenarios()` (the padded, uniform width): a phantom slot beyond
+    // the real count is unconditionally overwritten by the later
+    // `pad_library_to_uniform` call with a real replica, so checking the padded
+    // width here would reject a stage that legitimately has fewer real scenarios
+    // than another stage (e.g. a branching root's single external observation).
     for stage in 0..library.n_stages() {
-        for scenario in 0..library.n_scenarios() {
+        let real_scenarios = library.raw_scenarios_per_stage()[stage];
+        for scenario in 0..real_scenarios {
             let eta = library.eta_slice(stage, scenario);
             for (entity_idx, &value) in eta.iter().enumerate() {
                 if value == f64::NEG_INFINITY || value.is_nan() {
@@ -657,6 +819,29 @@ pub fn validate_external_library<S: BuildHasher>(
 // pad_library_to_uniform
 // ---------------------------------------------------------------------------
 
+/// Replicate one stage's real (pre-padding) scenario slots into that stage's
+/// remaining `raw_count..n_scenarios` range via wrap-around indexing
+/// (`k % raw_count`), on a flat `(stage, scenario)`-major buffer with an
+/// `n_entities`-wide innermost stride — the shared wrap-around convention
+/// [`pad_library_to_uniform`] (the eta output) and
+/// [`standardize_external_inflow`] (the pre-inversion raw-value buffer) both
+/// apply, so the two padding operations can never disagree on how a phantom
+/// slot's value is chosen.
+fn replicate_to_uniform_width(
+    buffer: &mut [f64],
+    n_scenarios: usize,
+    n_entities: usize,
+    stage_idx: usize,
+    raw_count: usize,
+) {
+    for k in raw_count..n_scenarios {
+        let src_k = k % raw_count;
+        let src_offset = (stage_idx * n_scenarios + src_k) * n_entities;
+        let dst_offset = (stage_idx * n_scenarios + k) * n_entities;
+        buffer.copy_within(src_offset..src_offset + n_entities, dst_offset);
+    }
+}
+
 /// Fill each under-populated stage to `library.n_scenarios()` by replicating its
 /// raw scenario slots with wrap-around indexing (`k % raw_count`), so every
 /// scenario index holds a valid eta vector. No-op for already-uniform input.
@@ -680,17 +865,7 @@ pub fn pad_library_to_uniform(library: &mut ExternalScenarioLibrary) {
         }
 
         padded_stages.push((s, raw_count));
-
-        // Operate on the flat eta buffer directly; eta_slice/eta_slice_mut would
-        // borrow-conflict here.
-        for k in raw_count..n_scenarios {
-            let src_k = k % raw_count;
-            let src_offset = (s * n_scenarios + src_k) * n_entities;
-            let dst_offset = (s * n_scenarios + k) * n_entities;
-            library
-                .eta
-                .copy_within(src_offset..src_offset + n_entities, dst_offset);
-        }
+        replicate_to_uniform_width(&mut library.eta, n_scenarios, n_entities, s, raw_count);
     }
 
     if !padded_stages.is_empty() {
@@ -733,8 +908,8 @@ mod tests {
     };
 
     use super::{
-        ExternalScenarioLibrary, standardize_external_inflow, standardize_external_load,
-        standardize_external_ncs,
+        ExternalScenarioLibrary, derive_external_sample_moments, standardize_external_inflow,
+        standardize_external_load, standardize_external_ncs,
     };
     use crate::derive_inflow_seeds;
     use crate::par::{
@@ -1353,7 +1528,8 @@ mod tests {
             bus_id,
             value_mw: 240.0,
         }];
-        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 1);
+        let stages = vec![make_stage(0, 0, 0)];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, &stages);
 
         let eta = lib.eta_slice(0, 0)[0];
         assert!((eta - 1.0).abs() < 1e-10, "eta = {eta}");
@@ -1399,7 +1575,8 @@ mod tests {
                 value_mw: 99.0,
             },
         ];
-        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 2);
+        let stages = vec![make_stage(0, 0, 0), make_stage(1, 1, 0)];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, &stages);
 
         assert!(
             (lib.eta_slice(0, 0)[0] - 5.0).abs() < 1e-12,
@@ -1435,7 +1612,8 @@ mod tests {
             ncs_id,
             value: 0.7,
         }];
-        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, 1);
+        let stages = vec![make_stage(0, 0, 0)];
+        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, &stages);
 
         let eta = lib.eta_slice(0, 0)[0];
         assert!((eta - 1.0).abs() < 1e-10, "eta = {eta}");
@@ -1465,7 +1643,8 @@ mod tests {
             bus_id,
             value_mw: 0.5,
         }];
-        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 1);
+        let stages = vec![make_stage(0, 0, 0)];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, &stages);
 
         let eta = lib.eta_slice(0, 0)[0];
         assert_eq!(eta, 0.0, "eta must be 0.0 when std=0.0, got {eta}");
@@ -1491,7 +1670,8 @@ mod tests {
             ncs_id,
             value: 0.4,
         }];
-        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, 1);
+        let stages = vec![make_stage(0, 0, 0)];
+        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, &stages);
 
         let eta = lib.eta_slice(0, 0)[0];
         assert_eq!(eta, 0.0, "eta must be 0.0 when std=0.0, got {eta}");
@@ -1563,7 +1743,8 @@ mod tests {
                 value_mw: 520.0, // (520-400)/40 = 3.0
             },
         ];
-        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 2);
+        let stages = vec![make_stage(0, 0, 0), make_stage(1, 1, 0)];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, &stages);
 
         assert!((lib.eta_slice(0, 0)[0] - 1.5).abs() < 1e-10);
         assert!((lib.eta_slice(0, 0)[1] - 2.0).abs() < 1e-10);
@@ -1635,7 +1816,8 @@ mod tests {
                 value: 1.60, // (1.60-0.40)/0.40 = 3.0
             },
         ];
-        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, 2);
+        let stages = vec![make_stage(0, 0, 0), make_stage(1, 1, 0)];
+        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, &stages);
 
         assert!((lib.eta_slice(0, 0)[0] - 1.5).abs() < 1e-10);
         assert!((lib.eta_slice(0, 0)[1] - 2.0).abs() < 1e-10);
@@ -2859,6 +3041,160 @@ mod tests {
                 &mut primary,
                 &mut downstream,
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sample-moment reduction tests
+    // -----------------------------------------------------------------------
+
+    /// Bit-identical constant column: `σ = 0.0` exactly, `μ` equal to the
+    /// constant exactly (guards the catastrophic-cancellation trap a naive
+    /// two-pass sum would fall into).
+    #[test]
+    fn test_derive_external_sample_moments_constant_column_is_exact() {
+        let bus_id = EntityId(1);
+        let bus_ids = vec![bus_id];
+        let rows = vec![
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 0,
+                bus_id,
+                value_mw: 42.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 1,
+                bus_id,
+                value_mw: 42.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 2,
+                bus_id,
+                value_mw: 42.0,
+            },
+        ];
+        let moments =
+            derive_external_sample_moments(&rows, &bus_ids, 1, |row: &ExternalLoadRow| {
+                (row.bus_id, row.stage_id, row.scenario_id, row.value_mw)
+            });
+        let (mean, std) = moments[0];
+        assert_eq!(
+            std, 0.0,
+            "constant column must yield sigma = 0.0, got {std}"
+        );
+        assert_eq!(
+            mean, 42.0,
+            "constant column mean must equal the constant, got {mean}"
+        );
+    }
+
+    /// Two distinct values: `σ > 0` and `(μ, σ)` match the hand-computed
+    /// population moments (mean=15.0, population std=5.0).
+    #[test]
+    fn test_derive_external_sample_moments_two_distinct_values() {
+        let bus_id = EntityId(1);
+        let bus_ids = vec![bus_id];
+        let rows = vec![
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 0,
+                bus_id,
+                value_mw: 10.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 1,
+                bus_id,
+                value_mw: 20.0,
+            },
+        ];
+        let moments =
+            derive_external_sample_moments(&rows, &bus_ids, 1, |row: &ExternalLoadRow| {
+                (row.bus_id, row.stage_id, row.scenario_id, row.value_mw)
+            });
+        let (mean, std) = moments[0];
+        assert!(std > 0.0, "distinct values must yield sigma > 0, got {std}");
+        assert!((mean - 15.0).abs() < 1e-12, "mean = {mean}, expected 15.0");
+        assert!((std - 5.0).abs() < 1e-12, "std = {std}, expected 5.0");
+    }
+
+    /// An `(entity, stage)` cell with no rows defaults to `(0.0, 0.0)`.
+    #[test]
+    fn test_derive_external_sample_moments_empty_cell_defaults_to_zero() {
+        let bus_a = EntityId(1);
+        let bus_b = EntityId(2);
+        let bus_ids = vec![bus_a, bus_b];
+        let rows = vec![ExternalLoadRow {
+            stage_id: 0,
+            scenario_id: 0,
+            bus_id: bus_a,
+            value_mw: 7.0,
+        }];
+        let moments =
+            derive_external_sample_moments(&rows, &bus_ids, 1, |row: &ExternalLoadRow| {
+                (row.bus_id, row.stage_id, row.scenario_id, row.value_mw)
+            });
+        assert_eq!(moments[0], (7.0, 0.0), "entity with rows keeps its moments");
+        assert_eq!(
+            moments[1],
+            (0.0, 0.0),
+            "entity with no rows must default to (0.0, 0.0)"
+        );
+    }
+
+    mod sample_moment_reduction_proptests {
+        use proptest::prelude::*;
+
+        use super::{EntityId, ExternalLoadRow, derive_external_sample_moments};
+
+        proptest! {
+            /// A permutation of the same external rows must reduce to a
+            /// bit-for-bit identical (mu, sigma) table (declaration-order
+            /// invariance).
+            #[test]
+            fn derive_external_sample_moments_is_declaration_order_invariant(
+                cell_values in prop::collection::vec(
+                    prop::collection::vec(-1000.0_f64..1000.0_f64, 0..=5),
+                    4,
+                ),
+                rotate_by in 0_usize..37,
+            ) {
+                let bus_ids = vec![EntityId(1), EntityId(2)];
+                let n_stages = 2;
+
+                let mut rows = Vec::new();
+                for (cell_idx, values) in cell_values.iter().enumerate() {
+                    let entity_idx = cell_idx % 2;
+                    let stage_idx = cell_idx / 2;
+                    for (scenario_id, &value) in values.iter().enumerate() {
+                        rows.push(ExternalLoadRow {
+                            stage_id: i32::try_from(stage_idx).unwrap(),
+                            scenario_id: i32::try_from(scenario_id).unwrap(),
+                            bus_id: bus_ids[entity_idx],
+                            value_mw: value,
+                        });
+                    }
+                }
+
+                let row_fields = |row: &ExternalLoadRow| {
+                    (row.bus_id, row.stage_id, row.scenario_id, row.value_mw)
+                };
+
+                let baseline = derive_external_sample_moments(&rows, &bus_ids, n_stages, row_fields);
+
+                let mut permuted = rows.clone();
+                permuted.reverse();
+                if !permuted.is_empty() {
+                    let len = permuted.len();
+                    permuted.rotate_left(rotate_by % len);
+                }
+                let reordered =
+                    derive_external_sample_moments(&permuted, &bus_ids, n_stages, row_fields);
+
+                prop_assert_eq!(baseline, reordered);
+            }
         }
     }
 }

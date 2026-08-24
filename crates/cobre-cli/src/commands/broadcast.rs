@@ -8,8 +8,8 @@ use cobre_io::Config;
 use cobre_io::PolicyMode;
 use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
 use cobre_sddp::{
-    CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
-    StoppingRule, StoppingRuleSet, StudyParams,
+    BoundaryStateRequirements, CutSelectionStrategy, DEFAULT_MAX_ITERATIONS,
+    InflowNonNegativityMethod, StoppingMode, StoppingRule, StoppingRuleSet, StudyParams,
     setup::{
         NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
         SimulationEnumeratedRequest, StageIdx, TypedVec,
@@ -35,7 +35,6 @@ pub(crate) enum BroadcastStoppingRule {
         iterations: u64,
         tolerance: f64,
     },
-    /// Mirrors [`StoppingRule::Gap`].
     Gap {
         /// Absolute gap tolerance, canonical R$.
         tolerance: Option<f64>,
@@ -81,9 +80,8 @@ impl From<BroadcastBackwardScheduler> for BackwardScheduler {
 /// Configuration snapshot broadcast from rank 0 to all ranks.
 // Rationale (struct_excessive_bools): each bool is an independent config
 // flag `StudyParams::from_config` resolves from a DIFFERENT `Config` section
-// (training selection, training enable, exports, policy.boundary); grouping
-// them into an enum or a state machine would invent a joint state no config
-// section actually declares.
+// (training selection, training enable, exports); grouping them into an enum or
+// a state machine would invent a joint state no config section actually declares.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct BroadcastConfig {
@@ -107,7 +105,6 @@ pub(crate) struct BroadcastConfig {
     pub(crate) cut_activity_tolerance: f64,
     /// When `false`, all ranks skip training and proceed to simulation (or exit).
     pub(crate) training_enabled: bool,
-    /// Policy initialization mode.
     pub(crate) policy_mode: PolicyMode,
     /// Whether the visited-states archive is allocated for export.
     pub(crate) export_states: bool,
@@ -117,7 +114,6 @@ pub(crate) struct BroadcastConfig {
     /// Scenario source for the training forward pass, broadcast so non-root
     /// ranks build the stochastic context with matching sampling schemes.
     pub(crate) training_source: ScenarioSource,
-    /// Scenario source for the post-training simulation forward pass.
     pub(crate) simulation_source: ScenarioSource,
     /// Backward-pass solver profile override (`training.solver.backward`),
     /// resolved identically on every rank by
@@ -134,15 +130,13 @@ pub(crate) struct BroadcastConfig {
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
     /// resolved identically on every rank by [`StudyParams::from_config`].
     pub(crate) cost_scale_factor: f64,
-    /// Effective inflow-lag state depth, inferred on rank 0 from a loaded boundary
-    /// policy's required depth (`None` when no boundary is loaded) and set after
-    /// `from_config`. Rebuilt into `ConstructionConfig` on every rank, widening
-    /// `L_state` in `resolve_state_layout`.
-    pub(crate) inflow_lag_depth: Option<u32>,
-    /// `policy.boundary.is_some()`, resolved identically on every rank by
-    /// `StudyParams::from_config`. Gates the water-bucket terminal mask
-    /// (`build_transit_bucket_topology`) before `inject_boundary_cuts` runs.
-    pub(crate) boundary_present: bool,
+    /// Boundary-derived state requirements, resolved on rank 0
+    /// (`resolve_boundary_state_requirements`) and set after `from_config`, then
+    /// broadcast so every rank rebuilds the identical `StudyParams`: the
+    /// inflow-lag depth widens `L_state` in `resolve_state_layout` and the
+    /// present flag gates the water-bucket terminal mask before
+    /// `inject_boundary_cuts` runs.
+    pub(crate) boundary: BoundaryStateRequirements,
 }
 
 impl BroadcastConfig {
@@ -226,8 +220,7 @@ impl BroadcastConfig {
             simulation_solver: params.simulation_solver,
             backward_scheduler: params.backward_scheduler.into(),
             cost_scale_factor: params.cost_scale_factor,
-            inflow_lag_depth: params.inflow_lag_depth,
-            boundary_present: params.boundary_present,
+            boundary: params.boundary,
         })
     }
 }
@@ -695,8 +688,6 @@ mod tests {
     // BroadcastStoppingRule tests
     // ------------------------------------------------------------------
 
-    /// Postcard round-trip for the `BroadcastStoppingRule::Gap` arm — the
-    /// mirror `BroadcastStoppingRule`'s doc comment exists for.
     #[test]
     fn broadcast_stopping_rule_gap_round_trips_via_postcard() {
         let original = BroadcastStoppingRule::Gap {
@@ -740,11 +731,14 @@ mod tests {
         );
     }
 
-    /// The boundary-inferred `inflow_lag_depth` (set on `BroadcastConfig` by rank
-    /// 0 after `from_config`) survives the postcard wire hop to non-root ranks.
+    /// The resolved boundary requirements — patched onto `BroadcastConfig` by
+    /// rank 0 after `from_config` (`from_config` itself leaves the `none()`
+    /// placeholder) — survive the postcard wire hop to non-root ranks as one
+    /// value carrying both the present flag and the inflow-lag depth.
     #[test]
-    fn broadcast_config_carries_inflow_lag_depth() {
+    fn broadcast_config_carries_boundary_requirements() {
         use super::BroadcastConfig;
+        use cobre_sddp::BoundaryStateRequirements;
 
         let json = r#"{
             "training": {
@@ -754,38 +748,19 @@ mod tests {
         }"#;
         let config: cobre_io::Config = serde_json::from_str(json).unwrap();
         let mut original = BroadcastConfig::from_config(&config).unwrap();
-        original.inflow_lag_depth = Some(12);
+        assert!(
+            !original.boundary.is_present(),
+            "from_config leaves the none() placeholder; the resolver owns presence"
+        );
+        original.boundary = BoundaryStateRequirements::present(12);
 
         let bytes = postcard::to_allocvec(&original).expect("postcard serialization must succeed");
         let decoded: BroadcastConfig =
             postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
-        assert_eq!(decoded.inflow_lag_depth, Some(12));
+        assert!(decoded.boundary.is_present());
+        assert_eq!(decoded.boundary.inflow_lag_depth(), Some(12));
     }
 
-    /// A present `policy.boundary` reaches `BroadcastConfig` as `boundary_present
-    /// = true` and survives the postcard wire hop.
-    #[test]
-    fn broadcast_config_carries_boundary_present() {
-        use super::BroadcastConfig;
-
-        let json = r#"{
-            "training": {
-                "selection": { "method": "sampled", "forward_passes": 4 },
-                "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }]
-            },
-            "policy": { "boundary": { "path": "unused" } }
-        }"#;
-        let config: cobre_io::Config = serde_json::from_str(json).unwrap();
-        let original = BroadcastConfig::from_config(&config).unwrap();
-        assert!(original.boundary_present);
-
-        let bytes = postcard::to_allocvec(&original).expect("postcard serialization must succeed");
-        let decoded: BroadcastConfig =
-            postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
-        assert!(decoded.boundary_present);
-    }
-
-    /// Postcard serialization round-trip for `BroadcastConfig`.
     #[test]
     fn broadcast_config_roundtrips_via_postcard() {
         use cobre_core::scenario::{SamplingScheme, ScenarioSource};

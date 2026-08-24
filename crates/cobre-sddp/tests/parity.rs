@@ -427,7 +427,7 @@ mod self_reproducibility_regression {
 
         let params = StudyParams::from_config(&config_with_sim)
             .expect("StudyParams::from_config must succeed");
-        let construction = params.into_construction_config();
+        let construction = params;
 
         let mut setup = StudySetup::from_broadcast_params(
             &system,
@@ -1380,16 +1380,7 @@ mod determinism {
                     0,
                     i32::try_from(idx).expect("worker_id fits in i32"),
                     MockSolver3H::new(100.0),
-                    PatchBuffer::new(
-                        fx.state.hydro_count,
-                        fx.state.max_par_order,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                    ),
+                    PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
                     fx.state.n_state,
                     WorkspaceSizing {
                         hydro_count: fx.state.hydro_count,
@@ -1487,7 +1478,7 @@ mod determinism {
                         energy_conversion: &ec,
                         hydro_min_storage_hm3: &[0.0; 3],
                         event_sender: None,
-                        commitment_window_delivery_dates: &[],
+                        extended_delivery_anchors: &[],
                         transit_seed_arcs: &[],
                         past_defluences: &[],
                         study_stage_dates: &[],
@@ -2165,7 +2156,6 @@ mod water_travel_time_no_arc_byte_identity {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -2409,7 +2399,7 @@ mod water_travel_time_no_arc_byte_identity {
 
         let params =
             StudyParams::from_config(&config).expect("StudyParams::from_config must succeed");
-        let construction = params.into_construction_config();
+        let construction = params;
 
         StudySetup::from_broadcast_params(
             &system,

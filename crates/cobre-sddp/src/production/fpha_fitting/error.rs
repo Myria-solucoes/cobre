@@ -2,6 +2,8 @@
 
 use std::fmt;
 /// Errors that arise during FPHA fitting geometry validation or evaluation.
+///
+/// Every variant carries the rejected hydro's name in its `hydro_name` field.
 #[derive(Debug)]
 pub(crate) enum FphaFittingError {
     /// No VHA curve points were provided.
@@ -9,7 +11,6 @@ pub(crate) enum FphaFittingError {
     /// A single point IS accepted (a constant run-of-river forebay yielding
     /// `γ_V = 0`); only the zero-row case reaches this variant.
     InsufficientPoints {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// Number of points provided.
         count: usize,
@@ -20,7 +21,6 @@ pub(crate) enum FphaFittingError {
     /// Strict monotonicity maps each volume to a unique interpolation interval;
     /// duplicate volumes produce a zero-length segment and undefined derivatives.
     NonMonotonicVolume {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// Row whose volume is not strictly greater than the previous row's.
         index: usize,
@@ -35,7 +35,6 @@ pub(crate) enum FphaFittingError {
     /// Heights must be non-decreasing: greater volume always gives a higher or
     /// equal water surface.
     NonMonotonicHeight {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// Row whose height is strictly less than the previous row's.
         index: usize,
@@ -48,7 +47,6 @@ pub(crate) enum FphaFittingError {
     /// Both absolute and percentile bounds set for the same dimension (the min
     /// and max pairs are each mutually exclusive).
     ConflictingFittingWindow {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// Human-readable description of the conflict.
         detail: String,
@@ -60,7 +58,6 @@ pub(crate) enum FphaFittingError {
     /// error: it reroutes through the single-volume run-of-river path
     /// ([`resolve_fitting_bounds`](super::geometry::resolve_fitting_bounds)).
     EmptyFittingWindow {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// Resolved lower bound (hm³).
         v_min: f64,
@@ -74,7 +71,6 @@ pub(crate) enum FphaFittingError {
     /// `>= 1`; `n_volume_points` must be `>= 2` on the multi-volume path only — the
     /// single-volume path synthesizes its own two samples and is exempt.
     InsufficientDiscretization {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// `"volume"`, `"turbine"`, `"spillage"`, or `"max_planes_per_hydro"`.
         dimension: String,
@@ -87,7 +83,6 @@ pub(crate) enum FphaFittingError {
     /// A non-positive `α` would flip every coefficient sign or collapse the
     /// envelope to zero, both physically invalid.
     NonPositiveAlpha {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// The computed `α_FPHA` value.
         alpha: f64,
@@ -95,10 +90,7 @@ pub(crate) enum FphaFittingError {
 
     /// The fitting pipeline produced zero valid hyperplanes (e.g. net head ≤ 0
     /// everywhere, so the hull yields no upper-envelope facet).
-    NoHyperplanesProduced {
-        /// Name of the rejected hydro plant.
-        hydro_name: String,
-    },
+    NoHyperplanesProduced { hydro_name: String },
 
     /// The 3-D production cloud was too degenerate for a convex-hull fit.
     ///
@@ -106,17 +98,13 @@ pub(crate) enum FphaFittingError {
     /// collapses onto a line or plane (e.g. constant net head with no V/Q
     /// dependence) yields no facet. Mapped from the hull's degenerate status
     /// rather than panicking, so one pathological hydro does not abort the loop.
-    DegenerateProductionCloud {
-        /// Name of the rejected hydro plant.
-        hydro_name: String,
-    },
+    DegenerateProductionCloud { hydro_name: String },
 
     /// A fitted hyperplane has a coefficient with the wrong sign.
     ///
     /// Physical planes satisfy `gamma_v ≥ 0`, `gamma_q ≥ 0`, `gamma_s ≤ 0`
     /// (spillage raises tailrace, reducing net head).
     InvalidCoefficient {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// Index of the offending hyperplane in the selected set.
         plane_index: usize,
@@ -129,7 +117,6 @@ pub(crate) enum FphaFittingError {
     /// Each segment's lower bound must meet the previous segment's upper bound; a
     /// gap leaves outflow values unowned, an overlap makes ownership ambiguous.
     TailraceGap {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// Upper bound of the lower-indexed segment (m³/s).
         outflow_max_prev: f64,
@@ -143,7 +130,6 @@ pub(crate) enum FphaFittingError {
     /// The piecewise quartic must be C0-continuous: both segments must evaluate
     /// to the same elevation at the boundary they share.
     TailraceDiscontinuity {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// Shared boundary outflow (m³/s).
         boundary: f64,
@@ -161,7 +147,6 @@ pub(crate) enum FphaFittingError {
     /// owning check is
     /// [`TailraceFamilies::from_rows`](super::tailrace::TailraceFamilies::from_rows).
     TailraceFamilyKeyMissing {
-        /// Name of the rejected hydro plant.
         hydro_name: String,
         /// Number of families found (> 1 when this fires).
         family_count: usize,

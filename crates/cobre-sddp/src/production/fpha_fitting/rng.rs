@@ -1,6 +1,6 @@
 //! Deterministic seeded PRNG and identity hash for the sampled plane reduction.
 //!
-//! # Determinism (Voice 1 / D5)
+//! # Determinism
 //!
 //! The sampled-distance reduction draws random `(V, Q)` points; seeding from a
 //! STABLE (plant / entry / slot) identity via [`fnv1a64`] + [`SplitMix64`] — and
@@ -11,7 +11,7 @@
 
 /// A tiny, fully deterministic, seedable PRNG: the `SplitMix64` seed-expander.
 ///
-/// # Contract — verbatim algorithm/constants (Voice 1)
+/// # Contract — verbatim algorithm/constants
 ///
 /// The mixing constants (`0x9E37_79B9_7F4A_7C15`, `0xBF58_476D_1CE4_E5B9`,
 /// `0x94D0_49BB_1331_11EB`) and the shift amounts are the reference `SplitMix64`
@@ -39,7 +39,7 @@ impl SplitMix64 {
 
     /// A uniform `f64` in `[0, 1)` from the top 53 bits of the next `u64`.
     ///
-    /// # Contract — top 53 bits, scaled by `2⁻⁵³` (Voice 1)
+    /// # Contract — top 53 bits, scaled by `2⁻⁵³`
     ///
     /// `(next_u64() >> 11) as f64 * 2.0_f64.powi(-53)` takes the high 53 bits
     /// (the exact mantissa width of an `f64`) and scales them into `[0, 1)`. The
@@ -56,7 +56,7 @@ impl SplitMix64 {
 
 /// FNV-1a 64-bit hash of a byte slice.
 ///
-/// # Contract — fixed offset basis and prime (Voice 1)
+/// # Contract — fixed offset basis and prime
 ///
 /// The offset basis `0xcbf2_9ce4_8422_2325` and prime `0x0000_0100_0000_01b3`
 /// are the standard FNV-1a 64-bit constants. They define the function: changing

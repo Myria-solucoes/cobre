@@ -60,8 +60,8 @@ fn main() {
         );
     }
 
-    // Rebuild when any vendored source or header changes. The directory directive
-    // covers `.c`/`.h` edits and additions/removals within the vendored tree.
+    // The directory directive covers `.c`/`.h` edits and additions/removals
+    // within the vendored tree, not just edits to already-tracked files.
     println!("cargo:rerun-if-changed=vendor/qhull/src/libqhull_r/");
 
     let mut build = cc::Build::new();
@@ -99,13 +99,11 @@ fn main() {
     build.compile("qhull_r");
 
     // The C shim `csrc/qhull_wrapper.c` is a thin reentrant wrapper exposing a
-    // stable convex-hull entry point to Rust. Because it is cobre's own code it
-    // compiles on its OWN `cc::Build` with `.warnings(true)` — kept separate from
-    // the vendored, warnings-silenced build above so the shim stays under
-    // scrutiny while qhull stays quiet. It includes `qhull_ra.h` from the
-    // vendored tree, so the same include dir is required; it links against the
-    // `qhull_r` archive compiled above (both archives are linked into the crate,
-    // resolving the shim's qhull symbols).
+    // stable convex-hull entry point to Rust; unlike the vendored build above,
+    // it compiles with `.warnings(true)` since it's cobre's own code. It
+    // includes `qhull_ra.h` from the vendored tree, so the same include dir is
+    // required; it links against the `qhull_r` archive compiled above (both
+    // archives are linked into the crate, resolving the shim's qhull symbols).
     let shim_dir = manifest_dir.join("csrc");
     let shim_source = shim_dir.join("qhull_wrapper.c");
     if !shim_source.exists() {

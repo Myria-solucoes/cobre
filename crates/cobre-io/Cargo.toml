@@ -25,8 +25,8 @@ slow-tests = []
 flatc-conformance = []
 
 [dependencies]
-cobre-core = { version = "0.14.3", path = "../cobre-core", features = ["serde"] }
-cobre-stochastic = { version = "0.14.3", path = "../cobre-stochastic" }
+cobre-core = { version = "0.15.0", path = "../cobre-core", features = ["serde"] }
+cobre-stochastic = { version = "0.15.0", path = "../cobre-stochastic" }
 arrow = { version = "59", default-features = false, features = ["prettyprint"] }
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1"
@@ -41,7 +41,7 @@ flatbuffers = "25"
 gethostname = "1.1.0"
 
 [dev-dependencies]
-cobre-core = { version = "0.14.3", path = "../cobre-core", features = ["test-support"] }
+cobre-core = { version = "0.15.0", path = "../cobre-core", features = ["test-support"] }
 parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
 proptest = "1"
 tempfile = "3"

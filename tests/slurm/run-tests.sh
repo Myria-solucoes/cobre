@@ -502,7 +502,7 @@ PYEOF
 # Verifies:
 #   1. Exit code is 0 (or reports timeout on code 124)
 #   2. Output directory exists
-#   3. policy/metadata.json exists
+#   3. policy/manifest.bin exists (the self-describing checkpoint commit signal)
 #   4. training/convergence.parquet exists
 #   5. Every classified output is bit-identical to the baseline directory
 #
@@ -530,9 +530,9 @@ check_outputs() {
         return 1
     fi
 
-    local policy_meta="${output_dir}/policy/metadata.json"
-    if [[ ! -f "${policy_meta}" ]]; then
-        echo "[${test_name}] FAIL: policy/metadata.json missing"
+    local policy_manifest="${output_dir}/policy/manifest.bin"
+    if [[ ! -f "${policy_manifest}" ]]; then
+        echo "[${test_name}] FAIL: policy/manifest.bin missing"
         echo "[${test_name}] Contents of ${output_dir}:"
         ls -la "${output_dir}" 2>&1 || true
         return 1

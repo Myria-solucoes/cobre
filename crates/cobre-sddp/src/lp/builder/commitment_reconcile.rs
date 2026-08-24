@@ -1,29 +1,17 @@
-//! Reconcile a pinned anticipated commitment against the delivery-stage
+//! Reconciles a pinned anticipated commitment against the delivery-stage
 //! generation bounds the fishing equality couples it to.
 //!
-//! # Why this is permanent
+//! A carried commitment is a basic ring-slot column's solver-computed value —
+//! accurate only to the backend's `primal_feasibility_tolerance`, never to 1
+//! ULP — so a commitment at its cap can drift past the enforced bound and turn
+//! the fishing equality's no-slack pin into a false `Infeasible`. This is
+//! permanent, not redundant with `col_scale` unscaling
+//! (`apply_commitment_hold_col_scale_unscale`): unscaling removes the ring
+//! *carry* drift but not the deposit row's, which only the basis
+//! factorization introduces.
 //!
-//! A carried commitment is the solver's computed value for a **basic** ring-slot
-//! column, so it is accurate only to the backend's `primal_feasibility_tolerance`
-//! (`1e-9` on both `HiGHS` and CLP) — never to 1 ULP. Re-pinned as a hard equality at
-//! the delivery stage and coupled by `Σ_b h_b·gen_b = H·commitment` to generation
-//! columns that keep their own `[min_gen, max_gen]`, a commitment that drifted a
-//! hair past the cap renders the LP infeasible over a physically meaningless
-//! quantity.
-//!
-//! This cannot be fixed by construction. `col_scale = 1.0` on the hold columns
-//! (`apply_commitment_hold_col_scale_unscale`) removes the *carry* drift and is
-//! retained, but the deposit `slot_out − decision = 0` produces `slot_out` through
-//! the basis factorization: exactness is the solver's to give, and it does not give
-//! it. Deleting this reconciliation on the premise that unscaling made it redundant
-//! reintroduces a hard `Infeasible` abort on any study whose commitment reaches its
-//! generation cap.
-//!
-//! # What it refuses to do
-//!
-//! Absorb a real over-commitment. Drift beyond [`drift_margin`] is
-//! [`SddpError::AnticipatedCommitmentOutOfBounds`], never relaxed — the margin is
-//! the discrimination line between solver noise and a modelling error.
+//! Refuses to absorb a genuine over-commitment: drift beyond [`drift_margin`]
+//! is [`SddpError::AnticipatedCommitmentOutOfBounds`], never relaxed.
 
 use cobre_solver::StageTemplate;
 
@@ -45,7 +33,6 @@ const COMMITMENT_DRIFT_REL: f64 = 1e-7;
 /// a purely relative term fails to do for a commitment near zero.
 const COMMITMENT_DRIFT_ABS: f64 = 1e-5;
 
-/// Headroom bounding solver-tolerance drift on `commitment`.
 #[must_use]
 pub(crate) fn drift_margin(commitment: f64) -> f64 {
     commitment
@@ -167,11 +154,8 @@ pub(crate) struct DeliveryPins<'a> {
     pub geometry: &'a StageGeometry,
     /// Anticipated-local → `system.thermals[]` position.
     pub anticipated_thermal_indices: &'a [usize],
-    /// Blocks at this stage.
     pub n_blks: usize,
-    /// Stage being solved.
     pub stage_idx: usize,
-    /// Study stage count.
     pub n_stages: usize,
 }
 

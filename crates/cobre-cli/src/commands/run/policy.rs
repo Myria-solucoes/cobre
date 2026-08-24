@@ -18,11 +18,11 @@ use cobre_sddp::PolicyStageManifest;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::build_basis_cache_from_checkpoint;
+use cobre_sddp::checkpoint_terminal_cost_scale_factor;
 use cobre_sddp::inject_boundary_cuts;
 use cobre_sddp::load_boundary_cuts;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::resolve_boundary_source_stage;
-use cobre_sddp::resolve_effective_inflow_lag_depth;
 use cobre_sddp::validate_policy_load;
 
 use crate::error::CliError;
@@ -55,9 +55,11 @@ fn load_and_validate_checkpoint(
     let mut checkpoint = read_policy_checkpoint(policy_dir).map_err(|e| CliError::Internal {
         message: format!("failed to read policy checkpoint: {e}"),
     })?;
+    let source_cost_scale_factor =
+        checkpoint_terminal_cost_scale_factor(&checkpoint).map_err(CliError::from)?;
     rescale_checkpoint_cuts_for_load(
         &mut checkpoint.stage_cuts,
-        checkpoint.metadata.producer.cost_scale_factor,
+        Some(source_cost_scale_factor),
         setup.stage_data.stage_templates.cost_scale_factor,
     );
 
@@ -71,8 +73,6 @@ fn load_and_validate_checkpoint(
 
     // The terminal pool is always full-config, so its manifest witnesses every
     // state family's slot identity — a terminal-only comparison covers all stages.
-    // `state_dimension` is per-pool now (the global metadata copy is gone), so the
-    // source dimension is the terminal pool payload's own.
     let current_manifest = setup.build_terminal_entity_manifest(system);
     let checkpoint_terminal_manifest: &[EntitySlot] = checkpoint
         .stage_cuts
@@ -234,9 +234,7 @@ pub(super) fn apply_training_policy(
     // Must run after the match: warm-start replaces the whole FCF first, then
     // boundary cuts overwrite only the terminal pool.
     if let Some(bp) = root_config.and_then(|c| c.policy.boundary.as_ref()) {
-        // Resolve against the CASE dir (an external source checkpoint), never the
-        // current run's output dir; an absolute `bp.path` passes through unchanged.
-        let boundary_path = ctx.case_dir.join(&bp.path);
+        let boundary_path = bp.checkpoint_path(&ctx.case_dir);
         // Rationale: the cast cannot truncate — `state_dimension` counts FCF
         // state variables (one per reservoir/lag), bounded by the validated study
         // dimensions and far below `u32::MAX`.
@@ -244,6 +242,7 @@ pub(super) fn apply_training_policy(
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
         let target_delivery_intervals = setup.build_terminal_anticipated_delivery_intervals(system);
+        let fixed_windows = setup.build_terminal_fixed_post_horizon_windows(system);
         let source_stage = if let Some(idx) = bp.source_stage {
             idx
         } else {
@@ -266,17 +265,17 @@ pub(super) fn apply_training_policy(
                 let _ = stderr.write_line(&format!("warning: {msg}"));
             }
         };
-        // Inferred from this boundary policy's own cuts (the same depth the state
-        // layout reserved), so the load-time depth guard is a defensive check,
-        // never a user error.
-        let effective_inflow_lag_depth =
-            resolve_effective_inflow_lag_depth(Some(&boundary_path)).map_err(CliError::from)?;
+        // The depth the state layout already reserved (read off the constructed
+        // setup, not re-inferred from the checkpoint), so the load-time depth
+        // guard is a defensive check, never a user error.
+        let effective_inflow_lag_depth = setup.boundary_requirements().inflow_lag_depth();
         let boundary_records = load_boundary_cuts(
             &boundary_path,
             source_stage,
             state_dim,
             &current_manifest,
             &target_delivery_intervals,
+            &fixed_windows,
             effective_inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,

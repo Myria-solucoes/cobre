@@ -18,8 +18,7 @@ use super::production::ProductionFunction;
 
 /// Number of evenly-spaced `lateral_flow` samples for the per-plane secant fit.
 ///
-/// Fixed (not config-driven) so the secant is deterministic and order-independent
-/// (D5).
+/// Fixed (not config-driven) so the secant is deterministic and order-independent.
 const N_LATERAL_FLOW_SAMPLES: usize = 9;
 
 /// Magnitude below which a fitted `γ_S` slope is snapped to exactly 0.
@@ -35,7 +34,7 @@ const GAMMA_S_SNAP_EPS: f64 = 1e-10;
 /// Resolve the lateral-flow sample upper bound `S_max` for the secant fit:
 /// `2 × long-term mean inflow` when positive, else `2 × max_turbined_m3s`.
 ///
-/// # Contract — `long-term mean inflow > 0` strictly, else fall back (Voice 1)
+/// # Contract — `long-term mean inflow > 0` strictly, else fall back
 ///
 /// The test is strict: a history-less hydro yields `long_term_mean_inflow_m3s =
 /// 0.0` and MUST take the fallback. `>= 0.0` would collapse `S_max = 0` and zero
@@ -51,7 +50,7 @@ pub(crate) fn resolve_s_max(long_term_mean_inflow_m3s: f64, max_turbined_m3s: f6
 
 /// Representative operating point `(V, q)` at which a plane's `γ_S` secant is fit.
 ///
-/// # Contract — anchor where the plane binds (argmin), not where it is loosest (Voice 1)
+/// # Contract — anchor where the plane binds (argmin), not where it is loosest
 ///
 /// Each plane anchors at the spill = 0 grid point where it is the *active* binding
 /// bound — the pointwise **minimum** over planes (the LP applies `g ≤ plane_k`),
@@ -61,7 +60,7 @@ pub(crate) fn resolve_s_max(long_term_mean_inflow_m3s: f64, max_turbined_m3s: f6
 /// anchors each plane where it does not govern, over-steepening `γ_S` on high-head
 /// planes and zeroing it on planes that never attain the max.
 ///
-/// Determinism (D5): the closed-form `build_grid` grid scanned in fixed `(v, q)`
+/// Determinism: the closed-form `build_grid` grid scanned in fixed `(v, q)`
 /// order with a strict `>` test resolves ties to the first point.
 ///
 /// Returns `None` for a plane never active on the grid; the caller leaves
@@ -100,7 +99,7 @@ fn representative_operating_point(
 /// Fit the lateral-flow secant `γ_S` for a single plane at `(v_rep, q_rep)` — the
 /// OLS slope of `generation` vs `lateral_flow` over a fixed sample of `[0, S_max]`.
 ///
-/// # Contract — `γ_S ≤ 0` (Voice 1)
+/// # Contract — `γ_S ≤ 0`
 ///
 /// More lateral flow raises the tailrace and lowers `generation`, so the slope is
 /// non-positive; floating-point noise is clamped to `0.0` to satisfy the
@@ -108,7 +107,7 @@ fn representative_operating_point(
 /// wrong-but-compiling alternative — a `+1e-15` round-off would surface as an
 /// invalid coefficient downstream.
 ///
-/// # Contract — degenerate `S_max ≤ 0` returns the neutral `γ_S = 0` (Voice 1)
+/// # Contract — degenerate `S_max ≤ 0` returns the neutral `γ_S = 0`
 ///
 /// `S_max ≤ 0` collapses the sample to one point (`Σ(x_i − x̄)² = 0`, slope
 /// undefined); return `0.0` rather than dividing by zero. The same neutral path

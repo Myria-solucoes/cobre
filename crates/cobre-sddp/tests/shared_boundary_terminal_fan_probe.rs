@@ -20,19 +20,23 @@
 use std::path::Path;
 
 use cobre_io::{
-    FORMAT_VERSION, GraphManifest, ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord,
-    ProducerBlock, StageCutsPayload, write_policy_checkpoint,
+    GraphManifest, PolicyCutRecord, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
+    write_policy_checkpoint,
 };
 use cobre_sddp::setup::{NodeGraph, NodePos};
 use cobre_sddp::test_support::k_fan_setup;
 use cobre_sddp::{LEGACY_COST_SCALE_FACTOR, inject_boundary_cuts, load_boundary_cuts};
 
-/// Write a synthetic single-pool policy checkpoint whose graph manifest
-/// declares `graph_nodes` as `(node_id, stage_id, pool_id)` triples —
-/// `load_boundary_cuts` resolves `source_stage` through this manifest, never
-/// by a stage/pool coincidence. Carries no entity manifest (the identity
-/// check is out of this probe's scope; covered by the boundary-injection
-/// manifest-mismatch tests elsewhere).
+/// Write a synthetic single-pool policy checkpoint whose pool's own
+/// `graph_stage_id`/`node_id` self-describing facts are derived from
+/// `graph_nodes` (`(node_id, stage_id, pool_id)` triples all naming
+/// `pool_id`): `graph_stage_id` is their shared `stage_id`; `node_id` is the
+/// sole owner's id, or [`STAGE_CUTS_NODE_ID_SENTINEL`] when more than one node
+/// owns the pool — mirroring the real writer's `sole_pool_owner_node_id`, so
+/// `load_boundary_cuts` resolves and single-node-checks this pool exactly as
+/// it would a genuinely exported one. Carries no entity manifest (the
+/// identity check is out of this probe's scope; covered by the
+/// boundary-injection manifest-mismatch tests elsewhere).
 fn write_synthetic_checkpoint(
     dir: &Path,
     graph_nodes: &[(i32, i32, u32)],
@@ -55,6 +59,26 @@ fn write_synthetic_checkpoint(
         })
         .collect();
     let active_cut_indices: Vec<u32> = (0..intercepts.len() as u32).collect();
+
+    let mut owner_node_id: Option<i32> = None;
+    let mut owner_stage_id: Option<i32> = None;
+    let mut shared = false;
+    for &(id, stage_id, owning_pool) in graph_nodes {
+        if owning_pool == pool_id {
+            if owner_node_id.is_some() {
+                shared = true;
+            }
+            owner_node_id = Some(id);
+            owner_stage_id = Some(stage_id);
+        }
+    }
+    let node_id = if shared {
+        STAGE_CUTS_NODE_ID_SENTINEL
+    } else {
+        owner_node_id.unwrap_or(STAGE_CUTS_NODE_ID_SENTINEL)
+    };
+    let graph_stage_id = owner_stage_id.unwrap_or(-1);
+
     let payload = StageCutsPayload {
         stage_id: pool_id,
         state_dimension,
@@ -64,31 +88,14 @@ fn write_synthetic_checkpoint(
         active_cut_indices: &active_cut_indices,
         populated_count: intercepts.len() as u32,
         entity_manifest: &[],
+        cost_scale_factor: 1_000_000.0,
+        node_id,
+        graph_stage_id,
     };
-    let nodes: Vec<ManifestNode> = graph_nodes
-        .iter()
-        .map(|&(id, stage_id, pool_id)| ManifestNode {
-            id,
-            stage_id,
-            pool_id,
-        })
-        .collect();
-    let n_pools = graph_nodes
-        .iter()
-        .map(|&(_, _, p)| p + 1)
-        .max()
-        .unwrap_or(0);
-    let metadata = PolicyCheckpointMetadata {
-        format_version: FORMAT_VERSION,
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-        created_at: "2026-08-10T00:00:00Z".to_string(),
-        num_stages: 1,
-        graph_manifest: GraphManifest {
-            n_pools,
-            nodes,
-            edges: vec![],
-        },
-        producer: ProducerBlock {
+    let metadata = cobre_sddp::test_support::checkpoint_metadata(
+        1,
+        GraphManifest::default(),
+        ProducerBlock {
             completed_iterations: 0,
             final_lower_bound: 0.0,
             best_upper_bound: None,
@@ -102,7 +109,7 @@ fn write_synthetic_checkpoint(
             training_block_mode_per_stage: vec![],
             cost_scale_factor: None,
         },
-    };
+    );
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }
 
@@ -164,6 +171,7 @@ fn single_node_source_injects_into_the_one_pool_every_terminal_fan_leaf_shares()
         state_dimension,
         &[],
         &[],
+        &[],
         None,
         LEGACY_COST_SCALE_FACTOR,
         &mut |msg| warnings.push(msg.to_string()),
@@ -209,7 +217,8 @@ fn single_node_source_injects_into_the_one_pool_every_terminal_fan_leaf_shares()
 fn multi_node_source_stage_is_rejected() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let source_dir = tmp.path().join("multi_node_source");
-    // Two declared nodes (ids 200, 201) both at stage 5: a multi-node source.
+    // Two declared nodes (ids 200, 201) both at stage 5, sharing pool 0: the
+    // pool's own node_id reads the STAGE_CUTS_NODE_ID_SENTINEL.
     write_synthetic_checkpoint(&source_dir, &[(200, 5, 0), (201, 5, 0)], 0, &[7.0, 11.0], 2);
 
     let result = load_boundary_cuts(
@@ -218,22 +227,23 @@ fn multi_node_source_stage_is_rejected() {
         2,
         &[],
         &[],
+        &[],
         None,
         LEGACY_COST_SCALE_FACTOR,
         &mut |_| {},
     );
 
-    assert!(
-        result.is_err(),
-        "a multi-node source stage must be rejected, not silently resolved to one of its nodes"
+    let err = result.expect_err(
+        "a source pool shared by multiple nodes must be rejected, not silently resolved to one \
+         of them",
     );
-    let msg = result.unwrap_err().to_string();
+    let msg = err.to_string();
     assert!(
-        msg.contains("multi-node"),
-        "rejection must name the stage as multi-node: {msg}"
+        msg.contains("single-node terminal pool") && msg.contains("shared by multiple nodes"),
+        "rejection must name the shared-pool node_id guard: {msg}"
     );
     assert!(
-        msg.contains("source_stage 5"),
-        "rejection must name the offending stage: {msg}"
+        msg.contains(&source_dir.display().to_string()),
+        "rejection must name the checkpoint path: {msg}"
     );
 }

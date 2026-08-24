@@ -13,6 +13,10 @@ correctness contracts live in `.claude/rules/sddp.md` (§ "Water travel time" an
 "Anticipated thermal commitments"), which this document summarizes but does not
 replace.
 
+> New to these features? Start with the primer,
+> [`../guide/anticipated-thermals-and-water-travel-time.md`](../guide/anticipated-thermals-and-water-travel-time.md)
+> (contextualization, worked examples, diagrams), then return here for the contracts.
+
 ---
 
 ## 0. The unifying idea
@@ -49,16 +53,16 @@ delivery rings sit inside it:
 [0, N)                     storage             — outgoing storage volumes (N = hydro count)
 [N, N*(1+L))               inflow_lags         — AR lag variables (L lags per hydro)
 [N*(1+L), N*(1+L)+B)       transit_buckets_out — WATER ring, outgoing (identity-resolved)
-[N*(1+L)+B, …+S)           commit_out          — ANTICIPATED ring + post-horizon lanes, outgoing
+[N*(1+L)+B, …+S)           commit_out          — ANTICIPATED ring, outgoing
 […+S, …+N)                 z_inflow            — realized inflow (auxiliary, not state)
 […+N, …+2N)                storage_in          — incoming storage (pinned)
 […+2N, …+2N+B)             transit_buckets_in  — WATER ring, incoming (pinned)
-[…+B, …+B+S)               commit_in           — ANTICIPATED ring + lanes, incoming (pinned)
+[…+B, …+B+S)               commit_in           — ANTICIPATED ring, incoming (pinned)
 …+S                        theta               — future-cost variable
 ```
 
-with `B = n_buckets` (water) and `S = A·k_max + W` (anticipated: `A =
-n_anticipated`, `k_max` = ring depth, `W = n_commitment` post-horizon lanes). The
+with `B = n_buckets` (water) and `S = A·k_max` (anticipated: `A =
+n_anticipated`, `k_max` = ring depth). The
 region walk order — `Storage → Lag → Buckets → CommitmentHold` — is owned once by
 `REGION_ORDER`; every consumer dispatches over it exhaustively, so a new region
 fails to compile until handled.
@@ -90,12 +94,12 @@ in_col (slot, lane) = in_block.start  + slot * n_lanes + lane
 `slot_lane_at` is the exact inverse (used by the policy manifest). The primitive
 emits four kinds of CSC entries; each subsystem uses a subset:
 
-| Method                  | Emits                                                            | Used by                      |
-| ----------------------- | ---------------------------------------------------------------- | ---------------------------- |
-| `emit_shift_rows`       | `out[slot] +1`, `in[slot+1] −1` (advance to the **next** slot)   | **water**                    |
-| `emit_carry_rows`       | `out[slot] +1`, `in[slot] −1` (**same-slot** hold)               | **anticipated**              |
-| `emit_deposit`          | `out[slot] +1`, `decision_col −1` (latch a decision into a slot) | anticipated (+ post-horizon) |
-| `freeze_masked_columns` | masked slot → `[0,0]`; reachable → the ring's open bound         | both                         |
+| Method                  | Emits                                                            | Used by         |
+| ----------------------- | ---------------------------------------------------------------- | --------------- |
+| `emit_shift_rows`       | `out[slot] +1`, `in[slot+1] −1` (advance to the **next** slot)   | **water**       |
+| `emit_carry_rows`       | `out[slot] +1`, `in[slot] −1` (**same-slot** hold)               | **anticipated** |
+| `emit_deposit`          | `out[slot] +1`, `decision_col −1` (latch a decision into a slot) | anticipated     |
+| `freeze_masked_columns` | masked slot → `[0,0]`; reachable → the ring's open bound         | both            |
 
 All ring definition rows carry `[0,0]` equality bounds — the `+1`/`−1` structural
 coefficients do the work, never the bounds.
@@ -295,34 +299,56 @@ keys or neither matches no variant and is a parse error; that _is_ the exclusion
 mechanism.
 
 There is **no delivery-window field on the config**. The delivered quantities live
-on three separate surfaces:
+on two separate surfaces:
 
 - `initial_conditions.past_anticipated_commitments[]`
   (`AnticipatedCommitmentHistory { thermal_id, start_date, end_date, value_mw }`) —
   pre-study **decided** MW windows that deliver into the study's leading stages
   (the stage-0 ring seed; sunk cost, never in the objective).
-- `initial_conditions.future_anticipated_deliveries[]`
-  (`FutureAnticipatedDelivery { thermal_id, delivery_start, delivery_end, min_mw,
-max_mw }`) — in-study decisions delivering **after** the horizon (the
-  post-horizon lanes; `min_mw == max_mw` pins a fixed commitment).
-- `post_study_stages.json` — the post-horizon calendar plus per-`(thermal,
-post-study stage)` `cost_per_mwh`/`min_mw`/`max_mw` the lanes are priced and
-  bounded against.
+- `post_study_stages.json` (`crates/cobre-core/src/model/post_study.rs`) — the
+  **sole** post-study declaration surface: an ordered post-study calendar
+  segment plus a per-`(thermal, post-study stage)` `cost_per_mwh`/`min_mw`/`max_mw`
+  an in-study decision delivering past the horizon is priced and bounded against.
+  It extends the delivery axis to `n_delivery = n_stages + n_post` — the runtime
+  axis is built by `delivery_stage_durations` in `resolve_anticipated_commitments_core`
+  (`build_extended_delivery_axis` is the separate cobre-io _validation_ axis used
+  for the reach check below); with it absent the axis is study-only and no lead can
+  reach a post-study stage. `min_mw == max_mw` pins a fixed post-study profile (a
+  legitimate replay deck).
 
-Validation (`crates/cobre-io/src/validation/semantic/thermal.rs`): lead-vs-horizon
-bounds (a `LeadTime` exceeding the horizon is allowed _only_ if the plant declares
-a `future_anticipated_deliveries` window); the commitment windows must **tile** the
-calendar-derived leading delivery stages at coverage exactly `1.0` (per-stage
-tiling, not a count); the committed value must lie inside the delivery stage's
-generation bounds; and — load-bearing for the LP —
-`check_block_id_on_anticipated_thermal` rejects any per-block bound row on an
-anticipated thermal, which is what licenses the LP's overlay-ignoring bound read
-(§3.4).
+Validation (`crates/cobre-io/src/validation/semantic/thermal.rs`): the
+lead-versus-horizon bound rejects a `LeadTime` whose lead exceeds the summed
+study-stage durations (strict `>`) _only_ when the plant's extended lead reaches
+**no** declared post-study stage at all — a lead that reaches one legitimately
+delivers past the horizon, either decided in-study or decided pre-study as a
+**fixed post-horizon commitment** (below), and is exempt either way. Reach is
+resolved by `classify_deliveries`'s four-way partition over the concatenated
+study + post-study calendar that `build_extended_delivery_axis` assembles and
+`extended_deciders` walks.
+
+A pre-study-decided, post-study-delivered commitment — a **fixed post-horizon
+commitment** — is representable: the
+`initial_conditions.past_anticipated_commitments` surface (above) extends
+unchanged to carry it — its windows are allowed to sit past the study horizon;
+no new field, no schema reshape. It is a declared constant that never
+enters the ring, priced by the boundary intercept fold and reported at its real
+delivery date (§3.5). The commitment windows must **tile exactly** the plant's
+pre-study-decided delivery set — the leading in-study stages and, past the
+horizon, the stages the plant also decides before the study — at coverage
+`1.0`: a gap (a pre-study-decided stage left uncovered) and an over-coverage (a
+window reaching a stage the study itself decides, or one beyond the plant's
+decision reach) are both rejected. The committed value must lie inside the
+delivery stage's generation bounds, in-study and post-horizon alike; and —
+load-bearing for the LP — `check_block_id_on_anticipated_thermal` rejects any
+per-block bound row on an anticipated thermal, which is what licenses the LP's
+overlay-ignoring bound read (§3.4).
 
 ### 3.2 Resolution & sizing — how many ring slots
 
 The lead resolves to a **decider** `c(m)` = the decision stage for each delivery
-stage `m`, via `PointResolution` (`crates/cobre-sddp/src/lead_time/mod.rs`):
+stage `m` on the **extended delivery axis** `[0, n_delivery)` (`n_delivery =
+n_stages + n_post`, study-only when no `post_study_stages.json` is declared), via
+`PointResolution` (`crates/cobre-sddp/src/lead_time/mod.rs`):
 
 - `LeadTime` (`resolve_decider_physical`): `c(m)` is the stage containing
   `stage_end(m) − Δ` — **end-anchored** (a sub-stage lead `Δ < h_m` then gives
@@ -330,35 +356,56 @@ stage `m`, via `PointResolution` (`crates/cobre-sddp/src/lead_time/mod.rs`):
   stage; `None` means a pre-study decider.
 - `LeadStages` (`resolve_decider_stage_count`): `c(m) = m − ℓ`, calendar never read.
 
-From `c(m)` a difference-array prefix sum builds `depth[t] = K(t) = |{ m > t : c(m)
-≤ t }|` — the count of deliveries **decided in-study at or before `t` and delivered
-strictly after `t`** (pre-study deciders contribute nothing). The **ring depth**:
+From `c(m)` a difference-array prefix sum builds two per-decision-stage series:
+`depth[t] = |{ m > t : c(m) = Some(c'), c' ≤ t }|` (in-study deciders only —
+pre-study deciders contribute nothing) and the **full in-flight occupancy**
+`occupancy[t] = |{ m > t : m has a carrier as of t }|`, which additionally counts
+every pre-study (`None`-decider) commitment still in flight. The **ring depth**
+per plant is
 
 ```
-k_max = max( max over LeadTime plants of max_t K_i(t),
-             max over LeadStages plants of ℓ_i )
+ring_depth = max(occupancy_max, n_none_in_study)
+k_max = max over plants i of ring_depth_i
 ```
 
-i.e. the maximum number of **simultaneously in-flight commitments**. For a
-`LeadStages` plant `K_i(t) ≤ ℓ_i`, so a pure-`LeadStages` study gets `k_max = max_i
-ℓ_i` byte-for-byte (the pre-delivery-anchor sizing). Nothing else widens it:
-`k_max ≤ n_stages`, and it is independent of `n_stages`, `n_blks`, or the number of
-decisions. `k_max` is computed in `AnticipatedResolution::resolve` and the final
-widen lives in `resolve_state_layout` (`crates/cobre-sddp/src/setup/mod.rs`).
+where `occupancy_max = max_t occupancy(t)` and `n_none_in_study` is the
+plant's leading pre-study (`None`-decider) run inside the decision axis alone.
+Sizing from `occupancy_max` alone under-counts the one moment every
+simultaneous pre-study seed is in flight — stage 0, before the first fishing —
+whenever that run outlives the occupancy term: the last seeded stage then
+silently delivers an earlier stage's MW (the ring-depth under-sizing defect
+this form closes). Sizing from `depth` instead under-counts even earlier and
+collides a carry row with a deposit row the moment a pre-study seed outlives
+the in-study in-flight count; `occupancy` and `depth` coincide only on a
+uniform-calendar lead (`occupancy[t] = depth[t] + max(0, n_none − 1 − t)`,
+`n_none` = the leading pre-study run), so a pure-`LeadStages` study still gets
+`k_max = max_i ℓ_i` byte-for-byte — `LeadStages(l)` returns `l` **verbatim**
+(the pre-delivery-anchor sizing anchor). `k_max` is a pure function of the
+per-plant leads and the delivery calendar — independent of `n_blks`,
+`block_mode`, or the number of decisions. It is computed in
+`AnticipatedResolution::resolve` and the final widen lives in
+`resolve_state_layout` (`crates/cobre-sddp/src/setup/mod.rs`).
 
-The state region is `S = A·k_max + W` (see §3.3). The **modular slot key** is what
-makes the ring compact:
+The state region is `S = A·k_max` (see §3.3). The **modular slot key** is keyed
+on the **ring axis**, not the raw delivery axis: the delivery axis with each
+plant's own fixed post-horizon commitment (if any) excised — identity whenever
+the plant declares none. `PointResolution::ring_index`/`physical_target` own
+the forward map and its inverse; no new type, no new state.
 
 ```
-slot(m) = m mod k_max        (slot-major, plant-minor: commitment_hold_in_study_offset)
+slot(m) = ring_index(m) mod k_max        (slot-major, plant-minor: commitment_hold_in_study_offset)
 ```
 
-This is a bijection on the in-flight set because `c(m)` is nondecreasing in `m`, so
-the in-flight deliveries at any stage form a contiguous run `{t+1, …, t+K}` with `K
-≤ k_max` — consecutive integers, hence distinct residues mod `k_max`. No collision,
-no extra sizing. (The trap: `depth[t]` **excludes** pre-study occupancy, so it is
-_not_ the ring's per-stage occupancy boundary — the interior/deposit/padding split
-is decided per delivery target, not from `depth`.)
+This is injective over the **ring window** in ring-axis terms — the
+strictly-future, not-yet-due delivery targets a stage carries, a contiguous run
+of `k_max` consecutive ring-axis integers, hence distinct residues mod
+`k_max`. Keying on the raw `m mod k_max` instead is the wrong-but-compiling
+alternative once a plant declares a fixed post-horizon commitment: the excised
+window breaks the raw axis's contiguity, so two in-flight commitments can
+collide onto one slot. (The trap: `depth[t]` **excludes** pre-study occupancy,
+so it is _not_ the ring's per-stage occupancy boundary — the
+interior/deposit/padding split is decided per delivery target, not from
+`depth`.)
 
 Two sizing-adjacent gates:
 
@@ -375,16 +422,13 @@ Two sizing-adjacent gates:
 
 ### 3.3 State layout
 
-The anticipated ring occupies the merged **commitment-hold** region
-(`commit_out` / `commit_in`), split into:
-
-- **Leading `A·k_max` in-study slots** — the ring proper, slot-major/plant-minor,
-  keyed by delivery-target residue. Slots beyond a plant's own lead `K_i` are
-  structural padding, frozen `[0,0]`.
-- **Trailing `W` post-horizon lanes** — one per _surviving_
-  `future_anticipated_deliveries` window, no depth axis (one slot per window),
-  survivor-indexed in canonical `(anticipated thermal position, delivery_start)`
-  order (never a raw input index).
+The anticipated ring occupies the whole merged **commitment-hold** region
+(`commit_out` / `commit_in`), spanning exactly `A·k_max` slots —
+slot-major/plant-minor, keyed by delivery-target residue. There is no separate
+appended block: a slot whose delivery target lands past the horizon (`m >=
+n_stages`, reachable only when `post_study_stages.json` extends the delivery axis)
+is one of the ring's own slots, not a trailing lane. Slots beyond a plant's own
+lead `K_i` are structural padding, frozen `[0,0]`.
 
 `n_anticipated` is the count of thermals with `anticipated_config.is_some()` in
 canonical `System::thermals()` order. The stage-0 seed writes
@@ -398,7 +442,9 @@ staggered commissioning).
 The commitment transition is realized entirely by three `[0,0]`-equality row
 families over the one dense `anticipated_ring` (`n_lanes = n_anticipated`, `depth =
 k_max`); `commit_in` is pinned to the previous stage's `commit_out` by column
-bounds, so there is no Rust-side shift step:
+bounds, so there is no Rust-side shift step. Every `mod k_max` slot key below is
+a **ring-axis** residue (§3.2) — `ring_index(m) mod k_max`, the identity whenever
+the plant declares no fixed post-horizon commitment:
 
 - **Latch / deposit** (`fill_anticipated_state_out_def_entries` → `emit_deposit`):
   a plant's fresh decision at stage `t` pins the slot of its **own delivery
@@ -429,11 +475,17 @@ read reintroduces a capacity-drop infeasibility. The anticipated plant's per-blo
 generation columns carry **no objective coefficient**; fuel is booked on the
 decision column so nothing double-counts.
 
-Masking is **asymmetric** across the region: in-study slots keep the two-sided
-mask (masked → no row + `[0,0]` column); the **post-horizon lanes are never masked**
-— kept open `(-inf, inf)` at every stage including the terminal, so the boundary
-FCF can price the carried state. (Reachable in-study slots use `(-inf, inf)`, not
-water's `[0, inf)`, because a committed MW value carries either sign.)
+Masking is the ring's **two-sided reachability masking over the whole slot range**
+— there is no separate appended block with a rule of its own. Every position keeps
+the two-sided discipline the shared skeleton ships together: a masked (unreachable)
+position gets **no** definition row _and_ a frozen `[0,0]` outgoing column in the
+same pass. `fill_anticipated_slot_columns` (`crates/cobre-sddp/src/lp/builder/columns.rs`)
+applies `freeze_masked_columns` over the whole `anticipated_slot_row_pos`: a
+reachable post-study-targeted slot is open `(-inf, inf)` because it is **not**
+masked (its `row_pos` is `Some`), never because it is exempt from freezing, and the
+boundary FCF then prices its carried state directly through the generic `β·state`
+projection. (Reachable slots use `(-inf, inf)`, not water's `[0, inf)`, because a
+committed MW value carries either sign.)
 
 **Drift reconciliation** (`crates/cobre-sddp/src/lp/builder/commitment_reconcile.rs`):
 a latched `commit_out` is a _basic_ variable produced by the simplex factorization,
@@ -449,8 +501,22 @@ none can opt out.
 
 `col_scale` is forced to `1.0` across the whole `commit_out ∪ commit_in` region.
 The same divide-on-extract / multiply-on-render dual convention as storage and the
-water buckets applies. The post-horizon lanes join the same generic `β·state` cut
-projection as everything else — no per-family terminal-pricing arm.
+water buckets applies. The ring's reachable slots — post-study-targeted ones
+included — join the same generic `β·state` cut projection as everything else, no
+per-family terminal-pricing arm.
+
+A post-study-targeted slot in a study that declares **no** `config.policy.boundary`
+carries **zero** terminal value: the slot still exists and still joins the
+`β·state` projection, but the terminal boundary FCF it would price against is
+empty, so the term contributes nothing. This is a ratified scope boundary, **never
+a reject** — a `min_mw == max_mw` replay deck is a legitimate use of a fixed
+post-study profile with no boundary, and rejecting it would abort a valid study.
+Setup emits exactly one advisory naming every affected plant
+(`setup::warn_on_boundary_absent_post_study_delivery`, on the same `tracing::warn!`
+channel as the `K = 0` advisory but a distinct condition — do not conflate it with
+`warn_on_sub_stage_lead`, which fires on a sub-stage lead resolving `c(m) = m`).
+Silence is the opposite failure: it hides a modelling error where the user expected
+the commitment valued against a real future.
 
 ---
 
@@ -460,24 +526,39 @@ Both rings share the `DeliveryRing` skeleton, one contiguous state region, the
 out-by-identity / in-pinned column resolution, the two-sided masking discipline,
 and the dual sign convention. They differ in exactly four call-site-local ways:
 
-| Aspect                   | Water travel time                                 | Anticipated thermal                                |
-| ------------------------ | ------------------------------------------------- | -------------------------------------------------- |
-| Ring instances           | one per downstream plant (`n_lanes = 1`)          | one dense ring (`n_lanes = n_anticipated`)         |
-| Transition               | **shift** (`emit_shift_rows`, `slot → slot+1`)    | **hold** (`emit_carry_rows`, same slot)            |
-| Slot key                 | lag (distance in flight), one plant per ring      | delivery-target residue `m mod k_max`              |
-| Deposit                  | `k_d`-weighted release share at the call site     | single decision latch (`emit_deposit`)             |
-| Depth sizing             | overlap measure (`stage_reach`, IC overlap)       | max simultaneous in-flight count `K_i(t)`          |
-| Reachable column bound   | `[0, inf)` (a volume)                             | `(-inf, inf)` (a signed MW value)                  |
-| Masked terminal slot     | drops a **genuine** deposited share (imprecision) | provably **zero** (commitment never created)       |
-| Terminal live-state gate | needs `config.policy.boundary` (not inert)        | additive appended lanes (inert without a boundary) |
+| Aspect                   | Water travel time                                 | Anticipated thermal                                                             |
+| ------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Ring instances           | one per downstream plant (`n_lanes = 1`)          | one dense ring (`n_lanes = n_anticipated`)                                      |
+| Transition               | **shift** (`emit_shift_rows`, `slot → slot+1`)    | **hold** (`emit_carry_rows`, same slot)                                         |
+| Slot key                 | lag (distance in flight), one plant per ring      | delivery-target residue on the **ring axis** (`ring_index(m) mod k_max`)        |
+| Deposit                  | `k_d`-weighted release share at the call site     | single decision latch (`emit_deposit`)                                          |
+| Depth sizing             | overlap measure (`stage_reach`, IC overlap)       | `max(occupancy_max, n_none_in_study)` per plant                                 |
+| Reachable column bound   | `[0, inf)` (a volume)                             | `(-inf, inf)` (a signed MW value)                                               |
+| Masked terminal slot     | drops a **genuine** deposited share (imprecision) | provably **zero** (no commitment targets a masked slot)                         |
+| Terminal live-state gate | needs `config.policy.boundary` (not inert)        | post-study slot **existence** on declared `post_study_stages.json` + lead reach |
 
-The masked-terminal-slot row is the deepest asymmetry: the water ring _discards a
-real end-of-horizon release share_ (a documented target-stage imprecision, safe
-only because a finite horizon's terminal value is zero), whereas the anticipated
-ring _never creates_ a past-horizon commitment in the first place (`stage_idx + K_i
-< n_stages` gates the decision's existence), so its masked slots are provably
-vacuous. This is why un-masking the water terminal slots must be gated on a loaded
-boundary policy, while the anticipated post-horizon lanes are simply always open.
+These last two rows carry the deepest asymmetry, and it **survives** the
+ring-native re-derivation rather than collapsing into one rule. On the masked slot:
+the water ring _discards a real end-of-horizon release share_ (a documented
+target-stage imprecision, safe only because a finite horizon's terminal value is
+zero), whereas an anticipated masked slot is _provably_ vacuous — no commitment
+ever targets it, because the decision-existence gate —
+`is_anticipated_decision_active_for_delivery`, the production entry point (the
+constant-lead `is_anticipated_decision_active` wrapper is test-only) — keys on the
+extended delivery axis `[0, n_delivery)` and a masked slot is unreachable. On the terminal live-state
+gate: un-masking the water ring's horizon-capped deep-lag slots re-enables their
+definition rows, deposit share, and outgoing columns — a live LP change — so it
+**must** be gated on `config.policy.boundary` presence, keeping a no-boundary study
+byte-for-byte. The anticipated ring gates the **existence** of a post-study slot
+instead — on a declared `post_study_stages.json` extending the delivery axis past
+the horizon, plus the plant's own lead reaching that target. A post-study-targeted
+slot is one of the ring's **own** reachable slots, held open `(-inf, inf)` whenever
+reachable and priced through the same generic `β·state` projection, never a
+boundary-conditional block; with no post-study calendar the axis is study-only and
+every `m >= n_stages` slot is masked. Water gates terminal live-**state** on a
+loaded boundary; anticipated gates post-study slot **existence** on the declared
+calendar and lead reach — the same asymmetry, re-derived (`.claude/rules/sddp.md` §
+"Delivery-family right-boundary pricing").
 
 ---
 
@@ -497,11 +578,12 @@ The invariants that make the above _correct_ rather than merely plausible live i
   sizing; shared arrival density (`Σ_b w_b·χ_{b,d} = k_d`); fixed delivery density.
 - **Anticipated:** delivery-anchored end-anchored decider; slots keyed by residue
   with a same-slot hold carry; `depth[t]` is not the occupancy boundary; in-study
-  maturity always fishes (carry-to-terminal is the post-horizon lane's alone);
-  end-of-horizon masking is exact (never a dropped commitment); fan-out reject is
-  the sole guard; `K = 0` is exclude-with-advisory; delivery-anchoring preservation
-  (bounds/cost/discount read at the delivery stage); mandatory non-parametric drift
-  reconciliation; hour-weighted post-horizon boundary reconciliation.
+  maturity always fishes (carry-to-terminal is the post-study-targeted ring slot's
+  alone); end-of-horizon masking is exact (never a dropped commitment); fan-out
+  reject is the sole guard; `K = 0` is exclude-with-advisory; delivery-anchoring
+  preservation (bounds/cost/discount read at the delivery stage); mandatory
+  non-parametric drift reconciliation; hour-weighted post-study boundary
+  reconciliation.
 
 When changing anything in either subsystem, read the matching `sddp.md` section
 first: a plausible-looking deviation in either ring produces wrong bounds, rejected

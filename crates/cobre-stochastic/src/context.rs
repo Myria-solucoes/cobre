@@ -3,7 +3,13 @@
 //! [`StochasticContext`] owns the precomputed stochastic infrastructure;
 //! [`build_stochastic_context`] assembles it from a [`System`] reference.
 
-use cobre_core::{EntityId, LoadModel, System, scenario::SamplingScheme};
+use std::collections::HashMap;
+
+use cobre_core::{
+    EntityId, LoadModel, System,
+    scenario::{ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, InflowModel, SamplingScheme},
+    temporal::Stage,
+};
 
 /// Per-class sampling scheme selections for provenance tracking; each field is
 /// `None` when its class is not configured.
@@ -44,6 +50,7 @@ pub struct OpeningTreeInputs<'a> {
 use crate::{
     StochasticError,
     correlation::resolve::DecomposedCorrelation,
+    derive_external_sample_moments,
     normal::precompute::{EntityFactorEntry, PrecomputedNormal},
     par::{precompute::PrecomputedPar, validation::validate_par_parameters},
     provenance::{ComponentProvenance, StochasticProvenance},
@@ -95,32 +102,23 @@ impl NoiseEntityOrder {
 /// An NCS with `std = 0` is included unconditionally: it contributes zero noise
 /// after the transform, and dropping it would shift the canonical entity order.
 ///
-/// Load-bus membership defers to [`LoadModel::is_noise_member`], the single
-/// membership authority — this fn does not re-derive the predicate. Inflow
-/// stays all-hydros and NCS stays unfiltered; only load's membership reads
-/// `schemes`. Every caller must pass the SAME resolved `schemes` (the training
-/// scenario source) so the external-library width check, the opening-tree
-/// layout, and the backward assembly all agree on which entities occupy the
-/// vector.
+/// Load and NCS membership both route through `System`'s own authority
+/// ([`System::load_noise_member_bus_ids`], [`System::ncs_noise_member_ids`]) —
+/// the single owner every LP/noise-vector site (this function, the external
+/// library builders, the LP template builder) calls rather than re-deriving
+/// membership. Every caller must pass the SAME resolved `schemes` (the
+/// training scenario source) so the external-library width check, the
+/// opening-tree layout, and the backward assembly all agree on which
+/// entities occupy the vector.
 #[must_use]
 pub fn noise_entity_order(system: &System, schemes: &ClassSchemes) -> NoiseEntityOrder {
-    let sorted_dedup = |mut ids: Vec<EntityId>| {
-        ids.sort_unstable_by_key(|id| id.0);
-        ids.dedup();
-        ids
-    };
+    let load_scheme = schemes.load.unwrap_or(SamplingScheme::InSample);
+    let ncs_scheme = schemes.ncs.unwrap_or(SamplingScheme::InSample);
 
     NoiseEntityOrder {
         hydro_ids: system.hydros().iter().map(|h| h.id).collect(),
-        load_bus_ids: sorted_dedup(
-            system
-                .load_models()
-                .iter()
-                .filter(|m| m.is_noise_member(schemes.load.unwrap_or(SamplingScheme::InSample)))
-                .map(|m| m.bus_id)
-                .collect(),
-        ),
-        ncs_entity_ids: sorted_dedup(system.ncs_models().iter().map(|m| m.ncs_id).collect()),
+        load_bus_ids: system.load_noise_member_bus_ids(load_scheme),
+        ncs_entity_ids: system.ncs_noise_member_ids(ncs_scheme),
     }
 }
 
@@ -396,6 +394,176 @@ impl StochasticContext {
     }
 }
 
+/// Map each study stage's declared `Stage.id` to its 0-based position in
+/// `study_stages` — the declared-domain-id -> canonical-study-index
+/// resolution `cobre-io`'s `StageIdResolver` performs for the σ=0 validator
+/// (rule 47), replicated here because `cobre-stochastic` cannot depend on
+/// `cobre-io` (`cobre-io` depends on `cobre-stochastic`).
+/// `ExternalScenarioRow`/`ExternalLoadRow`/`ExternalNcsRow::stage_id` is
+/// documented as a declared domain id, "not a 0-based index" — every
+/// External-row consumer below resolves through this map, never casts
+/// `stage_id as usize` directly.
+fn stage_id_to_index(study_stages: &[Stage]) -> HashMap<i32, usize> {
+    study_stages
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id, i))
+        .collect()
+}
+
+/// Resolve each row's declared `stage_id` to its 0-based study-stage index
+/// via `stage_index`, dropping rows whose declared id names no study stage
+/// (mirroring an unresolvable id being rejected upstream, never silently
+/// mis-indexed) — [`derive_external_sample_moments`]'s own contract requires
+/// an already-resolved index, never the raw declared id.
+fn resolve_row_stages<R, FR>(
+    rows: &[R],
+    stage_index: &HashMap<i32, usize>,
+    row_fields: FR,
+) -> Vec<(EntityId, i32, i32, f64)>
+where
+    FR: Fn(&R) -> (EntityId, i32, i32, f64),
+{
+    rows.iter()
+        .filter_map(|row| {
+            let (entity_id, stage_id, scenario_id, value) = row_fields(row);
+            let idx = *stage_index.get(&stage_id)?;
+            let idx_i32 = i32::try_from(idx).ok()?;
+            Some((entity_id, idx_i32, scenario_id, value))
+        })
+        .collect()
+}
+
+/// Under `External`, build a derived-moment [`LoadModel`] slice — one entry
+/// per `(entity, study stage)` with `mean_mw`/`std_mw` set to the sample
+/// moments [`derive_external_sample_moments`] computes over `external_rows`.
+/// Feeds [`PrecomputedNormal::build`] the SAME `(μ, σ)` pair the
+/// standardization side derives from the same rows, so the
+/// standardize/reconstruct round trip holds — both sides must keep deriving
+/// from the same rows.
+fn external_derived_load_models<R, FR>(
+    external_rows: &[R],
+    entity_ids: &[EntityId],
+    study_stages: &[Stage],
+    stage_index: &HashMap<i32, usize>,
+    row_fields: FR,
+) -> Vec<LoadModel>
+where
+    FR: Fn(&R) -> (EntityId, i32, i32, f64),
+{
+    let n_entities = entity_ids.len();
+    let resolved_rows = resolve_row_stages(external_rows, stage_index, row_fields);
+    let moments = derive_external_sample_moments(
+        &resolved_rows,
+        entity_ids,
+        study_stages.len(),
+        |&(entity_id, stage_idx, scenario_id, value)| (entity_id, stage_idx, scenario_id, value),
+    );
+    let mut models = Vec::with_capacity(study_stages.len() * n_entities);
+    for (stage_idx, stage) in study_stages.iter().enumerate() {
+        for (entity_idx, &bus_id) in entity_ids.iter().enumerate() {
+            let (mean, std) = moments[stage_idx * n_entities + entity_idx];
+            models.push(LoadModel {
+                bus_id,
+                stage_id: stage.id,
+                mean_mw: mean,
+                std_mw: std,
+            });
+        }
+    }
+    models
+}
+
+/// Under `External`, override each AR(0) hydro's study-stage [`InflowModel`]
+/// mean/std with sample moments derived from `system.external_scenarios()`;
+/// an AR(p > 0) hydro's models pass through unchanged. AR(0)-ness mirrors
+/// `par_probe`'s own per-hydro classification (`PrecomputedPar::order`/
+/// `has_annual`, built from the unmodified models), so the override can
+/// never disagree with what a later `PrecomputedPar::build` itself would
+/// treat as AR(0).
+///
+/// A hydro/stage with no `inflow_seasonal_stats` row at all — the file is
+/// entirely absent — still classifies AR(0) under `PrecomputedPar::build`'s
+/// default (`order`/`has_annual` start at their zero value for a hydro with no
+/// models), so it is synthesized here from `moments` rather than left out:
+/// otherwise the override never fires for that hydro and `PrecomputedPar`
+/// defaults its mean/std to `0.0`, which V3.7 then rejects as a
+/// deterministic-anchor mismatch against the real external value.
+fn external_ar0_inflow_models(
+    system: &System,
+    hydro_ids: &[EntityId],
+    study_stages: &[Stage],
+    stage_index: &HashMap<i32, usize>,
+    par_probe: &PrecomputedPar,
+) -> Vec<InflowModel> {
+    let n_stages = study_stages.len();
+    let n_hydros = hydro_ids.len();
+    let resolved_rows = resolve_row_stages(
+        system.external_scenarios(),
+        stage_index,
+        |row: &ExternalScenarioRow| (row.hydro_id, row.stage_id, row.scenario_id, row.value_m3s),
+    );
+    let moments = derive_external_sample_moments(
+        &resolved_rows,
+        hydro_ids,
+        n_stages,
+        |&(entity_id, stage_idx, scenario_id, value)| (entity_id, stage_idx, scenario_id, value),
+    );
+    let hydro_index: HashMap<EntityId, usize> = hydro_ids
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
+
+    let mut has_row = vec![false; n_stages * n_hydros];
+    let mut models: Vec<InflowModel> = system
+        .inflow_models()
+        .iter()
+        .cloned()
+        .map(|model| {
+            let Some(&stage_idx) = stage_index.get(&model.stage_id) else {
+                return model;
+            };
+            let Some(&h_idx) = hydro_index.get(&model.hydro_id) else {
+                return model;
+            };
+            has_row[stage_idx * n_hydros + h_idx] = true;
+            if par_probe.order(h_idx) != 0 || par_probe.has_annual(h_idx) {
+                return model;
+            }
+            let (mean_m3s, std_m3s) = moments[stage_idx * n_hydros + h_idx];
+            InflowModel {
+                mean_m3s,
+                std_m3s,
+                ..model
+            }
+        })
+        .collect();
+
+    for (h_idx, &hydro_id) in hydro_ids.iter().enumerate() {
+        if par_probe.order(h_idx) != 0 || par_probe.has_annual(h_idx) {
+            continue;
+        }
+        for (stage_idx, stage) in study_stages.iter().enumerate() {
+            if has_row[stage_idx * n_hydros + h_idx] {
+                continue;
+            }
+            let (mean_m3s, std_m3s) = moments[stage_idx * n_hydros + h_idx];
+            models.push(InflowModel {
+                hydro_id,
+                stage_id: stage.id,
+                mean_m3s,
+                std_m3s,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            });
+        }
+    }
+
+    models
+}
+
 /// Initialize the full stochastic pipeline from a [`System`] reference.
 ///
 /// Stage filtering keeps only study stages (non-negative `stage.id`). Load-bus
@@ -453,6 +621,7 @@ pub fn build_stochastic_context(
         .filter(|s| s.id >= 0)
         .cloned()
         .collect();
+    let stage_index = stage_id_to_index(&study_stages);
 
     let noise_order = noise_entity_order(system, &schemes);
     let dim = noise_order.dim();
@@ -503,6 +672,13 @@ pub fn build_stochastic_context(
         .map(|sm| sm.seasons.len());
     let par_lp =
         PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
+    let par_lp = if schemes.inflow == Some(SamplingScheme::External) {
+        let external_models =
+            external_ar0_inflow_models(system, &hydro_ids, &study_stages, &stage_index, &par_lp);
+        PrecomputedPar::build(&external_models, &study_stages, &hydro_ids, cycle_len)?
+    } else {
+        par_lp
+    };
 
     let correlation = if dim == 0 || system.correlation().profiles.is_empty() {
         DecomposedCorrelation::empty()
@@ -538,29 +714,56 @@ pub fn build_stochastic_context(
         .max()
         .unwrap_or(0);
 
-    let normal_lp = PrecomputedNormal::build(
-        system.load_models(),
-        load_factors,
-        &study_stages,
-        &load_bus_ids,
-        max_blocks,
-    )?;
+    let normal_lp = if schemes.load == Some(SamplingScheme::External) {
+        let external_models = external_derived_load_models(
+            system.external_load_scenarios(),
+            &load_bus_ids,
+            &study_stages,
+            &stage_index,
+            |row: &ExternalLoadRow| (row.bus_id, row.stage_id, row.scenario_id, row.value_mw),
+        );
+        PrecomputedNormal::build(
+            &external_models,
+            load_factors,
+            &study_stages,
+            &load_bus_ids,
+            max_blocks,
+        )?
+    } else {
+        PrecomputedNormal::build(
+            system.load_models(),
+            load_factors,
+            &study_stages,
+            &load_bus_ids,
+            max_blocks,
+        )?
+    };
 
     // The `mean_mw`/`std_mw` carried here are dimensionless availability factors,
     // not MW; the NCS noise transform applies the `max_gen` scaling.
     let ncs_normal = if ncs_entity_ids.is_empty() {
         PrecomputedNormal::default()
     } else {
-        let ncs_as_load: Vec<LoadModel> = system
-            .ncs_models()
-            .iter()
-            .map(|m| LoadModel {
-                bus_id: m.ncs_id,
-                stage_id: m.stage_id,
-                mean_mw: m.mean,
-                std_mw: m.std,
-            })
-            .collect();
+        let ncs_as_load: Vec<LoadModel> = if schemes.ncs == Some(SamplingScheme::External) {
+            external_derived_load_models(
+                system.external_ncs_scenarios(),
+                &ncs_entity_ids,
+                &study_stages,
+                &stage_index,
+                |row: &ExternalNcsRow| (row.ncs_id, row.stage_id, row.scenario_id, row.value),
+            )
+        } else {
+            system
+                .ncs_models()
+                .iter()
+                .map(|m| LoadModel {
+                    bus_id: m.ncs_id,
+                    stage_id: m.stage_id,
+                    mean_mw: m.mean,
+                    std_mw: m.std,
+                })
+                .collect()
+        };
         PrecomputedNormal::build(
             &ncs_as_load,
             ncs_factors,
@@ -596,8 +799,8 @@ mod tests {
         Bus, DeficitSegment, EntityId, SystemBuilder,
         entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
         scenario::{
-            CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-            LoadModel, NcsModel, SamplingScheme,
+            CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
+            ExternalLoadRow, ExternalScenarioRow, InflowModel, LoadModel, NcsModel, SamplingScheme,
         },
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -973,7 +1176,7 @@ mod tests {
 
         // A non-positive-definite matrix: rho > 1 is invalid.
         let n = 2usize;
-        let rho = 2.0_f64; // off-diagonal > 1 -- not PD.
+        let rho = 2.0_f64;
         let matrix: Vec<Vec<f64>> = (0..n)
             .map(|i| (0..n).map(|j| if i == j { 1.0 } else { rho }).collect())
             .collect();
@@ -1562,7 +1765,6 @@ mod tests {
         )
         .unwrap();
 
-        // Dimensions must match expectations for a 2-hydro, 3-stage, BF=3 system.
         assert_eq!(ctx.dim(), 2, "dim should be 2 (2 hydros, no load buses)");
         assert_eq!(ctx.n_stages(), 3, "n_stages should be 3");
         assert_eq!(ctx.base_seed(), 42, "base_seed should be 42");
@@ -1650,14 +1852,12 @@ mod tests {
             4,
             "stage 0 must have 4 openings (user-supplied)"
         );
-        // Verify values come from the user-supplied tree.
         assert_eq!(
             ctx.opening_tree().opening(0, 0),
             &[99.0_f64, 99.0],
             "opening values must match user-supplied data"
         );
 
-        // par_lp, correlation, and normal_lp must still be built from the system.
         assert_eq!(
             ctx.par().n_hydros(),
             2,
@@ -1888,6 +2088,223 @@ mod tests {
             ctx.forward_seed(),
             None,
             "forward_seed() must return None when not supplied"
+        );
+    }
+
+    /// AC (Unit Test): the AR-order branch selects derived-vs-seasonal
+    /// correctly under `External` — an AR(0) hydro's PAR moments come from
+    /// the external samples, while an AR(p > 0) hydro's stay byte-identical
+    /// to the seasonal, unmodified build.
+    #[test]
+    fn external_inflow_override_applies_only_to_ar0_hydros() {
+        let hydros = vec![make_hydro(1), make_hydro(2)];
+        let stages = vec![make_stage(0, 0, 1), make_stage(1, 1, 1)];
+        // Hydro 1: AR(0), seasonal stats deliberately disagree with the
+        // external file. Hydro 2: AR(1), stats must stay untouched.
+        let inflow_models = vec![
+            make_inflow_model(1, 0, 30.0, vec![]),
+            make_inflow_model(1, 1, 30.0, vec![]),
+            make_inflow_model(2, 0, 30.0, vec![0.4]),
+            make_inflow_model(2, 1, 30.0, vec![0.4]),
+        ];
+        let external_rows = vec![
+            ExternalScenarioRow {
+                stage_id: 0,
+                scenario_id: 0,
+                hydro_id: EntityId(1),
+                value_m3s: 200.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 0,
+                hydro_id: EntityId(1),
+                value_m3s: 10.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 1,
+                hydro_id: EntityId(1),
+                value_m3s: 30.0,
+            },
+        ];
+
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(hydros)
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .correlation(identity_correlation(&[1, 2]))
+            .external_scenarios(external_rows)
+            .build()
+            .unwrap();
+
+        let seasonal_ctx = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+
+        let external_ctx = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::External),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+
+        // AR(0) hydro (canonical index 0): derived from the external samples,
+        // not the deliberately-disagreeing seasonal stats (mean=30.0 seasonal
+        // std, vs. the external file's 200.0 / 10.0 / 30.0 samples).
+        assert!((external_ctx.par().deterministic_base(0, 0) - 200.0).abs() < 1e-10);
+        assert!(external_ctx.par().sigma(0, 0).abs() < 1e-10);
+        assert!((external_ctx.par().deterministic_base(1, 0) - 20.0).abs() < 1e-10);
+        assert!((external_ctx.par().sigma(1, 0) - 10.0).abs() < 1e-10);
+
+        // AR(1) hydro (canonical index 1): byte-identical to the seasonal build.
+        assert!(
+            (external_ctx.par().deterministic_base(0, 1)
+                - seasonal_ctx.par().deterministic_base(0, 1))
+            .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (external_ctx.par().sigma(0, 1) - seasonal_ctx.par().sigma(0, 1)).abs() < f64::EPSILON
+        );
+        assert_eq!(
+            external_ctx.par().psi_slice(0, 1),
+            seasonal_ctx.par().psi_slice(0, 1)
+        );
+    }
+
+    /// Regression: a GAPPED (non-0-based) declared study-stage id must
+    /// resolve to its canonical position — the same resolution cobre-io's
+    /// rule-47 validator performs — never be treated as already being that
+    /// position. Study stages are declared `2, 5` (not `0, 1`); under the
+    /// pre-fix bug, `stage_idx = declared_id` always exceeds `n_stages` here,
+    /// so the AR(0)/load overrides would silently never fire and the
+    /// (deliberately disagreeing) seasonal stats would survive untouched.
+    #[test]
+    fn external_derivation_resolves_gapped_stage_ids() {
+        let hydro_id = EntityId(1);
+        let bus_id = EntityId(10);
+        let hydros = vec![make_hydro(1)];
+        let stages = vec![make_stage(0, 2, 1), make_stage(1, 5, 1)];
+        let inflow_models = vec![
+            make_inflow_model(1, 2, 30.0, vec![]),
+            make_inflow_model(1, 5, 30.0, vec![]),
+        ];
+        let load_models = vec![
+            make_load_model(10, 2, 999.0, 0.0),
+            make_load_model(10, 5, 999.0, 0.0),
+        ];
+        let external_inflow_rows = vec![
+            ExternalScenarioRow {
+                stage_id: 2,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: 200.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 5,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: 10.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 5,
+                scenario_id: 1,
+                hydro_id,
+                value_m3s: 30.0,
+            },
+        ];
+        let external_load_rows = vec![
+            ExternalLoadRow {
+                stage_id: 2,
+                scenario_id: 0,
+                bus_id,
+                value_mw: 123.0,
+            },
+            ExternalLoadRow {
+                stage_id: 5,
+                scenario_id: 0,
+                bus_id,
+                value_mw: 456.0,
+            },
+            ExternalLoadRow {
+                stage_id: 5,
+                scenario_id: 1,
+                bus_id,
+                value_mw: 456.0,
+            },
+        ];
+
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0), make_bus(10)])
+            .hydros(hydros)
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .correlation(identity_correlation(&[1]))
+            .external_scenarios(external_inflow_rows)
+            .external_load_scenarios(external_load_rows)
+            .build()
+            .unwrap();
+
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::External),
+                load: Some(SamplingScheme::External),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+
+        // Position 0 <-> declared stage id 2; position 1 <-> declared id 5.
+        assert!(
+            (ctx.par().deterministic_base(0, 0) - 200.0).abs() < 1e-10,
+            "gapped id 2 must resolve to position 0 and derive from its own \
+             external sample, not the disagreeing seasonal mean (999.0-shaped \
+             sentinel); got {}",
+            ctx.par().deterministic_base(0, 0)
+        );
+        assert!(ctx.par().sigma(0, 0).abs() < 1e-10);
+        assert!(
+            (ctx.par().deterministic_base(1, 0) - 20.0).abs() < 1e-10,
+            "gapped id 5 must resolve to position 1"
+        );
+        assert!((ctx.par().sigma(1, 0) - 10.0).abs() < 1e-10);
+
+        assert!(
+            (ctx.normal().mean(0, 0) - 123.0).abs() < 1e-10,
+            "load derivation must resolve gapped id 2 to position 0, not the \
+             seasonal mean_mw (999.0)"
+        );
+        assert!(ctx.normal().std(0, 0).abs() < 1e-10);
+        assert!(
+            (ctx.normal().mean(1, 0) - 456.0).abs() < 1e-10,
+            "gapped id 5 must resolve to position 1"
         );
     }
 }

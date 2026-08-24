@@ -24,8 +24,12 @@
 //! The `in_transit/` partition is present only when the system declares a
 //! travel-time arc; a non-travel-time study writes no such directory or file.
 //! The `anticipated_lanes/` partition is present only when the system
-//! declares a `future_anticipated_deliveries` window; without one, no such
-//! directory or file is written.
+//! declares post-study stages; without them, no such directory or file is
+//! written.
+//!
+//! Every record's `node_id` below is the declared node visited at that stage —
+//! the degenerate per-stage id on a chain — and must never be gated on whether
+//! the system declared `nodes[]`.
 //!
 //! ## Circular-dependency mitigation
 //!
@@ -41,7 +45,9 @@ use arrow::array::{
     BooleanBuilder, Date32Builder, Float64Builder, Int8Builder, Int32Builder, RecordBatch,
 };
 
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
+
+use super::date32_days;
 use cobre_core::System;
 
 use crate::MetadataSimulationSolveStats;
@@ -66,8 +72,7 @@ use crate::output::schemas::{
 pub struct CostWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level aggregates.
     pub block_id: Option<u32>,
@@ -129,8 +134,7 @@ pub struct CostWriteRecord {
 pub struct HydroWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -203,8 +207,7 @@ pub struct HydroWriteRecord {
 pub struct ThermalWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -229,8 +232,7 @@ pub struct ThermalWriteRecord {
 pub struct ExchangeWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -251,8 +253,7 @@ pub struct ExchangeWriteRecord {
 pub struct BusWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -273,8 +274,7 @@ pub struct BusWriteRecord {
 pub struct PumpingWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -295,8 +295,7 @@ pub struct PumpingWriteRecord {
 pub struct ContractWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -317,8 +316,7 @@ pub struct ContractWriteRecord {
 pub struct NonControllableWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -341,8 +339,7 @@ pub struct NonControllableWriteRecord {
 pub struct InflowLagWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Hydro plant entity ID.
     pub hydro_id: i32,
@@ -358,8 +355,7 @@ pub struct InflowLagWriteRecord {
 pub struct TransitBucketWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Downstream hydro plant entity ID the arc feeds.
     pub hydro_id: i32,
@@ -393,8 +389,7 @@ pub struct TransitSeedWriteRecord {
 pub struct HydroBusWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -413,8 +408,7 @@ pub struct HydroBusWriteRecord {
 pub struct GenericViolationWriteRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Block index, or `None` for stage-level rows.
     pub block_id: Option<u32>,
@@ -432,8 +426,7 @@ pub struct GenericViolationWriteRecord {
 pub struct AnticipatedLaneWriteRecord {
     /// Stage index (0-based) — the lane's own in-study decider stage.
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Thermal unit entity ID owning this lane.
     pub thermal_id: i32,
@@ -450,8 +443,7 @@ pub struct AnticipatedLaneWriteRecord {
 pub struct StageWritePayload {
     /// Stage index (0-based).
     pub stage_id: u32,
-    /// Declared node id visited at this stage; the degenerate per-stage id on a
-    /// chain, never gated on whether `nodes[]` was declared.
+    /// Declared node id visited at this stage.
     pub node_id: i32,
     /// Cost breakdown records for this stage.
     pub costs: Vec<CostWriteRecord>,
@@ -648,14 +640,13 @@ impl SimulationParquetWriter {
             std::fs::create_dir_all(sim_dir.join("violations/generic"))
                 .map_err(|e| OutputError::io(sim_dir.join("violations/generic"), e))?;
         }
-        // Gate on a declared post-horizon commitment window, not on thermal count:
-        // a study with no `future_anticipated_deliveries` must emit no
-        // `anticipated_lanes` directory (byte-neutral).
-        let declares_post_horizon_commitment = !system
-            .initial_conditions()
-            .future_anticipated_deliveries
-            .is_empty();
-        if declares_post_horizon_commitment {
+        // Gate on declared post-study stages, not on thermal count: a study with
+        // no post-study stages must emit no `anticipated_lanes` directory
+        // (byte-neutral).
+        let declares_post_study = system
+            .post_study_stages()
+            .is_some_and(|ps| !ps.stages.is_empty());
+        if declares_post_study {
             std::fs::create_dir_all(sim_dir.join("anticipated_lanes"))
                 .map_err(|e| OutputError::io(sim_dir.join("anticipated_lanes"), e))?;
         }
@@ -1906,13 +1897,6 @@ fn build_in_transit_batch<'a>(
         ],
     )
     .map_err(|e| OutputError::serialization("in_transit", e.to_string()))
-}
-
-/// Arrow `Date32`'s native representation (days since the Unix epoch,
-/// 1970-01-01) for one calendar date.
-fn date32_days(date: NaiveDate) -> i32 {
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).map_or(0, |e| e.num_days_from_ce());
-    date.num_days_from_ce() - epoch
 }
 
 #[allow(clippy::cast_possible_wrap)]

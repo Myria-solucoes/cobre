@@ -1,6 +1,7 @@
 //! Accessor methods and context builders for [`StudySetup`].
 
 use chrono::NaiveDate;
+use cobre_core::AnticipatedCommitmentHistory;
 use cobre_core::System;
 use cobre_core::commissioning::commissioning_active;
 use cobre_core::scenario::SamplingScheme;
@@ -30,6 +31,14 @@ impl StudySetup {
     /// Replace the FCF with a pre-loaded policy.
     pub fn replace_fcf(&mut self, fcf: FutureCostFunction) {
         self.fcf = fcf;
+    }
+
+    /// The boundary-derived state requirements this study was built against — the
+    /// boundary-cut load path reads its inflow-lag depth here rather than
+    /// re-resolving from the source checkpoint.
+    #[must_use]
+    pub fn boundary_requirements(&self) -> &super::BoundaryStateRequirements {
+        &self.boundary_requirements
     }
 
     /// Set the starting iteration for resumed training.
@@ -104,6 +113,21 @@ impl StudySetup {
         &self.stage_data.state
     }
 
+    /// Resolve the terminal cut pool's ordinal and its owning study stage id.
+    ///
+    /// `terminal_idx` is a pool ordinal (`== n_pools - 1`); its owning stage
+    /// resolves through `node_graph.pool_stage`, never `study_stage_ids[terminal_idx]`,
+    /// which is OOB once `n_pools > n_stages` on a branching graph. Sole owner of
+    /// this resolution so [`Self::build_terminal_entity_manifest`] and
+    /// [`Self::build_terminal_anticipated_delivery_intervals`] date a slot and
+    /// interval it at the SAME stage — a divergence would date a slot at one stage
+    /// and interval it at another.
+    fn terminal_pool_stage_id(&self) -> (usize, i32) {
+        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx].0];
+        (terminal_idx, stage_id)
+    }
+
     /// Build the per-slot entity-identity manifest for the terminal cut pool —
     /// the pool a boundary policy injects into.
     ///
@@ -120,11 +144,7 @@ impl StudySetup {
     /// `system` is passed explicitly because [`StudySetup`] does not own it.
     #[must_use]
     pub fn build_terminal_entity_manifest(&self, system: &System) -> Vec<EntitySlot> {
-        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
-        // `terminal_idx` is a pool ordinal (`== n_pools - 1`); its owning stage
-        // resolves through `pool_stage`, never `study_stage_ids[terminal_idx]`,
-        // which is OOB once `n_pools > n_stages` on a branching graph.
-        let stage_id = self.study_stage_ids[self.node_graph.pool_stage[terminal_idx].0];
+        let (terminal_idx, stage_id) = self.terminal_pool_stage_id();
         build_stage_entity_manifest(
             system,
             &self.stage_data.state,
@@ -133,10 +153,10 @@ impl StudySetup {
         )
     }
 
-    /// Build the per-slot post-horizon delivery interval for the terminal cut
-    /// pool, aligned 1:1 with [`Self::build_terminal_entity_manifest`]:
-    /// `Some((start, end))` for a live, dated `AnticipatedThermalState`
-    /// post-horizon lane slot, `None` elsewhere.
+    /// Build the per-slot delivery interval for the terminal cut pool, aligned
+    /// 1:1 with [`Self::build_terminal_entity_manifest`]: `Some((start, end))` for
+    /// a dated post-study target — an in-study ring slot whose modular delivery
+    /// target lands on a post-study stage — `None` elsewhere.
     ///
     /// Delegates to [`build_stage_entity_delivery_intervals`], the companion
     /// [`build_stage_entity_manifest`] walks in lockstep, against the SAME
@@ -153,18 +173,65 @@ impl StudySetup {
         &self,
         system: &System,
     ) -> Vec<Option<(NaiveDate, NaiveDate)>> {
-        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        let (terminal_idx, stage_id) = self.terminal_pool_stage_id();
         build_stage_entity_delivery_intervals(
             system,
             &self.stage_data.state,
             &self.stage_data.cut_state_layouts[terminal_idx],
+            stage_id,
         )
+    }
+
+    /// Build the study's fixed post-horizon (class-4) anticipated commitment
+    /// windows — declared post-study deliveries the terminal boundary FCF
+    /// prices by folding into each boundary cut's intercept — in canonical
+    /// anticipated-plant order, then per-plant ascending `start_date`.
+    ///
+    /// A window is class-4 iff its `start_date` is at or after the study
+    /// horizon end (the last study stage's `end_date`).
+    /// `past_anticipated_commitments` carries only pre-study-decided class-2
+    /// (in-study) and class-4 windows, and the calendar validation rejects any
+    /// window straddling into an in-study-decided/never-priced stage, so the
+    /// date threshold classifies unambiguously; the in-study (class-2) windows
+    /// are the ones the terminal boundary does not price and this accessor
+    /// omits.
+    ///
+    /// `system` is passed explicitly because [`StudySetup`] does not own it.
+    #[must_use]
+    pub fn build_terminal_fixed_post_horizon_windows(
+        &self,
+        system: &System,
+    ) -> Vec<AnticipatedCommitmentHistory> {
+        let Some(horizon_end) = system
+            .stages()
+            .iter()
+            .rfind(|s| s.id >= 0)
+            .map(|s| s.end_date)
+        else {
+            return Vec::new();
+        };
+        let ic = system.initial_conditions();
+        let mut windows = Vec::new();
+        for thermal in system.thermals() {
+            if thermal.anticipated_config.is_none() {
+                continue;
+            }
+            let mut plant_windows: Vec<AnticipatedCommitmentHistory> = ic
+                .past_anticipated_commitments
+                .iter()
+                .filter(|w| w.thermal_id == thermal.id && w.start_date >= horizon_end)
+                .cloned()
+                .collect();
+            plant_windows.sort_by_key(|w| w.start_date);
+            windows.extend(plant_windows);
+        }
+        windows
     }
 
     /// Number of stages in the planning horizon.
     #[must_use]
     pub fn num_stages(&self) -> usize {
-        self.methodology.horizon.num_stages()
+        self.horizon.num_stages()
     }
 
     /// Build the value-function artifact's graph manifest for the current study
@@ -245,11 +312,11 @@ impl StudySetup {
     pub fn training_ctx(&self) -> TrainingContext<'_> {
         let tr = &self.scenario_libraries.training;
         TrainingContext {
-            horizon: &self.methodology.horizon,
+            horizon: &self.horizon,
             state: &self.stage_data.state,
             cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
-            inflow_method: &self.methodology.inflow_method,
+            inflow_method: &self.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
             inflow_scheme: tr.inflow_scheme,
@@ -311,13 +378,13 @@ impl StudySetup {
                 });
 
         TrainingContext {
-            horizon: &self.methodology.horizon,
+            horizon: &self.horizon,
             state: &self.stage_data.state,
             // Simulation renders stored cuts into frozen templates and the DCS LP
             // (it does not extract), so the per-pool projection threads through here.
             cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
-            inflow_method: &self.methodology.inflow_method,
+            inflow_method: &self.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
             inflow_scheme: sim.inflow_scheme,

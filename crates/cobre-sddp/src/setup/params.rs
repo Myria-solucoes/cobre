@@ -1,4 +1,4 @@
-//! `StudyParams`, `ConstructionConfig`, and associated constants.
+//! `StudyParams` and associated constants.
 
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Simulation's `enumerated`-selection declaration, carried on
-/// [`StudyParams`]/[`ConstructionConfig`] until the node graph resolves
+/// [`StudyParams`] until the node graph resolves
 /// [`StudyParams::n_scenarios`] (config load holds no graph to derive the
 /// count from). A plain externally-tagged enum carrying no
 /// `#[serde(tag = ...)]`, so it round-trips over the MPI broadcast wire
@@ -46,6 +46,60 @@ pub const DEFAULT_COST_SCALE_FACTOR: f64 = 1_000_000.0;
 /// are accepted but logged via `tracing::warn!`.
 const COST_SCALE_FACTOR_ADVISORY_MIN: f64 = 1.0;
 const COST_SCALE_FACTOR_ADVISORY_MAX: f64 = 1e12;
+
+// ---------------------------------------------------------------------------
+// BoundaryStateRequirements
+// ---------------------------------------------------------------------------
+
+/// The boundary-derived setup facts a study needs to size its state space,
+/// resolved once from `config.policy.boundary` (and the source checkpoint) by
+/// [`resolve_boundary_state_requirements`](crate::resolve_boundary_state_requirements)
+/// and threaded onto the config-projection carriers as one value. Both facts are
+/// derived together by that resolver — the single owner — so [`Self::is_present`]
+/// and [`Self::inflow_lag_depth`] cannot disagree. A new externally-authored
+/// boundary state family adds a field and accessor here, never a new scalar
+/// threaded through the carriers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundaryStateRequirements {
+    present: bool,
+    inflow_lag_depth: Option<u32>,
+}
+
+impl BoundaryStateRequirements {
+    /// No boundary policy: the study reserves nothing on its behalf.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            present: false,
+            inflow_lag_depth: None,
+        }
+    }
+
+    /// A boundary policy is present, requiring `required_lag_depth` inflow-lag
+    /// slots; `0` reserves none (an all-storage source policy).
+    #[must_use]
+    pub fn present(required_lag_depth: u32) -> Self {
+        Self {
+            present: true,
+            inflow_lag_depth: (required_lag_depth > 0).then_some(required_lag_depth),
+        }
+    }
+
+    /// Whether the study declares a terminal boundary FCF
+    /// (`config.policy.boundary.is_some()`).
+    #[must_use]
+    pub fn is_present(&self) -> bool {
+        self.present
+    }
+
+    /// Effective inflow-lag state depth the loaded boundary requires (`None` when
+    /// no boundary is loaded or it carries no inflow-lag slot). Widens `L_state`
+    /// in `resolve_state_layout` via `widen_lag_state_depth`.
+    #[must_use]
+    pub fn inflow_lag_depth(&self) -> Option<u32> {
+        self.inflow_lag_depth
+    }
+}
 
 // ---------------------------------------------------------------------------
 // StudyParams
@@ -108,16 +162,19 @@ pub struct StudyParams {
     /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
     /// time — one value per study.
     pub cost_scale_factor: f64,
-    /// Effective inflow-lag state depth, inferred from a loaded boundary policy's
-    /// required depth (`None` when no boundary is loaded). Widens `L_state` in
-    /// `resolve_state_layout` via `widen_lag_state_depth`.
-    pub inflow_lag_depth: Option<u32>,
-    /// `policy.boundary.is_some()`: whether the study declares a terminal
-    /// boundary FCF. Threaded into `build_transit_bucket_topology` so the
-    /// water-bucket terminal mask un-caps only for a study that will load one
-    /// (the "Terminal credit deferred" contract); the ACTUAL boundary cuts
-    /// load later, after `StudySetup` construction.
-    pub boundary_present: bool,
+    /// Boundary-derived state-space requirements. `none()` out of
+    /// [`Self::from_config`]; the resolved value is patched by
+    /// [`StudySetup::new_with_boundary_requirements`](super::StudySetup::new_with_boundary_requirements)
+    /// (local) or the broadcast carrier (MPI), before any consumer reads it.
+    pub boundary: BoundaryStateRequirements,
+    /// Whether the visited-states archive is allocated for export
+    /// (`config.exports.states`). Overridable post-construction via
+    /// [`StudySetup::set_export_states`](super::StudySetup::set_export_states).
+    pub export_states: bool,
+    /// Loaded `constraints/generic_parameters.json` entries; empty out of
+    /// [`Self::from_config`] (they are loaded from disk artifacts, not `Config`)
+    /// and patched by each setup caller before `from_broadcast_params`.
+    pub scalar_parameters: Vec<ScalarParameter>,
 }
 
 impl StudyParams {
@@ -258,8 +315,6 @@ impl StudyParams {
             );
         }
 
-        let boundary_present = config.policy.boundary.is_some();
-
         Ok(Self {
             seed,
             forward_passes,
@@ -278,127 +333,14 @@ impl StudyParams {
             simulation_solver,
             backward_scheduler,
             cost_scale_factor,
-            // The boundary-inferred depth (or None) is set by
-            // `StudySetup::new_with_inflow_lag_depth` after this returns; no config
-            // knob feeds it.
-            inflow_lag_depth: None,
-            boundary_present,
+            // resolve_boundary_state_requirements owns both facts; no config knob
+            // feeds them, so from_config leaves the placeholder for the caller to patch.
+            boundary: BoundaryStateRequirements::none(),
+            export_states: config.exports.states,
+            // Loaded from disk artifacts, not Config; each setup caller patches it.
+            scalar_parameters: Vec::new(),
         })
     }
-
-    /// Convert into a [`ConstructionConfig`] for [`StudySetup::from_broadcast_params`](super::StudySetup::from_broadcast_params).
-    ///
-    /// Sets `export_states = false`; callers should use
-    /// [`StudySetup::set_export_states`](super::StudySetup::set_export_states) to enable state export after construction.
-    #[must_use]
-    pub fn into_construction_config(self) -> ConstructionConfig {
-        ConstructionConfig {
-            seed: self.seed,
-            forward_passes: self.forward_passes,
-            training_enumerated: self.training_enumerated,
-            stopping_rule_set: self.stopping_rule_set,
-            n_scenarios: self.n_scenarios,
-            simulation_enumerated: self.simulation_enumerated,
-            io_channel_capacity: self.io_channel_capacity,
-            policy_path: self.policy_path,
-            inflow_method: self.inflow_method,
-            cut_selection: self.cut_selection,
-            cut_activity_tolerance: self.cut_activity_tolerance,
-            budget: self.budget,
-            export_states: false,
-            scalar_parameters: Vec::new(),
-            training_solver_backward: self.training_solver_backward,
-            training_solver_forward: self.training_solver_forward,
-            simulation_solver: self.simulation_solver,
-            backward_scheduler: self.backward_scheduler,
-            cost_scale_factor: self.cost_scale_factor,
-            inflow_lag_depth: self.inflow_lag_depth,
-            boundary_present: self.boundary_present,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ConstructionConfig
-// ---------------------------------------------------------------------------
-
-/// Scalar and config parameters bundled for [`StudySetup::from_broadcast_params`](super::StudySetup::from_broadcast_params).
-///
-/// Groups parameters to reduce argument count. Construct via
-/// [`StudyParams::into_construction_config`] from a [`Config`],
-/// or populate fields directly from a broadcast config.
-#[derive(Debug, Clone)]
-pub struct ConstructionConfig {
-    /// Random seed for noise generation.
-    pub seed: u64,
-    /// Number of forward-pass trajectories per training iteration. A
-    /// placeholder ([`DEFAULT_FORWARD_PASSES`]) when [`Self::training_enumerated`]
-    /// is `true`, until [`StudySetup::from_broadcast_params`](super::StudySetup::from_broadcast_params)
-    /// resolves the derived count from the node graph.
-    pub forward_passes: u32,
-    /// `true` when `training.selection = enumerated` is declared — the setup
-    /// layer re-resolves [`Self::forward_passes`] from the node graph once it
-    /// exists (config load holds no graph to derive the count from).
-    pub training_enumerated: bool,
-    /// Stopping rule set (rules + mode) governing when training halts.
-    pub stopping_rule_set: StoppingRuleSet,
-    /// Number of simulation scenarios (0 if simulation is disabled, or a
-    /// placeholder while [`Self::simulation_enumerated`] is
-    /// [`SimulationEnumeratedRequest::Enumerated`], until the node graph
-    /// resolves the derived count).
-    pub n_scenarios: u32,
-    /// `simulation.selection`'s resolution — the setup layer re-resolves
-    /// [`Self::n_scenarios`] from the node graph once it exists when this is
-    /// [`SimulationEnumeratedRequest::Enumerated`].
-    pub simulation_enumerated: SimulationEnumeratedRequest,
-    /// Buffer capacity for the simulation output channel.
-    pub io_channel_capacity: usize,
-    /// Policy directory path string.
-    pub policy_path: String,
-    /// Inflow non-negativity enforcement method.
-    pub inflow_method: InflowNonNegativityMethod,
-    /// Optional cut selection strategy (`None` means cut selection is disabled).
-    pub cut_selection: Option<CutSelectionStrategy>,
-    /// Minimum dual multiplier for a cut to count as binding (`0.0` if unset).
-    pub cut_activity_tolerance: f64,
-    /// Maximum number of active cuts per stage (hard cap on LP size).
-    ///
-    /// `None` means no cap is enforced. Derived from
-    /// `config.training.cut_selection.max_active_per_stage`.
-    pub budget: Option<u32>,
-    /// Whether the caller wants the visited-states archive for export.
-    ///
-    /// When `true`, the archive is allocated during training regardless of the
-    /// cut selection strategy. Defaults to `false`; set based on
-    /// `exports.states`.
-    pub export_states: bool,
-    /// Loaded `constraints/generic_parameters.json` entries, or empty when the file is
-    /// absent or the manifest flag `constraints_generic_parameters_json` is `false`.
-    /// Consumed by `build_resolved_parameters` to populate the per-`(parameter_id,
-    /// stage_idx)` lookup table used by the LP builder.
-    pub scalar_parameters: Vec<ScalarParameter>,
-    /// Backward-pass solver profile override (`training.solver.backward`).
-    pub training_solver_backward: Option<PhaseSolverProfileConfig>,
-    /// Forward-pass solver profile override (`training.solver.forward`).
-    pub training_solver_forward: Option<PhaseSolverProfileConfig>,
-    /// Simulation solver profile override (`simulation.solver`).
-    pub simulation_solver: Option<PhaseSolverProfileConfig>,
-    /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
-    /// carrying the opening-block size when the `by_node` method is
-    /// selected.
-    pub backward_scheduler: BackwardScheduler,
-    /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
-    /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
-    /// time — one value per study.
-    pub cost_scale_factor: f64,
-    /// Effective inflow-lag state depth, inferred from a loaded boundary policy's
-    /// required depth (`None` when no boundary is loaded). Widens `L_state` in
-    /// `resolve_state_layout` via `widen_lag_state_depth`.
-    pub inflow_lag_depth: Option<u32>,
-    /// `policy.boundary.is_some()`; threaded into
-    /// `bucket_topology::build_transit_bucket_topology` so every rank builds
-    /// the identical (un-capped-or-not) water-bucket terminal mask.
-    pub boundary_present: bool,
 }
 
 #[cfg(test)]
@@ -408,7 +350,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cobre_io::config::{
-        BoundaryPolicy, Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, ParallelismConfig,
         PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
         SimulationSelection, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
@@ -416,7 +358,7 @@ mod tests {
     };
     use tracing::{Event, Level, Metadata, Subscriber, span};
 
-    use super::StudyParams;
+    use super::{BoundaryStateRequirements, StudyParams};
 
     // ---------------------------------------------------------------------------
     // Minimal WARN-capturing subscriber for use in tests.
@@ -582,17 +524,6 @@ mod tests {
         config
     }
 
-    /// `policy.boundary` present or absent; the checkpoint `path` is never
-    /// read by `from_config` (only `.is_some()` matters here).
-    fn config_with_boundary(present: bool) -> Config {
-        let mut config = base_test_config();
-        config.policy.boundary = present.then(|| BoundaryPolicy {
-            path: "unused".to_string(),
-            source_stage: None,
-        });
-        config
-    }
-
     /// An absent `modeling.cost_scale_factor` resolves to
     /// [`DEFAULT_COST_SCALE_FACTOR`] — the byte-neutral-at-default contract.
     #[test]
@@ -699,33 +630,34 @@ mod tests {
         }
     }
 
-    /// `from_config` leaves `inflow_lag_depth` at `None`; the boundary-inferred
-    /// depth is set later by `StudySetup::new_with_inflow_lag_depth`.
+    /// `from_config` leaves `boundary` at the `none()` placeholder and
+    /// `scalar_parameters` empty; the resolver
+    /// (`resolve_boundary_state_requirements`) owns both boundary facts and the
+    /// caller patches the resolved value + the disk-loaded scalar parameters in.
     #[test]
-    fn from_config_leaves_inflow_lag_depth_none() {
+    fn from_config_leaves_boundary_requirements_none() {
         let params = StudyParams::from_config(&base_test_config()).expect("base config is valid");
-        assert_eq!(params.inflow_lag_depth, None);
-        let construction = params.into_construction_config();
-        assert_eq!(construction.inflow_lag_depth, None);
+        assert!(!params.boundary.is_present());
+        assert_eq!(params.boundary.inflow_lag_depth(), None);
+        assert!(params.scalar_parameters.is_empty());
     }
 
-    /// An absent `policy.boundary` resolves `boundary_present` to `false`.
+    /// `BoundaryStateRequirements` derives both facts together: `present(depth)`
+    /// is present with the depth `> 0` folded to `Some`, `none()` is absent with
+    /// no depth — the two can never disagree.
     #[test]
-    fn boundary_present_absent_resolves_to_false() {
-        let params = StudyParams::from_config(&config_with_boundary(false))
-            .expect("absent policy.boundary is valid");
-        assert!(!params.boundary_present);
-    }
+    fn boundary_state_requirements_derives_both_facts_together() {
+        let absent = BoundaryStateRequirements::none();
+        assert!(!absent.is_present());
+        assert_eq!(absent.inflow_lag_depth(), None);
 
-    /// A present `policy.boundary` resolves `boundary_present` to `true` and
-    /// carries through to the derived `ConstructionConfig`.
-    #[test]
-    fn boundary_present_true_resolves_and_carries_to_construction_config() {
-        let params = StudyParams::from_config(&config_with_boundary(true))
-            .expect("present policy.boundary is valid");
-        assert!(params.boundary_present);
-        let construction = params.into_construction_config();
-        assert!(construction.boundary_present);
+        let present_no_lag = BoundaryStateRequirements::present(0);
+        assert!(present_no_lag.is_present());
+        assert_eq!(present_no_lag.inflow_lag_depth(), None);
+
+        let present_with_lag = BoundaryStateRequirements::present(3);
+        assert!(present_with_lag.is_present());
+        assert_eq!(present_with_lag.inflow_lag_depth(), Some(3));
     }
 
     /// `from_config` rejects a `Gap` rule with neither `tolerance` nor

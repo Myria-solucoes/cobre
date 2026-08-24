@@ -37,6 +37,7 @@ use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
 };
 
+use crate::BoundaryStateRequirements;
 use crate::StudySetup;
 use crate::context::{StageContext, TrainingContext};
 use crate::cut::pool::CutPool;
@@ -526,9 +527,10 @@ pub fn geometry(
         anticipated_windows: vec![(None, None); dims.n_anticipated],
         anticipated_resolution: AnticipatedResolution::default(),
         study_stage_ids: Vec::new(),
+        delivery_stage_ids: Vec::new(),
         has_penalty: dims.has_inflow_penalty,
-        cumulative_discount_factors: vec![1.0],
-        total_hours_per_stage: vec![744.0],
+        delivery_cumulative_discount_factors: vec![1.0],
+        delivery_total_hours: vec![744.0],
         filling_v_target: BTreeMap::new(),
         arc_stage_weights: HashMap::new(),
         arc_spread_chrono: HashMap::new(),
@@ -721,6 +723,31 @@ pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLo
     };
     validate_policy_load::<FullFcf>(&manifest, &manifest)
         .expect("trivial matching manifest cannot fail validate_policy_load")
+}
+
+/// Assemble the [`CheckpointManifest`] for a checkpoint fixture:
+/// the three invariant fields (`format_version` = [`FORMAT_VERSION`],
+/// `cobre_version` matching the production writer, a fixed `created_at` no
+/// consumer reads) are filled here — the sole owner of the manifest literal for
+/// `cobre-sddp` tests — and `num_stages`/`graph_manifest`/`producer` are
+/// forwarded verbatim.
+///
+/// [`CheckpointManifest`]: cobre_io::CheckpointManifest
+/// [`FORMAT_VERSION`]: cobre_io::FORMAT_VERSION
+#[must_use]
+pub fn checkpoint_metadata(
+    num_stages: u32,
+    graph_manifest: cobre_io::GraphManifest,
+    producer: cobre_io::ProducerBlock,
+) -> cobre_io::CheckpointManifest {
+    cobre_io::CheckpointManifest {
+        format_version: cobre_io::FORMAT_VERSION,
+        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        num_stages,
+        graph_manifest,
+        producer,
+    }
 }
 
 /// Patch one stage-LP solve exactly as the production backward pass's
@@ -1268,7 +1295,6 @@ fn fan_or_chain_system_ext(
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
 
     SystemBuilder::new()
@@ -1713,7 +1739,6 @@ pub fn capture_patched_node_template(setup: &StudySetup, node_pos: NodePos) -> S
         space.n_buckets,
         space.n_anticipated,
         space.k_max,
-        space.n_commitment,
     );
     let mut scratch = ScratchBuffers::new(WorkspaceSizing {
         hydro_count: space.hydro_count,
@@ -1730,7 +1755,6 @@ pub fn capture_patched_node_template(setup: &StudySetup, node_pos: NodePos) -> S
         noise_dim: 0,
         n_anticipated: space.n_anticipated,
         k_max: space.k_max,
-        n_commitment: space.n_commitment,
     });
 
     let raw_noise = oracle_raw_noise(setup, node_pos);
@@ -2097,12 +2121,15 @@ fn build_external_distinct_fan_setup(
     )
     .expect("build_external_distinct_fan_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new_with_inflow_lag_depth(
+    StudySetup::new_with_boundary_requirements(
         &system,
         &config,
         stochastic,
         hydro_models,
-        inflow_lag_depth,
+        inflow_lag_depth.map_or_else(
+            BoundaryStateRequirements::none,
+            BoundaryStateRequirements::present,
+        ),
     )
     .expect("build_external_distinct_fan_setup: StudySetup::new must succeed")
 }
@@ -2505,7 +2532,7 @@ fn branching_tree_policy_graph(reversed: bool) -> HorizonGraph {
 /// pool, stage 2 (leaf level) sizes each FAN NODE's pool. Declaring stage 1
 /// `inflow_lags: true` and stage 2 `inflow_lags: false` makes the root's pool
 /// project the full storage+lag state (2 dims: 1 hydro × 1 declared lag slot,
-/// widened via the depth passed to `new_with_inflow_lag_depth` in
+/// widened via the depth passed to `new_with_boundary_requirements` in
 /// [`build_non_uniform_branching_setup`]'s config — not a fitted PAR order,
 /// which the K-fan/chain fixtures' zero-std inflow cannot normalize) while each
 /// fan node's pool projects storage only (1 dim) — and the trailing shared leaf
@@ -2538,7 +2565,7 @@ fn non_uniform_branching_stage_configs() -> [StageStateConfig; 3] {
 /// (non-binding) reservoir — Generated, `branching_factor: 1`, the
 /// oracle-compatible (`|Ω| = 1` per node) shape [`extensive_form_optimum`]
 /// requires, matching [`k_fan_system`]/[`oracle_chain_setup`]. The lag SLOT
-/// itself (`max_par_order`) comes from the depth passed to `new_with_inflow_lag_depth` in
+/// itself (`max_par_order`) comes from the depth passed to `new_with_boundary_requirements` in
 /// [`build_non_uniform_branching_setup`]'s config, not from an `ar_coefficients`
 /// declared here — the AR-normalization path this crate's inflow estimator uses
 /// rejects a zero-std series (`ar_order >= 1` needs nonzero variance to
@@ -2616,8 +2643,14 @@ fn build_non_uniform_branching_setup(
     )
     .expect("non_uniform_branching_setup: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    StudySetup::new_with_inflow_lag_depth(&system, &config, stochastic, hydro_models, Some(1))
-        .expect("non_uniform_branching_setup: StudySetup::new must succeed")
+    StudySetup::new_with_boundary_requirements(
+        &system,
+        &config,
+        stochastic,
+        hydro_models,
+        BoundaryStateRequirements::present(1),
+    )
+    .expect("non_uniform_branching_setup: StudySetup::new must succeed")
 }
 
 /// The `enumerated`-mode 3-stage binary tree oracle fixture: root branches into 2
@@ -3050,8 +3083,14 @@ pub fn dual_folding_setup(fold: LagFold, forward_passes: u32, max_iterations: u3
         1,
         3,
     );
-    StudySetup::new_with_inflow_lag_depth(&system, &config, stochastic, hydro_models, Some(1))
-        .expect("dual_folding_setup: StudySetup::new must succeed")
+    StudySetup::new_with_boundary_requirements(
+        &system,
+        &config,
+        stochastic,
+        hydro_models,
+        BoundaryStateRequirements::present(1),
+    )
+    .expect("dual_folding_setup: StudySetup::new must succeed")
 }
 
 // ── Deterministic-trunk + terminal-fan fixture (node-native enumerated backward) ──

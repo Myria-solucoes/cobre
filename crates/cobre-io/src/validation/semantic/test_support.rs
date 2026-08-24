@@ -215,7 +215,6 @@ fn base_parsed_data(stages: StagesData) -> ParsedData {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         },
         post_study_stages: None,
         buses: vec![Bus {

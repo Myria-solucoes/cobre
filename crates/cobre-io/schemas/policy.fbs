@@ -38,6 +38,12 @@
 //     vector field, and `EntitySlot` field id 4 (vtable slot 12) held the former
 //     month-integer `delivery_anchor` — both deleted under the 0.14 format break.
 //     Each is kept `deprecated` so no future field silently reuses that slot.
+//   • A further root, `Cobre.IO.Policy.CheckpointManifest`, carries the
+//     study-global checkpoint metadata (format version, the policy-graph
+//     manifest of nodes/edges, and the producer provenance block). Its field
+//     ids start fresh at 0 and reuse none of the burned slots above — those are
+//     per-table (`AffinePiece` id 7, `EntitySlot` id 4), so the manifest's own
+//     id 4 and id 7 sit in a distinct vtable and collide with neither.
 
 namespace Cobre.IO.Policy;
 
@@ -159,6 +165,22 @@ table StageCuts {
 
   /// Per-slot entity identity. Length equals `StageCuts.state_dimension`.
   entity_manifest:[EntitySlot] (id: 7);
+
+  /// Objective cost-scale factor the writing study resolved — the provenance
+  /// marker making each cut's `coefficients`/`intercept` scale-independent at
+  /// rest. A reader yields no value (absent) for a pre-`id:8` buffer.
+  cost_scale_factor:float64 (id: 8);
+
+  /// Owning node's policy-graph id when this pool has a single owner, else `-1`
+  /// (a shared pool, which is never a boundary source). Default `-1` is also the
+  /// value a reader yields when the field is absent from a pre-`id:8` buffer.
+  node_id:int32 = -1 (id: 9);
+
+  /// Graph-stage id of the node(s) owning this pool (`pool_stage` resolved
+  /// through the study stage ids) — the boundary-resolution key. Default `-1` is
+  /// also the value a reader yields when the field is absent from a pre-`id:8`
+  /// buffer.
+  graph_stage_id:int32 = -1 (id: 10);
 }
 
 /// Root table for `policy/basis/<stage>.bin`.
@@ -218,4 +240,102 @@ table StageStates {
   /// resolved) — the value a reader yields when the field is absent from a
   /// pre-`id:5` buffer (forward-compatible default).
   node_id:int32 = -1 (id: 5);
+}
+
+/// One node of the checkpoint's policy-graph manifest. Element type of
+/// `CheckpointManifest.nodes`.
+///
+/// `pool_id` is the node → pool map: a reader resolves node `id`'s affine pieces
+/// as `pool_id`'s `StageCuts` payload (leaf nodes sharing a pool name the same
+/// `pool_id`).
+table ManifestNode {
+  /// Declared node id.
+  id:int32 (id: 0);
+
+  /// Graph-stage id this node sits at.
+  stage_id:int32 (id: 1);
+
+  /// Pool whose payload holds this node's affine pieces.
+  pool_id:uint32 (id: 2);
+}
+
+/// One directed edge of the policy-graph manifest, with its transition
+/// probability. Element type of `CheckpointManifest.edges`.
+table ManifestEdge {
+  /// Source node id.
+  source_id:int32 (id: 0);
+
+  /// Target node id.
+  target_id:int32 (id: 1);
+
+  /// Transition probability `P(source -> target)`.
+  probability:float64 (id: 2);
+}
+
+/// Root table for the study-global checkpoint manifest: the artifact format
+/// version, the stage count, the policy-graph manifest (nodes, edges, pool-set
+/// size), and the producer provenance block.
+///
+/// Field ids start fresh at 0 and reuse none of the burned slots noted in the
+/// header (those are per-table: `AffinePiece` id 7, `EntitySlot` id 4). The
+/// three `float64` provenance fields (`final_lower_bound`, `best_upper_bound`,
+/// `cost_scale_factor`) carry no explicit default, so an absent field decodes as
+/// "no value recorded" rather than a spurious `0.0`.
+table CheckpointManifest {
+  /// On-disk artifact format version; a reader rejects any other value.
+  format_version:uint32 (id: 0);
+
+  /// Producer crate version that wrote this checkpoint.
+  cobre_version:string (id: 1);
+
+  /// ISO 8601 timestamp when the checkpoint was written.
+  created_at:string (id: 2);
+
+  /// Number of stages the graph manifest spans.
+  num_stages:uint32 (id: 3);
+
+  /// Number of distinct pools (the pool-set size).
+  n_pools:uint32 (id: 4);
+
+  /// Graph-manifest nodes, in canonical order.
+  nodes:[ManifestNode] (id: 5);
+
+  /// Graph-manifest directed edges with their transition probabilities.
+  edges:[ManifestEdge] (id: 6);
+
+  /// Producer training iterations completed at write time.
+  completed_iterations:uint32 (id: 7);
+
+  /// Lower bound after the final completed iteration.
+  final_lower_bound:float64 (id: 8);
+
+  /// Last iteration's upper bound; absent when the producer recorded none.
+  best_upper_bound:float64 (id: 9);
+
+  /// Maximum iterations configured for the run.
+  max_iterations:uint32 (id: 10);
+
+  /// Forward passes per iteration.
+  forward_passes:uint32 (id: 11);
+
+  /// Pieces loaded from a previous artifact at run start.
+  warm_start_cuts:uint32 (id: 12);
+
+  /// Per-pool warm-start piece counts, in pool-id order.
+  warm_start_counts:[uint32] (id: 13);
+
+  /// RNG seed used by the scenario sampler.
+  rng_seed:uint64 (id: 14);
+
+  /// Total visited states across all nodes.
+  total_visited_states:uint64 (id: 15);
+
+  /// Block mode the checkpoint was trained under, or `"mixed"`.
+  training_block_mode:string (id: 16);
+
+  /// Per-study-stage block modes, in study-stage order (mixed-mode only).
+  training_block_mode_per_stage:[string] (id: 17);
+
+  /// Objective cost-scale factor the writing study resolved; absent when unmarked.
+  cost_scale_factor:float64 (id: 18);
 }

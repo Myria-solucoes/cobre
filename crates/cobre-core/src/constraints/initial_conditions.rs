@@ -32,7 +32,6 @@
 //!     ],
 //!     recent_observations: vec![],
 //!     past_defluences: vec![],
-//!     future_anticipated_deliveries: vec![],
 //! };
 //!
 //! assert_eq!(ic.storage.len(), 2);
@@ -40,7 +39,6 @@
 //! assert_eq!(ic.past_anticipated_commitments.len(), 1);
 //! assert_eq!(ic.recent_observations.len(), 0);
 //! assert_eq!(ic.past_defluences.len(), 0);
-//! assert_eq!(ic.future_anticipated_deliveries.len(), 0);
 //! ```
 
 use chrono::NaiveDate;
@@ -111,10 +109,13 @@ pub struct HydroPastDefluence {
 ///
 /// `cobre-core` has no view of the entity registry or the stage calendar, so
 /// the `cobre-io` semantic validator (not `cobre-core`) enforces:
-/// - The plant's windows tile its calendar-derived leading delivery stages at
-///   coverage `1.0` — no gap, no overlap, none beyond the horizon (a hard
-///   error, no fallback; the "Pre-study anticipated commitments:
-///   calendar-derived coverage" contract).
+/// - The plant's windows tile the delivery stages it decides before the study
+///   at coverage `1.0` — no gap, no overlap. Those stages fall on both sides of
+///   the study horizon: the leading in-study stages and, when the plant's lead
+///   reaches past the horizon, the post-horizon stages it decides before the
+///   study. A window may not cover a stage the study itself decides, nor one
+///   past the plant's decision reach (a hard error, no fallback; the "Pre-study
+///   anticipated commitments: calendar-derived coverage" contract).
 /// - Every window's `value_mw` in `[min_generation_mw, max_generation_mw]` (an
 ///   out-of-bounds rate makes the covered stage's fishing equality infeasible).
 /// - `thermal_id` references a thermal whose `anticipated_config` is `Some`.
@@ -131,36 +132,6 @@ pub struct AnticipatedCommitmentHistory {
     pub end_date: NaiveDate,
     /// Externally-decided MW rate delivered over the window, held constant.
     pub value_mw: f64,
-}
-
-/// One in-study decided anticipated-delivery window for a single thermal
-/// plant, delivered after the study horizon — the right-boundary counterpart
-/// to [`AnticipatedCommitmentHistory`]'s left-boundary declaration.
-///
-/// A delivery is a `[delivery_start, delivery_end)` window (`delivery_end`
-/// exclusive, after `delivery_start`) carrying a `[min_mw, max_mw]` bound: the
-/// delivered MW rate is a decision the LP solves within the interval, not an
-/// externally-fixed value. `min_mw == max_mw` pins a fixed commitment.
-///
-/// # Sorting invariant
-///
-/// Callers MUST sort the containing `Vec<FutureAnticipatedDelivery>` by
-/// `(thermal_id, delivery_start)` ascending before
-/// `SystemBuilder::initial_conditions`, to satisfy declaration-order invariance.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct FutureAnticipatedDelivery {
-    /// Thermal plant identifier. Must reference an anticipated thermal entity.
-    pub thermal_id: EntityId,
-    /// Start of the delivery window (inclusive).
-    pub delivery_start: NaiveDate,
-    /// End of the delivery window (exclusive). Must be after `delivery_start`.
-    pub delivery_end: NaiveDate,
-    /// Lower bound of the delivered MW rate over the window.
-    pub min_mw: f64,
-    /// Upper bound of the delivered MW rate over the window. `min_mw ==
-    /// max_mw` pins a fixed commitment.
-    pub max_mw: f64,
 }
 
 /// Observed inflow for a single hydro plant over a specific date range.
@@ -198,7 +169,8 @@ pub struct RecentObservation {
 ///
 /// The `#[serde(default)]` fields below (`past_anticipated_commitments` onward)
 /// are part of the postcard wire format MPI broadcast round-trips: a new field
-/// must be appended at the end, never inserted earlier in the struct.
+/// must be appended after `past_defluences` (the current trailing field),
+/// never inserted earlier in the struct.
 ///
 /// [`filling_storage`]: InitialConditions::filling_storage
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -232,11 +204,6 @@ pub struct InitialConditions {
     /// postcard round-trip used by MPI broadcast.
     #[cfg_attr(feature = "serde", serde(default))]
     pub past_defluences: Vec<HydroPastDefluence>,
-    /// Future in-study decided anticipated deliveries per anticipated thermal
-    /// plant, delivered after the study horizon; empty without any. See
-    /// [`FutureAnticipatedDelivery`] for the per-entry contract.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub future_anticipated_deliveries: Vec<FutureAnticipatedDelivery>,
 }
 
 #[cfg(test)]
@@ -263,7 +230,6 @@ mod tests {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         assert_eq!(ic.storage.len(), 2);
@@ -315,7 +281,6 @@ mod tests {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         let json = serde_json::to_string(&ic).unwrap();
@@ -355,7 +320,6 @@ mod tests {
                 value_m3s: 500.0,
             }],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
         assert_eq!(ic.recent_observations.len(), 1);
         assert_eq!(ic.recent_observations[0].hydro_id, EntityId(0));
@@ -391,7 +355,6 @@ mod tests {
                 },
             ],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
         let json = serde_json::to_string(&ic).unwrap();
         let deserialized: InitialConditions = serde_json::from_str(&json).unwrap();
@@ -460,7 +423,6 @@ mod tests {
             ],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
         assert_eq!(ic.past_anticipated_commitments.len(), 2);
         assert_eq!(ic.past_anticipated_commitments[0].thermal_id, EntityId(3));
@@ -549,7 +511,6 @@ mod tests {
                     value_m3s: 650.0,
                 },
             ],
-            future_anticipated_deliveries: vec![],
         };
 
         let bytes = postcard::to_allocvec(&ic).unwrap();
@@ -561,7 +522,7 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
-    fn test_past_defluences_postcard_field_order_precedes_future_anticipated_deliveries() {
+    fn test_past_defluences_postcard_field_order_is_last() {
         let base = InitialConditions {
             storage: vec![HydroStorage {
                 hydro_id: EntityId(0),
@@ -578,7 +539,6 @@ mod tests {
                 value_m3s: 500.0,
             }],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
         let mut with_defl = base.clone();
         with_defl.past_defluences = vec![HydroPastDefluence {
@@ -593,193 +553,11 @@ mod tests {
         let prefix = postcard::to_allocvec(&base).unwrap();
         let full = postcard::to_allocvec(&with_defl).unwrap();
 
-        // past_defluences and future_anticipated_deliveries are both empty in
-        // `base`, each a 1-byte zero-length varint: the shared prefix ends 2
-        // bytes before `prefix`'s end.
-        let shared_prefix_len = prefix.len() - 2;
-        assert!(full.len() > prefix.len());
-        assert_eq!(
-            &full[..shared_prefix_len],
-            &prefix[..shared_prefix_len],
-            "past_defluences must serialize after recent_observations and before \
-             future_anticipated_deliveries (append-last wire contract)"
-        );
-        assert_eq!(
-            full[full.len() - 1],
-            prefix[prefix.len() - 1],
-            "future_anticipated_deliveries (trailing, empty in both) must be \
-             unaffected by populating past_defluences"
-        );
-    }
-
-    // --- FutureAnticipatedDelivery / future_anticipated_deliveries tests ---
-
-    #[test]
-    fn test_future_anticipated_delivery_construction_and_clone() {
-        let fad = FutureAnticipatedDelivery {
-            thermal_id: EntityId(6),
-            delivery_start: NaiveDate::from_ymd_opt(2026, 9, 5)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            delivery_end: NaiveDate::from_ymd_opt(2026, 9, 12)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            min_mw: 0.0,
-            max_mw: 350.0,
-        };
-        assert_eq!(fad.thermal_id, EntityId(6));
-        assert_eq!(fad.max_mw, 350.0);
-        assert_eq!(fad.clone(), fad);
-    }
-
-    #[test]
-    fn test_future_anticipated_deliveries_default_empty() {
-        let ic = InitialConditions::default();
-        assert!(ic.future_anticipated_deliveries.is_empty());
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_future_anticipated_delivery_serde_roundtrip() {
-        let fad = FutureAnticipatedDelivery {
-            thermal_id: EntityId(86),
-            delivery_start: NaiveDate::from_ymd_opt(2026, 9, 5)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            delivery_end: NaiveDate::from_ymd_opt(2026, 9, 12)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            min_mw: 0.0,
-            max_mw: 350.0,
-        };
-        let json = serde_json::to_string(&fad).unwrap();
-        let deserialized: FutureAnticipatedDelivery = serde_json::from_str(&json).unwrap();
-        assert_eq!(fad, deserialized);
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_initial_conditions_serde_default_future_anticipated_deliveries_absent() {
-        let json = r#"{"storage":[],"filling_storage":[]}"#;
-        let ic: InitialConditions = serde_json::from_str(json).unwrap();
-        assert!(ic.future_anticipated_deliveries.is_empty());
-    }
-
-    #[test]
-    fn test_initial_conditions_with_future_anticipated_deliveries() {
-        let ic = InitialConditions {
-            storage: vec![],
-            filling_storage: vec![],
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-            past_defluences: vec![],
-            future_anticipated_deliveries: vec![
-                FutureAnticipatedDelivery {
-                    thermal_id: EntityId(3),
-                    delivery_start: NaiveDate::from_ymd_opt(2026, 9, 5)
-                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                    delivery_end: NaiveDate::from_ymd_opt(2026, 9, 12)
-                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                    min_mw: 0.0,
-                    max_mw: 100.0,
-                },
-                FutureAnticipatedDelivery {
-                    thermal_id: EntityId(5),
-                    delivery_start: NaiveDate::from_ymd_opt(2026, 9, 5)
-                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                    delivery_end: NaiveDate::from_ymd_opt(2026, 9, 12)
-                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                    min_mw: 50.0,
-                    max_mw: 50.0,
-                },
-            ],
-        };
-        assert_eq!(ic.future_anticipated_deliveries.len(), 2);
-        assert_eq!(ic.future_anticipated_deliveries[0].thermal_id, EntityId(3));
-        assert_eq!(ic.future_anticipated_deliveries[0].max_mw, 100.0);
-        assert_eq!(ic.future_anticipated_deliveries[1].thermal_id, EntityId(5));
-        assert_eq!(ic.future_anticipated_deliveries[1].min_mw, 50.0);
-        assert_eq!(ic.future_anticipated_deliveries[1].max_mw, 50.0);
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_future_anticipated_deliveries_postcard_round_trip() {
-        let ic = InitialConditions {
-            storage: vec![HydroStorage {
-                hydro_id: EntityId(0),
-                value_hm3: 1_000.0,
-            }],
-            filling_storage: vec![],
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-            past_defluences: vec![],
-            future_anticipated_deliveries: vec![
-                FutureAnticipatedDelivery {
-                    thermal_id: EntityId(0),
-                    delivery_start: NaiveDate::from_ymd_opt(2026, 9, 5)
-                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                    delivery_end: NaiveDate::from_ymd_opt(2026, 9, 12)
-                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                    min_mw: 0.0,
-                    max_mw: 350.0,
-                },
-                FutureAnticipatedDelivery {
-                    thermal_id: EntityId(0),
-                    delivery_start: NaiveDate::from_ymd_opt(2026, 9, 12)
-                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                    delivery_end: NaiveDate::from_ymd_opt(2026, 9, 19)
-                        .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                    min_mw: 100.0,
-                    max_mw: 100.0,
-                },
-            ],
-        };
-
-        let bytes = postcard::to_allocvec(&ic).unwrap();
-        let restored: InitialConditions = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(ic, restored);
-        assert_eq!(bytes, postcard::to_allocvec(&restored).unwrap());
-        assert_eq!(restored.future_anticipated_deliveries.len(), 2);
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_future_anticipated_deliveries_postcard_field_order_is_last() {
-        let base = InitialConditions {
-            storage: vec![HydroStorage {
-                hydro_id: EntityId(0),
-                value_hm3: 1_000.0,
-            }],
-            filling_storage: vec![],
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-            past_defluences: vec![HydroPastDefluence {
-                hydro_id: EntityId(0),
-                start_date: NaiveDate::from_ymd_opt(2026, 4, 1)
-                    .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                end_date: NaiveDate::from_ymd_opt(2026, 4, 4)
-                    .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-                value_m3s: 700.0,
-            }],
-            future_anticipated_deliveries: vec![],
-        };
-        let mut with_future = base.clone();
-        with_future.future_anticipated_deliveries = vec![FutureAnticipatedDelivery {
-            thermal_id: EntityId(9),
-            delivery_start: NaiveDate::from_ymd_opt(2026, 9, 5)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            delivery_end: NaiveDate::from_ymd_opt(2026, 9, 12)
-                .unwrap_or_else(|| unreachable!("hardcoded date is valid")),
-            min_mw: 0.0,
-            max_mw: 350.0,
-        }];
-
-        let prefix = postcard::to_allocvec(&base).unwrap();
-        let full = postcard::to_allocvec(&with_future).unwrap();
-
         assert!(full.len() > prefix.len());
         assert_eq!(
             &full[..prefix.len() - 1],
             &prefix[..prefix.len() - 1],
-            "future_anticipated_deliveries must serialize after past_defluences \
-             (append-last wire contract)"
+            "past_defluences must serialize last (append-last wire contract)"
         );
     }
 }

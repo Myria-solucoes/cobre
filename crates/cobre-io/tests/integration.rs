@@ -22,7 +22,9 @@ use cobre_io::output::simulation_writer::{
     HydroBusWriteRecord, HydroWriteRecord, ScenarioWritePayload, SimulationParquetWriter,
     StageWritePayload, write_paths,
 };
-use cobre_io::{ParquetWriterConfig, deserialize_system, load_case, serialize_system};
+use cobre_io::{
+    ParquetWriterConfig, deserialize_system, load_case, serialize_system, validate_case,
+};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
 
@@ -860,6 +862,120 @@ fn test_lead_time_single_decider_on_disk_load() {
     }
 }
 
+// ── LeadStages full-anticipation: load_case ↔ validate_case agreement ────────
+
+/// Write `system/thermals.json` declaring a single `LeadStages`-configured
+/// anticipated thermal on bus 1, on top of [`helpers::make_minimal_case`]'s
+/// single 744h study stage.
+fn write_lead_stages_anticipated_thermal(root: &Path, lead_stages: u32) {
+    helpers::write_file(
+        root,
+        "system/thermals.json",
+        &format!(
+            r#"{{
+    "thermals": [
+        {{
+            "id": 1,
+            "name": "T_ANT",
+            "operational_start_date": "2024-01-01",
+            "bus_id": 1,
+            "cost_per_mwh": 10.0,
+            "generation": {{ "min_mw": 0.0, "max_mw": 300.0 }},
+            "anticipated_config": {{ "lead_stages": {lead_stages} }}
+        }}
+    ]
+}}"#
+        ),
+    );
+}
+
+/// Write `initial_conditions.json` tiling the minimal case's single study
+/// stage (id 0, `[2024-01-01, 2024-02-01)`) and, when `with_post_study_window`
+/// is set, also the post-study stage `[2024-02-01, 2024-03-01)` — the window a
+/// `lead_stages: 2` thermal's extended lead decides pre-study.
+fn write_ic_for_full_anticipation(root: &Path, with_post_study_window: bool) {
+    let mut windows = vec![
+        r#"{ "thermal_id": 1, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 }"#
+            .to_string(),
+    ];
+    if with_post_study_window {
+        windows.push(
+            r#"{ "thermal_id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01", "value_mw": 0.0 }"#
+                .to_string(),
+        );
+    }
+    helpers::write_file(
+        root,
+        "initial_conditions.json",
+        &format!(
+            r#"{{
+    "storage": [],
+    "filling_storage": [],
+    "past_anticipated_commitments": [{}]
+}}"#,
+            windows.join(",\n")
+        ),
+    );
+}
+
+/// Given a `LeadStages(2)` thermal on the minimal case's single 744h study
+/// stage (`n_stages = 1`) whose extended lead reaches only a declared
+/// post-study stage tiled by `past_anticipated_commitments` (the
+/// full-anticipation regime), both `load_case` and `validate_case` accept the
+/// case identically — they share the same six-layer pipeline, so a fix to the
+/// `lead_stages` horizon guard cannot make them disagree.
+#[test]
+fn test_full_anticipation_lead_stages_reaching_only_post_study_loads() {
+    let dir = TempDir::new().unwrap();
+    helpers::make_minimal_case(&dir);
+    let root = dir.path();
+
+    write_lead_stages_anticipated_thermal(root, 2);
+    write_ic_for_full_anticipation(root, true);
+    helpers::write_file(
+        root,
+        "post_study_stages.json",
+        r#"{
+    "stages": [ { "start_date": "2024-02-01", "duration_hours": 696.0 } ],
+    "thermal_bounds": []
+}"#,
+    );
+
+    load_case(root).unwrap_or_else(|e| {
+        panic!("load_case must accept a full-anticipation LeadStages thermal, got: {e}")
+    });
+    validate_case(root).unwrap_or_else(|e| {
+        panic!("validate_case must accept a full-anticipation LeadStages thermal, got: {e}")
+    });
+}
+
+/// The same `LeadStages(2)` thermal with NO `post_study_stages.json`
+/// declared: the plant genuinely can never deliver, and both `load_case` and
+/// `validate_case` reject it identically — the guard widening is scoped to a
+/// reachable post-study stage, never a blanket relaxation of the horizon cap.
+#[test]
+fn test_lead_stages_exceeding_horizon_without_post_study_stages_rejected_by_both_entry_points() {
+    let dir = TempDir::new().unwrap();
+    helpers::make_minimal_case(&dir);
+    let root = dir.path();
+
+    write_lead_stages_anticipated_thermal(root, 2);
+    write_ic_for_full_anticipation(root, false);
+
+    let load_msg = load_case(root).unwrap_err().to_string();
+    assert!(
+        load_msg.contains("lead_stages exceeds study horizon") && load_msg.contains("Thermal 1"),
+        "load_case should reject the unreachable LeadStages thermal, got: {load_msg}"
+    );
+
+    let validate_msg = validate_case(root).unwrap_err().to_string();
+    assert!(
+        validate_msg.contains("lead_stages exceeds study horizon")
+            && validate_msg.contains("Thermal 1"),
+        "validate_case should reject the unreachable LeadStages thermal identically, got: {validate_msg}"
+    );
+}
+
 // ── test_postcard_round_trip ──────────────────────────────────────────────────
 
 #[test]
@@ -910,7 +1026,7 @@ fn test_postcard_round_trip() {
     );
 }
 
-// ── hydro_bus_generation output shape (item 8) ────────────────────────────────
+// ── hydro_bus_generation output shape ─────────────────────────────────────────
 
 /// Every non-essential column at a plausible value; only the caller-chosen
 /// `turbined_m3s`/`generation_mw` are load-bearing for the shape assertions
@@ -1322,7 +1438,7 @@ fn test_single_bus_hydro_bus_generation_output_shape() {
     );
 }
 
-// ── block-axis bound-row validation message shape (item 7, block axis) ──────
+// ── block-axis bound-row validation message shape ────────────────────────────
 
 /// Writes `constraints/thermal_bounds.parquet` at `dir` from explicit rows —
 /// shared by the three block-axis rejection tests below.
@@ -1505,5 +1621,57 @@ fn test_thermal_bounds_block_id_on_stage_level_cost_column_rejected_by_load_case
         Ok(_) => panic!(
             "expected Err for a block_id on the stage-level-only cost_per_mwh column, got Ok"
         ),
+    }
+}
+
+/// Recursively copies `src` into `dst`, skipping any `output` directory —
+/// mirrors `crates/cobre-sddp/tests/deterministic.rs`'s `copy_case_dir`.
+fn copy_case_dir_into(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let file_type = entry.file_type().unwrap();
+        let src_path = entry.path();
+        if file_type.is_dir() {
+            if entry.file_name() == "output" {
+                continue;
+            }
+            copy_case_dir_into(&src_path, &dst.join(entry.file_name()));
+        } else {
+            std::fs::copy(&src_path, dst.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+/// D56 (c): copying the committed `d56-external-authoritative` deck into a
+/// `TempDir` and dropping in the committed AR(1) reject fixture as
+/// `scenarios/inflow_ar_coefficients.parquet` makes hydro 1 AR(1) while its
+/// external inflow column stays constant (sigma=0). `validate_case` rejects
+/// it naming the deterministic PAR output reason, never the retired
+/// "inversion is undefined" phrasing.
+#[test]
+fn test_d56_ar1_sigma_zero_inflow_rejected_by_validate_case() {
+    let src = Path::new("../../examples/deterministic/d56-external-authoritative");
+    let dir = TempDir::new().unwrap();
+    copy_case_dir_into(src, dir.path());
+    std::fs::copy(
+        Path::new("tests/fixtures/d56_reject_ar_coefficients.parquet"),
+        dir.path().join("scenarios/inflow_ar_coefficients.parquet"),
+    )
+    .unwrap();
+
+    match validate_case(dir.path()) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("deterministic PAR output"),
+                "message must name the deterministic PAR output reason: {msg}"
+            );
+            assert!(
+                !msg.contains("inversion is undefined"),
+                "message must not repeat the retired 'inversion is undefined' phrasing: {msg}"
+            );
+        }
+        Ok(_) => panic!("expected the AR(1) + sigma=0 external inflow deck to be rejected, got Ok"),
     }
 }

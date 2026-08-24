@@ -89,9 +89,6 @@ pub struct InflowArCoefficientRow {
 
 /// Parse `scenarios/inflow_ar_coefficients.parquet` and return a sorted row table.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(hydro_id, stage_id, lag)` ascending.
-///
 /// # Errors
 ///
 /// | Condition                                     | Error variant              |

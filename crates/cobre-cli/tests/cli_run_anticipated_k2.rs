@@ -9,12 +9,9 @@ use std::process::Command;
 
 use arrow::array::{Array, BooleanArray, Float64Array, Int32Array};
 use assert_cmd::prelude::*;
-use cobre_io::{EntitySlot, deserialize_stage_cuts};
+use cobre_io::{EntitySlot, StateFamily, deserialize_stage_cuts};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
-
-/// Raw `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 
 fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
@@ -445,9 +442,6 @@ fn cli_run_k2_populates_anticipated_columns_and_manifest() {
         );
     }
 
-    // The per-slot state identity now lives in the embedded entity manifest of
-    // each policy cut file, not a separate dictionary sidecar. Read stage 0's
-    // manifest and assert it carries the two anticipated ring slots for plant 2.
     let cuts_path = output.join("policy/cuts/000.bin");
     assert!(
         cuts_path.exists(),
@@ -460,11 +454,10 @@ fn cli_run_k2_populates_anticipated_columns_and_manifest() {
     let stage_cuts = deserialize_stage_cuts(&cuts_bytes)
         .unwrap_or_else(|e| panic!("failed to decode {}: {e:?}", cuts_path.display()));
 
-    // No hydros in this case, so every manifest slot is an anticipated ring slot.
     let anticipated_slots: Vec<&EntitySlot> = stage_cuts
         .entity_manifest
         .iter()
-        .filter(|slot| slot.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE)
+        .filter(|slot| slot.entity_type == StateFamily::AnticipatedThermalState.code())
         .collect();
 
     assert_eq!(
@@ -493,9 +486,8 @@ fn cli_run_k2_populates_anticipated_columns_and_manifest() {
         "anticipated slots must cover ring subindex values {{0, 1}}, found {ring_subindices:?}"
     );
 
-    // `was_active` encodes the active/dormant distinction the sidecar's
-    // `lead_stages` split previously served: plant 2 has no commissioning
-    // window and K_i = K_max = 2, so both ring slots are active at stage 0.
+    // Plant 2 has no commissioning window and K_i = K_max = 2, so both ring
+    // slots are active at stage 0.
     for slot in &anticipated_slots {
         assert!(
             slot.was_active,

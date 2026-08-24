@@ -43,8 +43,8 @@ use cobre_io::output::simulation_writer::{
     ScenarioWritePayload, SimulationParquetWriter, write_scenario_summary,
 };
 use cobre_io::{
-    Config, EstimationConfig, MetadataSimulationSolveStats, ParquetWriterConfig,
-    PolicyCheckpointMetadata, PolicyCutRecord, PolicyMode, SimulationOutput, StageCutsPayload,
+    Config, EstimationConfig, MetadataSimulationSolveStats, ParquetWriterConfig, PolicyCutRecord,
+    PolicyMode, SimulationOutput, StageCutsPayload, read_policy_checkpoint,
     write_policy_checkpoint, write_results,
 };
 use cobre_sddp::{
@@ -742,17 +742,17 @@ fn train_simulate_write_cycle() {
             active_cut_indices: &active_indices_per_stage[stage_idx],
             populated_count: pool.populated() as u32,
             entity_manifest: &[],
+            cost_scale_factor: 1_000_000.0,
+            node_id: i32::try_from(stage_idx).unwrap_or(-1),
+            graph_stage_id: -1,
         })
         .collect();
 
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-    let policy_metadata = PolicyCheckpointMetadata {
-        format_version: cobre_io::FORMAT_VERSION,
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-        created_at: "2026-03-08T00:00:00Z".to_string(),
-        num_stages: fx.n_stages as u32,
-        graph_manifest: cobre_io::GraphManifest::default(),
-        producer: cobre_io::ProducerBlock {
+    let policy_metadata = cobre_sddp::test_support::checkpoint_metadata(
+        fx.n_stages as u32,
+        cobre_io::GraphManifest::default(),
+        cobre_io::ProducerBlock {
             completed_iterations: result.result.iterations as u32,
             final_lower_bound: result.result.final_lb,
             best_upper_bound: Some(result.result.final_ub),
@@ -766,7 +766,7 @@ fn train_simulate_write_cycle() {
             training_block_mode_per_stage: vec![],
             cost_scale_factor: None,
         },
-    };
+    );
 
     write_policy_checkpoint(
         &policy_dir,
@@ -805,16 +805,7 @@ fn train_simulate_write_cycle() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(
-            fx.state.hydro_count,
-            fx.state.max_par_order,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ),
+        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
         fx.state.n_state,
         WorkspaceSizing {
             hydro_count: fx.state.hydro_count,
@@ -889,7 +880,7 @@ fn train_simulate_write_cycle() {
             energy_conversion: &ec,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
-            commitment_window_delivery_dates: &[],
+            extended_delivery_anchors: &[],
             transit_seed_arcs: &[],
             past_defluences: &[],
             study_stage_dates: &[],
@@ -998,13 +989,12 @@ fn train_simulate_write_cycle() {
 
     assert!(output_dir.join("simulation/_SUCCESS").is_file());
 
-    let policy_meta_path = policy_dir.join("metadata.json");
-    assert!(policy_meta_path.is_file());
+    let policy_manifest_path = policy_dir.join("manifest.bin");
+    assert!(policy_manifest_path.is_file());
     {
-        let content = std::fs::read_to_string(&policy_meta_path).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_str(&content).expect("policy/metadata.json must be valid JSON");
-        assert_eq!(value["producer"]["completed_iterations"].as_u64(), Some(3));
+        let checkpoint =
+            read_policy_checkpoint(&policy_dir).expect("policy manifest.bin must read back");
+        assert_eq!(checkpoint.metadata.producer.completed_iterations, 3);
     }
 
     let stage_bin_path = policy_dir.join("cuts/000.bin");
@@ -1514,7 +1504,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0, 0),
+        PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
         state.n_state,
         WorkspaceSizing {
             hydro_count: state.hydro_count,
@@ -1565,7 +1555,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             energy_conversion: &ec2,
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
-            commitment_window_delivery_dates: &[],
+            extended_delivery_anchors: &[],
             transit_seed_arcs: &[],
             past_defluences: &[],
             study_stage_dates: &[],
@@ -1744,16 +1734,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
                 0,
                 0,
                 sim_solver,
-                PatchBuffer::new(
-                    fx.state.hydro_count,
-                    fx.state.max_par_order,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ),
+                PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
                 fx.state.n_state,
                 WorkspaceSizing {
                     hydro_count: fx.state.hydro_count,
@@ -1792,7 +1773,7 @@ fn enumerated_census_k1_matches_sampled_single_scenario() {
                     energy_conversion: &ec,
                     hydro_min_storage_hm3: &[0.0],
                     event_sender: None,
-                    commitment_window_delivery_dates: &[],
+                    extended_delivery_anchors: &[],
                     transit_seed_arcs: &[],
                     past_defluences: &[],
                     study_stage_dates: &[],

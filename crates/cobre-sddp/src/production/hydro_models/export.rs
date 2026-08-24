@@ -6,7 +6,6 @@
 //! `evaporation_models.parquet`.
 
 use cobre_core::System;
-use cobre_io::FphaDeviationPointRow;
 use cobre_io::{DeviationSummary, DeviationWorstEntry, EvaporationModelRow};
 
 use super::types::{
@@ -86,23 +85,11 @@ pub fn build_evaporation_model_rows(
     rows
 }
 
-/// Borrow the per-sampled-point FPHA deviation rows from the pipeline result.
-///
-/// A pass-through: the resolver already built these in canonical
-/// `(hydro_id, stage_id, grid)` order, so do not re-sort. Empty unless the run
-/// opted in via `config.exports.fpha_deviation_points`.
-#[must_use]
-pub fn build_fpha_deviation_point_rows(
-    result: &PrepareHydroModelsResult,
-) -> &[FphaDeviationPointRow] {
-    &result.fpha_deviation_point_rows
-}
-
 /// Roll up the computed-FPHA fit deviations into the run-level
 /// [`cobre_io::DeviationSummary`] in `training/metadata.json`. `None` on an empty
 /// slice (the metadata section is then omitted).
 ///
-/// # Determinism — first-seen wins on a relative tie (Voice 1 / D5)
+/// # Determinism — first-seen wins on a relative tie
 ///
 /// The worst-entry scan uses strict `>`, so a tie resolves to the canonical-first
 /// entry (`entries` arrives in canonical `(hydro, stage)` order). `>=` would flip

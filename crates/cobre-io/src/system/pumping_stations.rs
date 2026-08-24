@@ -241,8 +241,8 @@ fn convert_pumping(raw: RawPumpingFile, path: &Path) -> Result<Vec<PumpingStatio
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id so this parser's output is deterministic regardless of file row
-    // order (declaration-order invariance); id is the builder's canonical tiebreak.
+    // Sort by id: output must not depend on file row order (declaration-order
+    // invariance).
     stations.sort_by_key(|s| s.id.0);
     Ok(stations)
 }

@@ -53,7 +53,7 @@ pub(crate) struct IterationScratch {
     /// Reusable scratch buffers for `freeze_rows_into_template` (count/emit-pass temporaries).
     pub(crate) freeze_scratch: FreezeScratch,
     /// Per-path probability weights for the exact upper-bound reduction, filled
-    /// only on an enumerated forward. Empty (unallocated) on the sampled path.
+    /// only on an enumerated forward; empty on the sampled path.
     pub(crate) ub_path_weights: Vec<f64>,
     /// Per-path per-stage immediate costs (this rank's paths, path-major) fed to
     /// the nested risk-adjusted upper bound. Filled only on an enumerated forward
@@ -93,7 +93,6 @@ impl IterationScratch {
         n_buckets: usize,
         n_anticipated: usize,
         k_max: usize,
-        n_commitment: usize,
         stage_ctx: &StageContext<'_>,
     ) -> Self {
         let n_pools = pool_stage.len();
@@ -110,11 +109,10 @@ impl IterationScratch {
             .collect();
 
         // The LB path never calls `fill_load_patches` (load), so the
-        // `n_load_buses` and `max_blocks` args are 0. Bucket, anticipated, and
-        // commitment-block column capacity MUST be sized by the actual
-        // `n_buckets` / `n_anticipated * k_max` / `n_commitment`: undersizing
-        // leaves those state slots unpinned or panics in
-        // `fill_col_state_patches`.
+        // `n_load_buses` and `max_blocks` args are 0. Bucket and anticipated
+        // column capacity MUST be sized by the actual `n_buckets` /
+        // `n_anticipated * k_max`: undersizing leaves those state slots
+        // unpinned or panics in `fill_col_state_patches`.
         let patch_buf = PatchBuffer::new(
             hydro_count,
             max_par_order,
@@ -123,7 +121,6 @@ impl IterationScratch {
             n_buckets,
             n_anticipated,
             k_max,
-            n_commitment,
         );
 
         let empty_row_batch = || RowBatch {
@@ -179,8 +176,8 @@ impl IterationScratch {
             lb_scratch,
             lb_noise_scratch,
             freeze_scratch,
-            ub_path_weights: Vec::new(),
-            ub_stage_costs: Vec::new(),
+            ub_path_weights: Vec::with_capacity(max_local_fwd),
+            ub_stage_costs: Vec::with_capacity(max_local_fwd * num_stages),
             terminal_has_boundary_cuts: false,
             fwd_stats_pack_local: Vec::new(),
             fwd_stats_pack_global: Vec::new(),
@@ -288,7 +285,6 @@ mod tests {
             0,
             0,
             0,
-            0,
             &stage_ctx,
         );
 
@@ -341,7 +337,6 @@ mod tests {
             template_0_num_rows,
             hydro_count,
             max_par_order,
-            0,
             0,
             0,
             0,
@@ -400,7 +395,6 @@ mod tests {
             0,
             n_anticipated,
             k_max,
-            0,
             &stage_ctx,
         );
 
@@ -464,7 +458,6 @@ mod tests {
             0,
             0,
             0,
-            0,
             &stage_ctx,
         );
 
@@ -506,7 +499,6 @@ mod tests {
             hydro_count,
             max_par_order,
             n_buckets,
-            0,
             0,
             0,
             &stage_ctx,

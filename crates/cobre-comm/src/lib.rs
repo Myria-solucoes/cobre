@@ -73,3 +73,28 @@ pub use ferrompi::FerrompiLocalComm;
 
 #[cfg(feature = "mpi")]
 pub use factory::CommBackend;
+
+/// Even rank partition of `total` items across `num_ranks` ranks for an
+/// `allgatherv`: the first `total % num_ranks` ranks each receive
+/// `⌈total / num_ranks⌉`, the rest `⌊total / num_ranks⌋`; index `r` holds rank
+/// `r`'s count. The single owner of the partition rule every `allgatherv` count
+/// vector in one collective must agree on.
+#[must_use]
+pub fn per_rank_counts(total: usize, num_ranks: usize) -> Vec<usize> {
+    let base = total / num_ranks;
+    let remainder = total % num_ranks;
+    (0..num_ranks)
+        .map(|r| base + usize::from(r < remainder))
+        .collect()
+}
+
+/// Exclusive prefix-sum displacements for a per-rank `counts` vector — the
+/// `allgatherv` displacement companion to [`per_rank_counts`].
+#[must_use]
+pub fn prefix_displs(counts: &[usize]) -> Vec<usize> {
+    let mut displs = vec![0usize; counts.len()];
+    for r in 1..counts.len() {
+        displs[r] = displs[r - 1] + counts[r - 1];
+    }
+    displs
+}

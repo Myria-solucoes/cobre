@@ -859,7 +859,6 @@ mod lb_conformance {
             0,
             0,
             0,
-            0,
         );
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
@@ -1085,8 +1084,6 @@ fn build_geometry(
         diversion: diversion_start..thermal_start,
         thermal: thermal_start..thermal_end,
         anticipated_decision: 0..0,
-        commitment_decision: 0..0,
-        commitment_decision_windows: Vec::new(),
         line_fwd: line_fwd_start..line_rev_start,
         line_rev: line_rev_start..deficit_start,
         deficit: deficit_start..excess_start,

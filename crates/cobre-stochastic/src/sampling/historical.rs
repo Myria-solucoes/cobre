@@ -839,7 +839,7 @@ mod tests {
     /// Single hydro, AR(1), `psi_orig`=0.5 in original units, base=80, sigma=25.
     ///
     /// Uses 12 monthly stages so that the lag season (one step before Jan) is Dec.
-    /// With `n_seasons`=12 and `max_order`=1, under the new convention:
+    /// With `n_seasons`=12 and `max_order`=1:
     ///   - Lag season: (0 - 1 + 12) % 12 = 11 (Dec), `year_offset` = -1
     ///   - Study seasons: 0..11, `year_offset` = 0
     ///   - Full sequence: [(-1,11),(0,0),(0,1),...,(0,11)]
@@ -889,7 +889,7 @@ mod tests {
             par.sigma(0, 0)
         );
 
-        // Window year 1990, max_order=1 (new convention: study at window_year):
+        // Window year 1990, max_order=1 (study starts at window_year):
         //   lag: (1989, season 11 = Dec) → 110.0
         //   stage 0: (1990, season 0 = Jan) → 130.0
         //   stage 1: (1990, season 1 = Feb) → 95.0

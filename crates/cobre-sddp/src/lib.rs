@@ -29,6 +29,7 @@ pub mod config;
 pub mod convergence;
 pub mod cut;
 pub mod error;
+pub(crate) mod fixed_delivery_echo;
 pub(crate) mod gemm;
 pub(crate) mod generic_constraint_echo;
 pub mod horizon_mode;
@@ -48,51 +49,38 @@ pub mod training;
 pub mod validate_phases;
 pub mod workspace;
 
-// Re-export shim: exposes `workspace::context` at `cobre_sddp::context` for the
-// `crate::context::` call sites.
+// The `pub use` shims below re-expose selected cluster sub-modules at their
+// crate-root paths for raw-path callers (tests, benches, or internal
+// `crate::`-prefixed references) that the curated re-exports further down do
+// not cover; each shim's own comment states only what is unique to it.
 pub use workspace::context;
 
-// Re-export shims for `solve::solver_phase` / `solve::stage_solve` at their
-// crate-root paths. `stage_solve` stays `pub(crate)` — no external consumer.
+// `stage_solve` stays `pub(crate)` — no external consumer.
 pub use solve::solver_phase;
 pub(crate) use solve::stage_solve;
 
-// Re-export shim: exposes `risk_measure` / `stopping_rule` at their crate-root
-// paths for integration tests that import them by qualified path.
 pub use convergence::{risk_measure, stopping_rule};
 
-// Re-export shims exposing the `cut/` cluster modules at their crate-root paths
-// for external (bench/test) and internal `crate::`-prefixed consumers.
 pub use cut::{basis_reconstruct, cut_selection, cut_sync, dcs};
 
-// Re-export shims exposing the `lp/` cluster at crate-root paths: `indexer` and
-// `lp_builder` (alias of `lp::builder`) for external and internal consumers;
-// `generic_constraints` stays `pub(crate)`.
+// `lp_builder` aliases `lp::builder`; `generic_constraints` stays `pub(crate)`.
 pub use lp::builder as lp_builder;
 pub(crate) use lp::generic_constraints;
 pub use lp::indexer;
 
-// Re-export shim exposing the `policy/` cluster modules at crate-root paths for
-// raw-path callers the curated re-exports below do not cover.
 pub use policy::{orchestration, policy_export, resolved_parameters, scaling_report};
 
-// Re-export shim exposing the `production/` cluster modules at crate-root paths
-// for raw-path callers the curated re-exports below do not cover.
 // `hydro_models::prepare_hydro_models_from_artifacts` is intentionally absent
 // from the curated re-export — this shim is its sole resolution path.
 // `fpha_fitting` stays `pub(crate)`.
 pub(crate) use production::fpha_fitting;
 pub use production::{energy_conversion, hydro_models};
 
-// Re-export shim exposing the `stochastic/` cluster modules at crate-root paths
-// for raw-path callers the curated re-exports below do not cover. `noise` and
-// `stochastic_summary` stay `pub(crate)`.
+// `noise` and `stochastic_summary` stay `pub(crate)`.
 pub use stochastic::inflow_method;
 pub(crate) use stochastic::{noise, stochastic_summary};
 
-// Re-export shim exposing the `training/` pass modules at crate-root paths for
-// the internal `crate::`-prefixed references the curated re-exports below do not
-// cover. `forward` and `lower_bound` stay `pub`; the rest are `pub(crate)`.
+// `forward` and `lower_bound` stay `pub`; the rest are `pub(crate)`.
 pub(crate) use training::{
     backward, backward_pass_state, forward_pass_state, rank_reconcile, state_exchange, trajectory,
     visited_states,
@@ -100,14 +88,14 @@ pub(crate) use training::{
 pub use training::{forward, lower_bound};
 
 // Test/tooling-only re-export: exposes `BackwardPassState`/`BackwardPassInputs`
-// to downstream integration tests driving the backward pass directly (e.g. the opening-block scheduler
-// scratch capacity/sizing assertions) without widening the crate's production
-// public API. Never reachable outside `test`/`test-support` builds.
+// to downstream integration tests driving the backward pass directly, without
+// widening the crate's production public API. Never reachable outside
+// `test`/`test-support` builds.
 #[cfg(any(test, feature = "test-support"))]
 pub use training::backward_pass_state::{BackwardPassInputs, BackwardPassState};
 
 // Re-export shim: aliases `training::session` at `crate::training_session` for
-// the `crate::training_session::` references in `training/forward_pass_state.rs`.
+// the internal `crate::training_session::` references.
 pub(crate) use training::session as training_session;
 
 // ── config ────────────────────────────────────────────────────────────────────
@@ -131,6 +119,8 @@ pub use error::SddpError;
 pub use cobre_io::scenarios::estimation::{
     EstimationPath, EstimationReport, estimate_from_history,
 };
+// ── fixed_delivery_echo ───────────────────────────────────────────────────────
+pub use fixed_delivery_echo::build_fixed_delivery_rows;
 // ── forward ───────────────────────────────────────────────────────────────────
 pub use training::forward::SyncResult;
 // ── generic_constraint_echo ───────────────────────────────────────────────────
@@ -139,8 +129,7 @@ pub use generic_constraint_echo::build_generic_constraint_echo_rows;
 pub use production::hydro_models::{
     FphaFitDeviationEntry, FphaHydroDetail, HydroFitTimings, HydroModelSummary,
     PrepareHydroModelsResult, ProductionModelSource, build_deviation_summary,
-    build_evaporation_model_rows, build_fpha_deviation_point_rows, build_hydro_model_summary,
-    prepare_hydro_models,
+    build_evaporation_model_rows, build_hydro_model_summary, prepare_hydro_models,
 };
 // ── inflow_method ─────────────────────────────────────────────────────────────
 pub use stochastic::inflow_method::InflowNonNegativityMethod;
@@ -152,9 +141,10 @@ pub use lp::builder::{StageTemplates, build_stage_templates};
 pub use policy::policy_load::{
     BoundaryInjection, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind, PolicyLoadProof,
     PolicyStageManifest, ValidatedBoundaryCuts, boundary_policy_required_lag_depth,
-    build_basis_cache_from_checkpoint, compare_manifest_slot_identity, inject_boundary_cuts,
-    load_boundary_cuts, rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage,
-    resolve_effective_inflow_lag_depth, validate_policy_load,
+    build_basis_cache_from_checkpoint, checkpoint_terminal_cost_scale_factor,
+    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
+    rescale_checkpoint_cuts_for_load, resolve_boundary_source_stage,
+    resolve_boundary_state_requirements, validate_policy_load,
 };
 // ── policy_export (checkpoint authoring) ─────────────────────────────────────
 pub use policy::policy_export::{ReservedInflowLagLayout, reserve_boundary_inflow_lag_slots};
@@ -171,8 +161,9 @@ pub use training::rank_reconcile::reconcile_global_ok;
 pub use convergence::risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────
 pub use setup::{
-    DEFAULT_COST_SCALE_FACTOR, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, PrepareStochasticResult,
-    StudyParams, StudySetup, prepare_stochastic,
+    BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED,
+    PrepareStochasticResult, StudyParams, StudySetup, build_stochastic_context_for_study,
+    prepare_stochastic,
 };
 // ── simulation ────────────────────────────────────────────────────────────────
 pub use simulation::{
@@ -212,4 +203,4 @@ pub use training::state_exchange::ExchangeBuffers;
 // ── trajectory ────────────────────────────────────────────────────────────────
 pub use training::trajectory::TrajectoryRecord;
 // ── workspace ─────────────────────────────────────────────────────────────────
-pub use workspace::workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
+pub use workspace::workspace::{BASIS_BROADCAST_FORMAT_TAG, CapturedBasis};

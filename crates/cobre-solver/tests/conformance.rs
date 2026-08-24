@@ -1252,8 +1252,8 @@ fn solve_borrows_internal_buffers() {
 
 /// After `add_rows`, `solve()` must reflect the extended LP.
 ///
-/// The fixture with two Benders cuts has an optimal objective of 162.0
-/// (x0=6, x1=62, x2=2; the tighter cut forces x1 up to 62).
+/// The fixture with two appended rows has an optimal objective of 162.0
+/// (x0=6, x1=62, x2=2; the tighter row forces x1 up to 62).
 /// `view.dual.len()` must equal `template.num_rows + cuts.num_rows` (2 + 2 = 4).
 #[cfg(feature = "highs")]
 #[test]

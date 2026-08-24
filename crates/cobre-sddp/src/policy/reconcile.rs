@@ -13,8 +13,8 @@
 //! miss is the expected case, not a boundary the current study is
 //! incompatible with. Anticipated slots dispatch on `delivery_date` and the
 //! caller-supplied `target_delivery_intervals`: `SENTINEL` (pre-fan-out
-//! padding) always defaults to `Zero`; a live, dated POST-HORIZON lane (dated
-//! WITH a resolved interval) fans out against the source's own anticipated
+//! padding) always defaults to `Zero`; a live, dated post-study-targeted ring
+//! slot (dated WITH a resolved interval) fans out against the source's own anticipated
 //! months by calendar overlap — full coverage by priced source months yields
 //! [`RebindOp::Blend`] (the `÷H_M` distribute), a boundary-edge slot straddling
 //! into unpriced time yields [`RebindOp::Renormalize`] (anti-deflation over the
@@ -35,16 +35,14 @@ use std::collections::HashMap;
 
 use chrono::Months;
 use chrono::NaiveDate;
+use cobre_core::AnticipatedCommitmentHistory;
 use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_io::EntitySlot;
 use cobre_io::OwnedPolicyCutRecord;
+use cobre_io::StateFamily;
 use serde::Serialize;
 
 use crate::SddpError;
-use crate::policy::policy_export::{
-    ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG, ENTITY_TYPE_HYDRO_STORAGE,
-    ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
-};
 
 /// Tolerance (hours) for treating a target slot's covered-month overlap as
 /// exactly `H_w` — the `Blend`-vs-`Renormalize` dividing line. Calendar-day
@@ -113,8 +111,9 @@ struct MonthSource {
 }
 
 /// `(entity_type, entity_id)` — the anticipated fan-out join key. A source
-/// anticipated slot's `entity_type` is always [`ENTITY_TYPE_ANTICIPATED_THERMAL_STATE`],
-/// so the first component never varies; kept for symmetry with [`SlotKey`],
+/// anticipated slot's `entity_type` is always
+/// [`StateFamily::AnticipatedThermalState`], so the first component never varies;
+/// kept for symmetry with [`SlotKey`],
 /// the identity families' join key.
 type MonthKey = (u8, i32);
 
@@ -186,7 +185,7 @@ fn build_by_month_index(
 ) -> Result<HashMap<MonthKey, Vec<MonthSource>>, SddpError> {
     let mut by_month: HashMap<MonthKey, Vec<MonthSource>> = HashMap::new();
     for (pos, slot) in source.iter().enumerate() {
-        if slot.entity_type != ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        if slot.entity_type != StateFamily::AnticipatedThermalState.code()
             || slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
         {
             continue;
@@ -203,6 +202,58 @@ fn build_by_month_index(
             });
     }
     Ok(by_month)
+}
+
+/// The boundary intercept-fold vector `(source_pos, factor)` pricing a study's
+/// fixed post-horizon commitments, reusing [`resolve_anticipated`]'s per-month
+/// `÷H_M` distribute (`overlap_hours(w, M) / H_M`) applied to each fixed
+/// window's declared MW instead of a state dimension. A window overlapping no
+/// source month contributes nothing (mirrors [`RebindOp::Zero`], never an
+/// error), a `value_mw == 0.0` window is skipped, and only non-zero factors are
+/// emitted — an empty vector is the byte-neutral no-contribution case the
+/// intercept fold relies on, so zero-factor entries must never be emitted.
+///
+/// Determinism (D5): accumulates into a `source_pos`-indexed `Vec`, iterating
+/// `fixed_windows` and each plant's [`build_by_month_index`] records in given
+/// order; the sole map use is the `by_month` lookup, never a `HashMap`
+/// iteration.
+///
+/// # Errors
+///
+/// Propagates [`SddpError::Validation`] from [`build_by_month_index`] when a
+/// live anticipated `source` slot's `delivery_date` fails to decode.
+pub(crate) fn build_boundary_fold(
+    source: &[EntitySlot],
+    fixed_windows: &[AnticipatedCommitmentHistory],
+) -> Result<Vec<(usize, f64)>, SddpError> {
+    let by_month = build_by_month_index(source)?;
+    let mut factor = vec![0.0_f64; source.len()];
+    for window in fixed_windows {
+        if window.value_mw == 0.0 {
+            continue;
+        }
+        let key = (
+            StateFamily::AnticipatedThermalState.code(),
+            window.thermal_id.0,
+        );
+        let Some(months) = by_month.get(&key) else {
+            continue;
+        };
+        for m in months {
+            let overlap = overlap_hours(
+                (window.start_date, window.end_date),
+                (m.month_start, m.month_end),
+            );
+            if overlap > 0.0 {
+                factor[m.source_pos] += (overlap / m.h_m) * window.value_mw;
+            }
+        }
+    }
+    Ok(factor
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, f)| f != 0.0)
+        .collect())
 }
 
 /// Build one [`RebindOp`] per `target` slot, dispatched per target slot's
@@ -274,14 +325,14 @@ fn resolve_target_slot(
     by_month: &HashMap<MonthKey, Vec<MonthSource>>,
     target_interval: Option<(NaiveDate, NaiveDate)>,
 ) -> RebindOp {
-    match slot.entity_type {
-        ENTITY_TYPE_HYDRO_STORAGE => resolve_storage(slot, by_identity),
-        ENTITY_TYPE_HYDRO_INFLOW_LAG => resolve_inflow_lag(slot, by_identity),
-        ENTITY_TYPE_HYDRO_TRANSIT_BUCKET => resolve_transit_bucket(slot, by_identity),
-        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE => {
+    match slot.family() {
+        Some(StateFamily::HydroStorage) => resolve_storage(slot, by_identity),
+        Some(StateFamily::HydroInflowLag) => resolve_inflow_lag(slot, by_identity),
+        Some(StateFamily::HydroTransitBucket) => resolve_transit_bucket(slot, by_identity),
+        Some(StateFamily::AnticipatedThermalState) => {
             resolve_anticipated(slot, target_interval, by_month)
         }
-        _ => resolve_by_identity(i, slot, by_identity),
+        None => resolve_by_identity(i, slot, by_identity),
     }
 }
 
@@ -336,14 +387,15 @@ fn resolve_transit_bucket(slot: &EntitySlot, by_identity: &HashMap<SlotKey, usiz
 /// is an IN-STUDY ring slot — a commitment delivered WITHIN the current
 /// horizon (e.g. a matured commitment fished at the terminal stage, or a
 /// `K = 0` sub-stage-lead delivery self-delivered there) — and resolves to
-/// `Zero`: the terminal boundary FCF prices only post-horizon obligations, so
+/// `Zero`: the terminal boundary FCF prices only post-study obligations, so
 /// a within-horizon delivery, already discharged inside the study, contributes
-/// nothing. Post-horizon lanes read their `delivery_date` and their
-/// `target_interval` from the SAME destination-stage index into 1:1-length
-/// vectors ([`build_stage_entity_delivery_intervals`] mirrors
-/// [`build_stage_entity_manifest`]), so a post-horizon lane is always
+/// nothing. A post-study-targeted ring slot derives its `delivery_date` and its
+/// `target_interval` from the SAME modular delivery stage
+/// ([`build_stage_entity_delivery_intervals`] mirrors
+/// [`build_stage_entity_manifest`], each dating the slot at its modular delivery
+/// stage), so a post-study-targeted ring slot is always
 /// `dated ⟺ Some(interval)`; a `None` interval on a dated slot therefore marks
-/// the in-study ring uniquely, never a failed post-horizon resolution. Two
+/// the in-study ring uniquely, never a failed post-study resolution. Two
 /// wrong-but-compiling alternatives: [`RebindOp::Reject`] here aborts a
 /// legitimate boundary load the moment any anticipated thermal delivers
 /// in-horizon (a sub-stage lead at the terminal stage — the K=0 case); fanning
@@ -547,13 +599,13 @@ pub struct BoundaryReconciliationReport {
 }
 
 impl BoundaryReconciliationReport {
-    fn tally_mut(&mut self, family: ReportFamily) -> &mut FamilyTally {
+    fn tally_mut(&mut self, family: Option<StateFamily>) -> &mut FamilyTally {
         match family {
-            ReportFamily::Storage => &mut self.storage,
-            ReportFamily::InflowLag => &mut self.inflow_lag,
-            ReportFamily::TransitBucket => &mut self.transit_bucket,
-            ReportFamily::Anticipated => &mut self.anticipated,
-            ReportFamily::OtherIdentity => &mut self.other_identity,
+            Some(StateFamily::HydroStorage) => &mut self.storage,
+            Some(StateFamily::HydroInflowLag) => &mut self.inflow_lag,
+            Some(StateFamily::HydroTransitBucket) => &mut self.transit_bucket,
+            Some(StateFamily::AnticipatedThermalState) => &mut self.anticipated,
+            None => &mut self.other_identity,
         }
     }
 
@@ -633,32 +685,16 @@ impl BoundaryReconciliationReport {
     }
 }
 
-/// The five report families [`build_reconciliation_report`] tallies,
-/// dispatched by `entity_type` identically to [`resolve_target_slot`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReportFamily {
-    Storage,
-    InflowLag,
-    TransitBucket,
-    Anticipated,
-    OtherIdentity,
-}
-
-fn report_family(entity_type: u8) -> ReportFamily {
-    match entity_type {
-        ENTITY_TYPE_HYDRO_STORAGE => ReportFamily::Storage,
-        ENTITY_TYPE_HYDRO_INFLOW_LAG => ReportFamily::InflowLag,
-        ENTITY_TYPE_HYDRO_TRANSIT_BUCKET => ReportFamily::TransitBucket,
-        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE => ReportFamily::Anticipated,
-        _ => ReportFamily::OtherIdentity,
-    }
-}
-
 /// Classify one target slot's `(family, op)` into `tally`: `Copy` → COPY;
 /// `Blend`/`Renormalize` → FAN-OUT (`Renormalize` also STRADDLING); `Zero` on
 /// a sentinel-anticipated slot is a structural pad, excluded from every
 /// tally; every other `Zero` → DEFAULT-0.0.
-fn classify_op(op: &RebindOp, family: ReportFamily, slot: &EntitySlot, tally: &mut FamilyTally) {
+fn classify_op(
+    op: &RebindOp,
+    family: Option<StateFamily>,
+    slot: &EntitySlot,
+    tally: &mut FamilyTally,
+) {
     match op {
         RebindOp::Copy(_) => tally.copy += 1,
         RebindOp::Blend(_) => tally.fan_out += 1,
@@ -667,7 +703,7 @@ fn classify_op(op: &RebindOp, family: ReportFamily, slot: &EntitySlot, tally: &m
             tally.straddling += 1;
         }
         RebindOp::Zero => {
-            let sentinel_anticipated_pad = family == ReportFamily::Anticipated
+            let sentinel_anticipated_pad = family == Some(StateFamily::AnticipatedThermalState)
                 && slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
             if !sentinel_anticipated_pad {
                 tally.default_zero += 1;
@@ -715,7 +751,7 @@ pub(crate) fn build_reconciliation_report(
 
     let mut target_span = None;
     for (i, (slot, op)) in target.iter().zip(rebind).enumerate() {
-        let family = report_family(slot.entity_type);
+        let family = slot.family();
         let interval = target_delivery_intervals.get(i).copied().flatten();
         fold_span(&mut target_span, interval);
         classify_op(op, family, slot, report.tally_mut(family));
@@ -724,16 +760,14 @@ pub(crate) fn build_reconciliation_report(
 
     for pos in dropped_source_positions(source.len(), rebind) {
         if let Some(slot) = source.get(pos) {
-            report
-                .tally_mut(report_family(slot.entity_type))
-                .dropped_source += 1;
+            report.tally_mut(slot.family()).dropped_source += 1;
         }
     }
 
     let mut source_span = None;
     let mut source_month_count = 0;
     for slot in source {
-        if slot.entity_type != ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        if slot.entity_type != StateFamily::AnticipatedThermalState.code()
             || slot.delivery_date == ENTITY_SLOT_DELIVERY_DATE_SENTINEL
         {
             continue;
@@ -755,12 +789,12 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::{
-        BoundaryReconciliationReport, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
-        ENTITY_TYPE_HYDRO_INFLOW_LAG, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, FamilyTally, RebindOp,
+        BoundaryReconciliationReport, FamilyTally, RebindOp, StateFamily, build_boundary_fold,
         build_rebind, build_reconciliation_report, decode_month_anchor, dropped_source_positions,
         rebind_cut,
     };
     use crate::SddpError;
+    use cobre_core::{AnticipatedCommitmentHistory, EntityId};
     use cobre_io::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyCutRecord};
 
     fn storage_slot(id: i32) -> EntitySlot {
@@ -775,7 +809,7 @@ mod tests {
 
     fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+            entity_type: StateFamily::HydroInflowLag.code(),
             entity_id: id,
             subindex: lag_depth,
             was_active: true,
@@ -785,7 +819,7 @@ mod tests {
 
     fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+            entity_type: StateFamily::HydroTransitBucket.code(),
             entity_id: downstream_hydro_id,
             subindex: lag,
             was_active: true,
@@ -795,7 +829,7 @@ mod tests {
 
     fn anticipated_sentinel_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_type: StateFamily::AnticipatedThermalState.code(),
             entity_id: thermal_id,
             subindex: ring_slot,
             was_active: true,
@@ -805,7 +839,7 @@ mod tests {
 
     fn anticipated_dated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_type: StateFamily::AnticipatedThermalState.code(),
             entity_id: thermal_id,
             subindex: ring_slot,
             was_active: true,
@@ -834,6 +868,20 @@ mod tests {
 
     fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("valid calendar date")
+    }
+
+    fn fixed_window(
+        thermal_id: i32,
+        start: NaiveDate,
+        end: NaiveDate,
+        value_mw: f64,
+    ) -> AnticipatedCommitmentHistory {
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(thermal_id),
+            start_date: start,
+            end_date: end,
+            value_mw,
+        }
     }
 
     /// Given a `source` and `target` manifest of equal shape (all storage),
@@ -1037,7 +1085,7 @@ mod tests {
     }
 
     /// Given a source manifest with one monthly anticipated slot and a
-    /// target lane slot whose interval lies fully inside that month, when
+    /// target ring slot whose interval lies fully inside that month, when
     /// `build_rebind` runs, then it resolves to `Blend` with a single term
     /// weighted `overlap/H_M`.
     #[test]
@@ -1065,7 +1113,7 @@ mod tests {
         );
     }
 
-    /// Given a target lane slot spanning one week fully inside a priced
+    /// Given a target ring slot spanning one week fully inside a priced
     /// source month, when `build_rebind` runs, then it resolves to `Blend`
     /// with a fractional `overlap/H_M` weight.
     #[test]
@@ -1092,7 +1140,7 @@ mod tests {
         }
     }
 
-    /// Given a target lane slot whose interval straddles a priced month and
+    /// Given a target ring slot whose interval straddles a priced month and
     /// an unpriced one, when `build_rebind` runs, then it resolves to
     /// `Renormalize` with a single covered term scaled to the full slot —
     /// never an implicit `0.0` deflation term for the uncovered days.
@@ -1137,7 +1185,7 @@ mod tests {
         );
     }
 
-    /// Given a target lane slot whose interval falls in a month the source
+    /// Given a target ring slot whose interval falls in a month the source
     /// carries no anticipated slot for, when `build_rebind` runs, then it
     /// resolves to `Zero` — no covered month, nothing to reconcile to.
     #[test]
@@ -1154,8 +1202,8 @@ mod tests {
     /// Given a live, dated anticipated target slot whose
     /// `target_delivery_intervals` entry is `None` — the shape of an IN-STUDY
     /// ring slot (a within-horizon delivery, e.g. a `K = 0` sub-stage-lead
-    /// thermal maturing at the terminal stage), never a post-horizon lane
-    /// (those are always dated ⟺ interval) — when `build_rebind` runs, then it
+    /// thermal maturing at the terminal stage), never a post-study-targeted ring
+    /// slot (those are always dated ⟺ interval) — when `build_rebind` runs, then it
     /// resolves to `Zero`: the terminal boundary prices no within-horizon
     /// delivery. It must never reject (which would abort a legitimate load) and
     /// never fan out against the source months (which would wrongly `Blend`).
@@ -1246,7 +1294,7 @@ mod tests {
     }
 
     /// Given a source with one monthly anticipated slot and a target with two
-    /// lane slots exactly tiling that month, when `build_reconciliation_report`
+    /// ring slots exactly tiling that month, when `build_reconciliation_report`
     /// runs over the resulting `Blend` ops, then the anticipated family's
     /// `fan_out` equals the target slot count, `straddling`/`default_zero` are
     /// `0`, and the coverage line renders the expected shape.
@@ -1288,7 +1336,7 @@ mod tests {
         );
     }
 
-    /// Given a target lane slot straddling a priced month and an unpriced one
+    /// Given a target ring slot straddling a priced month and an unpriced one
     /// (a `Renormalize` op), when `build_reconciliation_report` runs, then the
     /// anticipated family's `straddling` includes that slot and it is also
     /// counted in `fan_out`.
@@ -1429,6 +1477,101 @@ mod tests {
         assert_eq!(
             report.summary_line(),
             format!("boundary reconciliation: {}", report.tally_clause())
+        );
+    }
+
+    /// A single fixed window one whole week fully inside a priced source month
+    /// (April, `H_M = 30·24`) folds to the hand-computed `(overlap/H_M)·value`
+    /// at the source month's own position.
+    #[test]
+    fn build_boundary_fold_single_window_yields_hand_computed_factor() {
+        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
+        let k = 1;
+        let value = 50.0;
+        let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), value)];
+
+        let fold = build_boundary_fold(&source, &windows).unwrap();
+
+        assert_eq!(fold.len(), 1);
+        assert_eq!(fold[0].0, k);
+        let expected = (7.0 * 24.0 / (30.0 * 24.0)) * value;
+        assert!(
+            (fold[0].1 - expected).abs() < expected * 1e-9,
+            "factor {} != expected {expected}",
+            fold[0].1
+        );
+    }
+
+    /// A fixed window in a month the source carries no anticipated slot for
+    /// contributes nothing — mirrors `RebindOp::Zero`, an empty fold.
+    #[test]
+    fn build_boundary_fold_no_overlapping_source_month_is_empty() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let windows = vec![fixed_window(9, ymd(2026, 5, 1), ymd(2026, 5, 8), 50.0)];
+
+        let fold = build_boundary_fold(&source, &windows).unwrap();
+
+        assert_eq!(fold, vec![]);
+    }
+
+    /// A `value_mw == 0.0` window overlapping a source month contributes
+    /// nothing, keeping the fold empty for the all-zero horizon-end stub.
+    #[test]
+    fn build_boundary_fold_zero_value_window_is_empty() {
+        let source = vec![anticipated_dated_slot(9, 0, 20_260_401)];
+        let windows = vec![fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 0.0)];
+
+        let fold = build_boundary_fold(&source, &windows).unwrap();
+
+        assert_eq!(fold, vec![]);
+    }
+
+    /// Two windows overlapping the one source month accumulate into a single
+    /// emitted term at that source position — a per-position accumulation.
+    #[test]
+    fn build_boundary_fold_accumulates_windows_at_one_source_position() {
+        let source = vec![storage_slot(1), anticipated_dated_slot(9, 0, 20_260_401)];
+        let k = 1;
+        let value_a = 30.0;
+        let value_b = 60.0;
+        let windows = vec![
+            fixed_window(9, ymd(2026, 4, 1), ymd(2026, 4, 8), value_a),
+            fixed_window(9, ymd(2026, 4, 20), ymd(2026, 4, 27), value_b),
+        ];
+
+        let fold = build_boundary_fold(&source, &windows).unwrap();
+
+        assert_eq!(fold.len(), 1, "one source position -> one emitted term");
+        assert_eq!(fold[0].0, k);
+        let w = 7.0 * 24.0 / (30.0 * 24.0);
+        let expected = w * value_a + w * value_b;
+        assert!(
+            (fold[0].1 - expected).abs() < expected * 1e-9,
+            "factor {} != expected sum {expected}",
+            fold[0].1
+        );
+    }
+
+    /// Reordering the fixed windows (here across two plants at distinct source
+    /// positions) never changes the emitted fold — the sole map use is a
+    /// lookup, the accumulation a `source_pos`-indexed `Vec`.
+    #[test]
+    fn build_boundary_fold_is_order_invariant() {
+        let source = vec![
+            anticipated_dated_slot(9, 0, 20_260_401),
+            anticipated_dated_slot(7, 0, 20_260_401),
+        ];
+        let w9 = fixed_window(9, ymd(2026, 4, 8), ymd(2026, 4, 15), 50.0);
+        let w7 = fixed_window(7, ymd(2026, 4, 1), ymd(2026, 4, 8), 20.0);
+
+        let fold_ab = build_boundary_fold(&source, &[w9.clone(), w7.clone()]).unwrap();
+        let fold_ba = build_boundary_fold(&source, &[w7, w9]).unwrap();
+
+        assert_eq!(fold_ab, fold_ba);
+        assert_eq!(fold_ab.len(), 2);
+        assert!(
+            fold_ab[0].0 < fold_ab[1].0,
+            "the fold is emitted ascending by source position"
         );
     }
 }

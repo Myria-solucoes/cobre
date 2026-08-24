@@ -366,9 +366,9 @@ fn compute_external_scenario_counts(
 /// loading, opening-tree library construction, and stochastic context build.
 ///
 /// `inflow_lag_depth` is the boundary-inferred lag depth (from
-/// `resolve_effective_inflow_lag_depth`), or `None` for a study with no loaded
-/// boundary; it sizes the opening-tree library's lag state to match the state
-/// layout `StudySetup` reserves.
+/// `BoundaryStateRequirements::inflow_lag_depth`), or `None` for a study with no
+/// loaded boundary; it sizes the opening-tree library's lag state to match the
+/// state layout `StudySetup` reserves.
 ///
 /// # Errors
 ///
@@ -387,7 +387,49 @@ pub fn prepare_stochastic(
 
     let user_opening_tree =
         load_user_opening_tree_inner(case_dir, &system, config, training_source)?;
+    let external_scenario_counts = compute_external_scenario_counts(&system, training_source);
 
+    let stochastic = build_stochastic_context_for_study(
+        &system,
+        case_dir,
+        seed,
+        training_source,
+        inflow_lag_depth,
+        user_opening_tree,
+        external_scenario_counts,
+    )?;
+
+    Ok(PrepareStochasticResult {
+        system,
+        stochastic,
+        estimation_report,
+        estimation_path,
+    })
+}
+
+/// Build the study's [`StochasticContext`] from a resolved (post-estimation)
+/// `system` and the run's scenario inputs: the load/NCS factor entries (load
+/// factors re-read from `case_dir`), the opening-tree historical library, and the
+/// forward seed. Both rank 0 (via [`prepare_stochastic`], after PAR estimation and
+/// user-tree loading) and the CLI non-root reconstruction call this one builder, so
+/// the non-root path is no longer a hand-mirror of this derivation across the crate
+/// boundary. `user_tree` and `external_scenario_counts` are the two inputs that
+/// differ by rank — rank 0 loads / computes them; a non-root rank receives the tree
+/// over the wire and passes `None` counts.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Io`] on load-factor read/parse failure, or
+/// [`SddpError::Stochastic`] on PAR / library-build / context-build failure.
+pub fn build_stochastic_context_for_study(
+    system: &System,
+    case_dir: &Path,
+    seed: u64,
+    training_source: &ScenarioSource,
+    inflow_lag_depth: Option<u32>,
+    user_tree: Option<OpeningTree>,
+    external_scenario_counts: Option<Vec<usize>>,
+) -> Result<StochasticContext, SddpError> {
     let load_factor_entries = load_load_factors_for_stochastic(case_dir)?;
     let block_pairs: Vec<Vec<BlockFactorPair>> = load_factor_entries
         .iter()
@@ -404,30 +446,27 @@ pub fn prepare_stochastic(
         .map(|(e, pairs)| (e.bus_id, e.stage_id, pairs.as_slice()))
         .collect();
 
-    let ncs_factor_entries = build_ncs_factor_entries(&system);
+    let ncs_factor_entries = build_ncs_factor_entries(system);
     let ncs_entity_factor_entries: Vec<EntityFactorEntry<'_>> = ncs_factor_entries
         .iter()
         .map(|(ncs_id, stage_id, pairs)| (*ncs_id, *stage_id, pairs.as_slice()))
         .collect();
 
     let opening_tree_library =
-        build_opening_tree_library(&system, training_source, inflow_lag_depth)?;
-    let external_scenario_counts = compute_external_scenario_counts(&system, training_source);
-
-    let opening_tree_noise_group_ids = study_stage_noise_group_ids(&system);
+        build_opening_tree_library(system, training_source, inflow_lag_depth)?;
 
     let forward_seed = training_source.seed.map(i64::unsigned_abs);
     let stochastic = build_stochastic_context(
-        &system,
+        system,
         seed,
         forward_seed,
         &entity_factor_entries,
         &ncs_entity_factor_entries,
         OpeningTreeInputs {
-            user_tree: user_opening_tree,
+            user_tree,
             historical_library: opening_tree_library.as_ref(),
             external_scenario_counts,
-            noise_group_ids: Some(opening_tree_noise_group_ids),
+            noise_group_ids: Some(study_stage_noise_group_ids(system)),
         },
         ClassSchemes {
             inflow: Some(training_source.inflow_scheme),
@@ -435,13 +474,7 @@ pub fn prepare_stochastic(
             ncs: Some(training_source.ncs_scheme),
         },
     )?;
-
-    Ok(PrepareStochasticResult {
-        system,
-        stochastic,
-        estimation_report,
-        estimation_path,
-    })
+    Ok(stochastic)
 }
 
 #[cfg(test)]
@@ -818,7 +851,6 @@ mod tests {
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
-                future_anticipated_deliveries: vec![],
             })
             .build()
             .expect("ring fixture: valid system");
@@ -1234,7 +1266,6 @@ mod tests {
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
-                future_anticipated_deliveries: vec![],
             })
             .build()
             .expect("AR(0) declared-lag-history fixture: valid system");
@@ -1634,7 +1665,6 @@ mod tests {
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
-                future_anticipated_deliveries: vec![],
             })
             .external_scenarios(external_scenarios)
             .external_load_scenarios(external_load_scenarios)

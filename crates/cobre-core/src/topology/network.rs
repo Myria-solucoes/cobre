@@ -368,7 +368,6 @@ mod tests {
 
     #[test]
     fn test_single_line() {
-        // Line 0: bus 0 (source) -> bus 1 (target).
         let buses = vec![make_bus(0), make_bus(1)];
         let lines = vec![make_line(0, 0, 1)];
         let topo = NetworkTopology::build(&buses, &lines, &[], &[], &[], &[], &[]);
@@ -386,7 +385,6 @@ mod tests {
 
     #[test]
     fn test_multiple_lines_same_bus() {
-        // Bus 0 is source of lines 0, 1, 2; each targeting a different bus.
         let buses = vec![make_bus(0), make_bus(1), make_bus(2), make_bus(3)];
         let lines = vec![make_line(0, 0, 1), make_line(1, 0, 2), make_line(2, 0, 3)];
         let topo = NetworkTopology::build(&buses, &lines, &[], &[], &[], &[], &[]);
@@ -401,7 +399,6 @@ mod tests {
 
     #[test]
     fn test_generators_per_bus() {
-        // Bus 0: hydro 0, hydro 1, thermal 0.  Bus 1: NCS 0.
         let buses = vec![make_bus(0), make_bus(1)];
         let hydros = vec![make_hydro(0, 0), make_hydro(1, 0)];
         let thermals = vec![make_thermal(0, 0)];
@@ -422,7 +419,6 @@ mod tests {
 
     #[test]
     fn test_loads_per_bus() {
-        // Bus 0: contract 0, pumping station 0.
         let buses = vec![make_bus(0)];
         let contracts = vec![make_contract(0, 0)];
         let stations = vec![make_pumping_station(0, 0)];
@@ -437,7 +433,6 @@ mod tests {
 
     #[test]
     fn test_bus_no_connections() {
-        // Bus 0 exists but nothing is connected to it.
         let buses = vec![make_bus(0)];
         let topo = NetworkTopology::build(&buses, &[], &[], &[], &[], &[], &[]);
 
@@ -453,27 +448,20 @@ mod tests {
 
     #[test]
     fn test_deterministic_ordering() {
-        // Insert generators in reverse ID order; expect canonical ID-ascending order.
         let buses = vec![make_bus(0)];
-        // Hydros with IDs 5, 3, 1 connected to bus 0 — supplied in reverse order.
         let hydros = vec![make_hydro(5, 0), make_hydro(3, 0), make_hydro(1, 0)];
-        // Thermals with IDs 4, 2 connected to bus 0 — supplied in reverse order.
         let thermals = vec![make_thermal(4, 0), make_thermal(2, 0)];
-        // Contracts with IDs 10, 7 connected to bus 0 — supplied in reverse order.
         let contracts = vec![make_contract(10, 0), make_contract(7, 0)];
         let topo = NetworkTopology::build(&buses, &[], &hydros, &thermals, &[], &contracts, &[]);
 
         let generators = topo.bus_generators(EntityId(0));
-        // Hydro IDs must be sorted ascending: 1, 3, 5.
         assert_eq!(
             generators.hydro_ids,
             vec![EntityId(1), EntityId(3), EntityId(5)]
         );
-        // Thermal IDs must be sorted ascending: 2, 4.
         assert_eq!(generators.thermal_ids, vec![EntityId(2), EntityId(4)]);
 
         let loads = topo.bus_loads(EntityId(0));
-        // Contract IDs must be sorted ascending: 7, 10.
         assert_eq!(loads.contract_ids, vec![EntityId(7), EntityId(10)]);
     }
 
@@ -523,7 +511,6 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_topology_serde_roundtrip_network() {
-        // Build a network with buses, lines, hydros, and thermals.
         let buses = vec![make_bus(0), make_bus(1)];
         let lines = vec![make_line(0, 0, 1)];
         let hydros = vec![make_hydro(0, 0)];

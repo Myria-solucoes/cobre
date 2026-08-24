@@ -553,7 +553,7 @@ fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<M
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(state.n_state),
         scratch: ScratchBuffers {
             noise_buf: Vec::with_capacity(state.hydro_count),
@@ -1447,7 +1447,7 @@ fn sync_forward_exact_single_path_returns_cost_with_zero_ci() {
 #[test]
 fn nested_ub_recursion_is_nested_not_end_of_horizon() {
     use super::stats_aggregation::nested_ub_recursion;
-    use crate::setup::node_graph::{NodePos, TypedVec};
+    use crate::setup::node_graph::{NestedUbTopology, NodePos, TypedVec};
 
     // parent map: 0=root; 1,2 = stage-1 children of 0; 3,4 = leaves of 1; 5,6 = leaves of 2.
     let parent: TypedVec<NodePos, Option<NodePos>> = vec![
@@ -1471,12 +1471,13 @@ fn nested_ub_recursion_is_nested_not_end_of_horizon() {
         0.0, 100.0, 100.0, // path via leaf 6 (bad stage-1, bad leaf)
     ];
     let cum_d = [1.0_f64, 1.0, 1.0];
+    let topology = NestedUbTopology::new(&parent, &leaf, &weight);
 
     let cvar = RiskMeasure::CVaR {
         alpha: 0.5,
         lambda: 1.0,
     };
-    let nested = nested_ub_recursion(&parent, &leaf, &weight, &global, 3, &cum_d, cvar);
+    let nested = nested_ub_recursion(&topology, &global, 3, &cum_d, cvar);
     assert!(
         (nested - 200.0).abs() < 1e-12,
         "nested pure CVaR_0.5 must be 200.0, got {nested}"
@@ -1496,15 +1497,7 @@ fn nested_ub_recursion_is_nested_not_end_of_horizon() {
     );
 
     // Expectation collapses the recursion to the plain probability-weighted total.
-    let expectation = nested_ub_recursion(
-        &parent,
-        &leaf,
-        &weight,
-        &global,
-        3,
-        &cum_d,
-        RiskMeasure::Expectation,
-    );
+    let expectation = nested_ub_recursion(&topology, &global, 3, &cum_d, RiskMeasure::Expectation);
     assert!(
         (expectation - 75.0).abs() < 1e-12,
         "Expectation must collapse to Σ wᵢ·total = 75.0, got {expectation}"
@@ -2756,7 +2749,7 @@ fn forward_pass_load_noise_positive_realization() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
     let state = test_support::state_layout(1, 0);
-    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -2919,7 +2912,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
     let state = test_support::state_layout(1, 0);
-    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -3671,14 +3664,13 @@ mod dcs_forward {
             noise_dim: 1,
             n_anticipated: 0,
             k_max: 0,
-            n_commitment: 0,
         };
         let solver = ActiveSolver::new().expect("ActiveSolver::new()");
         SolverWorkspace::new(
             0,
             0,
             solver,
-            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             1,
             sizing,
         )
@@ -4064,13 +4056,12 @@ mod transit_bucket_copy_gap {
             noise_dim: 1,
             n_anticipated: 1,
             k_max: 1,
-            n_commitment: 0,
         };
         SolverWorkspace::new(
             0,
             0,
             MockSolver::always_ok(transit_bucket_solution()),
-            PatchBuffer::new(1, 1, 0, 0, 1, 1, 1, 0),
+            PatchBuffer::new(1, 1, 0, 0, 1, 1, 1),
             4,
             sizing,
         )

@@ -7,7 +7,6 @@
 
 use std::os::raw::{c_char, c_double, c_int, c_void};
 
-/// C `int32_t` mapped to Rust `i32`.
 pub type int32_t = i32;
 
 // ============================================================

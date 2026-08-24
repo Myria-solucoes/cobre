@@ -60,19 +60,24 @@ mod boundary_cuts {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
-        let stage_cuts =
-            build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
+        let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let stage_cuts = build_stage_cuts_payloads(
+            fcf,
+            &setup.node_graph,
+            &study_stage_ids,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
         let (basis_col, basis_row) = convert_basis_cache(result);
         let stage_bases =
             build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-        let metadata = cobre_io::PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-03-29T00:00:00Z".to_string(),
-            num_stages: fcf.pools.len() as u32,
-            graph_manifest: setup.build_graph_manifest(),
-            producer: cobre_io::ProducerBlock {
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            fcf.pools.len() as u32,
+            setup.build_graph_manifest(),
+            cobre_io::ProducerBlock {
                 completed_iterations: result.iterations as u32,
                 final_lower_bound: result.final_lb,
                 best_upper_bound: Some(result.final_ub),
@@ -86,7 +91,7 @@ mod boundary_cuts {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
             },
-        };
+        );
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");
     }
@@ -152,6 +157,7 @@ mod boundary_cuts {
             state_dim,
             &current_manifest,
             &vec![None; current_manifest.len()],
+            &[],
             None,
             1_000_000.0,
             &mut |msg| warnings.push(msg.to_string()),
@@ -1422,7 +1428,6 @@ mod hybrid_reconstruction {
             stats,
             ReconstructionStats {
                 preserved: 2,
-                new_tight: 0,
                 new_slack: 3,
             },
             "preserved={{10, 30}} (2), new_slack={{25, 45, 50}} (3)",
@@ -1463,7 +1468,6 @@ mod hybrid_reconstruction {
             stats,
             ReconstructionStats {
                 preserved: 3,
-                new_tight: 0,
                 new_slack: 0,
             },
         );
@@ -1497,7 +1501,6 @@ mod hybrid_reconstruction {
             stats,
             ReconstructionStats {
                 preserved: 0,
-                new_tight: 0,
                 new_slack: 3,
             },
         );
@@ -1545,19 +1548,24 @@ mod warm_start {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
-        let stage_cuts =
-            build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
+        let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let stage_cuts = build_stage_cuts_payloads(
+            fcf,
+            &setup.node_graph,
+            &study_stage_ids,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
         let (basis_col, basis_row) = convert_basis_cache(result);
         let stage_bases =
             build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-        let metadata = cobre_io::PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-03-29T00:00:00Z".to_string(),
-            num_stages: fcf.pools.len() as u32,
-            graph_manifest: setup.build_graph_manifest(),
-            producer: cobre_io::ProducerBlock {
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            fcf.pools.len() as u32,
+            setup.build_graph_manifest(),
+            cobre_io::ProducerBlock {
                 completed_iterations: result.iterations as u32,
                 final_lower_bound: result.final_lb,
                 best_upper_bound: Some(result.final_ub),
@@ -1571,7 +1579,7 @@ mod warm_start {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
             },
-        };
+        );
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");
     }
@@ -2677,19 +2685,24 @@ mod range_warm_start_determinism {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
-        let stage_cuts =
-            build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
+        let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let stage_cuts = build_stage_cuts_payloads(
+            fcf,
+            &setup.node_graph,
+            &study_stage_ids,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
         let (basis_col, basis_row) = convert_basis_cache(result);
         let stage_bases =
             build_stage_basis_records(fcf, result, &setup.node_graph, &basis_col, &basis_row);
         let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-        let metadata = cobre_io::PolicyCheckpointMetadata {
-            format_version: cobre_io::FORMAT_VERSION,
-            cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: "2026-08-08T00:00:00Z".to_string(),
-            num_stages: fcf.pools.len() as u32,
-            graph_manifest: setup.build_graph_manifest(),
-            producer: cobre_io::ProducerBlock {
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            fcf.pools.len() as u32,
+            setup.build_graph_manifest(),
+            cobre_io::ProducerBlock {
                 completed_iterations: result.iterations as u32,
                 final_lower_bound: result.final_lb,
                 best_upper_bound: Some(result.final_ub),
@@ -2703,7 +2716,7 @@ mod range_warm_start_determinism {
                 training_block_mode_per_stage: vec![],
                 cost_scale_factor: None,
             },
-        };
+        );
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");
     }

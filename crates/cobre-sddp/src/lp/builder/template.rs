@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
-use cobre_core::scenario::SamplingScheme;
+use cobre_core::scenario::{LoadModel, SamplingScheme};
 use cobre_core::{BlockMode, ContractType, EntityId, Hydro, ResolvedBounds, Stage, System};
 use cobre_io::StageIdResolver;
 use cobre_solver::StageTemplate;
@@ -241,15 +241,6 @@ pub struct StageGeometry {
     /// stage-level). Starts at `thermal.end`, which is `n_blks`-dependent, so the
     /// cost-breakdown `range_sum` needs the per-stage base.
     pub anticipated_decision: Range<usize>,
-    /// Post-horizon commitment-decision column range (one per declared window
-    /// whose decider stage is this stage — sparse, `0..0` at a stage no window
-    /// decides at).
-    pub commitment_decision: Range<usize>,
-    /// Global window index per `commitment_decision` local position, parallel
-    /// to it (`commitment_decision_windows[i]` is the window whose deposited
-    /// decision lives at `commitment_decision.start + i`). Sparse, empty at a
-    /// stage no window decides at.
-    pub commitment_decision_windows: Vec<usize>,
     /// Forward line-flow column range (one per line per block).
     pub line_fwd: Range<usize>,
     /// Reverse line-flow column range (one per line per block).
@@ -444,7 +435,7 @@ pub(super) fn build_single_stage_template(
         }
     }
 
-    // Sort each column's entries by row index (CSC invariant).
+    // CSC invariant: each column's entries must be row-sorted.
     for col_entry_vec in &mut col_entries {
         col_entry_vec.sort_unstable_by_key(|&(row, _)| row);
     }
@@ -492,26 +483,108 @@ pub(super) fn build_single_stage_template(
     }
 }
 
-/// Bus-slice positions of every noise-member load bus (per
-/// `LoadModel::is_noise_member` under `load_scheme`), sorted by `EntityId`
-/// for declaration-order invariance; IDs repeated across stages are
-/// deduplicated.
+/// Bus-slice positions of every load-noise-member bus
+/// ([`System::load_noise_member_bus_ids`] — the single membership authority
+/// `noise_entity_order` and the external library builders also route
+/// through), sorted by `EntityId` for declaration-order invariance.
 fn collect_load_bus_indices(
     system: &System,
     bus_pos: &BTreeMap<EntityId, usize>,
     load_scheme: SamplingScheme,
 ) -> Vec<usize> {
-    let mut ids: Vec<EntityId> = system
-        .load_models()
+    system
+        .load_noise_member_bus_ids(load_scheme)
         .iter()
-        .filter(|m| m.is_noise_member(load_scheme))
-        .map(|m| m.bus_id)
-        .collect();
-    ids.sort_unstable_by_key(|id| id.0);
-    ids.dedup();
-    ids.iter()
         .filter_map(|id| bus_pos.get(id).copied())
         .collect()
+}
+
+/// Synthesize one entity-model per `(entity, stage)` for every entity in
+/// `entity_ids`, reading `(mean, std)` from `normal_lp` at its own canonical
+/// position. `entity_ids`/`study_stages` MUST be exactly the shape `normal_lp`
+/// was built over (a `debug_assert` enforces it) — this is a pure positional
+/// read, never a re-derivation from raw rows. Shared by
+/// [`load_models_from_normal`]'s own conversion and by the external library
+/// builders' standardization-moment derivation
+/// (`setup::scenario_libraries::build_external_load_library` /
+/// `build_external_ncs_library`), so a library's standardization and
+/// `cobre_stochastic::context`'s reconstruction read the identical moments
+/// rather than each re-deriving independently.
+pub(crate) fn models_from_normal<M>(
+    normal_lp: &PrecomputedNormal,
+    entity_ids: &[EntityId],
+    study_stages: &[&Stage],
+    constructor: impl Fn(EntityId, i32, f64, f64) -> M,
+) -> Vec<M> {
+    debug_assert_eq!(
+        normal_lp.n_entities(),
+        entity_ids.len(),
+        "normal_lp must be built over exactly entity_ids"
+    );
+    debug_assert_eq!(
+        normal_lp.n_stages(),
+        study_stages.len(),
+        "normal_lp must be built over exactly study_stages"
+    );
+    let mut models = Vec::with_capacity(study_stages.len() * entity_ids.len());
+    for (stage_idx, stage) in study_stages.iter().enumerate() {
+        for (entity_idx, &entity_id) in entity_ids.iter().enumerate() {
+            models.push(constructor(
+                entity_id,
+                stage.id,
+                normal_lp.mean(stage_idx, entity_idx),
+                normal_lp.std(stage_idx, entity_idx),
+            ));
+        }
+    }
+    models
+}
+
+/// The static load-balance RHS [`fill_load_balance_rows`] reads for every
+/// load-noise-member bus, sourced from `normal_lp` — the SAME derivation
+/// [`PrecomputedNormal::build`] used to build it (external-derived under
+/// `External`, seasonal-derived otherwise) — mirroring inflow's
+/// `external_ar0_inflow_models` override so the LP template's static default
+/// and the runtime noise reconstruction never disagree. A non-member bus's
+/// declared row (a deterministic, `std_mw == 0.0` load under a non-External
+/// scheme) passes through unchanged: `normal_lp`'s entity set excludes it.
+///
+/// A `normal_lp` whose shape does not match `member_ids`/`study_stages` (a
+/// placeholder `PrecomputedNormal::default()`, the same escape hatch
+/// `build_stage_templates`'s own `n_entities() == 0` `debug_assert` tolerance
+/// grants a caller that has not built the real stochastic context) falls
+/// back to the raw declared rows unconditionally — indexing `normal_lp` at
+/// that shape would panic, and today's structural-layout-only test callers
+/// pass exactly this placeholder.
+fn load_models_from_normal(
+    system: &System,
+    normal_lp: &PrecomputedNormal,
+    load_scheme: SamplingScheme,
+    study_stages: &[&Stage],
+) -> Vec<LoadModel> {
+    let member_ids = system.load_noise_member_bus_ids(load_scheme);
+    if normal_lp.n_entities() != member_ids.len() || normal_lp.n_stages() != study_stages.len() {
+        return system.load_models().to_vec();
+    }
+    let member_set: HashSet<EntityId> = member_ids.iter().copied().collect();
+    let mut models: Vec<LoadModel> = system
+        .load_models()
+        .iter()
+        .filter(|lm| !member_set.contains(&lm.bus_id))
+        .cloned()
+        .collect();
+    models.extend(models_from_normal(
+        normal_lp,
+        &member_ids,
+        study_stages,
+        |bus_id, stage_id, mean_mw, std_mw| LoadModel {
+            bus_id,
+            stage_id,
+            mean_mw,
+            std_mw,
+        },
+    ));
+    models
 }
 
 /// Build one [`StageTemplate`] per study stage from a fully loaded [`System`].
@@ -577,7 +650,7 @@ fn collect_load_bus_indices(
 /// The `v_in` contribution propagates through the LP via the matrix coefficient
 /// `-gamma_v/2` on the incoming-storage column; when `v_in` is pinned by that
 /// column's bounds its value automatically enters the FPHA constraint
-/// right-hand side.  No changes to the backward pass or cut extraction are needed.
+/// right-hand side.
 ///
 /// Returns `Ok` with empty templates for a system with zero stages.  All
 /// entity counts may be zero (valid for degenerate test systems).
@@ -673,10 +746,12 @@ pub fn build_stage_templates(
         ));
     }
 
+    let load_models = load_models_from_normal(system, normal_lp, load_scheme, &study_stages);
     let (ctx, load_bus_indices, diversion_upstream_output) = build_template_build_ctx(
         system,
         inflow_method,
         par_lp,
+        &load_models,
         production_models,
         evaporation_models,
         resolved_parameters,
@@ -869,6 +944,7 @@ fn build_template_build_ctx<'a>(
     system: &'a System,
     inflow_method: InflowNonNegativityMethod,
     par_lp: &'a PrecomputedPar,
+    load_models: &'a [LoadModel],
     production_models: &'a ProductionModelSet,
     evaporation_models: &'a EvaporationModelSet,
     resolved_parameters: &'a ResolvedParameters,
@@ -1010,8 +1086,18 @@ fn build_template_build_ctx<'a>(
         "total_hours_per_stage length must equal n_study_stages"
     );
 
+    // Same canonical anticipated-local order `resolve_state_layout` derives
+    // (`system.thermals()` filtered on `anticipated_config.is_some()`) —
+    // `anticipated_thermal_indices` above is that exact order, so this reads
+    // back through it rather than re-filtering `system.thermals()` a second time.
+    let anticipated_thermal_ids: Vec<EntityId> = anticipated_thermal_indices
+        .iter()
+        .map(|&idx| system.thermals()[idx.get()].id)
+        .collect();
+
     let post_study_resolved = resolve_post_study_artifacts(
         system.post_study_stages(),
+        &anticipated_thermal_ids,
         system.policy_graph(),
         cumulative_discount_factors.last().copied().unwrap_or(1.0),
         per_stage_discount.last().copied().unwrap_or(1.0),
@@ -1021,6 +1107,60 @@ fn build_template_build_ctx<'a>(
     // operation-window clause on the DELIVERY stage's `stage.id`, mapping the
     // delivery index `t + K_i` to its id through this slice.
     let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
+
+    // Concatenate rather than recompute: `resolve_post_study_artifacts` already
+    // establishes that the post-study half continues the study recurrence, so a
+    // second derivation would risk diverging from it.
+    let delivery_total_hours: Vec<f64> = total_hours_per_stage
+        .iter()
+        .copied()
+        .chain(post_study_resolved.total_hours.iter().copied())
+        .collect();
+    let delivery_cumulative_discount_factors: Vec<f64> = cumulative_discount_factors
+        .iter()
+        .copied()
+        .chain(
+            post_study_resolved
+                .cumulative_discount_factors
+                .iter()
+                .copied(),
+        )
+        .collect();
+    // Synthetic continuation from `study_stage_ids.last()` (never
+    // `study_stages.len()` — the `s.id >= 0` filter breaks that relation), never
+    // `post_study_calendar_stages`'s own `Stage::id`: those restart at `0` and
+    // would make a post-study delivery compare as an early study stage.
+    let n_post = post_study_resolved.total_hours.len();
+    let next_delivery_id = study_stage_ids.last().map_or(0, |&last| last + 1);
+    let end_delivery_id =
+        next_delivery_id.saturating_add(i32::try_from(n_post).unwrap_or(i32::MAX));
+    let delivery_stage_ids: Vec<i32> = study_stage_ids
+        .iter()
+        .copied()
+        .chain(next_delivery_id..end_delivery_id)
+        .collect();
+
+    let n_delivery = study_stage_ids.len() + n_post;
+    debug_assert_eq!(
+        delivery_total_hours.len(),
+        n_delivery,
+        "delivery_total_hours length must equal n_study_stages + n_post"
+    );
+    debug_assert_eq!(
+        delivery_cumulative_discount_factors.len(),
+        n_delivery,
+        "delivery_cumulative_discount_factors length must equal n_study_stages + n_post"
+    );
+    debug_assert_eq!(
+        delivery_stage_ids.len(),
+        n_delivery,
+        "delivery_stage_ids length must equal n_study_stages + n_post"
+    );
+    debug_assert!(
+        delivery_stage_ids.windows(2).all(|w| w[0] < w[1]),
+        "delivery_stage_ids must be strictly increasing — commissioning_active's \
+         monotonicity depends on it"
+    );
 
     let stage_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
 
@@ -1036,7 +1176,7 @@ fn build_template_build_ctx<'a>(
         thermals: system.thermals(),
         lines: system.lines(),
         buses,
-        load_models: system.load_models(),
+        load_models,
         cascade: system.cascade(),
         hydro_cell_index,
         resolved: ResolvedTables {
@@ -1077,9 +1217,10 @@ fn build_template_build_ctx<'a>(
         anticipated_windows,
         anticipated_resolution,
         study_stage_ids,
+        delivery_stage_ids,
         has_penalty: n_hydros > 0 && inflow_method.has_slack_columns(),
-        cumulative_discount_factors,
-        total_hours_per_stage,
+        delivery_cumulative_discount_factors,
+        delivery_total_hours,
         filling_v_target,
         arc_stage_weights,
         arc_spread_chrono,

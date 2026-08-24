@@ -74,7 +74,7 @@ pub struct CapturedBasis {
 /// captures no basis by design (a captured basis would describe the frozen
 /// layout, not the DCS resident subset — see `StageOpeningSolver::solve_lazy`),
 /// so there the field is never part of a consumed warm-start.
-pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 2;
+pub const BASIS_BROADCAST_FORMAT_TAG: i32 = 2;
 
 /// Widens [`BasisStatus::to_discriminant_code`] to the `i32` the broadcast payload
 /// carries; that method is the single owner of the numeric mapping (injective, so
@@ -133,7 +133,7 @@ impl CapturedBasis {
     ///
     /// Pushes the following into `i32_buf` in order:
     /// - `1_i32` sentinel (present)
-    /// - [`BASIS_BROADCAST_WIRE_VERSION`] as `i32` (wire version)
+    /// - [`BASIS_BROADCAST_FORMAT_TAG`] as `i32` (format tag)
     /// - `node_id` as `i32` (the generating/capture node — self-describing
     ///   header, so the decode side no longer fills it positionally)
     /// - `col_status.len()` as `i32`
@@ -153,7 +153,7 @@ impl CapturedBasis {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn to_broadcast_payload(&self, i32_buf: &mut Vec<i32>, f64_buf: &mut Vec<f64>) {
         i32_buf.push(1_i32);
-        i32_buf.push(BASIS_BROADCAST_WIRE_VERSION);
+        i32_buf.push(BASIS_BROADCAST_FORMAT_TAG);
         i32_buf.push(self.node_id.0);
         i32_buf.push(self.basis.col_status.len() as i32);
         i32_buf.push(self.basis.row_status.len() as i32);
@@ -179,14 +179,14 @@ impl CapturedBasis {
     ///
     /// Returns `Ok(None)` when the sentinel read is `0` (no basis
     /// for this stage). Returns `Ok(Some(captured))` when the
-    /// sentinel is `1`, the version matches [`BASIS_BROADCAST_WIRE_VERSION`],
+    /// sentinel is `1`, the format tag matches [`BASIS_BROADCAST_FORMAT_TAG`],
     /// and the payload is complete.
     ///
     /// # Layout (`Some` path)
     ///
     /// Reads from `i32_buf` in order:
     /// - `1_i32` sentinel (present)
-    /// - [`BASIS_BROADCAST_WIRE_VERSION`] as `i32` (wire version)
+    /// - [`BASIS_BROADCAST_FORMAT_TAG`] as `i32` (format tag)
     /// - `node_id` as `i32` (the generating/capture node, read straight into
     ///   the reconstructed [`CapturedBasis::node_id`])
     /// - `col_status.len()` as `i32`
@@ -204,9 +204,9 @@ impl CapturedBasis {
     ///
     /// Returns `SddpError::Validation` if the `i32_buf` or
     /// `f64_buf` is truncated at any of the bounded reads
-    /// (sentinel, version, `node_id` + five length fields, `col_status`,
-    /// `row_status`, `cut_row_slots`, `state_at_capture`), or if the version
-    /// field does not match [`BASIS_BROADCAST_WIRE_VERSION`]. The error message
+    /// (sentinel, format tag, `node_id` + five length fields, `col_status`,
+    /// `row_status`, `cut_row_slots`, `state_at_capture`), or if the format-tag
+    /// field does not match [`BASIS_BROADCAST_FORMAT_TAG`]. The error message
     /// names the affected stage and the expected vs. available byte count.
     #[allow(
         clippy::cast_possible_truncation,
@@ -235,7 +235,7 @@ impl CapturedBasis {
             return Ok(None);
         }
 
-        // Version byte is present only on the Some path, after the sentinel.
+        // Format tag is present only on the Some path, after the sentinel.
         if *i32_cursor >= i32_buf.len() {
             return Err(Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading version at stage {stage}"
@@ -243,10 +243,10 @@ impl CapturedBasis {
         }
         let version = i32_buf[*i32_cursor];
         *i32_cursor += 1;
-        if version != BASIS_BROADCAST_WIRE_VERSION {
+        if version != BASIS_BROADCAST_FORMAT_TAG {
             return Err(Validation(format!(
                 "try_from_broadcast_payload: unsupported wire version {version} at stage \
-                 {stage} (expected {BASIS_BROADCAST_WIRE_VERSION})"
+                 {stage} (expected {BASIS_BROADCAST_FORMAT_TAG})"
             )));
         }
 
@@ -386,10 +386,6 @@ pub struct WorkspaceSizing {
     /// Maximum lead-time horizon across anticipated thermals (K); with
     /// `n_anticipated`, sizes the anticipated-state ring buffer.
     pub k_max: usize,
-    /// Terminal commitment-block window count (W); pre-sizes the
-    /// `PatchBuffer` commitment-block column region. `0` when no commitment
-    /// window is declared.
-    pub n_commitment: usize,
 }
 
 /// Pre-allocated accumulators for the backward pass trial-point loop.
@@ -895,7 +891,6 @@ impl<S: SolverInterface> WorkspacePool<S> {
                     sizing.n_buckets,
                     sizing.n_anticipated,
                     sizing.k_max,
-                    sizing.n_commitment,
                 );
                 SolverWorkspace::new(rank, worker_id, solver, patch_buf, n_state, sizing)
             })
@@ -935,7 +930,6 @@ impl<S: SolverInterface> WorkspacePool<S> {
                 sizing.n_buckets,
                 sizing.n_anticipated,
                 sizing.k_max,
-                sizing.n_commitment,
             );
             workspaces.push(SolverWorkspace::new(
                 rank, worker_id, solver, patch_buf, n_state, sizing,
@@ -1279,7 +1273,6 @@ mod tests {
 
     #[test]
     fn test_scratch_buffers_zero_downstream_par_order_empty_buffers() {
-        // AC: downstream_par_order=0 → all downstream fields are zero/empty.
         let scratch = ScratchBuffers::new(WorkspaceSizing {
             hydro_count: 5,
             max_par_order: 2,
@@ -1308,7 +1301,6 @@ mod tests {
 
     #[test]
     fn test_scratch_buffers_nonzero_downstream_par_order_allocates_correctly() {
-        // AC: downstream_par_order=2, hydro_count=3 → lengths 3 and 6, all 0.0.
         let scratch = ScratchBuffers::new(WorkspaceSizing {
             hydro_count: 3,
             max_par_order: 2,
@@ -1341,7 +1333,6 @@ mod tests {
 
     #[test]
     fn test_workspace_pool_propagates_downstream_par_order() {
-        // AC: WorkspacePool propagates downstream_par_order=2, hydro_count=3.
         let pool = WorkspacePool::new(
             0,
             2,
@@ -1586,8 +1577,6 @@ mod tests {
 
     #[test]
     fn test_basis_store_holds_captured_basis() {
-        // AC: BasisStore after migration holds Option<CapturedBasis>, not Option<Basis>.
-        // slot set, slot read, default None holds for all 15 cells.
         let mut store = BasisStore::new(3, 5);
         // All 15 slots start as None.
         for s in 0..3 {
@@ -1958,14 +1947,11 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// Round-trip verification that `to_broadcast_payload` emits
-    /// `BASIS_BROADCAST_WIRE_VERSION` at offset 1 of the `i32_buf` (immediately
+    /// `BASIS_BROADCAST_FORMAT_TAG` at offset 1 of the `i32_buf` (immediately
     /// after the presence sentinel).
-    ///
-    /// AC1 + AC5: the constant is referenced by the pack method; the unpacked
-    /// basis matches the input field-by-field.
     #[test]
     fn to_broadcast_payload_emits_version_byte() {
-        use super::BASIS_BROADCAST_WIRE_VERSION;
+        use super::BASIS_BROADCAST_FORMAT_TAG;
 
         let original = CapturedBasis {
             basis: Basis {
@@ -1996,8 +1982,8 @@ mod tests {
         assert_eq!(i32_buf[0], 1_i32, "offset 0 must be the presence sentinel");
         // Offset 1 must be the wire version.
         assert_eq!(
-            i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
-            "offset 1 must be BASIS_BROADCAST_WIRE_VERSION"
+            i32_buf[1], BASIS_BROADCAST_FORMAT_TAG,
+            "offset 1 must be BASIS_BROADCAST_FORMAT_TAG"
         );
 
         // Full round-trip must return a bit-equal CapturedBasis.
@@ -2026,8 +2012,6 @@ mod tests {
     /// v1 format) and assert that `try_from_broadcast_payload` returns
     /// `Err(SddpError::Validation)` whose message contains
     /// `"unsupported wire version 1"`.
-    ///
-    /// AC2: stale-version peer detection.
     #[test]
     fn try_from_broadcast_payload_rejects_wrong_version() {
         use crate::SddpError;
@@ -2085,8 +2069,6 @@ mod tests {
 
     /// A `None` payload (sentinel `0_i32`) returns `Ok(None)` and advances the
     /// i32 cursor by exactly 1 — the version byte is never consumed.
-    ///
-    /// AC3: version byte is absent on the `None` path.
     #[test]
     fn try_from_broadcast_payload_none_does_not_consume_version_byte() {
         // Build a buffer that starts with a 0 sentinel followed by sentinel=1
@@ -2208,9 +2190,6 @@ mod tests {
     /// Roundtrip a basis whose `state_at_capture` has the
     /// `N*(1+L) + n_anticipated*k_max` layout introduced by the
     /// anticipated-thermals feature, with numerically distinct regions.
-    ///
-    /// AC-1, AC-2: pack then unpack; assert bit-equality of the full
-    /// state slice and of the anticipated sub-slice.
     #[test]
     fn test_captured_basis_round_trip_includes_anticipated_state() {
         // Layout: N=2 hydros, L=1 PAR lag, n_anticipated=1, k_max=2.
@@ -2286,8 +2265,6 @@ mod tests {
     /// `state_at_capture` length field in the wire payload equals `n_state`
     /// for three layouts (`n_anticipated=0` baseline, `n_anticipated` > 0 small,
     /// and a larger realistic layout).
-    ///
-    /// AC-3, AC-4, AC-5: introspect `i32_buf` positions.
     #[test]
     fn test_captured_basis_state_at_capture_length_is_recorded_correctly() {
         // Layout 1: small with anticipated.
@@ -2307,19 +2284,19 @@ mod tests {
         small.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
         // i32_buf layout (Some path):
         //   [0] = 1 (sentinel)
-        //   [1] = BASIS_BROADCAST_WIRE_VERSION = 2
+        //   [1] = BASIS_BROADCAST_FORMAT_TAG = 2
         //   [2] = node_id = 0
         //   [3] = col_len = 4
         //   [4] = row_len = 3
         //   [5] = base_row_count = 2
         //   [6] = cut_slot_count = 0
-        //   [7] = state_len = 6   <-- AC-3
+        //   [7] = state_len = 6
         assert_eq!(
             i32_buf[7], 6_i32,
             "state_at_capture length field must be 6 for N=2 L=1 A=1 K=2"
         );
 
-        // Layout 2: n_state == 0 boundary case (AC-4).
+        // Layout 2: n_state == 0 boundary case.
         let empty_state = CapturedBasis {
             basis: Basis {
                 col_status: vec![BasisStatus::Basic],
@@ -2338,7 +2315,7 @@ mod tests {
             "state_at_capture length field must be 0 for empty state"
         );
 
-        // Layout 3: larger realistic layout N=3 L=2 A=2 K_max=3 (AC-5).
+        // Layout 3: larger realistic layout N=3 L=2 A=2 K_max=3.
         // n_state = 3 * (1+2) + 2 * 3 = 9 + 6 = 15.
         let large_state: Vec<f64> = (0..15).map(|i| f64::from(i) * 10.0).collect();
         let large = CapturedBasis {
@@ -2490,11 +2467,11 @@ mod tests {
         );
     }
 
-    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 2: widening the anticipated
+    /// Locks `BASIS_BROADCAST_FORMAT_TAG` at 2: widening the anticipated
     /// ring does not bump the wire version.
     #[test]
     fn test_basis_broadcast_wire_version_stays_stable_with_state_out_column() {
-        use super::BASIS_BROADCAST_WIRE_VERSION;
+        use super::BASIS_BROADCAST_FORMAT_TAG;
 
         // Representative basis with enough col_status entries to include the
         // anticipated-ring columns.
@@ -2515,7 +2492,7 @@ mod tests {
 
         // i32_buf layout per workspace.rs to_broadcast_payload:
         //   [0]: sentinel (1)
-        //   [1]: BASIS_BROADCAST_WIRE_VERSION
+        //   [1]: BASIS_BROADCAST_FORMAT_TAG
         //   [2]: node_id
         //   [3]: col_status.len()
         //   [4]: row_status.len()
@@ -2525,11 +2502,11 @@ mod tests {
         //   [8..]: col_status elements, then row_status, then cut_row_slots
         assert_eq!(i32_buf[0], 1, "sentinel must be 1");
         assert_eq!(
-            i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
-            "wire version field must equal BASIS_BROADCAST_WIRE_VERSION (= 2)"
+            i32_buf[1], BASIS_BROADCAST_FORMAT_TAG,
+            "wire version field must equal BASIS_BROADCAST_FORMAT_TAG (= 2)"
         );
         assert_eq!(
-            BASIS_BROADCAST_WIRE_VERSION, 2,
+            BASIS_BROADCAST_FORMAT_TAG, 2,
             "broadcast wire-format version constant must remain stable across releases"
         );
 
@@ -2681,7 +2658,7 @@ mod tests {
             0,
             0,
             MockSolver,
-            PatchBuffer::new(0, 0, 0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(0, 0, 0, 0, 0, 0, 0),
             0,
             WorkspaceSizing::default(),
         );

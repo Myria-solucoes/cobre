@@ -1,6 +1,6 @@
 use super::{
-    NodeId, NodePos, PhaseLibraries, ScenarioLibraries, StudySetup, assert_external_library_widths,
-    build_contract_prices_per_stage,
+    BoundaryStateRequirements, NodeId, NodePos, PhaseLibraries, ScenarioLibraries, StudySetup,
+    assert_external_library_widths, build_contract_prices_per_stage,
 };
 use crate::SddpError;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
@@ -19,8 +19,8 @@ use cobre_core::{
     ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_core::{
-    ContractType, EnergyContract, EntityId, FutureAnticipatedDelivery, HorizonGraph,
-    HydroPastDefluence, InitialConditions, PostStudyStage, PostStudyStages, SystemBuilder,
+    ContractType, EnergyContract, EntityId, HorizonGraph, HydroPastDefluence, InitialConditions,
+    PostStudyStage, PostStudyStages, SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
         hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -665,7 +665,7 @@ fn accessor_methods_return_expected_values() {
     assert_eq!(setup.stage_data.block_counts_per_stage.len(), n_stages);
     assert!(setup.loop_params.max_blocks > 0);
 
-    assert_eq!(setup.methodology.horizon.num_stages(), n_stages);
+    assert_eq!(setup.horizon.num_stages(), n_stages);
 
     assert_eq!(setup.cut_management.risk_measures.len(), n_stages);
 
@@ -738,10 +738,7 @@ fn inflow_method_reflects_config() {
     .expect("setup");
 
     assert!(
-        !matches!(
-            setup.methodology.inflow_method,
-            InflowNonNegativityMethod::None
-        ),
+        !matches!(setup.inflow_method, InflowNonNegativityMethod::None),
         "expected penalty or truncation method"
     );
 }
@@ -866,7 +863,7 @@ fn training_ctx_fields_match_study_setup() {
 
     assert_eq!(
         ctx.horizon.num_stages(),
-        setup.methodology.horizon.num_stages(),
+        setup.horizon.num_stages(),
         "horizon num_stages mismatch"
     );
     assert_eq!(
@@ -2425,7 +2422,6 @@ fn minimal_system_2_hydros_with_history(
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("minimal_system_2_hydros_with_history: valid")
@@ -2902,7 +2898,6 @@ fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = staggered_dates_system_2_hydros(1, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3218,7 +3213,6 @@ fn build_initial_state_seeds_filling_storage() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3252,7 +3246,6 @@ fn build_initial_state_filling_empty_pit_is_zero() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 1, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3279,7 +3272,6 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let baseline_system = filling_system_2_hydros(1, 0, baseline_ic);
     let baseline = build_initial_state(&baseline_system, &study_dims, &layout, &[0.0; 4]);
@@ -3293,7 +3285,6 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let state = build_initial_state(&system, &study_dims, &layout, &[0.0; 4]);
@@ -3323,7 +3314,6 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
-        future_anticipated_deliveries: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
@@ -3770,7 +3760,6 @@ fn system_with_anticipated_thermals(
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_anticipated_thermals: valid")
@@ -4037,7 +4026,6 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_two_anticipated_thermals_staggered_dates: valid");
@@ -4481,6 +4469,214 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
         (state[s + 3] - 75.0).abs() < 1e-10,
         "slot 1 plant 1 expected 75.0, got {}",
         state[s + 3]
+    );
+}
+
+/// The ring-depth under-sizing reproduction's seeds (the sizing contract lives
+/// in `.claude/rules/sddp.md`, "Ring depth sizing"): four
+/// `AnticipatedCommitmentHistory` windows tiling
+/// [`minimal_system_with_anticipated_and_commitments`]'s `[168.0, 168.0, 168.0,
+/// 648.0]`-hour calendar (`2024-01-01` cursor) at distinct values
+/// `100/200/300/400`.
+fn bug_doc_reproduction_past_commits() -> Vec<cobre_core::AnticipatedCommitmentHistory> {
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    vec![
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 1, 8).unwrap(),
+            value_mw: 100.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 8).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            value_mw: 200.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 1, 22).unwrap(),
+            value_mw: 300.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 22).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 18).unwrap(),
+            value_mw: 400.0,
+        },
+    ]
+}
+
+/// Bug doc's reproduction shape: a `LeadTime(1160.0)` thermal whose lead
+/// resolves all four study deliveries pre-study, plus one post-study month —
+/// [`resolve_anticipated_commitments_widens_lead_time_plant_lead_to_the_ring_depth`]
+/// pins `resolution.k_max == 4` and `lead_stages == [4]` for this exact shape.
+fn bug_doc_reproduction_system() -> cobre_core::System {
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 2, 18).unwrap(),
+            duration_hours: 648.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    minimal_system_with_anticipated_and_commitments(
+        &[168.0, 168.0, 168.0, 648.0],
+        AnticipatedConfig::LeadTime(1160.0),
+        4,
+        Some(post_study),
+        bug_doc_reproduction_past_commits(),
+    )
+}
+
+/// Reproduces the ring-depth under-sizing defect (the sizing contract in
+/// `.claude/rules/sddp.md`, "Ring depth sizing"): when `K_i` is
+/// undersized to the occupancy max `3`, the `.take(k_i)` clamp drops the stage-3
+/// window and modular aliasing fishes stage 0's `100.0` for stage 3. With `K_i`
+/// sized to the ring depth `4`, all four leading stages seed at four distinct
+/// offsets, stage 3 holding its own `400.0`.
+#[test]
+fn initial_state_seeds_every_leading_commitment_under_the_widened_ring_depth() {
+    use super::build_initial_state;
+
+    let system = bug_doc_reproduction_system();
+    let layout = layout_with_anticipated(1, &[4]);
+
+    let state = build_initial_state(
+        &system,
+        &test_support::study_dims_for(&counts_with_anticipated(1, &[4], &[0])),
+        &layout,
+        &[],
+    );
+
+    let s = layout.commit_out.start;
+    assert_eq!(
+        state[s..s + 4],
+        [100.0, 200.0, 300.0, 400.0],
+        "all four leading stages must land at four distinct offsets"
+    );
+    assert!(
+        (state[s + 3] - 400.0).abs() < 1e-10,
+        "stage-3 slot must hold its own seed 400.0, not stage 0's aliased 100.0, got {}",
+        state[s + 3]
+    );
+}
+
+/// A short-lead plant's padding range `[K_i, k_max)` stays zero even when a
+/// sibling plant's own lead widens the shared ring past it: plant 0 tiles
+/// every ring slot with its own seed while plant 1 covers only its own
+/// leading stage, leaving plant 1's remaining slots as genuine, non-empty
+/// padding for the encoder-driven loop to protect.
+#[test]
+fn initial_state_leaves_padding_slots_zero() {
+    use super::build_initial_state;
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let (s2_start, s2_end) = anticipated_stage_window(2);
+    let past_commits = vec![
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 111.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 222.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s2_start,
+            end_date: s2_end,
+            value_mw: 333.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 444.0,
+        },
+    ];
+    let system = system_with_anticipated_thermals(&[3, 1], past_commits);
+    let layout = layout_with_anticipated(2, &[3, 1]);
+    let k_i_short = layout.anticipated_lead_stages[1];
+    assert!(
+        k_i_short < layout.k_max,
+        "fixture must leave a non-empty padding range to exercise"
+    );
+
+    let state = build_initial_state(
+        &system,
+        &test_support::study_dims_for(&counts_with_anticipated(2, &[3, 1], &[0, 1])),
+        &layout,
+        &[],
+    );
+
+    let s = layout.commit_out.start;
+    let plant0_seeds = [111.0, 222.0, 333.0];
+    for (slot, &expected) in plant0_seeds.iter().enumerate() {
+        let off = s + layout.commitment_hold_in_study_offset(0, slot);
+        assert!(
+            (state[off] - expected).abs() < 1e-10,
+            "plant 0 slot {slot} expected {expected}, got {}",
+            state[off]
+        );
+    }
+    let off_plant1_seed = s + layout.commitment_hold_in_study_offset(1, 0);
+    assert!(
+        (state[off_plant1_seed] - 444.0).abs() < 1e-10,
+        "plant 1 slot 0 expected 444.0, got {}",
+        state[off_plant1_seed]
+    );
+
+    for slot in k_i_short..layout.k_max {
+        let off = s + layout.commitment_hold_in_study_offset(1, slot);
+        assert_eq!(state[off], 0.0, "padding slot {slot} must be 0.0");
+    }
+}
+
+/// The seed walk's covered-stage cross-check: a layout whose `anticipated_lead_stages`
+/// is deliberately narrower than a covered stage in `past_anticipated_commitments`
+/// simulates a resolver/validator desync — never reachable through cobre-io's own
+/// coverage rule — and the `debug_assert!` guarding the silent-drop replacement
+/// fires in a debug build.
+#[test]
+#[should_panic(expected = "covered stage beyond plant's own lead")]
+fn initial_state_rejects_a_covered_stage_beyond_the_plants_own_lead() {
+    use super::build_initial_state;
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let past_commits = vec![
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 100.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 200.0,
+        },
+    ];
+    let system = system_with_anticipated_thermals(&[2], past_commits);
+    // Deliberately narrower than a resolved K_i would ever be for this
+    // fully-covered history: simulates the desync the cross-check guards.
+    let layout = layout_with_anticipated(1, &[1]);
+
+    let _ = build_initial_state(
+        &system,
+        &test_support::study_dims_for(&counts_with_anticipated(1, &[1], &[0])),
+        &layout,
+        &[],
     );
 }
 
@@ -6323,24 +6519,42 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
     );
 }
 
+/// [`minimal_system_with_anticipated_and_commitments`] with no
+/// `past_anticipated_commitments` — the pre-existing thermal-only system every
+/// caller but the seed-walk fixtures wants.
+fn minimal_system_with_anticipated(
+    stage_hours: &[f64],
+    anticipated_config: AnticipatedConfig,
+    k_max_bounds: usize,
+    post_study_stages: Option<PostStudyStages>,
+) -> cobre_core::System {
+    minimal_system_with_anticipated_and_commitments(
+        stage_hours,
+        anticipated_config,
+        k_max_bounds,
+        post_study_stages,
+        Vec::new(),
+    )
+}
+
 /// Like [`minimal_system`] but the thermal carries `anticipated_config` and each
 /// stage's block runs for the matching `stage_hours` entry. `k_max_bounds`
 /// widens the thermal stage-bounds axis for delivery-stage padding.
-/// `future_anticipated_deliveries`/`post_study_stages` thread straight onto the
-/// built system for post-horizon commitment-window fixtures; empty/`None`
-/// reproduces the pre-existing thermal-only system every other caller wants.
+/// `post_study_stages` threads straight onto the built system for post-horizon
+/// commitment-window fixtures. `past_commits` seeds
+/// `initial_conditions.past_anticipated_commitments` directly.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::items_after_statements
 )]
-fn minimal_system_with_anticipated(
+fn minimal_system_with_anticipated_and_commitments(
     stage_hours: &[f64],
     anticipated_config: AnticipatedConfig,
     k_max_bounds: usize,
-    future_anticipated_deliveries: Vec<FutureAnticipatedDelivery>,
     post_study_stages: Option<PostStudyStages>,
+    past_commits: Vec<cobre_core::AnticipatedCommitmentHistory>,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -6577,12 +6791,12 @@ fn minimal_system_with_anticipated(
         .bounds(bounds)
         .penalties(penalties)
         .initial_conditions(InitialConditions {
-            future_anticipated_deliveries,
-            ..Default::default()
+            past_anticipated_commitments: past_commits,
+            ..InitialConditions::default()
         })
         .post_study_stages(post_study_stages)
         .build()
-        .expect("minimal_system_with_anticipated: valid")
+        .expect("minimal_system_with_anticipated_and_commitments: valid")
 }
 
 fn minimal_system_with_anticipated_lead_stages(
@@ -6593,7 +6807,6 @@ fn minimal_system_with_anticipated_lead_stages(
         &vec![744.0; n_stages],
         AnticipatedConfig::LeadStages(lead_stages),
         lead_stages as usize,
-        Vec::new(),
         None,
     )
 }
@@ -6701,14 +6914,16 @@ fn setup_leadstages_resolution_preserves_k_max_and_state_dimension() {
 /// Hand-derived: a `LeadTime(720.0)` plant on the weekly-then-monthly PMO
 /// calendar `[168,168,168,168,720,720]` resolves (end-anchored `resolve_point`)
 /// to `decider == [None,None,None,None,Some(3),Some(4)]`, `C(3) == {4}`,
-/// `C(4) == {5}`, `depth == [0,0,0,1,1,0]` (ring depth 1).
+/// `C(4) == {5}`, `depth == [0,0,0,1,1,0]`, `occupancy == [3,2,1,1,1,0]`. Its
+/// leading None-run (4) exceeds both its max depth (1) and its max occupancy
+/// (3, which subtracts the seed maturing at stage 0), so `ring_depth` sizes the
+/// ring at 4 to hold every simultaneous pre-study seed.
 #[test]
 fn test_anticipated_resolve_point_pmo_calendar() {
     let system = minimal_system_with_anticipated(
         &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
         AnticipatedConfig::LeadTime(720.0),
         6,
-        Vec::new(),
         None,
     );
     let (resolution, _) = super::resolve_anticipated_commitments(&system);
@@ -6721,7 +6936,56 @@ fn test_anticipated_resolve_point_pmo_calendar() {
     assert_eq!(point.decision_sets[3], vec![4]);
     assert_eq!(point.decision_sets[4], vec![5]);
     assert_eq!(point.depth, vec![0, 0, 0, 1, 1, 0]);
-    assert_eq!(resolution.k_max, 1);
+    assert_eq!(point.occupancy, vec![3, 2, 1, 1, 1, 0]);
+    assert_eq!(resolution.k_max, 4);
+}
+
+/// Anchor: a `LeadTime(350.0)` plant on the uniform `[100.0; 4]` calendar
+/// resolves cumulative boundaries `[0, 100, 200, 300, 400]`; the per-delivery
+/// targets `end_m - 350` are `-250, -150, -50, +50`, so only delivery 3 has a
+/// non-negative target and decides at stage 0 — `decider == [None, None,
+/// None, Some(0)]`.
+#[test]
+fn lead_time_three_stage_lead_resolves_a_pre_study_prefix() {
+    let system =
+        minimal_system_with_anticipated(&[100.0; 4], AnticipatedConfig::LeadTime(350.0), 1, None);
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+    let point = &resolution.per_plant[0];
+
+    assert_eq!(point.decider, vec![None, None, None, Some(0)]);
+}
+
+/// Ring-undersizing reproduction: the same four-stage `LeadTime` shape's true
+/// stage-0 in-flight set is `{1, 2, 3}` (delivery 1 and 2 are pre-study,
+/// `None`-decided; delivery 3 is decided at stage 0) — three items, so the
+/// ring must be at least `k_max == 3` deep to hold them. `AnticipatedResolution::k_max`
+/// derives from `PointResolution::depth`, which structurally excludes
+/// pre-study (`None`-decider) occupancy from its running count, so it
+/// resolves a ring too narrow to hold the true in-flight set.
+#[test]
+fn ring_depth_counts_pre_study_occupancy() {
+    let system =
+        minimal_system_with_anticipated(&[100.0; 4], AnticipatedConfig::LeadTime(350.0), 1, None);
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(resolution.k_max, 3);
+}
+
+/// `LeadStages` at `ℓ == n_stages` with no post-study calendar: every delivery
+/// is pre-study, so the leading None-run (`n_stages`) exceeds the occupancy max
+/// (`n_stages − 1`, which subtracts the seed maturing at stage 0). `ring_depth`
+/// sizes `k_max` at `ℓ` directly, and the per-plant lead stays `ℓ`, so the two
+/// agree without leaning on `resolve_state_layout`'s
+/// `.max(anticipated_lead_stages)` clamp.
+#[test]
+fn leadstages_ring_depth_covers_full_lead_when_lead_equals_horizon() {
+    let n_stages = 4;
+    let system =
+        minimal_system_with_anticipated_lead_stages(n_stages, u32::try_from(n_stages).unwrap());
+    let (resolution, lead_stages) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(resolution.k_max, n_stages);
+    assert_eq!(lead_stages, vec![n_stages]);
 }
 
 /// Hand-derived: a `LeadTime(720.0)` plant on the monthly-then-weekly fan-out
@@ -6734,7 +6998,6 @@ fn test_anticipated_resolve_point_fanout_calendar() {
         &[720.0, 168.0, 168.0, 168.0, 168.0, 168.0],
         AnticipatedConfig::LeadTime(720.0),
         6,
-        Vec::new(),
         None,
     );
     let (resolution, _) = super::resolve_anticipated_commitments(&system);
@@ -6744,6 +7007,41 @@ fn test_anticipated_resolve_point_fanout_calendar() {
     assert_eq!(point.decision_sets[0].len(), 4);
     assert_eq!(point.depth, vec![4, 4, 3, 2, 1, 0]);
     assert_eq!(resolution.k_max, 4);
+}
+
+/// The bug doc's reproduction shape as a `System`: a `LeadTime(1160)` thermal
+/// whose lead resolves all four study deliveries pre-study, plus one post-study
+/// month. `resolve_anticipated_commitments_core` widens the per-plant lead to
+/// the ring depth `4` — every simultaneous pre-study seed — matching
+/// `resolution.k_max`, not the occupancy max `3` the pre-fix sizing reported.
+#[test]
+fn resolve_anticipated_commitments_widens_lead_time_plant_lead_to_the_ring_depth() {
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 2, 18).unwrap(),
+            duration_hours: 648.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated(
+        &[168.0, 168.0, 168.0, 648.0],
+        AnticipatedConfig::LeadTime(1160.0),
+        4,
+        Some(post_study),
+    );
+    let (resolution, lead_stages) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(
+        resolution.per_plant[0].occupancy.iter().copied().max(),
+        Some(3),
+        "occupancy max stays 3; ring_depth restores the fourth simultaneous seed"
+    );
+    assert_eq!(resolution.k_max, 4);
+    assert_eq!(
+        lead_stages,
+        vec![4],
+        "per-plant lead widened to ring_depth == k_max"
+    );
 }
 
 /// Assert `state` is finalized and byte-for-byte reproduces a fresh
@@ -6861,12 +7159,12 @@ fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
     )
     .expect("stochastic context");
 
-    let setup = StudySetup::new_with_inflow_lag_depth(
+    let setup = StudySetup::new_with_boundary_requirements(
         &system,
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
-        Some(24),
+        BoundaryStateRequirements::present(24),
     )
     .expect("setup with a boundary depth exceeding the AR order");
 
@@ -6912,12 +7210,12 @@ fn resolve_state_layout_floors_declared_depth_at_ar_order() {
     )
     .expect("stochastic context");
 
-    let setup = StudySetup::new_with_inflow_lag_depth(
+    let setup = StudySetup::new_with_boundary_requirements(
         &system,
         &config,
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
-        Some(1),
+        BoundaryStateRequirements::present(1),
     )
     .expect("setup with a boundary depth below the AR order");
 
@@ -7286,7 +7584,6 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("system_with_travel_time_arc: valid")
@@ -7994,7 +8291,6 @@ fn test_anticipated_resolve_point_k0_uniform_calendar() {
         &[744.0, 744.0, 744.0, 744.0],
         AnticipatedConfig::LeadTime(720.0),
         0,
-        Vec::new(),
         None,
     );
     let (resolution, lead_stages) = super::resolve_anticipated_commitments(&system);
@@ -8029,7 +8325,6 @@ fn resolve_anticipated_commitments_warns_on_k0_sub_stage_lead() {
         &[744.0, 744.0, 744.0, 744.0],
         AnticipatedConfig::LeadTime(720.0),
         0,
-        Vec::new(),
         None,
     );
 
@@ -8090,7 +8385,6 @@ fn warn_on_sub_stage_lead_emits_once_per_self_delivered_stage() {
         &[168.0, 168.0, 168.0, 744.0],
         AnticipatedConfig::LeadTime(200.0),
         0,
-        Vec::new(),
         None,
     );
 
@@ -8122,6 +8416,276 @@ fn warn_on_sub_stage_lead_emits_once_per_self_delivered_stage() {
 }
 
 // ---------------------------------------------------------------------------
+// Extended delivery axis — n_delivery spans n_stages + n_post
+// ---------------------------------------------------------------------------
+
+/// The no-half-switch invariant: `resolve_anticipated_commitments_core`'s
+/// primary axis site resolves a plant's `decider` vector to the EXTENDED
+/// delivery width `n_stages + n_post`, not the study-only `n_stages` a
+/// half-switched site would still report. Two study stages plus two declared
+/// post-study stages resolve `decider.len() == 4`.
+#[test]
+fn resolve_anticipated_commitments_core_reports_the_extended_delivery_width() {
+    let post_study = PostStudyStages {
+        stages: vec![
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                duration_hours: 744.0,
+            },
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+                duration_hours: 720.0,
+            },
+        ],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        Some(post_study),
+    );
+
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(
+        resolution.per_plant[0].decider.len(),
+        4,
+        "n_stages (2) + n_post (2) must resolve to 4, the extended delivery axis"
+    );
+}
+
+/// A study declaring no post-study stages leaves the primary axis site
+/// byte-identical to the pre-widening study-only axis: `decider.len() ==
+/// n_stages`.
+#[test]
+fn resolve_anticipated_commitments_core_matches_study_only_width_without_post_study() {
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        None,
+    );
+
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    assert_eq!(resolution.per_plant[0].decider.len(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// Boundary-absent post-study delivery advisory
+// ---------------------------------------------------------------------------
+
+/// A `LeadStages(1)` plant with one declared post-study stage decides its
+/// post-study-targeted delivery in-study (`m = n_stages`, `c(m) = n_stages -
+/// 1 < n_stages`). With no `config.policy.boundary` declared, exactly one
+/// advisory fires naming the plant, once at setup.
+#[test]
+fn warn_on_boundary_absent_post_study_delivery_fires_once_when_boundary_absent() {
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            duration_hours: 744.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        Some(post_study),
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, false);
+    });
+    let recorded = messages.lock().unwrap();
+    let relevant: Vec<&str> = recorded
+        .iter()
+        .filter(|msg| msg.contains("post-study-targeted delivery"))
+        .map(std::string::String::as_str)
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        1,
+        "expected exactly one boundary-absent advisory, got: {recorded:?}"
+    );
+    assert!(
+        relevant[0].contains("T1"),
+        "advisory must name the plant, got: {}",
+        relevant[0]
+    );
+}
+
+/// The same fixture with `boundary_present == true` emits no advisory — the
+/// post-study delivery has a real terminal FCF to price against.
+#[test]
+fn warn_on_boundary_absent_post_study_delivery_silent_when_boundary_present() {
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            duration_hours: 744.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        Some(post_study),
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, true);
+    });
+    let recorded = messages.lock().unwrap();
+    assert!(
+        recorded
+            .iter()
+            .all(|msg| !msg.contains("post-study-targeted delivery")),
+        "a declared boundary must suppress the advisory; got: {recorded:?}"
+    );
+}
+
+/// A plant with NO class-3 reach (no post-study stages declared, so
+/// `decider.get(n_stages..)` is empty) that declares one non-zero class-4
+/// fixed post-horizon window (`start_date >= horizon_end`) and no boundary:
+/// exactly one advisory fires and names it.
+#[test]
+fn warn_on_boundary_absent_fires_for_nonzero_fixed_value_without_boundary() {
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let system = minimal_system_with_anticipated_and_commitments(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        None,
+        vec![AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            value_mw: 42.0,
+        }],
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, false);
+    });
+    let recorded = messages.lock().unwrap();
+    let relevant: Vec<&str> = recorded
+        .iter()
+        .filter(|msg| msg.contains("post-study-targeted delivery"))
+        .map(std::string::String::as_str)
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        1,
+        "expected exactly one boundary-absent advisory for the non-zero fixed value, got: {recorded:?}"
+    );
+    assert!(
+        relevant[0].contains("T1"),
+        "advisory must name the plant, got: {}",
+        relevant[0]
+    );
+}
+
+/// The same no-class-3-reach fixture, but the plant's only post-horizon
+/// declaration is an all-zero tiling (the mandatory horizon-end 0 MW stub):
+/// a zero value is provably inert, so no advisory fires.
+#[test]
+fn warn_on_boundary_absent_silent_for_all_zero_stub_without_boundary() {
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let system = minimal_system_with_anticipated_and_commitments(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        None,
+        vec![AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            value_mw: 0.0,
+        }],
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, false);
+    });
+    let recorded = messages.lock().unwrap();
+    assert!(
+        recorded
+            .iter()
+            .all(|msg| !msg.contains("post-study-targeted delivery")),
+        "an all-zero fixed post-horizon window must not trigger the advisory; got: {recorded:?}"
+    );
+}
+
+/// A plant hitting BOTH the class-3 condition (the `_fires_once_when_boundary_absent`
+/// fixture) AND a non-zero class-4 fixed window: the merged predicate still
+/// names it exactly once in the one emitted event, never a duplicate.
+#[test]
+fn warn_on_boundary_absent_names_dual_cause_plant_once() {
+    use cobre_core::AnticipatedCommitmentHistory;
+
+    let post_study = PostStudyStages {
+        stages: vec![PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+            duration_hours: 744.0,
+        }],
+        thermal_bounds: Vec::new(),
+    };
+    let system = minimal_system_with_anticipated_and_commitments(
+        &[744.0, 744.0],
+        AnticipatedConfig::LeadStages(1),
+        1,
+        Some(post_study),
+        vec![AnticipatedCommitmentHistory {
+            thermal_id: EntityId(2),
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            value_mw: 42.0,
+        }],
+    );
+    let (resolution, _) = super::resolve_anticipated_commitments_core(&system);
+
+    let (subscriber, messages) = WarnRecorder::new();
+    tracing::subscriber::with_default(subscriber, || {
+        super::warn_on_boundary_absent_post_study_delivery(&system, &[0], &resolution, false);
+    });
+    let recorded = messages.lock().unwrap();
+    let relevant: Vec<&str> = recorded
+        .iter()
+        .filter(|msg| msg.contains("post-study-targeted delivery"))
+        .map(std::string::String::as_str)
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        1,
+        "both causes on one plant must still emit a single merged event, got: {recorded:?}"
+    );
+    assert!(
+        relevant[0].contains("1 anticipated thermal(s)"),
+        "the plant must be counted exactly once, not once per cause; got: {}",
+        relevant[0]
+    );
+    assert_eq!(
+        relevant[0].matches("T1").count(),
+        1,
+        "the plant must be named exactly once in the merged list, got: {}",
+        relevant[0]
+    );
+}
+
+// ---------------------------------------------------------------------------
 // LeadTime fan-out — rejected at setup, not silently dropped, no panic
 // ---------------------------------------------------------------------------
 
@@ -8136,7 +8700,6 @@ fn lead_time_fanout_rejected_at_setup() {
         &[744.0, 168.0, 168.0],
         AnticipatedConfig::LeadTime(900.0),
         2,
-        Vec::new(),
         None,
     );
 
@@ -8188,125 +8751,6 @@ fn lead_time_fanout_rejected_at_setup() {
         msg.contains("not yet supported"),
         "message should state fan-out output is not yet supported, got: {msg}"
     );
-}
-
-// ---------------------------------------------------------------------------
-// resolve_commitment_hold_windows — survivor-indexed post-horizon windows
-// ---------------------------------------------------------------------------
-
-/// The coordinate-space regression this resolution exists to prevent: a
-/// `LeadTime` thermal declares TWO post-horizon windows in ascending
-/// `delivery_start` order. The FIRST's decider precedes the study horizon
-/// (dropped, logged as a warning) and the SECOND survives. Survivor index 0
-/// must describe the SECOND window's `(min_mw, max_mw)` and destination
-/// stage — a raw-index-by-survivor-position implementation would instead
-/// report the dropped first window's data at index 0.
-#[test]
-fn commitment_hold_windows_survivor_index_diverges_from_raw_index_on_a_drop() {
-    let dropped = FutureAnticipatedDelivery {
-        thermal_id: EntityId(2),
-        delivery_start: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        delivery_end: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        min_mw: 1.0,
-        max_mw: 2.0,
-    };
-    let survives = FutureAnticipatedDelivery {
-        thermal_id: EntityId(2),
-        delivery_start: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
-        delivery_end: NaiveDate::from_ymd_opt(2024, 3, 11).unwrap(),
-        min_mw: 10.0,
-        max_mw: 20.0,
-    };
-    let post_study = PostStudyStages {
-        stages: vec![PostStudyStage {
-            start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
-            duration_hours: 240.0,
-        }],
-        thermal_bounds: Vec::new(),
-    };
-
-    let system = minimal_system_with_anticipated(
-        &[744.0],
-        AnticipatedConfig::LeadTime(1500.0),
-        0,
-        vec![dropped, survives],
-        Some(post_study),
-    );
-
-    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
-
-    assert_eq!(windows.n_commitment, 1, "the first window must be dropped");
-    assert_eq!(
-        windows.min_max[0],
-        (10.0, 20.0),
-        "survivor 0 must describe the SECOND (surviving) window, not the dropped first"
-    );
-    assert_eq!(
-        windows.dest_stage[0], 0,
-        "survivor 0 must resolve to the post-study stage the surviving window covers"
-    );
-}
-
-/// Happy path: a single surviving post-horizon window resolves its
-/// `(min_mw, max_mw)` interval and its destination post-study stage `j` — here
-/// `j == 1`, the SECOND declared post-study stage, ruling out a resolver that
-/// always reports stage 0.
-#[test]
-fn commitment_hold_windows_happy_path_min_max_and_dest_stage() {
-    let delivery = FutureAnticipatedDelivery {
-        thermal_id: EntityId(2),
-        delivery_start: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
-        delivery_end: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
-        min_mw: 30.0,
-        max_mw: 40.0,
-    };
-    let post_study = PostStudyStages {
-        stages: vec![
-            PostStudyStage {
-                start_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
-                duration_hours: 744.0,
-            },
-            PostStudyStage {
-                start_date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
-                duration_hours: 720.0,
-            },
-        ],
-        thermal_bounds: Vec::new(),
-    };
-
-    let system = minimal_system_with_anticipated(
-        &[744.0],
-        AnticipatedConfig::LeadTime(2400.0),
-        0,
-        vec![delivery],
-        Some(post_study),
-    );
-
-    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
-
-    assert_eq!(windows.n_commitment, 1);
-    assert_eq!(windows.min_max[0], (30.0, 40.0));
-    assert_eq!(
-        windows.dest_stage[0], 1,
-        "must resolve into the second post-study stage"
-    );
-}
-
-/// Inert: a study with no `future_anticipated_deliveries` resolves both
-/// survivor arrays empty and `n_commitment == 0`.
-#[test]
-fn commitment_hold_windows_inert_without_deliveries() {
-    let system = minimal_system_with_anticipated(
-        &[744.0],
-        AnticipatedConfig::LeadTime(720.0),
-        0,
-        Vec::new(),
-        None,
-    );
-
-    let windows = super::resolve_commitment_hold_windows(&system, &[0]);
-
-    assert_eq!(windows, super::CommitmentHoldWindows::default());
 }
 
 /// Two anticipated thermals: id=20 non-fanning `LeadStages(1)`, id=21
@@ -8493,7 +8937,6 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         })
         .build()
         .expect("two-thermal fan-out system: valid")

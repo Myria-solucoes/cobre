@@ -14,14 +14,8 @@ impl SolverInterface for ClpSolver {
     type Profile = ClpProfile;
 
     /// Applies every [`ClpProfile`] field to the underlying CLP model, then
-    /// caches the profile in `current_profile`.
-    ///
-    /// The default profile sends perturbation `102` to disable CLP's
-    /// auto-perturbation; CLP's own default `100` breaks bit-for-bit
-    /// reproducibility across re-solves. The two C++-class-only knobs (dual-row
-    /// pricing, refactorization cadence) each issue no shim call at their
-    /// sentinel value, so the default profile stays byte-identical to a build
-    /// that never issued either setter.
+    /// caches the profile in `current_profile`. Perturbation `102` (not CLP's
+    /// own default `100`) is required for bit-for-bit reproducible re-solves.
     fn apply_profile(&mut self, profile: &ClpProfile) {
         // Cache the profile first so `resolve_simplex_cap` reads the new
         // simplex iteration limit when computing the FFI cap below.
@@ -246,8 +240,7 @@ impl SolverInterface for ClpSolver {
             self.unmark_hot_start();
         }
 
-        // Transpose-append the CSR batch into the retained CSC. `per_col_count[c]`
-        // is the number of batch entries in column `c`.
+        // `per_col_count[c]` is the number of batch entries in column `c`.
         let mut per_col_count = vec![0_usize; self.num_cols];
         for &col in &rows.col_indices {
             #[allow(clippy::cast_sign_loss)]
@@ -283,7 +276,6 @@ impl SolverInterface for ClpSolver {
                 new_values[acc] = self.values[k];
                 acc += 1;
             }
-            // Advance past the copied existing entries so appended entries follow.
             write_cursor[c] = acc;
             acc += per_col_count[c];
         }
@@ -318,8 +310,6 @@ impl SolverInterface for ClpSolver {
         // Rationale: `rows.num_rows` was asserted to fit in i32 above.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let number = rows.num_rows as i32;
-        // Append into CLP natively from the CSR batch (NOT the retained CSC) so
-        // CLP's factorization/basis is preserved (no full reload).
         // SAFETY:
         // - `self.handle` is a valid, non-null CLP pointer from
         //   `cobre_clp_create()` with a model loaded.
@@ -381,8 +371,6 @@ impl SolverInterface for ClpSolver {
             self.row_lower[row] = lower[i];
             self.row_upper[row] = upper[i];
         }
-        // `Clp_chgRowLower`/`Upper` replace the entire bound array (not a
-        // subset), so the retained vectors are forwarded in full.
         // SAFETY:
         // - `self.handle` is a valid, non-null CLP pointer with a model loaded.
         // - `self.row_lower`/`self.row_upper` each have exactly `self.num_rows`
@@ -544,10 +532,6 @@ impl SolverInterface for ClpSolver {
             });
         }
 
-        // `PRIMAL_INFEASIBLE` (CLP's false-infeasible) and `STOPPED` route
-        // through the escalation ladder; `DUAL_INFEASIBLE`, `ERRORS`, and any
-        // unexpected status stay terminal (not retry-recoverable).
-        //
         // `failure_count` is deliberately NOT incremented before the ladder: a
         // solve recovered by escalation counts only as a (retried) success. It is
         // incremented on the terminal paths below and on ladder exhaustion.
@@ -565,8 +549,6 @@ impl SolverInterface for ClpSolver {
             self.apply_profile(&profile);
 
             if let Some(escalation) = outcome {
-                // Recovered: count as a retried success — bump `success_count`
-                // and `retry_count`, but NOT `first_try_successes`.
                 self.stats.success_count += 1;
                 self.stats.retry_count += escalation.attempts;
                 self.stats.total_iterations += escalation.iterations;

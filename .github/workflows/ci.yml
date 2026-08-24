@@ -339,8 +339,8 @@ jobs:
         run: ./scripts/ci/check_schemas.sh --build
 
   # Locks structural invariants of a fresh `cobre init` -> `run` -> `report`
-  # (template file count, training/metadata.json keys, policy/metadata.json
-  # warm-start keys, the `cobre report` key set) against the live binary, so the
+  # (template file count, training/metadata.json keys, policy/manifest.bin
+  # presence, the `cobre report` key set) against the live binary, so the
   # CLI's on-disk/stdout output shape cannot silently drift. Minimal setup: only
   # the default-feature (HiGHS) `cobre` binary is needed — no MPICH or flatc,
   # since the default CLI build enables neither `mpi` nor `flatc-conformance`.

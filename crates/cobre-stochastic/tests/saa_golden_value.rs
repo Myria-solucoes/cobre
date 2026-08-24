@@ -80,10 +80,6 @@ fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
     DecomposedCorrelation::build(&model).unwrap()
 }
 
-// ---------------------------------------------------------------------------
-// Test
-// ---------------------------------------------------------------------------
-
 #[test]
 fn saa_golden_value_regression() {
     let stages = vec![

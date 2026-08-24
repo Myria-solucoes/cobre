@@ -1390,8 +1390,6 @@ mod tests {
 
     #[test]
     fn ac_add_cut_stores_at_slot_zero_and_active_count_is_one() {
-        // Given CutPool::new(100, 9, 10, 0), when add_cut(0, 0, ...) is called,
-        // then the cut is stored at slot 0 and active_count() returns 1.
         let mut pool = CutPool::new(100, 9, 10, 0);
         let coeffs = vec![0.0; 9];
         pool.add_cut(NodeId(0), 0, 0, 5.0, &coeffs);
@@ -1402,8 +1400,6 @@ mod tests {
 
     #[test]
     fn ac_deactivate_reduces_active_count_correctly() {
-        // Given a pool with 3 cuts at slots 0, 1, 2, when deactivate(&[1]) is
-        // called, then active_count() returns 2 and slot 1 is inactive.
         let mut pool = CutPool::new(10, 1, 1, 0);
         pool.add_cut(NodeId(0), 0, 0, 1.0, &[1.0]);
         pool.add_cut(NodeId(0), 1, 0, 2.0, &[2.0]);
@@ -1417,8 +1413,6 @@ mod tests {
 
     #[test]
     fn ac_evaluate_at_state_returns_correct_max() {
-        // cuts: (intercept=10, coeffs=[1,0]) and (intercept=5, coeffs=[0,2])
-        // state=[3,4] → max(10+3, 5+8) = max(13, 13) = 13
         let mut pool = CutPool::new(10, 2, 1, 0);
         pool.add_cut(NodeId(0), 0, 0, 10.0, &[1.0, 0.0]);
         pool.add_cut(NodeId(0), 1, 0, 5.0, &[0.0, 2.0]);
@@ -1428,8 +1422,6 @@ mod tests {
 
     #[test]
     fn ac_warm_start_count_offsets_slot() {
-        // Given CutPool::new(100, 9, 10, 5), when add_cut(0, 0, ...) is called,
-        // then slot = 5 + 0*10 + 0 = 5.
         let mut pool = CutPool::new(100, 9, 10, 5);
         let coeffs = vec![0.0; 9];
         pool.add_cut(NodeId(0), 0, 0, 1.0, &coeffs);
@@ -1440,7 +1432,6 @@ mod tests {
 
     #[test]
     fn ac_empty_pool_evaluate_returns_neg_infinity() {
-        // Given an empty pool, evaluate_at_state returns NEG_INFINITY.
         let pool = CutPool::new(10, 2, 1, 0);
         assert_eq!(pool.evaluate_at_state(&[1.0, 2.0]), f64::NEG_INFINITY);
     }
@@ -1989,7 +1980,6 @@ mod tests {
         assert!(pool.active[2]);
     }
 
-    /// `apply_updates` on an empty `CutActivityUpdates` must be a no-op.
     #[test]
     fn apply_updates_empty_is_noop() {
         use crate::cut_selection::CutActivityUpdates;

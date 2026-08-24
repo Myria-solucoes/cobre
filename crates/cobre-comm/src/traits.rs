@@ -146,9 +146,7 @@ pub trait Communicator: Send + Sync {
     /// [`ReduceOp::Sum`] may produce results that vary across runs with different
     /// rank counts or MPI implementations, because floating-point addition is
     /// non-associative and the reduction tree shape is implementation-defined.
-    /// This is acceptable: the upper bound is a statistical estimate and small
-    /// variations do not affect convergence. [`ReduceOp::Min`] is exact
-    /// (comparison-based, no arithmetic).
+    /// [`ReduceOp::Min`] is exact (comparison-based, no arithmetic).
     ///
     /// # Errors
     ///
@@ -235,7 +233,7 @@ pub trait Communicator: Send + Sync {
 }
 
 /// Object-safe sub-trait of [`Communicator`] for intra-node initialization
-/// coordination. Only available with the `shared-memory` Cargo feature.
+/// coordination.
 ///
 /// `Communicator` is not object-safe (its generic methods need static dispatch),
 /// but `split_local` returns an init-only intra-node communicator where dynamic
@@ -273,8 +271,6 @@ pub trait LocalCommunicator: Send + Sync {
 /// Enum dispatch over the closed set of intra-node communicator backends,
 /// returned by [`SharedMemoryProvider::split_local`]. A new variant requires
 /// updating all `match` arms in the `LocalCommunicator` impl below.
-///
-/// Only available with the `shared-memory` Cargo feature.
 #[cfg(feature = "shared-memory")]
 pub enum LocalCommKind {
     /// Single-process local backend (always available).

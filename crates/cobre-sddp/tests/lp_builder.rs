@@ -90,7 +90,7 @@ mod extraction_nonuniform_block_bases {
 
         let params = StudyParams::from_config(&config_with_sim)
             .expect("StudyParams::from_config must succeed");
-        let construction = params.into_construction_config();
+        let construction = params;
 
         let sentinel = Path::new("config.json");
         let training_source = config_with_sim
@@ -559,6 +559,7 @@ mod policy_entity_manifest {
     use std::path::Path;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::StateFamily;
     use cobre_sddp::{
         StudySetup,
         hydro_models::prepare_hydro_models,
@@ -568,11 +569,6 @@ mod policy_entity_manifest {
     use cobre_solver::ActiveSolver;
 
     use super::common::StubComm;
-
-    /// `EntityType::HydroInflowLag` discriminant from `schemas/policy.fbs`.
-    const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
-    /// `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
-    const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 
     fn case_dir(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -709,7 +705,7 @@ mod policy_entity_manifest {
             reduced_stage
                 .entity_manifest
                 .iter()
-                .all(|s| s.entity_type != ENTITY_TYPE_HYDRO_INFLOW_LAG),
+                .all(|s| s.entity_type != StateFamily::HydroInflowLag.code()),
             "the reduced stage manifest must contain no HydroInflowLag slot"
         );
 
@@ -724,7 +720,7 @@ mod policy_entity_manifest {
             full_stage
                 .entity_manifest
                 .iter()
-                .any(|s| s.entity_type == ENTITY_TYPE_HYDRO_INFLOW_LAG),
+                .any(|s| s.entity_type == StateFamily::HydroInflowLag.code()),
             "a full-state stage manifest must contain an inflow-lag slot"
         );
     }
@@ -746,7 +742,7 @@ mod policy_entity_manifest {
         let anticipated_slots: Vec<_> = stage0
             .entity_manifest
             .iter()
-            .filter(|s| s.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE)
+            .filter(|s| s.entity_type == StateFamily::AnticipatedThermalState.code())
             .collect();
 
         assert_eq!(

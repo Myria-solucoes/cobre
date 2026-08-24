@@ -314,8 +314,8 @@ fn convert_thermals(raw: RawThermalFile, path: &Path) -> Result<Vec<Thermal>, Lo
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id so this parser's output is deterministic regardless of file row
-    // order (declaration-order invariance); id is the builder's canonical tiebreak.
+    // Sort by id: output must not depend on file row order (declaration-order
+    // invariance).
     thermals.sort_by_key(|t| t.id.0);
     Ok(thermals)
 }

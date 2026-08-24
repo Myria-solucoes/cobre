@@ -19,7 +19,7 @@
 //!
 //! [`cut::wire`]: crate::cut::wire
 
-use cobre_comm::Communicator;
+use cobre_comm::{Communicator, per_rank_counts, prefix_displs};
 
 use crate::{
     FutureCostFunction, SddpError,
@@ -179,18 +179,11 @@ impl CutSyncBuffers {
         let max_record_size = cut_wire_size(n_state);
         let send_cap = max_cuts_per_rank * max_record_size;
 
-        let base = total_forward_passes / num_ranks;
-        let remainder = total_forward_passes % num_ranks;
-        let per_rank_cuts: Vec<usize> = (0..num_ranks)
-            .map(|r| base + usize::from(r < remainder))
-            .collect();
+        let per_rank_cuts = per_rank_counts(total_forward_passes, num_ranks);
         let recv_cap: usize = per_rank_cuts.iter().sum::<usize>() * max_record_size;
 
         let counts: Vec<usize> = per_rank_cuts.iter().map(|&c| c * max_record_size).collect();
-        let mut displs = vec![0usize; num_ranks];
-        for r in 1..num_ranks {
-            displs[r] = displs[r - 1] + counts[r - 1];
-        }
+        let displs = prefix_displs(&counts);
 
         Self {
             send_buf: vec![0u8; send_cap],
@@ -907,7 +900,7 @@ mod tests {
 
     #[test]
     fn new_deserialize_scratch_bufs_start_empty() {
-        // AC3: deserialize_headers_buf and deserialize_coefficients_buf both
+        // deserialize_headers_buf and deserialize_coefficients_buf both
         // have capacity == 0 immediately after construction (grown lazily).
         let bufs = CutSyncBuffers::new(2, 3, 4);
         assert_eq!(
@@ -1039,11 +1032,8 @@ mod tests {
 
     #[test]
     fn sync_cuts_single_rank_returns_zero_remote_cuts() {
-        // AC: Given CutSyncBuffers::new(n_state=2, max_cuts_per_rank=2,
-        // num_ranks=1), when sync_cuts is called with 2 local cuts in
-        // single-rank mode, then it returns Ok(0) — the single rank's own
-        // cuts are skipped. (max_cuts_per_rank must equal the actual cut count
-        // so per_rank_cuts[0] == n_local.)
+        // max_cuts_per_rank must equal the actual cut count so
+        // per_rank_cuts[0] == n_local.
         let mut bufs = CutSyncBuffers::new(2, 2, 1);
         let mut fcf = FutureCostFunction::new(2, 2, 2, 10, &[0; 2]);
         let comm = LocalBackend;

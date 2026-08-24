@@ -13,7 +13,7 @@ use cobre_core::System;
 use cobre_core::scenario::SamplingScheme;
 use cobre_io::Config;
 use cobre_sddp::{
-    SimulationScenarioResult, StudySetup,
+    BoundaryStateRequirements, SimulationScenarioResult, StudySetup,
     hydro_models::{PrepareHydroModelsResult, prepare_hydro_models},
     setup::{StudyParams, prepare_stochastic},
 };
@@ -129,28 +129,32 @@ impl Communicator for Rank0Of2 {
     }
 }
 
+/// Resolve the boundary state requirements for a test case, tolerating a
+/// placeholder boundary path: a test that installs a fake `policy.boundary` and
+/// injects cuts manually must not trigger a read of the missing checkpoint. The
+/// boundary is still PRESENT whenever `policy.boundary` is configured — only the
+/// depth read is skipped — so a fake/unreadable checkpoint yields `present(0)`
+/// (present, no inflow-lag slots), never `none()`. Routes through the production
+/// resolver when a real checkpoint exists.
+pub fn boundary_requirements(case_dir: &Path, config: &Config) -> BoundaryStateRequirements {
+    let Some(bp) = config.policy.boundary.as_ref() else {
+        return BoundaryStateRequirements::none();
+    };
+    if !bp.checkpoint_path(case_dir).join("manifest.bin").exists() {
+        return BoundaryStateRequirements::present(0);
+    }
+    cobre_sddp::resolve_boundary_state_requirements(case_dir, config)
+        .unwrap_or_else(|_| BoundaryStateRequirements::present(0))
+}
+
 /// Build a [`StudySetup`] for a case directory.
 ///
 /// The caller's `prepare_hydro_models` has already folded the productivity
 /// override into `hydro_models`. This helper re-loads `case_dir`'s
 /// `CaseArtifacts` (a second full parse) for `scalar_parameters`, because
-/// `StudyParams::into_construction_config` never carries them — every setup
-/// caller must patch them in itself (cobre-cli via MPI broadcast,
-/// cobre-python directly).
-/// Resolve the boundary-inferred inflow-lag depth for a test case, tolerating a
-/// placeholder boundary path: a test that installs a fake `policy.boundary` and
-/// injects cuts manually must not trigger a read of the missing checkpoint.
-pub fn boundary_inflow_lag_depth(case_dir: &Path, config: &Config) -> Option<u32> {
-    let bp = config.policy.boundary.as_ref()?;
-    let path = case_dir.join(&bp.path);
-    if !path.join("metadata.json").exists() {
-        return None;
-    }
-    cobre_sddp::resolve_effective_inflow_lag_depth(Some(&path))
-        .ok()
-        .flatten()
-}
-
+/// `StudyParams::from_config` leaves them empty (they load from disk artifacts,
+/// not `Config`) — every setup caller must patch them in itself (cobre-cli via
+/// MPI broadcast, cobre-python directly).
 pub fn build_setup_for_case(
     case_dir: &Path,
     config: &Config,
@@ -166,9 +170,9 @@ pub fn build_setup_for_case(
         .simulation_scenario_source(sentinel)
         .expect("simulation_scenario_source must parse");
 
-    let params = StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
-    let mut construction = params.into_construction_config();
-    construction.inflow_lag_depth = boundary_inflow_lag_depth(case_dir, config);
+    let mut construction =
+        StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
+    construction.boundary = boundary_requirements(case_dir, config);
     construction.scalar_parameters = cobre_io::load_case_with_artifacts(case_dir)
         .expect("load_case_with_artifacts must succeed")
         .artifacts
@@ -197,7 +201,7 @@ pub fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut Config)) -> St
     let training_source = config
         .training_scenario_source(&config_path)
         .expect("training_scenario_source must parse");
-    let inflow_lag_depth = boundary_inflow_lag_depth(case_dir, &config);
+    let inflow_lag_depth = boundary_requirements(case_dir, &config).inflow_lag_depth();
     let prepare_result = prepare_stochastic(
         system,
         case_dir,

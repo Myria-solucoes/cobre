@@ -24,9 +24,10 @@
 //! ## Validation
 //!
 //! The reader enforces the per-file invariants; the cross-file invariants
-//! (date-contiguity, first `start_date` equals the study horizon end, coverage of
-//! `future_anticipated_deliveries`, and the commitment∩capability intersection)
-//! are enforced by the `cobre-io` semantic validator, which has the study
+//! (date-contiguity, first `start_date` equals the study horizon end, a
+//! `PostStudyThermalBound` for every post-study stage an anticipated lead
+//! reaches, and no post-study delivery decided at a pre-study stage) are
+//! enforced by the `cobre-io` semantic validator, which has the study
 //! calendar this reader does not.
 //!
 //! 1. Every `start_date` parses as ISO 8601 (`YYYY-MM-DD`); no two stages share a

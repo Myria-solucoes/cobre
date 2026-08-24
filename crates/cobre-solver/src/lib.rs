@@ -7,9 +7,9 @@
 //!
 //! - **Solver trait**: unified API for LP and MIP problem construction, solving,
 //!   and dual/basis extraction.
-//! - **`HiGHS` backend** (`highs` feature, on by default): production-grade
-//!   open-source solver, well-suited for iterative LP solving in power system
-//!   optimization; exposed as `HighsSolver` and `HighsProfile`.
+//! - **`HiGHS` backend** (`highs` feature, on by default): an open-source
+//!   solver suited to iterative LP solving in power system optimization;
+//!   exposed as `HighsSolver` and `HighsProfile`.
 //! - **`CLP` backend** (`clp` feature, off by default): optional CLP/`CoinUtils`
 //!   backend exposed as `ClpSolver` and `ClpProfile`; conformance-validated
 //!   as a drop-in implementing the same [`SolverInterface`]. Requires the Clp
@@ -18,10 +18,10 @@
 //! - **Basis management**: warm-starting support for iterative algorithms
 //!   that solve sequences of related LPs.
 //!
-//! Exactly one LP backend is enabled at compile time (both-on is a
-//! `compile_error!`), so the `Active*` aliases and `active_solver_*` functions
-//! resolve to the CLP backend under `--features clp`, else the `HiGHS` backend
-//! under the default `highs` feature; when neither is enabled they are undefined.
+//! Exactly one LP backend is enabled at compile time — both-on and neither-on
+//! are each a `compile_error!` — so the `Active*` aliases and `active_solver_*`
+//! functions resolve to the CLP backend under `--features clp`, or the `HiGHS`
+//! backend under the default `highs` feature.
 //!
 //! ## Status
 //!
@@ -339,7 +339,9 @@ mod active_alias_tests {
         active_solver_name, active_solver_version,
     };
 
-    /// `ActiveProfile` must be exactly the profile of the active solver.
+    /// Compile-time assertion that `ActiveProfile` is exactly
+    /// `<ActiveSolver as SolverInterface>::Profile`; never called — the body
+    /// only type-checks when the two match, hence `dead_code`.
     #[allow(dead_code)]
     const fn _assert_profile_identity(
         p: ActiveProfile,
@@ -380,8 +382,6 @@ mod active_alias_tests {
         assert_eq!(active_solver_metadata_id(), "highs");
     }
 
-    /// CLP build (`--no-default-features --features clp`): the active backend
-    /// resolves to CLP.
     #[cfg(feature = "clp")]
     #[test]
     fn active_backend_is_clp_when_clp_enabled() {

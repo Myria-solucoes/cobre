@@ -26,7 +26,7 @@ use super::error::FphaFittingError;
 
 /// Absolute tolerance for the inter-segment contiguity check (m³/s).
 ///
-/// Contract (Voice 1): consecutive segments meet when `|outflow_min −
+/// Consecutive segments meet when `|outflow_min −
 /// outflow_max| <= CONTIG_EPS`, never when `outflow_min == outflow_max`. The
 /// source bounds are calibrated floats differing in their last ULPs, so an
 /// exact-equality test would reject essentially every real family. Owning check:
@@ -40,7 +40,7 @@ const C0_EPS_ABS: f64 = 1e-3;
 
 /// Relative tolerance for the inter-segment C0-continuity check.
 ///
-/// Contract (Voice 1): adjacent quartics are continuous when their boundary
+/// Adjacent quartics are continuous when their boundary
 /// elevations agree within `max(C0_EPS_ABS, C0_EPS_REL * max(|h_left|,
 /// |h_right|))`, never bit-for-bit (`==`) — the two quartics are fit
 /// independently and meet only to calibration precision, which scales with the
@@ -219,7 +219,7 @@ impl TailraceFamilies {
     /// ordered ascending by `downstream_reference_level_m` (`total_cmp`) with
     /// `family_id` as the secondary tie-break.
     ///
-    /// # Family-key contract (Voice 1)
+    /// # Family-key contract
     ///
     /// A plant with **more than one** family must carry a downstream reference
     /// level (`downstream_reference_level_m`) on **every** family — a multi-family table with any
@@ -309,7 +309,7 @@ impl TailraceFamilies {
     /// - **multiple families + `None`** ⇒ the lowest-level family (a deterministic
     ///   fallback for an unresolved downstream level).
     ///
-    /// # Clamp-not-extrapolate contract (Voice 1)
+    /// # Clamp-not-extrapolate contract
     ///
     /// `L` is clamped to the calibrated level range before bracketing, so the
     /// result is NEVER extrapolated past it. Extending the linear blend beyond the

@@ -21,9 +21,8 @@ use std::ops::Range;
 /// The in-study commitment-hold ring (`n_lanes = n_anticipated`,
 /// slot-major/plant-minor, `depth = k_max`, modular-addressed) every
 /// anticipated call site shares — the single owner of its out/in block
-/// construction. Borrows the LEADING `n_anticipated * k_max` sub-range of the
-/// merged [`StateSpace::commit_out`]/[`StateSpace::commit_in`] region; see
-/// [`commitment_hold_post_horizon_ring`] for the trailing sub-range.
+/// construction. Borrows the merged [`StateSpace::commit_out`]/
+/// [`StateSpace::commit_in`] region.
 pub(super) fn anticipated_ring(layout: &StageLayout) -> DeliveryRing {
     let state = layout.state;
     let n_ant_state = layout.n_anticipated * layout.k_max;
@@ -32,24 +31,6 @@ pub(super) fn anticipated_ring(layout: &StageLayout) -> DeliveryRing {
         state.commit_in.start..state.commit_in.start + n_ant_state,
         layout.n_anticipated,
         layout.k_max,
-    )
-}
-
-/// The terminal post-horizon lane ring (`n_lanes = n_commitment`, `depth =
-/// 1` — no lead-stage axis, a window's state never shifts slots). Borrows
-/// the TRAILING `n_commitment` sub-range of the merged
-/// [`StateSpace::commit_out`]/[`StateSpace::commit_in`] region, immediately
-/// after [`anticipated_ring`]'s in-study sub-range.
-pub(super) fn commitment_hold_post_horizon_ring(layout: &StageLayout) -> DeliveryRing {
-    let state = layout.state;
-    let n_ant_state = layout.n_anticipated * layout.k_max;
-    let out_base = state.commit_out.start + n_ant_state;
-    let in_base = state.commit_in.start + n_ant_state;
-    DeliveryRing::new(
-        out_base..out_base + state.n_commitment,
-        in_base..in_base + state.n_commitment,
-        state.n_commitment,
-        1,
     )
 }
 
@@ -74,6 +55,11 @@ pub(super) fn commitment_hold_post_horizon_ring(layout: &StageLayout) -> Deliver
 /// pre-migration `+h_b`/`−H` coefficient shape exactly; only its slot
 /// addressing is modular (`stage_idx mod k_max`, via
 /// [`crate::indexer::StateSpace::commitment_hold_in_study_offset`]).
+/// `stage_idx` is in-study by construction
+/// (`build_anticipated_fishing_row_pos` returns an empty mapping once
+/// `stage_idx >= n_stages`), where [`PointResolution::ring_index`] is the
+/// identity — so this slot needs no excision; applying one here would
+/// double-shift a slot the plant already owns.
 pub(super) fn fill_anticipated_fishing_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -86,12 +72,23 @@ pub(super) fn fill_anticipated_fishing_entries(
     let ring = anticipated_ring(layout);
     let mut n_active = 0_usize;
     for local_idx in 0..ctx.n_anticipated {
-        let Some(pos) = layout.anticipated.anticipated_fishing_row_pos[local_idx] else {
+        // Indexed via `.get` rather than `[local_idx]`: `n_anticipated` sizes
+        // this loop, but `build_anticipated_fishing_row_pos` returns an empty
+        // vec whenever `k_max == 0`, regardless of `n_anticipated`.
+        let Some(pos) = layout
+            .anticipated
+            .anticipated_fishing_row_pos
+            .get(local_idx)
+            .copied()
+            .flatten()
+        else {
             continue;
         };
-        // A `Some` position here implies at least one anticipated plant
-        // exists, so `k_max >= 1` (every anticipated thermal's own
-        // `lead_stages >= 1`) — no divide-by-zero guard needed.
+        // Reachable only because `build_anticipated_fishing_row_pos` gates
+        // this position on `k_max >= 1`, not `n_anticipated >= 1` alone —
+        // `is_anticipated_at` is `true` for a pre-study (`None`) decider, so
+        // an `n_anticipated`-only gate would reach this modulo on an empty
+        // ring.
         let slot = stage_idx % layout.k_max;
         let row = layout.anticipated.row_anticipated_fishing_start + pos;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
@@ -118,10 +115,13 @@ pub(super) fn fill_anticipated_fishing_entries(
 
 /// Encode the commitment-hold ring's delivery-decision LATCH row
 /// `slot^out − decision_col = 0` for each plant with a genuine, active
-/// decision this stage (`anticipated_decision_row_pos`). `slot =
-/// delivery_stage mod k_max` — the modular, delivery-target-keyed slot
-/// [`crate::indexer::StateSpace::commitment_hold_in_study_offset`] addresses,
-/// never a distance-derived boundary.
+/// decision this stage (`anticipated_decision_row_pos`). `slot` is the
+/// RING-AXIS residue of the decision's own delivery target
+/// ([`PointResolution::ring_index`] owns the delivery-axis → ring-axis map),
+/// never a distance-derived boundary. `delivery_stage % k_max` — keying
+/// directly off the raw delivery axis — is the forbidden alternative: it
+/// collides the first post-study deposit with the last in-study seed's slot
+/// whenever a plant declares a fixed post-horizon window.
 pub(super) fn fill_anticipated_state_out_def_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -139,7 +139,15 @@ pub(super) fn fill_anticipated_state_out_def_entries(
         let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
             continue;
         };
-        let Some(pos) = layout.anticipated.anticipated_decision_row_pos[local_idx] else {
+        // Indexed via `.get` rather than `[local_idx]`: `build_anticipated_decision_row_pos`
+        // returns an empty vec whenever `k_max == 0`, regardless of `n_ant`.
+        let Some(pos) = layout
+            .anticipated
+            .anticipated_decision_row_pos
+            .get(local_idx)
+            .copied()
+            .flatten()
+        else {
             continue;
         };
         let row = row_start + pos;
@@ -148,7 +156,14 @@ pub(super) fn fill_anticipated_state_out_def_entries(
             "a genuine decision's delivery stage must be strictly after the decision \
              stage (K=0 self-delivery must already be excluded)"
         );
-        let slot = delivery_stage % layout.k_max;
+        let r = point.ring_index(delivery_stage);
+        debug_assert!(
+            r.is_some(),
+            "plant local_idx={local_idx}: genuine delivery target {delivery_stage} is \
+             inside the excised fixed post-horizon window — never a ring member, so a \
+             genuine in-study decision cannot target it"
+        );
+        let slot = r.unwrap_or(delivery_stage) % layout.k_max;
         let col_decision = layout.anticipated.col_anticipated_decision_start + local_idx;
         ring.emit_deposit(slot, local_idx, row, col_decision, col_entries);
         n_active += 1;
@@ -185,38 +200,6 @@ fn fill_anticipated_slot_definition_entries(
         "fill_anticipated_slot_definition_entries: reachable-slot count must match \
          n_anticipated_slot_definition_rows"
     );
-}
-
-/// Encode the terminal post-horizon lanes' per-window row: at window `w`'s
-/// own decider stage, the LATCH row (`out_col(w) +1`, `decision_col −1`, via
-/// [`DeliveryRing::emit_deposit`]); every other stage, the CARRY row
-/// (`out_col(w) +1`, `in_col(w) −1`, via [`DeliveryRing::emit_carry_rows`]'s
-/// same-slot hold identity at `depth = 1`). No fish arm exists for a
-/// post-horizon lane — it is never consumed in-study; the boundary FCF prices
-/// the carried state (`fill_commitment_decision_columns` books the fuel).
-fn fill_commitment_post_horizon_entries(
-    layout: &StageLayout,
-    col_entries: &mut [Vec<(usize, f64)>],
-) {
-    let state = layout.state;
-    if state.n_commitment == 0 {
-        return;
-    }
-    let ring = commitment_hold_post_horizon_ring(layout);
-    let row_start = layout.anticipated.row_commitment_start;
-    let decision_start = layout.anticipated.col_commitment_decision_start;
-    let decision_windows = &layout.anticipated.commitment_decision_windows;
-
-    for w in 0..state.n_commitment {
-        let row = row_start + w;
-        if let Ok(local_idx) = decision_windows.binary_search(&w) {
-            let decision_col = decision_start + local_idx;
-            ring.emit_deposit(0, w, row, decision_col, col_entries);
-        } else {
-            col_entries[ring.out_col(0, w)].push((row, 1.0));
-            col_entries[ring.in_col(0, w)].push((row, -1.0));
-        }
-    }
 }
 
 /// Returns `true` when hydro `h_idx` is in the `PreFilling` phase at this stage.
@@ -1627,7 +1610,6 @@ pub(super) fn build_stage_matrix_entries(
     fill_pumping_water_entries(ctx, stage, layout, &mut col_entries);
     fill_anticipated_state_out_def_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_anticipated_slot_definition_entries(layout, &mut col_entries);
-    fill_commitment_post_horizon_entries(layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
     fill_fpha_entries(ctx, stage, stage_idx, layout, &mut col_entries);
@@ -2263,7 +2245,7 @@ mod zero_cost_tests {
 
     use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
     use crate::indexer::{BlockIdx, HydroCellIndex, ThermalSys};
-    use crate::lead_time::{AnticipatedResolution, LeadTime};
+    use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution};
     use crate::resolved_parameters::ResolvedParameters;
     use crate::setup::PostStudyResolved;
 
@@ -2272,7 +2254,9 @@ mod zero_cost_tests {
     use super::super::rows::{
         fill_anticipated_fishing_rows, fill_anticipated_state_out_def_rows, fill_stage_rows,
     };
-    use super::super::test_support::{state_layout_for, two_block_stage};
+    use super::super::test_support::{
+        state_layout_for, state_layout_with_resolution, two_block_stage,
+    };
     use super::{
         build_stage_matrix_entries, fill_anticipated_fishing_entries,
         fill_anticipated_slot_definition_entries, fill_anticipated_state_out_def_entries,
@@ -2438,12 +2422,14 @@ mod zero_cost_tests {
                 anticipated_windows: vec![(None, None); n_anticipated],
                 anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
+                delivery_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0))
+                    .collect(),
                 has_penalty: false,
                 // Sized to cover every active plant's delivery stage
                 // (`stage_idx + K_i < n_stages`); `fill_anticipated_columns`
                 // indexes these by delivery stage when pricing the decision column.
-                cumulative_discount_factors: vec![1.0; self.bounds.n_stages() + k_max],
-                total_hours_per_stage: vec![744.0; self.bounds.n_stages() + k_max],
+                delivery_cumulative_discount_factors: vec![1.0; self.bounds.n_stages() + k_max],
+                delivery_total_hours: vec![744.0; self.bounds.n_stages() + k_max],
                 // No hydros ⇒ no filling targets.
                 filling_v_target: BTreeMap::new(),
             }
@@ -2670,6 +2656,33 @@ mod zero_cost_tests {
                  expected {expected_neg}, got {coeff} (plant local_idx={local_idx})"
             );
         }
+    }
+
+    /// C13 regression: `build_anticipated_fishing_row_pos` gates a plant's
+    /// fishing row on `k_max >= 1`, not merely `n_anticipated >= 1`.
+    /// `anticipated_lead_stages = vec![1]` (not `vec![0]`, the `K = 0`
+    /// self-delivery case
+    /// `k0_sub_stage_lead_emits_no_anticipated_rows_or_fishing_coupling` above
+    /// covers) makes the plant genuinely in-flight via a pre-study (`None`)
+    /// decider, so `is_anticipated_at` would still be `true` on an empty ring
+    /// absent the guard. `fill_anticipated_fishing_entries` must reach the
+    /// final line without panicking and without writing any coupling.
+    #[test]
+    fn fishing_fill_on_an_empty_ring_does_not_divide_by_zero() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(1, 0, 1);
+        let ctx = fixtures.make_ctx(1, 0, vec![1], vec![0], 1);
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_fishing_entries(&ctx, &stage, 0, &layout, &mut col_entries);
+
+        assert!(
+            col_entries.iter().all(Vec::is_empty),
+            "an empty ring must emit no anticipated fishing coupling entries"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -3037,8 +3050,11 @@ mod zero_cost_tests {
         let mut state = state_layout_for(&ctx);
         state.set_anticipated_resolution(AnticipatedResolution::resolve(
             &[LeadTime::Time(720.0)],
-            &[744.0, 744.0, 744.0, 744.0],
-            4,
+            DeliveryAxis {
+                stage_lengths_hours: &[744.0, 744.0, 744.0, 744.0],
+                n_decision: 4,
+                n_delivery: 4,
+            },
         ));
 
         for stage_idx in 0..4 {
@@ -3089,6 +3105,304 @@ mod zero_cost_tests {
                 );
             }
         }
+    }
+
+    /// Three-family collapse (C13 guard): `anticipated_lead_stages = vec![1]`
+    /// genuinely fishes at stage 0 (`m = 0`'s decider is `None`, pre-study)
+    /// AND genuinely decides at stage 0 (`m = 1`'s decider is `Some(0)`) —
+    /// absent the `k_max >= 1` guard, both `build_anticipated_fishing_row_pos`
+    /// and `build_anticipated_decision_row_pos` would produce a `Some`
+    /// position on this empty (`k_max == 0`) ring. All three row
+    /// families — fishing, deposit, and interior carry — collapse to zero,
+    /// and none of the three entry-fill functions panics or writes a
+    /// coupling.
+    #[test]
+    fn empty_ring_collapses_all_three_anticipated_row_families() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(2, 0, 1);
+        let ctx = fixtures.make_ctx(1, 0, vec![1], vec![0], 1);
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        assert_eq!(
+            layout.anticipated.n_anticipated_fishing_rows, 0,
+            "k_max == 0 must collapse the fishing-row family to zero"
+        );
+        assert_eq!(
+            layout.anticipated.n_anticipated_state_out_def_rows, 0,
+            "k_max == 0 must collapse the deposit-row family to zero"
+        );
+        assert_eq!(
+            layout.anticipated.n_anticipated_slot_definition_rows, 0,
+            "k_max == 0 must collapse the interior-carry-row family to zero"
+        );
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_fishing_entries(&ctx, &stage, 0, &layout, &mut col_entries);
+        fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
+        fill_anticipated_slot_definition_entries(&layout, &mut col_entries);
+
+        assert!(
+            col_entries.iter().all(Vec::is_empty),
+            "an empty ring must emit no anticipated coupling entries from any of \
+             the three families"
+        );
+    }
+
+    /// Ring-undersizing collision reproduction: a `LeadTime(350.0)` plant on
+    /// the uniform `[100.0; 4]` calendar has a real stage-0 in-flight set of
+    /// three deliveries (`decider == [None, None, None, Some(0)]`), but
+    /// `AnticipatedResolution::k_max` (derived from `PointResolution::depth`,
+    /// which excludes pre-study occupancy) resolves a ring only `1` slot
+    /// deep. The interior carry row (delivery 1, pre-study, still in flight)
+    /// and the deposit row (delivery 3, decided this stage) both address
+    /// modular slot `m % k_max == 0`, so both write the SAME outgoing column
+    /// — a definition-row collision no column in the ring's outgoing block
+    /// may exhibit.
+    #[test]
+    fn deposit_and_carry_never_share_an_outgoing_column() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(4, 3, 1);
+        let mut ctx = fixtures.make_ctx(1, 3, vec![3], vec![0], 1);
+        ctx.anticipated_resolution = AnticipatedResolution::resolve(
+            &[LeadTime::Time(350.0)],
+            DeliveryAxis {
+                stage_lengths_hours: &[100.0; 4],
+                n_decision: 4,
+                n_delivery: 4,
+            },
+        );
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_with_resolution(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_slot_definition_entries(&layout, &mut col_entries);
+        fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let out_start = layout.anticipated.col_anticipated_slots_out_start;
+        let n_ant_state = layout.n_anticipated * layout.k_max;
+        for (offset, entries) in col_entries[out_start..out_start + n_ant_state]
+            .iter()
+            .enumerate()
+        {
+            let col = out_start + offset;
+            let mut rows: Vec<usize> = entries.iter().map(|(r, _)| *r).collect();
+            rows.sort_unstable();
+            rows.dedup();
+            assert!(
+                rows.len() <= 1,
+                "outgoing column {col} carries entries from {} distinct rows ({rows:?}); \
+                 expected at most 1",
+                rows.len()
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Ring-axis excision: the deposit latch resolves through `ring_index`
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Byte-identity anchor: with no fixed post-horizon window `ring_index` is
+    /// the identity, so the deposit's ring-axis residue equals the raw-axis
+    /// residue `delivery_stage % k_max` — unchanged from before the excision.
+    /// Two-plant fixture (`K = [3, 4]`, `k_max = 4`, no attached
+    /// `AnticipatedResolution`, so `anticipated_resolution_for` falls back to
+    /// the on-the-fly constant-lead resolution, whose `n_delivery == n_decision`
+    /// makes `ring_index` the identity everywhere): plant 0's decision at
+    /// `stage_idx = 0` targets `delivery_stage = 3` (`3 < k_max`, so the raw and
+    /// ring-axis residues coincide without wrapping).
+    #[test]
+    fn anticipated_deposit_targets_the_raw_residue_on_an_identity_axis() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(8, 4, 0);
+        let ctx = fixtures.make_ctx(2, 4, vec![3, 4], vec![0, 1], 0);
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let row = layout.anticipated.row_anticipated_state_out_def_start;
+        let slot = 3_usize;
+        let col_state_out = layout.anticipated.col_anticipated_slots_out_start + slot * 2;
+        let col_decision = layout.anticipated.col_anticipated_decision_start;
+
+        assert!(
+            col_entries[col_state_out]
+                .iter()
+                .any(|&(r, v)| r == row && (v - 1.0).abs() < 1e-15),
+            "plant 0: expected (+1.0) entry at (col_state_out={col_state_out}, row={row}), \
+             got {:?}",
+            col_entries[col_state_out]
+        );
+        assert!(
+            col_entries[col_decision]
+                .iter()
+                .any(|&(r, v)| r == row && (v + 1.0).abs() < 1e-15),
+            "plant 0: expected (-1.0) entry at (col_decision={col_decision}, row={row}), \
+             got {:?}",
+            col_entries[col_decision]
+        );
+    }
+
+    /// Plant 0's resolution for the ring-axis excision tests below: `k_max =
+    /// 4`, `decision_sets.len() == 4` (`n_decision`), a 3-wide excised fixed
+    /// post-horizon window `decider[4..7) == None` (`g == 3`), and a genuine
+    /// decision at `stage_idx = 0` targeting `delivery_stage = 7`
+    /// (`decider[7] == Some(0)`). `ring_index(7) == Some(4)` (`n_decision + g
+    /// == 7`), so the deposit's ring-axis residue is `4 % 4 == 0` — not the
+    /// raw-axis residue `7 % 4 == 3`, the slot the stage-3 seed (`decider[3]
+    /// == None`, still in flight) already carries at.
+    fn plant0_excised_window_g3_resolution() -> AnticipatedResolution {
+        let point = PointResolution {
+            decider: vec![
+                None,
+                None,
+                None,
+                None, // m = 0..3 (in-study, pre-study seeds)
+                None,
+                None,
+                None, // m = 4..6 (excised window, g = 3)
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3), // m = 7..10
+            ],
+            decision_sets: vec![vec![7], vec![8], vec![9], vec![10]],
+            depth: vec![1, 2, 3, 4],
+            occupancy: vec![4, 4, 4, 4],
+        };
+        AnticipatedResolution {
+            per_plant: vec![point],
+            k_max: 4,
+            max_fanout: 1,
+        }
+    }
+
+    /// The deposit's slot resolves through the ring axis, not the raw
+    /// delivery axis, across [`plant0_excised_window_g3_resolution`]'s excised
+    /// window.
+    #[test]
+    fn anticipated_deposit_targets_the_ring_axis_residue_across_an_excised_window() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(4, 4, 0);
+        let mut ctx = fixtures.make_ctx(1, 4, vec![4], vec![0], 0);
+        ctx.anticipated_resolution = plant0_excised_window_g3_resolution();
+        ctx.delivery_stage_ids = (0..11).collect();
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_with_resolution(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let row = layout.anticipated.row_anticipated_state_out_def_start;
+        let col_decision = layout.anticipated.col_anticipated_decision_start;
+        let col_slot0 = layout.anticipated.col_anticipated_slots_out_start;
+        let col_slot3 = layout.anticipated.col_anticipated_slots_out_start + 3;
+
+        assert!(
+            col_entries[col_slot0]
+                .iter()
+                .any(|&(r, v)| r == row && (v - 1.0).abs() < 1e-15),
+            "expected (+1.0) entry at (col_slot0={col_slot0}, row={row}), got {:?}",
+            col_entries[col_slot0]
+        );
+        assert!(
+            col_entries[col_decision]
+                .iter()
+                .any(|&(r, v)| r == row && (v + 1.0).abs() < 1e-15),
+            "expected (-1.0) entry at (col_decision={col_decision}, row={row}), got {:?}",
+            col_entries[col_decision]
+        );
+        assert!(
+            col_entries[col_slot3].iter().all(|&(r, _)| r != row),
+            "the deposit row must not land on slot 3 — the slot the stage-3 seed holds; \
+             got {:?}",
+            col_entries[col_slot3]
+        );
+    }
+
+    /// With both families filled for the same excised-window fixture, no
+    /// outgoing ring column carries entries from two distinct definition rows
+    /// — the collision the ring-axis excision removes.
+    #[test]
+    fn anticipated_deposit_and_carry_never_share_an_outgoing_column() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(4, 4, 0);
+        let mut ctx = fixtures.make_ctx(1, 4, vec![4], vec![0], 0);
+        ctx.anticipated_resolution = plant0_excised_window_g3_resolution();
+        ctx.delivery_stage_ids = (0..11).collect();
+        let stage = two_block_stage(0, [372.0, 372.0]);
+        let state = state_layout_with_resolution(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_slot_definition_entries(&layout, &mut col_entries);
+        fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
+
+        let out_start = layout.anticipated.col_anticipated_slots_out_start;
+        let n_ant_state = layout.n_anticipated * layout.k_max;
+        for (offset, entries) in col_entries[out_start..out_start + n_ant_state]
+            .iter()
+            .enumerate()
+        {
+            let col = out_start + offset;
+            let mut rows: Vec<usize> = entries.iter().map(|(r, _)| *r).collect();
+            rows.sort_unstable();
+            rows.dedup();
+            assert!(
+                rows.len() <= 1,
+                "outgoing column {col} carries entries from {} distinct rows ({rows:?}); \
+                 expected at most 1",
+                rows.len()
+            );
+        }
+    }
+
+    /// `fill_anticipated_fishing_entries` is unchanged by the excision — its
+    /// `stage_idx` is in-study by construction, so `ring_index` is the
+    /// identity there. Reuses
+    /// [`plant0_excised_window_g3_resolution`]'s `g == 3` fixture at
+    /// `stage_idx = 2` (in-study), where the maturing slot is
+    /// `2 % k_max == 2`, unaffected by the plant's post-study excised window.
+    #[test]
+    fn anticipated_fishing_slot_is_unchanged_by_an_excised_window() {
+        let mut fixtures = AntFixtures::new();
+        fixtures.bounds = AntFixtures::bounds_with_n_stages(4, 4, 1);
+        let mut ctx = fixtures.make_ctx(1, 4, vec![4], vec![0], 1);
+        ctx.anticipated_resolution = plant0_excised_window_g3_resolution();
+        ctx.delivery_stage_ids = (0..11).collect();
+        let stage = two_block_stage(2, [372.0, 372.0]);
+        let state = state_layout_with_resolution(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 2);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_fishing_entries(&ctx, &stage, 2, &layout, &mut col_entries);
+
+        let row = layout.anticipated.row_anticipated_fishing_start;
+        let col_in_slot2 = layout.col_anticipated_state_start() + 2;
+        let block_hours_total: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
+        let expected_neg = -block_hours_total;
+
+        let couplings: Vec<&(usize, f64)> = col_entries[col_in_slot2]
+            .iter()
+            .filter(|(r, _)| *r == row)
+            .collect();
+        assert_eq!(
+            couplings.len(),
+            1,
+            "in_col(2, plant 0) must carry exactly 1 coupling at fishing row {row}; got {:?}",
+            col_entries[col_in_slot2]
+        );
+        let (_, coeff) = couplings[0];
+        assert!(
+            (coeff - expected_neg).abs() < 1e-12,
+            "in_col(2, plant 0) fishing-row coupling: expected {expected_neg}, got {coeff}"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -3883,9 +4197,10 @@ mod pumping_water_tests {
                 anticipated_windows: vec![],
                 anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: vec![],
+                delivery_stage_ids: vec![],
                 has_penalty: false,
-                cumulative_discount_factors: vec![1.0; N_STAGES],
-                total_hours_per_stage: vec![744.0; N_STAGES],
+                delivery_cumulative_discount_factors: vec![1.0; N_STAGES],
+                delivery_total_hours: vec![744.0; N_STAGES],
                 // These single-stage fixtures decouple `stage.id` from
                 // `stage_idx` (every phase is exercised at `stage_idx = 0` against
                 // one bounds row), so the filling window's stage ids all resolve to

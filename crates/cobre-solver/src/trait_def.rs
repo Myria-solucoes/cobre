@@ -119,8 +119,7 @@ pub trait SolverInterface: Send {
     /// `HighsSolver` retains its internal simplex basis and factorization across
     /// consecutive `solve` calls — the primary warm-start mechanism for
     /// backward-pass workloads where the LP shape is constant across trial points
-    /// at the same (stage, opening). Callers that need solve-independence must pass
-    /// an explicit `Basis` or call `load_model` to reset topology.
+    /// at the same (stage, opening).
     ///
     /// # Errors
     ///

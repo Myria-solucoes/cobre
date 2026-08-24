@@ -151,8 +151,6 @@ impl Communicator for LocalBackend {
 /// Shared memory region backed by a heap-allocated [`Vec<T>`], for backends
 /// without true intra-node shared memory; [`SharedRegion`] phases degenerate to
 /// plain `Vec` operations and `fence` is a no-op.
-///
-/// Only available with the `shared-memory` Cargo feature.
 #[cfg(feature = "shared-memory")]
 pub struct HeapRegion<T: CommData> {
     data: Vec<T>,

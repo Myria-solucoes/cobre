@@ -6,7 +6,10 @@
 //!
 //! Also covers transit-bucket (identity match copies, a miss defaults to
 //! `0.0`), sentinel-dated-anticipated default-`0.0`, and the dated-anticipated
-//! date-driven fan-out (`÷H_M` `Blend`, coverage-`Renormalize`).
+//! date-driven fan-out (`÷H_M` `Blend`, coverage-`Renormalize`) — including a
+//! ring-sourced post-study slot reconciling bit-identically to the
+//! pre-switchover shape, and an in-study ring slot (no resolved interval)
+//! defaulting to `Zero`.
 
 #![allow(
     clippy::unwrap_used,
@@ -23,26 +26,16 @@
 
 use chrono::NaiveDate;
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
-    ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock, StageCutsPayload,
-    write_policy_checkpoint,
+    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
+    PolicyCutRecord, ProducerBlock, StageCutsPayload, StateFamily, write_policy_checkpoint,
 };
 use cobre_sddp::{
     BoundaryInjection, FullFcf, PolicyStageManifest, load_boundary_cuts, validate_policy_load,
 };
 
-/// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
-/// `EntityType::HydroInflowLag` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
-/// `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
-/// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
-
 fn storage_slot(id: i32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+        entity_type: StateFamily::HydroStorage.code(),
         entity_id: id,
         subindex: 0,
         was_active: true,
@@ -52,7 +45,7 @@ fn storage_slot(id: i32) -> EntitySlot {
 
 fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+        entity_type: StateFamily::HydroInflowLag.code(),
         entity_id: id,
         subindex: lag_depth,
         was_active: true,
@@ -62,7 +55,7 @@ fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
 
 fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+        entity_type: StateFamily::HydroTransitBucket.code(),
         entity_id: downstream_hydro_id,
         subindex: lag,
         was_active: true,
@@ -72,7 +65,7 @@ fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
 
 fn sentinel_anticipated_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+        entity_type: StateFamily::AnticipatedThermalState.code(),
         entity_id: thermal_id,
         subindex: ring_slot,
         was_active: true,
@@ -82,7 +75,7 @@ fn sentinel_anticipated_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
 
 fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
     EntitySlot {
-        entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+        entity_type: StateFamily::AnticipatedThermalState.code(),
         entity_id: thermal_id,
         subindex: ring_slot,
         was_active: true,
@@ -153,15 +146,12 @@ fn write_checkpoint(dir: &std::path::Path, manifest: &[EntitySlot], coefficients
         active_cut_indices: &[0],
         populated_count: 1,
         entity_manifest: manifest,
+        cost_scale_factor: 1.0,
+        node_id: 0,
+        graph_stage_id: -1,
     };
-    let metadata = PolicyCheckpointMetadata {
-        format_version: FORMAT_VERSION,
-        cobre_version: "0.14.0".to_string(),
-        created_at: "2026-08-11T00:00:00Z".to_string(),
-        num_stages: 1,
-        graph_manifest: single_stage_manifest(),
-        producer: producer_block(),
-    };
+    let metadata =
+        cobre_sddp::test_support::checkpoint_metadata(1, single_stage_manifest(), producer_block());
     write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
 }
 
@@ -182,8 +172,9 @@ fn boundary_injection_storage_lag_identity_match_succeeds() {
         2,
         &current,
         &no_intervals(current.len()),
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("an identity-matching boundary must load");
@@ -212,8 +203,9 @@ fn boundary_injection_different_hydro_source_rejects_naming_hydro() {
         1,
         &current,
         &no_intervals(current.len()),
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     );
 
@@ -282,8 +274,9 @@ fn boundary_injection_transit_bucket_defaults_to_zero() {
         2,
         &current,
         &no_intervals(current.len()),
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a transit-only-target load must succeed via the default-zero arm");
@@ -293,6 +286,47 @@ fn boundary_injection_transit_bucket_defaults_to_zero() {
         cuts[0].coefficients,
         vec![10.0, 0.0],
         "the transit slot must default to 0.0"
+    );
+}
+
+/// Given a boundary SOURCE that prices a transit-bucket arc the current study's
+/// topology does not model (same state dimension, mismatched bucket identity),
+/// when the `BoundaryInjection` load runs, then the source coupling is dropped
+/// (its coefficient discarded) BUT the load succeeds and emits a warning naming
+/// the dropped family and slot — the previously-silent C17 source-drop is now
+/// visible. The target's own transit slot still defaults to `0.0`.
+#[test]
+fn boundary_injection_dropped_source_transit_coupling_warns_and_loads() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest = vec![storage_slot(1), transit_bucket_slot(2, 1)];
+    write_checkpoint(tmp.path(), &manifest, &[10.0, 20.0]);
+
+    let current = vec![storage_slot(1), transit_bucket_slot(9, 1)];
+    let mut warnings: Vec<String> = Vec::new();
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        2,
+        &current,
+        &no_intervals(current.len()),
+        &[],
+        None,
+        1.0,
+        &mut |w| warnings.push(w.to_string()),
+    )
+    .expect("a dropped source coupling must warn, never reject");
+
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients,
+        vec![10.0, 0.0],
+        "the target's own unmatched transit slot still defaults to 0.0"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("transit-bucket") && w.contains("id 2")),
+        "the dropped source transit-bucket coupling must be surfaced: {warnings:?}"
     );
 }
 
@@ -313,8 +347,9 @@ fn boundary_injection_sentinel_anticipated_defaults_to_zero() {
         2,
         &current,
         &no_intervals(current.len()),
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a sentinel-anticipated-target load must succeed via the default-zero arm");
@@ -351,8 +386,9 @@ fn boundary_injection_target_shaped_source_reconciles_bit_identically() {
         3,
         &current,
         &no_intervals(current.len()),
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a target-shaped source must load");
@@ -388,8 +424,9 @@ fn boundary_injection_transit_bucket_copies_on_identity_match() {
         2,
         &current,
         &no_intervals(current.len()),
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a matching transit-bucket boundary must load");
@@ -449,8 +486,9 @@ fn boundary_injection_dated_anticipated_fan_out_matrix() {
         5,
         &current,
         &intervals,
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a fully-covered dated anticipated fan-out must load");
@@ -507,8 +545,9 @@ fn boundary_injection_dated_anticipated_interior_weeks_conservation() {
         4,
         &current,
         &intervals,
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a fully-covered dated anticipated fan-out must load");
@@ -556,8 +595,9 @@ fn boundary_injection_report_fan_out_matrix_coverage() {
         5,
         &current,
         &intervals,
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a fully-covered dated anticipated fan-out must load");
@@ -606,8 +646,9 @@ fn boundary_injection_report_target_shaped_superset_is_copy_only() {
         3,
         &current,
         &no_intervals(current.len()),
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("a target-shaped source must load");
@@ -640,8 +681,9 @@ fn boundary_injection_report_empty_manifest_is_unreconciled() {
         2,
         &current,
         &no_intervals(current.len()),
+        &[],
         None,
-        1_000_000.0,
+        1.0,
         &mut |_| {},
     )
     .expect("an absent manifest must still load cuts");
@@ -654,4 +696,106 @@ fn boundary_injection_report_empty_manifest_is_unreconciled() {
         report.summary_line()
     );
     assert!(report.detail_lines().is_empty());
+}
+
+/// Given a monthly-priced source (April 2026, `π_M = 300.0`) and a current
+/// terminal manifest whose ring-residue `subindex` values (100/101) tag a
+/// post-study-targeted provenance, when `load_boundary_cuts` fans one
+/// fully-covered lane and one lane straddling into unpriced (post-study) time,
+/// then the coefficients equal the `Blend` (`π_M · overlap/H_M`, the same value
+/// `boundary_injection_dated_anticipated_fan_out_matrix` asserts for a 7-day
+/// lane) and `Renormalize` (`π_M · H_w/H_M`) values — reconcile keys on
+/// `delivery_date`, never the ring `subindex`, so ring provenance reconciles
+/// identically to the retired lane shape.
+#[test]
+fn boundary_injection_ring_sourced_post_study_fan_out_matches_pre_switchover() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source_manifest = vec![
+        storage_slot(1),
+        dated_anticipated_slot(9, 0, 20_260_401),
+        sentinel_anticipated_slot(9, 1),
+    ];
+    write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0, 0.0]);
+
+    let current = vec![
+        storage_slot(1),
+        dated_anticipated_slot(9, 100, 20_260_401),
+        dated_anticipated_slot(9, 101, 20_260_401),
+    ];
+    let intervals = vec![
+        None,
+        Some((ymd(2026, 4, 1), ymd(2026, 4, 8))),
+        Some((ymd(2026, 4, 22), ymd(2026, 5, 8))),
+    ];
+
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        3,
+        &current,
+        &intervals,
+        &[],
+        None,
+        1.0,
+        &mut |_| {},
+    )
+    .expect("a ring-sourced post-study dated fan-out must load");
+
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients[0], 10.0,
+        "the storage slot still copies its identity-matched coefficient"
+    );
+
+    let h_m = 30.0 * 24.0;
+    let expected_blend = 300.0 * (7.0 * 24.0) / h_m;
+    assert!(
+        (cuts[0].coefficients[1] - expected_blend).abs() < expected_blend.abs() * 1e-9,
+        "fully-covered ring lane must Blend to π_M · overlap/H_M = {expected_blend}, got {}",
+        cuts[0].coefficients[1]
+    );
+    let expected_renorm = 300.0 * (16.0 * 24.0) / h_m;
+    assert!(
+        (cuts[0].coefficients[2] - expected_renorm).abs() < expected_renorm.abs() * 1e-9,
+        "straddling ring lane must Renormalize to π_M · H_w/H_M = {expected_renorm}, got {}",
+        cuts[0].coefficients[2]
+    );
+}
+
+/// Given a current terminal manifest carrying a dated ring slot whose
+/// `delivery_date` resolves NO interval — an in-study ring slot (a
+/// within-horizon delivery, e.g. a `K = 0` self-delivery) — when
+/// `load_boundary_cuts` runs, then that slot reconciles to `0.0`, not a reject
+/// and not a blend, even though the source carries a month whose date would
+/// overlap it if it were wrongly fanned out. The integration mirror of the unit
+/// pin `build_rebind_dated_in_study_ring_slot_with_no_interval_yields_zero`.
+#[test]
+fn boundary_injection_dated_in_study_ring_slot_with_no_interval_yields_zero() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source_manifest = vec![storage_slot(1), dated_anticipated_slot(9, 0, 20_260_401)];
+    write_checkpoint(tmp.path(), &source_manifest, &[10.0, 300.0]);
+
+    let current = vec![storage_slot(1), dated_anticipated_slot(9, 0, 20_260_401)];
+    let intervals = vec![None, None];
+
+    let cuts = load_boundary_cuts(
+        tmp.path(),
+        0,
+        2,
+        &current,
+        &intervals,
+        &[],
+        None,
+        1.0,
+        &mut |_| {},
+    )
+    .expect("an in-study ring slot with no interval must load, defaulting to 0.0");
+
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(
+        cuts[0].coefficients,
+        vec![10.0, 0.0],
+        "a dated ring slot with no resolved interval is an in-study delivery: it defaults \
+         to 0.0, never fans out against the overlapping source month"
+    );
 }

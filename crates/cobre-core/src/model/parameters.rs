@@ -203,8 +203,7 @@ pub enum ComputedParameter {
 ///     ParameterKind::Seasonal { values: vec![(1, 0.5), (2, 1.5)] }
 /// );
 /// ```
-// Deserialize is NOT derived: the manual impl below applies the PerStage
-// contiguity-from-0 validation that `#[serde(from = ...)]` could not surface.
+// Deserialize is manual, not derived — see the impl below for why.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(into = "ParameterKindJson"))]

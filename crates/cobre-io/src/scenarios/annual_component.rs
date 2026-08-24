@@ -87,9 +87,6 @@ pub struct InflowAnnualComponentRow {
 
 /// Parse `scenarios/inflow_annual_component.parquet` and return a sorted row table.
 ///
-/// Reads all record batches from the Parquet file at `path`, validates per-row
-/// constraints, then returns all rows sorted by `(hydro_id, stage_id)` ascending.
-///
 /// # Errors
 ///
 /// | Condition                                              | Error variant              |

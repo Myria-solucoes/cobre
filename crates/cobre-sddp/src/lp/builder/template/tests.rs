@@ -19,12 +19,14 @@ use cobre_core::{
     ContractBlockBounds, ContractType, DeficitSegment, EnergyContract, EntityId, Hydro,
     HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
     LineBlockBounds, LineStagePenalties, LoadModel, NcsStagePenalties, NoiseMethod,
-    PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, PumpingStation, ResolvedBounds,
-    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
-    SystemBuilder, Thermal, ThermalBlockBounds, ThermalStageBounds,
+    PenaltiesCountsSpec, PenaltiesDefaults, PostStudyStage, PostStudyStages, PostStudyThermalBound,
+    PumpingBlockBounds, PumpingStation, ResolvedBounds, ResolvedPenalties, ScenarioSourceConfig,
+    Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal, ThermalBlockBounds,
+    ThermalStageBounds,
 };
 use cobre_stochastic::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
+use cobre_stochastic::season_cast::post_study_calendar_stages;
 
 use crate::hydro_models::PrepareHydroModelsResult;
 use crate::indexer::{
@@ -35,8 +37,13 @@ use crate::inflow_method::InflowNonNegativityMethod;
 use crate::lead_time::AnticipatedResolution;
 use crate::resolved_parameters::ResolvedParameters;
 use crate::setup::bucket_topology::build_transit_bucket_topology;
-use crate::setup::template_postprocess::postprocess_templates;
-use crate::setup::{resolve_anticipated_commitments, resolve_state_layout};
+use crate::setup::template_postprocess::{
+    compute_cumulative_discount_factors, compute_per_stage_discount_factors, postprocess_templates,
+};
+use crate::setup::{
+    PostStudyResolved, resolve_anticipated_commitments, resolve_post_study_artifacts,
+    resolve_state_layout,
+};
 use crate::test_support::state_layout_full;
 
 use super::super::test_support::{ctx_anticipated_and_mask_inputs, state_layout_for};
@@ -455,6 +462,7 @@ fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -518,6 +526,7 @@ fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -602,6 +611,7 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -794,6 +804,7 @@ fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -856,6 +867,7 @@ fn stage_layout_geometry_populates_contract_ranges() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -914,6 +926,7 @@ fn stage_layout_geometry_empty_contracts_are_pumping_end_anchored() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -1062,6 +1075,7 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -1141,6 +1155,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -1218,6 +1233,7 @@ fn build_template_build_ctx_zero_anticipated_when_none() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -1622,6 +1638,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -1705,9 +1722,10 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
             max_fanout: ctx_a.anticipated_resolution.max_fanout,
         },
         study_stage_ids: ctx_a.study_stage_ids.clone(),
+        delivery_stage_ids: ctx_a.delivery_stage_ids.clone(),
         has_penalty: ctx_a.has_penalty,
-        cumulative_discount_factors: ctx_a.cumulative_discount_factors.clone(),
-        total_hours_per_stage: ctx_a.total_hours_per_stage.clone(),
+        delivery_cumulative_discount_factors: ctx_a.delivery_cumulative_discount_factors.clone(),
+        delivery_total_hours: ctx_a.delivery_total_hours.clone(),
         filling_v_target: ctx_a.filling_v_target.clone(),
         arc_stage_weights: ctx_a.arc_stage_weights.clone(),
         arc_spread_chrono: ctx_a.arc_spread_chrono.clone(),
@@ -1839,6 +1857,15 @@ fn stage_templates_empty_is_all_empty_with_n_hydros() {
 /// global rate, so the postprocessed per-stage factors are all < 1.0 and the
 /// cumulative vector compounds below the 1.0 placeholder.
 fn discounted_multi_stage_system() -> cobre_core::System {
+    discounted_multi_stage_system_with_post_study(None)
+}
+
+/// [`discounted_multi_stage_system`], optionally attaching `post_study`
+/// stages — the single owner of this fixture's shape so the delivery-axis
+/// tests share the same non-trivial discount rate.
+fn discounted_multi_stage_system_with_post_study(
+    post_study: Option<PostStudyStages>,
+) -> cobre_core::System {
     use cobre_core::{HorizonGraph, PolicyGraphType};
 
     let n_stages = 3_usize;
@@ -1960,6 +1987,7 @@ fn discounted_multi_stage_system() -> cobre_core::System {
         .bounds(resolved_bounds)
         .penalties(penalties)
         .policy_graph(policy_graph)
+        .post_study_stages(post_study)
         .build()
         .expect("discounted_multi_stage_system: valid system")
 }
@@ -2022,6 +2050,557 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
         cumulative[cumulative.len() - 1] < 1.0,
         "the final cumulative factor must be discounted below 1.0, got {}",
         cumulative[cumulative.len() - 1]
+    );
+}
+
+// ── Delivery-axis extended vectors (delivery_stage_ids / delivery_total_hours /
+// delivery_cumulative_discount_factors) ────────────────────────────────────
+
+/// Two post-study stages following the discounted 3-stage study horizon,
+/// mirroring [`cobre_core::model::post_study`]'s doc fixture. No thermal
+/// bounds: these tests exercise only the delivery-vector concatenation, not
+/// the per-thermal cost/bounds lookup.
+fn two_post_study_stages() -> PostStudyStages {
+    PostStudyStages {
+        stages: vec![
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+                duration_hours: 720.0,
+            },
+            PostStudyStage {
+                start_date: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+                duration_hours: 744.0,
+            },
+        ],
+        thermal_bounds: vec![],
+    }
+}
+
+/// With no `post_study_stages` declared, `delivery_stage_ids` is element-wise
+/// identical to `study_stage_ids` — `n_post == 0` collapses the concatenation
+/// to a no-op.
+#[test]
+fn delivery_stage_ids_equals_study_stage_ids_with_no_post_study() {
+    let system = discounted_multi_stage_system();
+    let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+    let par_lp = PrecomputedPar::default();
+    let resolved_params = empty_resolved_params();
+    let (
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+    ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
+    let (ctx, _, _) = super::build_template_build_ctx(
+        &system,
+        InflowNonNegativityMethod::None,
+        &par_lp,
+        system.load_models(),
+        &hydro_result.production,
+        &hydro_result.evaporation,
+        &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+        &hydro_cell_index,
+        SamplingScheme::InSample,
+    );
+
+    assert_eq!(ctx.delivery_stage_ids, ctx.study_stage_ids);
+}
+
+/// Three study stages (ids `[0, 1, 2]`) plus two post-study stages continue
+/// `delivery_stage_ids` with a synthetic, strictly increasing tail
+/// (`max(study_stage_ids) + 1 ..`), never `post_study_calendar_stages`'s own
+/// `Stage::id` (which restarts at `0`).
+#[test]
+fn delivery_stage_ids_continue_the_horizon_with_synthetic_ids() {
+    let system = discounted_multi_stage_system_with_post_study(Some(two_post_study_stages()));
+    let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+    let par_lp = PrecomputedPar::default();
+    let resolved_params = empty_resolved_params();
+    let (
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+    ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
+    let (ctx, _, _) = super::build_template_build_ctx(
+        &system,
+        InflowNonNegativityMethod::None,
+        &par_lp,
+        system.load_models(),
+        &hydro_result.production,
+        &hydro_result.evaporation,
+        &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+        &hydro_cell_index,
+        SamplingScheme::InSample,
+    );
+
+    assert_eq!(ctx.study_stage_ids, vec![0, 1, 2]);
+    assert_eq!(ctx.delivery_stage_ids, vec![0, 1, 2, 3, 4]);
+    assert!(
+        ctx.delivery_stage_ids.windows(2).all(|w| w[0] < w[1]),
+        "delivery_stage_ids must be strictly increasing, got {:?}",
+        ctx.delivery_stage_ids
+    );
+}
+
+/// The post-study delivery index reads that post-study stage's own hours and
+/// its continued cumulative discount factor.
+#[test]
+fn delivery_vectors_read_the_post_study_element_at_its_delivery_index() {
+    let post_study = two_post_study_stages();
+    let system = discounted_multi_stage_system_with_post_study(Some(post_study.clone()));
+    let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+    let par_lp = PrecomputedPar::default();
+    let resolved_params = empty_resolved_params();
+    let (
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+    ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
+    let (ctx, _, _) = super::build_template_build_ctx(
+        &system,
+        InflowNonNegativityMethod::None,
+        &par_lp,
+        system.load_models(),
+        &hydro_result.production,
+        &hydro_result.evaporation,
+        &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+        &hydro_cell_index,
+        SamplingScheme::InSample,
+    );
+
+    assert_eq!(
+        ctx.delivery_total_hours[3],
+        post_study.stages[0].duration_hours
+    );
+    assert_eq!(
+        ctx.delivery_cumulative_discount_factors[3],
+        ctx.post_study_resolved.cumulative_discount_factors[0]
+    );
+}
+
+/// `delivery_cumulative_discount_factors` is bit-identical to
+/// `compute_cumulative_discount_factors` run over the study's own per-stage
+/// factors concatenated with the post-study per-stage factors — the same
+/// identity `continued_cumulative_discount_matches_extended_horizon`
+/// (`crate::setup`) already pins for the post-study half alone.
+#[test]
+fn delivery_cumulative_discount_matches_recomputed_extended_horizon() {
+    let post_study = two_post_study_stages();
+    let system = discounted_multi_stage_system_with_post_study(Some(post_study.clone()));
+    let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+    let par_lp = PrecomputedPar::default();
+    let resolved_params = empty_resolved_params();
+    let (
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+    ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
+    let (ctx, _, _) = super::build_template_build_ctx(
+        &system,
+        InflowNonNegativityMethod::None,
+        &par_lp,
+        system.load_models(),
+        &hydro_result.production,
+        &hydro_result.evaporation,
+        &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+        &hydro_cell_index,
+        SamplingScheme::InSample,
+    );
+
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    let study_per_stage = compute_per_stage_discount_factors(&study_stages, system.policy_graph());
+
+    // Mirrors `resolve_post_study_artifacts`'s own deliberately stripped rate
+    // graph — a full `system.policy_graph()` would let a real stage's
+    // discount-rate override leak onto a synthetic post-study stage.
+    let rate_graph = cobre_core::HorizonGraph {
+        annual_discount_rate: system.policy_graph().annual_discount_rate,
+        ..cobre_core::HorizonGraph::default()
+    };
+    let calendar_stages = post_study_calendar_stages(&post_study.stages);
+    let calendar_stage_refs: Vec<_> = calendar_stages.iter().collect();
+    let per_stage_post = compute_per_stage_discount_factors(&calendar_stage_refs, &rate_graph);
+
+    let mut extended_per_stage = study_per_stage;
+    extended_per_stage.extend_from_slice(&per_stage_post);
+    let extended_cumulative = compute_cumulative_discount_factors(&extended_per_stage);
+
+    assert_eq!(
+        ctx.delivery_cumulative_discount_factors, extended_cumulative,
+        "delivery_cumulative_discount_factors must be bit-identical to \
+         compute_cumulative_discount_factors over study++post per-stage factors"
+    );
+}
+
+// ── Post-study anticipated bounds table (dense [anticipated_local][stage]) ─
+
+/// One `LeadStages(1)` anticipated thermal per id, distinct `operational_start_date`s
+/// so canonical `(operational_start_date, id)` order places `EntityId(7)` at
+/// anticipated-local `0` and `EntityId(3)` at anticipated-local `1` — the
+/// declared-id-descending order the sort would NOT produce on its own.
+fn two_anticipated_thermals(ids: [i32; 2]) -> Vec<Thermal> {
+    ids.into_iter()
+        .enumerate()
+        .map(|(i, id)| Thermal {
+            id: EntityId(id),
+            name: format!("T{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1 + i as u32, 1).unwrap(),
+            bus_id: EntityId(1),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            cost_per_mwh: 10.0,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
+        })
+        .collect()
+}
+
+/// [`system_with_thermals`]'s one-stage, one-bus shape plus `post_study`
+/// attached — a dedicated fixture rather than widening `system_with_thermals`
+/// itself, whose existing callers are outside this table's scope.
+fn system_with_anticipated_thermals_and_post_study(
+    thermals: Vec<Thermal>,
+    post_study: PostStudyStages,
+) -> cobre_core::System {
+    let n_thermals = thermals.len();
+    let n_stages = 1_usize;
+    let bus = fixture_bus();
+
+    let stages: Vec<Stage> = vec![Stage {
+        index: 0,
+        id: 0,
+        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        season_id: Some(0),
+        blocks: vec![Block {
+            index: 0,
+            name: "BLK0".to_string(),
+            duration_hours: 744.0,
+        }],
+        block_mode: BlockMode::Parallel,
+        state_config: StageStateConfig {
+            storage: false,
+            inflow_lags: false,
+        },
+        risk_config: StageRiskConfig::Expectation,
+        scenario_config: ScenarioSourceConfig {
+            branching_factor: 1,
+            noise_method: NoiseMethod::Saa,
+        },
+    }];
+
+    let load_models = vec![LoadModel {
+        bus_id: EntityId(1),
+        stage_id: 0,
+        mean_mw: 100.0,
+        std_mw: 0.0,
+    }];
+
+    let resolved_bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 0,
+            n_thermals,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages,
+            k_max: 1,
+        },
+        &BoundsDefaults {
+            hydro: default_hydro_bounds(),
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+            },
+            line_block: LineBlockBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping_block: PumpingBlockBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract_block: ContractBlockBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 0,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages,
+        },
+        &PenaltiesDefaults {
+            hydro: default_hydro_penalties(),
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .thermals(thermals)
+        .stages(stages)
+        .load_models(load_models)
+        .bounds(resolved_bounds)
+        .penalties(penalties)
+        .post_study_stages(Some(post_study))
+        .build()
+        .expect("system_with_anticipated_thermals_and_post_study: valid system")
+}
+
+/// Three post-study stages, matching [`two_anticipated_thermals`]'s pair —
+/// used by every table-shape test below.
+fn three_post_study_stages() -> Vec<PostStudyStage> {
+    vec![
+        PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+            duration_hours: 720.0,
+        },
+        PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+            duration_hours: 744.0,
+        },
+        PostStudyStage {
+            start_date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+            duration_hours: 720.0,
+        },
+    ]
+}
+
+/// Build `ctx.post_study_resolved` for a two-anticipated-thermal,
+/// three-post-study-stage system declaring exactly `thermal_bounds`.
+fn build_post_study_resolved_for(
+    ids: [i32; 2],
+    thermal_bounds: Vec<PostStudyThermalBound>,
+) -> PostStudyResolved {
+    let system = system_with_anticipated_thermals_and_post_study(
+        two_anticipated_thermals(ids),
+        PostStudyStages {
+            stages: three_post_study_stages(),
+            thermal_bounds,
+        },
+    );
+    let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+    let par_lp = PrecomputedPar::default();
+    let resolved_params = empty_resolved_params();
+    let (
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+    ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
+    let (ctx, _, _) = super::build_template_build_ctx(
+        &system,
+        InflowNonNegativityMethod::None,
+        &par_lp,
+        system.load_models(),
+        &hydro_result.production,
+        &hydro_result.evaporation,
+        &resolved_params,
+        anticipated_resolution,
+        anticipated_lead_stages,
+        per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
+        max_par_order,
+        &hydro_cell_index,
+        SamplingScheme::InSample,
+    );
+    ctx.post_study_resolved
+}
+
+/// Given `post_study` is `None`, `resolve_post_study_artifacts` returns
+/// [`PostStudyResolved::default`] and the accessor returns `None` on the empty
+/// table, never a panic.
+#[test]
+fn resolve_post_study_artifacts_none_returns_default_and_empty_table() {
+    let resolved =
+        resolve_post_study_artifacts(None, &[], &cobre_core::HorizonGraph::default(), 1.0, 1.0);
+
+    assert_eq!(resolved, PostStudyResolved::default());
+    assert_eq!(
+        resolved.anticipated_bound(AnticipatedLocal::new(0), 0),
+        None
+    );
+}
+
+/// Two anticipated plants in canonical anticipated-local order
+/// `[EntityId(7), EntityId(3)]`, a deck declaring a bound only at
+/// `(EntityId(7), post-study stage 1)`: `anticipated_bound` returns that bound
+/// for local `0` at stage `1` and `None` for local `1` at the same stage.
+#[test]
+fn anticipated_bound_matches_the_one_declared_cell_only() {
+    let resolved = build_post_study_resolved_for(
+        [7, 3],
+        vec![PostStudyThermalBound {
+            thermal_id: EntityId(7),
+            post_study_stage_index: 1,
+            cost_per_mwh: 42.0,
+            min_mw: 5.0,
+            max_mw: 50.0,
+        }],
+    );
+
+    assert_eq!(
+        resolved.anticipated_bound(AnticipatedLocal::new(0), 1),
+        Some((42.0, 5.0, 50.0)),
+        "local 0 (EntityId(7)) must carry the declared bound at stage 1"
+    );
+    assert_eq!(
+        resolved.anticipated_bound(AnticipatedLocal::new(1), 1),
+        None,
+        "local 1 (EntityId(3)) has no declared bound at stage 1"
+    );
+}
+
+/// Distinct `(cost, min, max)` triples per `(local, stage)`, local-major —
+/// shared by every table-shape test below so a stride/row mix-up surfaces as
+/// a mismatch against a specific expected value, never a coincidental match.
+const FULL_TABLE_VALUES: [[(f64, f64, f64); 3]; 2] = [
+    [(10.0, 1.0, 11.0), (20.0, 2.0, 22.0), (30.0, 3.0, 33.0)],
+    [(40.0, 4.0, 44.0), (50.0, 5.0, 55.0), (60.0, 6.0, 66.0)],
+];
+
+/// Every `(local, stage)` cell of `ids` x 3 stages, valued from
+/// [`FULL_TABLE_VALUES`], sorted canonically by `(thermal_id,
+/// post_study_stage_index)` — [`PostStudyThermalLookup::new`](crate::setup::PostStudyThermalLookup::new)'s
+/// own precondition, which anticipated-local order (`ids` here) does not
+/// generally satisfy.
+fn full_two_plant_three_stage_bounds(ids: [i32; 2]) -> Vec<PostStudyThermalBound> {
+    let mut bounds: Vec<PostStudyThermalBound> = ids
+        .iter()
+        .enumerate()
+        .flat_map(|(local, &id)| {
+            FULL_TABLE_VALUES[local].iter().enumerate().map(
+                move |(stage, &(cost_per_mwh, min_mw, max_mw))| PostStudyThermalBound {
+                    thermal_id: EntityId(id),
+                    post_study_stage_index: stage,
+                    cost_per_mwh,
+                    min_mw,
+                    max_mw,
+                },
+            )
+        })
+        .collect();
+    bounds.sort_by_key(|b| (b.thermal_id, b.post_study_stage_index));
+    bounds
+}
+
+/// A fully-declared 2-plant x 3-stage deck: every cell of the dense table
+/// agrees exactly with [`PostStudyThermalLookup::lookup`](crate::setup::PostStudyThermalLookup::lookup)
+/// for the corresponding `EntityId` — pins the table as a faithful projection
+/// of the lookup, not merely a plausible one.
+#[test]
+fn anticipated_bound_agrees_with_lookup_on_every_cell() {
+    let ids = [7, 3];
+    let resolved = build_post_study_resolved_for(ids, full_two_plant_three_stage_bounds(ids));
+
+    for (local, &id) in ids.iter().enumerate() {
+        for stage in 0..3 {
+            assert_eq!(
+                resolved.anticipated_bound(AnticipatedLocal::new(local), stage),
+                resolved.thermal_bounds.lookup(EntityId(id), stage),
+                "local {local} (EntityId({id})) stage {stage} must agree with lookup"
+            );
+        }
+    }
+}
+
+/// The same fully-declared 2-plant x 3-stage deck: the flattened table holds
+/// exactly `2 * 3 = 6` cells. Every in-range `(local, stage)` combination
+/// resolves to its own distinct declared value (so a stride/row mix-up would
+/// surface as a mismatch, not a coincidental match), and both boundaries —
+/// one plant past the row count, one stage past the stride — return `None`
+/// rather than wrapping into a neighboring row, pinning the row-count and
+/// stride the builder's `debug_assert`s enforce.
+#[test]
+fn anticipated_bounds_table_shape_is_two_plants_by_three_stages() {
+    let ids = [7, 3];
+    let resolved = build_post_study_resolved_for(ids, full_two_plant_three_stage_bounds(ids));
+
+    for local in 0..2 {
+        for stage in 0..3 {
+            assert_eq!(
+                resolved.anticipated_bound(AnticipatedLocal::new(local), stage),
+                Some(FULL_TABLE_VALUES[local][stage]),
+                "local {local} stage {stage}"
+            );
+        }
+    }
+
+    assert_eq!(
+        resolved.anticipated_bound(AnticipatedLocal::new(2), 0),
+        None,
+        "one plant past the row count must return None, not wrap into a nonexistent row"
+    );
+    assert_eq!(
+        resolved.anticipated_bound(AnticipatedLocal::new(0), 3),
+        None,
+        "one stage past the stride must return None, not shift into the next row"
     );
 }
 
@@ -2292,6 +2871,7 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
         system,
         InflowNonNegativityMethod::None,
         par_lp,
+        system.load_models(),
         production,
         &hydro_models.evaporation,
         resolved_params,
@@ -3089,6 +3669,7 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &production,
         &hydro_models.evaporation,
         &resolved_params,
@@ -3204,6 +3785,7 @@ fn block_layout_and_template(
         system,
         InflowNonNegativityMethod::None,
         par_lp,
+        system.load_models(),
         production,
         &hydro_models.evaporation,
         resolved_params,
@@ -3752,6 +4334,7 @@ fn stage_geometry_rerouted_ranges_match_layout_source_at_every_stage() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -4195,6 +4778,7 @@ fn filling_block_layout_and_template(
         system,
         InflowNonNegativityMethod::None,
         par_lp,
+        system.load_models(),
         production,
         &hydro_models.evaporation,
         resolved_params,
@@ -4519,6 +5103,7 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,
@@ -4617,6 +5202,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
+        system.load_models(),
         &hydro_result.production,
         &hydro_result.evaporation,
         &resolved_params,

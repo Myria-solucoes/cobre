@@ -24,12 +24,6 @@
 //!   self-describing `[start_date, end_date)` window on the pre-study calendar,
 //!   mirroring `recent_observations`. Optional; defaults to an empty array when
 //!   absent.
-//! - `future_anticipated_deliveries` — in-study decided delivery windows per
-//!   anticipated thermal plant, delivered after the study horizon: the
-//!   right-boundary counterpart to `past_anticipated_commitments`. Each entry
-//!   is a self-describing `[delivery_start, delivery_end)` window carrying a
-//!   `[min_mw, max_mw]` bound (`min_mw == max_mw` pins a fixed commitment).
-//!   Optional; defaults to an empty array when absent.
 //!
 //! ```json
 //! {
@@ -45,9 +39,6 @@
 //!   ],
 //!   "past_anticipated_commitments": [
 //!     { "thermal_id": 1, "start_date": "2026-01-01", "end_date": "2026-02-01", "value_mw": 0.0 }
-//!   ],
-//!   "future_anticipated_deliveries": [
-//!     { "thermal_id": 86, "delivery_start": "2026-09-05", "delivery_end": "2026-09-12", "min_mw": 0.0, "max_mw": 350.0 }
 //!   ]
 //! }
 //! ```
@@ -76,9 +67,12 @@
 //!    `value_mw` is finite, and windows for the same `thermal_id` do not overlap
 //!    (adjacent ranges where `start == prev_end` are accepted). All four route
 //!    through the shared windowed-record validator.
-//! 9. Each thermal's windows tile its calendar-derived leading delivery stages
-//!    at coverage `1.0` — no gap, no overlap, none beyond the horizon — and
-//!    every `value_mw` lies within the plant's
+//! 9. Each thermal's windows tile the delivery stages it decides before the
+//!    study at coverage `1.0` — no gap, no overlap — on both sides of the study
+//!    horizon: the leading in-study stages and, when the plant's lead reaches
+//!    past the horizon, the post-horizon stages it decides before the study. A
+//!    window may not cover a stage the study itself decides or one past the
+//!    plant's decision reach. Every `value_mw` lies within the plant's
 //!    `[min_generation_mw, max_generation_mw]` bounds and, if the plant has a
 //!    commissioning window, matures inside it. All are enforced by the semantic
 //!    validator (Layer 5a); the committed values are sunk cost and do not enter
@@ -89,14 +83,6 @@
 //! 11. Every `value_m3s` in `past_defluences` is finite and non-negative.
 //! 12. For defluence windows with the same `hydro_id`, date ranges do not overlap
 //!     (adjacent ranges where `start == prev_end` are accepted).
-//! 13. No `(thermal_id, delivery_start)` pair appears more than once in
-//!     `future_anticipated_deliveries`.
-//! 14. Every `delivery_start` and `delivery_end` in `future_anticipated_deliveries`
-//!     parses as ISO 8601 (`YYYY-MM-DD`), `delivery_end > delivery_start`, `min_mw`
-//!     is finite, and windows for the same `thermal_id` do not overlap (adjacent
-//!     ranges where `start == prev_end` are accepted).
-//! 15. Every `max_mw` in `future_anticipated_deliveries` is finite and
-//!     `min_mw <= max_mw` (equality pins a fixed commitment).
 //!
 //! Cross-reference validation (checking that hydro IDs exist in the hydro
 //! registry) is deferred to Layer 3 (deferred). Storage bounds validation
@@ -105,8 +91,8 @@
 
 use chrono::NaiveDate;
 use cobre_core::{
-    AnticipatedCommitmentHistory, EntityId, FutureAnticipatedDelivery, HydroPastDefluence,
-    HydroStorage, InitialConditions, RecentObservation,
+    AnticipatedCommitmentHistory, EntityId, HydroPastDefluence, HydroStorage, InitialConditions,
+    RecentObservation,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -157,15 +143,6 @@ pub(crate) struct RawInitialConditions {
     /// (start == previous end) are accepted. Optional; defaults to empty.
     #[serde(default)]
     past_defluences: Vec<RawHydroPastDefluence>,
-
-    /// In-study decided delivery windows per anticipated thermal plant,
-    /// delivered after the study horizon, each a self-describing
-    /// `[delivery_start, delivery_end)` window carrying a `[min_mw, max_mw]`
-    /// bound (`min_mw == max_mw` pins a fixed commitment). Windows for the
-    /// same thermal must not overlap; adjacent ranges (start == previous end)
-    /// are accepted. Optional; defaults to empty.
-    #[serde(default)]
-    future_anticipated_deliveries: Vec<RawFutureAnticipatedDelivery>,
 }
 
 /// Initial reservoir volume for one hydro plant, in hm³.
@@ -231,12 +208,14 @@ struct RawRecentObservation {
 ///
 /// A self-describing `[start_date, end_date)` window (ISO 8601, `end_date`
 /// exclusive and after `start_date`) carrying `value_mw`, the MW rate held
-/// constant over the window. A plant's windows must tile its calendar-derived
-/// leading delivery stages exactly (validated semantically). The values are
-/// sunk cost: they do not enter the study objective. Each `value_mw` must lie
-/// within the plant's `[min_generation_mw, max_generation_mw]` bounds and, if
-/// the plant has a commissioning window, mature inside it (both validated
-/// semantically).
+/// constant over the window. A plant's windows must tile the delivery stages it
+/// decides before the study exactly — those may fall on either side of the
+/// study horizon (leading in-study stages, or post-horizon stages the plant
+/// decides ahead of the study), never a stage the study itself decides
+/// (validated semantically). The values are sunk cost: they do not enter the
+/// study objective. Each `value_mw` must lie within the plant's
+/// `[min_generation_mw, max_generation_mw]` bounds and, if the plant has a
+/// commissioning window, mature inside it (both validated semantically).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -251,33 +230,6 @@ pub(crate) struct RawAnticipatedCommitmentHistory {
     end_date: String,
     /// Committed MW rate over the window, held constant.
     value_mw: f64,
-}
-
-/// One in-study decided delivery window for an anticipated thermal plant,
-/// delivered after the study horizon — the right-boundary counterpart to
-/// [`RawAnticipatedCommitmentHistory`].
-///
-/// A self-describing `[delivery_start, delivery_end)` window (ISO 8601,
-/// `delivery_end` exclusive and after `delivery_start`) carrying a
-/// `[min_mw, max_mw]` bound on the delivered MW rate. `min_mw == max_mw` pins
-/// a fixed commitment.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawFutureAnticipatedDelivery {
-    /// Thermal plant identifier. Must reference an anticipated thermal.
-    thermal_id: i32,
-    /// Start of the delivery window (inclusive), as an ISO 8601 date
-    /// (YYYY-MM-DD).
-    delivery_start: String,
-    /// End of the delivery window (exclusive), as an ISO 8601 date
-    /// (YYYY-MM-DD). Must be after `delivery_start`.
-    delivery_end: String,
-    /// Lower bound of the delivered MW rate over the window. Must be finite.
-    min_mw: f64,
-    /// Upper bound of the delivered MW rate over the window. Must be finite
-    /// and `>= min_mw`.
-    max_mw: f64,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -359,18 +311,6 @@ fn validate_raw(raw: &RawInitialConditions, path: &Path) -> Result<(), LoadError
         path,
     )?;
     validate_past_defluences_non_negative(&raw.past_defluences, path)?;
-
-    let future_delivery_windows =
-        parse_future_anticipated_delivery_windows(&raw.future_anticipated_deliveries, path)?;
-    validate_no_duplicate_future_delivery_windows(&future_delivery_windows, path)?;
-    validate_windowed_records(
-        &future_delivery_windows,
-        "future_anticipated_deliveries",
-        "thermal_id",
-        "min_mw",
-        path,
-    )?;
-    validate_future_delivery_bounds(&raw.future_anticipated_deliveries, path)?;
 
     Ok(())
 }
@@ -465,38 +405,6 @@ fn parse_past_defluence_windows(
         .collect()
 }
 
-/// Parse `future_anticipated_deliveries` dates and build the shared windowed
-/// view for [`validate_windowed_records`]. `min_mw` stands in for the shared
-/// view's single value slot; `max_mw` finiteness and the `min_mw <= max_mw`
-/// bound are checked separately by [`validate_future_delivery_bounds`].
-fn parse_future_anticipated_delivery_windows(
-    entries: &[RawFutureAnticipatedDelivery],
-    path: &Path,
-) -> Result<Vec<WindowedRecord>, LoadError> {
-    entries
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let start_date = parse_iso_date(
-                &format!("future_anticipated_deliveries[{i}].delivery_start"),
-                &entry.delivery_start,
-                path,
-            )?;
-            let end_date = parse_iso_date(
-                &format!("future_anticipated_deliveries[{i}].delivery_end"),
-                &entry.delivery_end,
-                path,
-            )?;
-            Ok(WindowedRecord {
-                entity_id: entry.thermal_id,
-                start_date,
-                end_date,
-                value: entry.min_mw,
-            })
-        })
-        .collect()
-}
-
 fn validate_non_negative(
     entries: &[RawHydroStorage],
     array_name: &str,
@@ -569,64 +477,6 @@ fn validate_no_duplicate_commitment_windows(
                 message: format!(
                     "duplicate (thermal_id {}, start_date {}) in past_anticipated_commitments",
                     window.entity_id, window.start_date
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Reject two delivery windows sharing a `(thermal_id, delivery_start)` —
-/// mirrors [`validate_no_duplicate_commitment_windows`] for the right-boundary
-/// surface. Date/overlap/`min_mw` finiteness are enforced by
-/// [`validate_windowed_records`].
-fn validate_no_duplicate_future_delivery_windows(
-    windows: &[WindowedRecord],
-    path: &Path,
-) -> Result<(), LoadError> {
-    let mut seen: HashSet<(i32, NaiveDate)> = HashSet::new();
-    for (i, window) in windows.iter().enumerate() {
-        if !seen.insert((window.entity_id, window.start_date)) {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("future_anticipated_deliveries[{i}].delivery_start"),
-                message: format!(
-                    "duplicate (thermal_id {}, delivery_start {}) in future_anticipated_deliveries",
-                    window.entity_id, window.start_date
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Reject a non-finite `max_mw` or an inverted `[min_mw, max_mw]` interval.
-/// `min_mw` finiteness is enforced upstream by [`validate_windowed_records`]
-/// (called before this function in [`validate_raw`]), so a non-finite
-/// `min_mw` never reaches the `min_mw > max_mw` comparison here.
-fn validate_future_delivery_bounds(
-    entries: &[RawFutureAnticipatedDelivery],
-    path: &Path,
-) -> Result<(), LoadError> {
-    for (i, entry) in entries.iter().enumerate() {
-        if !entry.max_mw.is_finite() {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("future_anticipated_deliveries[{i}].max_mw"),
-                message: format!(
-                    "future_anticipated_deliveries[{i}].max_mw must be a finite number, got {}",
-                    entry.max_mw
-                ),
-            });
-        }
-        if entry.min_mw > entry.max_mw {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("future_anticipated_deliveries[{i}].max_mw"),
-                message: format!(
-                    "future_anticipated_deliveries[{i}]: max_mw ({}) must be >= min_mw ({}) \
-                     for thermal_id {}, delivery_start {}",
-                    entry.max_mw, entry.min_mw, entry.thermal_id, entry.delivery_start
                 ),
             });
         }
@@ -726,28 +576,12 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .collect();
     past_defluences.sort_by_key(|e| (e.hydro_id.0, e.start_date));
 
-    let mut future_anticipated_deliveries: Vec<FutureAnticipatedDelivery> = raw
-        .future_anticipated_deliveries
-        .into_iter()
-        .map(|e| FutureAnticipatedDelivery {
-            thermal_id: EntityId(e.thermal_id),
-            delivery_start: NaiveDate::parse_from_str(&e.delivery_start, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("delivery_start already validated")),
-            delivery_end: NaiveDate::parse_from_str(&e.delivery_end, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("delivery_end already validated")),
-            min_mw: e.min_mw,
-            max_mw: e.max_mw,
-        })
-        .collect();
-    future_anticipated_deliveries.sort_by_key(|e| (e.thermal_id.0, e.delivery_start));
-
     InitialConditions {
         storage,
         filling_storage,
         past_anticipated_commitments,
         recent_observations,
         past_defluences,
-        future_anticipated_deliveries,
     }
 }
 
@@ -1738,6 +1572,36 @@ mod tests {
                 assert!(
                     message.contains("past_inflows"),
                     "message should name the unknown 'past_inflows' field, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+    }
+
+    // ── AC: retired future_anticipated_deliveries field → rejected ────────────
+
+    /// A stale `initial_conditions.json` still declaring a
+    /// `future_anticipated_deliveries` array is rejected by `deny_unknown_fields`
+    /// rather than silently dropped — the field's retirement is a breaking
+    /// input-contract change, and the unknown-field message routes to
+    /// `ParseError` (via serde), not `SchemaError`.
+    #[test]
+    fn test_retired_future_anticipated_deliveries_field_is_rejected() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "future_anticipated_deliveries": [
+            { "thermal_id": 86, "delivery_start": "2026-09-05", "delivery_end": "2026-09-12", "min_mw": 0.0, "max_mw": 350.0 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_initial_conditions(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("future_anticipated_deliveries"),
+                    "message should name the unknown 'future_anticipated_deliveries' field, \
+                     got: {message}"
                 );
             }
             other => panic!("expected ParseError, got: {other:?}"),

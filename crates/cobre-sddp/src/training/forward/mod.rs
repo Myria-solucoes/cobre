@@ -1,32 +1,38 @@
 //! Forward pass execution for SDDP training.
 //!
-//! [`run_forward_pass`] simulates scenario trajectories via stage LPs with the
-//! current Future Cost Function. Outputs [`TrajectoryRecord`]s and [`ForwardResult`]
+//! `run_forward_pass` simulates scenario trajectories via stage LPs with the
+//! current Future Cost Function. Outputs `TrajectoryRecord`s and [`ForwardResult`]
 //! for the backward pass and synchronisation step. Parallelised across workers
 //! with deterministic scenario assignment; the per-scenario hot loop lives in
 //! `forward_pass_state::ForwardPassState::run`.
 //!
 //! This `mod.rs` owns the result structs ([`ForwardResult`], [`SyncResult`]), the
-//! per-call parameter bundles ([`ForwardPassBatch`], `StageKey`), and the thin
-//! [`run_forward_pass`] shim that delegates to `ForwardPassState::run`.
+//! per-call parameter bundles (`ForwardPassBatch`, `StageKey`), and the thin
+//! `run_forward_pass` shim that delegates to `ForwardPassState::run`.
 
-use std::sync::mpsc::Sender;
+use crate::{
+    cut::pool::CutPool,
+    dcs::DcsParams,
+    setup::node_graph::{NodePos, StageIdx},
+    solver_stats::SolverStatsDelta,
+};
 
-use cobre_core::TrainingEvent;
-use cobre_solver::ActiveProfile;
-use cobre_solver::{SolverInterface, StageTemplate};
-
+// Consumed only by the test-support `run_forward_pass` shim / `ForwardPassBatch`
+// below; the import gate mirrors their `cfg` so a featureless build stays clean.
+#[cfg(any(test, feature = "test-support"))]
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
-    cut::pool::CutPool,
-    dcs::DcsParams,
     error::SddpError,
-    setup::node_graph::{NodePos, StageIdx},
-    solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, SolverWorkspace},
 };
+#[cfg(any(test, feature = "test-support"))]
+use cobre_core::TrainingEvent;
+#[cfg(any(test, feature = "test-support"))]
+use cobre_solver::{ActiveProfile, SolverInterface, StageTemplate};
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::mpsc::Sender;
 
 mod basis_capture;
 mod delta_cut_batch;
@@ -40,7 +46,6 @@ mod tests;
 
 pub use delta_cut_batch::build_delta_cut_row_batch_into;
 pub use sampler::build_sampler_from_ctx;
-pub(crate) use stats_aggregation::enumerated_nested_ub;
 pub use stats_aggregation::{ForwardBound, sync_forward};
 
 pub(crate) use basis_capture::write_capture_metadata;
@@ -107,6 +112,7 @@ pub struct SyncResult {
 ///
 /// Groups the per-iteration, per-rank scalar arguments that are forwarded
 /// from [`crate::train`] into [`run_forward_pass`].
+#[cfg(any(test, feature = "test-support"))]
 pub struct ForwardPassBatch<'a> {
     /// Number of forward-pass scenarios assigned to this rank.
     pub local_forward_passes: usize,
@@ -186,6 +192,7 @@ pub(crate) struct StageKey<'a> {
 ///
 /// - `records.len() != batch.local_forward_passes * num_stages`
 /// - `training_ctx.initial_state.len() != state.n_state`
+#[cfg(any(test, feature = "test-support"))]
 pub fn run_forward_pass<S>(
     workspaces: &mut [SolverWorkspace<S>],
     basis_store: &mut BasisStore,

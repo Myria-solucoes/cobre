@@ -69,7 +69,7 @@ pub(crate) use tailrace::{TailraceFamilies, build_tailrace_families_map};
 
 /// Combined result of the FPHA fitting pipeline.
 ///
-/// # Contract — `planes` carry the α-scaled whole affine function (Voice 1)
+/// # Contract — `planes` carry the α-scaled whole affine function
 ///
 /// Each plane is `α·FPHA_0`: `intercept`, `gamma_v`, `gamma_q`, and `gamma_s` are
 /// all `α · (raw hull coefficient)`. The export row builder writes them verbatim
@@ -85,9 +85,9 @@ pub(crate) struct FphaFitResult {
     ///
     /// May be ≷ 1 (an MSE balance, not a bounded-below-1 factor). Divide a plane
     /// coefficient by `alpha` to recover the raw hull coefficient.
-    // Intent/Seam: surfaced for a future consumer that recovers the raw hull
-    // coefficients; currently read only by the fitter unit tests, so the allow
-    // re-fires when a non-test reader is removed.
+    // Surfaced for a future consumer that recovers the raw hull coefficients;
+    // currently read only by the fitter unit tests, so the allow re-fires when
+    // a non-test reader is removed.
     #[allow(dead_code)]
     pub alpha: f64,
     /// Fit-quality deviation of the FINAL (post-reduction) plane set — the set the
@@ -182,10 +182,8 @@ pub(crate) fn fit_fpha_planes(
 
     validate_fitted_planes(&scaled, alpha, &hydro.name)?;
 
-    // `None` is a LITERAL SKIP — the validated `scaled` set is converted unchanged,
-    // so a run without a reduction config is bit-identical to the pre-reduction
-    // pipeline. The post-merge re-validate cannot fail (the mean of two sign-valid
-    // planes is sign-valid) but makes the contract explicit.
+    // The post-merge re-validate cannot fail (the mean of two sign-valid planes
+    // is sign-valid) but makes the contract explicit.
     let reduced = match reduction {
         Some(cfg) => {
             let merged = reduce_planes(&scaled, cfg, &pf, &bounds, hydro_id, entry_level_bits);

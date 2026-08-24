@@ -175,11 +175,11 @@ impl StudySetup {
 
         let tr = &self.scenario_libraries.training;
         let training_ctx = TrainingContext {
-            horizon: &self.methodology.horizon,
+            horizon: &self.horizon,
             state: &self.stage_data.state,
             cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
-            inflow_method: &self.methodology.inflow_method,
+            inflow_method: &self.inflow_method,
             stochastic: &self.stochastic,
             initial_state: &self.initial_state,
             inflow_scheme: tr.inflow_scheme,
@@ -291,7 +291,7 @@ impl StudySetup {
             energy_conversion: &self.energy_conversion,
             hydro_min_storage_hm3: &self.hydro_min_storage_hm3,
             event_sender,
-            commitment_window_delivery_dates: &self.commitment_window_delivery_dates,
+            extended_delivery_anchors: &self.extended_delivery_anchors,
             transit_seed_arcs: &self.transit_seed_arcs,
             past_defluences: &self.past_defluences,
             study_stage_dates: &self.study_stage_dates,
@@ -367,7 +367,6 @@ impl StudySetup {
                 noise_dim: 0,
                 n_anticipated: self.stage_data.state.n_anticipated,
                 k_max: self.stage_data.state.k_max,
-                n_commitment: self.stage_data.state.n_commitment,
             },
             solver_factory,
         )?;

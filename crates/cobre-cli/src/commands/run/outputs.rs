@@ -30,7 +30,7 @@ use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
 use cobre_sddp::build_evaporation_model_rows;
-use cobre_sddp::build_fpha_deviation_point_rows;
+use cobre_sddp::build_fixed_delivery_rows;
 use cobre_sddp::build_generic_constraint_echo_rows;
 use cobre_sddp::delta_to_stats_row;
 use cobre_sddp::orchestration::CheckpointParams;
@@ -110,7 +110,7 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
     // Off by default, so a default run writes no file and stays byte-identical;
     // mirror on the Python side: `write_fpha_deviation_points_if_any`.
     if args.config.exports.fpha_deviation_points {
-        let deviation_point_rows = build_fpha_deviation_point_rows(args.hydro_models);
+        let deviation_point_rows = args.hydro_models.fpha_deviation_point_rows.as_slice();
         if !deviation_point_rows.is_empty() {
             let deviation_points_path = args
                 .output_dir
@@ -133,6 +133,9 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
             .join("resolved_echo.parquet");
         cobre_io::write_generic_constraint_echo(&echo_path, &rows).map_err(CliError::from)?;
     }
+
+    let fixed_rows = build_fixed_delivery_rows(args.setup, args.system);
+    cobre_io::write_fixed_delivery(args.output_dir, &fixed_rows).map_err(CliError::from)?;
 
     if !args.training_result.solver_stats_log.is_empty() {
         let rows = solver_stats_log_to_rows(&args.training_result.solver_stats_log);

@@ -500,7 +500,6 @@ mod tests {
         }
     }
 
-    // Minimal ParsedData builder — only sets the fields needed for each test.
     fn base_parsed_data() -> ParsedData {
         use crate::{
             config::{
@@ -577,7 +576,6 @@ mod tests {
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
-                future_anticipated_deliveries: vec![],
             },
             post_study_stages: None,
             buses: vec![],
@@ -805,7 +803,6 @@ mod tests {
         let mut data = base_parsed_data();
         data.hydros = vec![make_hydro(1, HydroGenerationModel::Fpha, None, None)];
         data.buses = vec![make_bus(1)];
-        // All optional data is empty — every data-gated rule is skipped.
 
         let mut ctx = ValidationContext::new();
         validate_dimensional_consistency(&data, &mut ctx);
@@ -831,7 +828,6 @@ mod tests {
             make_hydro(2, HydroGenerationModel::ConstantProductivity, None, None),
         ];
 
-        // Only hydro 2 has a hyperplane row — hydro 1 (FPHA) is missing.
         data.fpha_hyperplanes = vec![fpha_row(2)];
 
         let mut ctx = ValidationContext::new();
@@ -867,7 +863,6 @@ mod tests {
     #[test]
     fn test_hydro_lifecycle_entry_stage_id_skips_earlier_stages() {
         let mut data = base_parsed_data();
-        // Stages 0 and 1 are study stages.
         data.hydros = vec![make_hydro(
             1,
             HydroGenerationModel::ConstantProductivity,
@@ -894,7 +889,6 @@ mod tests {
     #[test]
     fn test_hydro_lifecycle_exit_stage_id_skips_later_stages() {
         let mut data = base_parsed_data();
-        // Stages 0 and 1 are study stages.
         data.hydros = vec![make_hydro(
             1,
             HydroGenerationModel::ConstantProductivity,
@@ -935,7 +929,6 @@ mod tests {
             None,
         )];
 
-        // Provide inflow stats for study stages 0 and 1 only — not pre-study.
         data.inflow_seasonal_stats = vec![inflow_stats_row(1, 0), inflow_stats_row(1, 1)];
 
         let mut ctx = ValidationContext::new();
@@ -1076,7 +1069,6 @@ mod tests {
             make_hydro(1, HydroGenerationModel::Fpha, None, None),
             make_hydro(2, HydroGenerationModel::ConstantProductivity, None, None),
         ];
-        // Geometry present for hydro 2 only; the FPHA hydro 1 has none.
         data.hydro_geometry = vec![geometry_row(2, 100.0), geometry_row(2, 200.0)];
 
         let mut ctx = ValidationContext::new();

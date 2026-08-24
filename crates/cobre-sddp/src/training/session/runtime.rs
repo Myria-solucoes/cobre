@@ -70,7 +70,6 @@ mod tests {
 
         assert!(runtime.event_sender().is_some());
 
-        // Send through the accessor's borrowed reference.
         runtime
             .event_sender()
             .unwrap()

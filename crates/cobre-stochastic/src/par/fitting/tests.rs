@@ -1299,14 +1299,6 @@ fn periodic_autocorrelation_population_divisor() {
 
     let _rho = periodic_autocorrelation(0, 1, 1, obs, stats);
 
-    // Compute expected with 1/N:
-    // With single season, lag 1 means same season at lag 1.
-    // cross-year: lag_season=0 >= ref_season=0 and lag<n_seasons(1) -> yes.
-    // So ref starts at index 1, lag starts at index 0, n_pairs=2.
-    // gamma = 1/2 * [(2-2)*(1-2) + (3-2)*(2-2)] = 1/2 * [0 + 0] = 0.
-    // Actually let me check: ref_obs[1]=2, ref_obs[2]=3; lag_obs[0]=1, lag_obs[1]=2.
-    // gamma = 1/2 * [(2-2)(1-2) + (3-2)(2-2)] = 1/2 * [0*(-1) + 1*0] = 0.
-    // For this particular data, gamma = 0. Let me use different data.
     let data2 = [1.0, 4.0, 9.0]; // mean=14/3
     let (mean2, std2) = pop_mean_std(&data2);
     let stats2: &[(f64, f64)] = &[(mean2, std2)];
@@ -1725,14 +1717,6 @@ fn periodic_autocorrelation_population_divisor_verification() {
     // The 50% difference at N=3 makes this easy to detect.
     //
     // Use two seasons to avoid cross-year adjustment complexity.
-    // season 0: [1, 2, 3], mean=2, std_pop = sqrt(2/3) ≈ 0.8165
-    // season 1: [4, 5, 6], mean=5, std_pop = sqrt(2/3) ≈ 0.8165
-    //
-    // rho(0, 1): ref=season0, lag=season1.
-    // lag_season = (0+2-1)%2 = 1. cross_year: lag<2 and lag_season(1)>=ref(0) -> yes.
-    // So ref starts at 1, pairs = min(3-1, 3) = 2.
-    // gamma = 1/2 * [(2-2)(4-5) + (3-2)(5-5)] = 1/2 * [0 + 0] = 0.
-    // For this specific data, gamma=0 regardless of divisor. Use different data.
     let s0 = [1.0, 4.0, 3.0]; // mean=8/3, std_pop
     let s1 = [2.0, 5.0, 4.0]; // mean=11/3, std_pop
     let stats_0 = pop_mean_std(&s0);
@@ -2582,8 +2566,7 @@ fn build_extended_periodic_yw_matrix_diagonal_is_one_for_ar1() {
 ///   [0,2]=[2,0] = cross_correlation_z_a(ref=1, lag=0)
 ///     lag==0 => years_crossed=0; 5 pairs
 ///     gamma=[(-1.4)(-1.2)+0.6(-2.2)+0.1(0.8)+1.1(-0.2)+(-0.4)(2.8)]/5
-///          =[1.68-1.32+0.08-0.22-1.12]/5=-0.18/1=-0.18/5=-0.036... wait
-///     Actually: -0.90/5=-0.18
+///          =[1.68-1.32+0.08-0.22-1.12]/5=-0.90/5=-0.18
 ///     rho=-0.18/(0.8602325*1.7204651) ~ -0.1216216
 ///
 ///   [1,2]=[2,1] = cross_correlation_z_a(ref=1, lag=1)

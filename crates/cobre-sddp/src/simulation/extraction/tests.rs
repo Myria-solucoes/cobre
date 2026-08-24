@@ -11,8 +11,8 @@ use chrono::NaiveDate;
 
 use super::{
     EntityCounts, HydroReverseLookup, SolutionView, StageExtractionSpec, accumulate_category_costs,
-    assign_scenarios, extract_contracts, extract_generic_violations, extract_pumping_stations,
-    extract_stage_result, extract_stub_collections,
+    assign_scenarios, extract_anticipated_lanes, extract_contracts, extract_generic_violations,
+    extract_pumping_stations, extract_stage_result, extract_stub_collections,
 };
 use cobre_core::{
     Block, BlockMode, CascadeTopology, ConstraintExpression, GenericConstraint, NoiseMethod,
@@ -1246,6 +1246,125 @@ fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
     assert_eq!(result.thermals[1].anticipated_decision_mw, Some(0.0));
 }
 
+/// The re-sourced `extract_anticipated_lanes` emits one row per anticipated
+/// plant's genuine decision at this stage whose delivery target is post-study,
+/// reading the deposited value from the ring decision column
+/// (`anticipated_decision.start + local`) and the carried value from the ring
+/// slot the target lands in (`commit_out.start + commitment_hold_in_study_offset`),
+/// and dating the row from the extended delivery-stage anchors — while a
+/// decision targeting an in-study delivery emits nothing.
+///
+/// Fixture: one anticipated plant (`k_max = 2`) over a 2-stage study extended by
+/// one post-study delivery stage (`n_delivery = 3`). Its genuine decisions are
+/// an in-study self-delivery decided at stage 0 (`m = 1`) and a post-study
+/// delivery decided at stage 1 (`m = 2`). Distinct primal values on the two ring
+/// columns prove the extractor reads the two distinct columns; the post-study
+/// target `m = 2` lands in slot `(2 % 2) * 1 + 0 = 0` and dates onto
+/// `delivery_dates[2]`.
+#[test]
+fn extract_anticipated_lanes_reads_ring_decision_and_slot_for_post_study_decision() {
+    let mut state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    state.set_anticipated_resolution(AnticipatedResolution {
+        per_plant: vec![PointResolution {
+            decider: vec![None, Some(0), Some(1)],
+            decision_sets: vec![vec![1], vec![2]],
+            depth: vec![0, 0],
+            occupancy: vec![0, 0],
+        }],
+        k_max: 2,
+        max_fanout: 0,
+    });
+    assert_eq!(state.commit_out.start, 0);
+
+    let geometry = StageGeometry {
+        anticipated_decision: 6..7,
+        ..StageGeometry::default()
+    };
+    let study_dims = StudyDimensions {
+        anticipated_thermal_indices: vec![0],
+        ..StudyDimensions::default()
+    };
+    let counts = EntityCounts {
+        hydro_ids: vec![],
+        hydro_productivities: vec![],
+        thermal_ids: vec![7],
+        line_ids: vec![],
+        bus_ids: vec![],
+        pumping_station_ids: vec![],
+        contract_ids: vec![],
+        non_controllable_ids: vec![],
+    };
+    let mut primal = vec![0.0_f64; 8];
+    primal[state.commit_out.start] = 31.0; // ring slot the target lands in (carried)
+    primal[geometry.anticipated_decision.start] = 30.0; // decision column (deposited)
+    let delivery_dates = [2024_0101_i32, 2024_0201, 2024_0401];
+
+    let hydro_cell_index = test_support::identity_hydro_cell_index(1);
+    let ec = zero_energy_conversion(0, 2);
+    let diversion = HashMap::new();
+    let view = SolutionView {
+        primal: &primal,
+        dual: &[],
+        objective: 0.0,
+        objective_coeffs: &[],
+        row_lower: &[],
+    };
+    let spec = StageExtractionSpec {
+        state: &state,
+        study_dims: &study_dims,
+        n_blks: 0,
+        geometry: &geometry,
+        hydro_cell_index: &hydro_cell_index,
+        entity_counts: &counts,
+        inflow_m3s_per_hydro: &[],
+        block_hours: &[],
+        generic_constraint_entries: &[],
+        ncs_col_start: 0,
+        n_ncs: 0,
+        ncs_entity_ids: &[],
+        ncs_col_upper: &[],
+        pumping_col_start: 0,
+        n_pumping: 0,
+        pumping_consumption_mw_per_m3s: &[],
+        contract_prices: &[],
+        contract_is_import: &[],
+        diversion_upstream: &diversion,
+        hydro_productivities: &[],
+        col_scale: &[],
+        row_scale: &[],
+        cumulative_discount_factor: 1.0,
+        cost_scale_factor: 1.0,
+        energy_conversion: &ec,
+        hydro_min_storage_hm3: &[],
+        stage_index: 1,
+        n_stages: 2,
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+    };
+
+    // Decider stage (m = 2 is post-study): exactly one row, reading the two
+    // distinct ring columns and dating onto delivery_dates[2].
+    let rows = extract_anticipated_lanes(&view, &spec, &delivery_dates, 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].stage_id, 1);
+    assert_eq!(rows[0].thermal_id, 7);
+    assert_eq!(rows[0].delivery_date, 2024_0401);
+    assert_eq!(rows[0].deposited_decision_mw, 30.0);
+    assert_eq!(rows[0].carried_committed_mw, 31.0);
+
+    // Stage 0's only genuine decision (m = 1) targets an in-study delivery, so
+    // no lane row is emitted there.
+    let spec_stage0 = StageExtractionSpec {
+        stage_index: 0,
+        ..spec
+    };
+    let rows_stage0 = extract_anticipated_lanes(&view, &spec_stage0, &delivery_dates, 0);
+    assert!(
+        rows_stage0.is_empty(),
+        "an in-study-only decision emits no anticipated-lane row"
+    );
+}
+
 /// Verify that `is_anticipated` is `false` for every thermal when
 /// `anticipated_thermal_indices` is empty (no anticipated thermals configured).
 #[test]
@@ -1836,6 +1955,7 @@ fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
             decider: vec![None, Some(0), None],
             decision_sets: vec![vec![1], vec![], vec![]],
             depth: vec![1, 0, 0],
+            occupancy: vec![2, 1, 0],
         }],
         k_max: 3,
         max_fanout: 1,
@@ -6964,9 +7084,10 @@ fn two_sided_real_layout_allocates_minus_slack_column() {
         anticipated_windows: vec![],
         anticipated_resolution: AnticipatedResolution::default(),
         study_stage_ids: Vec::new(),
+        delivery_stage_ids: Vec::new(),
         has_penalty: false,
-        cumulative_discount_factors: vec![1.0],
-        total_hours_per_stage: vec![730.0],
+        delivery_cumulative_discount_factors: vec![1.0],
+        delivery_total_hours: vec![730.0],
         filling_v_target: BTreeMap::new(),
         arc_stage_weights: HashMap::new(),
         arc_spread_chrono: HashMap::new(),

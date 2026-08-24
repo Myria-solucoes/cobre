@@ -7,10 +7,13 @@
 //! it accepts aggregate result types and writes all output artifacts to the
 //! specified directory.
 
+use chrono::{Datelike, NaiveDate};
+
 pub(crate) mod atomic;
 pub mod convergence_reader;
 pub mod dictionary;
 pub mod error;
+pub mod fixed_delivery;
 pub mod generic_constraints_echo;
 pub mod hydro_models;
 pub mod manifest;
@@ -30,6 +33,7 @@ pub use convergence_reader::{
 };
 pub use dictionary::write_dictionaries;
 pub use error::OutputError;
+pub use fixed_delivery::{FixedDeliveryRow, write_fixed_delivery};
 pub use generic_constraints_echo::{GenericConstraintEchoRow, write_generic_constraint_echo};
 pub use hydro_models::{
     read_hydro_model_summary, write_evaporation_models, write_fpha_deviation_points,
@@ -55,6 +59,13 @@ pub use stochastic::{
     write_inflow_seasonal_stats, write_load_seasonal_stats, write_noise_openings,
 };
 pub use training_writer::{TrainingParquetWriter, write_row_selection_records};
+
+/// Arrow `Date32`'s native representation (days since the Unix epoch,
+/// 1970-01-01) for one calendar date.
+pub(crate) fn date32_days(date: NaiveDate) -> i32 {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).map_or(0, |e| e.num_days_from_ce());
+    date.num_days_from_ce() - epoch
+}
 
 /// One row of convergence data for a single training iteration, written to
 /// `training/convergence.parquet`.
@@ -423,7 +434,6 @@ impl SimulationOutput {
             .collect();
         partitions_written.sort();
 
-        // First present cost: producer feeds the rank-0 authoritative aggregate first.
         let cost = outputs.iter().find_map(|o| o.cost.clone());
 
         let solve_stats = merge_simulation_solve_stats(outputs);

@@ -81,8 +81,9 @@ use cobre_sddp::aggregate_simulation;
 use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::build_deviation_summary;
 use cobre_sddp::build_evaporation_model_rows;
-use cobre_sddp::build_fpha_deviation_point_rows;
+use cobre_sddp::build_fixed_delivery_rows;
 use cobre_sddp::build_generic_constraint_echo_rows;
+use cobre_sddp::checkpoint_terminal_cost_scale_factor;
 use cobre_sddp::delta_to_stats_row;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::inject_boundary_cuts;
@@ -92,7 +93,7 @@ use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::resolve_boundary_source_stage;
-use cobre_sddp::resolve_effective_inflow_lag_depth;
+use cobre_sddp::resolve_boundary_state_requirements;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
@@ -611,6 +612,22 @@ pub(crate) fn write_generic_constraint_echo_if_any(
     Ok(())
 }
 
+/// Write the run-level fixed post-horizon commitment echo.
+///
+/// Both Python write sites ([`run_via_study`] and `Study::train`) must emit this
+/// to match the CLI's `write_fixed_delivery` output (the Python-parity hard
+/// rule). The write is fully qualified, not imported, so the parity checker's
+/// `cobre_io::write_*` match sees both sides.
+pub(crate) fn write_fixed_delivery_if_any(
+    output_dir: &Path,
+    setup: &StudySetup,
+    system: &System,
+) -> Result<(), String> {
+    let rows = build_fixed_delivery_rows(setup, system);
+    cobre_io::write_fixed_delivery(output_dir, &rows)
+        .map_err(|e| format!("output write error: failed to write fixed_delivery: {e}"))
+}
+
 /// Write the per-sampled-point FPHA deviation table sidecar, when the run opted
 /// in (`config.exports.fpha_deviation_points`) AND the fit produced any points.
 ///
@@ -626,7 +643,7 @@ pub(crate) fn write_fpha_deviation_points_if_any(
     if !config.exports.fpha_deviation_points {
         return Ok(());
     }
-    let rows = build_fpha_deviation_point_rows(&setup.hydro_models);
+    let rows = setup.hydro_models.fpha_deviation_point_rows.as_slice();
     if !rows.is_empty() {
         let deviation_points_path = output_dir
             .join("hydro_models")
@@ -900,14 +917,11 @@ pub(crate) fn build_study_setup(
 
     let config = load_effective_config(&case_dir.join("config.json"), overrides)?;
 
-    // Infer the inflow-lag state block depth from a loaded boundary policy's cuts;
-    // carried onto the construction config below so both the layout and the
-    // boundary-load reject see it. Mirrors the CLI run path.
-    let inflow_lag_depth = match config.policy.boundary.as_ref() {
-        Some(bp) => resolve_effective_inflow_lag_depth(Some(&case_dir.join(&bp.path)))
-            .map_err(|e| e.to_string())?,
-        None => None,
-    };
+    // Resolve the boundary-derived state requirements once; carried onto the
+    // construction config below so both the layout and the boundary-load reject
+    // see them. Mirrors the CLI run path.
+    let boundary_requirements =
+        resolve_boundary_state_requirements(case_dir, &config).map_err(|e| e.to_string())?;
 
     let seed = config
         .training
@@ -924,7 +938,7 @@ pub(crate) fn build_study_setup(
         &config,
         seed,
         &training_source,
-        inflow_lag_depth,
+        boundary_requirements.inflow_lag_depth(),
     )
     .map_err(|e| format!("stochastic preprocessing error: {e}"))?;
     let system = result.system;
@@ -942,11 +956,11 @@ pub(crate) fn build_study_setup(
     let simulation_source = config
         .simulation_scenario_source(&case_dir.join("config.json"))
         .map_err(|e| format!("scenario source error: {e}"))?;
-    let params = StudyParams::from_config(&config).map_err(|e| e.to_string())?;
-    let mut construction = params.into_construction_config();
-    construction.inflow_lag_depth = inflow_lag_depth;
+    let mut construction = StudyParams::from_config(&config).map_err(|e| e.to_string())?;
+    construction.boundary = boundary_requirements;
     construction.scalar_parameters = artifacts.scalar_parameters;
-    let mut setup = StudySetup::from_broadcast_params(
+    // export_states is captured by StudyParams::from_config from config.exports.states.
+    let setup = StudySetup::from_broadcast_params(
         &system,
         result.stochastic,
         construction,
@@ -955,7 +969,6 @@ pub(crate) fn build_study_setup(
         &simulation_source,
     )
     .map_err(|e| e.to_string())?;
-    setup.set_export_states(config.exports.states);
 
     let mut provenance_report = build_provenance_report(
         estimation_path,
@@ -1038,9 +1051,11 @@ fn validate_loaded_policy(
     system: &System,
     setup: &StudySetup,
 ) -> Result<PolicyLoadProof<FullFcf>, String> {
+    let source_cost_scale_factor = checkpoint_terminal_cost_scale_factor(checkpoint)
+        .map_err(|e| format!("policy validation error: {e}"))?;
     rescale_checkpoint_cuts_for_load(
         &mut checkpoint.stage_cuts,
-        checkpoint.metadata.producer.cost_scale_factor,
+        Some(source_cost_scale_factor),
         setup.stage_data.stage_templates.cost_scale_factor,
     );
 
@@ -1171,9 +1186,6 @@ pub(crate) fn apply_training_policy_mode(
 
         let completed = u64::from(checkpoint.metadata.producer.completed_iterations);
 
-        // The pre-replacement (cold-path) FCF already carries the per-pool
-        // arrays `new_per_pool` derived for this study; the resume path
-        // reuses them verbatim rather than substituting a scalar.
         let pool_state_dimensions: Vec<usize> =
             setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
         let visit_bounds: Vec<u64> = setup
@@ -1182,7 +1194,6 @@ pub(crate) fn apply_training_policy_mode(
             .iter()
             .map(|p| u64::from(p.visit_stride))
             .collect();
-        // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
             &proof,
             &checkpoint.stage_cuts,
@@ -1194,9 +1205,6 @@ pub(crate) fn apply_training_policy_mode(
         .map_err(|e| format!("resume FCF construction error: {e}"))?;
         setup.replace_fcf(warm_fcf);
         setup.set_start_iteration(completed);
-        // Seed the warm-start basis store so iteration 1's cut-loaded LPs
-        // warm-start. Empty bases (checkpoint written without `store_basis`) leave
-        // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
             let basis_cache = build_basis_cache_from_checkpoint(
                 &checkpoint.stage_bases,
@@ -1212,13 +1220,12 @@ pub(crate) fn apply_training_policy_mode(
     // replaces the entire FCF first, then boundary cuts overwrite only the
     // terminal pool.
     if let Some(ref bp) = config.policy.boundary {
-        // Resolve against the CASE dir (an external source checkpoint), never the
-        // current run's output dir; an absolute `bp.path` passes through unchanged.
-        let boundary_path = case_dir.join(&bp.path);
+        let boundary_path = bp.checkpoint_path(case_dir);
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
         let target_delivery_intervals = setup.build_terminal_anticipated_delivery_intervals(system);
+        let fixed_windows = setup.build_terminal_fixed_post_horizon_windows(system);
         let source_stage = if let Some(idx) = bp.source_stage {
             idx
         } else {
@@ -1232,16 +1239,17 @@ pub(crate) fn apply_training_policy_mode(
             resolved
         };
         let mut on_warning = |msg: &str| eprintln!("cobre-python: boundary cut warning: {msg}");
-        // Inferred from this boundary policy's own cuts (the depth the state layout
-        // reserved) — a defensive guard on the load, never a user error.
-        let effective_inflow_lag_depth =
-            resolve_effective_inflow_lag_depth(Some(&boundary_path)).map_err(|e| e.to_string())?;
+        // The depth the state layout already reserved (read off the constructed
+        // setup, not re-inferred from the checkpoint) — a defensive guard on the
+        // load, never a user error.
+        let effective_inflow_lag_depth = setup.boundary_requirements().inflow_lag_depth();
         let boundary_records = load_boundary_cuts(
             &boundary_path,
             source_stage,
             state_dim,
             &current_manifest,
             &target_delivery_intervals,
+            &fixed_windows,
             effective_inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,
@@ -1398,6 +1406,7 @@ pub(crate) fn run_via_study(
         write_evaporation_models_if_any(&output_dir, &setup, &system)?;
         write_fpha_deviation_points_if_any(&output_dir, &setup, &config)?;
         write_generic_constraint_echo_if_any(&output_dir, &setup, &system)?;
+        write_fixed_delivery_if_any(&output_dir, &setup, &system)?;
 
         // Propagate a captured callback exception only AFTER all training
         // artifacts are written, so a raising or Ctrl-C-stopped run still persists
@@ -1822,6 +1831,34 @@ mod tests {
             "1dtoy config.training.enabled must be true"
         );
         // The stochastic summary must describe at least one hydro.
+        assert!(
+            loaded.stochastic_summary.n_hydros > 0,
+            "stochastic summary must report a non-zero hydro count"
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    /// The Python load path inherits `External`-scheme moment derivation
+    /// through the shared `build_study_setup` entry point: a σ = 0 External
+    /// load/inflow deck with no seasonal-stats twins must load successfully
+    /// with no binding change in this crate.
+    #[test]
+    fn build_study_setup_succeeds_for_d56_external_authoritative() {
+        let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-python parent")
+            .parent()
+            .expect("crates parent")
+            .join("examples/deterministic/d56-external-authoritative");
+
+        let output_dir =
+            std::env::temp_dir().join(format!("cobre_py_build_study_d56_{}", std::process::id()));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+
+        let loaded = build_study_setup(&case_dir, &output_dir, None)
+            .expect("build_study_setup must succeed for d56-external-authoritative");
+
         assert!(
             loaded.stochastic_summary.n_hydros > 0,
             "stochastic summary must report a non-zero hydro count"

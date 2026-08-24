@@ -5,10 +5,12 @@
 //! case directory. All file bytes are embedded at compile time via
 //! [`include_bytes!`], so the registry is entirely allocation-free.
 //!
-//! The template source files live at `examples/1dtoy/` in the workspace root.
-//! The build script (`build.rs`) copies them into `OUT_DIR/templates/1dtoy/`
-//! so that `include_bytes!` works with `cargo publish` (which only packages
-//! files within the crate directory).
+//! The build script (`build.rs`) copies the in-crate `templates/1dtoy/` files
+//! into `OUT_DIR/templates/1dtoy/` so that `include_bytes!` works with `cargo
+//! publish` (which only packages files within the crate directory). That
+//! in-crate copy must stay byte-identical to the canonical `examples/1dtoy/`
+//! at the workspace root, enforced by
+//! `test_1dtoy_embedded_files_match_canonical_source` below.
 //!
 //! # Example
 //!
@@ -196,7 +198,7 @@ mod tests {
 
     /// Guards the hand-synced dual copy against drift: `build.rs` embeds the
     /// `crates/cobre-cli/templates/1dtoy/` copy via `include_bytes!`, while
-    /// `examples/1dtoy/` is the canonical source the book and docs point at.
+    /// `examples/1dtoy/` is the canonical source the docs point at.
     /// Covers the whole set (JSON *and* parquet), not just `config.json`.
     #[test]
     fn test_1dtoy_embedded_files_match_canonical_source() {

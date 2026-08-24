@@ -37,7 +37,6 @@
 //!     LinearTerm, SlackConfig, VariableRef,
 //! };
 //!
-//! // Represents: hydro_generation(10) + hydro_generation(11)
 //! let expr = ConstraintExpression {
 //!     terms: vec![
 //!         LinearTerm::literal(1.0, VariableRef::HydroGeneration {

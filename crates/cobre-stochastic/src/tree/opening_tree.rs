@@ -26,9 +26,6 @@ pub enum SweepDirection {
 /// `data[stage_offsets[stage] + opening_idx * dim ..][..dim]`. The sentinel
 /// `stage_offsets[n_stages] == data.len()` keeps bounds checks exact without
 /// special-casing the last stage.
-///
-/// See [Scenario Generation SS2.3a](scenario-generation.md) for the full
-/// type specification and memory-layout rationale.
 #[derive(Debug)]
 pub struct OpeningTree {
     data: Box<[f64]>,

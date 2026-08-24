@@ -682,7 +682,6 @@ mod tests {
             ],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         let bytes = postcard::to_allocvec(&original).unwrap();
@@ -711,7 +710,6 @@ mod tests {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         let bytes = postcard::to_allocvec(&original).unwrap();

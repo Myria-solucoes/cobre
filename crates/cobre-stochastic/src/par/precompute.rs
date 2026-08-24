@@ -1298,18 +1298,6 @@ mod tests {
             );
         }
 
-        // Stage 12 has AR(0) in this setup (AR only at stage 0),
-        // so it won't have non-zero psi. Instead, verify that study-stage
-        // lag resolution (exact match) works at stage 1:
-        // Stage 1 (season 1): lag-1 = stage 0 (exact match, season 0).
-        // This should match the season 0 stats.
-        // But stage 1 is AR(0) too. Let me adjust the model to have
-        // AR at stage 12 as well.
-        //
-        // Actually, the multi-year test goal is to verify that stage 0
-        // and stage 12 (same season) produce the same psi when both
-        // have AR coefficients. Let me rebuild with AR at both stages.
-
         let mut models_v2 = Vec::new();
         for h_id in [1, 2] {
             for i in 0..24_i32 {

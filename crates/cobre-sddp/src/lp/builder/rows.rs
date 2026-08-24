@@ -44,7 +44,6 @@ pub(super) fn fill_stage_rows(
     fill_anticipated_fishing_rows(layout, &mut row_lower, &mut row_upper);
     fill_anticipated_state_out_def_rows(layout, &mut row_lower, &mut row_upper);
     fill_anticipated_slot_definition_rows(layout, &mut row_lower, &mut row_upper);
-    fill_commitment_post_horizon_rows(layout, &mut row_lower, &mut row_upper);
     fill_z_inflow_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
 
     (row_lower, row_upper)
@@ -569,22 +568,6 @@ fn fill_anticipated_slot_definition_rows(
         row_lower,
         row_upper,
     );
-}
-
-/// Fill the terminal post-horizon lanes' per-window equality row bounds
-/// (`0 == 0`): dense, every declared window gets exactly one row every
-/// stage (the latch or the carry — both render `[0, 0]`, mirroring the
-/// in-study families above).
-fn fill_commitment_post_horizon_rows(
-    layout: &StageLayout,
-    row_lower: &mut [f64],
-    row_upper: &mut [f64],
-) {
-    let start = layout.anticipated.row_commitment_start;
-    for w in 0..layout.state.n_commitment {
-        row_lower[start + w] = 0.0;
-        row_upper[start + w] = 0.0;
-    }
 }
 
 /// Write `0 == 0` bounds at each present position of a sparse row-position table.

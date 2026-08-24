@@ -12,7 +12,7 @@ use crate::{
     InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
     NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
     ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal,
+    ResolvedPenalties, SamplingScheme, Stage, Thermal,
 };
 
 mod builder;
@@ -441,10 +441,50 @@ impl System {
         &self.load_models
     }
 
+    /// Canonical load-noise-member bus IDs under `scheme`: [`LoadModel::is_noise_member`]
+    /// over `load_models()`, unioned with `external_load_scenarios()`'s own buses under
+    /// [`SamplingScheme::External`] — a bus with no `load_seasonal_stats` row is still a
+    /// noise member there. Sorted and deduplicated by [`EntityId`] for declaration-order
+    /// invariance. The single owner of this membership: every site deciding which buses
+    /// carry load noise calls this rather than re-deriving it.
+    #[must_use]
+    pub fn load_noise_member_bus_ids(&self, scheme: SamplingScheme) -> Vec<EntityId> {
+        let mut ids: Vec<EntityId> = self
+            .load_models
+            .iter()
+            .filter(|m| m.is_noise_member(scheme))
+            .map(|m| m.bus_id)
+            .collect();
+        if scheme == SamplingScheme::External {
+            ids.extend(self.external_load_scenarios.iter().map(|r| r.bus_id));
+        }
+        ids.sort_unstable_by_key(|id| id.0);
+        ids.dedup();
+        ids
+    }
+
     /// Returns all NCS availability noise models in canonical order (by NCS ID, then stage ID).
     #[must_use]
     pub fn ncs_models(&self) -> &[NcsModel] {
         &self.ncs_models
+    }
+
+    /// Canonical NCS-noise-member IDs under `scheme`: every NCS in `ncs_models()`
+    /// (unfiltered — an NCS with `std = 0` is still a member; dropping it would
+    /// shift the canonical noise-vector order), unioned with
+    /// `external_ncs_scenarios()`'s own NCS set under [`SamplingScheme::External`]
+    /// — an NCS with no `non_controllable_stats` row is still a noise member
+    /// there. Sorted and deduplicated by [`EntityId`]. NCS's LP-structural
+    /// presence is a separate concern owned by [`Self::non_controllable_sources`].
+    #[must_use]
+    pub fn ncs_noise_member_ids(&self, scheme: SamplingScheme) -> Vec<EntityId> {
+        let mut ids: Vec<EntityId> = self.ncs_models.iter().map(|m| m.ncs_id).collect();
+        if scheme == SamplingScheme::External {
+            ids.extend(self.external_ncs_scenarios.iter().map(|r| r.ncs_id));
+        }
+        ids.sort_unstable_by_key(|id| id.0);
+        ids.dedup();
+        ids
     }
 
     /// Returns a reference to the correlation model.
@@ -1572,7 +1612,6 @@ mod tests {
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         let system = SystemBuilder::new()
@@ -2002,7 +2041,6 @@ mod tests {
                 end_date: NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
                 value_m3s: 320.0,
             }],
-            future_anticipated_deliveries: vec![],
         };
 
         let generic_constraints = vec![GenericConstraint {

@@ -215,7 +215,6 @@ mod tests {
 
     #[test]
     fn test_linear_chain() {
-        // A(0) -> B(1) -> C(2)
         let hydros = vec![
             make_hydro(0, Some(1)),
             make_hydro(1, Some(2)),
@@ -242,7 +241,6 @@ mod tests {
 
     #[test]
     fn test_fork_merge() {
-        // A(0)->C(2), B(1)->C(2): two headwaters merge at C
         let hydros = vec![
             make_hydro(0, Some(2)),
             make_hydro(1, Some(2)),
@@ -259,11 +257,9 @@ mod tests {
         assert_eq!(upstream_c.len(), 2);
         assert!(upstream_c.contains(&EntityId(0)));
         assert!(upstream_c.contains(&EntityId(1)));
-        // Sorted by inner i32: A(0) before B(1)
         assert_eq!(upstream_c[0], EntityId(0));
         assert_eq!(upstream_c[1], EntityId(1));
 
-        // Topo order: A and B before C
         let order = topo.topological_order();
         let pos_a = order.iter().position(|&id| id == EntityId(0)).unwrap();
         let pos_b = order.iter().position(|&id| id == EntityId(1)).unwrap();
@@ -274,7 +270,6 @@ mod tests {
 
     #[test]
     fn test_parallel_chains() {
-        // A(0)->B(1) and C(2)->D(3): two independent chains
         let hydros = vec![
             make_hydro(0, Some(1)),
             make_hydro(1, None),
@@ -290,16 +285,13 @@ mod tests {
         let pos_c = order.iter().position(|&id| id == EntityId(2)).unwrap();
         let pos_d = order.iter().position(|&id| id == EntityId(3)).unwrap();
 
-        // A before B, C before D
         assert!(pos_a < pos_b);
         assert!(pos_c < pos_d);
-        // All hydros are represented
         assert_eq!(order.len(), 4);
     }
 
     #[test]
     fn test_all_terminal() {
-        // Three hydros, all terminal -- topological order is canonical ID order
         let hydros = vec![
             make_hydro(1, None),
             make_hydro(2, None),
@@ -308,13 +300,11 @@ mod tests {
         let topo = CascadeTopology::build(&hydros);
         assert_eq!(topo.len(), 3);
 
-        // All headwaters and all terminals
         for id in [1, 2, 3] {
             assert!(topo.is_headwater(EntityId(id)));
             assert!(topo.is_terminal(EntityId(id)));
         }
 
-        // Topological order is canonical ID order (all headwaters, sorted by i32)
         assert_eq!(
             topo.topological_order(),
             &[EntityId(1), EntityId(2), EntityId(3)]
@@ -323,7 +313,6 @@ mod tests {
 
     #[test]
     fn test_deterministic_ordering() {
-        // Same input built twice must produce identical results
         let hydros = vec![
             make_hydro(5, Some(10)),
             make_hydro(3, Some(10)),
@@ -338,7 +327,6 @@ mod tests {
 
     #[test]
     fn test_is_headwater() {
-        // A(0)->C(2), B(1)->C(2): A and B are headwaters, C is not
         let hydros = vec![
             make_hydro(0, Some(2)),
             make_hydro(1, Some(2)),
@@ -352,7 +340,6 @@ mod tests {
 
     #[test]
     fn test_is_terminal() {
-        // A(0)->C(2), B(1)->C(2): C is terminal, A and B are not
         let hydros = vec![
             make_hydro(0, Some(2)),
             make_hydro(1, Some(2)),
@@ -378,7 +365,6 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_topology_serde_roundtrip_cascade() {
-        // Linear cascade: A(0) -> B(1) -> C(2, terminal).
         let hydros = vec![
             make_hydro(0, Some(1)),
             make_hydro(1, Some(2)),

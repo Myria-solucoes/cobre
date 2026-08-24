@@ -1,17 +1,17 @@
 //! Real-deck read-back of the right-boundary mechanism: a converted case
-//! declaring `future_anticipated_deliveries` must expose its post-horizon
-//! commitment lane through the setup-only terminal manifest, dated and kept
-//! live for a boundary FCF to price. Two tiers:
+//! whose in-study decider reaches a post-study delivery must expose the
+//! carrying ring slot through the setup-only terminal manifest, dated and
+//! kept live for a boundary FCF to price. Two tiers:
 //!
 //! - `deck_independent_fanout` — CI-run, no deck: pure [`AnticipatedResolution`]
 //!   structural checks over calendars shaped like the deck's own and like the
 //!   fan-out geometry the setup-time reject targets.
 //! - `deck_smoke` — a single test guarded on a real converted deck's presence
 //!   on this machine; skips loudly and passes when the deck is absent OR when
-//!   the deck's post-horizon lane is not yet live (the bridge's converted
-//!   lead is currently too short for the window to survive setup), and
-//!   asserts the full carried-state and fanned-lane read-back once the lane
-//!   is live. Never runs in CI.
+//!   the deck's post-study-targeted ring slot is not yet live (the bridge's
+//!   converted lead is currently too short for any in-study decider to reach
+//!   it), and asserts the full carried-state read-back once the slot is
+//!   live. Never runs in CI.
 
 #![allow(
     clippy::unwrap_used,
@@ -29,7 +29,7 @@ mod deck_independent_fanout {
     //! rejects at setup time (pinned by `lead_time_fanout_rejected_at_setup`,
     //! not re-pinned here).
 
-    use cobre_sddp::lead_time::{AnticipatedResolution, LeadTime};
+    use cobre_sddp::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
 
     /// The deck's plant carries a uniform two-week anticipation lag on a
     /// weekly calendar: one delivery stage anchors to exactly one decision
@@ -40,8 +40,11 @@ mod deck_independent_fanout {
         let stage_lengths_hours = [168.0; 6];
         let resolution = AnticipatedResolution::resolve(
             &[LeadTime::Stages(2)],
-            &stage_lengths_hours,
-            stage_lengths_hours.len(),
+            DeliveryAxis {
+                stage_lengths_hours: &stage_lengths_hours,
+                n_decision: stage_lengths_hours.len(),
+                n_delivery: stage_lengths_hours.len(),
+            },
         );
 
         assert_eq!(
@@ -59,8 +62,11 @@ mod deck_independent_fanout {
         let stage_lengths_hours = [720.0, 168.0, 168.0, 168.0, 168.0];
         let resolution = AnticipatedResolution::resolve(
             &[LeadTime::Time(720.0)],
-            &stage_lengths_hours,
-            stage_lengths_hours.len(),
+            DeliveryAxis {
+                stage_lengths_hours: &stage_lengths_hours,
+                n_decision: stage_lengths_hours.len(),
+                n_delivery: stage_lengths_hours.len(),
+            },
         );
 
         assert!(
@@ -79,16 +85,10 @@ mod deck_smoke {
 
     use std::path::PathBuf;
 
-    use cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+    use cobre_io::StateFamily;
     use cobre_sddp::indexer::StateDim;
 
     use crate::common::fresh_setup_with;
-
-    /// `EntityType::AnticipatedThermalState`'s raw discriminant
-    /// (`schemas/policy.fbs`); mirrors `cobre_sddp::policy_export`'s own
-    /// same-named constant, which is private to its module and so
-    /// unreachable from here.
-    const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 
     /// The GNL plant's cobre thermal id in the converted deck.
     const DECK_THERMAL_ID: i32 = 94;
@@ -98,14 +98,20 @@ mod deck_smoke {
         PathBuf::from(home).join("git/cobre-bridge/example/cobre-mar-26-rv2")
     }
 
-    /// A converted case declaring one `future_anticipated_deliveries`
-    /// window must expose it in the terminal manifest, dated and kept live.
-    /// A canary, not a fixed assertion: when the deck's post-horizon lane
-    /// isn't live yet (today's reality — the bridge's converted GNL lead is
-    /// still the stale 168h, so the window is dropped at setup), this skips
-    /// loudly and passes instead of hard-failing; it starts asserting the
-    /// real read-back the moment a corrected deck lands, no code change
-    /// needed.
+    /// A converted case declaring a post-horizon-reaching lead must expose a
+    /// post-study-targeted ring slot in the terminal manifest, dated and kept
+    /// live. A canary, not a fixed assertion: when the deck's post-study
+    /// target isn't live yet (today's reality — the bridge's converted GNL
+    /// lead is still the stale 168h, so no in-study decider reaches a
+    /// post-study delivery), this skips loudly and passes instead of
+    /// hard-failing; it starts asserting the real read-back the moment a
+    /// corrected deck lands, no code change needed.
+    ///
+    /// The manifest position of a found slot IS its global state-dimension
+    /// index: the terminal pool's manifest walks an all-enabled projection
+    /// over the FULL state (`build_terminal_entity_manifest`), the identity
+    /// case `right_boundary_pricing.rs`'s `freeze_terminal_template` also
+    /// relies on — never a hand-rolled `commit_out`-relative offset.
     #[test]
     fn real_deck_terminal_manifest_lists_live_dated_post_horizon_lane() {
         let deck = deck_dir();
@@ -120,55 +126,38 @@ mod deck_smoke {
         let state = setup.stage_state();
 
         let manifest = setup.build_terminal_entity_manifest(&system);
-        let lane_slot = manifest.iter().find(|slot| {
-            slot.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
-                && usize::try_from(slot.subindex).unwrap_or(usize::MAX) >= state.k_max
+        let ring_slot = manifest.iter().enumerate().find(|(_, slot)| {
+            slot.entity_type == StateFamily::AnticipatedThermalState.code()
                 && slot.entity_id == DECK_THERMAL_ID
+                && slot.delivery_date >= 20_260_501
         });
-        let live_lane = state.n_commitment >= 1
-            && lane_slot
-                .is_some_and(|slot| slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
 
-        if !live_lane {
+        let Some((state_dim, _slot)) = ring_slot else {
             eprintln!(
-                "skipping deck smoke boundary read-back: n_commitment={}, thermal {DECK_THERMAL_ID} \
-                 manifest slot {}. The deck's converted GNL lead is still the stale 168h, so its \
-                 future_anticipated_deliveries window is dropped at setup — pending the bridge \
-                 re-conversion with the faithful ~2-month lead.",
-                state.n_commitment,
-                match lane_slot {
-                    Some(slot) => format!("found, delivery_date={}", slot.delivery_date),
-                    None => "absent".to_string(),
-                },
+                "skipping deck smoke boundary read-back: thermal {DECK_THERMAL_ID} carries no \
+                 ring slot dated at or after the study's post-horizon start. The deck's \
+                 converted GNL lead is still the stale 168h, so no in-study decider yet reaches \
+                 a post-study delivery — pending the bridge re-conversion with the faithful \
+                 ~2-month lead."
             );
             return;
-        }
+        };
 
-        let lane_slot = lane_slot.expect("live_lane guarantees Some");
-        assert_ne!(
-            lane_slot.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            "a live post-horizon lane must carry a real delivery date, not the sentinel"
-        );
-        assert!(
-            lane_slot.delivery_date >= 20_260_501,
-            "the delivery date must land at or after the study's post-horizon start; got {}",
-            lane_slot.delivery_date
-        );
-
-        let lane = state.commit_out.end - state.n_commitment;
-        let lane_out_col = state.state_to_lp_column(StateDim::new(lane)).get();
+        let out_col = state.state_to_lp_column(StateDim::new(state_dim)).get();
         let terminal_stage = setup.num_stages() - 1;
         let template = &setup.stage_ctx().templates[terminal_stage];
 
         assert_eq!(
-            template.col_lower[lane_out_col],
+            template.col_lower[out_col],
             f64::NEG_INFINITY,
-            "the post-horizon lane's commit_out column must stay open, never frozen [0, 0]"
+            "the post-study-targeted ring slot's commit_out column must stay open, never \
+             frozen [0, 0]"
         );
         assert_eq!(
-            template.col_upper[lane_out_col],
+            template.col_upper[out_col],
             f64::INFINITY,
-            "the post-horizon lane's commit_out column must stay open, never frozen [0, 0]"
+            "the post-study-targeted ring slot's commit_out column must stay open, never \
+             frozen [0, 0]"
         );
     }
 }
@@ -185,17 +174,12 @@ mod anticipated_fanout_readback {
 
     use chrono::NaiveDate;
     use cobre_io::{
-        ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest,
-        ManifestEdge, ManifestNode, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
-        StageCutsPayload, write_policy_checkpoint,
+        EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCutRecord, ProducerBlock,
+        StageCutsPayload, StateFamily, write_policy_checkpoint,
     };
     use cobre_sddp::load_boundary_cuts;
 
     use crate::common::fresh_setup_with;
-
-    /// Mirrors `deck_smoke`'s same-named constant (`EntityType::AnticipatedThermalState`'s
-    /// raw discriminant, `schemas/policy.fbs`); private to `cobre_sddp::policy_export`.
-    const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 
     /// SANTA CRUZ's cobre thermal id in the converted deck.
     const DECK_THERMAL_ID: i32 = 86;
@@ -238,7 +222,7 @@ mod anticipated_fanout_readback {
 
     fn anticipated_source_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
         EntitySlot {
-            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_type: StateFamily::AnticipatedThermalState.code(),
             entity_id: thermal_id,
             subindex: ring_slot,
             was_active: true,
@@ -270,26 +254,27 @@ mod anticipated_fanout_readback {
             active_cut_indices: &[0],
             populated_count: 1,
             entity_manifest: manifest,
+            cost_scale_factor: 1_000_000.0,
+            node_id: 0,
+            graph_stage_id: -1,
         };
-        let metadata = PolicyCheckpointMetadata {
-            format_version: FORMAT_VERSION,
-            cobre_version: "0.14.0".to_string(),
-            created_at: "2026-08-11T00:00:00Z".to_string(),
-            num_stages: 1,
-            graph_manifest: single_stage_manifest(),
-            producer: producer_block(),
-        };
+        let metadata = cobre_sddp::test_support::checkpoint_metadata(
+            1,
+            single_stage_manifest(),
+            producer_block(),
+        );
         write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).expect("write checkpoint");
     }
 
-    /// Reads back thermal 86's live post-horizon lane, asserts its
-    /// mixed weekly-then-monthly slot geometry as ranges, then cross-checks
-    /// the date-driven anticipated fan-out by reconciling a synthetic 2-month
-    /// source against the read-back lane via [`load_boundary_cuts`]
-    /// (`build_rebind` itself is `pub(crate)`, unreachable from this
-    /// integration test). A canary, exactly like `deck_smoke`: skips loudly
-    /// and passes when the deck is absent or the lane is not yet live,
-    /// asserting the full read-back only once a corrected deck lands.
+    /// Reads back thermal 86's live post-study-targeted ring slots, asserts
+    /// their mixed weekly-then-monthly slot geometry as ranges, then
+    /// cross-checks the date-driven anticipated fan-out by reconciling a
+    /// synthetic 2-month source against the read-back slots via
+    /// [`load_boundary_cuts`] (`build_rebind` itself is `pub(crate)`,
+    /// unreachable from this integration test). A canary, exactly like
+    /// `deck_smoke`: skips loudly and passes when the deck is absent or no
+    /// slot is yet live, asserting the full read-back only once a corrected
+    /// deck lands.
     #[test]
     fn rv3_thermal_86_anticipated_lane_matches_mixed_granularity_fanout() {
         let deck = deck_dir();
@@ -304,45 +289,51 @@ mod anticipated_fanout_readback {
         let setup = fresh_setup_with(&deck, |_| {});
         let system =
             cobre_io::load_case(&deck).expect("load_case must succeed on the converted deck");
-        let state = setup.stage_state();
 
         let manifest = setup.build_terminal_entity_manifest(&system);
         let intervals = setup.build_terminal_anticipated_delivery_intervals(&system);
 
-        let lane_positions: Vec<usize> = manifest
+        // Every ring slot is dated (the day-01 anchor of its modular delivery
+        // target's stage) regardless of whether that target lands in-study or
+        // post-study; a slot carries the thermal's POST-HORIZON commitment
+        // only when its anchor matches a declared post-study stage — the
+        // subindex >= k_max lane convention this test used to key on no
+        // longer exists (every commitment-hold slot is now a ring slot).
+        let post_study_anchors: std::collections::HashSet<i32> = system
+            .post_study_stages()
+            .map(|post_study| {
+                use chrono::Datelike;
+                post_study
+                    .stages
+                    .iter()
+                    .map(|s| {
+                        s.start_date.year() * 10_000
+                            + i32::try_from(s.start_date.month()).unwrap_or(1) * 100
+                            + 1
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let dated_positions: Vec<usize> = manifest
             .iter()
             .enumerate()
             .filter(|(_, slot)| {
-                slot.entity_type == ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
-                    && usize::try_from(slot.subindex).unwrap_or(usize::MAX) >= state.k_max
+                slot.entity_type == StateFamily::AnticipatedThermalState.code()
                     && slot.entity_id == DECK_THERMAL_ID
+                    && post_study_anchors.contains(&slot.delivery_date)
             })
             .map(|(i, _)| i)
             .collect();
-        let first_lane_slot = lane_positions.first().map(|&pos| &manifest[pos]);
-        let live_lane = state.n_commitment >= 1
-            && first_lane_slot
-                .is_some_and(|slot| slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
 
-        if !live_lane {
+        if dated_positions.is_empty() {
             eprintln!(
-                "skipping rv3 anticipated fan-out read-back: n_commitment={}, thermal \
-                 {DECK_THERMAL_ID} manifest slot {}. Pending the decomp-jul-26-rv3 bridge regen \
-                 with the faithful multi-month GNL lead.",
-                state.n_commitment,
-                match first_lane_slot {
-                    Some(slot) => format!("found, delivery_date={}", slot.delivery_date),
-                    None => "absent".to_string(),
-                },
+                "skipping rv3 anticipated fan-out read-back: thermal {DECK_THERMAL_ID} carries \
+                 no ring slot dated to a declared post-study month. Pending the \
+                 decomp-jul-26-rv3 bridge regen with the faithful multi-month GNL lead."
             );
             return;
         }
-
-        let dated_positions: Vec<usize> = lane_positions
-            .iter()
-            .copied()
-            .filter(|&pos| manifest[pos].delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL)
-            .collect();
 
         let mut by_month: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
         for &pos in &dated_positions {
@@ -423,6 +414,7 @@ mod anticipated_fanout_readback {
             source_state_dimension,
             &id86_manifest,
             &id86_intervals,
+            &[],
             None,
             1_000_000.0,
             &mut |_| {},

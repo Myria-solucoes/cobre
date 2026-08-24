@@ -52,7 +52,6 @@ use crate::solve::solver_phase::{Phase, validate_phase_solver_config};
 use crate::stochastic::noise_key::build_noise_key_table;
 mod accessors;
 pub(crate) mod bucket_topology;
-pub(crate) mod methodology_config;
 pub mod node_graph;
 mod orchestration;
 pub mod params;
@@ -67,14 +66,14 @@ pub use node_graph::{
     OpeningSource, StageIdx, Traversal, TypedVec,
 };
 pub use params::{
-    ConstructionConfig, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS,
-    DEFAULT_SEED, SimulationEnumeratedRequest, StudyParams,
+    BoundaryStateRequirements, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES,
+    DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, SimulationEnumeratedRequest, StudyParams,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
 pub use stochastic_pipeline::{
-    PrepareStochasticResult, build_ncs_factor_entries, load_load_factors_for_stochastic,
-    prepare_stochastic, study_stage_noise_group_ids,
+    PrepareStochasticResult, build_ncs_factor_entries, build_stochastic_context_for_study,
+    load_load_factors_for_stochastic, prepare_stochastic, study_stage_noise_group_ids,
 };
 
 use std::collections::HashMap;
@@ -87,7 +86,6 @@ use cobre_core::{
 };
 use cobre_io::StageIdResolver;
 use cobre_io::build_hydro_reference_volumes_resolved;
-use cobre_io::output::policy::ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
     ClassSchemes, ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext,
@@ -101,13 +99,11 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
-    lead_time::{
-        AnticipatedResolution, LeadTime, PointResolution, SpreadResolution,
-        resolve_future_delivery_decider,
-    },
+    indexer::{AnticipatedLocal, CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
+    inflow_method::InflowNonNegativityMethod,
+    lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime, PointResolution, SpreadResolution},
     lp_builder::{M3S_TO_HM3, build_stage_templates},
-    risk_measure::RiskMeasure,
+    risk_measure::{RiskMeasure, uniform_effective_measure},
     simulation::EntityCounts,
     simulation::extraction::TransitSeedArc,
     stopping_rule::{StoppingRule, StoppingRuleSet},
@@ -187,13 +183,15 @@ pub struct StudySetup {
     /// for the `anticipated_windows` gate.
     pub(crate) study_stage_ids: Vec<i32>,
 
-    /// Post-horizon window `w`'s resolved delivery date
-    /// ([`build_commitment_window_delivery_dates`]), in
-    /// [`StateSpace::commitment_window_thermal_id`] order. Threaded into the
-    /// simulation [`SimulationOutputSpec`](crate::simulation::SimulationOutputSpec)
-    /// so per-lane output extraction never re-derives the calendar walk. Empty
-    /// when the study declares no post-horizon commitment window.
-    pub(crate) commitment_window_delivery_dates: Vec<i32>,
+    /// Extended delivery-stage anchors ([`build_extended_delivery_anchors`]):
+    /// the `YYYYMM01` anchor of each delivery target stage, indexed by delivery
+    /// target `m` (study stages then the synthetic post-study continuation).
+    /// Threaded into the simulation
+    /// [`SimulationOutputSpec`](crate::simulation::SimulationOutputSpec)'s
+    /// `extended_delivery_anchors` so the `anticipated_lanes` extractor
+    /// dates a post-study-targeted decision without re-deriving the calendar
+    /// walk. Study-only when the study declares no post-study stage.
+    pub(crate) extended_delivery_anchors: Vec<i32>,
 
     /// Declared travel-time arcs (upstream hydro id + travel time), resolved
     /// once from [`System::hydros`] ([`build_transit_seed_arcs`]). Threaded
@@ -220,7 +218,7 @@ pub struct StudySetup {
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     pub scenario_libraries: ScenarioLibraries,
 
-    /// The runtime node graph (F7): node identity/order, the `node → pool`
+    /// The runtime node graph: node identity/order, the `node → pool`
     /// map, and per-node Ω views/out-edges. Absent `nodes[]` this is the
     /// byte-exact chain degeneracy. Reached through
     /// [`crate::context::TrainingContext::node_graph`] on the hot path.
@@ -277,8 +275,10 @@ pub struct StudySetup {
     /// [`crate::solve::solver_phase::SolverProfiles::hardest_first_claim_order`]).
     pub(crate) hardest_first_claim_order: bool,
 
-    /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
-    pub(crate) methodology: methodology_config::MethodologyConfig,
+    /// Study horizon mode (finite vs. infinite-horizon approximation).
+    pub(crate) horizon: HorizonMode,
+    /// Inflow non-negativity enforcement method.
+    pub(crate) inflow_method: InflowNonNegativityMethod,
 
     /// Derived per-hydro PAR lag-slot and accumulator seeds ([`derive_inflow_seeds`]),
     /// applied to the stage-0 lag block and to every trajectory start in the
@@ -321,6 +321,11 @@ pub struct StudySetup {
     /// [`BasisStore`](crate::workspace::BasisStore) so iteration 1's LPs warm-start.
     /// `None` for a fresh start, leaving fresh-mode behavior untouched.
     pub(crate) warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
+
+    /// Boundary-derived state requirements this study was built against, resolved
+    /// once and carried identically on every rank. The boundary-cut load path
+    /// reads its inflow-lag depth here instead of re-reading the source checkpoint.
+    pub(crate) boundary_requirements: BoundaryStateRequirements,
 }
 
 impl StudySetup {
@@ -340,30 +345,38 @@ impl StudySetup {
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
     ) -> Result<Self, SddpError> {
-        Self::new_with_inflow_lag_depth(system, config, stochastic, hydro_models, None)
+        // No case dir to read the source checkpoint, so the depth is unresolved
+        // (None); presence still follows the config, matching the boundary-mask
+        // gate an entry point resolves via `resolve_boundary_state_requirements`.
+        let boundary = if config.policy.boundary.is_some() {
+            BoundaryStateRequirements::present(0)
+        } else {
+            BoundaryStateRequirements::none()
+        };
+        Self::new_with_boundary_requirements(system, config, stochastic, hydro_models, boundary)
     }
 
-    /// [`Self::new`] with the boundary-inferred inflow-lag depth supplied
+    /// [`Self::new`] with the boundary-derived state requirements supplied
     /// explicitly.
     ///
-    /// The inflow-lag state depth is inferred from a loaded boundary policy
-    /// (`resolve_effective_inflow_lag_depth`, an I/O read the caller performs),
-    /// not from any config knob; `None` sizes the lag block from the PAR model
-    /// alone. The MPI broadcast path carries the same value on
-    /// `ConstructionConfig::inflow_lag_depth` for non-root ranks.
+    /// The requirements are resolved from a loaded boundary policy
+    /// (`resolve_boundary_state_requirements`, an I/O read the caller performs),
+    /// not from any config knob; [`BoundaryStateRequirements::none`] sizes the lag
+    /// block from the PAR model alone. The MPI broadcast path carries the same
+    /// value on `StudyParams::boundary` for non-root ranks.
     ///
     /// # Errors
     ///
     /// Same as [`Self::new`].
-    pub fn new_with_inflow_lag_depth(
+    pub fn new_with_boundary_requirements(
         system: &System,
         config: &Config,
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
-        inflow_lag_depth: Option<u32>,
+        boundary: BoundaryStateRequirements,
     ) -> Result<Self, SddpError> {
         let mut params = StudyParams::from_config(config)?;
-        params.inflow_lag_depth = inflow_lag_depth;
+        params.boundary = boundary;
         // Sentinel: the scenario-source resolvers use the path only for error
         // messages and the historical-years look-up, neither exercised here with a
         // validated Config.
@@ -374,11 +387,10 @@ impl StudySetup {
         let simulation_source = config
             .simulation_scenario_source(sentinel_path)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
-        let config = params.into_construction_config();
         Self::from_broadcast_params(
             system,
             stochastic,
-            config,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,
@@ -407,12 +419,12 @@ impl StudySetup {
     pub fn from_broadcast_params(
         system: &System,
         mut stochastic: StochasticContext,
-        config: ConstructionConfig,
+        config: StudyParams,
         hydro_models: PrepareHydroModelsResult,
         training_source: &ScenarioSource,
         simulation_source: &ScenarioSource,
     ) -> Result<Self, SddpError> {
-        let ConstructionConfig {
+        let StudyParams {
             seed,
             forward_passes,
             training_enumerated,
@@ -432,8 +444,7 @@ impl StudySetup {
             simulation_solver,
             backward_scheduler,
             cost_scale_factor,
-            inflow_lag_depth,
-            boundary_present,
+            boundary,
         } = config;
 
         // Fail fast on a backend-unsupported field before any template exists;
@@ -461,11 +472,11 @@ impl StudySetup {
         // Computed here (not inside `build_energy_and_templates`) so the one
         // `TransitBucketTopology` this constructor derives from `system` also seeds the
         // `StudySetup.transit_bucket_topology` field below, with no second call.
-        // `boundary_present` gates the terminal deep-lag mask (the Delivery-family
-        // right-boundary pricing contract) — every rank resolves it identically from
-        // the broadcast config, before `inject_boundary_cuts` runs.
+        // `boundary.is_present()` gates the terminal deep-lag mask (the
+        // Delivery-family right-boundary pricing contract) — every rank resolves it
+        // identically from the broadcast config, before `inject_boundary_cuts` runs.
         let transit_bucket_topology =
-            bucket_topology::build_transit_bucket_topology(system, boundary_present);
+            bucket_topology::build_transit_bucket_topology(system, boundary.is_present());
 
         // Resolved before the LP templates: none of the state dimensions depend on
         // the built LP, and `build_stage_templates` needs the finished `StateSpace`
@@ -475,8 +486,14 @@ impl StudySetup {
             system,
             stochastic.par(),
             &transit_bucket_topology,
-            inflow_lag_depth,
+            boundary.inflow_lag_depth(),
         )?;
+        warn_on_boundary_absent_post_study_delivery(
+            system,
+            &anticipated_thermal_indices,
+            &state_layout.anticipated_resolution,
+            boundary.is_present(),
+        );
 
         // The sole `derive_inflow_seeds` call site: every consumer (the lag block
         // below, `StudySetup::derived_inflow_seeds`) reads this one value — do not
@@ -709,8 +726,8 @@ impl StudySetup {
         let contract_is_import = build_contract_is_import(system);
 
         let anticipated_windows = build_anticipated_windows(system);
-        let commitment_window_delivery_dates =
-            build_commitment_window_delivery_dates(system, &state_layout);
+        let extended_delivery_anchors =
+            build_extended_delivery_anchors(system, &state_layout, n_stages);
         let transit_seed_arcs = build_transit_seed_arcs(system);
         let past_defluences = system.initial_conditions().past_defluences.clone();
 
@@ -747,7 +764,7 @@ impl StudySetup {
             ncs_allow_curtailment,
             anticipated_windows,
             study_stage_ids,
-            commitment_window_delivery_dates,
+            extended_delivery_anchors,
             transit_seed_arcs,
             past_defluences,
             study_stage_dates,
@@ -782,16 +799,15 @@ impl StudySetup {
             forward_profile,
             backward_scheduler,
             hardest_first_claim_order: true,
-            methodology: methodology_config::MethodologyConfig {
-                horizon,
-                inflow_method,
-            },
+            horizon,
+            inflow_method,
             derived_inflow_seeds,
             downstream_par_order,
             energy_conversion,
             hydro_min_storage_hm3,
             transit_bucket_topology,
             warm_start_basis_cache: None,
+            boundary_requirements: boundary,
         })
     }
 }
@@ -1123,13 +1139,13 @@ pub(crate) fn resolve_state_layout(
         vec![0; hydro_count]
     };
 
-    let commitment_hold_windows =
-        resolve_commitment_hold_windows(system, &anticipated_thermal_indices);
-
     // `StateSpace` is the sole role-(a) owner; its constructor finalizes the
     // nonzero mask unconditionally, so every study (storage-only or pure-thermal)
-    // has a finalized mask for the single-path mask-driven cut-row loop.
-    let mut state = StateSpace::new_with_commitment_hold_windows(
+    // has a finalized mask for the single-path mask-driven cut-row loop. There is
+    // no separate post-horizon commitment-hold block: a post-study-targeted
+    // delivery is carried by the in-study ring slot its modular residue
+    // resolves to.
+    let mut state = StateSpace::new(
         hydro_count,
         max_par_order,
         transit_bucket_topology.n_buckets,
@@ -1138,156 +1154,10 @@ pub(crate) fn resolve_state_layout(
         k_max,
         anticipated_lead_stages,
         &effective_lag_counts,
-        commitment_hold_windows.n_commitment,
-        commitment_hold_windows.decider_stage,
-        commitment_hold_windows.thermal_id,
-        commitment_hold_windows.min_max,
-        commitment_hold_windows.dest_stage,
     );
     state.set_anticipated_resolution(anticipated_resolution);
 
     Ok((state, hydro_count, anticipated_thermal_indices))
-}
-
-/// [`resolve_commitment_hold_windows`]'s return shape: every field is
-/// survivor-indexed and parallel, length [`Self::n_commitment`], in
-/// [`StateSpace::commit_out`]'s post-horizon-lane order — never a raw
-/// `future_anticipated_deliveries` position, which diverges from this index
-/// the moment any window is dropped.
-#[derive(Debug, Default, PartialEq)]
-struct CommitmentHoldWindows {
-    n_commitment: usize,
-    /// Survivor `w`'s in-study decider stage.
-    decider_stage: Vec<usize>,
-    /// Survivor `w`'s owning thermal id.
-    thermal_id: Vec<EntityId>,
-    /// Survivor `w`'s `(min_mw, max_mw)` commitment interval.
-    min_max: Vec<(f64, f64)>,
-    /// Survivor `w`'s resolved post-study destination stage index.
-    dest_stage: Vec<usize>,
-}
-
-/// Resolve every declared post-horizon delivery window
-/// ([`cobre_core::FutureAnticipatedDelivery`]) to its in-study decider stage
-/// ([`resolve_future_delivery_decider`]) and its resolved
-/// post-study destination stage ([`StageCalendar::resolve_window`] against the
-/// post-study calendar), in canonical `(anticipated thermal system position,
-/// delivery_start)` order — canonical thermal order, not raw `thermal_id`
-/// order, keeps the block's column order declaration-invariant under
-/// staggered commissioning the same way [`build_initial_state`]'s
-/// id-position-map contract does.
-///
-/// A window whose thermal has no physical lead time
-/// (`AnticipatedConfig::LeadStages`, which never consults the calendar) or
-/// whose resolved decider precedes the study horizon
-/// (`resolve_future_delivery_decider` returning `None`) is dropped with a
-/// setup-time advisory, never a hard error — mirrors
-/// [`warn_on_sub_stage_lead`]'s exclude-with-advisory convention. The returned
-/// [`CommitmentHoldWindows`] is entirely survivor-indexed; a dropped window
-/// leaves no trace in it. `future_anticipated_deliveries`' own sorting
-/// invariant (`(thermal_id, delivery_start)` ascending) is what keeps the
-/// per-thermal filter below yielding each thermal's windows in
-/// `delivery_start` order — the order
-/// [`crate::policy_export::build_stage_entity_manifest`] derives a window's
-/// local index within its thermal from.
-fn resolve_commitment_hold_windows(
-    system: &System,
-    anticipated_thermal_indices: &[usize],
-) -> CommitmentHoldWindows {
-    let Some(start_0) = study_start_date(system) else {
-        return CommitmentHoldWindows::default();
-    };
-    let stage_lengths_hours = bucket_topology::study_stage_durations(system);
-    let thermals = system.thermals();
-    let ic = system.initial_conditions();
-
-    let post_study_calendar_stages_vec = system
-        .post_study_stages()
-        .map(|post_study| post_study_calendar_stages(&post_study.stages))
-        .unwrap_or_default();
-    let post_study_calendar = StageCalendar::new(&post_study_calendar_stages_vec);
-
-    let mut decider_stage = Vec::new();
-    let mut thermal_id = Vec::new();
-    let mut min_max = Vec::new();
-    let mut dest_stage = Vec::new();
-    for &t_idx in anticipated_thermal_indices {
-        let thermal = &thermals[t_idx];
-        let entries: Vec<_> = ic
-            .future_anticipated_deliveries
-            .iter()
-            .filter(|d| d.thermal_id == thermal.id)
-            .collect();
-        if entries.is_empty() {
-            continue;
-        }
-
-        let Some(AnticipatedConfig::LeadTime(delta_hours)) = thermal.anticipated_config else {
-            for entry in &entries {
-                tracing::warn!(
-                    "anticipated thermal {} ({}): future_anticipated_deliveries window \
-                     [{}, {}) dropped — anticipated_config has no physical lead time \
-                     (LeadStages never consults the calendar) to resolve a post-horizon \
-                     in-study decider",
-                    thermal.id,
-                    thermal.name,
-                    entry.delivery_start,
-                    entry.delivery_end,
-                );
-            }
-            continue;
-        };
-
-        for entry in entries {
-            let window_end_hours = hours_between(entry.delivery_end, start_0);
-            if let Some((decider, _kind)) =
-                resolve_future_delivery_decider(delta_hours, &stage_lengths_hours, window_end_hours)
-            {
-                let window = DatedWindow {
-                    start_date: entry.delivery_start,
-                    end_date: entry.delivery_end,
-                };
-                let resolved_dest = post_study_calendar.resolve_window(&window);
-                debug_assert!(
-                    resolved_dest.is_some(),
-                    "a surviving future_anticipated_deliveries window must resolve to a \
-                     post-study stage — cobre-io's coverage validator rejects any window it \
-                     cannot cover exactly before setup ever runs this resolution"
-                );
-                decider_stage.push(decider);
-                thermal_id.push(thermal.id);
-                min_max.push((entry.min_mw, entry.max_mw));
-                dest_stage.push(resolved_dest.unwrap_or(0));
-            } else {
-                // `resolve_future_delivery_decider` collapses both out-of-reach
-                // directions to `None`; re-derive which side for an accurate
-                // advisory (target ≤ 0 ⇒ before the horizon start, else past it).
-                let reach = if window_end_hours - delta_hours <= 0.0 {
-                    "its decider would precede the study horizon start"
-                } else {
-                    "its decider would fall past the study horizon end"
-                };
-                tracing::warn!(
-                    "anticipated thermal {} ({}): future_anticipated_deliveries window \
-                     [{}, {}) dropped — out of the lead's reach ({})",
-                    thermal.id,
-                    thermal.name,
-                    entry.delivery_start,
-                    entry.delivery_end,
-                    reach,
-                );
-            }
-        }
-    }
-
-    let n_commitment = decider_stage.len();
-    CommitmentHoldWindows {
-        n_commitment,
-        decider_stage,
-        thermal_id,
-        min_max,
-        dest_stage,
-    }
 }
 
 /// Canonical absolute delivery/arrival calendar date of a stage `start_date`,
@@ -1307,77 +1177,63 @@ pub(crate) fn year_month_day_anchor(date: NaiveDate) -> i32 {
     date.year() * 10_000 + i32::try_from(date.month()).unwrap_or(1) * 100 + 1
 }
 
-/// Post-horizon window `w`'s delivery date: the `YYYYMM01` anchor of its
-/// resolved destination post-study stage
-/// ([`StateSpace::commitment_window_dest_stage`]). `thermal_id` is carried
-/// only for the debug assertion message. Single owner shared by the policy
-/// manifest ([`crate::policy_export::build_stage_entity_manifest`]) and the
-/// simulation output's per-window delivery-date array
-/// ([`build_commitment_window_delivery_dates`]) — never re-derived.
-///
-/// # Panics (debug builds only)
-///
-/// Panics if the window's destination does not resolve to a real post-study
-/// stage — an uncovered window is rejected at read time, so a covered lane
-/// never observes this.
-pub(crate) fn post_horizon_delivery_date(
-    system: &System,
-    global_layout: &StateSpace,
-    w: usize,
-    thermal_id: EntityId,
-) -> i32 {
-    let dest = global_layout.commitment_window_dest_stage[w];
-    let delivery_date = system
+/// The study's post-study delivery calendar ([`post_study_calendar_stages`]),
+/// empty when none is declared. Appended after the study stages to extend the
+/// ring's dating calendar so a slot maturing past the horizon dates onto its
+/// real post-study stage. Shared by [`build_extended_delivery_anchors`] and the
+/// policy manifest builders (`build_stage_entity_manifest`,
+/// `build_stage_entity_delivery_intervals`), so every delivery-dating site
+/// derives one calendar. The synthetic `Stage::id` restarts at `0` and collides
+/// with study ids — only `start_date`/`end_date` are ever read.
+pub(crate) fn post_study_delivery_calendar(system: &System) -> Vec<Stage> {
+    system
         .post_study_stages()
-        .and_then(|post_study| post_study.stages.get(dest))
-        .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |stage| {
-            year_month_day_anchor(stage.start_date)
-        });
-    debug_assert!(
-        delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        "commitment window {w} (thermal {thermal_id:?}) destination stage {dest} must \
-         resolve a real delivery date"
-    );
-    delivery_date
+        .map(|post_study| post_study_calendar_stages(&post_study.stages))
+        .unwrap_or_default()
 }
 
-/// Post-horizon window `w`'s delivery INTERVAL: `[start_date, start_date +
-/// duration_hours)` of its resolved destination post-study stage
-/// ([`StateSpace::commitment_window_dest_stage`]) — the real calendar span
-/// [`post_horizon_delivery_date`]'s day-01 anchor collapses. `None` when the
-/// window's destination does not resolve to a real post-study stage (mirrors
-/// [`post_horizon_delivery_date`]'s debug-assert precondition: a covered lane
-/// always resolves one). Delegates the `duration_hours` → `end_date` rounding
-/// to [`post_study_calendar_stages`], the single owner shared with the
-/// `cobre-io` semantic validator. Single owner shared by
-/// [`crate::policy_export::build_stage_entity_delivery_intervals`] and the
-/// boundary reconciliation's date-driven fan-out (`crate::policy::reconcile`),
-/// which consumes the interval to compute `overlap(w, M)` — never re-derived.
-#[must_use]
-pub(crate) fn post_horizon_delivery_interval(
-    system: &System,
-    global_layout: &StateSpace,
-    w: usize,
-) -> Option<(NaiveDate, NaiveDate)> {
-    let dest = global_layout.commitment_window_dest_stage[w];
-    let post_study = system.post_study_stages()?;
-    let calendar_stages = post_study_calendar_stages(&post_study.stages);
-    calendar_stages
-        .get(dest)
-        .map(|stage| (stage.start_date, stage.end_date))
-}
-
-/// Every declared post-horizon window's resolved delivery date, in
-/// [`StateSpace::commitment_window_thermal_id`] order — computed once here via
-/// [`post_horizon_delivery_date`] so simulation extraction threads the
-/// resulting array instead of re-deriving the calendar walk per stage.
-fn build_commitment_window_delivery_dates(system: &System, state: &StateSpace) -> Vec<i32> {
-    (0..state.n_commitment)
-        .map(|w| {
-            let thermal_id = state.commitment_window_thermal_id[w];
-            post_horizon_delivery_date(system, state, w, thermal_id)
-        })
+/// The extended dating calendar: the `study_stages` view chained with the
+/// borrowed `post_study_calendar`, so a slot maturing past the horizon dates
+/// onto its real post-study stage (study-only when the calendar is empty).
+/// Shared by [`build_extended_delivery_anchors`] and the policy manifest
+/// builders, so all derive one calendar.
+pub(crate) fn extended_delivery_stages<'a>(
+    study_stages: &[&'a Stage],
+    post_study_calendar: &'a [Stage],
+) -> Vec<&'a Stage> {
+    study_stages
+        .iter()
+        .copied()
+        .chain(post_study_calendar)
         .collect()
+}
+
+/// Extended delivery-stage anchors: the `YYYYMM01` anchor of each delivery
+/// target stage — the study stages (`id >= 0`) followed by the synthetic
+/// post-study continuation ([`post_study_delivery_calendar`]) — indexed by
+/// delivery target `m`. The dating input the `anticipated_lanes` output
+/// extractor reads for a post-study-targeted decision (`delivery_dates[m]`),
+/// matching the policy manifest's `delivery_anchor_at` walk over the same
+/// extended calendar. Study-only, byte-identical to a study-stages walk, when
+/// no post-study stage is declared.
+fn build_extended_delivery_anchors(
+    system: &System,
+    state: &StateSpace,
+    n_stages: usize,
+) -> Vec<i32> {
+    let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    let post_study_calendar = post_study_delivery_calendar(system);
+    let anchors: Vec<i32> = extended_delivery_stages(&study_stages, &post_study_calendar)
+        .iter()
+        .map(|s| year_month_day_anchor(s.start_date))
+        .collect();
+    debug_assert!(
+        anchors.len() >= state.delivery_stage_count(n_stages),
+        "extended delivery anchors ({}) must cover the delivery axis ({})",
+        anchors.len(),
+        state.delivery_stage_count(n_stages),
+    );
+    anchors
 }
 
 /// Declared travel-time arcs (upstream hydro id + travel time), one entry per
@@ -1457,12 +1313,53 @@ pub(crate) struct PostStudyResolved {
     pub(crate) cumulative_discount_factors: Vec<f64>,
     /// Per-`(thermal, post-study stage)` cost/bounds lookup.
     pub(crate) thermal_bounds: PostStudyThermalLookup,
+    /// Dense row-major `[anticipated_local][post_study_stage]` projection of
+    /// [`PostStudyThermalLookup::lookup`] — one cell per anticipated plant times
+    /// post-study stage, `None` where the deck declares none. `anticipated_local`
+    /// MUST be [`resolve_state_layout`]'s own `anticipated_thermal_indices`
+    /// canonical order (`system.thermals()` filtered on
+    /// `anticipated_config.is_some()`); a mismatched order silently prices one
+    /// plant's post-study commitment with another's fuel cost. Never index this
+    /// directly — read it only through [`Self::anticipated_bound`], and never
+    /// rebuild it into a `Vec<Vec<_>>` (a per-plant allocation) or an
+    /// `EntityId`-keyed map (a nondeterministic-iteration-order read).
+    anticipated_bounds: Vec<Option<(f64, f64, f64)>>,
+    /// Row stride of [`Self::anticipated_bounds`] — the post-study stage count,
+    /// `total_hours.len()`.
+    anticipated_bounds_stride: usize,
 }
 
-/// Resolve [`System::post_study_stages`] into the three setup-side artifacts:
-/// post-study `total_hours`, the discount continuation, and the per-thermal
-/// cost/bounds lookup. `None`/empty `post_study` returns
-/// [`PostStudyResolved::default`] — inert.
+impl PostStudyResolved {
+    /// `(cost_per_mwh, min_mw, max_mw)` declared for anticipated-local plant
+    /// `local_idx` at post-study stage `post_study_stage`, or `None` when the
+    /// deck declares no cell there — never a panic, including on an empty table
+    /// (`PostStudyResolved::default()`) or an out-of-range `local_idx`/
+    /// `post_study_stage`.
+    #[must_use]
+    pub(crate) fn anticipated_bound(
+        &self,
+        local_idx: AnticipatedLocal,
+        post_study_stage: usize,
+    ) -> Option<(f64, f64, f64)> {
+        if post_study_stage >= self.anticipated_bounds_stride {
+            return None;
+        }
+        self.anticipated_bounds
+            .get(local_idx.get() * self.anticipated_bounds_stride + post_study_stage)
+            .copied()
+            .flatten()
+    }
+}
+
+/// Resolve [`System::post_study_stages`] into the setup-side artifacts:
+/// post-study `total_hours`, the discount continuation, the per-thermal
+/// cost/bounds lookup, and its dense anticipated-local projection. `None`/empty
+/// `post_study` returns [`PostStudyResolved::default`] — inert.
+///
+/// `anticipated_thermal_ids` is the anticipated plants' `EntityId`s in
+/// anticipated-local order — [`resolve_state_layout`]'s own
+/// `anticipated_thermal_indices` order, handed in rather than re-derived here,
+/// since a second derivation could silently diverge from it.
 ///
 /// `last_real_cumulative` and `last_real_per_stage` are the study's own last
 /// cumulative and per-stage discount factors — [`crate::StageTemplates::
@@ -1478,6 +1375,7 @@ pub(crate) struct PostStudyResolved {
 /// cover the post-study stages.
 pub(crate) fn resolve_post_study_artifacts(
     post_study: Option<&PostStudyStages>,
+    anticipated_thermal_ids: &[EntityId],
     pg: &HorizonGraph,
     last_real_cumulative: f64,
     last_real_per_stage: f64,
@@ -1513,10 +1411,31 @@ pub(crate) fn resolve_post_study_artifacts(
 
     let thermal_bounds = PostStudyThermalLookup::new(post_study.thermal_bounds.clone());
 
+    // Dense [anticipated_local][post_study_stage] projection of `thermal_bounds`,
+    // built once here so the ring fill (`fill_anticipated_columns`) never
+    // reconstructs an `EntityId` from an anticipated-local index or re-searches
+    // `thermal_bounds` per fill call.
+    let anticipated_bounds_stride = total_hours.len();
+    let mut anticipated_bounds =
+        Vec::with_capacity(anticipated_thermal_ids.len() * anticipated_bounds_stride);
+    for &thermal_id in anticipated_thermal_ids {
+        for post_study_stage in 0..anticipated_bounds_stride {
+            anticipated_bounds.push(thermal_bounds.lookup(thermal_id, post_study_stage));
+        }
+    }
+    debug_assert_eq!(
+        anticipated_bounds.len(),
+        anticipated_thermal_ids.len() * anticipated_bounds_stride,
+        "PostStudyResolved.anticipated_bounds row count must equal \
+         anticipated_thermal_ids.len()"
+    );
+
     PostStudyResolved {
         total_hours,
         cumulative_discount_factors,
         thermal_bounds,
+        anticipated_bounds,
+        anticipated_bounds_stride,
     }
 }
 
@@ -1584,6 +1503,18 @@ fn first_fanned_plant_id(
         })
 }
 
+/// Study stage durations ([`bucket_topology::study_stage_durations`]) followed
+/// by every declared post-study stage's own duration — the extended delivery
+/// axis [`DeliveryAxis::stage_lengths_hours`] must carry so `n_delivery` spans
+/// `n_stages + n_post`. No post-study stages leaves this byte-identical to the
+/// study-only vector.
+fn delivery_stage_durations(mut study_durations: Vec<f64>, system: &System) -> Vec<f64> {
+    if let Some(post_study) = system.post_study_stages() {
+        study_durations.extend(post_study.stages.iter().map(|s| s.duration_hours));
+    }
+    study_durations
+}
+
 /// Resolve every anticipated thermal's delivery-anchored point commitment and
 /// derive the constant-lead per-plant `K_i` the still-live ring machinery reads.
 ///
@@ -1594,9 +1525,16 @@ fn first_fanned_plant_id(
 /// same accepted redundant-but-deterministic recompute this crate already
 /// applies to the bucket topology, not a second advisory emission. Returns the
 /// per-plant resolution and the anticipated-local constant leads: a
-/// `LeadStages(ℓ)` plant keeps `ℓ` byte-for-byte; a `LeadTime` plant (gated off
-/// the load path until the in-LP ring lands) takes its per-plant max depth as a
-/// `k_max`-consistent placeholder, so its LP path is not yet correct.
+/// `LeadStages(ℓ)` plant keeps `ℓ` byte-for-byte; a `LeadTime` plant takes its
+/// per-plant ring depth ([`PointResolution::ring_depth`]) — the plant's own
+/// `k_i` reachability/padding bound the slot masking and policy manifest read.
+///
+/// The delivery axis is EXTENDED: `n_delivery = n_stages + n_post` while
+/// `n_decision` stays `n_stages` (decisions are only ever made in-study), so a
+/// `LeadTime` plant's resolution can target a post-study delivery. Widening
+/// this site alone is a half-switch — [`crate::indexer::anticipated_gate::anticipated_resolution_for`]'s
+/// fixture fallback must widen in lockstep or the two resolution paths desync
+/// the moment a study declares `post_study_stages`.
 pub(crate) fn resolve_anticipated_commitments_core(
     system: &System,
 ) -> (AnticipatedResolution, Vec<usize>) {
@@ -1617,9 +1555,18 @@ pub(crate) fn resolve_anticipated_commitments_core(
         return (AnticipatedResolution::default(), Vec::new());
     }
 
-    let durations = bucket_topology::study_stage_durations(system);
-    let n_stages = durations.len();
-    let resolution = AnticipatedResolution::resolve(&leads, &durations, n_stages);
+    let study_durations = bucket_topology::study_stage_durations(system);
+    let n_stages = study_durations.len();
+    let durations = delivery_stage_durations(study_durations, system);
+    let n_delivery = durations.len();
+    let resolution = AnticipatedResolution::resolve(
+        &leads,
+        DeliveryAxis {
+            stage_lengths_hours: &durations,
+            n_decision: n_stages,
+            n_delivery,
+        },
+    );
 
     let lead_stages: Vec<usize> = leads
         .iter()
@@ -1637,9 +1584,13 @@ pub(crate) fn resolve_anticipated_commitments_core(
                     leadstages_decision_sets_are_singletons(point, l, n_stages),
                     "LeadStages c(m)=m−ℓ ⇒ each in-horizon C(t)={{t+ℓ}}"
                 );
+                debug_assert!(
+                    point.ring_depth() <= l,
+                    "LeadStages ring_depth must stay bounded by ℓ: returning ℓ verbatim under-sizes if a resolver change breaks this"
+                );
                 l
             }
-            LeadTime::Time(_) => point.depth.iter().copied().max().unwrap_or(0),
+            LeadTime::Time(_) => point.ring_depth(),
         })
         .collect();
 
@@ -1684,6 +1635,66 @@ fn warn_on_sub_stage_lead(thermals: &[&Thermal], resolution: &AnticipatedResolut
             );
         }
     }
+}
+
+/// Emit a single setup-time advisory when the resolved anticipated axis
+/// carries at least one post-study-targeted delivery — a plant's decider names
+/// an in-study decision stage for some delivery target `m >= n_stages`
+/// (class-3), or a plant declares at least one non-zero fixed post-horizon
+/// (class-4) window in `past_anticipated_commitments` — but the study
+/// declares no `config.policy.boundary`: both price at zero terminal value
+/// until a boundary is loaded. Never a reject: a `min_mw == max_mw` replay
+/// deck is a legitimate use of a fixed post-horizon profile with no boundary;
+/// silence would instead hide a modelling error where the user expected the
+/// commitment valued against a real future. An all-zero window (including the
+/// horizon-end 0 MW stub) never qualifies — a zero value is provably inert.
+/// Mirrors [`warn_on_sub_stage_lead`]'s channel and once-at-setup shape (a
+/// distinct condition from it and from the class-3 arm, sharing only the
+/// event), naming every affected plant in the one emitted event.
+fn warn_on_boundary_absent_post_study_delivery(
+    system: &System,
+    anticipated_thermal_indices: &[usize],
+    resolution: &AnticipatedResolution,
+    boundary_present: bool,
+) {
+    if boundary_present {
+        return;
+    }
+    let n_stages = bucket_topology::study_stage_durations(system).len();
+    let thermals = system.thermals();
+    let horizon_end = system
+        .stages()
+        .iter()
+        .rfind(|s| s.id >= 0)
+        .map(|s| s.end_date);
+    let past = &system.initial_conditions().past_anticipated_commitments;
+    let has_nonzero_fixed = |thermal_id: i32| -> bool {
+        horizon_end.is_some_and(|end| {
+            past.iter()
+                .any(|w| w.thermal_id.0 == thermal_id && w.start_date >= end && w.value_mw != 0.0)
+        })
+    };
+    let affected: Vec<String> = anticipated_thermal_indices
+        .iter()
+        .zip(&resolution.per_plant)
+        .filter(|&(&t_idx, point)| {
+            let class3 = point.decider.get(n_stages..).is_some_and(|post_study| {
+                post_study.iter().any(|c| c.is_some_and(|t| t < n_stages))
+            });
+            class3 || has_nonzero_fixed(thermals[t_idx].id.0)
+        })
+        .map(|(&t_idx, _)| format!("{} ({})", thermals[t_idx].id, thermals[t_idx].name))
+        .collect();
+    if affected.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        "{} anticipated thermal(s) resolve a post-study-targeted delivery with no \
+         config.policy.boundary declared: {} — the delivery prices at zero terminal \
+         value until a boundary policy is loaded",
+        affected.len(),
+        affected.join(", "),
+    );
 }
 
 /// Whether every in-horizon delivery stage's decision set is the singleton
@@ -1811,6 +1822,9 @@ fn precompute_lag_data(
 // Rationale: mirrors build_historical_inflow_library/build_external_inflow_library's
 // own arity; a context struct would just relocate the arity, not reduce it.
 #[allow(clippy::too_many_arguments)]
+// Rationale: a flat training/simulation x 4-class enumeration; splitting it
+// would relocate the enumeration into a same-shaped helper, not shrink it.
+#[allow(clippy::too_many_lines)]
 fn build_scenario_libraries(
     system: &System,
     stages: &[Stage],
@@ -1832,6 +1846,9 @@ fn build_scenario_libraries(
     let sim_inflow_scheme = simulation_source.inflow_scheme;
     let sim_load_scheme = simulation_source.load_scheme;
     let sim_ncs_scheme = simulation_source.ncs_scheme;
+    // Shared by every external LOAD call below, training and simulation alike
+    // — see `build_external_load_library`'s doc for why.
+    let normal_load_bus_ids = system.load_noise_member_bus_ids(load_scheme);
 
     let training_historical: Option<HistoricalScenarioLibrary> =
         if inflow_scheme == SamplingScheme::Historical {
@@ -1876,11 +1893,12 @@ fn build_scenario_libraries(
     let training_external_load: Option<ExternalScenarioLibrary> =
         if load_scheme == SamplingScheme::External {
             Some(scenario_libraries::build_external_load_library(
-                system.external_load_scenarios(),
-                system.load_models(),
+                system,
                 load_scheme,
                 stages,
                 forward_passes,
+                stochastic.normal(),
+                &normal_load_bus_ids,
             )?)
         } else {
             None
@@ -1889,10 +1907,11 @@ fn build_scenario_libraries(
     let training_external_ncs: Option<ExternalScenarioLibrary> =
         if ncs_scheme == SamplingScheme::External {
             Some(scenario_libraries::build_external_ncs_library(
-                system.external_ncs_scenarios(),
-                system.ncs_models(),
+                system,
                 stages,
                 forward_passes,
+                stochastic.ncs_normal(),
+                stochastic.ncs_entity_ids(),
             )?)
         } else {
             None
@@ -1941,11 +1960,12 @@ fn build_scenario_libraries(
     let simulation_external_load: Option<ExternalScenarioLibrary> =
         if sim_load_scheme == SamplingScheme::External && sim_load_scheme != load_scheme {
             Some(scenario_libraries::build_external_load_library(
-                system.external_load_scenarios(),
-                system.load_models(),
+                system,
                 sim_load_scheme,
                 stages,
                 forward_passes,
+                stochastic.normal(),
+                &normal_load_bus_ids,
             )?)
         } else {
             None
@@ -1954,10 +1974,11 @@ fn build_scenario_libraries(
     let simulation_external_ncs: Option<ExternalScenarioLibrary> =
         if sim_ncs_scheme == SamplingScheme::External && sim_ncs_scheme != ncs_scheme {
             Some(scenario_libraries::build_external_ncs_library(
-                system.external_ncs_scenarios(),
-                system.ncs_models(),
+                system,
                 stages,
                 forward_passes,
+                stochastic.ncs_normal(),
+                stochastic.ncs_entity_ids(),
             )?)
         } else {
             None
@@ -2138,21 +2159,23 @@ fn reject_gap_under_effective_risk_aversion(
 /// Returns [`SddpError::Validation`] naming the first stage whose measure differs
 /// and the admitting condition (a uniform measure).
 fn reject_gap_under_nonuniform_risk(risk_measures: &[RiskMeasure]) -> Result<(), SddpError> {
-    let Some(first) = risk_measures.first().map(|m| m.effective()) else {
+    // `uniform_effective_measure` is the single owner of the uniformity predicate,
+    // so this admission gate cannot drift from the bound the session applies. The
+    // loop below runs only to name the offending stage for the diagnostic.
+    if risk_measures.is_empty() || uniform_effective_measure(risk_measures).is_some() {
+        return Ok(());
+    }
+    let first = risk_measures[0].effective();
+    let Some(stage) = risk_measures.iter().position(|m| m.effective() != first) else {
         return Ok(());
     };
-    for (stage, measure) in risk_measures.iter().enumerate() {
-        if measure.effective() != first {
-            return Err(SddpError::Validation(format!(
-                "gap stopping rule under enumerated forwards requires a uniform risk measure \
-                 across all stages; stage {stage} ({measure:?}) differs from stage 0 \
-                 ({:?}). The risk-adjusted upper bound applies one static CVaR measure to the \
-                 enumerated path costs, undefined when stages differ",
-                risk_measures[0]
-            )));
-        }
-    }
-    Ok(())
+    Err(SddpError::Validation(format!(
+        "gap stopping rule under enumerated forwards requires a uniform risk measure \
+         across all stages; stage {stage} ({:?}) differs from stage 0 ({:?}). The \
+         risk-adjusted upper bound applies one static CVaR measure to the enumerated \
+         path costs, undefined when stages differ",
+        risk_measures[stage], risk_measures[0]
+    )))
 }
 
 /// Reject a `gap` stopping rule under sampled forward selection: the exact upper
@@ -2200,16 +2223,13 @@ fn rule_is_gap(rule: &StoppingRule) -> bool {
     }
 }
 
-/// Whether `measure` is *effectively* non-expectation (risk-averse).
-/// `CVaR { lambda: 0 }` is documented-equivalent to `Expectation` (its convex
-/// weight on the tail is zero), so only a positive risk-aversion weight counts.
-/// `RiskMeasure` is destructured exhaustively (every field named, no `..`) so a
-/// new `CVaR` field or a new variant must be dispositioned here.
+/// Whether `measure` is *effectively* non-expectation (risk-averse) — i.e. its
+/// [`effective`](RiskMeasure::effective) form is not `Expectation`.
+/// `CVaR { lambda: 0 }` is documented-equivalent to `Expectation`, so only a
+/// positive risk-aversion weight counts; the variant disposition lives on
+/// `RiskMeasure::effective`, the single owner of the `lambda > 0` predicate.
 fn is_effective_non_expectation(measure: &RiskMeasure) -> bool {
-    match measure {
-        RiskMeasure::Expectation => false,
-        RiskMeasure::CVaR { alpha: _, lambda } => *lambda > 0.0,
-    }
+    measure.effective() != RiskMeasure::Expectation
 }
 
 /// Advisory (never a reject) for an asymmetric enumeration declaration: when
@@ -2593,13 +2613,6 @@ fn build_initial_state(
         }
     }
 
-    // Anticipated ring, slot-major: `state[commit_out.start + slot *
-    // n_anticipated + local_idx]`. This IS the state-vector numbering
-    // (`StateSpace::state_to_lp_column`'s identity domain), the same
-    // `commit_out` position every other outgoing-state read uses — never
-    // `commit_in` (the relocated, incoming-only pinned block).
-    // Padding slots `[K_i, k_max)` must stay zero — the in-LP ring's row/column
-    // fill in `lp/builder` assumes it.
     if layout.n_anticipated > 0 && layout.k_max > 0 {
         debug_assert_eq!(
             study_dims.anticipated_thermal_indices.len(),
@@ -2608,8 +2621,6 @@ fn build_initial_state(
         );
         let thermals = system.thermals();
         let thermal_positions = id_to_position(thermals, |t: &Thermal| t.id.0);
-        let n_ant = layout.n_anticipated;
-        let ant_start = layout.commit_out.start;
         let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
             Some(idx) => &system.stages()[idx..],
             None => &[],
@@ -2630,8 +2641,9 @@ fn build_initial_state(
                 // Not an anticipated plant (`anticipated_config: None`) — skip.
                 continue;
             };
-            // Clamp to K_i, not k_max: a window resolving beyond it would otherwise
-            // corrupt the padding slots.
+            // A covered stage at or beyond K_i is a resolver/validator desync,
+            // unreachable through valid input — cobre-io's coverage rule rejects
+            // it before setup runs.
             let k_i = layout.anticipated_lead_stages[local_idx];
             let window = DatedWindow {
                 start_date: history.start_date,
@@ -2640,17 +2652,27 @@ fn build_initial_state(
             // coverage's whole-day-hours arithmetic keeps a full-coverage ratio
             // bit-exact (mirrors StageCalendar::covers_exactly).
             #[allow(clippy::float_cmp)]
-            for (slot, fraction) in calendar.coverage(&window).into_iter().enumerate().take(k_i) {
+            for (slot, fraction) in calendar.coverage(&window).into_iter().enumerate() {
                 if fraction == 1.0 {
-                    let off = ant_start + slot * n_ant + local_idx;
-                    state[off] = history.value_mw;
+                    if slot < k_i {
+                        let off = layout.commit_out.start
+                            + layout.commitment_hold_in_study_offset(local_idx, slot);
+                        state[off] = history.value_mw;
+                    } else {
+                        debug_assert!(
+                            false,
+                            "covered stage beyond plant's own lead: plant local_idx={local_idx}, slot={slot}, K_i={k_i}, k_max={}",
+                            layout.k_max
+                        );
+                    }
                 }
             }
             // Padding slots `[K_i, k_max)` must stay 0.0 — a non-zero value corrupts
             // the ring buffer and causes LP infeasibility.
             #[allow(clippy::float_cmp)]
             for slot in k_i..layout.k_max {
-                let off = ant_start + slot * n_ant + local_idx;
+                let off = layout.commit_out.start
+                    + layout.commitment_hold_in_study_offset(local_idx, slot);
                 debug_assert_eq!(
                     state[off], 0.0,
                     "padding slot must be zero: plant local_idx={local_idx}, slot={slot}, K_i={k_i}, k_max={}",
@@ -2836,7 +2858,7 @@ mod post_study_resolution_tests {
 
     #[test]
     fn post_study_absent_returns_default() {
-        let resolved = resolve_post_study_artifacts(None, &HorizonGraph::default(), 1.0, 1.0);
+        let resolved = resolve_post_study_artifacts(None, &[], &HorizonGraph::default(), 1.0, 1.0);
         assert_eq!(resolved, PostStudyResolved::default());
     }
 
@@ -2847,23 +2869,33 @@ mod post_study_resolution_tests {
             thermal_bounds: Vec::new(),
         };
         let resolved =
-            resolve_post_study_artifacts(Some(&empty), &HorizonGraph::default(), 1.0, 1.0);
+            resolve_post_study_artifacts(Some(&empty), &[], &HorizonGraph::default(), 1.0, 1.0);
         assert_eq!(resolved, PostStudyResolved::default());
     }
 
     #[test]
     fn total_hours_matches_declared_duration() {
         let post_study = two_stage_post_study();
-        let resolved =
-            resolve_post_study_artifacts(Some(&post_study), &HorizonGraph::default(), 1.0, 1.0);
+        let resolved = resolve_post_study_artifacts(
+            Some(&post_study),
+            &[],
+            &HorizonGraph::default(),
+            1.0,
+            1.0,
+        );
         assert_eq!(resolved.total_hours, vec![720.0, 744.0]);
     }
 
     #[test]
     fn continued_cumulative_discount_is_seed_at_zero_rate() {
         let post_study = two_stage_post_study();
-        let resolved =
-            resolve_post_study_artifacts(Some(&post_study), &HorizonGraph::default(), 0.9, 1.0);
+        let resolved = resolve_post_study_artifacts(
+            Some(&post_study),
+            &[],
+            &HorizonGraph::default(),
+            0.9,
+            1.0,
+        );
         assert_eq!(resolved.cumulative_discount_factors, vec![0.9, 0.9]);
     }
 
@@ -2884,6 +2916,7 @@ mod post_study_resolution_tests {
 
         let resolved = resolve_post_study_artifacts(
             Some(&post_study),
+            &[],
             &pg,
             last_real_cumulative,
             last_real_per_stage,
@@ -2911,8 +2944,13 @@ mod post_study_resolution_tests {
     #[test]
     fn thermal_bound_lookup_returns_declared_triple() {
         let post_study = two_stage_post_study();
-        let resolved =
-            resolve_post_study_artifacts(Some(&post_study), &HorizonGraph::default(), 1.0, 1.0);
+        let resolved = resolve_post_study_artifacts(
+            Some(&post_study),
+            &[],
+            &HorizonGraph::default(),
+            1.0,
+            1.0,
+        );
 
         assert_eq!(
             resolved.thermal_bounds.lookup(EntityId(1), 0),

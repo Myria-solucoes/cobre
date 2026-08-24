@@ -441,9 +441,6 @@ pub(crate) struct RawHydroPenaltyOverrides {
 /// row order (declaration-order invariance); the builder applies the same id as
 /// its `(operational_start_date, id)` canonical tiebreak.
 ///
-/// Cross-reference validation (`downstream_id`,
-/// `diversion.downstream_id`, `unit_groups[].bus_id`) is deferred to Layer 3.
-///
 /// # Errors
 ///
 /// | Condition                                           | Error variant              |
@@ -850,8 +847,8 @@ fn convert_hydros(
         })
         .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id so this parser's output is deterministic regardless of file row
-    // order (declaration-order invariance); id is the builder's canonical tiebreak.
+    // Sort by id: output must not depend on file row order (declaration-order
+    // invariance).
     hydros.sort_by_key(|h| h.id.0);
     Ok(hydros)
 }
@@ -963,7 +960,7 @@ fn convert_penalty_overrides(raw: RawHydroPenaltyOverrides) -> HydroPenaltyOverr
 
 /// Extract a field name hint from a `serde_json` error message.
 ///
-/// Mirrors the implementation in `config.rs`. `serde_json` error messages follow
+/// Mirrors the implementation in `config/mod.rs`. `serde_json` error messages follow
 /// patterns such as:
 /// - `"unknown variant 'foo', expected one of …"`
 /// - `"missing field 'xyz' at line 1 column 2"`

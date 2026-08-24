@@ -228,7 +228,6 @@ fn test_clp_set_row_bounds_patches_retained() {
     solver.set_row_bounds(&[0], &[4.0], &[4.0]);
     assert_eq!(solver.row_lower[0], 4.0);
     assert_eq!(solver.row_upper[0], 4.0);
-    // Untouched row is unchanged.
     assert_eq!(solver.row_lower[1], 14.0);
 }
 
@@ -240,7 +239,6 @@ fn test_clp_set_col_bounds_patches_retained() {
     solver.set_col_bounds(&[1], &[10.0], &[f64::INFINITY]);
     assert_eq!(solver.col_lower[1], 10.0);
     assert!(solver.col_upper[1].is_infinite());
-    // Untouched column is unchanged.
     assert_eq!(solver.col_lower[0], 0.0);
 }
 
@@ -259,7 +257,6 @@ fn test_clp_set_bounds_empty_no_reload() {
     assert_eq!(solver.num_rows, 2);
     assert_eq!(solver.num_cols, 3);
     assert_eq!(solver.stats.load_model_count, load_count_before);
-    // Bound vectors are untouched.
     assert_eq!(solver.row_lower, vec![6.0, 14.0]);
     assert_eq!(solver.col_lower, vec![0.0, 0.0, 0.0]);
 }

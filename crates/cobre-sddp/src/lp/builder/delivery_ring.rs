@@ -70,7 +70,7 @@ impl DeliveryRing {
     }
 
     /// Outgoing-block column for ring position `(slot, lane)` — the single
-    /// owner of the ring's addressing arithmetic (slot-major, lane-minor).
+    /// owner of the ring's addressing arithmetic.
     ///
     /// # Panics (debug builds only)
     ///

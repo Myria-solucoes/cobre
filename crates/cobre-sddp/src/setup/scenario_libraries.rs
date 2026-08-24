@@ -4,21 +4,20 @@
 //! standardization semantics.
 
 use cobre_core::{
-    EntityId, InflowHistoryRow, Stage,
-    scenario::{
-        ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, HistoricalYears, LoadModel, NcsModel,
-        SamplingScheme,
-    },
+    EntityId, InflowHistoryRow, Stage, System,
+    scenario::{ExternalScenarioRow, HistoricalYears, LoadModel, NcsModel, SamplingScheme},
     temporal::{SeasonMap, StageLagTransition},
 };
+use cobre_io::StageIdResolver;
 use cobre_stochastic::{
-    ExternalScenarioLibrary, HistoricalScenarioLibrary, PrecomputedPar,
+    ExternalScenarioLibrary, HistoricalScenarioLibrary, PrecomputedNormal, PrecomputedPar,
     discover_historical_windows, pad_library_to_uniform, standardize_external_inflow,
     standardize_external_load, standardize_external_ncs, standardize_historical_windows,
     validate_external_library, validate_historical_library,
 };
 
 use crate::SddpError;
+use crate::lp_builder::models_from_normal;
 
 /// Build and validate a [`HistoricalScenarioLibrary`] for inflow.
 ///
@@ -121,12 +120,12 @@ pub(crate) fn build_external_inflow_library(
     let n_hydros = hydro_ids.len();
     let row_entity_ids: std::collections::HashSet<EntityId> =
         external_rows.iter().map(|r| r.hydro_id).collect();
+    let resolver =
+        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
     let mut rows_per_stage = vec![0usize; n_stages];
-    #[allow(clippy::cast_sign_loss)]
     for row in external_rows {
-        let s = row.stage_id as usize;
-        if s < n_stages {
-            rows_per_stage[s] += 1;
+        if let Some(idx) = resolver.resolve(row.stage_id) {
+            rows_per_stage[idx] += 1;
         }
     }
     let per_stage_scenarios: Vec<usize> = if n_hydros > 0 {
@@ -170,40 +169,49 @@ pub(crate) fn build_external_inflow_library(
 
 /// Build and validate an [`ExternalScenarioLibrary`] for load.
 ///
-/// Canonical bus ID list from `load_models`, filtered by
-/// [`LoadModel::is_noise_member`] — the same authority `noise_entity_order`
-/// consumes, so a σ=0 bus keeps its noise-vector slot under the external
-/// scheme. `load_scheme` is the CALLING phase's own resolved scheme; a phase
-/// whose scheme diverges from the training-derived noise-vector width is
-/// caught by `assert_external_library_widths`, not here.
+/// Canonical bus ID list from [`System::load_noise_member_bus_ids`] — the
+/// single membership authority `noise_entity_order` and the LP template
+/// builder's `collect_load_bus_indices` also route through, so a σ=0 or
+/// seasonal-stats-absent bus keeps the same noise-vector slot everywhere.
+/// `load_scheme` is the CALLING phase's own resolved scheme; a phase whose
+/// scheme diverges from the training-derived noise-vector width is caught by
+/// `assert_external_library_widths`, not here.
+///
+/// Standardizes against `normal_lp`/`normal_bus_ids` — the SAME
+/// `PrecomputedNormal` and entity list `cobre_stochastic::context` builds for
+/// reconstruction — rather than re-deriving moments independently from
+/// `external_rows`, mirroring how [`build_external_inflow_library`]
+/// standardizes against the reconstruction `PrecomputedPar` it receives.
+/// `normal_bus_ids` is gated on the TRAINING scheme (the one scheme the
+/// shared `PrecomputedNormal` is built under), which may be narrower than
+/// this library's own `External`-gated `bus_ids` when the calling phase's
+/// scheme diverges from training's; a bus outside `normal_bus_ids` then
+/// standardizes to `(0.0, 0.0)`, matching what reconstruction itself would
+/// give it — never a divergent, independently-derived value.
 ///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on validation failure.
 pub(crate) fn build_external_load_library(
-    external_rows: &[ExternalLoadRow],
-    load_models: &[LoadModel],
+    system: &System,
     load_scheme: SamplingScheme,
     stages: &[Stage],
     forward_passes: u32,
+    normal_lp: &PrecomputedNormal,
+    normal_bus_ids: &[EntityId],
 ) -> Result<ExternalScenarioLibrary, SddpError> {
+    let external_rows = system.external_load_scenarios();
     let n_stages = stages.len();
-    let mut bus_ids: Vec<EntityId> = load_models
-        .iter()
-        .filter(|m| m.is_noise_member(load_scheme))
-        .map(|m| m.bus_id)
-        .collect();
-    bus_ids.sort_unstable_by_key(|id| id.0);
-    bus_ids.dedup();
+    let bus_ids = system.load_noise_member_bus_ids(load_scheme);
     let n_buses = bus_ids.len();
     let row_entity_ids: std::collections::HashSet<EntityId> =
         external_rows.iter().map(|r| r.bus_id).collect();
+    let resolver =
+        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
     let mut rows_per_stage = vec![0usize; n_stages];
-    #[allow(clippy::cast_sign_loss)]
     for row in external_rows {
-        let s = row.stage_id as usize;
-        if s < n_stages {
-            rows_per_stage[s] += 1;
+        if let Some(idx) = resolver.resolve(row.stage_id) {
+            rows_per_stage[idx] += 1;
         }
     }
     let per_stage_scenarios: Vec<usize> = if n_buses > 0 {
@@ -219,7 +227,25 @@ pub(crate) fn build_external_load_library(
         "load",
         per_stage_scenarios,
     );
-    standardize_external_load(&mut library, external_rows, &bus_ids, load_models, n_stages);
+    let stage_refs: Vec<&Stage> = stages.iter().collect();
+    let derived_load_models = models_from_normal(
+        normal_lp,
+        normal_bus_ids,
+        &stage_refs,
+        |bus_id, stage_id, mean_mw, std_mw| LoadModel {
+            bus_id,
+            stage_id,
+            mean_mw,
+            std_mw,
+        },
+    );
+    standardize_external_load(
+        &mut library,
+        external_rows,
+        &bus_ids,
+        &derived_load_models,
+        stages,
+    );
     validate_external_library(
         &library,
         &bus_ids,
@@ -235,30 +261,39 @@ pub(crate) fn build_external_load_library(
 
 /// Build and validate an [`ExternalScenarioLibrary`] for NCS.
 ///
-/// Uses canonical NCS ID list from `ncs_models` (all NCS entities, sorted and deduped).
+/// Canonical NCS ID list from [`System::ncs_noise_member_ids`] — this class
+/// is only ever built under `External` (the caller gates the call site), so
+/// an NCS with no `non_controllable_stats` row is still a noise member.
+///
+/// Standardizes against `ncs_normal`/`normal_ncs_ids` — the SAME
+/// `PrecomputedNormal` and entity list `cobre_stochastic::context` builds for
+/// reconstruction — rather than re-deriving moments independently, mirroring
+/// [`build_external_load_library`]'s own fix (see its doc for the
+/// TRAINING-scheme-gated `normal_ncs_ids` vs. this library's own
+/// `External`-gated `ncs_ids` distinction).
 ///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on validation failure.
 pub(crate) fn build_external_ncs_library(
-    external_rows: &[ExternalNcsRow],
-    ncs_models: &[NcsModel],
+    system: &System,
     stages: &[Stage],
     forward_passes: u32,
+    ncs_normal: &PrecomputedNormal,
+    normal_ncs_ids: &[EntityId],
 ) -> Result<ExternalScenarioLibrary, SddpError> {
+    let external_rows = system.external_ncs_scenarios();
     let n_stages = stages.len();
-    let mut ncs_ids: Vec<EntityId> = ncs_models.iter().map(|m| m.ncs_id).collect();
-    ncs_ids.sort_unstable_by_key(|id| id.0);
-    ncs_ids.dedup();
+    let ncs_ids = system.ncs_noise_member_ids(SamplingScheme::External);
     let n_ncs = ncs_ids.len();
     let row_entity_ids: std::collections::HashSet<EntityId> =
         external_rows.iter().map(|r| r.ncs_id).collect();
+    let resolver =
+        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
     let mut rows_per_stage = vec![0usize; n_stages];
-    #[allow(clippy::cast_sign_loss)]
     for row in external_rows {
-        let s = row.stage_id as usize;
-        if s < n_stages {
-            rows_per_stage[s] += 1;
+        if let Some(idx) = resolver.resolve(row.stage_id) {
+            rows_per_stage[idx] += 1;
         }
     }
     let per_stage_scenarios: Vec<usize> = if n_ncs > 0 {
@@ -269,7 +304,25 @@ pub(crate) fn build_external_ncs_library(
     let n_scenarios_ext = per_stage_scenarios.iter().copied().max().unwrap_or(0);
     let mut library =
         ExternalScenarioLibrary::new(n_stages, n_scenarios_ext, n_ncs, "ncs", per_stage_scenarios);
-    standardize_external_ncs(&mut library, external_rows, &ncs_ids, ncs_models, n_stages);
+    let stage_refs: Vec<&Stage> = stages.iter().collect();
+    let derived_ncs_models = models_from_normal(
+        ncs_normal,
+        normal_ncs_ids,
+        &stage_refs,
+        |ncs_id, stage_id, mean, std| NcsModel {
+            ncs_id,
+            stage_id,
+            mean,
+            std,
+        },
+    );
+    standardize_external_ncs(
+        &mut library,
+        external_rows,
+        &ncs_ids,
+        &derived_ncs_models,
+        stages,
+    );
     validate_external_library(
         &library,
         &ncs_ids,
@@ -287,14 +340,14 @@ pub(crate) fn build_external_ncs_library(
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        Block, BlockMode, InflowModel, NoiseMethod, ScenarioSourceConfig, StageRiskConfig,
-        StageStateConfig,
+        Block, BlockMode, ExternalLoadRow, InflowModel, NoiseMethod, ScenarioSourceConfig,
+        StageRiskConfig, StageStateConfig, SystemBuilder,
     };
-    use cobre_stochastic::StochasticError;
+    use cobre_stochastic::{PrecomputedNormal, StochasticError, derive_external_sample_moments};
 
     use super::{
-        EntityId, ExternalScenarioRow, PrecomputedPar, SddpError, Stage, StageLagTransition,
-        build_external_inflow_library,
+        EntityId, ExternalScenarioRow, LoadModel, PrecomputedPar, SamplingScheme, SddpError, Stage,
+        StageLagTransition, build_external_inflow_library, build_external_load_library,
     };
 
     fn single_stage(id: i32) -> Stage {
@@ -435,5 +488,567 @@ mod tests {
         );
 
         assert!(result.is_ok(), "expected Ok(()), got: {result:?}");
+    }
+
+    /// AC1: a σ=0 External LOAD bus reconstructs the external value, not a
+    /// deliberately-disagreeing seasonal `mean_mw` (design doc §3/§4.1).
+    #[test]
+    fn external_load_sigma_zero_reconstructs_external_value_not_seasonal_mean() {
+        let bus_id = EntityId(1);
+        let stages = vec![single_stage(0)];
+        let seasonal_load_models = vec![LoadModel {
+            bus_id,
+            stage_id: 0,
+            mean_mw: 999.0,
+            std_mw: 0.0,
+        }];
+        let external_rows = vec![ExternalLoadRow {
+            bus_id,
+            stage_id: 0,
+            scenario_id: 0,
+            value_mw: 123.0,
+        }];
+        let system = SystemBuilder::new()
+            .load_models(seasonal_load_models)
+            .external_load_scenarios(external_rows.clone())
+            .build()
+            .expect("system must build");
+
+        // Mirror context.rs's own training=External derivation: standardization
+        // must consume this SAME `PrecomputedNormal`, not re-derive it.
+        let moments = derive_external_sample_moments(
+            &external_rows,
+            &[bus_id],
+            1,
+            |row: &ExternalLoadRow| (row.bus_id, row.stage_id, row.scenario_id, row.value_mw),
+        );
+        let (mean, std) = moments[0];
+        assert!(
+            (mean - 123.0).abs() < 1e-10,
+            "the standardization moment source must be the external sample, not the \
+             seasonal mean_mw (999.0)"
+        );
+        assert!(
+            std.abs() < 1e-10,
+            "a single external sample -> sigma=0 exactly"
+        );
+        let derived_load_models = vec![LoadModel {
+            bus_id,
+            stage_id: 0,
+            mean_mw: mean,
+            std_mw: std,
+        }];
+        let normal_lp = PrecomputedNormal::build(&derived_load_models, &[], &stages, &[bus_id], 1)
+            .expect("normal_lp must build");
+
+        let library = build_external_load_library(
+            &system,
+            SamplingScheme::External,
+            &stages,
+            1,
+            &normal_lp,
+            &[bus_id],
+        )
+        .expect("a single-column external load library must build");
+
+        let eta = library.eta_slice(0, 0)[0];
+        let realized = (mean + std * eta).max(0.0);
+        assert!(
+            (realized - 123.0).abs() < 1e-10,
+            "reconstruction must equal the external value (123.0), not the seasonal \
+             mean_mw (999.0); got {realized}"
+        );
+    }
+
+    /// Regression: a divergent sim-only-External LOAD deck — training uses
+    /// `InSample`, simulation uses `External` for the same bus — must
+    /// standardize against the SAME `PrecomputedNormal`
+    /// `cobre_stochastic::context` builds for the training-gated
+    /// reconstruction, never re-derive independently from `external_rows`.
+    /// Two distinct external scenarios give a nonzero external sample sigma
+    /// (25.0), so a re-derivation would standardize a genuinely nonzero eta;
+    /// pre-fix, `build_external_load_library` always called
+    /// `derive_external_sample_moments` over the external sample regardless
+    /// of which phase invoked it, so this bus's standardization sigma (25.0)
+    /// disagreed with the training-gated reconstruction sigma (`0.0`, since a
+    /// σ=0 bus is not an `InSample` noise member at all) — a silent
+    /// divergence this test pins shut.
+    #[test]
+    fn external_load_divergent_sim_only_scheme_standardizes_against_training_gated_normal() {
+        let bus_id = EntityId(1);
+        let stages = vec![single_stage(0)];
+        let seasonal_load_models = vec![LoadModel {
+            bus_id,
+            stage_id: 0,
+            mean_mw: 999.0,
+            std_mw: 0.0,
+        }];
+        let external_rows = vec![
+            ExternalLoadRow {
+                bus_id,
+                stage_id: 0,
+                scenario_id: 0,
+                value_mw: 100.0,
+            },
+            ExternalLoadRow {
+                bus_id,
+                stage_id: 0,
+                scenario_id: 1,
+                value_mw: 150.0,
+            },
+        ];
+        let system = SystemBuilder::new()
+            .load_models(seasonal_load_models)
+            .external_load_scenarios(external_rows)
+            .build()
+            .expect("system must build");
+
+        // Training's own scheme is InSample: R2's default std_mw > 0.0 rule
+        // excludes this sigma=0 bus from noise membership entirely, so
+        // context.rs's non-External branch builds normal_lp over an empty
+        // entity list for this bus.
+        let normal_load_bus_ids = system.load_noise_member_bus_ids(SamplingScheme::InSample);
+        assert!(
+            normal_load_bus_ids.is_empty(),
+            "a sigma=0 bus must not be an InSample noise member"
+        );
+        let max_blocks = stages.iter().map(|s| s.blocks.len()).max().unwrap_or(0);
+        let normal_lp = PrecomputedNormal::build(
+            system.load_models(),
+            &[],
+            &stages,
+            &normal_load_bus_ids,
+            max_blocks,
+        )
+        .expect("normal_lp must build");
+
+        // Simulation's own scheme is External: R2's external-additive
+        // membership widens this library's own bus_ids to include the
+        // sigma=0 bus, strictly wider than normal_load_bus_ids above --
+        // exactly the divergent-scheme case the fix must not mis-standardize.
+        let library = build_external_load_library(
+            &system,
+            SamplingScheme::External,
+            &stages,
+            1,
+            &normal_lp,
+            &normal_load_bus_ids,
+        )
+        .expect("a divergent sim-only-External load library must still build");
+
+        for scenario in 0..2 {
+            let eta = library.eta_slice(0, scenario)[0];
+            assert!(
+                eta.abs() < 1e-10,
+                "a bus outside the training-gated normal_lp must standardize to eta=0 \
+                 (the (0.0, 0.0) fallback) -- agreeing with what training's own \
+                 reconstruction gives this bus -- not a nonzero eta derived from the \
+                 external sample's own sigma (25.0), which would silently diverge \
+                 from it; scenario {scenario} got {eta}"
+            );
+        }
+    }
+
+    /// AC2 + regression proof: a σ=0 External AR(0) inflow reconstructs the
+    /// external value, including at a stage whose real scenario count is
+    /// SMALLER than another stage's — a branching root's sole observation,
+    /// the non-uniform shape the V3.7-vs-padding-order fix (design doc
+    /// §3/§4.2) must not reject — and the padded phantom slot replicates the
+    /// correct value, not a rejected/garbage sentinel.
+    #[test]
+    fn external_inflow_ar0_nonuniform_scenario_counts_reconstructs_external_values() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+        let stages = vec![single_stage(0), single_stage(1)];
+
+        // Stage 0: a single real external scenario (sigma derives to 0
+        // exactly). Stage 1: two distinct real scenarios (sigma > 0).
+        let external_rows = vec![
+            ExternalScenarioRow {
+                stage_id: 0,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: 60.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: 10.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 1,
+                hydro_id,
+                value_m3s: 30.0,
+            },
+        ];
+
+        // Mirror context.rs's AR(0) override: derive moments over the
+        // external samples and rebuild PrecomputedPar from them.
+        let moments = derive_external_sample_moments(
+            &external_rows,
+            &hydro_ids,
+            2,
+            |row: &ExternalScenarioRow| {
+                (row.hydro_id, row.stage_id, row.scenario_id, row.value_m3s)
+            },
+        );
+        let overridden_models: Vec<InflowModel> = (0..2_usize)
+            .map(|s| {
+                let (mean_m3s, std_m3s) = moments[s];
+                InflowModel {
+                    hydro_id,
+                    stage_id: i32::try_from(s).unwrap(),
+                    mean_m3s,
+                    std_m3s,
+                    ar_coefficients: vec![],
+                    residual_std_ratio: 1.0,
+                    annual: None,
+                }
+            })
+            .collect();
+        let par = PrecomputedPar::build(&overridden_models, &stages, &hydro_ids, None).unwrap();
+        assert!(
+            par.sigma(0, 0).abs() < 1e-10,
+            "stage 0's single real scenario must derive sigma=0 exactly"
+        );
+        assert!(
+            par.sigma(1, 0) > 0.0,
+            "stage 1's two distinct real scenarios must derive sigma>0"
+        );
+
+        let transitions = vec![finalizing_transition(), finalizing_transition()];
+        let library = build_external_inflow_library(
+            &external_rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &[],
+            0,
+            &[],
+            &[],
+            &transitions,
+            2,
+            0,
+        )
+        .expect("V3.7 must not reject stage 0 for having fewer real scenarios than stage 1");
+
+        let reconstruct = |stage: usize, scenario: usize| {
+            let eta = library.eta_slice(stage, scenario)[0];
+            par.deterministic_base(stage, 0) + par.sigma(stage, 0) * eta
+        };
+
+        assert!(
+            (reconstruct(0, 0) - 60.0).abs() < 1e-10,
+            "stage 0's real scenario must reconstruct the external value"
+        );
+        assert!(
+            (reconstruct(1, 0) - 10.0).abs() < 1e-10,
+            "stage 1's first real scenario must reconstruct the external value"
+        );
+        assert!(
+            (reconstruct(1, 1) - 30.0).abs() < 1e-10,
+            "stage 1's second real scenario must reconstruct the external value"
+        );
+        assert!(
+            (reconstruct(0, 1) - 60.0).abs() < 1e-10,
+            "the padded phantom slot at stage 0 must replicate the real root value \
+             (60.0), not a rejected/garbage sentinel"
+        );
+    }
+
+    /// Regression pin: an AR(p > 0) hydro in a non-uniform-per-stage External
+    /// deck — stage 0 has one real scenario, a later stage has k — must NOT
+    /// have a real later-stage slot's stored eta inverted against a
+    /// fabricated phantom lag (`0.0`) instead of the lag the runtime forward
+    /// pass actually feeds: every stage-1 branch descends from the SAME
+    /// stage-0 root, so `accumulate_and_shift_lag_state`
+    /// (`stochastic/noise.rs`) carries that root's own realized inflow to
+    /// every child regardless of `scenario_id`. `standardize_external_inflow`
+    /// (`sampling/external.rs`) replicates a stage's real raw values to
+    /// uniform width BEFORE `run_eta_inversion`'s lag-chain advance for
+    /// exactly this reason. `lag_realized` below is sourced independently of
+    /// that fix: the branching root's own external value, recovered via this
+    /// AR(1) hydro's own stage-0 stored eta (verified equal to the root's raw
+    /// value) — never the lag the inversion used internally, which would mask
+    /// a real bug were the fix ever weakened.
+    #[test]
+    fn external_inflow_ar1_nonuniform_scenario_counts_round_trip() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+        let stages = vec![single_stage(0), single_stage(1)];
+
+        // AR(1), untouched seasonal model: this ticket never overrides an
+        // AR(p > 0) hydro's moments with derived external samples.
+        let seasonal_model = |stage_id| InflowModel {
+            hydro_id,
+            stage_id,
+            mean_m3s: 100.0,
+            std_m3s: 30.0,
+            ar_coefficients: vec![0.5],
+            residual_std_ratio: 1.0,
+            annual: None,
+        };
+        let seasonal_models = vec![seasonal_model(0), seasonal_model(1)];
+        let par = PrecomputedPar::build(&seasonal_models, &stages, &hydro_ids, None).unwrap();
+        let det_base = par.deterministic_base(0, 0);
+        let psi = par.psi_slice(0, 0)[0];
+        let sigma = par.sigma(0, 0);
+
+        // Stage 0: a single real external scenario (the branching root).
+        // Stage 1: two distinct real branches, both descending from that SAME
+        // root.
+        let external_rows = vec![
+            ExternalScenarioRow {
+                stage_id: 0,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: 200.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: 150.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 1,
+                scenario_id: 1,
+                hydro_id,
+                value_m3s: 250.0,
+            },
+        ];
+        let derived_lag_values = [0.0_f64];
+        let transitions = vec![finalizing_transition(), finalizing_transition()];
+
+        let library = build_external_inflow_library(
+            &external_rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &derived_lag_values,
+            1,
+            &[],
+            &[],
+            &transitions,
+            2,
+            0,
+        )
+        .expect("V3.7 must not reject stage 0 for having fewer real scenarios than stage 1");
+
+        let stage0_eta_real = library.eta_slice(0, 0)[0];
+        let lag_realized = det_base + psi * derived_lag_values[0] + sigma * stage0_eta_real;
+        assert!(
+            (lag_realized - 200.0).abs() < 1e-10,
+            "the branching root's own realized inflow must equal its external value; \
+             got {lag_realized}"
+        );
+
+        let reconstruct_stage1 = |scenario: usize| {
+            let eta = library.eta_slice(1, scenario)[0];
+            det_base + psi * lag_realized + sigma * eta
+        };
+
+        let external_stage1 = [150.0_f64, 250.0_f64];
+        for (scenario, &expected) in external_stage1.iter().enumerate() {
+            let realized = reconstruct_stage1(scenario);
+            assert!(
+                (realized - expected).abs() < 1e-6,
+                "stage 1 scenario {scenario}: reconstructed {realized}, expected {expected} \
+                 (external value) using the REAL parent lag {lag_realized}"
+            );
+        }
+    }
+
+    /// Regression: a gapped/non-0-based External LOAD deck
+    /// (declared stage ids `2`/`5`, never `0`/`1`) must resolve through the
+    /// same canonical `stage_id -> index` mapping cobre-io's rule-47
+    /// validator uses. Pre-fix, `rows_per_stage`'s `row.stage_id as usize`
+    /// bound-check (`< n_stages`) silently dropped every row of a gapped
+    /// deck outright, since the raw ids (2, 5) both exceed `n_stages` (2).
+    #[test]
+    fn external_load_library_resolves_gapped_stage_ids() {
+        let bus_id = EntityId(1);
+        let stages = vec![single_stage(2), single_stage(5)];
+        let seasonal_load_models = vec![
+            LoadModel {
+                bus_id,
+                stage_id: 2,
+                mean_mw: 999.0,
+                std_mw: 0.0,
+            },
+            LoadModel {
+                bus_id,
+                stage_id: 5,
+                mean_mw: 999.0,
+                std_mw: 0.0,
+            },
+        ];
+        let external_rows = vec![
+            ExternalLoadRow {
+                bus_id,
+                stage_id: 2,
+                scenario_id: 0,
+                value_mw: 123.0,
+            },
+            ExternalLoadRow {
+                bus_id,
+                stage_id: 5,
+                scenario_id: 0,
+                value_mw: 456.0,
+            },
+        ];
+
+        let system = SystemBuilder::new()
+            .load_models(seasonal_load_models)
+            .external_load_scenarios(external_rows.clone())
+            .build()
+            .expect("system must build");
+
+        // Resolve the declared ids the same way the fixed engine now must:
+        // gapped id 2 -> canonical position 0, gapped id 5 -> position 1.
+        let resolved_rows: Vec<(EntityId, i32, i32, f64)> = external_rows
+            .iter()
+            .map(|row| {
+                let resolved = i32::from(row.stage_id == 5);
+                (row.bus_id, resolved, row.scenario_id, row.value_mw)
+            })
+            .collect();
+        let moments = derive_external_sample_moments(
+            &resolved_rows,
+            &[bus_id],
+            2,
+            |&(bus, stage_idx, scenario_id, value)| (bus, stage_idx, scenario_id, value),
+        );
+        // Mirror context.rs's own training=External derivation: standardization
+        // must consume this SAME `PrecomputedNormal`, not re-derive it.
+        let derived_load_models: Vec<LoadModel> = (0..2)
+            .map(|resolved_idx| {
+                let (mean, std) = moments[resolved_idx];
+                LoadModel {
+                    bus_id,
+                    stage_id: stages[resolved_idx].id,
+                    mean_mw: mean,
+                    std_mw: std,
+                }
+            })
+            .collect();
+        let normal_lp = PrecomputedNormal::build(&derived_load_models, &[], &stages, &[bus_id], 1)
+            .expect("normal_lp must build");
+
+        let library = build_external_load_library(
+            &system,
+            SamplingScheme::External,
+            &stages,
+            1,
+            &normal_lp,
+            &[bus_id],
+        )
+        .expect("a gapped-stage-id external load deck must build, not drop every row");
+
+        for (resolved_idx, expected) in [(0usize, 123.0_f64), (1usize, 456.0_f64)] {
+            let (mean, std) = moments[resolved_idx];
+            let eta = library.eta_slice(resolved_idx, 0)[0];
+            let realized = (mean + std * eta).max(0.0);
+            assert!(
+                (realized - expected).abs() < 1e-10,
+                "gapped declared stage id must resolve to canonical position {resolved_idx}; \
+                 got {realized}, expected {expected}"
+            );
+        }
+    }
+
+    /// Regression, inflow counterpart: a gapped/non-0-based
+    /// External INFLOW deck (declared stage ids `2`/`5`) must resolve
+    /// through the same canonical mapping — both in the `rows_per_stage`
+    /// count feeding V3.7 and in `standardize_external_inflow`'s own
+    /// per-stage fill. Pre-fix, both silently dropped every row of this
+    /// deck, since the raw ids exceed `n_stages` (2).
+    #[test]
+    fn external_inflow_library_resolves_gapped_stage_ids() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+        let stages = vec![single_stage(2), single_stage(5)];
+
+        let external_rows = vec![
+            ExternalScenarioRow {
+                stage_id: 2,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: 200.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 5,
+                scenario_id: 0,
+                hydro_id,
+                value_m3s: 400.0,
+            },
+        ];
+
+        // Mirror context.rs's AR(0) override: derive moments over the
+        // RESOLVED (canonical) stage positions, the same mapping the engine
+        // and the validator must both apply to the raw declared ids (2, 5).
+        let resolved_rows: Vec<(EntityId, i32, i32, f64)> = external_rows
+            .iter()
+            .map(|row| {
+                let resolved = i32::from(row.stage_id == 5);
+                (row.hydro_id, resolved, row.scenario_id, row.value_m3s)
+            })
+            .collect();
+        let moments = derive_external_sample_moments(
+            &resolved_rows,
+            &hydro_ids,
+            2,
+            |&(hydro, stage_idx, scenario_id, value)| (hydro, stage_idx, scenario_id, value),
+        );
+        let overridden_models: Vec<InflowModel> = stages
+            .iter()
+            .enumerate()
+            .map(|(idx, stage)| {
+                let (mean_m3s, std_m3s) = moments[idx];
+                InflowModel {
+                    hydro_id,
+                    stage_id: stage.id,
+                    mean_m3s,
+                    std_m3s,
+                    ar_coefficients: vec![],
+                    residual_std_ratio: 1.0,
+                    annual: None,
+                }
+            })
+            .collect();
+        let par = PrecomputedPar::build(&overridden_models, &stages, &hydro_ids, None).unwrap();
+        assert!(par.sigma(0, 0).abs() < 1e-10);
+        assert!(par.sigma(1, 0).abs() < 1e-10);
+
+        let transitions = vec![finalizing_transition(), finalizing_transition()];
+        let library = build_external_inflow_library(
+            &external_rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &[],
+            0,
+            &[],
+            &[],
+            &transitions,
+            1,
+            0,
+        )
+        .expect("a gapped-stage-id external inflow deck must build, not drop every row");
+
+        let reconstruct = |stage: usize| {
+            let eta = library.eta_slice(stage, 0)[0];
+            par.deterministic_base(stage, 0) + par.sigma(stage, 0) * eta
+        };
+        assert!(
+            (reconstruct(0) - 200.0).abs() < 1e-10,
+            "gapped declared id 2 must resolve to canonical position 0"
+        );
+        assert!(
+            (reconstruct(1) - 400.0).abs() < 1e-10,
+            "gapped declared id 5 must resolve to canonical position 1"
+        );
     }
 }

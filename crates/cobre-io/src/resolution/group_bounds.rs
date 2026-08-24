@@ -28,11 +28,11 @@ use crate::constraints::HydroUnitGroupBoundsRow;
 /// with it only when every entity shares one `operational_start_date` -- with
 /// each plant's `unit_groups` sorted by id (`Hydro::sort_unit_groups`, applied
 /// identically at parse time and by `SystemBuilder::build`, so that axis has
-/// no equivalent divergence). Slice/group position becomes
-/// `hydro_idx`/`group_pos`, the axis [`ResolvedHydroUnitGroupBounds`] is
-/// addressed by
-/// (`hydro_unit_group_bound_override_follows_declared_id_through_canonical_resort`
-/// falsifies a resolve-before-resort regression on the `hydros` axis).
+/// no equivalent divergence). Slice/group position becomes the
+/// `hydro_idx`/`group_pos` pair used to address
+/// [`ResolvedHydroUnitGroupBounds`]; the regression test
+/// `hydro_unit_group_bound_override_follows_declared_id_through_canonical_resort`
+/// falsifies a resolve-before-resort regression on the `hydros` ordering.
 /// `blocks_per_stage` and `stage_index` are the same tables
 /// [`resolve_bounds`](super::resolve_bounds) uses — reused, never rebuilt.
 ///

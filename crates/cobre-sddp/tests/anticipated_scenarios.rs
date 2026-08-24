@@ -382,7 +382,6 @@ mod anticipated_5stage_k2_smoke {
             ),
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -866,7 +865,6 @@ mod anticipated_two_plants_smoke {
             .concat(),
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -1018,13 +1016,10 @@ mod anticipated_two_plants_smoke {
             .state_at_capture
             .as_slice();
 
-        // HOLD (carry, not shift): a not-yet-matured commitment is held in its
-        // OWN modular slot across forward stages, never shifted to a lower slot.
         // Plant 1 (K=4, id 5) holds its delivery-3 commitment in slot `3 mod 4 = 3`
         // across stages 0-2, maturing only at stage 3, so the SAME slot carries the
         // same value across the consecutive forward-outgoing captures bc[1] (stage
-        // 0) and bc[2] (stage 1). Under the retired shift geometry this invariant
-        // instead read `slot 1 @ stage t == slot 0 @ stage t+1`.
+        // 0) and bc[2] (stage 1).
         let plant1 = 1_usize;
         let slot3_p1 = ant_start + 3 * n_anticipated + plant1;
         assert!(
@@ -1373,7 +1368,6 @@ mod anticipated_simulation_ring_buffer {
             ),
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -1912,7 +1906,6 @@ mod anticipated_generic_constraint_e2e {
             ),
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         let mut builder = SystemBuilder::new()
@@ -2950,7 +2943,6 @@ mod anticipated_commitment_at_cap {
             ),
             recent_observations: vec![],
             past_defluences: vec![],
-            future_anticipated_deliveries: vec![],
         };
 
         SystemBuilder::new()
@@ -3060,5 +3052,444 @@ mod anticipated_commitment_at_cap {
              never absorbed as drift and never reported as a bare Infeasible, got: {:?}",
             outcome.error
         );
+    }
+}
+
+mod faithful_resolution {
+    //! The headline resolution regression: a reference-deck-shaped case (one
+    //! anticipated plant, `LeadStages(7)` over four study stages plus a
+    //! seven-stage post-study calendar) asserting each carried post-study
+    //! delivery resolves to its real calendar window and duration — structural
+    //! only, read off the built setup through the two public terminal
+    //! accessors with no training and no solve.
+
+    use chrono::{Datelike, NaiveDate};
+    use cobre_core::entities::bus::DeficitSegment;
+    use cobre_core::entities::thermal::AnticipatedConfig;
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PostStudyStage, PostStudyStages,
+        PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
+        ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, SimulationSelection,
+        StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
+        UpperBoundEvaluationConfig,
+    };
+
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, StageSpec, ThermalSpec, make_bus, make_stage, make_thermal,
+    };
+
+    const BUS_ID: EntityId = EntityId(1);
+    const ANTICIPATED_ID: EntityId = EntityId(2);
+    const N_STUDY_STAGES: usize = 4;
+    const LEAD_STAGES: u32 = 7;
+    const N_POST_STUDY_STAGES: usize = 7;
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("hardcoded fixture date is valid")
+    }
+
+    /// Study-stage boundaries (five dates for four stages): three operative
+    /// weeks (168 h each) then one month (648 h) — the reference-deck shape.
+    fn study_boundaries() -> [NaiveDate; N_STUDY_STAGES + 1] {
+        [
+            date(2026, 3, 14),
+            date(2026, 3, 21),
+            date(2026, 3, 28),
+            date(2026, 4, 4),
+            date(2026, 5, 1),
+        ]
+    }
+    const STUDY_DURATION_HOURS: [f64; N_STUDY_STAGES] = [168.0, 168.0, 168.0, 648.0];
+
+    fn study_stages() -> Vec<Stage> {
+        let bounds = study_boundaries();
+        (0..N_STUDY_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: bounds[i],
+                        end_date: bounds[i + 1],
+                        season_id: None,
+                        blocks: vec![Block {
+                            index: 0,
+                            name: "S".to_string(),
+                            duration_hours: STUDY_DURATION_HOURS[i],
+                        }],
+                        block_mode: BlockMode::Parallel,
+                        state_config: StageStateConfig {
+                            storage: false,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Post-study calendar (seven stages, delivery indices 4–10): the fixed
+    /// window (24 h stub, then Sem 8/9) followed by the four class-3 windows
+    /// (Sem 10/11/12, then the June remainder) study stages 0–3 decide into.
+    const POST_STUDY_STARTS: [(i32, u32, u32); N_POST_STUDY_STAGES] = [
+        (2026, 5, 1),
+        (2026, 5, 2),
+        (2026, 5, 9),
+        (2026, 5, 16),
+        (2026, 5, 23),
+        (2026, 5, 30),
+        (2026, 6, 6),
+    ];
+    const POST_STUDY_DURATION_HOURS: [f64; N_POST_STUDY_STAGES] =
+        [24.0, 168.0, 168.0, 168.0, 168.0, 168.0, 576.0];
+
+    fn post_study_stages() -> PostStudyStages {
+        let stages = POST_STUDY_STARTS
+            .iter()
+            .zip(POST_STUDY_DURATION_HOURS)
+            .map(|(&(y, m, d), duration_hours)| PostStudyStage {
+                start_date: date(y, m, d),
+                duration_hours,
+            })
+            .collect();
+        PostStudyStages {
+            stages,
+            thermal_bounds: vec![],
+        }
+    }
+
+    fn bus() -> cobre_core::entities::bus::Bus {
+        make_bus(
+            BUS_ID,
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: date(2026, 3, 14),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 100_000.0,
+                }],
+                excess_cost: 0.0,
+            },
+        )
+    }
+
+    fn anticipated_thermal() -> cobre_core::entities::thermal::Thermal {
+        make_thermal(
+            ANTICIPATED_ID,
+            ThermalSpec {
+                name: "T_ant".to_string(),
+                operational_start_date: date(2026, 3, 14),
+                bus_id: BUS_ID,
+                min_generation_mw: 0.0,
+                max_generation_mw: 500.0,
+                cost_per_mwh: 10.0,
+                anticipated_config: Some(AnticipatedConfig::LeadStages(LEAD_STAGES)),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn load_models() -> Vec<cobre_core::scenario::LoadModel> {
+        (0..N_STUDY_STAGES)
+            .map(|i| cobre_core::scenario::LoadModel {
+                bus_id: BUS_ID,
+                stage_id: i as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect()
+    }
+
+    /// Thermal bounds/cost over the full delivery axis (`n_stages + lead`), the
+    /// same extended stride `fill_anticipated_columns` reads a delivery-anchored
+    /// decision's bounds from.
+    fn bounds() -> ResolvedBounds {
+        let k_max = LEAD_STAGES as usize;
+        let mut b = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STUDY_STAGES,
+                k_max,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds::default(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        for s in 0..(N_STUDY_STAGES + k_max) {
+            *b.thermal_bounds_mut(0, s) = ThermalStageBounds { cost_per_mwh: 10.0 };
+            *b.thermal_block_base_mut(0, s) = ThermalBlockBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 500.0,
+            };
+        }
+        b
+    }
+
+    fn penalties() -> ResolvedPenalties {
+        ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STUDY_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        )
+    }
+
+    /// One `past_anticipated_commitments` window per class-2 (in-study,
+    /// deliveries 0–3) study stage, tiling the study calendar.
+    const CLASS2_SEEDS_MW: [f64; N_STUDY_STAGES] = [100.0, 150.0, 200.0, 250.0];
+
+    fn class2_seed_windows() -> Vec<AnticipatedCommitmentHistory> {
+        let bounds = study_boundaries();
+        (0..N_STUDY_STAGES)
+            .map(|i| AnticipatedCommitmentHistory {
+                thermal_id: ANTICIPATED_ID,
+                start_date: bounds[i],
+                end_date: bounds[i + 1],
+                value_mw: CLASS2_SEEDS_MW[i],
+            })
+            .collect()
+    }
+
+    /// One `past_anticipated_commitments` window per class-4 (fixed
+    /// post-horizon, deliveries 4–6) post-study stage: an explicit 0 MW stub at
+    /// delivery 4, non-zero at deliveries 5 and 6.
+    const CLASS4_SEEDS_MW: [f64; 3] = [0.0, 60.0, 80.0];
+
+    fn class4_seed_windows() -> Vec<AnticipatedCommitmentHistory> {
+        (0..3)
+            .map(|i| {
+                let (y, m, d) = POST_STUDY_STARTS[i];
+                let (ny, nm, nd) = POST_STUDY_STARTS[i + 1];
+                AnticipatedCommitmentHistory {
+                    thermal_id: ANTICIPATED_ID,
+                    start_date: date(y, m, d),
+                    end_date: date(ny, nm, nd),
+                    value_mw: CLASS4_SEEDS_MW[i],
+                }
+            })
+            .collect()
+    }
+
+    fn build_system() -> cobre_core::System {
+        let mut past_anticipated_commitments = class2_seed_windows();
+        past_anticipated_commitments.extend(class4_seed_windows());
+        SystemBuilder::new()
+            .buses(vec![bus()])
+            .thermals(vec![anticipated_thermal()])
+            .stages(study_stages())
+            .load_models(load_models())
+            .bounds(bounds())
+            .penalties(penalties())
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_anticipated_commitments,
+                recent_observations: vec![],
+                past_defluences: vec![],
+            })
+            .post_study_stages(Some(post_study_stages()))
+            .build()
+            .expect("build_system: valid system")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig {
+                enabled: true,
+                io_channel_capacity: 8,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
+                ..IoSimulationConfig::default()
+            },
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// The reference calendar's real post-study delivery windows: each carried
+    /// post-study-targeted ring slot's real `(start, end)` window, ascending by
+    /// start date.
+    fn expected_class3_intervals() -> [(NaiveDate, NaiveDate); 4] {
+        [
+            (date(2026, 5, 16), date(2026, 5, 23)),
+            (date(2026, 5, 23), date(2026, 5, 30)),
+            (date(2026, 5, 30), date(2026, 6, 6)),
+            (date(2026, 6, 6), date(2026, 6, 30)),
+        ]
+    }
+
+    /// `YYYYMM01`, the same day-01 anchor `year_month_day_anchor` computes —
+    /// `EntitySlot::delivery_date` is month-granular by construction, never
+    /// the exact-day date.
+    fn month_anchor(d: NaiveDate) -> i32 {
+        d.year() * 10_000 + i32::try_from(d.month()).unwrap_or(1) * 100 + 1
+    }
+
+    #[test]
+    fn study_stage_deliveries_resolve_to_their_real_post_study_calendar_window() {
+        let config = build_config();
+        let setup = build_setup_in_code(build_system(), &config);
+        let system = build_system();
+
+        let intervals = setup.build_terminal_anticipated_delivery_intervals(&system);
+        let manifest = setup.build_terminal_entity_manifest(&system);
+        assert_eq!(
+            intervals.len(),
+            manifest.len(),
+            "the interval and manifest accessors must walk the same terminal projection"
+        );
+
+        // A `LeadStages` plant's ring `k_max` is clamped up to its own declared
+        // lead rather than the resolver's true occupancy, so the ring's own
+        // slot order does not match ascending delivery-target order — compare
+        // the carried set by value (sorted by start), never by vector position.
+        let mut carried: Vec<(usize, (NaiveDate, NaiveDate))> = intervals
+            .iter()
+            .enumerate()
+            .filter_map(|(j, interval)| interval.map(|window| (j, window)))
+            .collect();
+        carried.sort_by_key(|&(_, (start, _))| start);
+
+        let expected = expected_class3_intervals();
+        assert_eq!(
+            carried.len(),
+            expected.len(),
+            "expected exactly {} carried post-study-targeted ring slots, got {:?}",
+            expected.len(),
+            carried,
+        );
+
+        for (&(slot, window), expected_window) in carried.iter().zip(expected.iter()) {
+            assert_eq!(
+                window, *expected_window,
+                "a carried delivery interval must equal the literal reference window \
+                 {expected_window:?}, got {window:?}",
+            );
+
+            let expected_date = month_anchor(expected_window.0);
+            assert_eq!(
+                manifest[slot].delivery_date, expected_date,
+                "the manifest's delivery_date at slot {slot} must equal the month anchor \
+                 {expected_date} of the literal reference window's start, got {}",
+                manifest[slot].delivery_date,
+            );
+        }
+    }
+
+    #[test]
+    fn carried_delivery_durations_equal_their_declared_post_study_stage_span() {
+        let config = build_config();
+        let setup = build_setup_in_code(build_system(), &config);
+        let system = build_system();
+
+        let intervals = setup.build_terminal_anticipated_delivery_intervals(&system);
+        let mut carried: Vec<(NaiveDate, NaiveDate)> = intervals.into_iter().flatten().collect();
+        carried.sort_by_key(|&(start, _)| start);
+
+        let expected_days = [7_i64, 7, 7, 24];
+        assert_eq!(carried.len(), expected_days.len());
+        for ((start, end), &days) in carried.iter().zip(expected_days.iter()) {
+            assert_eq!(
+                (*end - *start).num_days(),
+                days,
+                "carried window {start}..{end} must span its literal declared \
+                 post-study stage width of {days} days",
+            );
+        }
     }
 }

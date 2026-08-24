@@ -12,9 +12,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION, GraphManifest, ManifestEdge,
-    ManifestNode, PolicyBasisRecord, PolicyCheckpointMetadata, PolicyCutRecord, ProducerBlock,
-    STAGE_STATES_NODE_ID_SENTINEL, StageCutsPayload, StageStatesPayload,
+    CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
+    GraphManifest, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord, ProducerBlock,
+    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL,
+    StageCutsPayload, StageStatesPayload,
 };
 use cobre_sddp::{SddpError, reserve_boundary_inflow_lag_slots};
 
@@ -76,6 +77,14 @@ pub(crate) struct PyStageCutsPayload {
     populated_count: Option<u32>,
     #[pyo3(default)]
     entity_manifest: Vec<PyEntitySlot>,
+    /// Cost-scale provenance; defaults to the metadata producer block's factor
+    /// when omitted (see [`write_policy_checkpoint`]).
+    #[pyo3(default)]
+    cost_scale_factor: Option<f64>,
+    #[pyo3(default = STAGE_CUTS_NODE_ID_SENTINEL)]
+    node_id: i32,
+    #[pyo3(default = STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL)]
+    graph_stage_id: i32,
 }
 
 #[derive(Debug, FromPyObject)]
@@ -210,7 +219,7 @@ pub(crate) struct PyPolicyCheckpointMetadata {
     producer: PyProducerBlock,
 }
 
-impl From<PyPolicyCheckpointMetadata> for PolicyCheckpointMetadata {
+impl From<PyPolicyCheckpointMetadata> for CheckpointManifest {
     fn from(m: PyPolicyCheckpointMetadata) -> Self {
         Self {
             format_version: m.format_version,
@@ -368,7 +377,8 @@ pub fn write_policy_checkpoint(
         .map(|sc| build_stage_cuts_data(sc, reserve_depth))
         .collect::<PyResult<_>>()?;
 
-    let metadata: PolicyCheckpointMetadata = metadata.into();
+    let metadata: CheckpointManifest = metadata.into();
+    let metadata_cost_scale_factor = metadata.producer.cost_scale_factor;
 
     py.detach(|| {
         let cut_records: Vec<Vec<PolicyCutRecord<'_>>> = stage_cuts
@@ -404,6 +414,14 @@ pub fn write_policy_checkpoint(
                 active_cut_indices: &sc.active_cut_indices,
                 populated_count: populated_counts[i],
                 entity_manifest: &data.manifest,
+                // None (per-stage and metadata) is the legacy at-rest scale
+                // (`ProducerBlock::cost_scale_factor`).
+                cost_scale_factor: sc
+                    .cost_scale_factor
+                    .or(metadata_cost_scale_factor)
+                    .unwrap_or(1_000_000.0),
+                node_id: sc.node_id,
+                graph_stage_id: sc.graph_stage_id,
             })
             .collect();
 

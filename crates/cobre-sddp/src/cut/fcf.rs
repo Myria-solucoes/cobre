@@ -802,6 +802,9 @@ mod tests {
             populated_count,
             cuts,
             entity_manifest: Vec::new(),
+            cost_scale_factor: None,
+            node_id: -1,
+            graph_stage_id: -1,
         }
     }
 

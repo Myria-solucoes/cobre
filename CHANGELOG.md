@@ -9,6 +9,168 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-24
+
+### Added
+
+- **A post-horizon anticipated thermal commitment is now declared in
+  `post_study_stages.json` and carried on the anticipated-commitment ring.**
+  `post_study_stages.json` gains a `thermal_bounds[]` table — one
+  `{thermal_id, post_study_stage_index, cost_per_mwh, min_mw, max_mw}` row per
+  post-study delivery cell — and this file is the sole surface for declaring a
+  commitment whose delivery lands past the study horizon. A delivery decided
+  inside the study but maturing after it now rides the same ring as an in-study
+  delivery, over a delivery axis extended across the post-study calendar,
+  instead of a separate carrier; its generation is bounded, costed, and priced
+  against the extended horizon.
+
+- **A deck may declare commitments decided before the study that deliver after
+  it.** `past_anticipated_commitments` windows may now extend past the study
+  horizon — the DECOMP "já-comandada" case — with no new field and no schema
+  reshape. Such a window is validated like any other: tiled at coverage 1.0
+  over every post-horizon delivery stage the plant decided before the study,
+  with an explicit `0 MW` window accepted as legitimate coverage. It is priced
+  against the terminal boundary by a constant fold into the future-cost cut
+  intercepts — a sunk cost, never an objective term — and reported at its real
+  delivery date in a run-level fixed-delivery table written by both the CLI
+  and the Python bindings.
+
+- **A policy checkpoint is now self-describing.** Every study-global fact a load
+  needs — the study graph, the stage count, and the producer provenance — lives
+  in a new `policy/manifest.bin` (a FlatBuffers root written last as the commit
+  signal and read first behind a format-version gate), and each `cuts/<pool>.bin`
+  now carries its own cost-scale factor and graph identity. A checkpoint no longer
+  depends on a hand-editable `policy/metadata.json`, which is removed; the Python
+  bindings read and write the new layout with an unchanged `load_policy` dict
+  shape.
+
+- **A terminal boundary future cost function may be injected from a source study
+  whose state shape differs from the loading study's.** A boundary-injection load
+  with a legitimately different state dimension — a source with no transit buckets
+  and monthly anticipated slots feeding a differently-shaped study — now
+  reconciles per state slot by entity identity and delivery date instead of
+  rejecting on the state-dimension check. A source cut coefficient that couples a
+  state slot the loading study does not model is reported with a named warning per
+  family and the load still succeeds, where the previous surface discarded it
+  silently.
+
+### Changed
+
+- **BREAKING — every policy checkpoint written by an earlier release must be
+  re-exported; none loads as-is.** The checkpoint format is now self-describing
+  (see Added): the study-global metadata moved from `policy/metadata.json` to
+  `policy/manifest.bin`, and each `cuts/<pool>.bin` gained the self-describing
+  cost-scale and identity fields every load path reads. A checkpoint predating
+  this format — warm-start, resume, simulation-only, or terminal boundary
+  injection alike — is rejected by name with no fallback and no in-place upgrade;
+  re-export it with this release, or retrain. This supersedes the two
+  configuration-scoped rejections below: it applies to every earlier checkpoint
+  regardless of the study's configuration.
+
+- **BREAKING — a policy checkpoint written by an earlier release for a study
+  that carries post-study anticipated deliveries is rejected when loaded for
+  warm-start or resume.** Moving a post-study delivery onto the ring changes the
+  anticipated-commitment ring's state dimension and its per-slot manifest
+  identity, so such a checkpoint no longer matches the current layout and fails
+  the state-dimension check with a named error. There is no in-place upgrade —
+  retrain to produce a current-version checkpoint. This state-dimension change is
+  a second, configuration-specific reason such a study cannot be upgraded in
+  place, on top of the universal format re-export above.
+
+- **A post-study delivery is now commissioning-gated at its own delivery
+  stage.** The delivery-anchored commissioning gate extends over the post-study
+  calendar through a continued stage-id sequence, so a plant whose service
+  window ends inside the study is inactive post-horizon and can no longer be
+  committed to a post-horizon delivery. The previous post-horizon surface
+  applied no commissioning gate at that stage, so a plant exiting inside the
+  study could still be committed post-horizon; a decommissioned plant committing
+  post-horizon generation is now the modeling error the gate catches.
+
+- **The anticipated-commitment ring is sized from full in-flight occupancy,
+  including pre-study seeds.** Ring depth now counts every carried delivery in
+  flight at a stage — a pre-study-seeded commitment included — instead of a
+  quantity that structurally excluded pre-study occupancy. This is
+  byte-identical on every well-behaved calendar and on every shipped case, but a
+  study whose ring was previously under-sized — a physical-lead plant with more
+  pre-study commitments in flight than the old depth counted — gets a wider
+  state vector, a different checkpoint, and different, correct results: the old
+  depth silently under-sized the ring and pinned a freshly-costed decision onto
+  a carried seed.
+
+- **Two carrier-absent configurations are now rejected at load instead of
+  silently mis-modeled.** An anticipated thermal whose lead reaches a post-study
+  stage for which `post_study_stages.json` declares no `thermal_bounds[]` cell
+  is rejected, naming the plant and the post-study stage — where the previous
+  surface dropped the delivery with only a log warning. A commitment decided at
+  a pre-study stage whose delivery lands past the horizon has no ring slot to
+  carry it and is rejected, naming the plant.
+
+- **BREAKING — a policy checkpoint written by an earlier release for a study
+  whose ring depth the sizing fix above widens no longer loads.** The
+  corrected ring depth changes that study's committed-state dimension, so such
+  a checkpoint fails the state-dimension check on load and must be
+  regenerated — it encoded the wrong committed value under the old sizing. A
+  study whose pre-study run never exceeded its in-flight occupancy keeps its
+  state dimension, though its checkpoints, like all others, still require the
+  format re-export above.
+
+- **Under the External sampling scheme, a class's realized values now come
+  from its external scenario file, including the deterministic (σ = 0)
+  case.** Load, NCS, and inflow validation and standardization derive their
+  mean and standard deviation from the external scenario samples themselves
+  rather than from the seasonal-statistics files, so a seasonal-stats file is
+  optional under External. A constant (σ = 0) external column is accepted for
+  load, NCS, and an AR(0) inflow model (no declared lag coefficient or annual
+  component); for an AR(p > 0) inflow model a deterministic column is still
+  rejected, and the message now states the real reason — the column would
+  have to equal that model's own deterministic output — instead of a message
+  about requiring a positive standard deviation.
+
+### Removed
+
+- **BREAKING — `initial_conditions.json`'s `future_anticipated_deliveries[]` is
+  removed.** A post-horizon delivery is declared in `post_study_stages.json`
+  (see above), now the sole post-horizon declaration surface. An
+  `initial_conditions.json` still carrying `future_anticipated_deliveries[]` is
+  rejected by the file's deny-unknown-fields contract; move each entry to a
+  `post_study_stages.json` `thermal_bounds[]` row.
+
+### Fixed
+
+- **An anticipated thermal whose lead reaches the full study horizon no longer
+  panics the LP build.** Such a plant produced an empty commitment ring while
+  still emitting a commitment-maturity row, and the maturity fill divided by the
+  zero ring depth and aborted the run — validation passed, so the crash surfaced
+  only at run time. Sizing the ring from full occupancy keeps a carried
+  delivery's depth positive, and the maturity fill is now gated on a positive
+  ring depth, so the divide is unreachable by construction.
+
+- **The anticipated ring depth now sizes as the larger of the in-flight
+  occupancy and the pre-study seed run.** A configuration whose pre-study run
+  outlived the in-flight occupancy previously sized the ring one or more slots
+  too shallow, silently aliasing a later delivery stage's committed value onto
+  an earlier one. A configuration where the occupancy term already dominated
+  is unaffected.
+
+### Migration
+
+Moving a study from 0.14 to 0.15:
+
+1. **Re-export or retrain every policy checkpoint.** The checkpoint format is now
+   self-describing (`policy/manifest.bin` replaces `policy/metadata.json`, and
+   `cuts/<pool>.bin` carries its own cost-scale and identity fields), so a
+   checkpoint written by an earlier release is rejected by name on every load
+   path — warm-start, resume, simulation-only, and terminal boundary injection
+   alike — with no in-place upgrade. A study that carries post-study anticipated
+   deliveries, or whose corrected ring depth widens (see above), additionally
+   needs a genuine retrain, since its state dimension changed.
+2. **Re-declare post-horizon deliveries.** Move every `initial_conditions.json`
+   `future_anticipated_deliveries[]` entry to a `post_study_stages.json`
+   `thermal_bounds[]` row keyed by `(thermal_id, post_study_stage_index)`,
+   supplying `cost_per_mwh`, `min_mw`, and `max_mw`. A cell missing for a plant
+   whose lead reaches that post-study stage now fails the load, naming the plant
+   and stage.
+
 ## [0.14.3] - 2026-08-19
 
 ### Added

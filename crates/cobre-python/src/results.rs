@@ -883,6 +883,87 @@ fn output_error_to_py(err: &cobre_io::OutputError) -> PyErr {
     convert_error(ErrorSource::Output(err))
 }
 
+/// Build the `metadata` dict field-by-field from a [`cobre_io::CheckpointManifest`],
+/// mirroring the `stage_cuts` surface in [`load_policy`] so the emitted dict shape
+/// does not depend on a whole-struct serde path.
+fn metadata_to_py<'py>(
+    py: Python<'py>,
+    metadata: &cobre_io::CheckpointManifest,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("format_version", into_py(py, metadata.format_version)?)?;
+    dict.set_item(
+        "cobre_version",
+        into_py(py, metadata.cobre_version.as_str())?,
+    )?;
+    dict.set_item("created_at", into_py(py, metadata.created_at.as_str())?)?;
+    dict.set_item("num_stages", into_py(py, metadata.num_stages)?)?;
+
+    let graph = &metadata.graph_manifest;
+    let graph_dict = PyDict::new(py);
+    graph_dict.set_item("n_pools", into_py(py, graph.n_pools)?)?;
+    let nodes = PyList::empty(py);
+    for node in &graph.nodes {
+        let node_dict = PyDict::new(py);
+        node_dict.set_item("id", into_py(py, node.id)?)?;
+        node_dict.set_item("stage_id", into_py(py, node.stage_id)?)?;
+        node_dict.set_item("pool_id", into_py(py, node.pool_id)?)?;
+        nodes.append(node_dict)?;
+    }
+    graph_dict.set_item("nodes", nodes)?;
+    let edges = PyList::empty(py);
+    for edge in &graph.edges {
+        let edge_dict = PyDict::new(py);
+        edge_dict.set_item("source_id", into_py(py, edge.source_id)?)?;
+        edge_dict.set_item("target_id", into_py(py, edge.target_id)?)?;
+        edge_dict.set_item("probability", into_py(py, edge.probability)?)?;
+        edges.append(edge_dict)?;
+    }
+    graph_dict.set_item("edges", edges)?;
+    dict.set_item("graph_manifest", graph_dict)?;
+
+    let producer = &metadata.producer;
+    let producer_dict = PyDict::new(py);
+    producer_dict.set_item(
+        "completed_iterations",
+        into_py(py, producer.completed_iterations)?,
+    )?;
+    producer_dict.set_item(
+        "final_lower_bound",
+        into_py(py, producer.final_lower_bound)?,
+    )?;
+    producer_dict.set_item("best_upper_bound", into_py(py, producer.best_upper_bound)?)?;
+    producer_dict.set_item("max_iterations", into_py(py, producer.max_iterations)?)?;
+    producer_dict.set_item("forward_passes", into_py(py, producer.forward_passes)?)?;
+    producer_dict.set_item("warm_start_cuts", into_py(py, producer.warm_start_cuts)?)?;
+    let warm_start_counts = PyList::empty(py);
+    for &count in &producer.warm_start_counts {
+        warm_start_counts.append(into_py(py, count)?)?;
+    }
+    producer_dict.set_item("warm_start_counts", warm_start_counts)?;
+    producer_dict.set_item("rng_seed", into_py(py, producer.rng_seed)?)?;
+    producer_dict.set_item(
+        "total_visited_states",
+        into_py(py, producer.total_visited_states)?,
+    )?;
+    producer_dict.set_item(
+        "training_block_mode",
+        into_py(py, producer.training_block_mode.as_str())?,
+    )?;
+    let per_stage = PyList::empty(py);
+    for mode in &producer.training_block_mode_per_stage {
+        per_stage.append(into_py(py, mode.as_str())?)?;
+    }
+    producer_dict.set_item("training_block_mode_per_stage", per_stage)?;
+    producer_dict.set_item(
+        "cost_scale_factor",
+        into_py(py, producer.cost_scale_factor)?,
+    )?;
+    dict.set_item("producer", producer_dict)?;
+
+    Ok(dict)
+}
+
 /// Read an optional simulation-metadata file, treating file-not-found as `None`.
 ///
 /// Mirrors the CLI's `read_optional_metadata` (`cobre-cli`'s `report.rs`):
@@ -1512,6 +1593,9 @@ pub fn load_simulation_arrow(
 ///             "capacity": 100,
 ///             "warm_start_count": 0,
 ///             "populated_count": 50,
+///             "cost_scale_factor": 2500000.0,
+///             "node_id": 0,
+///             "graph_stage_id": 0,
 ///             "entity_manifest": [
 ///                 {
 ///                     "entity_type": 0,
@@ -1590,9 +1674,7 @@ pub fn load_policy(
     let checkpoint =
         cobre_io::read_policy_checkpoint(&policy_dir).map_err(|e| output_error_to_py(&e))?;
 
-    let metadata_json = serde_json::to_value(&checkpoint.metadata)
-        .map_err(|e| PyValueError::new_err(format!("failed to serialize policy metadata: {e}")))?;
-    let metadata_py = json_value_to_py(py, &metadata_json)?;
+    let metadata_py = metadata_to_py(py, &checkpoint.metadata)?;
 
     let stage_cuts_list = PyList::empty(py);
     for sc in &checkpoint.stage_cuts {
@@ -1602,6 +1684,13 @@ pub fn load_policy(
         sc_dict.set_item("capacity", into_py(py, sc.capacity)?)?;
         sc_dict.set_item("warm_start_count", into_py(py, sc.warm_start_count)?)?;
         sc_dict.set_item("populated_count", into_py(py, sc.populated_count)?)?;
+
+        // Surface the self-describing stage facts so a rewrite preserves them —
+        // without node_id/graph_stage_id a genuine single-node pool collapses to
+        // the missing-key sentinel and fails boundary-cut load.
+        sc_dict.set_item("cost_scale_factor", into_py(py, sc.cost_scale_factor)?)?;
+        sc_dict.set_item("node_id", into_py(py, sc.node_id)?)?;
+        sc_dict.set_item("graph_stage_id", into_py(py, sc.graph_stage_id)?)?;
 
         // Emit the per-slot entity manifest so a loaded checkpoint round-trips
         // through `write_policy_checkpoint` (whose binding already accepts this
@@ -1870,10 +1959,9 @@ mod tests {
 
     #[test]
     fn build_report_value_missing_training_is_err() {
-        // The error path now routes through `crate::errors::convert_error`, which
+        // This error path routes through `crate::errors::convert_error`, which
         // attaches the GIL (`Python::attach`) to build the typed exception, so the
-        // interpreter must be initialized first (mirrors the GIL-bound test
-        // scaffolding elsewhere in this crate).
+        // interpreter must be initialized first.
         Python::initialize();
         let dir = TempDir::new().unwrap();
         // No training/metadata.json written.

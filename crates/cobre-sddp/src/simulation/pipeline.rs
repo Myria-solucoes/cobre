@@ -42,7 +42,7 @@ use crate::{
         extraction::{
             HydroReverseLookup, SolutionView, StageExtractionSpec, ThermalReverseLookup,
             TransitSeedArc, accumulate_category_costs, build_transit_seed,
-            extract_commitment_lanes, extract_stage_result_with_lookups,
+            extract_anticipated_lanes, extract_stage_result_with_lookups,
         },
         types::{ScenarioCategoryCosts, SimulationScenarioResult, SimulationStageResult},
     },
@@ -168,11 +168,12 @@ pub struct SimulationOutputSpec<'a> {
     /// Optional event sender for streaming progress events to the CLI/UI.
     pub event_sender: Option<Sender<TrainingEvent>>,
 
-    /// Post-horizon window `w`'s resolved delivery date (the `YYYYMM01`
-    /// anchor of its destination post-study stage), in
-    /// [`StateSpace::commitment_window_thermal_id`] order. Length equals
-    /// `state.n_commitment`; empty without a declared post-horizon commitment.
-    pub commitment_window_delivery_dates: &'a [i32],
+    /// Extended delivery-stage anchors: the `YYYYMM01` anchor of each delivery
+    /// target stage `m`, indexed by `m` (study stages then the synthetic
+    /// post-study continuation). The `anticipated_lanes` extractor dates a
+    /// post-study-targeted decision by `[m]`, matching the policy manifest's
+    /// `delivery_anchor_at` walk over the same extended calendar.
+    pub extended_delivery_anchors: &'a [i32],
 
     /// Declared travel-time arcs for the rolling-seed emitter
     /// ([`crate::setup::StudySetup::transit_seed_arcs`]). Empty when the study
@@ -742,68 +743,69 @@ pub(crate) fn extract_sim_stage_result(
         );
         &hydro_lookup_default
     };
+    let view = SolutionView {
+        primal: unscaled_primal,
+        dual: unscaled_dual,
+        objective: view_objective,
+        objective_coeffs: &ctx.template(t).objective,
+        row_lower: row_lower_ref,
+    };
+    let spec = StageExtractionSpec {
+        state,
+        study_dims,
+        n_blks: stage_n_blks,
+        geometry,
+        hydro_cell_index: output.hydro_cell_index,
+        entity_counts: output.entity_counts,
+        inflow_m3s_per_hydro: inflow_m3s_buf,
+        block_hours: blk_hrs,
+        generic_constraint_entries: output
+            .generic_constraint_row_entries
+            .get(t.0)
+            .map_or(&[], Vec::as_slice),
+        ncs_col_start,
+        n_ncs: ncs_n,
+        ncs_entity_ids: output
+            .ncs_entity_ids_per_stage
+            .get(t.0)
+            .map_or(&[], Vec::as_slice),
+        ncs_col_upper,
+        pumping_col_start,
+        n_pumping,
+        pumping_consumption_mw_per_m3s: output.pumping_consumption_mw_per_m3s,
+        contract_prices: output
+            .contract_prices_per_stage
+            .get(t.0)
+            .map_or(&[], Vec::as_slice),
+        contract_is_import: output.contract_is_import,
+        diversion_upstream: output.diversion_upstream,
+        hydro_productivities: output
+            .hydro_productivities_per_stage
+            .get(t.0)
+            .map_or(&[], Vec::as_slice),
+        col_scale: &ctx.template(t).col_scale,
+        row_scale: &ctx.template(t).row_scale,
+        cumulative_discount_factor: ctx.cumulative_discount_factor(t),
+        cost_scale_factor: ctx.cost_scale_factor,
+        energy_conversion: output.energy_conversion,
+        hydro_min_storage_hm3: output.hydro_min_storage_hm3,
+        stage_index: t.0,
+        n_stages: ctx.templates.len(),
+        anticipated_windows: ctx.anticipated_windows,
+        study_stage_ids: ctx.study_stage_ids,
+    };
     let mut result = extract_stage_result_with_lookups(
-        &SolutionView {
-            primal: unscaled_primal,
-            dual: unscaled_dual,
-            objective: view_objective,
-            objective_coeffs: &ctx.template(t).objective,
-            row_lower: row_lower_ref,
-        },
-        &StageExtractionSpec {
-            state,
-            study_dims,
-            n_blks: stage_n_blks,
-            geometry,
-            hydro_cell_index: output.hydro_cell_index,
-            entity_counts: output.entity_counts,
-            inflow_m3s_per_hydro: inflow_m3s_buf,
-            block_hours: blk_hrs,
-            generic_constraint_entries: output
-                .generic_constraint_row_entries
-                .get(t.0)
-                .map_or(&[], Vec::as_slice),
-            ncs_col_start,
-            n_ncs: ncs_n,
-            ncs_entity_ids: output
-                .ncs_entity_ids_per_stage
-                .get(t.0)
-                .map_or(&[], Vec::as_slice),
-            ncs_col_upper,
-            pumping_col_start,
-            n_pumping,
-            pumping_consumption_mw_per_m3s: output.pumping_consumption_mw_per_m3s,
-            contract_prices: output
-                .contract_prices_per_stage
-                .get(t.0)
-                .map_or(&[], Vec::as_slice),
-            contract_is_import: output.contract_is_import,
-            diversion_upstream: output.diversion_upstream,
-            hydro_productivities: output
-                .hydro_productivities_per_stage
-                .get(t.0)
-                .map_or(&[], Vec::as_slice),
-            col_scale: &ctx.template(t).col_scale,
-            row_scale: &ctx.template(t).row_scale,
-            cumulative_discount_factor: ctx.cumulative_discount_factor(t),
-            cost_scale_factor: ctx.cost_scale_factor,
-            energy_conversion: output.energy_conversion,
-            hydro_min_storage_hm3: output.hydro_min_storage_hm3,
-            stage_index: t.0,
-            n_stages: ctx.templates.len(),
-            anticipated_windows: ctx.anticipated_windows,
-            study_stage_ids: ctx.study_stage_ids,
-        },
+        &view,
+        &spec,
         ids.stage_id_u32,
         ids.node_id,
         hydro_lookup,
         &lookups.thermal,
     );
-    result.anticipated_lanes = extract_commitment_lanes(
-        unscaled_primal,
-        geometry,
-        state,
-        output.commitment_window_delivery_dates,
+    result.anticipated_lanes = extract_anticipated_lanes(
+        &view,
+        &spec,
+        output.extended_delivery_anchors,
         ids.stage_id_u32,
     );
     (immediate_cost, result)

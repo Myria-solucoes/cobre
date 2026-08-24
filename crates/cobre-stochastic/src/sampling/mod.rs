@@ -23,8 +23,9 @@ pub mod window;
 
 pub use class_sampler::{ClassSampleRequest, ClassSampler, select_transition_child};
 pub use external::{
-    ExternalScenarioLibrary, pad_library_to_uniform, standardize_external_inflow,
-    standardize_external_load, standardize_external_ncs, validate_external_library,
+    ExternalScenarioLibrary, derive_external_sample_moments, pad_library_to_uniform,
+    standardize_external_inflow, standardize_external_load, standardize_external_ncs,
+    validate_external_library,
 };
 pub use historical::{
     HistoricalScenarioLibrary, standardize_historical_windows, validate_historical_library,

@@ -53,9 +53,10 @@ pub use sampling::insample::sample_forward;
 pub use sampling::{
     ClassSampleRequest, ClassSampler, ExternalScenarioLibrary, ForwardNoise, ForwardSampler,
     ForwardSamplerConfig, HistoricalScenarioLibrary, SampleRequest, build_forward_sampler,
-    discover_historical_windows, pad_library_to_uniform, select_transition_child,
-    standardize_external_inflow, standardize_external_load, standardize_external_ncs,
-    standardize_historical_windows, validate_external_library, validate_historical_library,
+    derive_external_sample_moments, discover_historical_windows, pad_library_to_uniform,
+    select_transition_child, standardize_external_inflow, standardize_external_load,
+    standardize_external_ncs, standardize_historical_windows, validate_external_library,
+    validate_historical_library,
 };
 pub use seeds::{DerivedInflowSeeds, derive_inflow_seeds};
 pub use tree::{

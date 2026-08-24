@@ -2410,7 +2410,7 @@ mod tests {
             rank: 0,
             worker_id: 0,
             solver: ProfiledSolver::new(solver),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -3789,13 +3789,13 @@ mod tests {
         // Deliberately corrupt: the trunk node's parent should be `Some(root)`;
         // recording `None` instead makes root's own successor check fail.
         // `paths` is irrelevant here — `run_enumerated_backward` never reads it.
-        let bad_plan = EnumeratedPlan {
-            paths: EnumeratedForwardPaths {
+        let bad_plan = EnumeratedPlan::from_parts(
+            EnumeratedForwardPaths {
                 leaf: Vec::new(),
                 weight: Vec::new(),
             },
-            parent: vec![None, None, Some(trunk), Some(trunk), Some(trunk)].into(),
-        };
+            vec![None, None, Some(trunk), Some(trunk), Some(trunk)].into(),
+        );
         let traversal = Traversal::Enumerated(bad_plan);
 
         let mut enumerated_state = EnumeratedForwardScratch::default();
@@ -4873,11 +4873,11 @@ mod tests {
         };
         let tr = &setup.scenario_libraries.training;
         let training_ctx = TrainingContext {
-            horizon: &setup.methodology.horizon,
+            horizon: &setup.horizon,
             state: &setup.stage_data.state,
             cut_state_layouts: &setup.stage_data.cut_state_layouts,
             study_dims: &setup.stage_data.study_dims,
-            inflow_method: &setup.methodology.inflow_method,
+            inflow_method: &setup.inflow_method,
             stochastic: &setup.stochastic,
             initial_state: &setup.initial_state,
             inflow_scheme: tr.inflow_scheme,

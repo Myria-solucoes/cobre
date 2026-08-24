@@ -62,8 +62,8 @@
 //! |44 | Sum of unit group minima (`min_turbined_m3s`, `min_generation_mw`, checked independently) must reach the plant's own declared value — the flipped direction of rule 41: rule 41 caps `Σ group max ≤ plant max`, this floors `Σ group min ≥ plant min`; checked against the entity declaration only, never against per-stage resolved bounds | `system/hydros.json` | `InvalidValue` |
 //! |45 | `hydro_unit_group_bounds` row `max_turbined_m3s`/`max_generation_mw` must not exceed that GROUP's own declared value (checked independently) — the group-axis mirror of rule 43, which checks the plant's own declared value instead | `constraints/hydro_unit_group_bounds.parquet` | `InvalidValue` |
 //! |46 | `hydro_bounds` row `min_diversion_m3s` set for a hydro declaring no `diversion` channel (the channel is pinned `[0, 0]` with none declared, making a positive floor infeasible); cross-row/cross-source min/max inversion is deliberately out of scope for this rule | `constraints/hydro_bounds.parquet` | `InvalidValue` |
-//! |47 | Post-study boundary (`post_study_stages.json`): stages date-contiguous with first `start_date` at the study horizon end; every `future_anticipated_deliveries` window covered exactly (`1.0`) by them with a `PostStudyThermalBound` per referenced `(thermal, stage)` whose capability intersects the commitment interval | `post_study_stages.json` | `BusinessRuleViolation` |
-//! |48 | `future_anticipated_deliveries` entry's `thermal_id` resolves to a thermal with `anticipated_config` set — the delivery-side mirror of rule 15's bijection | `initial_conditions.json` | `BusinessRuleViolation` |
+//! |47 | Post-study boundary (`post_study_stages.json`), the sole post-horizon surface: stages date-contiguous with first `start_date` at the study horizon end (a); a `PostStudyThermalBound` for every post-study stage an anticipated thermal's extended lead reaches from an in-study, commissioning-active decision (Rule 1); the plant's pre-study-decided post-study stages tiled by `past_anticipated_commitments` at coverage `1.0`, an explicit `0 MW` window included where required (V2); no commitment window covering a study-decided or beyond-reach post-study stage (V3); a non-zero fixed value only inside the plant's commissioning window at its delivery stage (V5) | `post_study_stages.json` | `BusinessRuleViolation` |
+//! |48 | *(retired — number never reused)* | — | — |
 //!
 //! A hydro unit group bounds row's `block_id` range and duplicate-row keying
 //! are covered by rules 35 and 36 above; a row referencing a non-existent
@@ -125,7 +125,7 @@
 //! |46  | Every (slot-occupying external class, stage) carries the exact `scenario_id` set `{0..raw_c(t)-1}` per entity — a set check (rejects 1-based deck, gap, duplicate, out-of-range), not a bound check (A1) | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
 //! |47  | Every external scenario row's `stage_id` resolves to a declared study stage via the [`crate::StageIdResolver`], never silently dropped (A2) | `scenarios/external_*_scenarios.parquet` | `InvalidValue` |
 //! |48  | Per edge `n → m` and slot-occupying external class, the raw cells of columns `scenario_id(n)`/`scenario_id(m)` agree bitwise over the shared prefix `s <= t(n)` (declared `nodes[]` only) | `scenarios/external_*_scenarios.parquet` | `ModelQuality` (warning) |
-//! |50  | Inflow requires σ > 0 at every `(entity, stage)` an external class covers (its PAR inversion is undefined at σ = 0); load/NCS additionally accept σ = 0 when every external value at that `(entity, stage)` equals μ (a deterministic column, standardizing to η = 0) — σ = 0 with a value that disagrees with μ is rejected, naming the entity, stage, and offending value | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
+//! |50  | Under External, load/NCS get no σ check at all (their μ is defined by the external file itself, so there is no seasonal μ left to disagree with); inflow's remaining σ = 0 case is decided from the same external cells' own sample σ ([`cobre_stochastic::derive_external_sample_moments`], the reduction the engine also derives its `(μ, σ)` from) — accepted for an AR(0) hydro (no declared lag coefficient or annual component: its deterministic base is exactly μ), rejected for an AR(p > 0) hydro, naming the entity and stage, since a deterministic value there would have to equal that model's own deterministic PAR output, which this loader does not compute upstream | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
 //!
 //! Rule 49 (G2 — each standardized external library's `n_entities()` matches its
 //! `noise_entity_order` block width) is enforced downstream at study setup
@@ -166,7 +166,6 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_hydro_unit_groups(data, ctx);
     thermal::check_thermal_generation_bounds(data, ctx);
     thermal::check_anticipated_thermals(data, ctx);
-    thermal::check_future_delivery_thermal_is_anticipated(data, ctx);
     thermal::check_anticipated_cadence_transition(data, ctx);
     thermal::check_thermal_bounds_override_stage_range(data, ctx);
     thermal::check_post_study_stages(data, ctx);

@@ -942,7 +942,7 @@ mod tests {
     // score_violated_candidates tests
     // -----------------------------------------------------------------------
 
-    /// AC1: two non-resident active cuts, violations 5.0 (slot A) and 2.0
+    /// Two non-resident active cuts, violations 5.0 (slot A) and 2.0
     /// (slot B). With coeffs [0,0] and theta_raw = 0, alpha == intercept, so
     /// the intercepts ARE the violations. nadic = 10 → both selected, ordered
     /// descending.
@@ -979,7 +979,7 @@ mod tests {
         );
     }
 
-    /// AC2: same pool, nadic = 1. Full violated count is still 2, but only the
+    /// Same pool, nadic = 1. Full violated count is still 2, but only the
     /// top-1 slot is selected.
     #[test]
     fn respects_nadic_cap_returns_full_violated_count() {
@@ -1010,7 +1010,7 @@ mod tests {
         assert_eq!(out, vec![0], "top-1 only");
     }
 
-    /// AC3: equal violation 3.0 at slots 7 and 4, nadic = 1 → ascending slot id
+    /// Equal violation 3.0 at slots 7 and 4, nadic = 1 → ascending slot id
     /// tie-break selects slot 4.
     #[test]
     fn tie_break_ascending_slot_id() {
@@ -1041,7 +1041,7 @@ mod tests {
         assert_eq!(out, vec![4], "equal violation → ascending slot id wins");
     }
 
-    /// AC4: col_scale sign-flip. col_scale[theta] = 2.0, state-column scale 0.5.
+    /// col_scale sign-flip. col_scale[theta] = 2.0, state-column scale 0.5.
     /// One cut: intercept 0.5, coeff [1.0, 0.0]. Scaled primal: x_scaled[0] = 2.0,
     /// theta_scaled = 1.0.
     ///   raw:    x_raw[0] = 0.5 * 2.0 = 1.0; theta_raw = 2.0 * 1.0 = 2.0.
@@ -1087,7 +1087,7 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// AC5: a resident slot is never selected, even when violated.
+    /// A resident slot is never selected, even when violated.
     #[test]
     fn skips_resident_slots() {
         let idx = indexer();
@@ -1118,7 +1118,7 @@ mod tests {
         assert_eq!(out, vec![1]);
     }
 
-    /// AC6: k1 window. Two violated cuts: slot 0 generated at iteration 8
+    /// k1 window. Two violated cuts: slot 0 generated at iteration 8
     /// (age 2), slot 1 generated at iteration 2 (age 8). current_iteration = 10,
     /// k1 = Some(5) → only the age-2 cut (slot 0) is in window. With k1 = None
     /// both are eligible.
@@ -1198,7 +1198,7 @@ mod tests {
         assert_eq!(out, vec![0]);
     }
 
-    /// AC7: violation exactly equal to epsilon_viol is NOT counted (strict >).
+    /// Violation exactly equal to epsilon_viol is NOT counted (strict >).
     #[test]
     fn epsilon_viol_is_strict() {
         let idx = indexer();
@@ -1366,7 +1366,7 @@ mod tests {
         pool
     }
 
-    /// AC1: the batched scorer's per-candidate activities (`scratch.alpha`, by
+    /// The batched scorer's per-candidate activities (`scratch.alpha`, by
     /// bits) and its `out_selected` are bit-identical to a per-row reference that
     /// scores each candidate with an individual `gemm_block(.., 1, n_state, 1, ..)`
     /// call — over a randomized pool with a non-trivial primal and col_scale, a
@@ -1468,7 +1468,7 @@ mod tests {
         );
     }
 
-    /// AC2: a scoring pass issues exactly ONE batched GEMM over all `k` eligible
+    /// A scoring pass issues exactly ONE batched GEMM over all `k` eligible
     /// candidates, not `k` single-row calls. Observed via the gather buffers: all
     /// `k` candidates are in `cand_slots` / `cand_coef_block` (k_rows × n_state)
     /// and `alpha` holds exactly `k` activities after the single call.
@@ -1518,7 +1518,7 @@ mod tests {
         );
     }
 
-    /// AC2 (filtered): only the eligible (non-resident, in-window) candidates are
+    /// Only the eligible (non-resident, in-window) candidates are
     /// gathered into the single batched GEMM; filtered-out slots never enter the
     /// gather buffers.
     #[test]
@@ -1558,7 +1558,7 @@ mod tests {
         assert_eq!(scratch.alpha.len(), 2);
     }
 
-    /// AC2 (empty): an empty candidate set produces an empty gather and no
+    /// An empty candidate set produces an empty gather and no
     /// activities — the single GEMM is a no-op (k_rows = 0).
     #[test]
     fn batched_scoring_empty_candidates_no_op() {
@@ -1590,7 +1590,7 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// AC2 (all-resident): every active cut is resident → nothing is gathered and
+    /// Every active cut is resident → nothing is gathered and
     /// the single GEMM is a no-op, matching the empty-candidate behavior.
     #[test]
     fn batched_scoring_all_resident_no_candidates() {
@@ -1625,7 +1625,7 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// AC3: the new scratch buffers are growth-only. After a `reserve` sized to
+    /// The new scratch buffers are growth-only. After a `reserve` sized to
     /// the pool, repeated scoring passes never reallocate — capacities are stable
     /// and the per-pass `clear()` keeps lengths bounded by the eligible count.
     #[test]
@@ -2027,7 +2027,7 @@ mod tests {
     /// With an initial subset that already contains the binding cut, the loop
     /// adds no further rows and returns after the first solve.
     ///
-    /// AC1: the no-violation terminating path issues EXACTLY ONE LP solve (the
+    /// The no-violation terminating path issues EXACTLY ONE LP solve (the
     /// initial solve), not two — the redundant exit re-solve is eliminated. The
     /// resident subset already reproduces the all-cuts optimum, so the live view
     /// is copied into the result buffers and returned with no re-solve.
@@ -2063,7 +2063,7 @@ mod tests {
         // The optimum is the binding cut floor; no growth needed.
         assert_eq!(view.primal[LAZY_THETA_COL], 5.0);
         assert!(scratch.out_selected.is_empty());
-        // AC1: exactly ONE solve — the initial solve, then the no-violation
+        // Exactly ONE solve — the initial solve, then the no-violation
         // copy-and-return (no redundant exit re-solve).
         assert_eq!(
             solve_delta, 1,
@@ -2074,7 +2074,7 @@ mod tests {
     /// Omitting the binding cut forces at least one inner add_rows, and the
     /// final theta reflects the now-resident binding cut.
     ///
-    /// AC2: the one-addition path issues EXACTLY TWO LP solves — the initial
+    /// The one-addition path issues EXACTLY TWO LP solves — the initial
     /// solve and the add-and-resolve whose rescore finds no violation and
     /// copies-and-returns with no third solve.
     #[test]
@@ -2109,7 +2109,7 @@ mod tests {
             view.primal[LAZY_THETA_COL], 5.0,
             "final theta must reflect the added binding cut"
         );
-        // AC2: exactly TWO solves (initial + one add/resolve), no redundant exit.
+        // Exactly TWO solves (initial + one add/resolve), no redundant exit.
         assert_eq!(
             solve_delta, 2,
             "one-addition path must issue exactly 2 solves (no redundant exit re-solve)"
@@ -2125,7 +2125,7 @@ mod tests {
     /// of the carried residents {0,1,2}. This is the now-mandatory backward
     /// opening-reuse mechanism (ReuseContinue) exercised in isolation.
     ///
-    /// AC3: a third opening C continues at x0 = 2 where the binding cut (slot 2)
+    /// A third opening C continues at x0 = 2 where the binding cut (slot 2)
     /// is ALREADY resident from the carried set, so the lazy loop adds nothing and
     /// must issue EXACTLY ONE solve on the continue-carry no-add path.
     #[test]
@@ -2201,7 +2201,7 @@ mod tests {
         // Opening C (x0 = 2 again, continue, NO add): re-pin back to x0 = 2 where
         // the binding cut (slot 2, floor 5) is already resident from A. The
         // continue loop finds no violation and must issue EXACTLY ONE solve — the
-        // continue-carry no-add path (AC3).
+        // continue-carry no-add path.
         solver.set_col_bounds(&[0], &[2.0], &[2.0]);
         let solves_before = solver.statistics().solve_count;
         lazy_solve_preloaded(
@@ -2227,7 +2227,7 @@ mod tests {
             5.0,
             "opening C theta (x0=2) reverts to the carried binding cut (slot 2)"
         );
-        // AC3: continue-carry no-add path issues exactly ONE solve.
+        // Continue-carry no-add path issues exactly ONE solve.
         assert_eq!(
             solve_delta, 1,
             "continue-carry no-add opening must issue exactly 1 solve (no redundant exit re-solve)"
@@ -2376,7 +2376,7 @@ mod tests {
     /// max_inner_iterations = 1 forces the TC fallback after one inner add; it
     /// must terminate and still return the all-cuts-equivalent optimum.
     ///
-    /// AC5: the cap-hit fallback scores the live primal, appends remaining
+    /// The cap-hit fallback scores the live primal, appends remaining
     /// violated slots, and solves once to return — preserving the all-cuts
     /// optimum. The TC path issues initial + one capped add/resolve + the final
     /// TC solve = 3.
@@ -2414,7 +2414,7 @@ mod tests {
 
         assert!((view.objective - all_obj).abs() < 1e-9);
         assert!((view.primal[LAZY_THETA_COL] - all_theta).abs() < 1e-9);
-        // AC5: TC fallback solve count is preserved (initial + capped add + final).
+        // TC fallback solve count is preserved (initial + capped add + final).
         assert_eq!(
             solve_delta, 3,
             "TC fallback issues initial + one capped add/resolve + final TC solve = 3"
@@ -2453,7 +2453,7 @@ mod tests {
         assert_eq!(run(), run(), "objective must be deterministic");
     }
 
-    /// AC6: the reused `res_*` result buffers are growth-only. Once warmed to the
+    /// The reused `res_*` result buffers are growth-only. Once warmed to the
     /// LP's solution size, repeated `lazy_solve_preloaded` calls refill them via
     /// `clear()` + `extend_from_slice` without reallocating — capacities are
     /// stable (no steady-state heap allocation on the result-copy path). Also
@@ -2684,7 +2684,7 @@ mod tests {
     // build_initial_resident_set tests
     // -----------------------------------------------------------------------
 
-    /// AC1: slots 0..4 with last_active_iter = [10, 8, 3, 10, 6], all active,
+    /// Slots 0..4 with last_active_iter = [10, 8, 3, 10, 6], all active,
     /// all generated at iter 1, current = 10, k2 = 5. Slot 2 excluded
     /// (10 - 3 = 7 > 5); the rest are within the window.
     #[test]
@@ -2701,7 +2701,7 @@ mod tests {
         assert_eq!(out, vec![0, 1, 3, 4]);
     }
 
-    /// AC2: a current-iteration cut (iteration_generated == current) is always
+    /// A current-iteration cut (iteration_generated == current) is always
     /// seeded even when its last_active_iter is far in the past.
     #[test]
     fn always_seeds_current_iteration_cuts() {
@@ -2717,7 +2717,7 @@ mod tests {
         );
     }
 
-    /// AC3: an inactive slot within the k2 window is never included.
+    /// An inactive slot within the k2 window is never included.
     #[test]
     fn excludes_inactive_slots() {
         // Slot 0 active in window; slot 1 inactive in window; slot 2 active.
@@ -2727,7 +2727,7 @@ mod tests {
         assert_eq!(out, vec![0, 2], "inactive slot 1 excluded");
     }
 
-    /// AC4: the result is strictly ascending and deterministic across repeated
+    /// The result is strictly ascending and deterministic across repeated
     /// calls on the same metadata (no dependence on iteration order).
     #[test]
     fn result_is_ascending_and_deterministic() {
@@ -2750,12 +2750,11 @@ mod tests {
         assert_eq!(a, vec![0, 1, 3, 4]);
     }
 
-    /// AC3: the seed keys on **binding recency** via
+    /// The seed keys on **binding recency** via
     /// `last_active_iter`, NOT on generation iteration. A cut generated long ago
     /// (`iteration_generated` well outside the k2 window) but binding recently
     /// (`last_active_iter == i`) must be seeded at iteration `i + d` for
-    /// `0 < d <= k2` — the §3.1 clause-1 behavior the binding-count maintenance
-    /// restores. The companion "generated but never re-bound" cut, whose
+    /// `0 < d <= k2`. The companion "generated but never re-bound" cut, whose
     /// `last_active_iter` stayed at its old generation iteration, is correctly
     /// excluded once it falls outside the window.
     #[test]
@@ -2778,7 +2777,7 @@ mod tests {
         );
     }
 
-    /// AC: k2 = 0 boundary. Only slots active in the current iteration
+    /// k2 = 0 boundary. Only slots active in the current iteration
     /// (last_active_iter >= current) plus current-iteration cuts are included.
     #[test]
     fn k2_zero_window_boundary() {
