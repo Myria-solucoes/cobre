@@ -99,8 +99,8 @@ def test_training_manifest_structure(run_output: pathlib.Path) -> None:
 
 
 def test_policy_output_exists(run_output: pathlib.Path) -> None:
-    """A successful run produces policy cuts and metadata."""
-    assert (run_output / "policy" / "metadata.json").exists()
+    """A successful run produces policy cuts and a self-describing manifest."""
+    assert (run_output / "policy" / "manifest.bin").exists()
     cuts = list((run_output / "policy" / "cuts").iterdir())
     assert len(cuts) > 0, "policy/cuts/ must contain stage files"
 
@@ -227,7 +227,7 @@ def test_d28_runs_and_produces_outputs(d28_output: pathlib.Path) -> None:
     assert (d28_output / "training" / "scaling_report.json").is_file()
 
     # Policy artifacts
-    assert (d28_output / "policy" / "metadata.json").is_file()
+    assert (d28_output / "policy" / "manifest.bin").is_file()
     cuts_dir = d28_output / "policy" / "cuts"
     assert cuts_dir.is_dir()
     assert len(list(cuts_dir.iterdir())) > 0, "policy/cuts/ must contain files"

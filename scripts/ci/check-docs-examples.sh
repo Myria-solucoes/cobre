@@ -15,7 +15,9 @@
 #   2. training/metadata.json EXISTS and carries every TRAINING_METADATA_KEYS
 #      top-level key. Routed here per the file each key actually lives in:
 #      warm_start_* are NOT here.
-#   3. policy/metadata.json EXISTS and carries warm_start_counts + warm_start_cuts.
+#   3. policy/manifest.bin EXISTS (the self-describing checkpoint's commit
+#      signal; its binary FlatBuffers content — graph, warm-start counts,
+#      provenance — is pinned by the Rust manifest conformance tests, not here).
 #   4. `cobre report` stdout JSON has EXACTLY the REPORT_KEYS_SORTED key set.
 #
 # This gate is scoped to structural invariants the assert_cmd integration
@@ -38,7 +40,8 @@ readonly EXPECTED_INPUT_FILES=11
 readonly TEMPLATE="1dtoy"
 
 # Expected top-level keys of training/metadata.json. Per
-# the routing decision, warm_start_* belong to policy/metadata.json, NOT here.
+# the routing decision, warm_start_* belong to the policy checkpoint's
+# manifest.bin, NOT here.
 readonly TRAINING_METADATA_KEYS=(
   cobre_version
   hostname
@@ -56,12 +59,6 @@ readonly TRAINING_METADATA_KEYS=(
   bounds
   solve_stats
   distribution
-)
-
-# Expected keys the policy/metadata.json `producer` block must carry.
-readonly POLICY_METADATA_KEYS=(
-  warm_start_counts
-  warm_start_cuts
 )
 
 # Expected ReportOutput top-level key set. Sorted; the `cobre report` stdout
@@ -116,14 +113,10 @@ for key in "${TRAINING_METADATA_KEYS[@]}"; do
 done
 echo "training/metadata.json: ${#TRAINING_METADATA_KEYS[@]} expected top-level keys present (incl. row_pool) ✓"
 
-# ── Invariant 3: policy/metadata.json exists + warm_start_* keys ──────────────
-policy_meta="$OUT_DIR/policy/metadata.json"
-[[ -f "$policy_meta" ]] || fail "policy/metadata.json was not written."
-for key in "${POLICY_METADATA_KEYS[@]}"; do
-  jq -e ".producer | has(\"$key\")" "$policy_meta" >/dev/null \
-    || fail "policy/metadata.json is missing expected key \`producer.$key\`."
-done
-echo "policy/metadata.json: expected producer keys present (${POLICY_METADATA_KEYS[*]}) ✓"
+# ── Invariant 3: policy/manifest.bin exists (the checkpoint commit signal) ────
+policy_manifest="$OUT_DIR/policy/manifest.bin"
+[[ -f "$policy_manifest" ]] || fail "policy/manifest.bin was not written."
+echo "policy/manifest.bin: present (self-describing checkpoint commit signal) ✓"
 
 # ── Invariant 4: report stdout has EXACTLY the expected ReportOutput keys ─────
 report_keys="$("$BIN" report "$OUT_DIR" --color never | jq -r 'keys | sort | join(",")')"
