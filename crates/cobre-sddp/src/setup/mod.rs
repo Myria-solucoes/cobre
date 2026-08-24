@@ -1822,6 +1822,9 @@ fn precompute_lag_data(
 // Rationale: mirrors build_historical_inflow_library/build_external_inflow_library's
 // own arity; a context struct would just relocate the arity, not reduce it.
 #[allow(clippy::too_many_arguments)]
+// Rationale: a flat training/simulation x 4-class enumeration; splitting it
+// would relocate the enumeration into a same-shaped helper, not shrink it.
+#[allow(clippy::too_many_lines)]
 fn build_scenario_libraries(
     system: &System,
     stages: &[Stage],
@@ -1843,6 +1846,9 @@ fn build_scenario_libraries(
     let sim_inflow_scheme = simulation_source.inflow_scheme;
     let sim_load_scheme = simulation_source.load_scheme;
     let sim_ncs_scheme = simulation_source.ncs_scheme;
+    // Shared by every external LOAD call below, training and simulation alike
+    // — see `build_external_load_library`'s doc for why.
+    let normal_load_bus_ids = system.load_noise_member_bus_ids(load_scheme);
 
     let training_historical: Option<HistoricalScenarioLibrary> =
         if inflow_scheme == SamplingScheme::Historical {
@@ -1891,6 +1897,8 @@ fn build_scenario_libraries(
                 load_scheme,
                 stages,
                 forward_passes,
+                stochastic.normal(),
+                &normal_load_bus_ids,
             )?)
         } else {
             None
@@ -1902,6 +1910,8 @@ fn build_scenario_libraries(
                 system,
                 stages,
                 forward_passes,
+                stochastic.ncs_normal(),
+                stochastic.ncs_entity_ids(),
             )?)
         } else {
             None
@@ -1954,6 +1964,8 @@ fn build_scenario_libraries(
                 sim_load_scheme,
                 stages,
                 forward_passes,
+                stochastic.normal(),
+                &normal_load_bus_ids,
             )?)
         } else {
             None
@@ -1965,6 +1977,8 @@ fn build_scenario_libraries(
                 system,
                 stages,
                 forward_passes,
+                stochastic.ncs_normal(),
+                stochastic.ncs_entity_ids(),
             )?)
         } else {
             None

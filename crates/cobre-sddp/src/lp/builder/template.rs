@@ -499,6 +499,47 @@ fn collect_load_bus_indices(
         .collect()
 }
 
+/// Synthesize one entity-model per `(entity, stage)` for every entity in
+/// `entity_ids`, reading `(mean, std)` from `normal_lp` at its own canonical
+/// position. `entity_ids`/`study_stages` MUST be exactly the shape `normal_lp`
+/// was built over (a `debug_assert` enforces it) — this is a pure positional
+/// read, never a re-derivation from raw rows. Shared by
+/// [`load_models_from_normal`]'s own conversion and by the external library
+/// builders' standardization-moment derivation
+/// (`setup::scenario_libraries::build_external_load_library` /
+/// `build_external_ncs_library`), so a library's standardization and
+/// `cobre_stochastic::context`'s reconstruction read the identical moments
+/// rather than each re-deriving independently.
+pub(crate) fn models_from_normal<M>(
+    normal_lp: &PrecomputedNormal,
+    entity_ids: &[EntityId],
+    study_stages: &[&Stage],
+    constructor: impl Fn(EntityId, i32, f64, f64) -> M,
+) -> Vec<M> {
+    debug_assert_eq!(
+        normal_lp.n_entities(),
+        entity_ids.len(),
+        "normal_lp must be built over exactly entity_ids"
+    );
+    debug_assert_eq!(
+        normal_lp.n_stages(),
+        study_stages.len(),
+        "normal_lp must be built over exactly study_stages"
+    );
+    let mut models = Vec::with_capacity(study_stages.len() * entity_ids.len());
+    for (stage_idx, stage) in study_stages.iter().enumerate() {
+        for (entity_idx, &entity_id) in entity_ids.iter().enumerate() {
+            models.push(constructor(
+                entity_id,
+                stage.id,
+                normal_lp.mean(stage_idx, entity_idx),
+                normal_lp.std(stage_idx, entity_idx),
+            ));
+        }
+    }
+    models
+}
+
 /// The static load-balance RHS [`fill_load_balance_rows`] reads for every
 /// load-noise-member bus, sourced from `normal_lp` — the SAME derivation
 /// [`PrecomputedNormal::build`] used to build it (external-derived under
@@ -532,16 +573,17 @@ fn load_models_from_normal(
         .filter(|lm| !member_set.contains(&lm.bus_id))
         .cloned()
         .collect();
-    for (stage_idx, stage) in study_stages.iter().enumerate() {
-        for (entity_idx, &bus_id) in member_ids.iter().enumerate() {
-            models.push(LoadModel {
-                bus_id,
-                stage_id: stage.id,
-                mean_mw: normal_lp.mean(stage_idx, entity_idx),
-                std_mw: normal_lp.std(stage_idx, entity_idx),
-            });
-        }
-    }
+    models.extend(models_from_normal(
+        normal_lp,
+        &member_ids,
+        study_stages,
+        |bus_id, stage_id, mean_mw, std_mw| LoadModel {
+            bus_id,
+            stage_id,
+            mean_mw,
+            std_mw,
+        },
+    ));
     models
 }
 

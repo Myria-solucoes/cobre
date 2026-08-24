@@ -70,6 +70,7 @@ pub(crate) use scaling::{
     apply_col_scale, apply_commitment_hold_col_scale_unscale, apply_row_scale, compute_col_scale,
     compute_row_scale,
 };
+pub(crate) use template::models_from_normal;
 
 // ---------------------------------------------------------------------------
 // Shared constants

@@ -1,8 +1,8 @@
 # External scenarios are authoritative
 
-> **Status:** Proposal — target design, not yet implemented. The current-behavior
-> sections describe the tree as it stands today; the design sections describe the
-> intended change. Symbols are cited by name and file so the pointers survive
+> **Status:** Implemented (retained pending fold into the live spec). The behavior
+> described below ships; the current-behavior and design sections now both describe
+> the live tree. Symbols are cited by name and file so the pointers survive
 > line-number churn.
 
 **Scope:** how an externally-supplied scenario file (`scheme == External`, per

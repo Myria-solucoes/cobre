@@ -980,6 +980,50 @@ pass `&SuccessorSpec`, or a role newtype.
   deliberate). Optional single-match consolidation in `admission_gate`.
   **Owner.** Setup. **Trigger.** Next admission-gate change.
 
+### External-scenarios-authoritative deferrals (2026-08-24)
+
+#### Deterministic (σ = 0) AR(p > 0) external inflow stays rejected
+
+**What it is.** Under the `External` scheme the external scenario file is the
+authoritative source of a class's realized values, σ = 0 included, for load, NCS,
+and AR(0) inflow. An AR(p > 0) inflow at σ = 0 remains **rejected**: a deterministic
+autoregressive series would have to equal the model's own deterministic PAR output
+at every stage — a whole-trajectory constraint of marginal value that the loader
+cannot compute upstream. Both the SDDP loader and `cobre.io.validate` reject it with
+that reason (no "inversion is undefined" phrasing).
+
+**Owner.** The stochastic/formulation owner.
+
+**Trigger.** A real deck needing a deterministic AR(p > 0) external inflow — then
+admit it by validating the values against the deterministic PAR recursion.
+
+#### `LoadModel` conflates physical load with its stochastic model
+
+**What it is.** `LoadModel` is both "this bus has load" (physical) and "here is its
+noise model" (stochastic-stats-derived), unlike NCS which separates
+`NonControllableSource` (physical) from `NcsModel` (stochastic). This conflation is
+why load-noise membership had to be unified into one `System` authority
+(`load_noise_member_bus_ids`) consumed by every site, rather than read off a physical
+registry the way NCS is. Splitting the physical/stochastic roles is the deeper
+structural fix.
+
+**Owner.** The core data-model owner.
+
+**Trigger.** A dedicated data-model plan; do not attempt inside a feature ticket
+(the split ripples every `&[LoadModel]` borrow).
+
+#### Cross-path static-RHS contract not yet in `.claude/rules/sddp.md`
+
+**What it is.** The stage-0 lower-bound static LP RHS must read the same
+`PrecomputedNormal` moment source the runtime reconstruction uses
+(`load_models_from_normal`) — the load analogue of the "lower-bound evaluation must
+patch NCS" contract. It is a Voice-1 doc comment on the owning symbols + pinned by
+tests, but not yet mirrored into `.claude/rules/sddp.md`.
+
+**Owner.** The SDDP-rules owner.
+
+**Trigger.** Next `.claude/rules/sddp.md` edit — add the contract beside the NCS one.
+
 ### Cleared (recorded so a future audit does not re-raise)
 
 The computed-parameter resolver is not a god-function (cohesive); the water

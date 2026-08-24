@@ -10,13 +10,14 @@ use cobre_core::{
 };
 use cobre_io::StageIdResolver;
 use cobre_stochastic::{
-    ExternalScenarioLibrary, HistoricalScenarioLibrary, PrecomputedPar,
-    derive_external_sample_moments, discover_historical_windows, pad_library_to_uniform,
-    standardize_external_inflow, standardize_external_load, standardize_external_ncs,
-    standardize_historical_windows, validate_external_library, validate_historical_library,
+    ExternalScenarioLibrary, HistoricalScenarioLibrary, PrecomputedNormal, PrecomputedPar,
+    discover_historical_windows, pad_library_to_uniform, standardize_external_inflow,
+    standardize_external_load, standardize_external_ncs, standardize_historical_windows,
+    validate_external_library, validate_historical_library,
 };
 
 use crate::SddpError;
+use crate::lp_builder::models_from_normal;
 
 /// Build and validate a [`HistoricalScenarioLibrary`] for inflow.
 ///
@@ -166,58 +167,6 @@ pub(crate) fn build_external_inflow_library(
     Ok(library)
 }
 
-/// Build a derived-moment model slice under `External`: one entry per
-/// `(entity, stage)` with the sample moments [`derive_external_sample_moments`]
-/// computes over `external_rows`, mapped into the class's model type via
-/// `constructor`. Feeds the SAME `(μ, σ)` pair into `standardize_external_load`
-/// / `standardize_external_ncs` that `cobre_stochastic::context` derives from
-/// the same rows for reconstruction, so the standardize/reconstruct round trip
-/// holds — the two call sites must keep deriving from the same rows.
-///
-/// `row_fields`' `stage_id` is the row's raw declared domain id; `resolver`
-/// maps it to the canonical 0-based index `derive_external_sample_moments`
-/// requires, the same [`StageIdResolver`] the rule-47 validator resolves
-/// against, so a gapped or non-0-based deck's rows land on the same stage the
-/// validator's own σ=0 decision reads. An unresolvable `stage_id` is dropped,
-/// never fed to the reduction.
-fn external_derived_models<R, FR, M, FM>(
-    external_rows: &[R],
-    entity_ids: &[EntityId],
-    stages: &[Stage],
-    resolver: &StageIdResolver,
-    row_fields: FR,
-    constructor: FM,
-) -> Vec<M>
-where
-    FR: Fn(&R) -> (EntityId, i32, i32, f64),
-    FM: Fn(EntityId, i32, f64, f64) -> M,
-{
-    let n_entities = entity_ids.len();
-    let resolved_rows: Vec<(EntityId, i32, i32, f64)> = external_rows
-        .iter()
-        .filter_map(|row| {
-            let (entity_id, stage_id, scenario_id, value) = row_fields(row);
-            let stage_idx = resolver.resolve(stage_id)?;
-            let stage_idx_i32 = i32::try_from(stage_idx).ok()?;
-            Some((entity_id, stage_idx_i32, scenario_id, value))
-        })
-        .collect();
-    let moments = derive_external_sample_moments(
-        &resolved_rows,
-        entity_ids,
-        stages.len(),
-        |&(entity_id, stage_idx, scenario_id, value)| (entity_id, stage_idx, scenario_id, value),
-    );
-    let mut models = Vec::with_capacity(stages.len() * n_entities);
-    for (stage_idx, stage) in stages.iter().enumerate() {
-        for (entity_idx, &entity_id) in entity_ids.iter().enumerate() {
-            let (mean, std) = moments[stage_idx * n_entities + entity_idx];
-            models.push(constructor(entity_id, stage.id, mean, std));
-        }
-    }
-    models
-}
-
 /// Build and validate an [`ExternalScenarioLibrary`] for load.
 ///
 /// Canonical bus ID list from [`System::load_noise_member_bus_ids`] — the
@@ -228,6 +177,18 @@ where
 /// scheme diverges from the training-derived noise-vector width is caught by
 /// `assert_external_library_widths`, not here.
 ///
+/// Standardizes against `normal_lp`/`normal_bus_ids` — the SAME
+/// `PrecomputedNormal` and entity list `cobre_stochastic::context` builds for
+/// reconstruction — rather than re-deriving moments independently from
+/// `external_rows`, mirroring how [`build_external_inflow_library`]
+/// standardizes against the reconstruction `PrecomputedPar` it receives.
+/// `normal_bus_ids` is gated on the TRAINING scheme (the one scheme the
+/// shared `PrecomputedNormal` is built under), which may be narrower than
+/// this library's own `External`-gated `bus_ids` when the calling phase's
+/// scheme diverges from training's; a bus outside `normal_bus_ids` then
+/// standardizes to `(0.0, 0.0)`, matching what reconstruction itself would
+/// give it — never a divergent, independently-derived value.
+///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on validation failure.
@@ -236,6 +197,8 @@ pub(crate) fn build_external_load_library(
     load_scheme: SamplingScheme,
     stages: &[Stage],
     forward_passes: u32,
+    normal_lp: &PrecomputedNormal,
+    normal_bus_ids: &[EntityId],
 ) -> Result<ExternalScenarioLibrary, SddpError> {
     let external_rows = system.external_load_scenarios();
     let n_stages = stages.len();
@@ -264,12 +227,11 @@ pub(crate) fn build_external_load_library(
         "load",
         per_stage_scenarios,
     );
-    let derived_load_models = external_derived_models(
-        external_rows,
-        &bus_ids,
-        stages,
-        &resolver,
-        |row| (row.bus_id, row.stage_id, row.scenario_id, row.value_mw),
+    let stage_refs: Vec<&Stage> = stages.iter().collect();
+    let derived_load_models = models_from_normal(
+        normal_lp,
+        normal_bus_ids,
+        &stage_refs,
         |bus_id, stage_id, mean_mw, std_mw| LoadModel {
             bus_id,
             stage_id,
@@ -303,6 +265,13 @@ pub(crate) fn build_external_load_library(
 /// is only ever built under `External` (the caller gates the call site), so
 /// an NCS with no `non_controllable_stats` row is still a noise member.
 ///
+/// Standardizes against `ncs_normal`/`normal_ncs_ids` — the SAME
+/// `PrecomputedNormal` and entity list `cobre_stochastic::context` builds for
+/// reconstruction — rather than re-deriving moments independently, mirroring
+/// [`build_external_load_library`]'s own fix (see its doc for the
+/// TRAINING-scheme-gated `normal_ncs_ids` vs. this library's own
+/// `External`-gated `ncs_ids` distinction).
+///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on validation failure.
@@ -310,6 +279,8 @@ pub(crate) fn build_external_ncs_library(
     system: &System,
     stages: &[Stage],
     forward_passes: u32,
+    ncs_normal: &PrecomputedNormal,
+    normal_ncs_ids: &[EntityId],
 ) -> Result<ExternalScenarioLibrary, SddpError> {
     let external_rows = system.external_ncs_scenarios();
     let n_stages = stages.len();
@@ -333,12 +304,11 @@ pub(crate) fn build_external_ncs_library(
     let n_scenarios_ext = per_stage_scenarios.iter().copied().max().unwrap_or(0);
     let mut library =
         ExternalScenarioLibrary::new(n_stages, n_scenarios_ext, n_ncs, "ncs", per_stage_scenarios);
-    let derived_ncs_models = external_derived_models(
-        external_rows,
-        &ncs_ids,
-        stages,
-        &resolver,
-        |row| (row.ncs_id, row.stage_id, row.scenario_id, row.value),
+    let stage_refs: Vec<&Stage> = stages.iter().collect();
+    let derived_ncs_models = models_from_normal(
+        ncs_normal,
+        normal_ncs_ids,
+        &stage_refs,
         |ncs_id, stage_id, mean, std| NcsModel {
             ncs_id,
             stage_id,
@@ -373,12 +343,11 @@ mod tests {
         Block, BlockMode, ExternalLoadRow, InflowModel, NoiseMethod, ScenarioSourceConfig,
         StageRiskConfig, StageStateConfig, SystemBuilder,
     };
-    use cobre_stochastic::StochasticError;
+    use cobre_stochastic::{PrecomputedNormal, StochasticError, derive_external_sample_moments};
 
     use super::{
         EntityId, ExternalScenarioRow, LoadModel, PrecomputedPar, SamplingScheme, SddpError, Stage,
         StageLagTransition, build_external_inflow_library, build_external_load_library,
-        derive_external_sample_moments,
     };
 
     fn single_stage(id: i32) -> Stage {
@@ -545,9 +514,8 @@ mod tests {
             .build()
             .expect("system must build");
 
-        let library = build_external_load_library(&system, SamplingScheme::External, &stages, 1)
-            .expect("a single-column external load library must build");
-
+        // Mirror context.rs's own training=External derivation: standardization
+        // must consume this SAME `PrecomputedNormal`, not re-derive it.
         let moments = derive_external_sample_moments(
             &external_rows,
             &[bus_id],
@@ -564,6 +532,24 @@ mod tests {
             std.abs() < 1e-10,
             "a single external sample -> sigma=0 exactly"
         );
+        let derived_load_models = vec![LoadModel {
+            bus_id,
+            stage_id: 0,
+            mean_mw: mean,
+            std_mw: std,
+        }];
+        let normal_lp = PrecomputedNormal::build(&derived_load_models, &[], &stages, &[bus_id], 1)
+            .expect("normal_lp must build");
+
+        let library = build_external_load_library(
+            &system,
+            SamplingScheme::External,
+            &stages,
+            1,
+            &normal_lp,
+            &[bus_id],
+        )
+        .expect("a single-column external load library must build");
 
         let eta = library.eta_slice(0, 0)[0];
         let realized = (mean + std * eta).max(0.0);
@@ -572,6 +558,95 @@ mod tests {
             "reconstruction must equal the external value (123.0), not the seasonal \
              mean_mw (999.0); got {realized}"
         );
+    }
+
+    /// Regression: a divergent sim-only-External LOAD deck — training uses
+    /// `InSample`, simulation uses `External` for the same bus — must
+    /// standardize against the SAME `PrecomputedNormal`
+    /// `cobre_stochastic::context` builds for the training-gated
+    /// reconstruction, never re-derive independently from `external_rows`.
+    /// Two distinct external scenarios give a nonzero external sample sigma
+    /// (25.0), so a re-derivation would standardize a genuinely nonzero eta;
+    /// pre-fix, `build_external_load_library` always called
+    /// `derive_external_sample_moments` over the external sample regardless
+    /// of which phase invoked it, so this bus's standardization sigma (25.0)
+    /// disagreed with the training-gated reconstruction sigma (`0.0`, since a
+    /// σ=0 bus is not an `InSample` noise member at all) — a silent
+    /// divergence this test pins shut.
+    #[test]
+    fn external_load_divergent_sim_only_scheme_standardizes_against_training_gated_normal() {
+        let bus_id = EntityId(1);
+        let stages = vec![single_stage(0)];
+        let seasonal_load_models = vec![LoadModel {
+            bus_id,
+            stage_id: 0,
+            mean_mw: 999.0,
+            std_mw: 0.0,
+        }];
+        let external_rows = vec![
+            ExternalLoadRow {
+                bus_id,
+                stage_id: 0,
+                scenario_id: 0,
+                value_mw: 100.0,
+            },
+            ExternalLoadRow {
+                bus_id,
+                stage_id: 0,
+                scenario_id: 1,
+                value_mw: 150.0,
+            },
+        ];
+        let system = SystemBuilder::new()
+            .load_models(seasonal_load_models)
+            .external_load_scenarios(external_rows)
+            .build()
+            .expect("system must build");
+
+        // Training's own scheme is InSample: R2's default std_mw > 0.0 rule
+        // excludes this sigma=0 bus from noise membership entirely, so
+        // context.rs's non-External branch builds normal_lp over an empty
+        // entity list for this bus.
+        let normal_load_bus_ids = system.load_noise_member_bus_ids(SamplingScheme::InSample);
+        assert!(
+            normal_load_bus_ids.is_empty(),
+            "a sigma=0 bus must not be an InSample noise member"
+        );
+        let max_blocks = stages.iter().map(|s| s.blocks.len()).max().unwrap_or(0);
+        let normal_lp = PrecomputedNormal::build(
+            system.load_models(),
+            &[],
+            &stages,
+            &normal_load_bus_ids,
+            max_blocks,
+        )
+        .expect("normal_lp must build");
+
+        // Simulation's own scheme is External: R2's external-additive
+        // membership widens this library's own bus_ids to include the
+        // sigma=0 bus, strictly wider than normal_load_bus_ids above --
+        // exactly the divergent-scheme case the fix must not mis-standardize.
+        let library = build_external_load_library(
+            &system,
+            SamplingScheme::External,
+            &stages,
+            1,
+            &normal_lp,
+            &normal_load_bus_ids,
+        )
+        .expect("a divergent sim-only-External load library must still build");
+
+        for scenario in 0..2 {
+            let eta = library.eta_slice(0, scenario)[0];
+            assert!(
+                eta.abs() < 1e-10,
+                "a bus outside the training-gated normal_lp must standardize to eta=0 \
+                 (the (0.0, 0.0) fallback) -- agreeing with what training's own \
+                 reconstruction gives this bus -- not a nonzero eta derived from the \
+                 external sample's own sigma (25.0), which would silently diverge \
+                 from it; scenario {scenario} got {eta}"
+            );
+        }
     }
 
     /// AC2 + regression proof: a σ=0 External AR(0) inflow reconstructs the
@@ -786,7 +861,7 @@ mod tests {
         }
     }
 
-    /// Epic-02 review regression: a gapped/non-0-based External LOAD deck
+    /// Regression: a gapped/non-0-based External LOAD deck
     /// (declared stage ids `2`/`5`, never `0`/`1`) must resolve through the
     /// same canonical `stage_id -> index` mapping cobre-io's rule-47
     /// validator uses. Pre-fix, `rows_per_stage`'s `row.stage_id as usize`
@@ -831,9 +906,6 @@ mod tests {
             .build()
             .expect("system must build");
 
-        let library = build_external_load_library(&system, SamplingScheme::External, &stages, 1)
-            .expect("a gapped-stage-id external load deck must build, not drop every row");
-
         // Resolve the declared ids the same way the fixed engine now must:
         // gapped id 2 -> canonical position 0, gapped id 5 -> position 1.
         let resolved_rows: Vec<(EntityId, i32, i32, f64)> = external_rows
@@ -849,6 +921,31 @@ mod tests {
             2,
             |&(bus, stage_idx, scenario_id, value)| (bus, stage_idx, scenario_id, value),
         );
+        // Mirror context.rs's own training=External derivation: standardization
+        // must consume this SAME `PrecomputedNormal`, not re-derive it.
+        let derived_load_models: Vec<LoadModel> = (0..2)
+            .map(|resolved_idx| {
+                let (mean, std) = moments[resolved_idx];
+                LoadModel {
+                    bus_id,
+                    stage_id: stages[resolved_idx].id,
+                    mean_mw: mean,
+                    std_mw: std,
+                }
+            })
+            .collect();
+        let normal_lp = PrecomputedNormal::build(&derived_load_models, &[], &stages, &[bus_id], 1)
+            .expect("normal_lp must build");
+
+        let library = build_external_load_library(
+            &system,
+            SamplingScheme::External,
+            &stages,
+            1,
+            &normal_lp,
+            &[bus_id],
+        )
+        .expect("a gapped-stage-id external load deck must build, not drop every row");
 
         for (resolved_idx, expected) in [(0usize, 123.0_f64), (1usize, 456.0_f64)] {
             let (mean, std) = moments[resolved_idx];
@@ -862,7 +959,7 @@ mod tests {
         }
     }
 
-    /// Epic-02 review regression, inflow counterpart: a gapped/non-0-based
+    /// Regression, inflow counterpart: a gapped/non-0-based
     /// External INFLOW deck (declared stage ids `2`/`5`) must resolve
     /// through the same canonical mapping — both in the `rows_per_stage`
     /// count feeding V3.7 and in `standardize_external_inflow`'s own
