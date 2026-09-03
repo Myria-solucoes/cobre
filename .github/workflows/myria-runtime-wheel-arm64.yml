@@ -1,0 +1,34 @@
+name: Release Myria runtime wheel ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable Myria runtime release tag
+        required: true
+        default: v0.15.0-myria.1
+
+permissions:
+  contents: write
+
+jobs:
+  wheel:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64-unknown-linux-gnu
+          manylinux: "2_28"
+          args: --release --out dist
+          working-directory: crates/cobre-python
+          before-script-linux: apt-get update && apt-get install -y cmake
+      - name: Upload ARM64 wheel to immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" crates/cobre-python/dist/*.whl --clobber
