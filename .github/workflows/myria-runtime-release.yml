@@ -59,10 +59,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$(find dist -maxdepth 1 -name 'cobre_python-*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
           gh release create "$RELEASE_TAG" \
             --target "$GITHUB_SHA" \
             --title "Myria Cobre runtime ${RELEASE_TAG#v}" \
             --notes "Pinned Myria runtime built from ${GITHUB_SHA}." \
             dist/cobre-cli-x86_64-unknown-linux-gnu.tar.xz \
-            dist/cobre_python-*.whl
+            dist/*.whl
