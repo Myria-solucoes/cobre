@@ -292,7 +292,28 @@ pub fn validate(
 
     dict.set_item("valid", true)?;
     dict.set_item("errors", PyList::empty(py))?;
-    dict.set_item("warnings", build_warnings_list(py, &report.warnings)?)?;
+    let warnings = build_warnings_list(py, &report.warnings)?;
+    if let Some(estimation) = &prepared.estimation_report {
+        for fallback in &estimation.stationarity_fallbacks {
+            let warning = PyDict::new(py);
+            warning.set_item("kind", "StationarityRegularized")?;
+            warning.set_item(
+                "message",
+                format!(
+                    "automatic PAR stationarity regularization applied to hydro_id={} season={}: {} (order {} -> {})",
+                    fallback.hydro_id.0,
+                    fallback.season_id,
+                    fallback.action,
+                    fallback.original_order,
+                    fallback.reduced_order,
+                ),
+            )?;
+            warning.set_item("file", "scenarios/inflow_history.parquet")?;
+            warning.set_item("entity", format!("hydro_id={}", fallback.hydro_id.0))?;
+            warnings.append(warning)?;
+        }
+    }
+    dict.set_item("warnings", warnings)?;
 
     Ok(dict.into())
 }

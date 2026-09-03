@@ -58,7 +58,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{Months, NaiveDate};
+use cobre_core::scenario::InflowModel;
 use cobre_core::{EntityId, SeasonMap, Stage, System};
+use cobre_stochastic::par::fitting::StationarityFallback;
 use cobre_stochastic::{
     StochasticError,
     par::aggregate::aggregate_observations_to_season,
@@ -238,7 +240,7 @@ fn run_estimation(
     let seasonal_stats =
         estimate_seasonal_stats_with_season_map(&observations, stages, &hydro_ids, season_map)?;
 
-    let (ar_estimates, estimation_report) = estimate_ar_coefficients_with_selection(
+    let (mut ar_estimates, mut estimation_report) = estimate_ar_coefficients_with_selection(
         &observations,
         &seasonal_stats,
         stages,
@@ -254,6 +256,14 @@ fn run_estimation(
         },
     )?;
 
+    let inflow_models = assemble_with_stationarity_fallback(
+        seasonal_stats_to_rows(&seasonal_stats, stages),
+        &mut ar_estimates,
+        stages,
+        season_map,
+        &mut estimation_report,
+    )?;
+
     let correlation = if manifest.scenarios_correlation_json {
         system.correlation().clone()
     } else {
@@ -266,17 +276,6 @@ fn run_estimation(
             season_map,
         )?
     };
-
-    let stats_rows = seasonal_stats_to_rows(&seasonal_stats, stages);
-    let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
-    let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
-
-    let mut inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
-    // `stages` (study + synthesized prestudy) matches `seasonal_stats_to_rows`'s own
-    // stage_to_season construction above: prestudy stage_ids appear in
-    // `inflow_models` too, so `system.stages()` alone would under-resolve them.
-    let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
-    populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
     Ok((
         system.with_scenario_models(inflow_models, correlation),
@@ -327,7 +326,7 @@ fn run_partial_estimation(
     let fitting_stats =
         estimate_seasonal_stats_with_season_map(&observations, stages, &hydro_ids, season_map)?;
 
-    let (ar_estimates, mut estimation_report) = estimate_ar_coefficients_with_selection(
+    let (mut ar_estimates, mut estimation_report) = estimate_ar_coefficients_with_selection(
         &observations,
         &fitting_stats,
         stages,
@@ -347,6 +346,21 @@ fn run_partial_estimation(
     let (white_noise_fallbacks, std_ratio_warnings) =
         validate_partial_estimation_coverage(&system, &fitting_stats, study_stages)?;
 
+    // LP assembly uses USER stats, not the fitting stats above.
+    let mut stats_rows = user_stats_to_rows(&system);
+    // Out-of-window lag seasons have no user stat; source their (mean, std) from
+    // fitting_stats so PrecomputedPar::build gets a Tier-1 lag hit at the negative
+    // stage_id rather than zeroing the lag. In-window wrap lags stay on the
+    // Tier-2 → user-stat path. Empty for full-year.
+    stats_rows.extend(prestudy_seasonal_rows(&fitting_stats, &prestudy));
+    let inflow_models = assemble_with_stationarity_fallback(
+        stats_rows,
+        &mut ar_estimates,
+        stages,
+        season_map,
+        &mut estimation_report,
+    )?;
+
     let correlation = if manifest.scenarios_correlation_json {
         system.correlation().clone()
     } else {
@@ -359,22 +373,6 @@ fn run_partial_estimation(
             season_map,
         )?
     };
-
-    // LP assembly uses USER stats, not the fitting stats above.
-    let mut stats_rows = user_stats_to_rows(&system);
-    // Out-of-window lag seasons have no user stat; source their (mean, std) from
-    // fitting_stats so PrecomputedPar::build gets a Tier-1 lag hit at the negative
-    // stage_id rather than zeroing the lag. In-window wrap lags stay on the
-    // Tier-2 → user-stat path. Empty for full-year.
-    stats_rows.extend(prestudy_seasonal_rows(&fitting_stats, &prestudy));
-    let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
-    let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
-    let mut inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
-    // `stages` (study + synthesized prestudy) — see `run_estimation`'s identical
-    // rationale: prestudy stage_ids appear in `inflow_models` too.
-    let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
-    populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
-
     estimation_report.white_noise_fallbacks = white_noise_fallbacks;
     estimation_report.std_ratio_warnings = std_ratio_warnings;
 
@@ -382,6 +380,151 @@ fn run_partial_estimation(
         system.with_scenario_models(inflow_models, correlation),
         estimation_report,
     ))
+}
+
+/// Assemble automatic PAR estimates, reducing only the hydro/season rejected by
+/// the periodic-ACF closure until the fitted model is stationary.
+///
+/// The fallback is deliberately confined to history-estimated models: callers
+/// with user-supplied AR rows continue through `run_user_ar_estimation` and
+/// keep the existing hard validation gate.  Every reduction is retained in the
+/// estimation report so Python validation, the CLI and output artifacts can
+/// tell the user that an approximation was applied.
+fn assemble_with_stationarity_fallback(
+    stats_rows: Vec<InflowSeasonalStatsRow>,
+    estimates: &mut [ArCoefficientEstimate],
+    stages: &[Stage],
+    season_map: Option<&SeasonMap>,
+    report: &mut EstimationReport,
+) -> Result<Vec<InflowModel>, EstimationError> {
+    let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
+    let max_repairs = estimates.len().saturating_mul(2).saturating_add(1);
+
+    for _ in 0..max_repairs {
+        let coeff_rows = ar_estimates_to_rows(estimates, stages);
+        let annual_rows = ar_estimates_to_annual_rows(estimates, stages);
+        let mut models = assemble_inflow_models(stats_rows.clone(), coeff_rows, annual_rows)?;
+        match populate_derived_residual_ratios(&mut models, &stage_to_season, n_seasons) {
+            Ok(()) => {
+                refresh_report_after_stationarity_fallback(estimates, n_seasons, report);
+                return Ok(models);
+            }
+            Err(error) => {
+                let Some((hydro_id, season_id)) = stationarity_failure_target(&error) else {
+                    return Err(EstimationError::Load(error));
+                };
+                let Some(repair) = reduce_non_stationary_estimate(estimates, hydro_id, season_id)
+                else {
+                    return Err(EstimationError::Load(error));
+                };
+                report.stationarity_fallbacks.push(repair);
+            }
+        }
+    }
+
+    Err(EstimationError::Load(ConstraintError {
+        description: "automatic PAR stationarity fallback exhausted its bounded repair budget"
+            .to_string(),
+    }))
+}
+
+fn stationarity_failure_target(error: &LoadError) -> Option<(EntityId, usize)> {
+    let LoadError::ConstraintError { description } = error else {
+        return None;
+    };
+    if !(description.contains("residual_std_ratio") || description.contains("closure is singular"))
+    {
+        return None;
+    }
+    let hydro = description
+        .split("hydro_id=")
+        .nth(1)?
+        .split_whitespace()
+        .next()?;
+    let hydro_id = hydro.parse::<i32>().ok()?;
+    let season = description
+        .split("season=")
+        .nth(1)
+        .and_then(|tail| tail.split(':').next())
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    Some((EntityId(hydro_id), season))
+}
+
+fn reduce_non_stationary_estimate(
+    estimates: &mut [ArCoefficientEstimate],
+    hydro_id: EntityId,
+    season_id: usize,
+) -> Option<StationarityFallback> {
+    // The annual component is the least-local extra dependency.  Remove it
+    // first, preserving the fitted monthly PAR coefficients whenever possible.
+    if estimates
+        .iter()
+        .any(|item| item.hydro_id == hydro_id && item.annual.is_some())
+    {
+        for item in estimates
+            .iter_mut()
+            .filter(|item| item.hydro_id == hydro_id)
+        {
+            item.annual = None;
+        }
+        let original_order = estimates
+            .iter()
+            .find(|item| item.hydro_id == hydro_id && item.season_id == season_id)
+            .map_or(0, |item| item.coefficients.len());
+        return Some(StationarityFallback {
+            hydro_id,
+            season_id,
+            original_order,
+            reduced_order: original_order,
+            action: "annual_component_removed",
+        });
+    }
+
+    // Then remove the highest lag at the failing season.  The loop retries the
+    // closure, so a difficult hydro is reduced progressively rather than being
+    // silently replaced by white noise in one step.
+    let index = estimates
+        .iter()
+        .position(|item| item.hydro_id == hydro_id && item.season_id == season_id)
+        .or_else(|| {
+            estimates
+                .iter()
+                .position(|item| item.hydro_id == hydro_id && !item.coefficients.is_empty())
+        })?;
+    let item = &mut estimates[index];
+    let original_order = item.coefficients.len();
+    if original_order == 0 {
+        return None;
+    }
+    item.coefficients.pop();
+    Some(StationarityFallback {
+        hydro_id,
+        season_id: item.season_id,
+        original_order,
+        reduced_order: item.coefficients.len(),
+        action: "highest_lag_removed",
+    })
+}
+
+fn refresh_report_after_stationarity_fallback(
+    estimates: &[ArCoefficientEstimate],
+    n_seasons: usize,
+    report: &mut EstimationReport,
+) {
+    for (hydro_id, entry) in &mut report.entries {
+        let mut coefficients = vec![Vec::new(); n_seasons];
+        for estimate in estimates
+            .iter()
+            .filter(|estimate| estimate.hydro_id == *hydro_id)
+        {
+            if estimate.season_id < n_seasons {
+                coefficients[estimate.season_id] = estimate.coefficients.clone();
+            }
+        }
+        entry.selected_order = coefficients.iter().map(Vec::len).max().unwrap_or(0) as u32;
+        entry.coefficients = coefficients;
+    }
 }
 
 /// Load inflow history from the case directory, gate each hydro's season
@@ -709,6 +852,7 @@ fn run_user_ar_estimation(
         method: "user_provided".to_string(),
         white_noise_fallbacks: Vec::new(),
         std_ratio_warnings: Vec::new(),
+        stationarity_fallbacks: Vec::new(),
     };
 
     Ok((

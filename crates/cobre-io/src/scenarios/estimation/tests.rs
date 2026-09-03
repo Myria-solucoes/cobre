@@ -11,7 +11,7 @@
 )]
 
 use super::*;
-use cobre_core::scenario::{CorrelationModel, InflowModel};
+use cobre_core::scenario::{AnnualComponent, CorrelationModel, InflowModel};
 use cobre_core::{EntityId, Hydro, HydroPenalties, SeasonMap, Stage, SystemBuilder};
 use cobre_stochastic::PrecomputedPar;
 
@@ -22,6 +22,61 @@ fn minimal_system_with_inflow_models(models: Vec<InflowModel>) -> System {
         .inflow_models(models)
         .build()
         .expect("valid system")
+}
+
+#[test]
+fn automatic_stationarity_repair_removes_annual_before_ar_lags() {
+    let hydro_id = EntityId(151);
+    let mut estimates = vec![
+        ArCoefficientEstimate {
+            hydro_id,
+            season_id: 7,
+            coefficients: vec![0.4, 0.2],
+            annual: Some(AnnualComponent {
+                coefficient: 0.3,
+                mean_m3s: 10.0,
+                std_m3s: 2.0,
+            }),
+        },
+        ArCoefficientEstimate {
+            hydro_id,
+            season_id: 8,
+            coefficients: vec![0.3],
+            annual: Some(AnnualComponent {
+                coefficient: 0.3,
+                mean_m3s: 10.0,
+                std_m3s: 2.0,
+            }),
+        },
+    ];
+
+    let first = reduce_non_stationary_estimate(&mut estimates, hydro_id, 7).unwrap();
+    assert_eq!(first.action, "annual_component_removed");
+    assert!(estimates.iter().all(|estimate| estimate.annual.is_none()));
+    assert_eq!(estimates[0].coefficients, vec![0.4, 0.2]);
+
+    let second = reduce_non_stationary_estimate(&mut estimates, hydro_id, 7).unwrap();
+    assert_eq!(second.action, "highest_lag_removed");
+    assert_eq!(second.original_order, 2);
+    assert_eq!(second.reduced_order, 1);
+    assert_eq!(estimates[0].coefficients, vec![0.4]);
+}
+
+#[test]
+fn stationarity_target_is_limited_to_reported_hydro_and_season() {
+    let error = LoadError::ConstraintError {
+        description: "hydro_id=151 season=7: residual_std_ratio non-finite / nonstationary"
+            .to_string(),
+    };
+    assert_eq!(
+        stationarity_failure_target(&error),
+        Some((EntityId(151), 7))
+    );
+
+    let unrelated = LoadError::ConstraintError {
+        description: "configuration validation error".to_string(),
+    };
+    assert_eq!(stationarity_failure_target(&unrelated), None);
 }
 
 // ── with_scenario_models tests ────────────────────────────────────────────

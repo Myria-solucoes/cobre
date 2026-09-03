@@ -97,6 +97,29 @@ pub struct EstimationReport {
     /// Hydros whose consecutive-season std ratios diverge between the
     /// user-provided and history-estimated profiles.
     pub std_ratio_warnings: Vec<StdRatioDivergence>,
+    /// Automatic, explicitly reported reductions required to make an
+    /// internally estimated PAR model stationary.
+    pub stationarity_fallbacks: Vec<StationarityFallback>,
+}
+
+/// A narrowly-scoped stationarity repair applied after automatic fitting.
+///
+/// This is never used for user-supplied AR coefficients.  It records the
+/// affected hydro/season and the exact step taken so callers can surface the
+/// modelling approximation instead of hiding it.
+#[must_use]
+#[derive(Debug, Clone)]
+pub struct StationarityFallback {
+    /// Hydro whose automatically fitted parameters were reduced.
+    pub hydro_id: EntityId,
+    /// Dense season id selected by the closure failure.
+    pub season_id: usize,
+    /// AR order before this individual fallback step.
+    pub original_order: usize,
+    /// AR order after this individual fallback step.
+    pub reduced_order: usize,
+    /// Stable action tag: `annual_component_removed` or `highest_lag_removed`.
+    pub action: &'static str,
 }
 
 /// Advisory diagnostic for a `(hydro, season pair)` whose cross-season std ratio
@@ -250,6 +273,7 @@ fn estimate_ar_with_pacf(
             method: "PACF".to_string(),
             white_noise_fallbacks: Vec::new(),
             std_ratio_warnings: Vec::new(),
+            stationarity_fallbacks: Vec::new(),
         };
         return Ok((estimates, report));
     }
@@ -1277,6 +1301,7 @@ pub fn build_estimation_report(
         method: method.to_string(),
         white_noise_fallbacks: Vec::new(),
         std_ratio_warnings: Vec::new(),
+        stationarity_fallbacks: Vec::new(),
     }
 }
 

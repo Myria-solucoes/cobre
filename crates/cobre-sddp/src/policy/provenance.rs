@@ -380,6 +380,7 @@ mod tests {
             method: method.to_owned(),
             white_noise_fallbacks: fallbacks.iter().map(|&id| EntityId(id)).collect(),
             std_ratio_warnings: Vec::new(),
+            stationarity_fallbacks: Vec::new(),
         }
     }
 
