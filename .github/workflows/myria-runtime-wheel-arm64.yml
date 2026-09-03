@@ -7,16 +7,45 @@ on:
         description: Existing immutable Myria runtime release tag
         required: true
         default: v0.15.0-myria.1
+      source_ref:
+        description: Source tag or commit used to build the release artifact
+        required: true
+        default: v0.15.0-myria.1
 
 permissions:
   contents: write
 
 jobs:
+  cli:
+    name: Build Linux ARM64 CLI archive
+    runs-on: ubuntu-24.04-arm
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_ref }}
+          submodules: recursive
+      - name: Install native build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake
+      - name: Build CLI archive
+        run: |
+          cargo build --release -p cobre-cli
+          mkdir -p dist/cli
+          cp target/release/cobre dist/cli/cobre
+          tar --create --xz --file dist/cobre-cli-aarch64-unknown-linux-gnu.tar.xz \
+            --directory dist/cli cobre
+      - name: Upload ARM64 CLI to immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" dist/cobre-cli-aarch64-unknown-linux-gnu.tar.xz --clobber
+
   wheel:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.source_ref }}
           submodules: recursive
       - uses: actions/setup-python@v6
         with:
