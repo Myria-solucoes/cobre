@@ -55,6 +55,9 @@ jobs:
               apt-get update && apt-get install -y cmake
             fi
 
+      - name: Collect Python wheel
+        run: cp crates/cobre-python/dist/*.whl dist/
+
       - name: Publish immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
