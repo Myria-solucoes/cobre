@@ -20,8 +20,8 @@ pub use ar_coefficients::{ArCoefficientEstimate, estimate_ar_coefficients_with_s
 pub use correlation::estimate_correlation_with_season_map;
 pub use estimation::{
     ArEstimationConfig, ContributionReduction, ContributionValidationResult, EstimationReport,
-    HydroEstimationEntry, ReductionReason, StdRatioDivergence, build_estimation_report,
-    estimate_ar_coefficients_with_selection,
+    HydroEstimationEntry, ReductionReason, StationarityFallback, StdRatioDivergence,
+    build_estimation_report, estimate_ar_coefficients_with_selection,
 };
 pub use order_selection::{
     AicSelectionResult, PacfSelectionResult, periodic_pacf, select_order_aic, select_order_pacf,

@@ -324,5 +324,20 @@ fn run_validate_pipeline(
         })?;
     }
 
-    Ok(report.warnings)
+    let mut warnings = report.warnings;
+    if let Some(estimation) = &prepared.estimation_report {
+        for fallback in &estimation.stationarity_fallbacks {
+            warnings.push(ReportEntry {
+                kind: "StationarityRegularized".to_string(),
+                message: format!(
+                    "automatic PAR stationarity regularization applied to hydro_id={} season={}: {} (order {} -> {})",
+                    fallback.hydro_id.0, fallback.season_id, fallback.action,
+                    fallback.original_order, fallback.reduced_order,
+                ),
+                file: "scenarios/inflow_history.parquet".to_string(),
+                entity: Some(format!("hydro_id={}", fallback.hydro_id.0)),
+            });
+        }
+    }
+    Ok(warnings)
 }
