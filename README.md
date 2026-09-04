@@ -44,6 +44,7 @@ pip install cobre-python
 | Documentation | [docs.cobre-rs.dev](https://docs.cobre-rs.dev/)                         |
 | API Docs      | [docs.rs/cobre-sddp](https://docs.rs/cobre-sddp)                        |
 | PyPI          | [pypi.org/project/cobre-python](https://pypi.org/project/cobre-python/) |
+| Myria runtime | [installation and validation guide](docs/guide/myria-runtime.md)         |
 
 ## Getting Started
 
@@ -54,6 +55,11 @@ pip install cobre-python
 ## Current Status
 
 Cobre is alpha software with a fully functional SDDP solver. The pipeline covers case loading, stochastic scenario generation, training, simulation, policy checkpointing, and output writing. See the [CHANGELOG](CHANGELOG.md) for release history.
+
+Deployment-specific Myria runtime tags preserve the public contract of their
+base release while carrying documented operational fixes and versioned Linux
+artifacts. See the [Myria runtime guide](docs/guide/myria-runtime.md) for
+installation, validation warnings, and release procedure.
 
 ## Contributing
 
