@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0-myria.1] - 2026-09-02
+
+This Myria runtime tag is based on Cobre 0.15.0 and preserves its public input
+schema and Python API.
+
+### Fixed
+
+- **Automatic PAR estimation recovers from hydro-season stationarity failures.**
+  A model fitted from `scenarios/inflow_history.parquet` now removes the affected
+  hydro's annual component and, when needed, progressively reduces the failing
+  season's lag order until periodic stationarity is restored. User-supplied
+  autoregressive models retain hard validation. Each automatic adjustment is
+  recorded in the estimation report and exposed by `cobre.io.validate()` as a
+  structured `StationarityRegularized` warning.
+
+### Distribution
+
+- **Versioned Myria Linux runtime artifacts.** The release publishes CLI
+  archives and CPython stable-ABI wheels for x86_64 and aarch64 through dedicated
+  GitHub Actions workflows. See the
+  [Myria runtime guide](docs/guide/myria-runtime.md) for installation and
+  verification.
+
 ## [0.15.0] - 2026-08-24
 
 ### Added
