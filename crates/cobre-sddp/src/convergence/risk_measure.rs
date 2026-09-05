@@ -3,7 +3,8 @@
 //! [`RiskMeasure`] aggregation replaces opening probabilities `p(ω)` with
 //! risk-adjusted weights `μ*_ω`. For `Expectation`, `μ*_ω = p(ω)`; for `CVaR`,
 //! a greedy allocation places maximum mass on the highest-cost scenarios
-//! after reserving `(1 - λ)·p(ω)` for every scenario, realizing `ρ^{λ,α}[Z] = (1 - λ)·E[Z] + λ·CVaR_α[Z]`.
+//! after reserving `(1 - λ)·p(ω)` for every scenario, realizing
+//! `ρ^{λ,α}[Z] = (1 - λ)·E[Z] + λ·CVaR_α[Z]`.
 //!
 //! ## Examples
 //!
@@ -29,7 +30,7 @@ use cobre_core::StageRiskConfig::Expectation;
 /// rayon worker (a field of `BackwardAccumulators`), so no synchronisation.
 #[derive(Debug, Default, Clone)]
 pub struct RiskMeasureScratch {
-    /// Per-scenario caps on additional CVaR mass `λ p_ω / α`.
+    /// Per-scenario caps on additional `CVaR` mass `λ p_ω / α`.
     pub upper_bounds: Vec<f64>,
     /// Scenario indices sorted descending by objective/cost value.
     pub order: Vec<usize>,
