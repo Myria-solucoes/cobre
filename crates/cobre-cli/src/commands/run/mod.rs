@@ -166,7 +166,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
     if training_enabled {
         apply_training_policy(ctx, &system, &mut setup, root_config.as_ref(), policy_mode)?;
         let training_started_at = now_iso8601();
-        let training = run_training_phase(ctx, &mut setup)?;
+        let training = run_training_phase(ctx, &mut setup, &system, root_config.as_ref())?;
         let training_completed_at = now_iso8601();
 
         // Write training outputs before simulation so they persist even if

@@ -591,6 +591,29 @@ where
     /// # Errors
     ///
     /// Returns `SddpError::Communication` if `broadcast_basis_cache` fails.
+    /// Persist only a completed iteration while all ranks are at the same boundary.
+    pub(crate) fn checkpoint(
+        &mut self,
+        callback: &mut crate::training::training::CheckpointCallback<'_>,
+    ) -> Result<(), SddpError> {
+        let r = &self.results;
+        let snapshot = TrainingResult::new(
+            r.final_lb,
+            r.final_ub,
+            r.final_ub_std,
+            r.final_gap,
+            r.completed_iterations,
+            "checkpoint".into(),
+            r.start_time.elapsed().as_millis() as u64,
+            broadcast_basis_cache(&self.basis_store, self.comm)?,
+            Vec::new(),
+            None,
+            None,
+        );
+        let result = callback(self.fcf, &snapshot);
+        reconcile_error_flag(result, self.comm, &mut self.fwd_state.reconcile_scratch)
+    }
+
     pub(crate) fn finalize(mut self) -> Result<TrainingOutcome, SddpError> {
         // Reconcile finalize arrival before the basis-cache broadcast so
         // broadcast_basis_cache is entered by all ranks or none: a peer that failed

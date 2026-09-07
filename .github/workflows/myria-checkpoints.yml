@@ -1,0 +1,37 @@
+name: Myria checkpoint runtime
+on:
+  push:
+    branches: [codex/durable-checkpoints]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: git submodule update --init --depth 1 crates/cobre-sddp/vendor/qhull crates/cobre-solver/vendor/HiGHS
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev pkg-config
+      - run: cargo test --locked -p cobre-cli --test cli_run
+      - run: cargo build --locked --release -p cobre-cli
+      - name: Package
+        run: |
+          mkdir dist
+          cp target/release/cobre dist/cobre
+          tar -C dist -cJf cobre-cli-${{ matrix.target }}.tar.xz cobre
+          sha256sum cobre-cli-${{ matrix.target }}.tar.xz > cobre-cli-${{ matrix.target }}.tar.xz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cobre-cli-${{ matrix.target }}
+          path: cobre-cli-${{ matrix.target }}.tar.xz*

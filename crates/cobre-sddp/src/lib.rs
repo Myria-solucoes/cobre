@@ -189,7 +189,7 @@ pub use stochastic::stochastic_summary::{
 // ── stopping_rule ─────────────────────────────────────────────────────────────
 pub use convergence::stopping_rule::{MonitorState, StoppingMode, StoppingRule, StoppingRuleSet};
 // ── training ──────────────────────────────────────────────────────────────────
-pub use training::training::{TrainingOutcome, TrainingResult, train};
+pub use training::training::{TrainingOutcome, TrainingResult, train, train_with_checkpoint};
 // ── training_output ───────────────────────────────────────────────────────────
 pub use training::training_output::{
     PhaseTimingTotals, build_training_output, sum_phase_timing_ms,

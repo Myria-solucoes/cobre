@@ -71,3 +71,20 @@ Licensed under [Apache-2.0](LICENSE).
   license = {Apache-2.0}
 }
 ```
+
+### Myria periodic checkpoints
+
+With `policy.checkpointing.enabled: true`, the CLI writes a complete policy at
+iteration boundaries to `output/checkpoints/iteration-NNNNNNNNNN/policy` and
+publishes the generation by atomic directory rename. `checkpoint.json` records
+the completed iteration; directories beginning with `.` are incomplete writes.
+The initial iteration and interval default to one. The normal training loop and
+its convergence history remain uninterrupted. Snapshot I/O failure fails the
+run explicitly, keeping previously completed generations intact.
+
+To resume in an independent workspace, copy a completed generation's `policy/`
+into the new output directory and set `policy.mode: "resume"`. Preserve the
+case, seed, runtime and iteration limit. Resume uses the existing native policy
+loader; changing model inputs is not a supported continuation. LP bases are
+omitted unless `store_basis` is explicitly enabled. Myria leaves it disabled:
+stored bases can be incompatible with the post-backward LP row shape in 0.15.

@@ -29,9 +29,13 @@ use super::node_graph::pool_fill_basis_cache;
 use super::{SimulationEnumeratedRequest, StudySetup, Traversal};
 use crate::build_training_output;
 use crate::simulate;
-use crate::train;
 
 impl StudySetup {
+    /// Number of iterations restored from the input policy.
+    pub fn start_iteration(&self) -> u64 {
+        self.loop_params.start_iteration
+    }
+
     /// Execute the training loop. Mutates `self.fcf` to store generated cuts.
     ///
     /// # Errors
@@ -64,6 +68,43 @@ impl StudySetup {
             event_sender,
             shutdown_flag,
             solver_profiles,
+            None,
+        )
+    }
+
+    /// Train with a synchronous checkpoint writer without restarting the loop.
+    #[allow(clippy::too_many_arguments)]
+    pub fn train_checkpointed<S, C: Communicator>(
+        &mut self,
+        solver: &mut S,
+        comm: &C,
+        n_threads: usize,
+        solver_factory: impl Fn() -> Result<S, SolverError>,
+        event_sender: Option<Sender<TrainingEvent>>,
+        checkpoint: &mut dyn FnMut(
+            &StudySetup,
+            &crate::FutureCostFunction,
+            &TrainingResult,
+        ) -> Result<(), SddpError>,
+    ) -> Result<TrainingOutcome, SddpError>
+    where
+        S: SolverInterface<Profile = ActiveProfile> + Send,
+    {
+        let profiles = SolverProfiles {
+            forward: self.forward_profile,
+            backward: self.backward_profile,
+            backward_scheduler: self.backward_scheduler,
+            hardest_first_claim_order: self.hardest_first_claim_order,
+        };
+        self.train_inner(
+            solver,
+            comm,
+            n_threads,
+            solver_factory,
+            event_sender,
+            None,
+            profiles,
+            Some(checkpoint),
         )
     }
 
@@ -97,6 +138,7 @@ impl StudySetup {
             None,
             None,
             solver_profiles,
+            None,
         )
     }
 
@@ -115,10 +157,21 @@ impl StudySetup {
         event_sender: Option<Sender<TrainingEvent>>,
         shutdown_flag: Option<&Arc<AtomicBool>>,
         solver_profiles: SolverProfiles,
+        mut checkpoint: Option<
+            &mut dyn FnMut(
+                &StudySetup,
+                &crate::FutureCostFunction,
+                &TrainingResult,
+            ) -> Result<(), SddpError>,
+        >,
     ) -> Result<TrainingOutcome, SddpError>
     where
         S: SolverInterface<Profile = ActiveProfile> + Send,
     {
+        let mut live_fcf = std::mem::replace(
+            &mut self.fcf,
+            crate::FutureCostFunction::new(0, 0, 1, 1, &[]),
+        );
         let training_config = TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: self.loop_params.forward_passes,
@@ -202,17 +255,31 @@ impl StudySetup {
 
         let warm_start_basis_cache = self.warm_start_basis_cache.take();
 
-        train(
+        let checkpoint_enabled = checkpoint.is_some();
+        let mut save = |fcf: &crate::FutureCostFunction, result: &TrainingResult| match checkpoint
+            .as_deref_mut()
+        {
+            Some(writer) => writer(self, fcf, result),
+            None => Ok(()),
+        };
+        let result = crate::train_with_checkpoint(
             solver,
             training_config,
-            &mut self.fcf,
+            &mut live_fcf,
             &stage_ctx,
             &training_ctx,
             comm,
             solver_factory,
             warm_start_basis_cache,
             solver_profiles,
-        )
+            if checkpoint_enabled {
+                Some(&mut save)
+            } else {
+                None
+            },
+        );
+        self.fcf = live_fcf;
+        result
     }
 
     /// Run simulation using the trained future cost function.

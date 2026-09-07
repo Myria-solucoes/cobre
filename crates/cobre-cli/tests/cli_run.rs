@@ -348,3 +348,117 @@ fn cli_run_writes_inflow_annual_component_when_par_a_active() {
         "expected zero annual component rows for a case with no hydros"
     );
 }
+
+#[test]
+fn periodic_checkpoint_resumes_in_a_new_output_directory() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+    let mut config: serde_json::Value = serde_json::from_str(CONFIG_JSON).unwrap();
+    config["training"]["stopping_rules"][0]["limit"] = 4.into();
+    config["policy"] = serde_json::json!({"mode":"fresh", "checkpointing": {
+        "enabled": true, "initial_iteration": 1, "interval_iterations": 1
+    }});
+    write_file(dir.path(), "config.json", &config.to_string());
+    let full = TempDir::new().unwrap();
+    cobre()
+        .args([
+            "run",
+            dir.path().to_str().unwrap(),
+            "--output",
+            full.path().to_str().unwrap(),
+            "--threads",
+            "1",
+            "--quiet",
+        ])
+        .assert()
+        .success();
+    let saved = full.path().join("checkpoints/iteration-0000000002");
+    assert!(saved.join("checkpoint.json").is_file());
+    let checkpoint =
+        cobre_io::output::policy::read_policy_checkpoint(&saved.join("policy")).unwrap();
+    assert_eq!(checkpoint.metadata.producer.completed_iterations, 2);
+    assert!(
+        !full
+            .path()
+            .join("checkpoints/.iteration-0000000002.pending")
+            .exists()
+    );
+    let resumed = TempDir::new().unwrap();
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    copy_tree(&saved.join("policy"), &resumed.path().join("policy"));
+    config["policy"]["mode"] = "resume".into();
+    write_file(dir.path(), "config.json", &config.to_string());
+    cobre()
+        .args([
+            "run",
+            dir.path().to_str().unwrap(),
+            "--output",
+            resumed.path().to_str().unwrap(),
+            "--threads",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("resuming from iteration 2"));
+    assert!(
+        !resumed
+            .path()
+            .join("checkpoints/iteration-0000000001")
+            .exists()
+    );
+    assert!(
+        resumed
+            .path()
+            .join("checkpoints/iteration-0000000003/policy/manifest.bin")
+            .is_file()
+    );
+    let resumed_policy =
+        cobre_io::output::policy::read_policy_checkpoint(&resumed.path().join("policy")).unwrap();
+    let full_policy =
+        cobre_io::output::policy::read_policy_checkpoint(&full.path().join("policy")).unwrap();
+    assert_eq!(resumed_policy.metadata.producer.completed_iterations, 4);
+    let difference = (resumed_policy.metadata.producer.final_lower_bound
+        - full_policy.metadata.producer.final_lower_bound)
+        .abs();
+    assert!(
+        difference < 1e-6,
+        "resumed lower bound diverged: {difference}"
+    );
+    // A failure during simulation can resume the final training checkpoint too.
+    let final_resume = TempDir::new().unwrap();
+    copy_tree(
+        &full.path().join("checkpoints/iteration-0000000004/policy"),
+        &final_resume.path().join("policy"),
+    );
+    cobre()
+        .args([
+            "run",
+            dir.path().to_str().unwrap(),
+            "--output",
+            final_resume.path().to_str().unwrap(),
+            "--threads",
+            "1",
+            "--quiet",
+        ])
+        .assert()
+        .success();
+    let final_policy =
+        cobre_io::output::policy::read_policy_checkpoint(&final_resume.path().join("policy"))
+            .unwrap();
+    assert_eq!(final_policy.metadata.producer.completed_iterations, 4);
+    assert_eq!(
+        final_policy.metadata.producer.final_lower_bound,
+        full_policy.metadata.producer.final_lower_bound
+    );
+}

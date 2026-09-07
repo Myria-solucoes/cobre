@@ -99,7 +99,25 @@ pub fn write_checkpoint(
     training_result: &TrainingResult,
     params: &CheckpointParams,
 ) -> Result<(), OutputError> {
-    let fcf = &setup.fcf;
+    write_checkpoint_with_fcf(
+        policy_dir,
+        setup,
+        &setup.fcf,
+        system,
+        training_result,
+        params,
+    )
+}
+
+/// Write the live iteration policy while setup's cut storage is borrowed by training.
+pub fn write_checkpoint_with_fcf(
+    policy_dir: &Path,
+    setup: &StudySetup,
+    fcf: &crate::FutureCostFunction,
+    system: &System,
+    training_result: &TrainingResult,
+    params: &CheckpointParams,
+) -> Result<(), OutputError> {
     // `n_pools` sizes the pool-indexed vectors below (`fcf.pools`,
     // `cut_state_layouts`, `stage_manifests`); `n_stages` (the true study stage
     // count, from `setup.num_stages()` — NOT `fcf.pools.len()`, which counts

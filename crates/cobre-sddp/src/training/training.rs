@@ -339,6 +339,41 @@ pub fn train<S, C: Communicator>(
 where
     S: SolverInterface<Profile = ActiveProfile> + Send,
 {
+    train_with_checkpoint(
+        solver,
+        config,
+        fcf,
+        stage_ctx,
+        training_ctx,
+        comm,
+        solver_factory,
+        warm_start_basis_cache,
+        solver_profiles,
+        None,
+    )
+}
+
+/// Iteration-boundary checkpoint callback. Called synchronously on every rank.
+pub type CheckpointCallback<'a> =
+    dyn FnMut(&FutureCostFunction, &TrainingResult) -> Result<(), SddpError> + 'a;
+
+/// Train without changing convergence history, optionally persisting each completed iteration.
+#[allow(clippy::too_many_arguments)]
+pub fn train_with_checkpoint<S, C: Communicator>(
+    solver: &mut S,
+    config: TrainingConfig,
+    fcf: &mut FutureCostFunction,
+    stage_ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    comm: &C,
+    solver_factory: impl Fn() -> Result<S, SolverError>,
+    warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
+    solver_profiles: SolverProfiles,
+    mut checkpoint: Option<&mut CheckpointCallback<'_>>,
+) -> Result<TrainingOutcome, SddpError>
+where
+    S: SolverInterface<Profile = ActiveProfile> + Send,
+{
     let mut session = TrainingSession::new(
         solver,
         config,
@@ -357,8 +392,16 @@ where
     session.prime_frozen_templates();
     for iteration in session.iteration_range() {
         match session.run_iteration(iteration) {
-            Ok(IterationOutcome::Continue) => {}
-            Ok(IterationOutcome::Converged | IterationOutcome::Shutdown) => break,
+            Ok(outcome) => {
+                if let Some(callback) = checkpoint.as_deref_mut() {
+                    if let Err(error) = session.checkpoint(callback) {
+                        return Ok(session.finalize_with_error(error));
+                    }
+                }
+                if !matches!(outcome, IterationOutcome::Continue) {
+                    break;
+                }
+            }
             Err(e) => return Ok(session.finalize_with_error(e)),
         }
     }
