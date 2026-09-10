@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Emit the experimental `lb_stability_v1` diagnostic beside the existing
+  `gap_percent` in `training/convergence.parquet` and
+  `training/metadata.json`. The legacy gap is unchanged, including negative
+  values. The new diagnostic measures the relative change in the monotone
+  best lower bound over its declared rolling window and is explicitly marked
+  `classification = "heuristic"` and `stop_eligible = false`; it does not
+  participate in stopping decisions. See
+  `docs/guide/convergence-gap-regimes.md` for field semantics and a copyable
+  reader example.
+
 ### Fixed
 
 - Preserve the expectation floor in expectation/CVaR mixture weights for

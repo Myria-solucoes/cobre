@@ -14,12 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float64Builder, Int32Builder, Int64Builder, RecordBatch, StringBuilder,
+    ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder, RecordBatch,
+    StringBuilder,
 };
 
 use super::{IterationRecord, TrainingOutput, WorkerTimingRecord};
 use crate::output::atomic::write_parquet_atomic;
 use crate::output::error::OutputError;
+use crate::output::gap_regime;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 
@@ -158,6 +160,12 @@ fn build_convergence_batch(
     let mut upper_bound_std = Float64Builder::with_capacity(n);
     let mut upper_bound_kind_col = StringBuilder::with_capacity(n, n * 12);
     let mut gap_percent = Float64Builder::with_capacity(n);
+    let mut gap_regime_name = StringBuilder::with_capacity(n, n * gap_regime::NAME.len());
+    let mut gap_regime_value_percent = Float64Builder::with_capacity(n);
+    let mut gap_regime_window_iterations = Int32Builder::with_capacity(n);
+    let mut gap_regime_classification =
+        StringBuilder::with_capacity(n, n * gap_regime::CLASSIFICATION.len());
+    let mut gap_regime_stop_eligible = BooleanBuilder::with_capacity(n);
     let mut cuts_added = Int32Builder::with_capacity(n);
     let mut cuts_removed = Int32Builder::with_capacity(n);
     let mut cuts_active = Int64Builder::with_capacity(n);
@@ -168,7 +176,8 @@ fn build_convergence_batch(
     let mut lp_solves = Int64Builder::with_capacity(n);
     let mut mean_rows_in_lp = Float64Builder::with_capacity(n);
 
-    for rec in records {
+    let gap_regime_values = gap_regime::values(records);
+    for (rec, gap_regime_value) in records.iter().zip(gap_regime_values) {
         iteration.append_value(rec.iteration as i32);
         lower_bound.append_value(rec.lower_bound);
         upper_bound.append_value(rec.upper_bound);
@@ -179,6 +188,11 @@ fn build_convergence_batch(
         }
         upper_bound_kind_col.append_value(upper_bound_kind);
         gap_percent.append_option(rec.gap_percent);
+        gap_regime_name.append_value(gap_regime::NAME);
+        gap_regime_value_percent.append_option(gap_regime_value);
+        gap_regime_window_iterations.append_value(gap_regime::WINDOW_ITERATIONS as i32);
+        gap_regime_classification.append_value(gap_regime::CLASSIFICATION);
+        gap_regime_stop_eligible.append_value(gap_regime::STOP_ELIGIBLE);
         cuts_added.append_value(rec.cuts_added as i32);
         cuts_removed.append_value(rec.cuts_removed as i32);
         cuts_active.append_value(i64::from(rec.cuts_active));
@@ -199,6 +213,11 @@ fn build_convergence_batch(
             Arc::new(upper_bound_std.finish()),
             Arc::new(upper_bound_kind_col.finish()),
             Arc::new(gap_percent.finish()),
+            Arc::new(gap_regime_name.finish()),
+            Arc::new(gap_regime_value_percent.finish()),
+            Arc::new(gap_regime_window_iterations.finish()),
+            Arc::new(gap_regime_classification.finish()),
+            Arc::new(gap_regime_stop_eligible.finish()),
             Arc::new(cuts_added.finish()),
             Arc::new(cuts_removed.finish()),
             Arc::new(cuts_active.finish()),
@@ -368,6 +387,7 @@ mod tests {
     use super::*;
     use crate::MetadataTrainingSolveStats;
     use crate::output::{RowPoolStatistics, TrainingOutput};
+    use arrow::array::Array;
 
     fn make_record(iteration: u32, gap: Option<f64>) -> IterationRecord {
         IterationRecord {
@@ -449,7 +469,7 @@ mod tests {
     fn convergence_batch_from_empty_records() {
         let batch = build_convergence_batch(&[], "statistical").expect("empty batch must succeed");
         assert_eq!(batch.num_rows(), 0, "empty records yield 0 rows");
-        assert_eq!(batch.num_columns(), 15, "convergence schema has 15 columns");
+        assert_eq!(batch.num_columns(), 20, "convergence schema has 20 columns");
     }
 
     #[test]
@@ -457,7 +477,7 @@ mod tests {
         let records: Vec<IterationRecord> = (1..=3).map(|i| make_record(i, Some(5.0))).collect();
         let batch = build_convergence_batch(&records, "statistical").expect("batch must be built");
         assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 15);
+        assert_eq!(batch.num_columns(), 20);
 
         let expected_schema = convergence_schema();
         assert_eq!(
@@ -484,6 +504,46 @@ mod tests {
         assert!(!gap_col.is_null(0), "row 0: Some(10.0) must not be null");
         assert!(!gap_col.is_null(1), "row 1: Some(5.0) must not be null");
         assert!(gap_col.is_null(2), "row 2: None must be null");
+    }
+
+    #[test]
+    fn convergence_batch_preserves_legacy_gap_and_adds_parallel_regime() {
+        let mut records = vec![
+            make_record(1, Some(-65.125)),
+            make_record(2, Some(-61.0)),
+            make_record(3, Some(-58.0)),
+        ];
+        records[0].lower_bound = 100.0;
+        records[1].lower_bound = 110.0;
+        records[2].lower_bound = 105.0;
+
+        let batch = build_convergence_batch(&records, "statistical").expect("batch must be built");
+        let legacy = batch
+            .column_by_name("gap_percent")
+            .expect("legacy gap column")
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .expect("legacy gap type");
+        let regime = batch
+            .column_by_name("gap_regime_value_percent")
+            .expect("regime value column")
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .expect("regime value type");
+        let eligible = batch
+            .column_by_name("gap_regime_stop_eligible")
+            .expect("stop eligibility column")
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .expect("stop eligibility type");
+
+        assert_eq!(legacy.value(0).to_bits(), (-65.125_f64).to_bits());
+        assert!(regime.is_null(0));
+        assert!(regime.is_null(1));
+        assert_eq!(regime.value(2), 10.0 / 110.0 * 100.0);
+        assert!(!eligible.value(0));
+        assert!(!eligible.value(1));
+        assert!(!eligible.value(2));
     }
 
     // -------------------------------------------------------------------------
@@ -822,7 +882,7 @@ mod tests {
             .expect("reader");
         let batch = reader.next().expect("must have rows").expect("batch Ok");
         assert_eq!(batch.num_rows(), 5);
-        assert_eq!(batch.num_columns(), 15);
+        assert_eq!(batch.num_columns(), 20);
 
         let timing_path = tmp.path().join("training/timing/iterations.parquet");
         let file = std::fs::File::open(&timing_path).expect("file must open");

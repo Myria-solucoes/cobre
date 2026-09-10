@@ -164,8 +164,26 @@ pub struct MetadataConvergence {
     pub achieved: bool,
     /// Final optimality gap in percent (`null` when upper bound evaluation is disabled).
     pub final_gap_percent: Option<f64>,
+    /// Parallel lower-bound stability diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap_regime: Option<MetadataGapRegime>,
     /// Human-readable description of the rule that terminated the run.
     pub termination_reason: String,
+}
+
+/// Experimental convergence diagnostic emitted alongside the legacy gap.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetadataGapRegime {
+    /// Stable diagnostic identifier.
+    pub name: String,
+    /// Final diagnostic value in percent.
+    pub value_percent: Option<f64>,
+    /// Rolling lower-bound observation count.
+    pub window_iterations: u32,
+    /// Evidence class of the diagnostic.
+    pub classification: String,
+    /// Whether the diagnostic may terminate training.
+    pub stop_eligible: bool,
 }
 
 /// Row-pool summary embedded in [`TrainingMetadata`].
@@ -599,6 +617,7 @@ mod tests {
             convergence: MetadataConvergence {
                 achieved: true,
                 final_gap_percent: Some(0.45),
+                gap_regime: None,
                 termination_reason: "bound_stalling".to_string(),
             },
             row_pool: MetadataRowPool {

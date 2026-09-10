@@ -333,6 +333,7 @@ mod tests {
             convergence: MetadataConvergence {
                 achieved: true,
                 final_gap_percent: Some(0.45),
+                gap_regime: None,
                 termination_reason: "gap_tolerance".to_string(),
             },
             row_pool: MetadataRowPool {

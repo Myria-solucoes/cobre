@@ -278,6 +278,7 @@ fn fully_populated_training_metadata() -> TrainingMetadata {
         convergence: MetadataConvergence {
             achieved: true,
             final_gap_percent: Some(0.45),
+            gap_regime: None,
             termination_reason: "bound_stalling".to_string(),
         },
         row_pool: MetadataRowPool {

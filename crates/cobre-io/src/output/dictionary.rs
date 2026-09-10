@@ -636,6 +636,19 @@ fn description_for(file: &str, column: &str) -> &'static str {
             "Upper bound regime: statistical (sampled forward) or exact (enumerated forward)"
         }
         ("convergence", "gap_percent") => "Relative optimality gap in percent (nullable)",
+        ("convergence", "gap_regime") => "Parallel convergence diagnostic identifier",
+        ("convergence", "gap_regime_value_percent") => {
+            "Rolling best-lower-bound change in percent (nullable until the window is full)"
+        }
+        ("convergence", "gap_regime_window_iterations") => {
+            "Observation count used by the parallel convergence diagnostic"
+        }
+        ("convergence", "gap_regime_classification") => {
+            "Evidence classification of the parallel convergence diagnostic"
+        }
+        ("convergence", "gap_regime_stop_eligible") => {
+            "Whether the parallel convergence diagnostic may terminate training"
+        }
         ("convergence", "cuts_added") => "Cuts added in this iteration",
         ("convergence", "cuts_removed") => "Cuts removed in this iteration",
         ("convergence", "cuts_active") => "Total active cuts after iteration",
@@ -2309,8 +2322,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 258,
-            "variables.csv must have exactly 258 data rows (one per column across all schemas)"
+            row_count, 263,
+            "variables.csv must have exactly 263 data rows (one per column across all schemas)"
         );
     }
 

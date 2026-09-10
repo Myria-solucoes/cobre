@@ -370,6 +370,11 @@ pub(crate) fn convergence_schema() -> Schema {
         Field::new("upper_bound_std", DataType::Float64, true),
         Field::new("upper_bound_kind", DataType::Utf8, false),
         Field::new("gap_percent", DataType::Float64, true),
+        Field::new("gap_regime", DataType::Utf8, false),
+        Field::new("gap_regime_value_percent", DataType::Float64, true),
+        Field::new("gap_regime_window_iterations", DataType::Int32, false),
+        Field::new("gap_regime_classification", DataType::Utf8, false),
+        Field::new("gap_regime_stop_eligible", DataType::Boolean, false),
         Field::new("cuts_added", DataType::Int32, false),
         Field::new("cuts_removed", DataType::Int32, false),
         Field::new("cuts_active", DataType::Int64, false),
@@ -1082,13 +1087,26 @@ mod tests {
         let schema = convergence_schema();
         assert_eq!(
             schema.fields().len(),
-            15,
-            "convergence schema must have 15 fields"
+            20,
+            "convergence schema must have 20 fields"
         );
         assert_eq!(field_type(&schema, "iteration"), DataType::Int32);
         assert_eq!(field_type(&schema, "lower_bound"), DataType::Float64);
         assert_eq!(field_type(&schema, "upper_bound"), DataType::Float64);
         assert_eq!(field_type(&schema, "upper_bound_kind"), DataType::Utf8);
+        assert_eq!(field_type(&schema, "gap_regime"), DataType::Utf8);
+        assert_eq!(
+            field_type(&schema, "gap_regime_value_percent"),
+            DataType::Float64
+        );
+        assert_eq!(
+            field_type(&schema, "gap_regime_window_iterations"),
+            DataType::Int32
+        );
+        assert_eq!(
+            field_type(&schema, "gap_regime_stop_eligible"),
+            DataType::Boolean
+        );
         assert_eq!(field_type(&schema, "cuts_added"), DataType::Int32);
         assert_eq!(field_type(&schema, "cuts_active"), DataType::Int64);
         assert_eq!(field_type(&schema, "time_forward_ms"), DataType::Int64);
@@ -1102,12 +1120,17 @@ mod tests {
         // gap_percent is nullable (None when LB <= 0); upper_bound_std is nullable
         // (NULL under an exact bound).
         assert!(is_nullable(&schema, "gap_percent"));
+        assert!(is_nullable(&schema, "gap_regime_value_percent"));
         assert!(is_nullable(&schema, "upper_bound_std"));
         for name in &[
             "iteration",
             "lower_bound",
             "upper_bound",
             "upper_bound_kind",
+            "gap_regime",
+            "gap_regime_window_iterations",
+            "gap_regime_classification",
+            "gap_regime_stop_eligible",
             "cuts_added",
             "cuts_removed",
             "cuts_active",
@@ -1326,7 +1349,7 @@ mod tests {
             ("in_transit", 7),
             ("generic_violations", 7),
             ("paths", 3),
-            ("convergence", 15),
+            ("convergence", 20),
             ("iteration_timing", 19),
             ("rank_timing", 8),
             ("cut_selection", 10),

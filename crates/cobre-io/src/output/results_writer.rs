@@ -7,15 +7,17 @@ use cobre_core::System;
 use super::dictionary::write_dictionaries;
 use super::error::OutputError;
 use super::manifest::{
-    MetadataBounds, MetadataConfiguration, MetadataConvergence, MetadataIterations,
-    MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, OutputContext,
-    SimulationMetadata, TrainingMetadata, write_simulation_metadata, write_training_metadata,
+    MetadataBounds, MetadataConfiguration, MetadataConvergence, MetadataGapRegime,
+    MetadataIterations, MetadataProblemDimensions, MetadataRowPool, MetadataScenarios,
+    OutputContext, SimulationMetadata, TrainingMetadata, write_simulation_metadata,
+    write_training_metadata,
 };
 use super::parquet_config::ParquetWriterConfig;
 use super::training_writer::TrainingParquetWriter;
 use super::{SimulationOutput, TrainingOutput};
 use crate::Config;
 use crate::config::{ForwardPassesResolution, StoppingRuleConfig};
+use crate::output::gap_regime;
 
 /// Write all training artifacts to the output directory.
 ///
@@ -85,6 +87,16 @@ pub fn write_training_results(
         convergence: MetadataConvergence {
             achieved: training_output.converged,
             final_gap_percent: training_output.final_gap_percent,
+            gap_regime: Some(MetadataGapRegime {
+                name: gap_regime::NAME.to_string(),
+                value_percent: gap_regime::values(&training_output.convergence_records)
+                    .last()
+                    .copied()
+                    .flatten(),
+                window_iterations: gap_regime::WINDOW_ITERATIONS,
+                classification: gap_regime::CLASSIFICATION.to_string(),
+                stop_eligible: gap_regime::STOP_ELIGIBLE,
+            }),
             termination_reason: training_output.termination_reason.clone(),
         },
         row_pool: MetadataRowPool {
@@ -586,8 +598,8 @@ mod tests {
         assert_eq!(total_rows, 0, "empty training must produce 0 rows");
         assert_eq!(
             schema.fields().len(),
-            15,
-            "convergence schema must have 15 columns"
+            20,
+            "convergence schema must have 20 columns"
         );
 
         assert!(
@@ -943,6 +955,16 @@ mod tests {
         let metadata = read_training_metadata(&tmp.path().join("training/metadata.json")).unwrap();
         assert_eq!(metadata.bounds.final_upper_bound_kind, "statistical");
         assert_eq!(metadata.bounds.final_upper_bound_std, Some(0.5));
+        assert_eq!(
+            metadata.convergence.gap_regime,
+            Some(MetadataGapRegime {
+                name: "lb_stability_v1".to_string(),
+                value_percent: Some(0.0),
+                window_iterations: 3,
+                classification: "heuristic".to_string(),
+                stop_eligible: false,
+            })
+        );
     }
 
     #[test]
