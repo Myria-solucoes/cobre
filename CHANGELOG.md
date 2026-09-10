@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0-myria.4] - 2026-09-10
+
+This Myria runtime tag is based on Cobre 0.15.0 and preserves the legacy
+`gap_percent` contract while exposing a separate experimental convergence
+reading for evaluation in sampled training.
+
 ### Added
 
 - Emit the experimental `lb_stability_v1` diagnostic beside the existing
@@ -17,9 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values. The new diagnostic measures the relative change in the monotone
   best lower bound over its declared rolling window and is explicitly marked
   `classification = "heuristic"` and `stop_eligible = false`; it does not
-  participate in stopping decisions. See
-  `docs/guide/convergence-gap-regimes.md` for field semantics and a copyable
-  reader example.
+  participate in stopping decisions. See the
+  [parallel convergence readings guide](docs/guide/convergence-gap-regimes.md)
+  for the motivation, formula, interpretation limits, worked example, field
+  semantics, and a copyable reader example.
 
 ### Fixed
 
@@ -3446,7 +3453,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/Myria-solucoes/cobre/compare/v0.15.0-myria.4...HEAD
+[0.15.0-myria.4]: https://github.com/Myria-solucoes/cobre/releases/tag/v0.15.0-myria.4
 [0.14.2]: https://github.com/cobre-rs/cobre/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/cobre-rs/cobre/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/cobre-rs/cobre/compare/v0.13.0...v0.14.0

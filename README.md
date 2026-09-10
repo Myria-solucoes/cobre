@@ -44,12 +44,14 @@ pip install cobre-python
 | Documentation | [docs.cobre-rs.dev](https://docs.cobre-rs.dev/)                         |
 | API Docs      | [docs.rs/cobre-sddp](https://docs.rs/cobre-sddp)                        |
 | PyPI          | [pypi.org/project/cobre-python](https://pypi.org/project/cobre-python/) |
+| Myria convergence | [parallel convergence readings](docs/guide/convergence-gap-regimes.md) |
 
 ## Getting Started
 
 - **Coming from other software?** -- See the [cobre-bridge guide](https://docs.cobre-rs.dev/guide/cobre-bridge.html)
 - **New to SDDP?** -- Read [What Cobre Solves](https://docs.cobre-rs.dev/tutorial/what-cobre-solves.html)
 - **Python user?** -- Try the [Python Quickstart](https://docs.cobre-rs.dev/guide/python-quickstart.html)
+- **Using the Myria runtime?** -- Understand the [parallel legacy gap and lower-bound stability readings](docs/guide/convergence-gap-regimes.md)
 
 ## Current Status
 
