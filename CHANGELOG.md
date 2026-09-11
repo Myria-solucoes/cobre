@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Entity classes sampled out of sample no longer share a noise stream.**
+  Every class sampler was seeded from the same forward seed with no class tag,
+  so a deck that set two or more of `inflow`, `load` and `ncs` to
+  `out_of_sample` drew bit-identical noise for the k-th entity of each class —
+  a perfect cross-class correlation no correlation profile declared, under
+  every noise method. The load and non-controllable-source classes now derive
+  their seed from the root forward seed and their class tag; the inflow class
+  keeps the root seed, so a deck with only the inflow class out of sample
+  reproduces bit-for-bit. Results for decks with two or more out-of-sample
+  classes change.
+
 - **Per-stage non-controllable-source curtailment penalty overrides now apply to
   the LP objective.** The stage LP column build priced every non-controllable
   source's curtailment cost from its single declaration-time constant,

@@ -35,6 +35,7 @@ pub(crate) mod out_of_sample;
 
 use cobre_core::{EntityId, scenario::SamplingScheme, temporal::NoiseMethod, temporal::Stage};
 
+use crate::noise::seed::derive_class_forward_seed;
 use crate::{
     OpeningTreeView, StochasticError, context::StochasticContext,
     correlation::resolve::DecomposedCorrelation, tree::generate::ClassDimensions,
@@ -418,7 +419,11 @@ pub fn build_forward_sampler(
     let load_scheme = class_schemes.load.unwrap_or(SamplingScheme::InSample);
     let ncs_scheme = class_schemes.ncs.unwrap_or(SamplingScheme::InSample);
 
-    let forward_seed = ctx.forward_seed();
+    // Inflow keeps the root seed: deriving it too would change every shipped
+    // inflow-only deck.
+    let inflow_forward_seed = ctx.forward_seed();
+    let load_forward_seed = inflow_forward_seed.map(|s| derive_class_forward_seed(s, "load"));
+    let ncs_forward_seed = inflow_forward_seed.map(|s| derive_class_forward_seed(s, "ncs"));
     let base_seed = ctx.base_seed();
 
     let noise_methods: Box<[NoiseMethod]> = stages
@@ -438,7 +443,7 @@ pub fn build_forward_sampler(
         scheme: inflow_scheme,
         offset: 0,
         len: dims.n_hydros,
-        forward_seed,
+        forward_seed: inflow_forward_seed,
         noise_methods: &noise_methods,
         tree: Some(ctx.tree_view()),
         base_seed,
@@ -451,7 +456,7 @@ pub fn build_forward_sampler(
         scheme: load_scheme,
         offset: dims.n_hydros,
         len: dims.n_load_buses,
-        forward_seed,
+        forward_seed: load_forward_seed,
         noise_methods: &noise_methods,
         tree: Some(ctx.tree_view()),
         base_seed,
@@ -464,7 +469,7 @@ pub fn build_forward_sampler(
         scheme: ncs_scheme,
         offset: dims.n_hydros + dims.n_load_buses,
         len: dims.n_ncs,
-        forward_seed,
+        forward_seed: ncs_forward_seed,
         noise_methods: &noise_methods,
         tree: Some(ctx.tree_view()),
         base_seed,
@@ -612,7 +617,7 @@ mod tests {
         entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-            SamplingScheme,
+            LoadModel, NcsModel, SamplingScheme,
         },
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -620,7 +625,10 @@ mod tests {
         },
     };
 
-    use super::{ClassSampler, ForwardNoise, ForwardSampler, SampleRequest, build_forward_sampler};
+    use super::{
+        ClassSampler, ForwardNoise, ForwardSampler, ForwardSamplerConfig, SampleRequest,
+        build_forward_sampler,
+    };
     use crate::{
         StochasticContext, StochasticError,
         context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context},
@@ -1347,6 +1355,109 @@ mod tests {
         assert!(
             any_differ,
             "different noise_group_id must produce different OutOfSample noise"
+        );
+    }
+
+    /// Classes sampled out of sample must not share a noise stream: with one
+    /// seed for every class, the load and NCS slots repeated the first inflow
+    /// slots bit-for-bit under every noise method. The inflow slot is pinned to
+    /// its pre-fix value: inflow keeps the root seed.
+    #[test]
+    fn test_out_of_sample_classes_draw_distinct_streams() {
+        let stages = vec![make_stage(0, 0, 5), make_stage(1, 1, 5)];
+        let load_model = |stage_id: i32| LoadModel {
+            bus_id: EntityId(0),
+            stage_id,
+            mean_mw: 100.0,
+            std_mw: 10.0,
+        };
+        let ncs_model = |stage_id: i32| NcsModel {
+            ncs_id: EntityId(20),
+            stage_id,
+            mean: 0.7,
+            std: 0.1,
+        };
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(vec![make_hydro(1), make_hydro(2)])
+            .stages(stages.clone())
+            .inflow_models(vec![
+                make_inflow_model(1, 0),
+                make_inflow_model(1, 1),
+                make_inflow_model(2, 0),
+                make_inflow_model(2, 1),
+            ])
+            .load_models(vec![load_model(0), load_model(1)])
+            .ncs_models(vec![ncs_model(0), ncs_model(1)])
+            .correlation(identity_correlation(&[1, 2]))
+            .build()
+            .unwrap();
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            Some(99),
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::OutOfSample),
+                ncs: Some(SamplingScheme::OutOfSample),
+            },
+        )
+        .unwrap();
+        assert_eq!(ctx.n_load_buses(), 1);
+        assert_eq!(ctx.n_stochastic_ncs(), 1);
+        let sampler = build_forward_sampler(ForwardSamplerConfig {
+            class_schemes: ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::OutOfSample),
+                ncs: Some(SamplingScheme::OutOfSample),
+            },
+            ctx: &ctx,
+            stages: &stages,
+            dims: ClassDimensions {
+                n_hydros: 2,
+                n_load_buses: 1,
+                n_ncs: 1,
+            },
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+        })
+        .unwrap();
+
+        let mut buf = vec![0.0f64; ctx.dim()];
+        let mut perm = vec![0usize; 5];
+        let noise = sampler
+            .sample(SampleRequest {
+                iteration: 1,
+                scenario: 2,
+                stage: 0,
+                stage_idx: 0,
+                noise_buf: &mut buf,
+                perm_scratch: &mut perm,
+                total_scenarios: 5,
+                noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
+                pinned_scenario: None,
+            })
+            .unwrap();
+        let s = noise.as_slice();
+        assert_ne!(
+            s[2], s[0],
+            "load slot must not repeat the first inflow slot"
+        );
+        assert_ne!(s[2], s[1]);
+        assert_ne!(s[3], s[0], "NCS slot must not repeat the first inflow slot");
+        assert_ne!(s[3], s[1]);
+        assert_ne!(s[3], s[2], "NCS slot must not repeat the load slot");
+        assert_eq!(
+            s[0].to_bits(),
+            4_608_014_355_120_151_153_u64,
+            "inflow draw must keep its root-seed value"
         );
     }
 }

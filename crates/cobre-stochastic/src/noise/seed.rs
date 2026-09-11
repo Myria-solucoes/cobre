@@ -4,10 +4,11 @@
 //! rank, thread ID, or process restart — the basis for communication-free noise.
 //!
 //! Domain separation: SipHash-1-3 folds message length into its state, so the
-//! variants' differing wire-format lengths (20 / 16 / 12 bytes, plus the
-//! grouped variant's `0x01` prefix) keep their outputs distinct even when the
-//! numeric arguments overlap. Changing a function's byte layout breaks this and
-//! the golden-value tests.
+//! variants' differing wire-format lengths (20 / 16 / 12 bytes), the grouped
+//! variant's `0x01` prefix, and the class variant's `0x02` prefix over
+//! `9 + len(class)` bytes keep their outputs distinct even when the numeric
+//! arguments overlap. Changing a function's byte layout breaks this and the
+//! golden-value tests.
 
 use siphasher::sip::SipHasher13;
 use std::hash::Hasher;
@@ -71,10 +72,24 @@ pub fn derive_forward_seed_grouped(
     hasher.finish()
 }
 
+/// Derive one entity class's forward seed from the study's root forward seed
+/// and the class tag (`"load"`, `"ncs"`). Classes sampled out of sample draw
+/// independent streams only because their seeds differ here; the `0x02` prefix
+/// separates the output from the un-prefixed numeric variants.
+#[must_use]
+pub fn derive_class_forward_seed(forward_seed: u64, class: &str) -> u64 {
+    let mut hasher = SipHasher13::new();
+    hasher.write(&[0x02]);
+    hasher.write(&forward_seed.to_le_bytes());
+    hasher.write(class.as_bytes());
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_forward_seed, derive_forward_seed_grouped, derive_opening_seed, derive_stage_seed,
+        derive_class_forward_seed, derive_forward_seed, derive_forward_seed_grouped,
+        derive_opening_seed, derive_stage_seed,
     };
 
     // -------------------------------------------------------------------------
@@ -242,5 +257,40 @@ mod tests {
             derive_forward_seed_grouped(42, 0, 0, 5),
             derive_forward_seed(42, 0, 0, 5),
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // derive_class_forward_seed: determinism and class separation
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_derive_class_forward_seed_deterministic() {
+        assert_eq!(
+            derive_class_forward_seed(42, "load"),
+            derive_class_forward_seed(42, "load"),
+        );
+    }
+
+    /// Golden values recorded from siphasher 1.0.2 with zero key; the class
+    /// seeds are a reproducibility contract for every load/NCS out-of-sample deck.
+    #[test]
+    fn class_forward_seed_golden_value() {
+        assert_eq!(
+            derive_class_forward_seed(42, "load"),
+            14_604_737_007_079_072_421_u64
+        );
+        assert_eq!(
+            derive_class_forward_seed(42, "ncs"),
+            8_293_717_529_204_897_878_u64
+        );
+    }
+
+    #[test]
+    fn test_derive_class_forward_seed_separates_classes_and_root() {
+        let load = derive_class_forward_seed(42, "load");
+        let ncs = derive_class_forward_seed(42, "ncs");
+        assert_ne!(load, ncs);
+        assert_ne!(load, 42);
+        assert_ne!(ncs, 42);
     }
 }
