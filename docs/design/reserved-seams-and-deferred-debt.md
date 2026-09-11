@@ -1071,6 +1071,12 @@ audit does not re-raise it.
 - **An invalid `simulation.scenario_source` fails at load and under `cobre validate`.** Config
   loading validated only the training source; the CLI and Python validate paths mirrored that
   gap while `cobre run` failed later at setup. `validate_config` resolves both sources once.
+- **Entity classes sampled out of sample draw independent noise streams.** Every class sampler
+  was seeded from the same forward seed with no class tag, so a deck with two or more classes
+  out of sample drew bit-identical noise for the k-th entity of each class under every noise
+  method. The load and non-controllable-source classes now derive their seed from the root seed
+  and their class tag; the inflow class keeps the root seed so inflow-only decks reproduce
+  bit-for-bit.
 - **Policy checkpoint writes are atomic and a rewrite cannot mix runs.** Payloads, the manifest
   and both dictionary CSVs go through the crate's atomic writer. A rewrite removes the previous
   manifest, then every previous payload file, before writing — the reader enumerates the payload
