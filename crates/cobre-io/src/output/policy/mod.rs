@@ -1126,6 +1126,122 @@ mod tests {
         assert_eq!(checkpoint.stage_bases[0].stage_id, 0);
     }
 
+    /// Run A leaves two pools, two bases and exported states; run B, into the
+    /// same directory, has one pool, one basis and no states. The reader lists
+    /// the payload directories, so anything A left behind would be read back as
+    /// B's — and B's terminal pool would then be A's stale pool 1.
+    #[test]
+    fn rewrite_with_fewer_pools_and_no_states_leaves_no_stale_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let a0 = [1.0_f64, 2.0, 3.0];
+        let cuts_a = [make_cut_record(101, 0, 1, &a0)];
+        let stage_cuts_a = [
+            make_stage_cuts_payload(0, &cuts_a, &[0], 3),
+            make_stage_cuts_payload(1, &cuts_a, &[0], 3),
+        ];
+        let basis_a = [make_basis_record(0), make_basis_record(1)];
+        let states_data = [1.0_f64, 2.0, 3.0];
+        let states_manifest = sample_manifest();
+        let states_a = [StageStatesPayload {
+            stage_id: 0,
+            node_id: 0,
+            state_dimension: 3,
+            count: 1,
+            data: &states_data,
+            entity_manifest: &states_manifest,
+        }];
+        write_policy_checkpoint(
+            tmp.path(),
+            &stage_cuts_a,
+            &basis_a,
+            &make_metadata(2, 3),
+            &states_a,
+        )
+        .expect("write of checkpoint A must succeed");
+        assert!(tmp.path().join("states").is_dir());
+
+        let b0 = [40.0_f64, 50.0, 60.0];
+        let cuts_b = [make_cut_record(202, 0, 5, &b0)];
+        let stage_cuts_b = [make_stage_cuts_payload(0, &cuts_b, &[0], 3)];
+        let basis_b = [make_basis_record(0)];
+        write_policy_checkpoint(
+            tmp.path(),
+            &stage_cuts_b,
+            &basis_b,
+            &make_metadata(1, 3),
+            &[],
+        )
+        .expect("rewrite with checkpoint B must succeed");
+
+        assert_no_tmp_files_under(tmp.path());
+        assert!(
+            !tmp.path().join("cuts").join("001.bin").exists(),
+            "A's second pool must not survive the rewrite"
+        );
+        assert!(
+            !tmp.path().join("basis").join("001.bin").exists(),
+            "A's second basis must not survive the rewrite"
+        );
+        assert!(
+            !tmp.path().join("states").exists(),
+            "A's states directory must not survive a rewrite that exports no states"
+        );
+
+        let checkpoint = read_policy_checkpoint(tmp.path())
+            .expect("read of the rewritten checkpoint must succeed");
+        assert_eq!(checkpoint.stage_cuts.len(), 1);
+        assert_eq!(checkpoint.stage_cuts[0].cuts[0].cut_id, 202);
+        assert_eq!(checkpoint.stage_bases.len(), 1);
+        assert!(checkpoint.stage_states.is_empty());
+    }
+
+    #[test]
+    fn rewrite_with_fewer_states_payloads_leaves_no_stale_states() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a0 = [1.0_f64, 2.0, 3.0];
+        let cuts = [make_cut_record(101, 0, 1, &a0)];
+        let stage_cuts = [make_stage_cuts_payload(0, &cuts, &[0], 3)];
+        let states_data = [1.0_f64, 2.0, 3.0];
+        let states_manifest = sample_manifest();
+        let states_for = |stage_id: u32| StageStatesPayload {
+            stage_id,
+            node_id: i32::try_from(stage_id).unwrap(),
+            state_dimension: 3,
+            count: 1,
+            data: &states_data,
+            entity_manifest: &states_manifest,
+        };
+
+        let states_a = [states_for(0), states_for(1)];
+        write_policy_checkpoint(
+            tmp.path(),
+            &stage_cuts,
+            &[],
+            &make_metadata(1, 3),
+            &states_a,
+        )
+        .expect("write of checkpoint A must succeed");
+
+        let states_b = [states_for(0)];
+        write_policy_checkpoint(
+            tmp.path(),
+            &stage_cuts,
+            &[],
+            &make_metadata(1, 3),
+            &states_b,
+        )
+        .expect("rewrite with checkpoint B must succeed");
+
+        assert!(
+            !tmp.path().join("states").join("001.bin").exists(),
+            "A's second states payload must not survive the rewrite"
+        );
+        let checkpoint = read_policy_checkpoint(tmp.path()).expect("read must succeed");
+        assert_eq!(checkpoint.stage_states.len(), 1);
+        assert_eq!(checkpoint.stage_states[0].stage_id, 0);
+    }
+
     #[test]
     fn interrupted_rewrite_never_pairs_an_old_manifest_with_new_payloads() {
         // Skip this test on platforms where read-only enforcement is unreliable
@@ -1144,8 +1260,8 @@ mod tests {
         write_policy_checkpoint(tmp.path(), &stage_cuts_a, &[], &metadata_a, &[])
             .expect("write of checkpoint A must succeed");
 
-        // Make cuts/ unwritable so the first payload write of the rewrite fails
-        // after the manifest removal has already happened.
+        // Make cuts/ unwritable so the rewrite fails right after the manifest
+        // removal, at the stale-payload sweep, before any payload write.
         let cuts_dir = tmp.path().join("cuts");
         let mut perms = std::fs::metadata(&cuts_dir).unwrap().permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);

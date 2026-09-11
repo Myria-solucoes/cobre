@@ -134,6 +134,9 @@ fn bin_file_name(id: u32) -> String {
 ///     000.bin        (only when stage_bases is non-empty)
 ///     001.bin
 ///     ...
+///   states/          (only when stage_states is non-empty)
+///     000.bin
+///     ...
 /// ```
 ///
 /// `manifest.bin` is written **last**, only after every `.bin` write succeeds:
@@ -142,9 +145,9 @@ fn bin_file_name(id: u32) -> String {
 /// (the `basis/` directory is still created).
 ///
 /// Rewriting a directory that already holds a checkpoint removes its
-/// `manifest.bin` before any payload write, so a crash partway through the
-/// rewrite cannot leave that old manifest pointing at new or partially written
-/// payloads.
+/// `manifest.bin` and every previous payload file before any payload write:
+/// an old manifest left in place would pair with new payloads, and a stale
+/// payload would survive a rewrite with fewer pools or with states export off.
 ///
 /// # Errors
 ///
@@ -228,6 +231,20 @@ pub fn write_policy_checkpoint(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(OutputError::io(&manifest_path, e)),
     }
+    remove_bin_files(&cuts_dir)?;
+    remove_bin_files(&basis_dir)?;
+
+    let states_dir = path.join("states");
+    if stage_states.is_empty() {
+        match std::fs::remove_dir_all(&states_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(OutputError::io(&states_dir, e)),
+        }
+    } else {
+        std::fs::create_dir_all(&states_dir).map_err(|e| OutputError::io(&states_dir, e))?;
+        remove_bin_files(&states_dir)?;
+    }
 
     for payload in stage_cuts {
         let file_path = cuts_dir.join(bin_file_name(payload.stage_id));
@@ -241,20 +258,28 @@ pub fn write_policy_checkpoint(
         write_bytes_atomic(&file_path, &buf)?;
     }
 
-    if !stage_states.is_empty() {
-        let states_dir = path.join("states");
-        std::fs::create_dir_all(&states_dir).map_err(|e| OutputError::io(&states_dir, e))?;
-
-        for payload in stage_states {
-            let file_path = states_dir.join(bin_file_name(payload.stage_id));
-            let buf = serialize_stage_states(payload);
-            write_bytes_atomic(&file_path, &buf)?;
-        }
+    for payload in stage_states {
+        let file_path = states_dir.join(bin_file_name(payload.stage_id));
+        let buf = serialize_stage_states(payload);
+        write_bytes_atomic(&file_path, &buf)?;
     }
 
     let manifest_buf = serialize_checkpoint_manifest(metadata);
     write_bytes_atomic(&manifest_path, &manifest_buf)?;
 
+    Ok(())
+}
+
+/// Deletes every `.bin` payload in `dir`. Only meaningful once `manifest.bin`
+/// is gone: [`read_policy_checkpoint`] lists the directory, so a file the
+/// current write does not replace would otherwise be read as a live pool.
+fn remove_bin_files(dir: &Path) -> Result<(), OutputError> {
+    for entry in std::fs::read_dir(dir).map_err(|e| OutputError::io(dir, e))? {
+        let file_path = entry.map_err(|e| OutputError::io(dir, e))?.path();
+        if file_path.extension().is_some_and(|ext| ext == "bin") {
+            std::fs::remove_file(&file_path).map_err(|e| OutputError::io(&file_path, e))?;
+        }
+    }
     Ok(())
 }
 

@@ -51,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule now admits all six bound families by declared-id membership, with the
   same diagnostic text for each.
 
+- **Rewriting a policy checkpoint directory now removes the previous
+  checkpoint's payload files first.** The checkpoint reader lists the `cuts/`,
+  `basis/` and `states/` directories rather than an inventory, so a rerun into
+  the same output directory with fewer cut pools, or with `exports.states`
+  turned off, left the earlier run's files to be read back alongside the new
+  ones — in a release build silently, with the stale last pool taken as the
+  terminal pool. The writer now clears those files after removing the old
+  manifest and before writing the new payloads.
+
 - **Policy checkpoint payloads and dictionary CSV files are now written
   atomically, and rewriting an existing policy checkpoint directory can no
   longer leave a partially written checkpoint behind.** Every checkpoint
