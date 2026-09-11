@@ -219,9 +219,11 @@ fn check_row(
     }
 }
 
-/// Thermal (rule 16) and NCS (the Layer-3 referential check) already own the
-/// stage-axis defect for their own families, so both are excluded here to avoid
-/// double-reporting.
+/// Rejects a bound-override row whose `stage_id` names no declared study
+/// stage, across the six bound families. Admission is membership in the
+/// declared id set — the same map [`resolve_bounds`] keys on — never a
+/// `[0, n)` position test: study ids may be gapped or start at 1. NCS is
+/// excluded because the Layer-3 referential check already owns its stage axis.
 pub(super) fn check_bound_stage_id_range(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_stage_ids: HashSet<i32> = data
         .stages
@@ -231,6 +233,16 @@ pub(super) fn check_bound_stage_id_range(data: &ParsedData, ctx: &mut Validation
         .map(|s| s.id)
         .collect();
 
+    for row in &data.thermal_bounds {
+        check_row_stage_range(
+            &THERMAL,
+            row.thermal_id.0,
+            None,
+            row.stage_id,
+            &study_stage_ids,
+            ctx,
+        );
+    }
     for row in &data.hydro_bounds {
         check_row_stage_range(
             &HYDRO,
@@ -1167,7 +1179,7 @@ mod tests {
     // ── stage-axis rule (check_bound_stage_id_range, rule 49) ────────────────
 
     #[test]
-    fn test_all_five_bound_families_in_horizon_stage_accepted() {
+    fn test_all_six_bound_families_in_horizon_stage_accepted() {
         let mut data = make_data(
             vec![],
             vec![],
@@ -1176,6 +1188,7 @@ mod tests {
             vec![],
             vec![],
         );
+        data.thermal_bounds = vec![thermal_row(1, 1, None)];
         data.hydro_bounds = vec![hydro_row(1, 0, None)];
         data.line_bounds = vec![line_row(1, 1, None)];
         data.pumping_bounds = vec![pumping_row(1, 0, None)];
@@ -1189,6 +1202,85 @@ mod tests {
         assert!(
             group_bound_errors_of_kind(&data, ErrorKind::BusinessRuleViolation).is_empty(),
             "in-horizon stage group-family row must not be rejected"
+        );
+    }
+
+    #[test]
+    fn test_thermal_bounds_out_of_horizon_and_negative_stage_rejected() {
+        let mut data = make_data(
+            vec![],
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.thermal_bounds = vec![
+            thermal_row(1, 2, None),
+            thermal_row(1, 3, None),
+            thermal_row(1, -1, None),
+        ];
+
+        let errors = bound_range_errors(&data);
+        assert_eq!(
+            errors.len(),
+            3,
+            "expected exactly three errors, got: {errors:?}"
+        );
+        for stage_id in ["stage_id=2", "stage_id=3", "stage_id=-1"] {
+            assert!(
+                errors.iter().any(|e| e.message.contains("Thermal 1")
+                    && e.message.contains(stage_id)
+                    && e.message.contains("not a declared study stage")),
+                "expected a {stage_id} finding: {errors:?}"
+            );
+        }
+    }
+
+    /// Study ids `{1, 2, 3}`: a `[0, 3)` position test would accept the
+    /// undeclared `stage_id=0` (silently dropped at resolution) and reject the
+    /// declared `stage_id=3`. Membership does the opposite, for every family.
+    #[test]
+    fn test_bound_stage_rule_admits_declared_ids_not_positions() {
+        let mut data = make_data(
+            vec![],
+            vec![],
+            vec![],
+            make_stages(vec![1, 2, 3]),
+            vec![],
+            vec![],
+        );
+        data.thermal_bounds = vec![thermal_row(1, 3, None), thermal_row(1, 0, None)];
+        data.hydro_bounds = vec![hydro_row(1, 3, None), hydro_row(1, 0, None)];
+        data.line_bounds = vec![line_row(1, 3, None)];
+        data.pumping_bounds = vec![pumping_row(1, 3, None)];
+        data.contract_bounds = vec![contract_row(1, 3, None)];
+
+        let errors = bound_range_errors(&data);
+        assert_eq!(
+            errors.len(),
+            2,
+            "only the two undeclared stage_id=0 rows may be rejected: {errors:?}"
+        );
+        assert!(
+            errors.iter().all(|e| e.message.contains("stage_id=0")),
+            "the declared stage_id=3 rows must be admitted: {errors:?}"
+        );
+        assert!(errors.iter().any(|e| e.message.contains("Thermal 1")));
+        assert!(errors.iter().any(|e| e.message.contains("Hydro 1")));
+    }
+
+    #[test]
+    fn test_bound_stage_rule_with_no_study_stages_rejects_every_row() {
+        let mut data = make_data(vec![], vec![], vec![], make_stages(vec![]), vec![], vec![]);
+        data.thermal_bounds = vec![thermal_row(1, 0, None)];
+        data.hydro_bounds = vec![hydro_row(1, 0, None)];
+
+        let errors = bound_range_errors(&data);
+        assert_eq!(
+            errors.len(),
+            2,
+            "no declared stage admits any row: {errors:?}"
         );
     }
 

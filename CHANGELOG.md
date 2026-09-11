@@ -11,14 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING — a hydro, line, pumping, contract, or hydro-unit-group
-  bound-override row naming a `stage_id` that is not a declared study stage
-  is now rejected at validation.** These five families previously resolved
-  such a row by silently dropping it, with no warning and no error. A deck
-  that relied on that leniency — for example carrying stale override rows
-  for a stage no longer in the study — now fails validation instead of
-  loading with the row discarded; remove or correct the offending rows'
-  `stage_id`.
+- **BREAKING — a bound-override row naming a `stage_id` that is not a
+  declared study stage is now rejected at validation, for every bound
+  family.** The hydro, line, pumping, contract and hydro-unit-group families
+  previously resolved such a row by silently dropping it, with no warning and
+  no error. The thermal family checked the id against the position range
+  `[0, n_stages)` rather than the declared ids, so in a deck whose stage ids
+  are gapped or start at 1 an undeclared id inside that range was dropped
+  silently too. A deck that relied on that leniency — for example carrying
+  stale override rows for a stage no longer in the study — now fails
+  validation instead of loading with the row discarded; remove or correct the
+  offending rows' `stage_id`.
 
 ### Fixed
 
@@ -39,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cobre validate` and Python's `cobre.io.validate` with no error, then failed
   at study setup when `cobre run` resolved the simulation source. Both checks
   now validate the same rules for both sections.
+
+- **Thermal bound-override rows naming the last declared study stage are no
+  longer rejected in decks whose stage ids do not start at 0.** The thermal
+  stage check compared the row's `stage_id` against the position range
+  `[0, n_stages)` while resolution keys rows by declared id, so a gapped or
+  1-based id set had its last declared stage rejected as out of range. One
+  rule now admits all six bound families by declared-id membership, with the
+  same diagnostic text for each.
 
 - **Policy checkpoint payloads and dictionary CSV files are now written
   atomically, and rewriting an existing policy checkpoint directory can no
