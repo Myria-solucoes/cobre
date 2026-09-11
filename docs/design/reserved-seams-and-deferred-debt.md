@@ -1047,6 +1047,108 @@ the canonical manifest builder, with the generic cobre-io writer unchanged —
 cleared for execution and homing only; its family-specific mechanism shape is
 the per-family-channel entry above, not cleared.
 
+## Deferred-debt register — 2026-09 quality evaluation (core-io and stochastic stations)
+
+Two of the evaluation's eleven stations have passed their owner gate: the descent through
+`cobre-core` + `cobre-io` and the descent through `cobre-stochastic`. Every ratified finding was
+re-derived against the tree at the `develop` merge that followed the gates, then ranked into the
+tiers below. The finding ledger, its ranking and the per-finding evidence live in the evaluation's
+own plan directory (tracked on the evaluation branch); this section is the behaviour-described
+mirror. Each open entry names an owner and a trigger; each fixed entry is recorded so a future
+audit does not re-raise it.
+
+### Fixed — user-visible correctness (2026-09-11)
+
+- **Per-stage curtailment-penalty overrides for non-controllable sources reach the LP objective.**
+  The stage LP priced curtailment from the source's declaration-time constant; the resolved
+  per-(source, stage) penalty table was written but never read. The column fill now reads it, on
+  the same path as the hydro, line and bus fills.
+- **Every bound-override family rejects a row naming an undeclared study stage.** Five families
+  dropped such rows silently at resolution; the thermal family tested a `[0, n)` position while
+  resolution keys rows by declared id, which mis-admitted gapped or 1-based id sets. One
+  table-driven rule in `crates/cobre-io/src/validation/semantic/block_bounds.rs` now covers all six
+  by declared-id set membership. The non-controllable-source family keeps its referential check.
+- **An invalid `simulation.scenario_source` fails at load and under `cobre validate`.** Config
+  loading validated only the training source; the CLI and Python validate paths mirrored that
+  gap while `cobre run` failed later at setup. `validate_config` resolves both sources once.
+- **Entity classes sampled out of sample draw independent noise streams.** Every class sampler
+  was seeded from the same forward seed with no class tag, so a deck with two or more classes
+  out of sample drew bit-identical noise for the k-th entity of each class under every noise
+  method. The load and non-controllable-source classes now derive their seed from the root seed
+  and their class tag; the inflow class keeps the root seed so inflow-only decks reproduce
+  bit-for-bit.
+- **Policy checkpoint writes are atomic and a rewrite cannot mix runs.** Payloads, the manifest
+  and both dictionary CSVs go through the crate's atomic writer. A rewrite removes the previous
+  manifest, then every previous payload file, before writing — the reader enumerates the payload
+  directories, so a rerun into the same output directory with fewer pools or with states export
+  off would otherwise read the earlier run's files back.
+
+**Owner.** The `cobre-io` validation and output owners and the LP-builder owner (as executed).
+**Trigger.** None — done.
+
+### Scheduled — forward-sampler hot path under out-of-sample QMC/LHS and wide correlation groups
+
+**What it is.** Under `scheme: out_of_sample`, every forward draw with Sobol noise rebuilds the
+direction matrix and scramble parameters on the heap; with Halton noise it re-runs the prime sieve
+and rebuilds the nested scramble tables; with LHS it reshuffles the full stratification permutation
+set per scenario, quadratic in the scenario count per stage. With a correlation group wider than
+the stack fast-path bound, every opening allocates transient gather/correlate scratch and
+re-resolves entity positions by linear scan because the position precompute has no caller. The
+default sample-average scheme, the in-sample schemes and narrow correlation groups are
+allocation-free. All of it is scenario-invariant state that a caller-owned per-(iteration, stage)
+scratch — the existing permutation-scratch precedent on the sample request — can hold, bit-for-bit
+neutral. The same change retires the duplicated full-vector correlation applier and the
+triplicated point-spec parameter struct.
+
+**Owner.** The `cobre-stochastic` sampling and tree-noise owners; the training engine's per-thread
+workspace owns the scratch.
+
+**Trigger.** Before QMC or LHS noise is recommended to users. The sample-average golden value, the
+three QMC/LHS integration suites and the reproducibility suite pin the bits any hoist must reproduce.
+
+### Scheduled — latent footguns, one change each
+
+- **Canonical order is set by the builder, not re-derived by the loader.** The stage index is
+  reassigned in the loader after the builder has already sorted; the three model tables are sorted
+  rather than validated as canonical. *Owner:* `cobre-core` system-builder owner. *Trigger:* the
+  next `cobre-core` or loader touch; validate-not-sort keeps bytes identical.
+- **Input-file registry keyed by name, not position.** The structural layer zips a file table with
+  the manifest's mutable fields positionally (they match today). *Owner:* `cobre-io` validation
+  owner. *Trigger:* the next input file added.
+- **Penalty twin type.** Two structurally identical per-stage hydro penalty types; a type alias
+  closes it without touching the ~130 construction sites. *Owner:* `cobre-core` model owner.
+  *Trigger:* opportunistic.
+- **Typed entity class in the correlation sampler.** The class tag is a string matched at the
+  sampling gate (a typo fails loudly, so not user-visible). *Owner:* `cobre-stochastic` sampling
+  owner. *Trigger:* the hot-path change above touches the same files.
+
+### Structural lever — a shared test-fixture surface in `cobre-core`
+
+**What it is.** `cobre-core` declares a `test-support` feature that gates a single method, while
+every consumer crate hand-copies entity literals (one hydro literal is byte-identical at nine
+sites; the stochastic integration binaries carry hundreds of duplicated helper lines). A
+parameterized builder surface behind that feature resolves most of the test-corpus findings at
+once. The order-invariance and reproducibility tests are load-bearing and are relocated, never
+deleted.
+
+**Owner.** The testing-architecture owner. **Trigger.** Ratification of the homing threshold and
+`test-support` convention proposed in `docs/design/testing-architecture.md` §5; the extractor
+contract tests land first as the safety net.
+
+### Dead-surface sweep
+
+Unwired public items in `cobre-io`, `cobre-core` and `cobre-stochastic` (dead error variants,
+never-read output fields, a serde-skipped payload rebuilt on receipt, a reader-prologue pattern
+repeated across the input modules) are batched with adjacent feature work; several are public-API
+removals and go through the API-break gate. **Owner.** The respective crate owners.
+**Trigger.** Batch with the next touch of each area.
+
+### Deprioritized (recorded, not scheduled)
+
+Setup-time performance items below the sweep threshold; doc and rule-table drift, one sweep; the
+generalization-alignment holds, which the alignment station adjudicates before any code; and the
+test-corpus sweep, which follows the fixture surface above.
+
 ## Audit-evidence
 
 The following mechanical checks were run against the tree at the time this
