@@ -308,14 +308,40 @@ fn removed_cut_selection_field_fails_validate() {
         .failure();
 }
 
+/// An invalid `simulation.scenario_source` must be rejected by both `validate`
+/// and `run`, carrying the same rule message — the training half of the
+/// config stays valid so the failure is unambiguously the simulation source.
+#[test]
+fn invalid_simulation_scenario_source_fails_validate_and_run() {
+    const MSG: &str = "historical scheme is only valid for the inflow class";
+
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+
+    let mut config: serde_json::Value = serde_json::from_str(CONFIG_JSON).unwrap();
+    config["simulation"] = serde_json::json!({
+        "scenario_source": { "seed": 1, "load": { "scheme": "historical" } }
+    });
+    write_file(dir.path(), "config.json", &config.to_string());
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(MSG));
+
+    cobre()
+        .args(["run", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(MSG));
+}
+
 /// An FPHA hydro with no `hydro_production_models.json` entry slips past the
 /// IO pipeline (the Layer-4 dimensional check skips FPHA hydros when
 /// `fpha_hyperplanes.parquet` is absent) and is rejected only at Phase 10 by
 /// `prepare_hydro_models_from_artifacts` → `determine_source`.
-#[test]
-fn fpha_hydro_without_production_models_json_fails_validate() {
-    let dir = TempDir::new().unwrap();
-
+fn write_fpha_hydro_without_production_models_case(dir: &TempDir) {
     write_file(dir.path(), "config.json", CONFIG_JSON);
     write_file(dir.path(), "penalties.json", PENALTIES_JSON);
     write_file(dir.path(), "stages.json", STAGES_JSON);
@@ -365,6 +391,12 @@ fn fpha_hydro_without_production_models_json_fails_validate() {
         ]
     }"#;
     write_file(dir.path(), "system/hydros.json", fpha_hydros_json);
+}
+
+#[test]
+fn fpha_hydro_without_production_models_json_fails_validate() {
+    let dir = TempDir::new().unwrap();
+    write_fpha_hydro_without_production_models_case(&dir);
 
     cobre()
         .args(["validate", dir.path().to_str().unwrap()])
@@ -569,7 +601,6 @@ fn boundary_json_mode_emits_parseable_object_with_tallies() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    // Parsing must succeed with no interleaved human text on stdout.
     let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(value["configured"], serde_json::json!(true));
     assert_eq!(value["report"]["storage"]["copy"], serde_json::json!(1));
@@ -619,56 +650,7 @@ fn boundary_mismatched_hydro_set_exits_nonzero_and_names_hydro() {
 #[test]
 fn fpha_hydro_without_production_models_json_stdout_mentions_file() {
     let dir = TempDir::new().unwrap();
-
-    write_file(dir.path(), "config.json", CONFIG_JSON);
-    write_file(dir.path(), "penalties.json", PENALTIES_JSON);
-    write_file(dir.path(), "stages.json", STAGES_JSON);
-    write_file(
-        dir.path(),
-        "initial_conditions.json",
-        INITIAL_CONDITIONS_JSON,
-    );
-    write_file(dir.path(), "system/buses.json", BUSES_JSON);
-    write_file(dir.path(), "system/lines.json", LINES_JSON);
-    write_file(dir.path(), "system/thermals.json", THERMALS_JSON);
-
-    let fpha_hydros_json = r#"{
-        "hydros": [
-            {
-                "id": 1,
-                "name": "UHE_FPHA",
-                "operational_start_date": "2024-01-01",
-                "downstream_id": null,
-                "reservoir": {
-                    "min_storage_hm3": 0.0,
-                    "max_storage_hm3": 500.0
-                },
-                "outflow": {
-                    "min_outflow_m3s": 0.0,
-                    "max_outflow_m3s": null
-                },
-                "generation": {
-                    "model": "fpha",
-                    "min_turbined_m3s": 0.0,
-                    "max_turbined_m3s": 100.0,
-                    "min_generation_mw": 0.0,
-                    "max_generation_mw": 300.0
-                },
-                "unit_groups": [
-                    {
-                        "id": 0,
-                        "name": "UHE_FPHA",
-                        "bus_id": 1,
-                        "min_generation_mw": 0.0,
-                        "max_generation_mw": 300.0,
-                        "min_turbined_m3s": 0.0,
-                        "max_turbined_m3s": 100.0
-                    }
-                ]
-            }
-        ]
-    }"#;
-    write_file(dir.path(), "system/hydros.json", fpha_hydros_json);
+    write_fpha_hydro_without_production_models_case(&dir);
 
     cobre()
         .args(["validate", dir.path().to_str().unwrap()])

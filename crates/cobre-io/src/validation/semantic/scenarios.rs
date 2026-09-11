@@ -35,7 +35,7 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
 
     // Skipped with no deficit segments (max == 0.0): there is then no comparand.
     if max_deficit_cost > 0.0 {
-        let mut violations: Vec<(i32, f64)> = Vec::new(); // (id, filling_target_cost)
+        let mut violations: Vec<(i32, f64)> = Vec::new();
         for hydro in &data.hydros {
             let filling = hydro.penalties.filling_target_violation_cost;
             if filling >= max_deficit_cost {
@@ -62,7 +62,7 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
     }
 
     {
-        let mut violations: Vec<(i32, f64)> = Vec::new(); // (id, storage_violation_cost)
+        let mut violations: Vec<(i32, f64)> = Vec::new();
         for hydro in &data.hydros {
             let higher = hydro.penalties.storage_violation_below_cost;
             if higher <= max_deficit_cost {
@@ -129,51 +129,48 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
     }
 
     {
-        if !data.hydros.is_empty() {
-            let min_cv = |h: &Hydro| {
-                let p = &h.penalties;
-                p.turbined_violation_below_cost
-                    .min(p.outflow_violation_below_cost)
-                    .min(p.outflow_violation_above_cost)
-                    .min(p.generation_violation_below_cost)
-                    .min(p.evaporation_violation_cost)
-                    .min(p.water_withdrawal_violation_cost)
-            };
+        let min_cv = |h: &Hydro| {
+            let p = &h.penalties;
+            p.turbined_violation_below_cost
+                .min(p.outflow_violation_below_cost)
+                .min(p.outflow_violation_above_cost)
+                .min(p.generation_violation_below_cost)
+                .min(p.evaporation_violation_cost)
+                .min(p.water_withdrawal_violation_cost)
+        };
 
-            let min_constraint_cost: f64 =
-                data.hydros.iter().map(min_cv).fold(f64::INFINITY, f64::min);
+        let min_constraint_cost: f64 = data.hydros.iter().map(min_cv).fold(f64::INFINITY, f64::min);
 
-            let max_resource_cost: f64 = data
-                .hydros
-                .iter()
-                .map(|h| h.penalties.spillage_cost.max(h.penalties.diversion_cost))
-                .fold(f64::NEG_INFINITY, f64::max)
-                .max(0.0);
+        let max_resource_cost: f64 = data
+            .hydros
+            .iter()
+            .map(|h| h.penalties.spillage_cost.max(h.penalties.diversion_cost))
+            .fold(f64::NEG_INFINITY, f64::max)
+            .max(0.0);
 
-            if min_constraint_cost <= max_resource_cost
-                && let Some(worst_hydro) = data.hydros.iter().min_by(|a, b| {
-                    min_cv(a)
-                        .partial_cmp(&min_cv(b))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-            {
-                ctx.add_warning(
-                    ErrorKind::ModelQuality,
-                    "penalties.json",
-                    None::<&str>,
-                    format!(
-                        "Penalty ordering violation: min(constraint_violation_costs) \
-                         ({min_constraint_cost}) should be > max(resource_costs) \
-                         ({max_resource_cost}) -- 1 hydro(s) affected, worst case: Hydro {}",
-                        worst_hydro.id.0
-                    ),
-                );
-            }
+        if min_constraint_cost <= max_resource_cost
+            && let Some(worst_hydro) = data.hydros.iter().min_by(|a, b| {
+                min_cv(a)
+                    .partial_cmp(&min_cv(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        {
+            ctx.add_warning(
+                ErrorKind::ModelQuality,
+                "penalties.json",
+                None::<&str>,
+                format!(
+                    "Penalty ordering violation: min(constraint_violation_costs) \
+                     ({min_constraint_cost}) should be > max(resource_costs) \
+                     ({max_resource_cost}) -- 1 hydro(s) affected, worst case: Hydro {}",
+                    worst_hydro.id.0
+                ),
+            );
         }
     }
 
     {
-        let mut violations: Vec<(i32, f64)> = Vec::new(); // (id, min_resource_cost)
+        let mut violations: Vec<(i32, f64)> = Vec::new();
         for hydro in &data.hydros {
             let min_resource = hydro
                 .penalties
@@ -213,20 +210,21 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
 pub(super) fn check_fpha_penalty_rule(data: &ParsedData, ctx: &mut ValidationContext) {
     use cobre_core::entities::HydroGenerationModel;
     for hydro in &data.hydros {
-        if hydro.generation_model == HydroGenerationModel::Fpha {
-            let fpha_cost = hydro.penalties.turbined_cost;
-            if fpha_cost < 0.0 {
-                let entity_str = format!("Hydro {}", hydro.id.0);
-                ctx.add_error(
-                    ErrorKind::BusinessRuleViolation,
-                    "penalties.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: turbined_cost ({fpha_cost}) must be non-negative (>= 0) \
-                         for FPHA hydros; negative values distort LP dispatch"
-                    ),
-                );
-            }
+        if hydro.generation_model != HydroGenerationModel::Fpha {
+            continue;
+        }
+        let fpha_cost = hydro.penalties.turbined_cost;
+        if fpha_cost < 0.0 {
+            let entity_str = format!("Hydro {}", hydro.id.0);
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "penalties.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: turbined_cost ({fpha_cost}) must be non-negative (>= 0) \
+                     for FPHA hydros; negative values distort LP dispatch"
+                ),
+            );
         }
     }
 }
@@ -456,7 +454,7 @@ fn describe_par_rejection(hydro_id: i32, rejection: &ClosureRejection) -> String
 /// Validates that when a class uses the `External` sampling scheme, the
 /// corresponding external scenario file data is non-empty.
 pub(super) fn check_external_scheme_has_files(data: &ParsedData, ctx: &mut ValidationContext) {
-    // Config is Layer-2-validated, so these reads do not fail in practice.
+    // validate_config resolves both sources at load, so these reads cannot fail here.
     let Ok(training_source) = data
         .config
         .training_scenario_source(Path::new("config.json"))
@@ -915,11 +913,8 @@ pub(super) fn check_load_factor_consistency(data: &ParsedData, ctx: &mut Validat
         for bf in &entry.block_factors {
             let block_idx = usize::try_from(bf.block_id).unwrap_or(usize::MAX);
             if !valid_indices.contains(&block_idx) {
-                let sorted: Vec<usize> = {
-                    let mut v: Vec<usize> = valid_indices.iter().copied().collect();
-                    v.sort_unstable();
-                    v
-                };
+                let mut sorted: Vec<usize> = valid_indices.iter().copied().collect();
+                sorted.sort_unstable();
                 ctx.add_error(
                     ErrorKind::BusinessRuleViolation,
                     "scenarios/load_factors.json",

@@ -138,6 +138,14 @@ fn write_codes_json(path: &Path) -> Result<(), OutputError> {
 
 // ─── entities.csv ────────────────────────────────────────────────────────────
 
+fn finish_csv_atomic(mut wtr: csv::Writer<Vec<u8>>, file_path: &Path) -> Result<(), OutputError> {
+    wtr.flush().map_err(|e| OutputError::io(file_path, e))?;
+    let bytes = wtr
+        .into_inner()
+        .map_err(|e| OutputError::io(file_path, std::io::Error::other(e)))?;
+    write_bytes_atomic(file_path, &bytes)
+}
+
 /// Write `entities.csv`, one row per entity, ordered by `entity_type_code`
 /// ascending then by entity ID (canonical accessor order). The
 /// `entity_type_code` 8 block breaks that second axis: a group's `entity_id`
@@ -145,8 +153,7 @@ fn write_codes_json(path: &Path) -> Result<(), OutputError> {
 /// order) then group-minor (each plant's own id-sorted `unit_groups` order).
 fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
     let file_path = path.join("entities.csv");
-    let mut wtr = csv::Writer::from_path(&file_path)
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+    let mut wtr = csv::Writer::from_writer(Vec::new());
 
     wtr.write_record([
         "entity_type_code",
@@ -210,9 +217,7 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
         }
     }
 
-    wtr.flush().map_err(|e| OutputError::io(&file_path, e))?;
-
-    Ok(())
+    finish_csv_atomic(wtr, &file_path)
 }
 
 // ─── variables.csv ───────────────────────────────────────────────────────────
@@ -253,8 +258,7 @@ fn variables_csv_schemas() -> Vec<(&'static str, Schema)> {
 /// by file and ordered by column position within each schema.
 fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
     let file_path = path.join("variables.csv");
-    let mut wtr = csv::Writer::from_path(&file_path)
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+    let mut wtr = csv::Writer::from_writer(Vec::new());
 
     wtr.write_record(["file", "column", "type", "unit", "description", "nullable"])
         .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
@@ -278,9 +282,7 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
         }
     }
 
-    wtr.flush().map_err(|e| OutputError::io(&file_path, e))?;
-
-    Ok(())
+    finish_csv_atomic(wtr, &file_path)
 }
 
 /// Map an Arrow `DataType` to the string representation used in `variables.csv`.
@@ -1969,6 +1971,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_entities_csv(tmp.path(), &system).expect("write_entities_csv must succeed");
 
+        assert!(
+            !tmp.path().join("entities.csv.tmp").exists(),
+            "no .tmp file must remain beside entities.csv"
+        );
+
         let content = std::fs::read_to_string(tmp.path().join("entities.csv")).unwrap();
         let mut rdr = csv::Reader::from_reader(content.as_bytes());
 
@@ -2303,6 +2310,11 @@ mod tests {
     fn variables_csv_total_columns() {
         let tmp = tempfile::tempdir().unwrap();
         write_variables_csv(tmp.path()).expect("write_variables_csv must succeed");
+
+        assert!(
+            !tmp.path().join("variables.csv.tmp").exists(),
+            "no .tmp file must remain beside variables.csv"
+        );
 
         let content = std::fs::read_to_string(tmp.path().join("variables.csv")).unwrap();
         let mut rdr = csv::Reader::from_reader(content.as_bytes());
