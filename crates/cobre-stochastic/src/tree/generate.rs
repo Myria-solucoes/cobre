@@ -33,6 +33,30 @@ pub struct ClassDimensions {
     pub n_ncs: usize,
 }
 
+impl ClassDimensions {
+    /// Sum of the three per-class entity counts.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.n_hydros + self.n_load_buses + self.n_ncs
+    }
+
+    /// Asserts `entity_order` observes the `[hydros | load buses | NCS]`
+    /// partition contract shared by every noise-generation entry point.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `entity_order.len() != self.total()`.
+    pub fn assert_partitions(&self, entity_order: &[EntityId]) {
+        assert_eq!(
+            self.total(),
+            entity_order.len(),
+            "entity_order length ({}) must equal dims.n_hydros + dims.n_load_buses + dims.n_ncs ({})",
+            entity_order.len(),
+            self.total(),
+        );
+    }
+}
+
 /// Optional input bundle for [`generate_opening_tree`]. When every field is
 /// `None`, the tree is generated from each stage's `scenario_config.noise_method`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -242,8 +266,9 @@ fn generate_saa(base_seed: u64, stage: &Stage, n_openings: usize, dim: usize, ou
 ///
 /// # Panics
 ///
-/// Panics if `external_scenario_counts` is `Some` with length `!= stages.len()`;
-/// debug-only for the same `noise_group_ids` mismatch.
+/// Panics if `external_scenario_counts` is `Some` with length `!= stages.len()`,
+/// or if `entity_order` fails [`ClassDimensions::assert_partitions`]; debug-only
+/// for the same `noise_group_ids` mismatch.
 pub fn generate_opening_tree<'a>(
     base_seed: u64,
     stages: &'a [Stage],
@@ -275,13 +300,7 @@ pub fn generate_opening_tree<'a>(
 
     let n_stages = stages.len();
 
-    assert_eq!(
-        dims.n_hydros + dims.n_load_buses + dims.n_ncs,
-        entity_order.len(),
-        "entity_order length ({}) must equal dims.n_hydros + dims.n_load_buses + dims.n_ncs ({})",
-        entity_order.len(),
-        dims.n_hydros + dims.n_load_buses + dims.n_ncs,
-    );
+    dims.assert_partitions(entity_order);
 
     let openings_per_stage =
         compute_effective_opening_counts(stages, historical_library, external_scenario_counts);

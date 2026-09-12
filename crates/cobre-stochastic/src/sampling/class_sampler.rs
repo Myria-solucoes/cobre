@@ -310,14 +310,6 @@ impl ClassSampler<'_> {
                     req.iteration,
                     req.total_scenarios,
                 );
-                debug_assert!(
-                    tables.group_at(req.stage_idx) == Some(req.noise_group_id),
-                    "ClassSampler::OutOfSample::fill: stage_idx {} table built for group {:?} \
-                     but request carries noise_group_id {}",
-                    req.stage_idx,
-                    tables.group_at(req.stage_idx),
-                    req.noise_group_id,
-                );
                 let table = tables.table_at(req.stage_idx).ok_or_else(|| {
                     StochasticError::InsufficientData {
                         context: format!(
@@ -326,6 +318,14 @@ impl ClassSampler<'_> {
                         ),
                     }
                 })?;
+                debug_assert!(
+                    tables.group_at(req.stage_idx) == Some(req.noise_group_id),
+                    "ClassSampler::OutOfSample::fill: stage_idx {} table built for group {:?} \
+                     but request carries noise_group_id {}",
+                    req.stage_idx,
+                    tables.group_at(req.stage_idx),
+                    req.noise_group_id,
+                );
                 let spec = FreshNoiseSpec {
                     forward_seed: *forward_seed,
                     noise_method,
@@ -336,8 +336,7 @@ impl ClassSampler<'_> {
                     dim: *dim,
                     total_scenarios: req.total_scenarios,
                 };
-                fill_uncorrelated(spec, table, output)?;
-                Ok(())
+                fill_uncorrelated(spec, table, output)
             }
 
             ClassSampler::Historical { library } => {

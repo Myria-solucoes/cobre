@@ -382,7 +382,6 @@ dependencies = [
  "cobre-solver",
  "cobre-stochastic",
  "matrixmultiply",
- "postcard",
  "rayon",
  "serde",
  "thiserror",

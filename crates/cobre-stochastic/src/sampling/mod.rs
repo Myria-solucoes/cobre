@@ -117,7 +117,7 @@ impl<'a> ForwardSampler<'a> {
     }
 }
 
-impl std::fmt::Debug for ForwardSampler<'_> {
+impl fmt::Debug for ForwardSampler<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ForwardSampler")
             .field("dims", &self.dims)
@@ -589,7 +589,6 @@ pub(crate) fn build_observation_sequence(
         return Vec::new();
     }
 
-    // Lag seasons, oldest first: step backwards from study_seasons[0].
     let first_study_season = study_seasons[0];
     let lag_seasons: Vec<usize> = (1..=max_order)
         .rev()
@@ -698,28 +697,7 @@ mod tests {
     }
 
     fn make_stage(index: usize, id: i32, bf: usize) -> Stage {
-        Stage {
-            index,
-            id,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: bf,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
+        make_stage_with_method(index, id, bf, NoiseMethod::Saa)
     }
 
     fn make_stage_with_method(index: usize, id: i32, bf: usize, method: NoiseMethod) -> Stage {
@@ -880,18 +858,23 @@ mod tests {
     // Factory helper
     // -----------------------------------------------------------------------
 
+    /// Split `ctx`'s entity counts into a `ClassDimensions` for the noise
+    /// buffer layout `[hydros | load_buses | ncs]`.
+    fn dims_from_ctx(ctx: &StochasticContext) -> ClassDimensions {
+        ClassDimensions {
+            n_hydros: ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs(),
+            n_load_buses: ctx.n_load_buses(),
+            n_ncs: ctx.n_stochastic_ncs(),
+        }
+    }
+
     /// Build a `ForwardSamplerConfig` with all three classes set to `scheme`.
     fn all_classes_config<'a>(
         scheme: SamplingScheme,
         ctx: &'a StochasticContext,
         stages: &'a [Stage],
     ) -> super::ForwardSamplerConfig<'a> {
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(ctx);
         super::ForwardSamplerConfig {
             class_schemes: ClassSchemes {
                 inflow: Some(scheme),
@@ -970,15 +953,15 @@ mod tests {
     fn test_build_historical_with_library() {
         use super::HistoricalScenarioLibrary;
         let (ctx, stages) = build_test_ctx(None);
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(&ctx);
         // 3 windows, 2 stages, 1 hydro, max_order=1.
-        let lib =
-            HistoricalScenarioLibrary::new(3, stages.len(), n_hydros, 1, vec![2000, 2001, 2002]);
+        let lib = HistoricalScenarioLibrary::new(
+            3,
+            stages.len(),
+            dims.n_hydros,
+            1,
+            vec![2000, 2001, 2002],
+        );
         let config = super::ForwardSamplerConfig {
             class_schemes: ClassSchemes {
                 inflow: Some(SamplingScheme::Historical),
@@ -1003,12 +986,7 @@ mod tests {
     #[test]
     fn test_build_historical_missing_library() {
         let (ctx, stages) = build_test_ctx(None);
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(&ctx);
         let config = super::ForwardSamplerConfig {
             class_schemes: ClassSchemes {
                 inflow: Some(SamplingScheme::Historical),
@@ -1039,16 +1017,11 @@ mod tests {
     fn test_build_external_with_library() {
         use super::ExternalScenarioLibrary;
         let (ctx, stages) = build_test_ctx(None);
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(&ctx);
         let lib = ExternalScenarioLibrary::new(
             stages.len(),
             10,
-            n_hydros,
+            dims.n_hydros,
             "inflow",
             vec![10usize; stages.len()],
         );
@@ -1076,12 +1049,7 @@ mod tests {
     #[test]
     fn test_build_historical_load_unsupported() {
         let (ctx, stages) = build_test_ctx(None);
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
-        let dims = ClassDimensions {
-            n_hydros,
-            n_load_buses: ctx.n_load_buses(),
-            n_ncs: ctx.n_stochastic_ncs(),
-        };
+        let dims = dims_from_ctx(&ctx);
         let config = super::ForwardSamplerConfig {
             class_schemes: ClassSchemes {
                 inflow: Some(SamplingScheme::InSample),
@@ -1619,7 +1587,6 @@ mod tests {
         ctx: &'a StochasticContext,
         stages: &'a [Stage],
     ) -> ForwardSamplerConfig<'a> {
-        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
         ForwardSamplerConfig {
             class_schemes: ClassSchemes {
                 inflow: Some(SamplingScheme::OutOfSample),
@@ -1628,11 +1595,7 @@ mod tests {
             },
             ctx,
             stages,
-            dims: ClassDimensions {
-                n_hydros,
-                n_load_buses: ctx.n_load_buses(),
-                n_ncs: ctx.n_stochastic_ncs(),
-            },
+            dims: dims_from_ctx(ctx),
             historical_library: None,
             external_inflow_library: None,
             external_load_library: None,

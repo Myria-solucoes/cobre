@@ -84,7 +84,6 @@ impl Communicator for LocalComm {
 struct MockSolver {
     objectives: Vec<f64>,
     call_count: usize,
-    infeasible_on_call: Option<usize>,
 }
 
 impl MockSolver {
@@ -92,7 +91,6 @@ impl MockSolver {
         Self {
             objectives,
             call_count: 0,
-            infeasible_on_call: None,
         }
     }
 }
@@ -116,9 +114,6 @@ impl SolverInterface for MockSolver {
     ) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
         let call = self.call_count;
         self.call_count += 1;
-        if self.infeasible_on_call == Some(call) {
-            return Err(SolverError::Infeasible);
-        }
         let obj = self.objectives[call % self.objectives.len()];
         Ok(cobre_solver::SolutionView {
             objective: obj,
@@ -232,16 +227,12 @@ fn simple_opening_tree(n_openings: usize) -> cobre_stochastic::OpeningTree {
         schedule: vec![],
     };
     let entity_order = vec![entity_id];
-    let decomposed = DecomposedCorrelation::build(
-        &corr_model,
-        &entity_order,
-        cobre_stochastic::ClassDimensions {
-            n_hydros: 1,
-            n_load_buses: 0,
-            n_ncs: 0,
-        },
-    )
-    .unwrap();
+    let dims = cobre_stochastic::ClassDimensions {
+        n_hydros: 1,
+        n_load_buses: 0,
+        n_ncs: 0,
+    };
+    let decomposed = DecomposedCorrelation::build(&corr_model, &entity_order, dims).unwrap();
 
     generate_opening_tree(
         42,
@@ -249,11 +240,7 @@ fn simple_opening_tree(n_openings: usize) -> cobre_stochastic::OpeningTree {
         1,
         &decomposed,
         &entity_order,
-        cobre_stochastic::ClassDimensions {
-            n_hydros: 1,
-            n_load_buses: 0,
-            n_ncs: 0,
-        },
+        dims,
         &OpeningTreeGenerationInputs::default(),
     )
     .unwrap()
@@ -483,7 +470,7 @@ mod stopping_rule_conformance {
                     // IterationLimit triggers at iter_limit=10.
                     // TimeLimit(3600) does NOT trigger (wall_time=1000s < 3600s).
                     // BoundStalling needs stalling_iters=5 entries; only 2 provided.
-                    let history = vec![99.0_f64, 100.0]; // history_len=2
+                    let history = vec![99.0_f64, 100.0];
                     let state = MonitorState {
                         iteration: iter_limit,
                         wall_time_seconds: 1000.0,

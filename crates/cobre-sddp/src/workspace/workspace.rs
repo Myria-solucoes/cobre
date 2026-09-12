@@ -344,8 +344,7 @@ impl CapturedBasis {
 /// on-demand via the growth-only resize semantics. Pass `0` for the backward
 /// fields (`max_openings`, `initial_pool_capacity`, `n_state`) on
 /// simulation-only workspaces, and for the forward fields (`max_local_fwd`,
-/// `total_forward_passes`, `noise_dim`) on backward-only or simulation-only
-/// workspaces.
+/// `noise_dim`) on backward-only or simulation-only workspaces.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorkspaceSizing {
     /// Number of hydro plants in the study.
@@ -374,8 +373,6 @@ pub struct WorkspaceSizing {
     /// Maximum forward-pass scenarios assigned to this rank; pre-sizes
     /// `ScratchBuffers::trajectory_costs_buf`.
     pub max_local_fwd: usize,
-    /// Total forward passes across all MPI ranks.
-    pub total_forward_passes: usize,
     /// Noise dimension for forward-pass sampling; pre-sizes
     /// `ScratchBuffers::raw_noise_buf`.
     pub noise_dim: usize,
@@ -861,6 +858,29 @@ pub struct WorkspacePool<S: SolverInterface> {
 }
 
 impl<S: SolverInterface> WorkspacePool<S> {
+    /// Build one workspace: size its [`PatchBuffer`] from `sizing` and
+    /// construct the [`SolverWorkspace`]. Shared tail of [`WorkspacePool::new`]
+    /// and [`WorkspacePool::try_new`], which differ only in how they obtain
+    /// `worker_id` and `solver`.
+    fn build_workspace(
+        rank: i32,
+        worker_id: i32,
+        solver: S,
+        n_state: usize,
+        sizing: WorkspaceSizing,
+    ) -> SolverWorkspace<S> {
+        let patch_buf = PatchBuffer::new(
+            sizing.hydro_count,
+            sizing.max_par_order,
+            sizing.n_load_buses,
+            sizing.max_blocks,
+            sizing.n_buckets,
+            sizing.n_anticipated,
+            sizing.k_max,
+        );
+        SolverWorkspace::new(rank, worker_id, solver, patch_buf, n_state, sizing)
+    }
+
     /// Construct a pool of `n_threads` independently allocated workspaces, each
     /// with a sequentially assigned `worker_id` in `0..n_threads` and a fresh
     /// solver from `solver_factory` (called once per thread).
@@ -883,16 +903,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
                 let worker_id =
                     i32::try_from(idx).expect("worker_id fits in i32 (rayon pools are small)");
                 let solver = solver_factory();
-                let patch_buf = PatchBuffer::new(
-                    sizing.hydro_count,
-                    sizing.max_par_order,
-                    sizing.n_load_buses,
-                    sizing.max_blocks,
-                    sizing.n_buckets,
-                    sizing.n_anticipated,
-                    sizing.k_max,
-                );
-                SolverWorkspace::new(rank, worker_id, solver, patch_buf, n_state, sizing)
+                Self::build_workspace(rank, worker_id, solver, n_state, sizing)
             })
             .collect();
         Self { workspaces }
@@ -922,17 +933,8 @@ impl<S: SolverInterface> WorkspacePool<S> {
             let worker_id =
                 i32::try_from(idx).expect("worker_id fits in i32 (rayon pools are small)");
             let solver = solver_factory()?;
-            let patch_buf = PatchBuffer::new(
-                sizing.hydro_count,
-                sizing.max_par_order,
-                sizing.n_load_buses,
-                sizing.max_blocks,
-                sizing.n_buckets,
-                sizing.n_anticipated,
-                sizing.k_max,
-            );
-            workspaces.push(SolverWorkspace::new(
-                rank, worker_id, solver, patch_buf, n_state, sizing,
+            workspaces.push(Self::build_workspace(
+                rank, worker_id, solver, n_state, sizing,
             ));
         }
         Ok(Self { workspaces })

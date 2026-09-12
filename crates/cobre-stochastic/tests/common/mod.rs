@@ -55,7 +55,8 @@ pub fn identity_correlation_model(entity_ids: &[i32]) -> CorrelationModel {
 
 pub fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
     let (entity_order, dims) = inflow_entity_order_and_dims(entity_ids);
-    DecomposedCorrelation::build(&correlation_model(entity_ids, 0.0), &entity_order, dims).unwrap()
+    DecomposedCorrelation::build(&identity_correlation_model(entity_ids), &entity_order, dims)
+        .unwrap()
 }
 
 pub fn correlated_correlation(entity_ids: &[i32], rho: f64) -> DecomposedCorrelation {

@@ -197,7 +197,8 @@ impl LhsPrecomputed {
 ///
 /// # Panics
 ///
-/// Panics if `output.len() < spec.dim`.
+/// Panics if `output.len() < spec.dim`. Panics (debug-only) if `spec.scenario`
+/// is out of range `0..ctx.n`.
 #[allow(clippy::cast_precision_loss)]
 pub fn sample_lhs_point(spec: &NoisePointSpec, ctx: &LhsPrecomputed, output: &mut [f64]) {
     assert!(
@@ -225,6 +226,12 @@ pub fn sample_lhs_point(spec: &NoisePointSpec, ctx: &LhsPrecomputed, output: &mu
     let uniform = unit_uniform();
 
     let scenario_idx = spec.scenario as usize;
+    debug_assert!(
+        scenario_idx < ctx.n,
+        "scenario {} out of range 0..{}",
+        spec.scenario,
+        ctx.n,
+    );
 
     for (d, slot) in output.iter_mut().take(spec.dim).enumerate() {
         let stratum = ctx.strata[d * ctx.n + scenario_idx];

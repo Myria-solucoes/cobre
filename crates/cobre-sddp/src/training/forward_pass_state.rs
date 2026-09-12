@@ -335,7 +335,8 @@ impl ForwardPassState {
     /// Returns `Err(SddpError::Infeasible { .. })` when a stage LP has no
     /// feasible solution. Returns `Err(SddpError::Solver(_))` for all other
     /// terminal LP solver failures. Returns `Err(SddpError::Stochastic(_))` if
-    /// `build_forward_sampler` fails.
+    /// `build_forward_sampler` fails, or if `rebuild_noise_tables` rejects an
+    /// out-of-sample class wider than the Sobol dimension capacity.
     ///
     /// # Panics (debug builds only)
     ///
@@ -1470,7 +1471,6 @@ mod tests {
         for inner in &state.worker_stage_stats {
             assert_eq!(inner.len(), 5);
         }
-        // Per-worker stat Vecs are pre-allocated with the given capacity.
         assert_eq!(state.worker_stats_before.capacity(), 3);
         assert_eq!(state.worker_stats_after.capacity(), 3);
         assert_eq!(state.worker_deltas.capacity(), 3);
@@ -1853,7 +1853,6 @@ mod tests {
 
         let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);
 
-        // First run: populates worker_stage_stats with the initial allocation.
         {
             let mut inputs = ForwardPassInputs {
                 workspaces: &mut fx.workspaces,
@@ -1880,7 +1879,6 @@ mod tests {
         let len_after_first = state.worker_stage_stats.len();
         let inner_len_after_first = state.worker_stage_stats[0].len();
 
-        // Second run: must reuse the inner allocations (no clear+rebuild).
         {
             let mut inputs = ForwardPassInputs {
                 workspaces: &mut fx.workspaces,

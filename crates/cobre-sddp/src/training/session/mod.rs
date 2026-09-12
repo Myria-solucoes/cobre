@@ -208,7 +208,6 @@ where
                 initial_pool_capacity: max_pool_capacity,
                 n_state: ranks.n_state,
                 max_local_fwd: ranks.max_local_fwd,
-                total_forward_passes,
                 noise_dim: training_ctx.stochastic.dim(),
                 n_anticipated: state.n_anticipated,
                 k_max: state.k_max,

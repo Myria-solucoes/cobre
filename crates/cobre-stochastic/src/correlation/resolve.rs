@@ -105,7 +105,7 @@ impl DecomposedCorrelation {
     ///
     /// # Panics
     ///
-    /// Panics if `dims.n_hydros + dims.n_load_buses + dims.n_ncs != entity_order.len()`.
+    /// Panics if `entity_order` fails [`ClassDimensions::assert_partitions`].
     ///
     /// # Examples
     ///
@@ -273,13 +273,7 @@ impl DecomposedCorrelation {
             .map(|entry| (entry.stage_id, entry.profile_name.clone()))
             .collect();
 
-        assert_eq!(
-            dims.n_hydros + dims.n_load_buses + dims.n_ncs,
-            entity_order.len(),
-            "entity_order length ({}) must equal dims.n_hydros + dims.n_load_buses + dims.n_ncs ({})",
-            entity_order.len(),
-            dims.n_hydros + dims.n_load_buses + dims.n_ncs,
-        );
+        dims.assert_partitions(entity_order);
 
         let inflow_order = &entity_order[..dims.n_hydros];
         let load_order = &entity_order[dims.n_hydros..dims.n_hydros + dims.n_load_buses];
@@ -345,8 +339,10 @@ impl DecomposedCorrelation {
     ///
     /// # Panics
     ///
-    /// Panics (debug-only) when `scratch` is smaller than twice the widest
-    /// matching group's entity count.
+    /// Panics when `scratch` is smaller than twice the widest matching
+    /// group's entity count; a debug build panics eagerly with a sized
+    /// message, a release build panics from the unconditional slice-bounds
+    /// check inside the split/index below.
     pub fn apply_groups_for_class(
         groups: &[GroupFactor],
         class: EntityClass,
@@ -411,13 +407,6 @@ mod tests {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn make_entity(id: i32) -> CorrelationEntity {
-        CorrelationEntity {
-            entity_type: "inflow".to_string(),
-            id: EntityId(id),
-        }
-    }
-
     fn make_entity_of_type(id: i32, entity_type: &str) -> CorrelationEntity {
         CorrelationEntity {
             entity_type: entity_type.to_string(),
@@ -426,27 +415,11 @@ mod tests {
     }
 
     fn identity_group(name: &str, entity_ids: &[i32]) -> CorrelationGroup {
-        let n = entity_ids.len();
-        let matrix: Vec<Vec<f64>> = (0..n)
-            .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
-            .collect();
-        CorrelationGroup {
-            name: name.to_string(),
-            entities: entity_ids.iter().copied().map(make_entity).collect(),
-            matrix,
-        }
+        make_group_with_type(name, entity_ids, 0.0, "inflow")
     }
 
     fn correlated_group(name: &str, entity_ids: &[i32], rho: f64) -> CorrelationGroup {
-        let n = entity_ids.len();
-        let matrix: Vec<Vec<f64>> = (0..n)
-            .map(|i| (0..n).map(|j| if i == j { 1.0 } else { rho }).collect())
-            .collect();
-        CorrelationGroup {
-            name: name.to_string(),
-            entities: entity_ids.iter().copied().map(make_entity).collect(),
-            matrix,
-        }
+        make_group_with_type(name, entity_ids, rho, "inflow")
     }
 
     fn make_group_with_type(
@@ -510,7 +483,6 @@ mod tests {
 
     #[test]
     fn build_single_non_default_profile_used_as_default() {
-        // Exactly one profile named "wet" — should become the implicit default.
         let model = single_profile_model("wet", vec![identity_group("g1", &[1])]);
         let dc = DecomposedCorrelation::build(
             &model,
@@ -598,12 +570,78 @@ mod tests {
         assert_eq!(dc.profile_for_stage(1), "default");
     }
 
+    #[test]
+    fn apply_groups_for_class_differs_between_scheduled_and_default_profile() {
+        // Same profiles/schedule as `build_with_schedule_mapping`: stage 0 -> "wet"
+        // (rho=0.8), stage 1 (unscheduled) -> "default" (identity).
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            CorrelationProfile {
+                groups: vec![identity_group("g1", &[1, 2])],
+            },
+        );
+        profiles.insert(
+            "wet".to_string(),
+            CorrelationProfile {
+                groups: vec![correlated_group("g1", &[1, 2], 0.8)],
+            },
+        );
+        let model = CorrelationModel {
+            method: "spectral".to_string(),
+            profiles,
+            schedule: vec![CorrelationScheduleEntry {
+                stage_id: 0,
+                profile_name: "wet".to_string(),
+            }],
+        };
+        let dc = build_two_entity_inflow(&model).unwrap();
+
+        let mut scratch = vec![0.0_f64; 4];
+        let mut stage0_noise = [1.0_f64, 0.0];
+        DecomposedCorrelation::apply_groups_for_class(
+            dc.groups_for_stage(0),
+            EntityClass::Inflow,
+            &mut stage0_noise,
+            &mut scratch,
+        );
+        let mut stage1_noise = [1.0_f64, 0.0];
+        DecomposedCorrelation::apply_groups_for_class(
+            dc.groups_for_stage(1),
+            EntityClass::Inflow,
+            &mut stage1_noise,
+            &mut scratch,
+        );
+
+        // Stage 0 ("wet", rho=0.8): z=[1,0] -> spectral D*[1,0] = [D[0][0], D[1][0]].
+        let d00 = f64::midpoint(f64::sqrt(1.8), f64::sqrt(0.2));
+        let d10 = (f64::sqrt(1.8) - f64::sqrt(0.2)) / 2.0;
+        assert!(
+            (stage0_noise[0] - d00).abs() < 1e-8,
+            "stage0_noise[0]={} (expected {d00})",
+            stage0_noise[0]
+        );
+        assert!(
+            (stage0_noise[1] - d10).abs() < 1e-8,
+            "stage0_noise[1]={} (expected {d10})",
+            stage0_noise[1]
+        );
+
+        // Stage 1 ("default", identity): z=[1,0] -> [1.0, 0.0], unchanged.
+        assert_eq!(stage1_noise, [1.0, 0.0]);
+
+        assert_ne!(
+            stage0_noise, stage1_noise,
+            "a stage-scheduled non-default profile must apply a different transform \
+             than the default profile"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Same-type entity validation tests
     // -----------------------------------------------------------------------
 
     fn mixed_type_group(name: &str) -> CorrelationGroup {
-        // One "inflow" entity and one "load" entity — intentionally invalid.
         CorrelationGroup {
             name: name.to_string(),
             entities: vec![
@@ -637,7 +675,6 @@ mod tests {
 
     #[test]
     fn test_build_accepts_same_type_entities() {
-        // All "inflow" — must succeed without error.
         let model = single_profile_model("default", vec![identity_group("g1", &[1, 2, 3])]);
         assert!(
             DecomposedCorrelation::build(

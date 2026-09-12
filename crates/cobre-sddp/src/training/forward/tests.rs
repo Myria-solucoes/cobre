@@ -2271,7 +2271,7 @@ fn truncation_clamps_negative_inflow_noise() {
     // Use zeta = 1.0 for simplicity (noise_scale = sigma).
     let mean_m3s = -1000.0_f64;
     let sigma = 1.0_f64;
-    let zeta = 1.0_f64; // simplified for test: treat zeta=1
+    let zeta = 1.0_f64;
     let base_rhs = zeta * mean_m3s;
     let noise_scale_val = zeta * sigma;
 
@@ -3073,7 +3073,7 @@ fn forward_pass_no_load_buses_unchanged() {
     ];
     let base_rows = vec![2usize, 2, 2];
     let initial_state = vec![0.0_f64; state.n_state];
-    let mut records = empty_records(3); // 1 scenario * 3 stages
+    let mut records = empty_records(3);
     let fcf = FutureCostFunction::new(3, state.n_state, 1, 10, &[0; 3]);
     let horizon = HorizonMode::Finite { num_stages: 3 };
     let mut basis_store = BasisStore::new(1, 3);
@@ -3082,10 +3082,10 @@ fn forward_pass_no_load_buses_unchanged() {
         geometry_per_stage: &[],
         templates: &templates,
         base_rows: &base_rows,
-        noise_scale: &[], // noise_scale empty when n_hydros=0
-        n_hydros: 0,      // skip inflow noise loop (minimal_template_1_0 has 1 row)
+        noise_scale: &[],
+        n_hydros: 0, // skip inflow noise loop (minimal_template_1_0 has 1 row)
         cost_scale_factor: 1_000_000.0,
-        n_load_buses: 0, // no load patches
+        n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
         block_counts_per_stage: &[1, 1, 1],
@@ -3153,7 +3153,6 @@ fn forward_pass_no_load_buses_unchanged() {
         "forward_patch_count must be N=1 when n_load_buses=0, got {}",
         ws.patch_buf.forward_patch_count()
     );
-    // load_rhs_buf must remain empty (never pushed to).
     assert!(
         ws.scratch.load_rhs_buf.is_empty(),
         "load_rhs_buf must be empty when n_load_buses=0"
@@ -3175,7 +3174,6 @@ fn empty_delta_batch() -> RowBatch {
 
 #[test]
 fn test_build_delta_empty_pool() {
-    // Empty pool → num_rows == 0, row_starts == [0], col_indices empty.
     let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     let state = test_support::state_layout(1, 0);
     let mut batch = empty_delta_batch();
@@ -3347,29 +3345,13 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
 
 #[test]
 fn test_build_delta_sparse_path() {
-    // State layout with non-empty nonzero_state_indices (sparse path).
-    // Verify that the emitted col_indices for the cut contain exactly
-    // nonzero_state_indices.len() + 1 entries (mask entries plus theta).
-    //
-    // State layout (n_hydro, n_lag): n_state = n_hydro * (1 + n_lag)
-    // With n_hydro=2, n_lag=0: n_state=2, no lags, sparse mask is empty.
-    // We need a lag to get a nonzero_state_indices mask.
-    // With n_hydro=1, n_lag=1: n_state=2, nonzero_state_indices=[0,1] (len=2)
-    // for a cut that touches both state components.
-    //
-    // Actually we verify against the existing build_cut_row_batch_into for
-    // correctness, which already tests the sparse path thoroughly.
-    // Here we just verify col_indices.len() == mask.len() + 1 per row.
-
-    // n_hydro=1, n_lag=1: n_state=2 (vol + lag).
-    // nonzero_state_indices should be non-empty (check via indexer).
+    // n_hydro=1, n_lag=1 gives a non-empty nonzero_state_indices mask (n_state=2);
+    // full sparse-path correctness is covered by build_cut_row_batch_into's own
+    // tests — this only checks col_indices.len() == mask.len() + 1 per row.
     let state = test_support::state_layout(1, 1);
-    // nonzero_state_indices is the mask for non-trivially-zero state dims.
     let mask_len = state.nonzero_state_indices.len();
 
-    // Only proceed if this indexer actually uses the sparse path.
     if mask_len == 0 {
-        // Sparse path not active for this indexer; skip the assertion.
         return;
     }
 
@@ -3658,7 +3640,6 @@ mod dcs_forward {
             initial_pool_capacity: 16,
             n_state: 1,
             max_local_fwd: 1,
-            total_forward_passes: 1,
             noise_dim: 1,
             n_anticipated: 0,
             k_max: 0,
@@ -4050,7 +4031,6 @@ mod transit_bucket_copy_gap {
             initial_pool_capacity: 16,
             n_state: 4,
             max_local_fwd: 1,
-            total_forward_passes: 1,
             noise_dim: 1,
             n_anticipated: 1,
             k_max: 1,

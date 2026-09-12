@@ -1751,7 +1751,6 @@ pub fn capture_patched_node_template(setup: &StudySetup, node_pos: NodePos) -> S
         initial_pool_capacity: 0,
         n_state: space.n_state,
         max_local_fwd: 0,
-        total_forward_passes: 0,
         noise_dim: 0,
         n_anticipated: space.n_anticipated,
         k_max: space.k_max,

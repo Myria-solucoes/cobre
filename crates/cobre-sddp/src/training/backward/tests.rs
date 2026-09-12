@@ -4151,7 +4151,6 @@ fn decompose_overhead(
 /// Scheduling = 250 - 200 = 50.
 #[test]
 fn decompose_four_workers_different_solve_times() {
-    // All setup times are zero; use only solve time to isolate imbalance.
     let zero = SolverStatistics::default();
     let pairs = vec![
         (zero.clone(), make_stats(0.1, 0.0, 0.0, 0.0)), // 100 ms solve
@@ -4162,12 +4161,10 @@ fn decompose_four_workers_different_solve_times() {
     let (setup_ms, imbalance_ms, scheduling_ms) = decompose_overhead(&pairs, 250);
 
     assert_eq!(setup_ms, 0, "no setup work expected");
-    // f64 mean = 157.5; imbalance = trunc(200.0 - 157.5) = trunc(42.5) = 42
     assert_eq!(
         imbalance_ms, 42,
         "imbalance = trunc(max(200.0) - avg(157.5)) = trunc(42.5) = 42"
     );
-    // scheduling = 250 - 200 = 50
     assert_eq!(scheduling_ms, 50, "scheduling overhead = wall - max_worker");
 }
 
@@ -5757,7 +5754,6 @@ fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
         initial_pool_capacity: 16,
         n_state: 1,
         max_local_fwd: 1,
-        total_forward_passes: 1,
         noise_dim: 1,
         n_anticipated: 0,
         k_max: 0,

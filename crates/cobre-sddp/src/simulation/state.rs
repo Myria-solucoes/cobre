@@ -14,7 +14,6 @@
 //! setup amortised across the simulation's per-scenario LP solves.
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use cobre_comm::Communicator;
@@ -483,7 +482,6 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     params: &SimWorkerParams<'_>,
 ) -> Result<(WorkerCosts, WorkerStats), SimulationError> {
     let (start_local, end_local) = partition(params.local_count, params.n_workers, w);
-    let worker_sender: Option<Sender<TrainingEvent>> = params.output.event_sender.clone();
     let n_scenarios = end_local - start_local;
     let mut worker_costs = Vec::with_capacity(n_scenarios);
     let mut worker_stats = Vec::with_capacity(n_scenarios);
@@ -505,7 +503,6 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     for local_idx in start_local..end_local {
         #[allow(clippy::cast_possible_truncation)]
         let scenario_id = (params.scenario_start + local_idx) as u32;
-        let global_scenario = scenario_id;
 
         let stats_before = ws.solver.statistics();
         let load_spec = SimScenarioLoadSpec {
@@ -525,7 +522,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
             params.output,
             &mut ScenarioIds {
                 scenario_id,
-                global_scenario,
+                global_scenario: scenario_id,
                 num_stages: params.num_stages,
                 total_scenarios: params.config.n_scenarios,
                 raw_noise_buf: &mut raw_noise_buf,
@@ -560,7 +557,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
             .min(params.config.n_scenarios);
         #[allow(clippy::cast_possible_truncation)]
         emit_sim_progress(
-            worker_sender.as_ref(),
+            params.output.event_sender.as_ref(),
             total_cost,
             scenario_solve_time_ms,
             scenario_lp_solves,

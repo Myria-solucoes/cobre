@@ -806,7 +806,6 @@ fn simulation_load_patches_applied() {
 
     let mut workspaces = single_workspace_with_load_buses(solver, n_load_buses);
 
-    // load_balance_row_starts[0]=2 (load balance row is row 2 in the template).
     // load_bus_indices=[0] (bus position 0 in the block layout).
     let load_balance_row_starts = vec![2usize];
     let load_bus_indices = vec![0usize];
@@ -2056,7 +2055,6 @@ mod dcs_simulation {
             initial_pool_capacity: 16,
             n_state: 1,
             max_local_fwd: 1,
-            total_forward_passes: 1,
             noise_dim: 1,
             n_anticipated: 0,
             k_max: 0,
@@ -2510,7 +2508,6 @@ mod anticipated_ring_matches_forward_propagation {
             initial_pool_capacity: 16,
             n_state,
             max_local_fwd: 1,
-            total_forward_passes: 1,
             noise_dim: 0,
             n_anticipated: 1,
             k_max: 2,

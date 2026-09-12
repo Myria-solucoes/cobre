@@ -363,7 +363,6 @@ impl StudySetup {
                 n_state: self.stage_data.state.n_state,
                 // Simulation-only pool: forward-worker scratch fields unused.
                 max_local_fwd: 0,
-                total_forward_passes: 0,
                 noise_dim: 0,
                 n_anticipated: self.stage_data.state.n_anticipated,
                 k_max: self.stage_data.state.k_max,

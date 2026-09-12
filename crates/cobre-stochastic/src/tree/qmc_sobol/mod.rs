@@ -40,6 +40,15 @@ pub(crate) const MAX_SOBOL_DIM: usize = SOBOL_MAX_DIM;
 /// `1.0 / 2^32`, scaling a uniform u32 to a float in `[0, 1)`.
 const INV_2_32: f64 = 1.0 / 4_294_967_296.0;
 
+/// Applies Matousek linear scrambling to a raw Sobol coordinate, then maps the
+/// result to N(0,1) via `norm_quantile`.
+#[inline]
+fn scramble_to_normal(x: u32, a: u32, b: u32) -> f64 {
+    let xp = a.wrapping_mul(x).wrapping_add(b);
+    let u = (f64::from(xp) * INV_2_32).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+    norm_quantile(u)
+}
+
 /// Build the full 32-bit direction vectors for each of the `dim` dimensions.
 ///
 /// Returns `result[d][j]`: the `j`-th direction number for dimension `d`, its
@@ -143,9 +152,7 @@ pub fn generate_qmc_sobol(
 
     for d in 0..dim {
         let (a, b) = scramble[d];
-        let xp = a.wrapping_mul(sobol_state[d]).wrapping_add(b);
-        let u = (f64::from(xp) * INV_2_32).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-        output[d] = norm_quantile(u);
+        output[d] = scramble_to_normal(sobol_state[d], a, b);
     }
 
     // Gray-code recurrence: for point i, XOR direction c = i.trailing_zeros()
@@ -156,9 +163,7 @@ pub fn generate_qmc_sobol(
         for d in 0..dim {
             sobol_state[d] ^= directions[d][c];
             let (a, b) = scramble[d];
-            let xp = a.wrapping_mul(sobol_state[d]).wrapping_add(b);
-            let u = (f64::from(xp) * INV_2_32).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-            output[i * dim + d] = norm_quantile(u);
+            output[i * dim + d] = scramble_to_normal(sobol_state[d], a, b);
         }
     }
 }
@@ -217,9 +222,7 @@ pub fn scrambled_sobol_point(spec: &NoisePointSpec, ctx: &SobolPrecomputed, outp
         }
 
         let (a, b) = ctx.scramble[d];
-        let xp = a.wrapping_mul(xd).wrapping_add(b);
-        let u = (f64::from(xp) * INV_2_32).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-        *out = norm_quantile(u);
+        *out = scramble_to_normal(xd, a, b);
     }
 }
 
