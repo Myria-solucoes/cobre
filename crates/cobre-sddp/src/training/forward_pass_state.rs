@@ -473,9 +473,7 @@ impl ForwardPassState {
             inputs.terminal_has_boundary_cuts,
         )?;
 
-        // Re-size the per-worker per-stage accumulators: the worker count may
-        // differ from `new()` if the pool shrank. Fast path resets in place when
-        // the shape is unchanged; otherwise rebuild to `(n_workers, num_stages)`.
+        // The worker count may differ from `new()` if the pool shrank.
         let shape_matches = self.worker_stage_stats.len() == n_workers
             && self.worker_stage_stats.first().map_or(0, Vec::len) == num_stages;
         if shape_matches {
@@ -499,9 +497,8 @@ impl ForwardPassState {
         self.worker_stats_before
             .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
 
-        // Apply the forward-phase solver profile to every workspace. `set_profile`
-        // is delta-tracked: it issues solver-option FFI calls only for fields that
-        // differ from each solver's current state.
+        // `set_profile` is delta-tracked: it issues solver-option FFI calls only
+        // for fields that differ from each solver's current state.
         let forward_profile = self.profile;
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&forward_profile);

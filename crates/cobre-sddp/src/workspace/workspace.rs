@@ -1067,7 +1067,6 @@ impl BasisStore {
         let total_scenarios = self.num_scenarios();
         let mut slices = Vec::with_capacity(n_workers);
         let mut bases_rem = self.bases.as_mut_slice();
-        let mut offset = 0usize;
 
         for w in 0..n_workers {
             let (start, end) = partition(total_scenarios, n_workers, w);
@@ -1077,10 +1076,9 @@ impl BasisStore {
             bases_rem = bases_rest;
             slices.push(BasisStoreSliceMut {
                 bases: bases_left,
-                scenario_offset: offset,
+                scenario_offset: start,
                 num_nodes: self.num_nodes,
             });
-            offset += count;
         }
         slices
     }

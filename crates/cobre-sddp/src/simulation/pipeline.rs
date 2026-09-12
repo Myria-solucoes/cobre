@@ -201,7 +201,6 @@ pub(crate) struct ScenarioIds<'a> {
     /// the transition draw — the scenario's own native id, mirroring how a
     /// training forward pass's global scenario index plays the same role.
     pub(crate) global_scenario: u32,
-    /// Total number of stages in the planning horizon.
     pub(crate) num_stages: usize,
     /// Total simulation scenario count, passed to `SampleRequest::total_scenarios`.
     pub(crate) total_scenarios: u32,
@@ -453,8 +452,8 @@ pub(crate) fn solve_simulation_stage<S: SolverInterface>(
 
     // mem::take (capacity retained) so these can be filled from `view` slices tied
     // to `ws` while `&mut ws` is live; restored at function end for buffer reuse.
-    let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
-    let mut unscaled_dual: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_dual);
+    let mut unscaled_primal = std::mem::take(&mut ws.scratch.unscaled_primal);
+    let mut unscaled_dual = std::mem::take(&mut ws.scratch.unscaled_dual);
 
     let col_scale = &ctx.template(t).col_scale;
     let row_scale = &ctx.template(t).row_scale;
@@ -677,11 +676,8 @@ pub(crate) fn extract_sim_stage_result(
     let ncs_n = output.n_ncs;
     let ncs_col_start = output.ncs_col_starts.get(t.0).copied().unwrap_or(0);
     let stage_n_blks = ctx.block_count(t);
-    // Pumping-flow column base for this stage; `StageLayout` is its sole owner.
     let pumping_col_start = output.pumping_col_starts.get(t.0).copied().unwrap_or(0);
     let n_pumping = output.n_pumping;
-    // Per-stage geometry: a single global stage-0 geometry would mis-stride any
-    // stage with a differing block count.
     debug_assert!(
         output.geometry_per_stage.is_empty()
             || output.geometry_per_stage.len() == ctx.templates.len(),

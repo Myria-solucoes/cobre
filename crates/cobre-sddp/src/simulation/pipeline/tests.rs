@@ -2105,7 +2105,7 @@ mod dcs_simulation {
             z_inflow_row_start,
             ..StageGeometry::default()
         }];
-        let templates = vec![core.clone()];
+        let templates = vec![core];
         let base_rows = vec![0_usize];
         let stochastic = super::make_stochastic_context(1);
         let horizon = HorizonMode::Finite { num_stages: 1 };
@@ -2217,7 +2217,7 @@ mod dcs_simulation {
             warm_basis: None,
         };
         let lookups = SimLookups::build(
-            &test_support::study_dims(),
+            &study_dims,
             &[],
             &test_support::identity_hydro_cell_index(256),
             0,

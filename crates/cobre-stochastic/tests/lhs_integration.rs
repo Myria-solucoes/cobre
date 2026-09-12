@@ -54,6 +54,10 @@ fn norm_cdf(z: f64) -> f64 {
     0.5 * (1.0 + approx_erf(z / std::f64::consts::SQRT_2))
 }
 
+fn cdf_floor_stratum(z: f64, n: usize, n_f: f64) -> usize {
+    ((norm_cdf(z) * n_f).floor() as usize).min(n - 1)
+}
+
 fn make_stage_lhs(index: usize, id: i32, branching_factor: usize) -> Stage {
     Stage {
         index,
@@ -323,11 +327,7 @@ fn lhs_marginal_uniformity() {
     let n_f = n as f64;
     for d in 0..dim {
         let mut strata: Vec<usize> = (0..n)
-            .map(|k| {
-                let z = tree.opening(0, k)[d];
-                let p = norm_cdf(z);
-                ((p * n_f).floor() as usize).min(n - 1)
-            })
+            .map(|k| cdf_floor_stratum(tree.opening(0, k)[d], n, n_f))
             .collect();
         strata.sort_unstable();
         let expected: Vec<usize> = (0..n).collect();
@@ -366,11 +366,7 @@ fn lhs_no_stratum_collision() {
     let n_f = n as f64;
     for d in 0..dim {
         let mut strata: Vec<usize> = (0..n)
-            .map(|k| {
-                let z = tree.opening(0, k)[d];
-                let p = norm_cdf(z);
-                ((p * n_f).floor() as usize).min(n - 1)
-            })
+            .map(|k| cdf_floor_stratum(tree.opening(0, k)[d], n, n_f))
             .collect();
         let original_len = strata.len();
         strata.sort_unstable();
@@ -538,9 +534,7 @@ fn lhs_point_wise_stratum_consistency() {
         sample_lhs_point(&spec, &ctx, &mut output);
 
         for (d, &v) in output.iter().enumerate() {
-            let p = norm_cdf(v);
-            let stratum = ((p * n_f).floor() as usize).min(n - 1);
-            strata_by_dim[d].push(stratum);
+            strata_by_dim[d].push(cdf_floor_stratum(v, n, n_f));
         }
     }
 

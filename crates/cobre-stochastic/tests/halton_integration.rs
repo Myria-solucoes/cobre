@@ -139,11 +139,7 @@ fn inflow_entity_order_and_dims(entity_ids: &[i32]) -> (Vec<EntityId>, ClassDime
 }
 
 fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
-    let n = entity_ids.len();
-    let matrix: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
-        .collect();
-    let model = correlation_model_from_matrix(entity_ids, matrix);
+    let model = identity_correlation_model(entity_ids);
     let (entity_order, dims) = inflow_entity_order_and_dims(entity_ids);
     DecomposedCorrelation::build(&model, &entity_order, dims).unwrap()
 }

@@ -949,8 +949,6 @@ fn dual_extraction_formula_coefficients_are_negated_duals() {
 #[test]
 fn intercept_formula_matches_spec() {
     // alpha = Q - pi^T * x_hat
-    // Given: objective=50.0, pi=[2.0, -1.0], x_hat=[10.0, 5.0]
-    // Expected: alpha = 50.0 - (2.0*10.0 + (-1.0)*5.0) = 50.0 - 15.0 = 35.0
     let objective = 50.0_f64;
     let coefficients = [2.0_f64, -1.0_f64];
     let x_hat = [10.0_f64, 5.0_f64];
@@ -1079,7 +1077,6 @@ fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
 
-    // Two trial points with states [10.0] and [20.0] at stage 0.
     let (mut exchange, records) =
         exchange_and_records(n_state, &[vec![10.0], vec![20.0]], n_stages);
 
@@ -1088,9 +1085,6 @@ fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
     };
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
-    // MockSolver returns objective=100.0, dual[0]=-5.0 for every solve.
-    // With x_hat=[10.0]: pi=[5.0], alpha = 100 - 5*10 = 50.
-    // With x_hat=[20.0]: pi=[5.0], alpha = 100 - 5*20 = 0 (could be negative).
     let solution = solution_1_0(100.0, -5.0);
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm;
@@ -1589,8 +1583,6 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
 
 #[test]
 fn expectation_aggregation_mean_of_per_opening_intercepts() {
-    // Given 3 openings with uniform probability 1/3 and per-opening
-    // intercepts [10.0, 20.0, 30.0], the aggregated intercept must be 20.0.
     use BackwardOutcome as BO;
 
     let outcomes = vec![
@@ -1623,18 +1615,8 @@ fn expectation_aggregation_mean_of_per_opening_intercepts() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
-    // Integration test: verify that the backward pass uses the correct
-    // dual extraction formula by checking cuts in the FCF.
-    //
-    // Setup: 2-stage, N=1, L=0, 1 opening, 1 trial point.
-    //   dual[0] = -3.0 (storage-fixing dual from MockSolver)
-    //   objective = 80.0
-    //   x_hat = [10.0]
-    //
-    // Expected (coefficients = dual, not -dual):
-    //   pi[0] = dual[0] = -3.0
-    //   intercept = 80.0 - (-3.0) * 10.0 = 110.0
-    //   coefficients = [-3.0]
+    // Cut coefficients equal the raw dual, not its negation (sddp.md
+    // Benders cut sign & subgradient extraction).
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = test_support::state_layout(1, 0);
@@ -1652,7 +1634,6 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     };
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
-    // dual[0] = -3.0, objective = 80.0
     let solution = solution_1_0(80.0, -3.0);
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm;
@@ -1748,17 +1729,9 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn cut_gradient_sign_physically_correct() {
-    // Regression test for the Benders cut sign bug.
-    //
-    // Physical invariant: more initial storage → lower future cost.
-    // The storage-fixing dual π is negative (shadow price of relaxing
-    // the fixing constraint increases cost when storage decreases).
-    //
-    // Correct: coefficient = π < 0, so the cut slope is negative
-    //   (more storage → lower cut value → lower theta → lower total cost).
-    //
-    // Old bug: coefficient = -π > 0, so the cut slope was positive
-    //   (more storage → higher cut value → wrong incentive).
+    // Physical invariant: more initial storage → lower future cost, so the
+    // storage-fixing dual π (negative) is kept as the cut coefficient, not
+    // negated (sddp.md Benders cut sign & subgradient extraction).
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = test_support::state_layout(1, 0);
@@ -1776,8 +1749,6 @@ fn cut_gradient_sign_physically_correct() {
     };
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
-    // dual[0] = -2.0 (negative: more storage → less cost)
-    // objective = 100.0, x_hat = 50.0
     let solution = solution_1_0(100.0, -2.0);
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm;
@@ -1858,8 +1829,6 @@ fn cut_gradient_sign_physically_correct() {
     assert_eq!(cuts.len(), 1, "expected exactly one cut");
     let (_, _intercept, coefficients) = &cuts[0];
 
-    // The coefficient must be negative (same sign as the dual).
-    // The old bug would produce +2.0 here instead of -2.0.
     assert!(
         coefficients[0] < 0.0,
         "cut coefficient must be negative (more storage → less future cost), \
@@ -1886,8 +1855,6 @@ fn cut_is_tight_at_trial_state() {
     //
     // If the sign is wrong (coefficient = -π instead of π), then:
     //   intercept + (-π) * x̂ ≠ Q(x̂) in general
-    //
-    // This test verifies the tightness property.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = test_support::state_layout(1, 0);

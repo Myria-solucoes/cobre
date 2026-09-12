@@ -543,21 +543,11 @@ pub fn build_forward_sampler(
 
     // Correlation refs are set only for OutOfSample; pre-correlated sources must
     // not be correlated again.
-    let inflow_correlation = if matches!(inflow_scheme, SamplingScheme::OutOfSample) {
-        Some(correlation)
-    } else {
-        None
-    };
-    let load_correlation = if matches!(load_scheme, SamplingScheme::OutOfSample) {
-        Some(correlation)
-    } else {
-        None
-    };
-    let ncs_correlation = if matches!(ncs_scheme, SamplingScheme::OutOfSample) {
-        Some(correlation)
-    } else {
-        None
-    };
+    let inflow_correlation =
+        matches!(inflow_scheme, SamplingScheme::OutOfSample).then_some(correlation);
+    let load_correlation =
+        matches!(load_scheme, SamplingScheme::OutOfSample).then_some(correlation);
+    let ncs_correlation = matches!(ncs_scheme, SamplingScheme::OutOfSample).then_some(correlation);
 
     Ok(ForwardSampler::new(
         inflow,

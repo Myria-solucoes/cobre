@@ -7,7 +7,7 @@
 //! Non-positive-definite matrices do not error; negative eigenvalues are clipped
 //! to 0.0 (nearest PSD approximation).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cobre_core::{CorrelationModel, EntityId};
 
@@ -188,21 +188,18 @@ impl DecomposedCorrelation {
             }
 
             // Overlapping groups (an entity ID in more than one group) produce incorrect covariance.
-            {
-                let mut seen: std::collections::HashSet<EntityId> =
-                    std::collections::HashSet::new();
-                for group in &profile.groups {
-                    for entity in &group.entities {
-                        if !seen.insert(entity.id) {
-                            return Err(StochasticError::InvalidCorrelation {
-                                profile_name: profile_name.clone(),
-                                reason: format!(
-                                    "entity ID {} appears in more than one correlation group \
-                                     within profile '{}'; groups must be disjoint",
-                                    entity.id.0, profile_name,
-                                ),
-                            });
-                        }
+            let mut seen: HashSet<EntityId> = HashSet::new();
+            for group in &profile.groups {
+                for entity in &group.entities {
+                    if !seen.insert(entity.id) {
+                        return Err(StochasticError::InvalidCorrelation {
+                            profile_name: profile_name.clone(),
+                            reason: format!(
+                                "entity ID {} appears in more than one correlation group \
+                                 within profile '{}'; groups must be disjoint",
+                                entity.id.0, profile_name,
+                            ),
+                        });
                     }
                 }
             }

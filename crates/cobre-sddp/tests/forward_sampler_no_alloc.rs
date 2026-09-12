@@ -310,47 +310,37 @@ fn out_of_sample_forward_draw_allocates_nothing() {
     let mut noise_buf = vec![0.0f64; dim];
     let mut corr_scratch = vec![0.0f64; 2 * dim];
 
-    // Warm up every stage once so any first-draw buffer growth happens before
-    // the counter resets; a warm-up allocation is one-time, not per draw.
-    for stage_idx in 0..3_usize {
+    let mut sample_stage = |stage_idx: usize, scenario: u32| {
+        let stage_u32 = u32::try_from(stage_idx).unwrap();
         sampler
             .sample(SampleRequest {
                 iteration: 0,
-                scenario: 0,
-                stage: u32::try_from(stage_idx).unwrap(),
+                scenario,
+                stage: stage_u32,
                 stage_idx,
                 noise_buf: &mut noise_buf,
                 corr_scratch: &mut corr_scratch,
                 total_scenarios,
-                noise_group_id: u32::try_from(stage_idx).unwrap(),
+                noise_group_id: stage_u32,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
                 tables: &tables,
             })
             .unwrap();
+    };
+
+    // Warm up every stage once so any first-draw buffer growth happens before
+    // the counter resets; a warm-up allocation is one-time, not per draw.
+    for stage_idx in 0..3_usize {
+        sample_stage(stage_idx, 0);
     }
 
     reset_alloc_count();
 
     for stage_idx in 0..3_usize {
         for scenario in 0..total_scenarios {
-            sampler
-                .sample(SampleRequest {
-                    iteration: 0,
-                    scenario,
-                    stage: u32::try_from(stage_idx).unwrap(),
-                    stage_idx,
-                    noise_buf: &mut noise_buf,
-                    corr_scratch: &mut corr_scratch,
-                    total_scenarios,
-                    noise_group_id: u32::try_from(stage_idx).unwrap(),
-                    node_opening_offset: 0,
-                    node_opening_len: 0,
-                    pinned_scenario: None,
-                    tables: &tables,
-                })
-                .unwrap();
+            sample_stage(stage_idx, scenario);
         }
     }
 

@@ -318,6 +318,8 @@ impl SimulationState {
                 &sampler,
                 &self.noise_tables,
                 sim_start,
+                n_workers,
+                world_size,
             )?,
             Traversal::Enumerated(plan) => {
                 let k = plan.paths.leaf.len();
@@ -400,12 +402,12 @@ fn run_sampled_simulation<S: SolverInterface + Send, C: Communicator>(
     sampler: &ForwardSampler<'_>,
     noise_tables: &ForwardNoiseTables,
     sim_start: Instant,
+    n_workers: usize,
+    world_size: u32,
 ) -> Result<(WorkerCosts, WorkerStats), SimulationError> {
     let training_ctx = inputs.training_ctx;
     let num_stages = training_ctx.horizon.num_stages();
     let rank = inputs.comm.rank();
-    let n_workers = inputs.workspaces.len().max(1);
-    let world_size = u32::try_from(inputs.comm.size()).unwrap_or(1).max(1);
     let scenarios_complete = AtomicU32::new(0);
 
     let scenario_range = assign_scenarios(inputs.config.n_scenarios, rank, inputs.comm.size());

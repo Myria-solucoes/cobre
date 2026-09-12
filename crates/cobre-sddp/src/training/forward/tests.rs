@@ -69,7 +69,6 @@ struct MockSolver {
 }
 
 impl MockSolver {
-    /// Create a solver that always returns `solution`.
     fn always_ok(solution: LpSolution) -> Self {
         let buf_primal = solution.primal.clone();
         let buf_dual = solution.dual.clone();
@@ -85,7 +84,6 @@ impl MockSolver {
         }
     }
 
-    /// Create a solver that returns infeasible on the `n`-th solve call.
     fn infeasible_on(solution: LpSolution, n: usize) -> Self {
         let buf_primal = solution.primal.clone();
         let buf_dual = solution.dual.clone();
