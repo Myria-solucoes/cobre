@@ -31,6 +31,7 @@ use crate::noise::{
     rng::rng_from_seed,
     seed::{derive_opening_seed, derive_stage_seed},
 };
+use crate::tree::point_spec::NoisePointSpec;
 
 /// Maximum supported Sobol dimension: dimension 1 (van der Corput) plus the
 /// Joe-Kuo entries in `SOBOL_DIRECTIONS`.
@@ -189,19 +190,13 @@ impl SobolPrecomputed {
     }
 }
 
-/// Generate one scenario's noise vector using a precomputed Sobol context.
-///
-/// Same as [`scrambled_sobol_point`] but avoids recomputing the direction
-/// matrix and scramble parameters per call.
+/// Generate one scenario's noise vector from a precomputed direction matrix
+/// and scramble parameters.
 ///
 /// # Panics
 ///
 /// Panics if `output.len() < spec.dim` or `spec.dim > MAX_SOBOL_DIM`.
-pub fn scrambled_sobol_point_precomputed(
-    spec: &SobolPointSpec,
-    ctx: &SobolPrecomputed,
-    output: &mut [f64],
-) {
+pub fn scrambled_sobol_point(spec: &NoisePointSpec, ctx: &SobolPrecomputed, output: &mut [f64]) {
     assert!(
         output.len() >= spec.dim,
         "output too short: need {}, got {}",
@@ -228,33 +223,14 @@ pub fn scrambled_sobol_point_precomputed(
     }
 }
 
-/// Configuration for single-scenario Sobol point generation.
-///
-/// Bundles the parameters needed by [`scrambled_sobol_point`] to generate
-/// one scenario's noise vector without inter-worker coordination.
-#[derive(Debug, Clone, Copy)]
-pub struct SobolPointSpec {
-    /// Forward-pass base seed.
-    pub sampling_seed: u64,
-    /// Training iteration index.
-    pub iteration: u32,
-    /// Global scenario index in `0..total_scenarios`.
-    pub scenario: u32,
-    /// Stage domain identifier.
-    pub stage_id: u32,
-    /// Total forward scenarios per iteration.
-    pub total_scenarios: u32,
-    /// Noise vector dimension.
-    pub dim: usize,
-}
-
-/// Generate one scenario's noise vector using scrambled Sobol QMC with direct
-/// binary decomposition, independent of all other scenarios.
+/// Derives the direction matrix and scramble parameters per call; this is the
+/// reference `scrambled_sobol_point` is tested against.
 ///
 /// # Panics
 ///
 /// Panics if `output.len() < spec.dim` or `spec.dim > MAX_SOBOL_DIM`.
-pub fn scrambled_sobol_point(spec: &SobolPointSpec, output: &mut [f64]) {
+#[cfg(test)]
+pub(crate) fn scrambled_sobol_point_reference(spec: &NoisePointSpec, output: &mut [f64]) {
     assert!(
         output.len() >= spec.dim,
         "output too short: need {}, got {}",
@@ -307,8 +283,8 @@ pub fn scrambled_sobol_point(spec: &SobolPointSpec, output: &mut [f64]) {
 )]
 mod tests {
     use super::{
-        INV_2_32, MAX_SOBOL_DIM, SobolPointSpec, build_direction_matrix, generate_qmc_sobol,
-        scrambled_sobol_point,
+        INV_2_32, MAX_SOBOL_DIM, NoisePointSpec, SobolPrecomputed, build_direction_matrix,
+        generate_qmc_sobol, scrambled_sobol_point, scrambled_sobol_point_reference,
     };
 
     /// Generate unscrambled Gray-code Sobol points in `[0,1)` for regression testing.
@@ -379,11 +355,11 @@ mod tests {
         assert_eq!(output.len(), n_openings * dim);
     }
 
-    /// Same `SobolPointSpec` must produce bitwise identical output.
+    /// Same `NoisePointSpec` must produce bitwise identical output.
     #[test]
     fn test_sobol_point_determinism() {
         let dim = 2;
-        let spec = SobolPointSpec {
+        let spec = NoisePointSpec {
             sampling_seed: 42,
             iteration: 0,
             scenario: 0,
@@ -393,8 +369,8 @@ mod tests {
         };
         let mut out1 = vec![0.0_f64; dim];
         let mut out2 = vec![0.0_f64; dim];
-        scrambled_sobol_point(&spec, &mut out1);
-        scrambled_sobol_point(&spec, &mut out2);
+        scrambled_sobol_point_reference(&spec, &mut out1);
+        scrambled_sobol_point_reference(&spec, &mut out2);
         assert_eq!(out1, out2, "scrambled_sobol_point is not deterministic");
     }
 
@@ -402,7 +378,7 @@ mod tests {
     #[test]
     fn test_sobol_point_different_seeds_differ() {
         let dim = 3;
-        let base_spec = SobolPointSpec {
+        let base_spec = NoisePointSpec {
             sampling_seed: 42,
             iteration: 0,
             scenario: 5,
@@ -412,9 +388,9 @@ mod tests {
         };
         let mut out1 = vec![0.0_f64; dim];
         let mut out2 = vec![0.0_f64; dim];
-        scrambled_sobol_point(&base_spec, &mut out1);
-        scrambled_sobol_point(
-            &SobolPointSpec {
+        scrambled_sobol_point_reference(&base_spec, &mut out1);
+        scrambled_sobol_point_reference(
+            &NoisePointSpec {
                 sampling_seed: 43,
                 ..base_spec
             },
@@ -432,7 +408,7 @@ mod tests {
         let n = 64_usize;
         let dim = 4;
         for scenario in 0..n {
-            let spec = SobolPointSpec {
+            let spec = NoisePointSpec {
                 sampling_seed: 42,
                 iteration: 0,
                 scenario: scenario as u32,
@@ -441,11 +417,41 @@ mod tests {
                 dim,
             };
             let mut output = vec![0.0_f64; dim];
-            scrambled_sobol_point(&spec, &mut output);
+            scrambled_sobol_point_reference(&spec, &mut output);
             for (d, &v) in output.iter().enumerate() {
                 assert!(
                     v.is_finite(),
                     "non-finite at scenario={scenario}, dim={d}: {v}"
+                );
+            }
+        }
+    }
+
+    /// `scrambled_sobol_point` matches `scrambled_sobol_point_reference`
+    /// element-wise for every scenario, across several `(dim, total_scenarios)`.
+    #[test]
+    fn sobol_point_matches_reference() {
+        for (dim, total_scenarios) in [(1_usize, 4_u32), (2, 16), (5, 8)] {
+            let ctx = SobolPrecomputed::new(42, 1, 3, dim);
+            let mut precomputed_out = vec![0.0_f64; dim];
+            let mut direct_out = vec![0.0_f64; dim];
+
+            for scenario in 0..total_scenarios {
+                let spec = NoisePointSpec {
+                    sampling_seed: 42,
+                    iteration: 1,
+                    scenario,
+                    stage_id: 3,
+                    total_scenarios,
+                    dim,
+                };
+
+                scrambled_sobol_point(&spec, &ctx, &mut precomputed_out);
+                scrambled_sobol_point_reference(&spec, &mut direct_out);
+
+                assert_eq!(
+                    precomputed_out, direct_out,
+                    "mismatch at dim={dim}, total_scenarios={total_scenarios}, scenario={scenario}"
                 );
             }
         }

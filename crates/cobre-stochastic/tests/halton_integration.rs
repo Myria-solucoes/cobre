@@ -28,10 +28,10 @@ use cobre_core::{
 };
 use cobre_stochastic::tree::generate::OpeningTreeGenerationInputs;
 use cobre_stochastic::{
-    ClassDimensions, ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+    ClassDimensions, ClassSchemes, NoisePointSpec, OpeningTreeInputs, build_stochastic_context,
     correlation::resolve::DecomposedCorrelation,
     generate_opening_tree,
-    tree::qmc_halton::{HaltonPointSpec, scrambled_halton_point},
+    tree::qmc_halton::{HaltonPrecomputed, scrambled_halton_point},
 };
 
 // ---------------------------------------------------------------------------
@@ -515,10 +515,11 @@ fn halton_point_wise_consistency() {
     let n = 64_usize;
     let dim = 3_usize;
 
+    let ctx = HaltonPrecomputed::new(77, 3, 1, dim, n as u32);
     let mut outputs: Vec<Vec<f64>> = Vec::with_capacity(n);
 
     for scenario in 0..n {
-        let spec = HaltonPointSpec {
+        let spec = NoisePointSpec {
             sampling_seed: 77,
             iteration: 3,
             scenario: scenario as u32,
@@ -527,7 +528,7 @@ fn halton_point_wise_consistency() {
             dim,
         };
         let mut output = vec![0.0_f64; dim];
-        scrambled_halton_point(&spec, &mut output);
+        scrambled_halton_point(&spec, &ctx, &mut output);
 
         for (d, &v) in output.iter().enumerate() {
             assert!(

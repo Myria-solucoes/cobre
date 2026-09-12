@@ -20,7 +20,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelI
 
 use cobre_comm::Communicator;
 use cobre_solver::{SolverInterface, StageTemplate};
-use cobre_stochastic::{ForwardSampler, SampleRequest};
+use cobre_stochastic::{ForwardNoiseTables, ForwardSampler, SampleRequest};
 
 use crate::{
     claim_scatter::{ClaimCursor, canonical_scatter},
@@ -113,6 +113,7 @@ struct EnumeratedSimParams<'p> {
     output: &'p SimulationOutputSpec<'p>,
     load_spec: &'p SimScenarioLoadSpec<'p>,
     sampler: &'p ForwardSampler<'p>,
+    noise_tables: &'p ForwardNoiseTables,
     lookups: &'p SimLookups,
     total_scenarios: u32,
 }
@@ -219,6 +220,7 @@ fn enumerated_sim_stage_worker<S: SolverInterface + Send>(
             node_opening_offset,
             node_opening_len,
             pinned_scenario,
+            tables: params.noise_tables,
         })?;
 
         let pool_id = node_graph.nodes[node].pool_id;
@@ -424,6 +426,7 @@ pub(crate) fn run_enumerated_simulation<S, C: Communicator>(
     inputs: &mut SimulationInputs<'_, S, C>,
     frozen_templates: &[StageTemplate],
     sampler: &ForwardSampler<'_>,
+    noise_tables: &ForwardNoiseTables,
 ) -> Result<(WorkerCosts, WorkerStats), SimulationError>
 where
     S: SolverInterface + Send,
@@ -458,6 +461,7 @@ where
         output: &inputs.output,
         load_spec: &load_spec,
         sampler,
+        noise_tables,
         lookups: &lookups,
         total_scenarios,
     };
@@ -586,6 +590,15 @@ mod tests {
 
         let sampler =
             crate::simulation::state::build_sim_sampler(&training_ctx).expect("forward sampler");
+        #[allow(clippy::cast_possible_truncation)]
+        let total_scenarios_u32 = k as u32;
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler.rebuild_noise_tables(
+            SIMULATION_ITERATION,
+            total_scenarios_u32,
+            stage_ctx.noise_group_ids,
+            &mut noise_tables,
+        );
 
         let lookups = SimLookups::build(
             training_ctx.study_dims,
@@ -605,8 +618,9 @@ mod tests {
             output: &output,
             load_spec: &load_spec,
             sampler: &sampler,
+            noise_tables: &noise_tables,
             lookups: &lookups,
-            total_scenarios: k as u32,
+            total_scenarios: total_scenarios_u32,
         };
 
         let mut scratch = EnumeratedSimScratch::new(plan, n_workers);

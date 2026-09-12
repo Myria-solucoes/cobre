@@ -28,10 +28,10 @@ use cobre_core::{
 };
 use cobre_stochastic::tree::generate::OpeningTreeGenerationInputs;
 use cobre_stochastic::{
-    ClassDimensions, ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+    ClassDimensions, ClassSchemes, NoisePointSpec, OpeningTreeInputs, build_stochastic_context,
     correlation::resolve::DecomposedCorrelation,
     generate_opening_tree,
-    tree::qmc_sobol::{SobolPointSpec, scrambled_sobol_point},
+    tree::qmc_sobol::{SobolPrecomputed, scrambled_sobol_point},
 };
 
 // ---------------------------------------------------------------------------
@@ -512,10 +512,11 @@ fn sobol_point_wise_consistency() {
     let n = 64_usize;
     let dim = 3_usize;
 
+    let ctx = SobolPrecomputed::new(77, 3, 1, dim);
     let mut outputs: Vec<Vec<f64>> = Vec::with_capacity(n);
 
     for scenario in 0..n {
-        let spec = SobolPointSpec {
+        let spec = NoisePointSpec {
             sampling_seed: 77,
             iteration: 3,
             scenario: scenario as u32,
@@ -524,7 +525,7 @@ fn sobol_point_wise_consistency() {
             dim,
         };
         let mut output = vec![0.0_f64; dim];
-        scrambled_sobol_point(&spec, &mut output);
+        scrambled_sobol_point(&spec, &ctx, &mut output);
 
         for (d, &v) in output.iter().enumerate() {
             assert!(

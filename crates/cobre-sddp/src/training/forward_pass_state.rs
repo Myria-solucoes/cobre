@@ -14,8 +14,8 @@ use cobre_stochastic::context::ClassSchemes;
 #[cfg(test)]
 use cobre_stochastic::select_transition_child;
 use cobre_stochastic::{
-    ClassDimensions, ClassSampleRequest, ForwardSampler, ForwardSamplerConfig, SampleRequest,
-    build_forward_sampler,
+    ClassDimensions, ClassSampleRequest, ForwardNoiseTables, ForwardSampler, ForwardSamplerConfig,
+    SampleRequest, build_forward_sampler,
 };
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
@@ -165,6 +165,9 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub training_ctx: &'a TrainingContext<'a>,
     /// Forward sampler that drives per-scenario-per-stage noise generation.
     pub sampler: &'a ForwardSampler<'a>,
+    /// Per-iteration scenario-invariant tables backing `sampler`'s
+    /// `OutOfSample` draws.
+    pub noise_tables: &'a ForwardNoiseTables,
 }
 
 /// Return bundle from [`run_forward_worker`].
@@ -249,6 +252,10 @@ pub(crate) struct ForwardPassState {
     /// `Enumerated`; always present (never `Option`) and grows to size on the
     /// first enumerated `run()`, so no allocation occurs after warm-up.
     enumerated_scratch: EnumeratedForwardScratch,
+
+    /// Scenario-invariant per-class noise tables, rebuilt once per iteration
+    /// in [`Self::run`] and shared by reference across every worker's draws.
+    noise_tables: ForwardNoiseTables,
 }
 
 impl ForwardPassState {
@@ -283,6 +290,7 @@ impl ForwardPassState {
             profile: Phase::Forward.profile(),
             traversal: Traversal::default(),
             enumerated_scratch: EnumeratedForwardScratch::default(),
+            noise_tables: ForwardNoiseTables::default(),
         }
     }
 
@@ -383,6 +391,13 @@ impl ForwardPassState {
             external_load_library: training_ctx.external_load_library,
             external_ncs_library: training_ctx.external_ncs_library,
         })?;
+        #[allow(clippy::cast_possible_truncation)]
+        sampler.rebuild_noise_tables(
+            inputs.iteration as u32,
+            inputs.total_forward_passes as u32,
+            inputs.ctx.noise_group_ids,
+            &mut self.noise_tables,
+        );
 
         // Taken out for the match's duration so `self` stays freely `&mut`-usable
         // inside both arms (the `Enumerated` arm's `plan` borrows this local, not
@@ -390,7 +405,15 @@ impl ForwardPassState {
         // is a stack-only `Sampled` variant.
         let traversal = std::mem::take(&mut self.traversal);
         let result = match &traversal {
-            Traversal::Enumerated(plan) => self.run_enumerated(inputs, &sampler, plan),
+            Traversal::Enumerated(plan) => {
+                // Taken out for the call's duration, mirroring `traversal` above: `self`
+                // must stay `&mut`-usable for `run_enumerated`'s receiver while this
+                // reference is also passed as an argument. Restored right after.
+                let noise_tables = std::mem::take(&mut self.noise_tables);
+                let r = self.run_enumerated(inputs, &sampler, &noise_tables, plan);
+                self.noise_tables = noise_tables;
+                r
+            }
             Traversal::Sampled { .. } => self.run_sampled(inputs, &sampler),
         };
         self.traversal = traversal;
@@ -517,6 +540,7 @@ impl ForwardPassState {
             fcf: inputs.fcf,
             training_ctx,
             sampler,
+            noise_tables: &self.noise_tables,
         };
         let worker_results: Vec<Result<ForwardWorkerResult, SddpError>> = inputs
             .workspaces
@@ -564,6 +588,7 @@ impl ForwardPassState {
         &mut self,
         inputs: &mut ForwardPassInputs<'_, S>,
         sampler: &ForwardSampler<'_>,
+        noise_tables: &ForwardNoiseTables,
         plan: &EnumeratedPlan,
     ) -> Result<ForwardResult, SddpError>
     where
@@ -605,6 +630,7 @@ impl ForwardPassState {
             fcf: inputs.fcf,
             training_ctx,
             sampler,
+            noise_tables,
             dcs: dcs_params,
             event_sender: inputs.event_sender,
         };
@@ -978,6 +1004,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 node_opening_offset,
                 node_opening_len,
                 pinned_scenario: None,
+                tables: params.noise_tables,
             })?;
             let raw_noise = noise.as_slice();
 
@@ -1701,6 +1728,13 @@ mod tests {
             external_ncs_library: None,
         })
         .expect("sampler build must not error");
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler.rebuild_noise_tables(
+            1,
+            u32::try_from(fx.n_scenarios).expect("fits u32"),
+            &[],
+            &mut noise_tables,
+        );
 
         let params = ForwardWorkerParams {
             forward_passes: fx.n_scenarios,
@@ -1721,6 +1755,7 @@ mod tests {
             fcf: &fx.fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
         };
 
         // Mutable per-call state: independent allocations, not borrows of fx.
@@ -2276,6 +2311,8 @@ mod tests {
             external_ncs_library: None,
         })
         .expect("sampler build must not error");
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler.rebuild_noise_tables(1, 1, &[], &mut noise_tables);
 
         let params = ForwardWorkerParams {
             forward_passes: 1,
@@ -2296,6 +2333,7 @@ mod tests {
             fcf: &fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
         };
 
         let solution = LpSolution {
@@ -2583,6 +2621,13 @@ mod tests {
 
         let forward_passes = 6_usize;
         let pinned_iteration = 3_u64;
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler.rebuild_noise_tables(
+            u32::try_from(pinned_iteration).expect("fits u32"),
+            u32::try_from(forward_passes).expect("fits u32"),
+            &[],
+            &mut noise_tables,
+        );
         let params = ForwardWorkerParams {
             forward_passes,
             total_forward_passes: forward_passes,
@@ -2602,6 +2647,7 @@ mod tests {
             fcf: &fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
         };
 
         let mut ws = single_workspace(MockSolver::always_ok(fixed_solution_1_0()), &state);

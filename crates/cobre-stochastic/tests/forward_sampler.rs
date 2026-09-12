@@ -28,7 +28,10 @@ use cobre_stochastic::{
     StochasticError,
     context::{ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context},
     sampling::insample::sample_forward,
-    sampling::{ForwardSamplerConfig, SampleRequest, build_forward_sampler},
+    sampling::{
+        ForwardNoiseTables, ForwardSampler, ForwardSamplerConfig, SampleRequest,
+        build_forward_sampler,
+    },
     tree::generate::ClassDimensions,
 };
 
@@ -268,6 +271,19 @@ fn stages_from_system(system: &cobre_core::System) -> Vec<Stage> {
         .collect()
 }
 
+/// Rebuild `sampler`'s noise tables for one `(iteration, total, groups)`
+/// triple — the `SampleRequest.tables` every `sample()` call in this file needs.
+fn tables_for(
+    sampler: &ForwardSampler<'_>,
+    iteration: u32,
+    total: u32,
+    groups: &[u32],
+) -> ForwardNoiseTables {
+    let mut tables = ForwardNoiseTables::default();
+    sampler.rebuild_noise_tables(iteration, total, groups, &mut tables);
+    tables
+}
+
 #[test]
 fn insample_dispatch_returns_tree_slice_of_correct_dim() {
     let system = build_test_system(
@@ -283,6 +299,7 @@ fn insample_dispatch_returns_tree_slice_of_correct_dim() {
 
     let mut noise_buf = vec![0.0f64; dim];
     let mut perm_scratch = vec![0usize; 5];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result = sampler
         .sample(SampleRequest {
@@ -297,6 +314,7 @@ fn insample_dispatch_returns_tree_slice_of_correct_dim() {
             node_opening_offset: 0,
             node_opening_len: ctx.tree_view().n_openings(0),
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -325,6 +343,7 @@ fn insample_copy_equivalence_matches_direct_call() {
 
     let mut noise_buf = vec![0.0f64; dim];
     let mut perm_scratch = vec![0usize; 5];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result = sampler
         .sample(SampleRequest {
@@ -339,6 +358,7 @@ fn insample_copy_equivalence_matches_direct_call() {
             node_opening_offset: 0,
             node_opening_len: ctx.tree_view().n_openings(0),
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -379,6 +399,7 @@ fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
 
     let mut noise_buf = vec![0.0f64; dim];
     let mut perm_scratch = vec![0usize; 5];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result = sampler
         .sample(SampleRequest {
@@ -393,6 +414,7 @@ fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -426,6 +448,7 @@ fn out_of_sample_is_deterministic() {
     let mut buf_b = vec![0.0f64; dim];
     let mut perm_a = vec![0usize; 5];
     let mut perm_b = vec![0usize; 5];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let a = sampler
         .sample(SampleRequest {
@@ -440,6 +463,7 @@ fn out_of_sample_is_deterministic() {
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -456,6 +480,7 @@ fn out_of_sample_is_deterministic() {
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -486,6 +511,7 @@ fn out_of_sample_scenario_changes_noise() {
     let mut buf_1 = vec![0.0f64; dim];
     let mut perm_0 = vec![0usize; 5];
     let mut perm_1 = vec![0usize; 5];
+    let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result_0 = sampler
         .sample(SampleRequest {
@@ -500,6 +526,7 @@ fn out_of_sample_scenario_changes_noise() {
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -516,6 +543,7 @@ fn out_of_sample_scenario_changes_noise() {
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 
@@ -550,6 +578,7 @@ fn out_of_sample_noise_is_finite() {
 
     let mut noise_buf = vec![0.0f64; dim];
     let mut perm_scratch = vec![0usize; total_scenarios as usize];
+    let tables = tables_for(&sampler, 0, total_scenarios, &[]);
 
     for scenario in 0..total_scenarios {
         let result = sampler
@@ -565,6 +594,7 @@ fn out_of_sample_noise_is_finite() {
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
 
@@ -600,6 +630,7 @@ fn out_of_sample_correlation_matches_target() {
     let mut perm_scratch = vec![0usize; n_scenarios as usize];
 
     let mut pairs: Vec<(f64, f64)> = Vec::with_capacity(n_scenarios as usize);
+    let tables = tables_for(&sampler, 0, n_scenarios, &[]);
 
     for scenario in 0..n_scenarios {
         let result = sampler
@@ -615,6 +646,7 @@ fn out_of_sample_correlation_matches_target() {
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
 
@@ -662,6 +694,7 @@ fn out_of_sample_per_stage_method_mixing() {
     let mut noise_buf = vec![0.0f64; dim];
     // LHS requires perm_scratch of length total_scenarios.
     let mut perm_scratch = vec![0usize; total_scenarios as usize];
+    let tables = tables_for(&sampler, 0, total_scenarios, &[]);
 
     for stage_idx in 0..3_usize {
         let stage_id = stage_idx as u32;
@@ -675,10 +708,11 @@ fn out_of_sample_per_stage_method_mixing() {
                     noise_buf: &mut noise_buf,
                     perm_scratch: &mut perm_scratch,
                     total_scenarios,
-                    noise_group_id: 0,
+                    noise_group_id: stage_id,
                     node_opening_offset: 0,
                     node_opening_len: 0,
                     pinned_scenario: None,
+                    tables: &tables,
                 })
                 .unwrap();
 
@@ -794,6 +828,7 @@ fn out_of_sample_resume_invariance() {
     let mut buf_resume = vec![0.0f64; dim];
     let mut perm_first = vec![0usize; 5];
     let mut perm_resume = vec![0usize; 5];
+    let tables = tables_for(&sampler, 5, 5, &[]);
 
     let first = sampler
         .sample(SampleRequest {
@@ -808,6 +843,7 @@ fn out_of_sample_resume_invariance() {
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
     let first_values: Vec<f64> = first.as_slice().to_vec();
@@ -825,6 +861,7 @@ fn out_of_sample_resume_invariance() {
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         })
         .unwrap();
 

@@ -28,10 +28,10 @@ use cobre_core::{
 };
 use cobre_stochastic::tree::generate::OpeningTreeGenerationInputs;
 use cobre_stochastic::{
-    ClassDimensions, ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+    ClassDimensions, ClassSchemes, NoisePointSpec, OpeningTreeInputs, build_stochastic_context,
     correlation::resolve::DecomposedCorrelation,
     generate_opening_tree,
-    tree::lhs::{LhsPointSpec, sample_lhs_point},
+    tree::lhs::{LhsPrecomputed, sample_lhs_point},
 };
 
 // ---------------------------------------------------------------------------
@@ -551,14 +551,14 @@ fn lhs_declaration_order_invariant() {
 fn lhs_point_wise_stratum_consistency() {
     let n = 60_usize;
     let dim = 3_usize;
-    let mut perm_scratch = vec![0_usize; n];
     let n_f = n as f64;
 
+    let ctx = LhsPrecomputed::new(77, 3, 1, dim, n as u32);
     let mut strata_by_dim: Vec<Vec<usize>> = (0..dim).map(|_| Vec::with_capacity(n)).collect();
 
     for scenario in 0..n {
         let mut output = vec![0.0_f64; dim];
-        let spec = LhsPointSpec {
+        let spec = NoisePointSpec {
             sampling_seed: 77,
             iteration: 3,
             scenario: scenario as u32,
@@ -566,7 +566,7 @@ fn lhs_point_wise_stratum_consistency() {
             total_scenarios: n as u32,
             dim,
         };
-        sample_lhs_point(&spec, &mut output, &mut perm_scratch);
+        sample_lhs_point(&spec, &ctx, &mut output);
 
         for (d, &v) in output.iter().enumerate() {
             let p = norm_cdf(v);

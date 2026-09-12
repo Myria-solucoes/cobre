@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use cobre_core::{TrainingEvent, WorkerTimingPhase};
 use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
-use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
+use cobre_stochastic::{ClassSampleRequest, ForwardNoiseTables, ForwardSampler, SampleRequest};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
 use crate::{
@@ -194,6 +194,7 @@ pub(crate) struct EnumeratedParams<'a> {
     pub fcf: &'a FutureCostFunction,
     pub training_ctx: &'a TrainingContext<'a>,
     pub sampler: &'a ForwardSampler<'a>,
+    pub noise_tables: &'a ForwardNoiseTables,
     pub dcs: Option<DcsParams>,
     pub event_sender: Option<&'a Sender<TrainingEvent>>,
 }
@@ -791,6 +792,7 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
             node_opening_offset,
             node_opening_len,
             pinned_scenario,
+            tables: params.noise_tables,
         })?;
 
         // Reuse the capture slot at `count`, growing only until the widest stage's
@@ -1014,6 +1016,13 @@ mod tests {
             usize::try_from(test_support::node_scenario_count(node_graph).expect("scenario count"))
                 .expect("fits usize");
         let dcs = training_ctx.dcs.filter(|p| p.is_active(iteration));
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler.rebuild_noise_tables(
+            u32::try_from(iteration).expect("fits u32"),
+            u32::try_from(total_forward_passes).expect("fits u32"),
+            stage_ctx.noise_group_ids,
+            &mut noise_tables,
+        );
 
         let params = EnumeratedParams {
             num_stages: setup.num_stages(),
@@ -1031,6 +1040,7 @@ mod tests {
             fcf: &setup.fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
             dcs,
             event_sender,
         };

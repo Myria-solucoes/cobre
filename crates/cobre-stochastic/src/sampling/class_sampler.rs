@@ -19,7 +19,7 @@ use crate::{
     StochasticError,
     noise::seed::derive_forward_seed,
     sampling::{
-        ExternalScenarioLibrary, HistoricalScenarioLibrary,
+        ClassNoiseTables, ExternalScenarioLibrary, HistoricalScenarioLibrary,
         out_of_sample::{FreshNoiseSpec, fill_uncorrelated},
     },
     tree::opening_tree::OpeningTreeView,
@@ -236,7 +236,9 @@ impl ClassSampler<'_> {
     /// # Errors
     ///
     /// - [`StochasticError::InsufficientData`] — when `OutOfSample` and
-    ///   `req.stage_idx` is out of bounds for the per-stage noise methods.
+    ///   `req.stage_idx` is out of bounds for the per-stage noise methods or
+    ///   for `tables`, or `tables`'s resolved variant does not match the
+    ///   stage's noise method.
     /// - [`StochasticError::DimensionExceedsCapacity`] — when `OutOfSample`
     ///   uses `QmcSobol` and `dim > MAX_SOBOL_DIM`.
     ///
@@ -244,11 +246,15 @@ impl ClassSampler<'_> {
     ///
     /// `InSample`: panics in debug builds if `output.len() != self.len`
     /// (programming error — caller is responsible for buffer sizing).
+    ///
+    /// `OutOfSample`: panics in debug builds if `tables` was not rebuilt for
+    /// `req`'s `(iteration, total_scenarios)`, or if `req.stage_idx`'s table
+    /// was not built for `req.noise_group_id`.
     pub fn fill(
         &self,
         req: &ClassSampleRequest,
+        tables: &ClassNoiseTables,
         output: &mut [f64],
-        perm_scratch: &mut [usize],
     ) -> Result<(), StochasticError> {
         match self {
             ClassSampler::InSample {
@@ -298,6 +304,30 @@ impl ClassSampler<'_> {
                         ),
                     }
                 })?;
+                debug_assert!(
+                    tables.built_for() == (req.iteration, req.total_scenarios),
+                    "ClassSampler::OutOfSample::fill: tables built for {:?} but request \
+                     carries (iteration={}, total_scenarios={})",
+                    tables.built_for(),
+                    req.iteration,
+                    req.total_scenarios,
+                );
+                debug_assert!(
+                    tables.group_at(req.stage_idx) == Some(req.noise_group_id),
+                    "ClassSampler::OutOfSample::fill: stage_idx {} table built for group {:?} \
+                     but request carries noise_group_id {}",
+                    req.stage_idx,
+                    tables.group_at(req.stage_idx),
+                    req.noise_group_id,
+                );
+                let table = tables.table_at(req.stage_idx).ok_or_else(|| {
+                    StochasticError::InsufficientData {
+                        context: format!(
+                            "stage_idx {} out of bounds for the noise tables",
+                            req.stage_idx,
+                        ),
+                    }
+                })?;
                 let spec = FreshNoiseSpec {
                     forward_seed: *forward_seed,
                     noise_method,
@@ -308,7 +338,7 @@ impl ClassSampler<'_> {
                     dim: *dim,
                     total_scenarios: req.total_scenarios,
                 };
-                fill_uncorrelated(spec, None, output, perm_scratch)?;
+                fill_uncorrelated(spec, table, output)?;
                 Ok(())
             }
 
@@ -345,11 +375,23 @@ mod tests {
 
     use crate::{
         StochasticError, sample_forward,
-        sampling::{ExternalScenarioLibrary, HistoricalScenarioLibrary},
+        sampling::{ClassNoiseTables, ExternalScenarioLibrary, HistoricalScenarioLibrary},
         tree::opening_tree::OpeningTree,
     };
 
     use super::{ClassSampleRequest, ClassSampler, select_transition_child};
+
+    /// `ClassNoiseTables` with one `Saa` slot per `groups` entry, built for
+    /// `(iteration, total_scenarios)` — enough for every `OutOfSample` case in
+    /// this module: all use `NoiseMethod::Saa`, whose `fill_uncorrelated` arm
+    /// ignores the table's contents, so only `table_at`'s `Some` resolution
+    /// and the stamped `(iteration, total_scenarios, group)` matter here.
+    fn saa_tables(iteration: u32, total_scenarios: u32, groups: &[u32]) -> ClassNoiseTables {
+        let mut tables = ClassNoiseTables::default();
+        let methods = vec![NoiseMethod::Saa; groups.len()];
+        tables.refill(1, 1, iteration, total_scenarios, groups, &methods);
+        tables
+    }
 
     // -----------------------------------------------------------------------
     // select_transition_child
@@ -482,13 +524,14 @@ mod tests {
         };
 
         let mut output = vec![0.0f64; 3];
-        let mut perm = vec![0usize; 10];
         let req = ClassSampleRequest {
             node_opening_len: tree.view().n_openings(0),
             ..base_req()
         };
 
-        sampler.fill(&req, &mut output, &mut perm).unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut output)
+            .unwrap();
 
         assert_eq!(output.len(), 3);
         for v in &output {
@@ -528,8 +571,9 @@ mod tests {
             ..base_req()
         };
         let mut output: Vec<f64> = Vec::new();
-        let mut perm = vec![0usize; 10];
-        sampler.fill(&req, &mut output, &mut perm).unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut output)
+            .unwrap();
         assert!(
             output.is_empty(),
             "zero-entity InSample fill must leave output untouched"
@@ -562,10 +606,13 @@ mod tests {
 
         let mut out_a = vec![0.0f64; 2];
         let mut out_b = vec![0.0f64; 2];
-        let mut perm = vec![0usize; 5];
 
-        sampler.fill(&req, &mut out_a, &mut perm).unwrap();
-        sampler.fill(&req, &mut out_b, &mut perm).unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut out_a)
+            .unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut out_b)
+            .unwrap();
 
         assert_eq!(out_a, out_b, "InSample::fill must be deterministic");
     }
@@ -602,13 +649,16 @@ mod tests {
 
         let mut out_no_draw = vec![0.0f64; 2];
         let mut out_with_draw = vec![0.0f64; 2];
-        let mut perm = vec![0usize; 5];
 
-        sampler.fill(&req, &mut out_no_draw, &mut perm).unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut out_no_draw)
+            .unwrap();
 
         let _ = select_transition_child(req.iteration, req.scenario, req.stage, [0.5_f64, 0.5]);
 
-        sampler.fill(&req, &mut out_with_draw, &mut perm).unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut out_with_draw)
+            .unwrap();
 
         assert_eq!(
             out_no_draw, out_with_draw,
@@ -646,10 +696,13 @@ mod tests {
 
         let mut out_a = vec![0.0f64; 3];
         let mut out_b = vec![0.0f64; 3];
-        let mut perm = vec![0usize; 10];
 
-        sampler.fill(&req, &mut out_a, &mut perm).unwrap();
-        sampler.fill(&req, &mut out_b, &mut perm).unwrap();
+        sampler
+            .fill(&req, &saa_tables(1, 10, &[0]), &mut out_a)
+            .unwrap();
+        sampler
+            .fill(&req, &saa_tables(1, 10, &[0]), &mut out_b)
+            .unwrap();
 
         assert_eq!(
             out_a, out_b,
@@ -672,9 +725,8 @@ mod tests {
         };
 
         let mut output = vec![0.0f64; 2];
-        let mut perm = vec![0usize; 10];
 
-        let result = sampler.fill(&req, &mut output, &mut perm);
+        let result = sampler.fill(&req, &ClassNoiseTables::default(), &mut output);
         assert!(
             matches!(result, Err(StochasticError::InsufficientData { .. })),
             "expected InsufficientData error, got: {result:?}"
@@ -717,10 +769,13 @@ mod tests {
 
         let mut out_a = vec![0.0f64; 2];
         let mut out_b = vec![0.0f64; 2];
-        let mut perm = vec![0usize; 10];
 
-        sampler.fill(&req, &mut out_a, &mut perm).unwrap();
-        sampler.fill(&req, &mut out_b, &mut perm).unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut out_a)
+            .unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut out_b)
+            .unwrap();
 
         assert_eq!(
             out_a, out_b,
@@ -732,7 +787,6 @@ mod tests {
     fn test_historical_fill_different_scenarios_may_differ() {
         let lib = make_historical_library();
         let sampler = ClassSampler::Historical { library: &lib };
-        let mut perm = vec![0usize; 10];
 
         let mut outputs: Vec<Vec<f64>> = (0_u32..20)
             .map(|scenario| {
@@ -748,7 +802,9 @@ mod tests {
                     pinned_scenario: None,
                 };
                 let mut out = vec![0.0f64; 2];
-                sampler.fill(&req, &mut out, &mut perm).unwrap();
+                sampler
+                    .fill(&req, &ClassNoiseTables::default(), &mut out)
+                    .unwrap();
                 out
             })
             .collect();
@@ -784,10 +840,13 @@ mod tests {
 
         let mut out0 = vec![0.0f64; 2];
         let mut out1 = vec![0.0f64; 2];
-        let mut perm = vec![0usize; 10];
 
-        sampler.fill(&req_stage0, &mut out0, &mut perm).unwrap();
-        sampler.fill(&req_stage1, &mut out1, &mut perm).unwrap();
+        sampler
+            .fill(&req_stage0, &ClassNoiseTables::default(), &mut out0)
+            .unwrap();
+        sampler
+            .fill(&req_stage1, &ClassNoiseTables::default(), &mut out1)
+            .unwrap();
 
         // Layout eta[w, s] = [w*100 + s*10, …]; same window, adjacent stage ⇒ +10.
         assert_eq!(
@@ -834,9 +893,10 @@ mod tests {
         };
 
         let mut output = vec![0.0f64; 3];
-        let mut perm = vec![0usize; 10];
 
-        sampler.fill(&req, &mut output, &mut perm).unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut output)
+            .unwrap();
 
         let scenario_idx = ClassSampler::select_external_scenario(&req, lib.n_scenarios());
         let expected = lib.eta_slice(req.stage_idx, scenario_idx);
@@ -853,7 +913,6 @@ mod tests {
         // mirroring test_historical_fill_window_selection_still_deterministic.
         let lib = make_external_library();
         let sampler = ClassSampler::External { library: &lib };
-        let mut perm = vec![0usize; 10];
 
         for scenario in 0..20_u32 {
             let req = ClassSampleRequest {
@@ -871,7 +930,9 @@ mod tests {
                 ClassSampler::select_external_scenario(&req, lib.n_scenarios());
 
             let mut output = vec![0.0f64; 3];
-            sampler.fill(&req, &mut output, &mut perm).unwrap();
+            sampler
+                .fill(&req, &ClassNoiseTables::default(), &mut output)
+                .unwrap();
             let expected_eta = lib.eta_slice(req.stage_idx, scenario_via_helper);
             assert_eq!(
                 &output, expected_eta,
@@ -899,10 +960,13 @@ mod tests {
 
         let mut out_a = vec![0.0f64; 3];
         let mut out_b = vec![0.0f64; 3];
-        let mut perm = vec![0usize; 10];
 
-        sampler.fill(&req, &mut out_a, &mut perm).unwrap();
-        sampler.fill(&req, &mut out_b, &mut perm).unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut out_a)
+            .unwrap();
+        sampler
+            .fill(&req, &ClassNoiseTables::default(), &mut out_b)
+            .unwrap();
 
         assert_eq!(
             out_a, out_b,
@@ -914,7 +978,6 @@ mod tests {
     fn test_external_fill_pinned_scenario_reads_that_column() {
         let lib = make_external_library();
         let sampler = ClassSampler::External { library: &lib };
-        let mut perm = vec![0usize; 10];
 
         // A pinned column is read verbatim, independent of (iteration, scenario)
         // — and distinct from what the hash would have chosen for the same request.
@@ -931,7 +994,9 @@ mod tests {
                 pinned_scenario: Some(pinned),
             };
             let mut output = vec![0.0f64; 3];
-            sampler.fill(&req, &mut output, &mut perm).unwrap();
+            sampler
+                .fill(&req, &ClassNoiseTables::default(), &mut output)
+                .unwrap();
             assert_eq!(
                 &output,
                 lib.eta_slice(req.stage_idx, pinned),
@@ -946,7 +1011,6 @@ mod tests {
         // (the sampled path is byte-identical to the pre-pin behavior).
         let lib = make_external_library();
         let sampler = ClassSampler::External { library: &lib };
-        let mut perm = vec![0usize; 10];
 
         for scenario in 0..20_u32 {
             let req = ClassSampleRequest {
@@ -962,7 +1026,9 @@ mod tests {
             };
             let hash_idx = ClassSampler::select_external_scenario(&req, lib.n_scenarios());
             let mut output = vec![0.0f64; 3];
-            sampler.fill(&req, &mut output, &mut perm).unwrap();
+            sampler
+                .fill(&req, &ClassNoiseTables::default(), &mut output)
+                .unwrap();
             assert_eq!(
                 &output,
                 lib.eta_slice(req.stage_idx, hash_idx),
@@ -994,10 +1060,13 @@ mod tests {
 
         let mut out0 = vec![0.0f64; 3];
         let mut out1 = vec![0.0f64; 3];
-        let mut perm = vec![0usize; 10];
 
-        sampler.fill(&req_stage0, &mut out0, &mut perm).unwrap();
-        sampler.fill(&req_stage1, &mut out1, &mut perm).unwrap();
+        sampler
+            .fill(&req_stage0, &ClassNoiseTables::default(), &mut out0)
+            .unwrap();
+        sampler
+            .fill(&req_stage1, &ClassNoiseTables::default(), &mut out1)
+            .unwrap();
 
         // Layout eta[s, sc] = [s*1000 + sc*10, …]; same scenario, adjacent stage ⇒ +1000.
         assert_eq!(
@@ -1069,7 +1138,6 @@ mod tests {
         // fill()'s window selection is independent of apply_initial_state.
         let lib = make_historical_library_with_lags();
         let sampler = ClassSampler::Historical { library: &lib };
-        let mut perm = vec![0usize; 20];
 
         for scenario in 0..20_u32 {
             let req = ClassSampleRequest {
@@ -1086,7 +1154,9 @@ mod tests {
             let window_via_helper = ClassSampler::select_historical_window(&req, lib.n_windows());
 
             let mut output = vec![0.0f64; lib.n_hydros()];
-            sampler.fill(&req, &mut output, &mut perm).unwrap();
+            sampler
+                .fill(&req, &ClassNoiseTables::default(), &mut output)
+                .unwrap();
             let expected_eta = lib.eta_slice(window_via_helper, req.stage_idx);
             assert_eq!(
                 &output, expected_eta,
@@ -1231,10 +1301,10 @@ mod tests {
 
         let mut out0 = vec![0.0f64; 3];
         let mut out1 = vec![0.0f64; 3];
-        let mut perm = vec![0usize; 10];
+        let tables = saa_tables(1, 10, &[5, 5]);
 
-        sampler.fill(&req_stage0, &mut out0, &mut perm).unwrap();
-        sampler.fill(&req_stage1, &mut out1, &mut perm).unwrap();
+        sampler.fill(&req_stage0, &tables, &mut out0).unwrap();
+        sampler.fill(&req_stage1, &tables, &mut out1).unwrap();
 
         assert_eq!(
             out0, out1,
@@ -1270,10 +1340,13 @@ mod tests {
 
         let mut out0 = vec![0.0f64; 3];
         let mut out1 = vec![0.0f64; 3];
-        let mut perm = vec![0usize; 10];
 
-        sampler.fill(&req_group0, &mut out0, &mut perm).unwrap();
-        sampler.fill(&req_group1, &mut out1, &mut perm).unwrap();
+        sampler
+            .fill(&req_group0, &saa_tables(1, 10, &[0]), &mut out0)
+            .unwrap();
+        sampler
+            .fill(&req_group1, &saa_tables(1, 10, &[1]), &mut out1)
+            .unwrap();
 
         let any_differ = out0.iter().zip(&out1).any(|(a, b)| a != b);
         assert!(

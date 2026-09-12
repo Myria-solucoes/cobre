@@ -25,7 +25,8 @@ use cobre_solver::freeze_rows_into_template;
 use cobre_solver::{RowBatch, SolverInterface, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
-    ClassDimensions, ForwardSampler, ForwardSamplerConfig, build_forward_sampler,
+    ClassDimensions, ForwardNoiseTables, ForwardSampler, ForwardSamplerConfig,
+    build_forward_sampler,
 };
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
@@ -42,8 +43,9 @@ use crate::{
         error::SimulationError,
         extraction::assign_scenarios,
         pipeline::{
-            ScenarioIds, SimLookups, SimulationOutputSpec, SimulationRunResult, WorkerCosts,
-            WorkerStats, dispatch_scenario_result, emit_sim_progress, process_scenario_stages,
+            SIMULATION_ITERATION, ScenarioIds, SimLookups, SimulationOutputSpec,
+            SimulationRunResult, WorkerCosts, WorkerStats, dispatch_scenario_result,
+            emit_sim_progress, process_scenario_stages,
         },
     },
     solve::partition,
@@ -150,6 +152,8 @@ pub(crate) struct SimWorkerParams<'w> {
     scenario_start: usize,
     /// Forward sampler that drives per-scenario-per-stage noise generation.
     sampler: &'w ForwardSampler<'w>,
+    /// Per-run scenario-invariant tables backing `sampler`'s `OutOfSample` draws.
+    noise_tables: &'w ForwardNoiseTables,
     /// Number of stages in the study horizon.
     num_stages: usize,
     /// Number of MPI ranks, scaling rank-local progress to a global estimate.
@@ -176,6 +180,10 @@ pub(crate) struct SimulationState {
     /// Defaults to `Phase::Simulation.profile()`; override with
     /// [`Self::set_profile`] before the first `run()` call.
     profile: ActiveProfile,
+
+    /// Scenario-invariant per-class noise tables, rebuilt once per run in
+    /// [`Self::run`] and shared by reference across every worker's draws.
+    noise_tables: ForwardNoiseTables,
 }
 
 impl SimulationState {
@@ -194,6 +202,7 @@ impl SimulationState {
             },
             freeze_scratch: FreezeScratch::new(),
             profile: Simulation.profile(),
+            noise_tables: ForwardNoiseTables::default(),
         }
     }
 
@@ -288,6 +297,12 @@ impl SimulationState {
         }
 
         let sampler = build_sim_sampler(training_ctx)?;
+        sampler.rebuild_noise_tables(
+            SIMULATION_ITERATION,
+            inputs.config.n_scenarios,
+            inputs.ctx.noise_group_ids,
+            &mut self.noise_tables,
+        );
 
         // Apply the simulation solver profile before the parallel region. For CLP
         // this selects the primal simplex, which eliminates the dual simplex's
@@ -297,9 +312,13 @@ impl SimulationState {
         }
 
         let (all_costs, all_stats): (WorkerCosts, WorkerStats) = match inputs.traversal {
-            Traversal::Sampled { .. } => {
-                run_sampled_simulation(inputs, frozen_templates, &sampler, sim_start)?
-            }
+            Traversal::Sampled { .. } => run_sampled_simulation(
+                inputs,
+                frozen_templates,
+                &sampler,
+                &self.noise_tables,
+                sim_start,
+            )?,
             Traversal::Enumerated(plan) => {
                 let k = plan.paths.leaf.len();
                 #[allow(clippy::cast_possible_truncation)]
@@ -310,7 +329,13 @@ impl SimulationState {
                         inputs.config.n_scenarios
                     )));
                 }
-                run_enumerated_simulation(plan, inputs, frozen_templates, &sampler)?
+                run_enumerated_simulation(
+                    plan,
+                    inputs,
+                    frozen_templates,
+                    &sampler,
+                    &self.noise_tables,
+                )?
             }
         };
 
@@ -373,6 +398,7 @@ fn run_sampled_simulation<S: SolverInterface + Send, C: Communicator>(
     inputs: &mut SimulationInputs<'_, S, C>,
     frozen_templates: &[StageTemplate],
     sampler: &ForwardSampler<'_>,
+    noise_tables: &ForwardNoiseTables,
     sim_start: Instant,
 ) -> Result<(WorkerCosts, WorkerStats), SimulationError> {
     let training_ctx = inputs.training_ctx;
@@ -412,6 +438,7 @@ fn run_sampled_simulation<S: SolverInterface + Send, C: Communicator>(
         n_workers,
         scenario_start,
         sampler,
+        noise_tables,
         num_stages,
         world_size,
         root_node,
@@ -505,6 +532,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
                 raw_noise_buf: &mut raw_noise_buf,
                 perm_scratch: &mut perm_scratch,
                 sampler: params.sampler,
+                noise_tables: params.noise_tables,
                 root_node: params.root_node,
             },
             &lookups,

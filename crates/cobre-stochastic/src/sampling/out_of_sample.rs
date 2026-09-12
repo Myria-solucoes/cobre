@@ -11,17 +11,14 @@ use rand::RngExt;
 use rand_distr::StandardNormal;
 
 #[cfg(test)]
-use crate::DecomposedCorrelation;
+use crate::{ClassNoiseTables, DecomposedCorrelation};
 use crate::{
-    StochasticError,
+    NoisePointSpec, NoiseTable, StochasticError,
     noise::{rng::rng_from_seed, seed::derive_forward_seed_grouped},
     tree::{
-        lhs::{LhsPointSpec, sample_lhs_point},
-        qmc_halton::{HaltonPointSpec, scrambled_halton_point},
-        qmc_sobol::{
-            MAX_SOBOL_DIM, SobolPointSpec, SobolPrecomputed, scrambled_sobol_point,
-            scrambled_sobol_point_precomputed,
-        },
+        lhs::sample_lhs_point,
+        qmc_halton::scrambled_halton_point,
+        qmc_sobol::{MAX_SOBOL_DIM, scrambled_sobol_point},
     },
 };
 
@@ -41,7 +38,7 @@ pub(crate) struct FreshNoiseSpec {
 }
 
 /// Fill `output[0..spec.dim]` with fresh N(0,1) noise, then apply spatial
-/// spectral correlation in-place. No heap allocation.
+/// spectral correlation in-place.
 ///
 /// # Errors
 ///
@@ -50,20 +47,43 @@ pub(crate) struct FreshNoiseSpec {
 ///
 /// # Panics
 ///
-/// Panics if `output.len() < spec.dim` or (for LHS)
-/// `perm_scratch.len() < spec.total_scenarios`.
+/// Panics if `output.len() < spec.dim`.
 #[cfg(test)]
 pub(crate) fn sample_fresh(
     spec: FreshNoiseSpec,
     output: &mut [f64],
-    perm_scratch: &mut [usize],
     correlation: &DecomposedCorrelation,
     entity_order: &[EntityId],
 ) -> Result<(), StochasticError> {
-    fill_uncorrelated(spec, None, output, perm_scratch)?;
+    let table = table_for_spec(spec);
+    fill_uncorrelated(spec, &table, output)?;
     #[allow(clippy::cast_possible_wrap)]
     correlation.apply_correlation(spec.stage_id as i32, &mut output[..spec.dim], entity_order);
     Ok(())
+}
+
+/// Build the [`NoiseTable`] a single `spec` would resolve to under
+/// [`ClassNoiseTables::refill`], for tests that call [`fill_uncorrelated`]
+/// directly instead of through a driver's rebuilt tables.
+///
+/// Mirrors `fill_uncorrelated`'s own `QmcSobol` guard: skips
+/// `SobolPrecomputed::new` (which panics past `MAX_SOBOL_DIM`) so a
+/// dimension-exceeds test still reaches the graceful error instead of a panic.
+#[cfg(test)]
+fn table_for_spec(spec: FreshNoiseSpec) -> NoiseTable {
+    if spec.noise_method == NoiseMethod::QmcSobol && spec.dim > MAX_SOBOL_DIM {
+        return NoiseTable::Direct;
+    }
+    let mut tables = ClassNoiseTables::default();
+    tables.refill(
+        spec.forward_seed,
+        spec.dim,
+        spec.iteration,
+        spec.total_scenarios,
+        &[spec.noise_group_id],
+        &[spec.noise_method],
+    );
+    tables.table_at(0).cloned().unwrap_or(NoiseTable::Direct)
 }
 
 /// Fill `output[0..spec.dim]` with independent N(0,1) noise, omitting the
@@ -73,24 +93,31 @@ pub(crate) fn sample_fresh(
 /// # Errors
 ///
 /// Returns [`StochasticError::DimensionExceedsCapacity`] when `QmcSobol`
-/// and `spec.dim > MAX_SOBOL_DIM`.
+/// and `spec.dim > MAX_SOBOL_DIM`, and [`StochasticError::InsufficientData`]
+/// when `table`'s variant does not match `spec.noise_method`.
 ///
 /// # Panics
 ///
-/// Panics if `output.len() < spec.dim` or (for LHS)
-/// `perm_scratch.len() < spec.total_scenarios`.
+/// Panics if `output.len() < spec.dim`.
 pub(crate) fn fill_uncorrelated(
     spec: FreshNoiseSpec,
-    sobol_ctx: Option<&SobolPrecomputed>,
+    table: &NoiseTable,
     output: &mut [f64],
-    perm_scratch: &mut [usize],
 ) -> Result<(), StochasticError> {
     match spec.noise_method {
         NoiseMethod::Saa => {
             fill_saa(spec, output);
         }
         NoiseMethod::Lhs => {
-            let lhs_spec = LhsPointSpec {
+            let NoiseTable::Lhs(ctx) = table else {
+                return Err(StochasticError::InsufficientData {
+                    context: format!(
+                        "fill_uncorrelated: noise_group_id {} expected NoiseTable::Lhs, got {table:?}",
+                        spec.noise_group_id,
+                    ),
+                });
+            };
+            let lhs_spec = NoisePointSpec {
                 sampling_seed: spec.forward_seed,
                 iteration: spec.iteration,
                 scenario: spec.scenario,
@@ -98,7 +125,7 @@ pub(crate) fn fill_uncorrelated(
                 total_scenarios: spec.total_scenarios,
                 dim: spec.dim,
             };
-            sample_lhs_point(&lhs_spec, output, perm_scratch);
+            sample_lhs_point(&lhs_spec, ctx, output);
         }
         NoiseMethod::QmcSobol => {
             if spec.dim > MAX_SOBOL_DIM {
@@ -108,7 +135,15 @@ pub(crate) fn fill_uncorrelated(
                     method: "sobol".to_string(),
                 });
             }
-            let sobol_spec = SobolPointSpec {
+            let NoiseTable::Sobol(ctx) = table else {
+                return Err(StochasticError::InsufficientData {
+                    context: format!(
+                        "fill_uncorrelated: noise_group_id {} expected NoiseTable::Sobol, got {table:?}",
+                        spec.noise_group_id,
+                    ),
+                });
+            };
+            let sobol_spec = NoisePointSpec {
                 sampling_seed: spec.forward_seed,
                 iteration: spec.iteration,
                 scenario: spec.scenario,
@@ -116,14 +151,18 @@ pub(crate) fn fill_uncorrelated(
                 total_scenarios: spec.total_scenarios,
                 dim: spec.dim,
             };
-            if let Some(ctx) = sobol_ctx {
-                scrambled_sobol_point_precomputed(&sobol_spec, ctx, output);
-            } else {
-                scrambled_sobol_point(&sobol_spec, output);
-            }
+            scrambled_sobol_point(&sobol_spec, ctx, output);
         }
         NoiseMethod::QmcHalton => {
-            let halton_spec = HaltonPointSpec {
+            let NoiseTable::Halton(ctx) = table else {
+                return Err(StochasticError::InsufficientData {
+                    context: format!(
+                        "fill_uncorrelated: noise_group_id {} expected NoiseTable::Halton, got {table:?}",
+                        spec.noise_group_id,
+                    ),
+                });
+            };
+            let halton_spec = NoisePointSpec {
                 sampling_seed: spec.forward_seed,
                 iteration: spec.iteration,
                 scenario: spec.scenario,
@@ -131,7 +170,7 @@ pub(crate) fn fill_uncorrelated(
                 total_scenarios: spec.total_scenarios,
                 dim: spec.dim,
             };
-            scrambled_halton_point(&halton_spec, output);
+            scrambled_halton_point(&halton_spec, ctx, output);
         }
         NoiseMethod::Selective => {
             tracing::warn!(
@@ -189,7 +228,7 @@ mod tests {
 
     use crate::{StochasticError, correlation::resolve::DecomposedCorrelation};
 
-    use super::{FreshNoiseSpec, fill_uncorrelated, sample_fresh};
+    use super::{FreshNoiseSpec, fill_uncorrelated, sample_fresh, table_for_spec};
 
     fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
         let n = entity_ids.len();
@@ -246,10 +285,9 @@ mod tests {
 
         let mut out_a = vec![0.0f64; spec.dim];
         let mut out_b = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        sample_fresh(spec, &mut out_a, &mut perm, &corr, &entity_order).unwrap();
-        sample_fresh(spec, &mut out_b, &mut perm, &corr, &entity_order).unwrap();
+        sample_fresh(spec, &mut out_a, &corr, &entity_order).unwrap();
+        sample_fresh(spec, &mut out_b, &corr, &entity_order).unwrap();
 
         assert_eq!(
             out_a, out_b,
@@ -274,10 +312,9 @@ mod tests {
 
         let mut out_a = vec![0.0f64; spec_a.dim];
         let mut out_b = vec![0.0f64; spec_b.dim];
-        let mut perm = vec![0usize; 10];
 
-        sample_fresh(spec_a, &mut out_a, &mut perm, &corr_a, &entity_order).unwrap();
-        sample_fresh(spec_b, &mut out_b, &mut perm, &corr_b, &entity_order).unwrap();
+        sample_fresh(spec_a, &mut out_a, &corr_a, &entity_order).unwrap();
+        sample_fresh(spec_b, &mut out_b, &corr_b, &entity_order).unwrap();
 
         assert_ne!(
             out_a, out_b,
@@ -295,9 +332,8 @@ mod tests {
         };
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, &entity_order);
 
         assert!(result.is_ok(), "LHS must return Ok(()), got {result:?}");
         for (i, &v) in output.iter().enumerate() {
@@ -312,9 +348,8 @@ mod tests {
         let spec = base_spec(NoiseMethod::QmcSobol);
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, &entity_order);
 
         assert!(
             result.is_ok(),
@@ -335,9 +370,8 @@ mod tests {
         };
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, &entity_order);
 
         match result {
             Err(StochasticError::DimensionExceedsCapacity {
@@ -364,9 +398,8 @@ mod tests {
         let spec = base_spec(NoiseMethod::QmcHalton);
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, &entity_order);
 
         assert!(
             result.is_ok(),
@@ -384,9 +417,8 @@ mod tests {
         let spec = base_spec(NoiseMethod::Selective);
 
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        let result = sample_fresh(spec, &mut output, &mut perm, &corr, &entity_order);
+        let result = sample_fresh(spec, &mut output, &corr, &entity_order);
 
         assert!(
             result.is_ok(),
@@ -416,10 +448,9 @@ mod tests {
 
         let mut out_selective = vec![0.0f64; spec.dim];
         let mut out_saa = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
 
-        sample_fresh(spec, &mut out_selective, &mut perm, &corr_a, &entity_order).unwrap();
-        sample_fresh(spec_saa, &mut out_saa, &mut perm, &corr_b, &entity_order).unwrap();
+        sample_fresh(spec, &mut out_selective, &corr_a, &entity_order).unwrap();
+        sample_fresh(spec_saa, &mut out_saa, &corr_b, &entity_order).unwrap();
 
         assert_eq!(
             out_selective, out_saa,
@@ -436,10 +467,10 @@ mod tests {
         let spec = base_spec(NoiseMethod::Saa);
         let mut out_a = vec![0.0f64; spec.dim];
         let mut out_b = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
+        let table = table_for_spec(spec);
 
-        fill_uncorrelated(spec, None, &mut out_a, &mut perm).unwrap();
-        fill_uncorrelated(spec, None, &mut out_b, &mut perm).unwrap();
+        fill_uncorrelated(spec, &table, &mut out_a).unwrap();
+        fill_uncorrelated(spec, &table, &mut out_b).unwrap();
 
         assert_eq!(
             out_a, out_b,
@@ -454,9 +485,9 @@ mod tests {
             ..base_spec(NoiseMethod::QmcSobol)
         };
         let mut output = vec![0.0f64; spec.dim];
-        let mut perm = vec![0usize; spec.total_scenarios as usize];
+        let table = table_for_spec(spec);
 
-        let result = fill_uncorrelated(spec, None, &mut output, &mut perm);
+        let result = fill_uncorrelated(spec, &table, &mut output);
 
         match result {
             Err(StochasticError::DimensionExceedsCapacity {
@@ -492,9 +523,9 @@ mod tests {
                 ..base_spec(method)
             };
             let mut output = vec![0.0f64; spec.dim];
-            let mut perm = vec![0usize; spec.total_scenarios as usize];
+            let table = table_for_spec(spec);
 
-            let result = fill_uncorrelated(spec, None, &mut output, &mut perm);
+            let result = fill_uncorrelated(spec, &table, &mut output);
 
             assert!(
                 result.is_ok(),

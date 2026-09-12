@@ -4819,6 +4819,7 @@ mod tests {
         event_sender: Option<&Sender<TrainingEvent>>,
     ) -> BackwardResult {
         use cobre_solver::ActiveSolver;
+        use cobre_stochastic::ForwardNoiseTables;
 
         let comm = StubComm;
         let num_stages = setup.stage_data.stages.len();
@@ -4896,6 +4897,13 @@ mod tests {
 
         let sampler =
             crate::forward::build_sampler_from_ctx(&training_ctx).expect("forward sampler");
+        let mut noise_tables = ForwardNoiseTables::default();
+        sampler.rebuild_noise_tables(
+            1,
+            u32::try_from(total_forward_passes).expect("fits u32"),
+            stage_ctx.noise_group_ids,
+            &mut noise_tables,
+        );
         let frozen: Vec<StageTemplate> = (0..node_graph.n_pools)
             .map(|p| stage_ctx.templates[node_graph.pool_stage[p].0].clone())
             .collect();
@@ -4920,6 +4928,7 @@ mod tests {
             fcf: &setup.fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
+            noise_tables: &noise_tables,
             dcs: None,
             event_sender,
         };

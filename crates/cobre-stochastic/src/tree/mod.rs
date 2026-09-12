@@ -7,8 +7,10 @@
 pub mod generate;
 pub mod lhs;
 pub mod opening_tree;
+pub mod point_spec;
 pub mod qmc_halton;
 pub mod qmc_sobol;
 
 pub use generate::{ClassDimensions, OpeningTreeGenerationInputs, generate_opening_tree};
 pub use opening_tree::{OpeningTree, OpeningTreeView, SweepDirection};
+pub use point_spec::NoisePointSpec;

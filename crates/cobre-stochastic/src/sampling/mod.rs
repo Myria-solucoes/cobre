@@ -19,6 +19,7 @@ mod eta_inversion;
 pub mod external;
 pub mod historical;
 pub mod insample;
+pub mod tables;
 pub mod window;
 
 pub use class_sampler::{ClassSampleRequest, ClassSampler, select_transition_child};
@@ -30,6 +31,7 @@ pub use external::{
 pub use historical::{
     HistoricalScenarioLibrary, standardize_historical_windows, validate_historical_library,
 };
+pub use tables::{ClassNoiseTables, ForwardNoiseTables, NoiseTable};
 pub use window::discover_historical_windows;
 pub(crate) mod out_of_sample;
 
@@ -155,6 +157,9 @@ pub struct SampleRequest<'b> {
     pub noise_buf: &'b mut [f64],
     /// Caller-owned scratch for LHS permutation generation.
     pub perm_scratch: &'b mut [usize],
+    /// Per-iteration scenario-invariant tables the driver owns, rebuilt once
+    /// via [`ForwardSampler::rebuild_noise_tables`].
+    pub tables: &'b ForwardNoiseTables,
     /// Total scenario count across all ranks (for LHS stratification).
     pub total_scenarios: u32,
     /// Seed-derivation identifier: stages sharing a `(season_id, year)` bucket
@@ -217,9 +222,10 @@ impl ForwardSampler<'_> {
             pinned_scenario: req.pinned_scenario,
         };
 
-        self.inflow.fill(&class_req, inflow_buf, req.perm_scratch)?;
-        self.load.fill(&class_req, load_buf, req.perm_scratch)?;
-        self.ncs.fill(&class_req, ncs_buf, req.perm_scratch)?;
+        self.inflow
+            .fill(&class_req, req.tables.inflow(), inflow_buf)?;
+        self.load.fill(&class_req, req.tables.load(), load_buf)?;
+        self.ncs.fill(&class_req, req.tables.ncs(), ncs_buf)?;
 
         // Correlation is applied only where a ref is set (OutOfSample); applying
         // it to a pre-correlated source would double-correlate.
@@ -252,6 +258,75 @@ impl ForwardSampler<'_> {
         }
 
         Ok(ForwardNoise::new(&req.noise_buf[..total_dim]))
+    }
+
+    /// Rebuild every scenario-invariant table in `out` for one training
+    /// iteration's `(iteration, total_scenarios, noise_group_ids)`, reusing
+    /// its buffer capacity across iterations. A class not sampled out of
+    /// sample is cleared, and its `table_at` calls return `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an `OutOfSample` class uses `QmcSobol` with
+    /// `dim > MAX_SOBOL_DIM` (`SobolPrecomputed::new`); callers must reject
+    /// that combination ahead of this call, as `fill_uncorrelated` already
+    /// does for every draw.
+    pub fn rebuild_noise_tables(
+        &self,
+        iteration: u32,
+        total_scenarios: u32,
+        noise_group_ids: &[u32],
+        out: &mut ForwardNoiseTables,
+    ) {
+        rebuild_class_tables(
+            &self.inflow,
+            iteration,
+            total_scenarios,
+            noise_group_ids,
+            &mut out.inflow,
+        );
+        rebuild_class_tables(
+            &self.load,
+            iteration,
+            total_scenarios,
+            noise_group_ids,
+            &mut out.load,
+        );
+        rebuild_class_tables(
+            &self.ncs,
+            iteration,
+            total_scenarios,
+            noise_group_ids,
+            &mut out.ncs,
+        );
+    }
+}
+
+/// Refill one class's noise tables from its [`ClassSampler`], clearing them
+/// when the class is not sampled out of sample.
+fn rebuild_class_tables(
+    sampler: &ClassSampler<'_>,
+    iteration: u32,
+    total_scenarios: u32,
+    noise_group_ids: &[u32],
+    out: &mut ClassNoiseTables,
+) {
+    if let ClassSampler::OutOfSample {
+        forward_seed,
+        dim,
+        noise_methods,
+    } = sampler
+    {
+        out.refill(
+            *forward_seed,
+            *dim,
+            iteration,
+            total_scenarios,
+            noise_group_ids,
+            noise_methods,
+        );
+    } else {
+        out.clear();
     }
 }
 
@@ -626,14 +701,15 @@ mod tests {
     };
 
     use super::{
-        ClassSampler, ForwardNoise, ForwardSampler, ForwardSamplerConfig, SampleRequest,
-        build_forward_sampler,
+        ClassNoiseTables, ClassSampleRequest, ClassSampler, ForwardNoise, ForwardNoiseTables,
+        ForwardSampler, ForwardSamplerConfig, NoiseTable, SampleRequest, build_forward_sampler,
     };
     use crate::{
-        StochasticContext, StochasticError,
+        NoisePointSpec, StochasticContext, StochasticError,
         context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context},
         sample_forward,
         tree::generate::ClassDimensions,
+        tree::lhs::{sample_lhs_point, sample_lhs_point_reference},
         tree::opening_tree::OpeningTree,
     };
 
@@ -671,6 +747,31 @@ mod tests {
             scenario_config: ScenarioSourceConfig {
                 branching_factor: bf,
                 noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    fn make_stage_with_method(index: usize, id: i32, bf: usize, method: NoiseMethod) -> Stage {
+        Stage {
+            index,
+            id,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: bf,
+                noise_method: method,
             },
         }
     }
@@ -834,6 +935,20 @@ mod tests {
             external_load_library: None,
             external_ncs_library: None,
         }
+    }
+
+    /// Rebuild `sampler`'s noise tables for one `(iteration, total,
+    /// groups)` triple — the `SampleRequest.tables` every `sample()` test
+    /// call needs.
+    fn tables_for(
+        sampler: &ForwardSampler<'_>,
+        iteration: u32,
+        total: u32,
+        groups: &[u32],
+    ) -> ForwardNoiseTables {
+        let mut tables = ForwardNoiseTables::default();
+        sampler.rebuild_noise_tables(iteration, total, groups, &mut tables);
+        tables
     }
 
     // -----------------------------------------------------------------------
@@ -1052,6 +1167,7 @@ mod tests {
 
         let mut noise_buf = vec![0.0f64; dim];
         let mut perm_scratch = vec![0usize; dim];
+        let tables = tables_for(&sampler, 0, 5, &[]);
 
         let result = sampler.sample(SampleRequest {
             iteration: 0,
@@ -1065,6 +1181,7 @@ mod tests {
             node_opening_offset: 0,
             node_opening_len: ctx.tree_view().n_openings(0),
             pinned_scenario: None,
+            tables: &tables,
         });
         let noise = result.expect("expected Ok from InSample sample()");
         assert_eq!(
@@ -1087,6 +1204,7 @@ mod tests {
         let mut buf_b = vec![0.0f64; dim];
         let mut perm_a = vec![0usize; dim];
         let mut perm_b = vec![0usize; dim];
+        let tables = tables_for(&sampler, 1, 5, &[]);
 
         let a = sampler
             .sample(SampleRequest {
@@ -1101,6 +1219,7 @@ mod tests {
                 node_opening_offset: 0,
                 node_opening_len: ctx.tree_view().n_openings(0),
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
         let b = sampler
@@ -1116,6 +1235,7 @@ mod tests {
                 node_opening_offset: 0,
                 node_opening_len: ctx.tree_view().n_openings(0),
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
 
@@ -1160,6 +1280,7 @@ mod tests {
 
         let mut noise_buf = vec![0.0f64; 5];
         let mut perm_scratch = vec![0usize; 10];
+        let tables = tables_for(&sampler, 0, 3, &[]);
 
         let result = sampler.sample(SampleRequest {
             iteration: 0,
@@ -1173,6 +1294,7 @@ mod tests {
             node_opening_offset: 0,
             node_opening_len: tree.view().n_openings(0),
             pinned_scenario: None,
+            tables: &tables,
         });
 
         let noise = result.expect("expected Ok from composite InSample sample()");
@@ -1204,6 +1326,7 @@ mod tests {
 
         let mut noise_buf = vec![0.0f64; dim];
         let mut perm_scratch = vec![0usize; 5];
+        let tables = tables_for(&sampler, 0, 5, &[]);
 
         let result = sampler.sample(SampleRequest {
             iteration: 0,
@@ -1217,6 +1340,7 @@ mod tests {
             node_opening_offset: 0,
             node_opening_len: 0,
             pinned_scenario: None,
+            tables: &tables,
         });
 
         let noise = result.expect("expected Ok from OutOfSample sample()");
@@ -1243,6 +1367,7 @@ mod tests {
         let mut buf_b = vec![0.0f64; dim];
         let mut perm_a = vec![0usize; 5];
         let mut perm_b = vec![0usize; 5];
+        let tables = tables_for(&sampler, 3, 5, &[]);
 
         let a = sampler
             .sample(SampleRequest {
@@ -1253,10 +1378,11 @@ mod tests {
                 noise_buf: &mut buf_a,
                 perm_scratch: &mut perm_a,
                 total_scenarios: 5,
-                noise_group_id: 0,
+                noise_group_id: 1,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
         let b = sampler
@@ -1268,10 +1394,11 @@ mod tests {
                 noise_buf: &mut buf_b,
                 perm_scratch: &mut perm_b,
                 total_scenarios: 5,
-                noise_group_id: 0,
+                noise_group_id: 1,
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
 
@@ -1297,6 +1424,7 @@ mod tests {
         let mut buf_b = vec![0.0f64; dim];
         let mut perm_a = vec![0usize; 5];
         let mut perm_b = vec![0usize; 5];
+        let tables_group7 = tables_for(&sampler, 2, 5, &[7]);
 
         let a = sampler
             .sample(SampleRequest {
@@ -1311,6 +1439,7 @@ mod tests {
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables_group7,
             })
             .unwrap();
         let b = sampler
@@ -1326,6 +1455,7 @@ mod tests {
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables_group7,
             })
             .unwrap();
         assert_eq!(
@@ -1336,6 +1466,7 @@ mod tests {
 
         let mut buf_c = vec![0.0f64; dim];
         let mut perm_c = vec![0usize; 5];
+        let tables_group8 = tables_for(&sampler, 2, 5, &[8]);
         let c = sampler
             .sample(SampleRequest {
                 iteration: 2,
@@ -1349,6 +1480,7 @@ mod tests {
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables_group8,
             })
             .unwrap();
         let any_differ = a.as_slice().iter().zip(c.as_slice()).any(|(x, y)| x != y);
@@ -1430,6 +1562,7 @@ mod tests {
 
         let mut buf = vec![0.0f64; ctx.dim()];
         let mut perm = vec![0usize; 5];
+        let tables = tables_for(&sampler, 1, 5, &[]);
         let noise = sampler
             .sample(SampleRequest {
                 iteration: 1,
@@ -1443,6 +1576,7 @@ mod tests {
                 node_opening_offset: 0,
                 node_opening_len: 0,
                 pinned_scenario: None,
+                tables: &tables,
             })
             .unwrap();
         let s = noise.as_slice();
@@ -1459,5 +1593,249 @@ mod tests {
             4_608_014_355_120_151_153_u64,
             "inflow draw must keep its root-seed value"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // rebuild_noise_tables
+    // -----------------------------------------------------------------------
+
+    /// Build a single-hydro, three-stage study whose inflow class is sampled
+    /// out of sample with the given per-stage methods and forward seed. Load
+    /// and NCS default to `InSample` — this fixture exercises only inflow.
+    fn build_inflow_oos_test_ctx(
+        methods: [NoiseMethod; 3],
+        forward_seed: u64,
+    ) -> (StochasticContext, Vec<Stage>) {
+        let hydros = vec![make_hydro(1)];
+        let stages = vec![
+            make_stage_with_method(0, 0, 5, methods[0]),
+            make_stage_with_method(1, 1, 5, methods[1]),
+            make_stage_with_method(2, 2, 5, methods[2]),
+        ];
+        let inflow_models = vec![
+            make_inflow_model(1, 0),
+            make_inflow_model(1, 1),
+            make_inflow_model(1, 2),
+        ];
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(hydros)
+            .stages(stages.clone())
+            .inflow_models(inflow_models)
+            .correlation(identity_correlation(&[1]))
+            .build()
+            .unwrap();
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            Some(forward_seed),
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+        (ctx, stages)
+    }
+
+    fn build_oos_inflow_config<'a>(
+        ctx: &'a StochasticContext,
+        stages: &'a [Stage],
+    ) -> ForwardSamplerConfig<'a> {
+        let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
+        ForwardSamplerConfig {
+            class_schemes: ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+            ctx,
+            stages,
+            dims: ClassDimensions {
+                n_hydros,
+                n_load_buses: ctx.n_load_buses(),
+                n_ncs: ctx.n_stochastic_ncs(),
+            },
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+        }
+    }
+
+    #[test]
+    fn test_rebuild_noise_tables_variant_per_method() {
+        let (ctx, stages) = build_inflow_oos_test_ctx(
+            [
+                NoiseMethod::QmcSobol,
+                NoiseMethod::QmcHalton,
+                NoiseMethod::Lhs,
+            ],
+            99,
+        );
+        let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
+        let mut tables = ForwardNoiseTables::default();
+
+        sampler.rebuild_noise_tables(0, 8, &[0, 1, 2], &mut tables);
+
+        assert!(matches!(
+            tables.inflow().table_at(0),
+            Some(NoiseTable::Sobol(_))
+        ));
+        assert!(matches!(
+            tables.inflow().table_at(1),
+            Some(NoiseTable::Halton(_))
+        ));
+        assert!(matches!(
+            tables.inflow().table_at(2),
+            Some(NoiseTable::Lhs(_))
+        ));
+    }
+
+    #[test]
+    fn test_rebuild_noise_tables_dedups_same_group_and_method() {
+        let (ctx, stages) =
+            build_inflow_oos_test_ctx([NoiseMethod::Lhs, NoiseMethod::Lhs, NoiseMethod::Lhs], 99);
+        let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
+        let mut tables = ForwardNoiseTables::default();
+
+        sampler.rebuild_noise_tables(0, 8, &[0, 0, 1], &mut tables);
+
+        let t0 = tables.inflow().table_at(0).expect("stage 0 has a table");
+        let t1 = tables.inflow().table_at(1).expect("stage 1 has a table");
+        let t2 = tables.inflow().table_at(2).expect("stage 2 has a table");
+        assert!(
+            std::ptr::eq(t0, t1),
+            "stages sharing a (group, method) pair must resolve to the same table"
+        );
+        assert!(
+            !std::ptr::eq(t0, t2),
+            "a different noise group must resolve to a distinct table"
+        );
+    }
+
+    #[test]
+    fn test_rebuild_noise_tables_keys_on_group_and_method_pair() {
+        let (ctx, stages) = build_inflow_oos_test_ctx(
+            [NoiseMethod::Lhs, NoiseMethod::QmcSobol, NoiseMethod::Saa],
+            99,
+        );
+        let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
+        let mut tables = ForwardNoiseTables::default();
+
+        sampler.rebuild_noise_tables(0, 8, &[0, 0, 0], &mut tables);
+
+        assert!(matches!(
+            tables.inflow().table_at(0),
+            Some(NoiseTable::Lhs(_))
+        ));
+        assert!(matches!(
+            tables.inflow().table_at(1),
+            Some(NoiseTable::Sobol(_))
+        ));
+        assert!(matches!(
+            tables.inflow().table_at(2),
+            Some(NoiseTable::Direct)
+        ));
+    }
+
+    #[test]
+    fn test_rebuild_noise_tables_lhs_matches_direct_point_function() {
+        let (ctx, stages) =
+            build_inflow_oos_test_ctx([NoiseMethod::Lhs, NoiseMethod::Lhs, NoiseMethod::Lhs], 99);
+        let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
+        let mut tables = ForwardNoiseTables::default();
+
+        sampler.rebuild_noise_tables(0, 8, &[0, 0, 1], &mut tables);
+
+        let Some(NoiseTable::Lhs(lhs_ctx)) = tables.inflow().table_at(2) else {
+            panic!("expected NoiseTable::Lhs for stage 2");
+        };
+
+        let forward_seed = 99; // inflow keeps the root seed unchanged
+        for scenario in 0..8u32 {
+            let spec = NoisePointSpec {
+                sampling_seed: forward_seed,
+                iteration: 0,
+                scenario,
+                stage_id: 1,
+                total_scenarios: 8,
+                dim: 1,
+            };
+            let mut precomputed_out = [0.0f64];
+            sample_lhs_point(&spec, lhs_ctx, &mut precomputed_out);
+
+            let mut perm_scratch = vec![0usize; 8];
+            let mut direct_out = [0.0f64];
+            sample_lhs_point_reference(&spec, &mut direct_out, &mut perm_scratch);
+
+            assert_eq!(
+                precomputed_out, direct_out,
+                "scenario {scenario}: precomputed LHS table must match the direct point function"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // OutOfSample::fill stamp assertions
+    // -----------------------------------------------------------------------
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "tables built for")]
+    fn out_of_sample_fill_panics_when_tables_stale_for_iteration() {
+        let sampler = ClassSampler::OutOfSample {
+            forward_seed: 1,
+            dim: 2,
+            noise_methods: vec![NoiseMethod::Saa].into_boxed_slice(),
+        };
+        let mut tables = ClassNoiseTables::default();
+        tables.refill(1, 2, 0, 4, &[0], &[NoiseMethod::Saa]);
+
+        let req = ClassSampleRequest {
+            iteration: 1,
+            scenario: 0,
+            stage: 0,
+            stage_idx: 0,
+            total_scenarios: 4,
+            noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
+        };
+        let mut output = vec![0.0f64; 2];
+        let _ = sampler.fill(&req, &tables, &mut output);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "table built for group")]
+    fn out_of_sample_fill_panics_when_stage_table_built_for_a_different_group() {
+        let methods = [NoiseMethod::Saa, NoiseMethod::Saa, NoiseMethod::Saa];
+        let sampler = ClassSampler::OutOfSample {
+            forward_seed: 1,
+            dim: 2,
+            noise_methods: methods.into(),
+        };
+        let mut tables = ClassNoiseTables::default();
+        tables.refill(1, 2, 0, 4, &[0, 0, 1], &methods);
+
+        let req = ClassSampleRequest {
+            iteration: 0,
+            scenario: 0,
+            stage: 0,
+            stage_idx: 2,
+            total_scenarios: 4,
+            noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
+            pinned_scenario: None,
+        };
+        let mut output = vec![0.0f64; 2];
+        let _ = sampler.fill(&req, &tables, &mut output);
     }
 }

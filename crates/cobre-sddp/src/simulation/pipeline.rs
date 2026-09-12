@@ -13,7 +13,7 @@ use cobre_core::commissioning::commissioning_active;
 use cobre_core::{EntityId, HydroPastDefluence, TrainingEvent};
 use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, StageTemplate};
-use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
+use cobre_stochastic::{ClassSampleRequest, ForwardNoiseTables, ForwardSampler, SampleRequest};
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::error::SddpError::Infeasible;
@@ -211,6 +211,8 @@ pub(crate) struct ScenarioIds<'a> {
     pub(crate) perm_scratch: &'a mut [usize],
     /// Noise sampler used to draw per-stage stochastic values.
     pub(crate) sampler: &'a ForwardSampler<'a>,
+    /// Per-run scenario-invariant tables backing `sampler`'s `OutOfSample` draws.
+    pub(crate) noise_tables: &'a ForwardNoiseTables,
     /// The stage-0 root's canonical `NodeGraph` position — this scenario's
     /// sampled walk starts here, mirroring the training forward pass.
     pub(crate) root_node: NodePos,
@@ -937,6 +939,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             node_opening_offset,
             node_opening_len,
             pinned_scenario: node_graph.node_pinned_scenario(node),
+            tables: ids.noise_tables,
         })?;
         let raw_noise = noise.as_slice();
 
