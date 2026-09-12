@@ -11,7 +11,7 @@ use rand::Rng;
 use rand::RngExt;
 use rand_distr::Uniform;
 
-use super::point_spec::NoisePointSpec;
+use super::NoisePointSpec;
 use crate::noise::{
     quantile::norm_quantile,
     rng::rng_from_seed,
@@ -25,6 +25,17 @@ pub(crate) fn fisher_yates(perm: &mut [usize], rng: &mut impl Rng) {
         let j = rng.random_range(0..=i);
         perm.swap(i, j);
     }
+}
+
+fn reset_identity_perm(perm: &mut [usize]) {
+    for (i, p) in perm.iter_mut().enumerate() {
+        *p = i;
+    }
+}
+
+#[allow(clippy::expect_used)]
+fn unit_uniform() -> Uniform<f64> {
+    Uniform::new(0.0_f64, 1.0_f64).expect("0.0 < 1.0 is always a valid range")
 }
 
 /// Fill `output` with `n_openings × dim` standard-normal N(0,1) values using LHS.
@@ -56,8 +67,7 @@ pub fn generate_lhs(
 
     let seed = derive_stage_seed(base_seed, stage_id);
     let mut rng = rng_from_seed(seed);
-    #[allow(clippy::expect_used)]
-    let uniform = Uniform::new(0.0_f64, 1.0_f64).expect("0.0 < 1.0 is always a valid range");
+    let uniform = unit_uniform();
 
     let mut samples = vec![0.0_f64; n_openings];
     let mut perm: Vec<usize> = (0..n_openings).collect();
@@ -74,9 +84,7 @@ pub fn generate_lhs(
             *sample = s.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
         }
 
-        for (i, p) in perm.iter_mut().enumerate() {
-            *p = i;
-        }
+        reset_identity_perm(&mut perm);
         fisher_yates(&mut perm, &mut rng);
 
         for k in 0..n_openings {
@@ -122,17 +130,14 @@ pub(crate) fn sample_lhs_point_reference(
     );
     let mut draw_rng = rng_from_seed(draw_seed);
 
-    #[allow(clippy::expect_used)]
-    let uniform = Uniform::new(0.0_f64, 1.0_f64).expect("0.0 < 1.0 is always a valid range");
+    let uniform = unit_uniform();
 
     let perm = &mut perm_scratch[..n];
     let scenario_idx = spec.scenario as usize;
 
     for slot in output.iter_mut().take(spec.dim) {
         // perm_rng advances identically on all workers, so the permutation matches.
-        for (i, p) in perm.iter_mut().enumerate() {
-            *p = i;
-        }
+        reset_identity_perm(perm);
         fisher_yates(perm, &mut perm_rng);
 
         let stratum = perm[scenario_idx];
@@ -172,9 +177,7 @@ impl LhsPrecomputed {
         let mut work: Vec<usize> = (0..n).collect();
 
         for d in 0..dim {
-            for (i, slot) in work.iter_mut().enumerate() {
-                *slot = i;
-            }
+            reset_identity_perm(&mut work);
             fisher_yates(&mut work, &mut perm_rng);
 
             let row = &mut strata[d * n..(d + 1) * n];
@@ -219,8 +222,7 @@ pub fn sample_lhs_point(spec: &NoisePointSpec, ctx: &LhsPrecomputed, output: &mu
     );
     let mut draw_rng = rng_from_seed(draw_seed);
 
-    #[allow(clippy::expect_used)]
-    let uniform = Uniform::new(0.0_f64, 1.0_f64).expect("0.0 < 1.0 is always a valid range");
+    let uniform = unit_uniform();
 
     let scenario_idx = spec.scenario as usize;
 

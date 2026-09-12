@@ -290,32 +290,7 @@ fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
 }
 
 fn identity_correlation(ids: &[i32]) -> CorrelationModel {
-    let n = ids.len();
-    let matrix: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
-        .collect();
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: ids
-                    .iter()
-                    .map(|&id| CorrelationEntity {
-                        entity_type: "inflow".to_string(),
-                        id: EntityId(id),
-                    })
-                    .collect(),
-                matrix,
-            }],
-        },
-    );
-    CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    }
+    correlated_correlation(ids, 0.0)
 }
 
 fn correlated_correlation(ids: &[i32], rho: f64) -> CorrelationModel {

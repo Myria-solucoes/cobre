@@ -104,10 +104,16 @@ pub(crate) fn fill_uncorrelated(
     table: &NoiseTable,
     output: &mut [f64],
 ) -> Result<(), StochasticError> {
+    let point_spec = NoisePointSpec {
+        sampling_seed: spec.forward_seed,
+        iteration: spec.iteration,
+        scenario: spec.scenario,
+        stage_id: spec.noise_group_id,
+        total_scenarios: spec.total_scenarios,
+        dim: spec.dim,
+    };
     match spec.noise_method {
-        NoiseMethod::Saa => {
-            fill_saa(spec, output);
-        }
+        NoiseMethod::Saa => fill_saa(spec, output),
         NoiseMethod::Lhs => {
             let NoiseTable::Lhs(ctx) = table else {
                 return Err(StochasticError::InsufficientData {
@@ -117,15 +123,7 @@ pub(crate) fn fill_uncorrelated(
                     ),
                 });
             };
-            let lhs_spec = NoisePointSpec {
-                sampling_seed: spec.forward_seed,
-                iteration: spec.iteration,
-                scenario: spec.scenario,
-                stage_id: spec.noise_group_id,
-                total_scenarios: spec.total_scenarios,
-                dim: spec.dim,
-            };
-            sample_lhs_point(&lhs_spec, ctx, output);
+            sample_lhs_point(&point_spec, ctx, output);
         }
         NoiseMethod::QmcSobol => {
             if spec.dim > MAX_SOBOL_DIM {
@@ -143,15 +141,7 @@ pub(crate) fn fill_uncorrelated(
                     ),
                 });
             };
-            let sobol_spec = NoisePointSpec {
-                sampling_seed: spec.forward_seed,
-                iteration: spec.iteration,
-                scenario: spec.scenario,
-                stage_id: spec.noise_group_id,
-                total_scenarios: spec.total_scenarios,
-                dim: spec.dim,
-            };
-            scrambled_sobol_point(&sobol_spec, ctx, output);
+            scrambled_sobol_point(&point_spec, ctx, output);
         }
         NoiseMethod::QmcHalton => {
             let NoiseTable::Halton(ctx) = table else {
@@ -162,15 +152,7 @@ pub(crate) fn fill_uncorrelated(
                     ),
                 });
             };
-            let halton_spec = NoisePointSpec {
-                sampling_seed: spec.forward_seed,
-                iteration: spec.iteration,
-                scenario: spec.scenario,
-                stage_id: spec.noise_group_id,
-                total_scenarios: spec.total_scenarios,
-                dim: spec.dim,
-            };
-            scrambled_halton_point(&halton_spec, ctx, output);
+            scrambled_halton_point(&point_spec, ctx, output);
         }
         NoiseMethod::Selective => {
             tracing::warn!(

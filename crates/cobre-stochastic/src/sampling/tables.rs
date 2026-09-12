@@ -162,11 +162,8 @@ fn build_table(
 /// without a class enum or an index.
 #[derive(Debug, Default)]
 pub struct ForwardNoiseTables {
-    /// Inflow class tables.
     pub(crate) inflow: ClassNoiseTables,
-    /// Load class tables.
     pub(crate) load: ClassNoiseTables,
-    /// NCS class tables.
     pub(crate) ncs: ClassNoiseTables,
 }
 

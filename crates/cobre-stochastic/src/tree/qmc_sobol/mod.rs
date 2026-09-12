@@ -31,7 +31,7 @@ use crate::noise::{
     rng::rng_from_seed,
     seed::{derive_opening_seed, derive_stage_seed},
 };
-use crate::tree::point_spec::NoisePointSpec;
+use crate::tree::NoisePointSpec;
 
 /// Maximum supported Sobol dimension: dimension 1 (van der Corput) plus the
 /// Joe-Kuo entries in `SOBOL_DIRECTIONS`.

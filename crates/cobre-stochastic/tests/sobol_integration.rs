@@ -102,70 +102,10 @@ fn make_stage_sobol_with_block(index: usize, id: i32, branching_factor: usize) -
     }
 }
 
-fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
-    let n = entity_ids.len();
-    let matrix: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
-        .collect();
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: entity_ids
-                    .iter()
-                    .map(|&id| CorrelationEntity {
-                        entity_type: "inflow".to_string(),
-                        id: EntityId(id),
-                    })
-                    .collect(),
-                matrix,
-            }],
-        },
-    );
-    let model = CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    };
-    DecomposedCorrelation::build(&model).unwrap()
-}
-
-fn correlated_correlation(entity_ids: &[i32], rho: f64) -> DecomposedCorrelation {
+fn correlation_model(entity_ids: &[i32], rho: f64) -> CorrelationModel {
     let n = entity_ids.len();
     let matrix: Vec<Vec<f64>> = (0..n)
         .map(|i| (0..n).map(|j| if i == j { 1.0 } else { rho }).collect())
-        .collect();
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: entity_ids
-                    .iter()
-                    .map(|&id| CorrelationEntity {
-                        entity_type: "inflow".to_string(),
-                        id: EntityId(id),
-                    })
-                    .collect(),
-                matrix,
-            }],
-        },
-    );
-    let model = CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    };
-    DecomposedCorrelation::build(&model).unwrap()
-}
-
-fn identity_correlation_model(entity_ids: &[i32]) -> CorrelationModel {
-    let n = entity_ids.len();
-    let matrix: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
         .collect();
     let mut profiles = BTreeMap::new();
     profiles.insert(
@@ -189,6 +129,18 @@ fn identity_correlation_model(entity_ids: &[i32]) -> CorrelationModel {
         profiles,
         schedule: vec![],
     }
+}
+
+fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
+    DecomposedCorrelation::build(&correlation_model(entity_ids, 0.0)).unwrap()
+}
+
+fn correlated_correlation(entity_ids: &[i32], rho: f64) -> DecomposedCorrelation {
+    DecomposedCorrelation::build(&correlation_model(entity_ids, rho)).unwrap()
+}
+
+fn identity_correlation_model(entity_ids: &[i32]) -> CorrelationModel {
+    correlation_model(entity_ids, 0.0)
 }
 
 fn make_bus(id: i32) -> Bus {

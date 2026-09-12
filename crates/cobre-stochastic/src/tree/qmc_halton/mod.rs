@@ -23,7 +23,7 @@ use crate::noise::{
     rng::rng_from_seed,
     seed::{derive_opening_seed, derive_stage_seed},
 };
-use crate::tree::point_spec::NoisePointSpec;
+use crate::tree::NoisePointSpec;
 
 use super::lhs::fisher_yates;
 
