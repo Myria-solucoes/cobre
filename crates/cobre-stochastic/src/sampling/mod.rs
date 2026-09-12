@@ -35,12 +35,14 @@ pub use tables::{ClassNoiseTables, ForwardNoiseTables, NoiseTable};
 pub use window::discover_historical_windows;
 pub(crate) mod out_of_sample;
 
-use cobre_core::{EntityId, scenario::SamplingScheme, temporal::NoiseMethod, temporal::Stage};
+use cobre_core::{scenario::SamplingScheme, temporal::NoiseMethod, temporal::Stage};
 
 use crate::noise::seed::derive_class_forward_seed;
 use crate::{
-    OpeningTreeView, StochasticError, context::StochasticContext,
-    correlation::resolve::DecomposedCorrelation, tree::generate::ClassDimensions,
+    OpeningTreeView, StochasticError,
+    context::StochasticContext,
+    correlation::resolve::{DecomposedCorrelation, EntityClass},
+    tree::generate::ClassDimensions,
 };
 
 // ---------------------------------------------------------------------------
@@ -66,22 +68,6 @@ impl<'b> ForwardNoise<'b> {
 }
 
 // ---------------------------------------------------------------------------
-// CorrelationRef
-// ---------------------------------------------------------------------------
-
-/// Pre-decomposed correlation matrix and entity ordering for one entity class.
-///
-/// Present (`Some`) only for `OutOfSample` samplers. `InSample`, `Historical`,
-/// and `External` samplers produce pre-correlated noise and must not apply it again.
-#[derive(Debug)]
-pub struct CorrelationRef<'a> {
-    /// Pre-decomposed spectral factors for this entity class.
-    pub decomposed: &'a DecomposedCorrelation,
-    /// Canonical entity ID ordering for the class segment.
-    pub entity_order: &'a [EntityId],
-}
-
-// ---------------------------------------------------------------------------
 // ForwardSampler
 // ---------------------------------------------------------------------------
 
@@ -101,11 +87,11 @@ pub struct ForwardSampler<'a> {
     /// Per-class entity counts that define the buffer split.
     dims: ClassDimensions,
     /// Correlation ref for the inflow class.
-    inflow_correlation: Option<CorrelationRef<'a>>,
+    inflow_correlation: Option<&'a DecomposedCorrelation>,
     /// Correlation ref for the load class.
-    load_correlation: Option<CorrelationRef<'a>>,
+    load_correlation: Option<&'a DecomposedCorrelation>,
     /// Correlation ref for the NCS class.
-    ncs_correlation: Option<CorrelationRef<'a>>,
+    ncs_correlation: Option<&'a DecomposedCorrelation>,
 }
 
 impl<'a> ForwardSampler<'a> {
@@ -115,9 +101,9 @@ impl<'a> ForwardSampler<'a> {
         load: ClassSampler<'a>,
         ncs: ClassSampler<'a>,
         dims: ClassDimensions,
-        inflow_correlation: Option<CorrelationRef<'a>>,
-        load_correlation: Option<CorrelationRef<'a>>,
-        ncs_correlation: Option<CorrelationRef<'a>>,
+        inflow_correlation: Option<&'a DecomposedCorrelation>,
+        load_correlation: Option<&'a DecomposedCorrelation>,
+        ncs_correlation: Option<&'a DecomposedCorrelation>,
     ) -> Self {
         Self {
             inflow,
@@ -155,8 +141,8 @@ pub struct SampleRequest<'b> {
     pub stage_idx: usize,
     /// Caller-owned buffer for fresh noise output.
     pub noise_buf: &'b mut [f64],
-    /// Caller-owned scratch for LHS permutation generation.
-    pub perm_scratch: &'b mut [usize],
+    /// Caller-owned gather/correlate scratch for wide correlation groups.
+    pub corr_scratch: &'b mut [f64],
     /// Per-iteration scenario-invariant tables the driver owns, rebuilt once
     /// via [`ForwardSampler::rebuild_noise_tables`].
     pub tables: &'b ForwardNoiseTables,
@@ -225,34 +211,40 @@ impl ForwardSampler<'_> {
         self.load.fill(&class_req, req.tables.load(), load_buf)?;
         self.ncs.fill(&class_req, req.tables.ncs(), ncs_buf)?;
 
-        // Correlation is applied only where a ref is set (OutOfSample); applying
-        // it to a pre-correlated source would double-correlate.
-        #[allow(clippy::cast_possible_wrap)]
-        if let Some(ref corr) = self.inflow_correlation {
-            corr.decomposed.apply_correlation_for_class(
-                req.stage as i32,
-                inflow_buf,
-                corr.entity_order,
-                "inflow",
-            );
-        }
-        #[allow(clippy::cast_possible_wrap)]
-        if let Some(ref corr) = self.load_correlation {
-            corr.decomposed.apply_correlation_for_class(
-                req.stage as i32,
-                load_buf,
-                corr.entity_order,
-                "load",
-            );
-        }
-        #[allow(clippy::cast_possible_wrap)]
-        if let Some(ref corr) = self.ncs_correlation {
-            corr.decomposed.apply_correlation_for_class(
-                req.stage as i32,
-                ncs_buf,
-                corr.entity_order,
-                "ncs",
-            );
+        // Applied only per class whose correlation ref is set — a pre-correlated
+        // source would double-correlate otherwise. All three fields hold the same
+        // reference when present, so the profile lookup happens once per draw.
+        if let Some(correlation) = self
+            .inflow_correlation
+            .or(self.load_correlation)
+            .or(self.ncs_correlation)
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            let groups = correlation.groups_for_stage(req.stage as i32);
+            if self.inflow_correlation.is_some() {
+                DecomposedCorrelation::apply_groups_for_class(
+                    groups,
+                    EntityClass::Inflow,
+                    inflow_buf,
+                    req.corr_scratch,
+                );
+            }
+            if self.load_correlation.is_some() {
+                DecomposedCorrelation::apply_groups_for_class(
+                    groups,
+                    EntityClass::Load,
+                    load_buf,
+                    req.corr_scratch,
+                );
+            }
+            if self.ncs_correlation.is_some() {
+                DecomposedCorrelation::apply_groups_for_class(
+                    groups,
+                    EntityClass::Ncs,
+                    ncs_buf,
+                    req.corr_scratch,
+                );
+            }
         }
 
         Ok(ForwardNoise::new(&req.noise_buf[..total_dim]))
@@ -508,11 +500,6 @@ pub fn build_forward_sampler(
         .map(|s| s.scenario_config.noise_method)
         .collect();
 
-    let entity_order = ctx.entity_order();
-    let inflow_order = &entity_order[..dims.n_hydros];
-    let load_order = &entity_order[dims.n_hydros..dims.n_hydros + dims.n_load_buses];
-    let ncs_order = &entity_order[dims.n_hydros + dims.n_load_buses..];
-
     let correlation = ctx.correlation();
 
     let inflow = build_class_sampler(ClassSamplerParams {
@@ -557,26 +544,17 @@ pub fn build_forward_sampler(
     // Correlation refs are set only for OutOfSample; pre-correlated sources must
     // not be correlated again.
     let inflow_correlation = if matches!(inflow_scheme, SamplingScheme::OutOfSample) {
-        Some(CorrelationRef {
-            decomposed: correlation,
-            entity_order: inflow_order,
-        })
+        Some(correlation)
     } else {
         None
     };
     let load_correlation = if matches!(load_scheme, SamplingScheme::OutOfSample) {
-        Some(CorrelationRef {
-            decomposed: correlation,
-            entity_order: load_order,
-        })
+        Some(correlation)
     } else {
         None
     };
     let ncs_correlation = if matches!(ncs_scheme, SamplingScheme::OutOfSample) {
-        Some(CorrelationRef {
-            decomposed: correlation,
-            entity_order: ncs_order,
-        })
+        Some(correlation)
     } else {
         None
     };
@@ -1171,7 +1149,7 @@ mod tests {
         let dim = ctx.dim();
 
         let mut noise_buf = vec![0.0f64; dim];
-        let mut perm_scratch = vec![0usize; dim];
+        let mut corr_scratch = vec![0.0f64; 2 * dim];
         let tables = tables_for(&sampler, 0, 5, &[]);
 
         let result = sampler.sample(SampleRequest {
@@ -1180,7 +1158,7 @@ mod tests {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -1207,8 +1185,8 @@ mod tests {
 
         let mut buf_a = vec![0.0f64; dim];
         let mut buf_b = vec![0.0f64; dim];
-        let mut perm_a = vec![0usize; dim];
-        let mut perm_b = vec![0usize; dim];
+        let mut corr_a = vec![0.0f64; 2 * dim];
+        let mut corr_b = vec![0.0f64; 2 * dim];
         let tables = tables_for(&sampler, 1, 5, &[]);
 
         let a = sampler
@@ -1218,7 +1196,7 @@ mod tests {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut buf_a,
-                perm_scratch: &mut perm_a,
+                corr_scratch: &mut corr_a,
                 total_scenarios: 5,
                 noise_group_id: 0,
                 node_opening_offset: 0,
@@ -1234,7 +1212,7 @@ mod tests {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut buf_b,
-                perm_scratch: &mut perm_b,
+                corr_scratch: &mut corr_b,
                 total_scenarios: 5,
                 noise_group_id: 0,
                 node_opening_offset: 0,
@@ -1284,7 +1262,7 @@ mod tests {
         );
 
         let mut noise_buf = vec![0.0f64; 5];
-        let mut perm_scratch = vec![0usize; 10];
+        let mut corr_scratch = vec![0.0f64; 2 * 5];
         let tables = tables_for(&sampler, 0, 3, &[]);
 
         let result = sampler.sample(SampleRequest {
@@ -1293,7 +1271,7 @@ mod tests {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 3,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -1330,7 +1308,7 @@ mod tests {
         let dim = ctx.dim();
 
         let mut noise_buf = vec![0.0f64; dim];
-        let mut perm_scratch = vec![0usize; 5];
+        let mut corr_scratch = vec![0.0f64; 2 * dim];
         let tables = tables_for(&sampler, 0, 5, &[]);
 
         let result = sampler.sample(SampleRequest {
@@ -1339,7 +1317,7 @@ mod tests {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -1370,8 +1348,8 @@ mod tests {
 
         let mut buf_a = vec![0.0f64; dim];
         let mut buf_b = vec![0.0f64; dim];
-        let mut perm_a = vec![0usize; 5];
-        let mut perm_b = vec![0usize; 5];
+        let mut corr_a = vec![0.0f64; 2 * dim];
+        let mut corr_b = vec![0.0f64; 2 * dim];
         let tables = tables_for(&sampler, 3, 5, &[]);
 
         let a = sampler
@@ -1381,7 +1359,7 @@ mod tests {
                 stage: 1,
                 stage_idx: 1,
                 noise_buf: &mut buf_a,
-                perm_scratch: &mut perm_a,
+                corr_scratch: &mut corr_a,
                 total_scenarios: 5,
                 noise_group_id: 1,
                 node_opening_offset: 0,
@@ -1397,7 +1375,7 @@ mod tests {
                 stage: 1,
                 stage_idx: 1,
                 noise_buf: &mut buf_b,
-                perm_scratch: &mut perm_b,
+                corr_scratch: &mut corr_b,
                 total_scenarios: 5,
                 noise_group_id: 1,
                 node_opening_offset: 0,
@@ -1427,8 +1405,8 @@ mod tests {
 
         let mut buf_a = vec![0.0f64; dim];
         let mut buf_b = vec![0.0f64; dim];
-        let mut perm_a = vec![0usize; 5];
-        let mut perm_b = vec![0usize; 5];
+        let mut corr_a = vec![0.0f64; 2 * dim];
+        let mut corr_b = vec![0.0f64; 2 * dim];
         let tables_group7 = tables_for(&sampler, 2, 5, &[7]);
 
         let a = sampler
@@ -1438,7 +1416,7 @@ mod tests {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut buf_a,
-                perm_scratch: &mut perm_a,
+                corr_scratch: &mut corr_a,
                 total_scenarios: 5,
                 noise_group_id: 7,
                 node_opening_offset: 0,
@@ -1454,7 +1432,7 @@ mod tests {
                 stage: 1,
                 stage_idx: 0,
                 noise_buf: &mut buf_b,
-                perm_scratch: &mut perm_b,
+                corr_scratch: &mut corr_b,
                 total_scenarios: 5,
                 noise_group_id: 7,
                 node_opening_offset: 0,
@@ -1470,7 +1448,7 @@ mod tests {
         );
 
         let mut buf_c = vec![0.0f64; dim];
-        let mut perm_c = vec![0usize; 5];
+        let mut corr_c = vec![0.0f64; 2 * dim];
         let tables_group8 = tables_for(&sampler, 2, 5, &[8]);
         let c = sampler
             .sample(SampleRequest {
@@ -1479,7 +1457,7 @@ mod tests {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut buf_c,
-                perm_scratch: &mut perm_c,
+                corr_scratch: &mut corr_c,
                 total_scenarios: 5,
                 noise_group_id: 8,
                 node_opening_offset: 0,
@@ -1566,7 +1544,7 @@ mod tests {
         .unwrap();
 
         let mut buf = vec![0.0f64; ctx.dim()];
-        let mut perm = vec![0usize; 5];
+        let mut corr = vec![0.0f64; 2 * ctx.dim()];
         let tables = tables_for(&sampler, 1, 5, &[]);
         let noise = sampler
             .sample(SampleRequest {
@@ -1575,7 +1553,7 @@ mod tests {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut buf,
-                perm_scratch: &mut perm,
+                corr_scratch: &mut corr,
                 total_scenarios: 5,
                 noise_group_id: 0,
                 node_opening_offset: 0,
@@ -1782,9 +1760,9 @@ mod tests {
             let mut precomputed_out = [0.0f64];
             sample_lhs_point(&spec, lhs_ctx, &mut precomputed_out);
 
-            let mut perm_scratch = vec![0usize; 8];
+            let mut perm = vec![0usize; 8];
             let mut direct_out = [0.0f64];
-            sample_lhs_point_reference(&spec, &mut direct_out, &mut perm_scratch);
+            sample_lhs_point_reference(&spec, &mut direct_out, &mut perm);
 
             assert_eq!(
                 precomputed_out, direct_out,

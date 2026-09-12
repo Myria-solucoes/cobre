@@ -231,8 +231,17 @@ fn simple_opening_tree(n_openings: usize) -> cobre_stochastic::OpeningTree {
         profiles,
         schedule: vec![],
     };
-    let decomposed = DecomposedCorrelation::build(&corr_model).unwrap();
     let entity_order = vec![entity_id];
+    let decomposed = DecomposedCorrelation::build(
+        &corr_model,
+        &entity_order,
+        cobre_stochastic::ClassDimensions {
+            n_hydros: 1,
+            n_load_buses: 0,
+            n_ncs: 0,
+        },
+    )
+    .unwrap();
 
     generate_opening_tree(
         42,

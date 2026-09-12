@@ -35,7 +35,7 @@ pub use context::{
     ClassSchemes, NoiseEntityOrder, OpeningTreeInputs, StochasticContext, build_stochastic_context,
     noise_entity_order,
 };
-pub use correlation::{DecomposedCorrelation, GroupFactor, SpectralFactor};
+pub use correlation::{DecomposedCorrelation, EntityClass, GroupFactor, SpectralFactor};
 pub use error::StochasticError;
 pub use noise::quantile::norm_quantile;
 pub use noise::rng::rng_from_seed;

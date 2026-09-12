@@ -879,8 +879,8 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     // run_forward_stage borrows ws (and so the allocation is reused).
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(params.noise_dim, 0.0_f64);
-    let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
-    perm_scratch.resize(params.total_forward_passes.max(1), 0_usize);
+    let mut corr_scratch = std::mem::take(&mut ws.scratch.corr_scratch);
+    corr_scratch.resize(2 * params.noise_dim, 0.0_f64);
 
     // Per-trajectory sampled-walk node carrier, root-initialized: each
     // trajectory advances its own entry by the transition draw at the end of
@@ -998,7 +998,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 stage: t32,
                 stage_idx: t.0,
                 noise_buf: &mut raw_noise_buf,
-                perm_scratch: &mut perm_scratch,
+                corr_scratch: &mut corr_scratch,
                 total_scenarios: total_scenarios_u32,
                 noise_group_id: params.ctx.noise_group_id_at(t),
                 node_opening_offset,
@@ -1044,7 +1044,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     }
 
     ws.scratch.raw_noise_buf = raw_noise_buf;
-    ws.scratch.perm_scratch = perm_scratch;
+    ws.scratch.corr_scratch = corr_scratch;
     ws.scratch.current_node_buf = current_node_buf;
 
     let local_solves = ws.solver.statistics().solve_count - local_solve_count_before;
@@ -1239,7 +1239,7 @@ mod tests {
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
-                perm_scratch: Vec::new(),
+                corr_scratch: Vec::new(),
                 current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),

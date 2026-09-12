@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation instead of loading with the row discarded; remove or correct the
   offending rows' `stage_id`.
 
+- **The out-of-sample forward draw no longer rebuilds per-draw sampling state for
+  the Sobol, Halton and Latin-hypercube noise methods, and no longer allocates
+  for a correlation group of any width.** Each of those methods
+  previously reconstructed its scenario-invariant tables on every draw; each now
+  reads tables built once per training iteration and reused across draws. The
+  correlation applier's separate full-vector code path is removed in favor of a
+  single applier that handles every group width from caller-owned scratch.
+  Results are unchanged.
+
 ### Fixed
 
 - **Entity classes sampled out of sample no longer share a noise stream.**

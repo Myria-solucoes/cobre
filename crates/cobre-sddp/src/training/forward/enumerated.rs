@@ -731,8 +731,8 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
 
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(params.noise_dim, 0.0_f64);
-    let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
-    perm_scratch.resize(params.total_forward_passes.max(1), 0_usize);
+    let mut corr_scratch = std::mem::take(&mut ws.scratch.corr_scratch);
+    corr_scratch.resize(2 * params.noise_dim, 0.0_f64);
 
     #[allow(clippy::cast_possible_truncation)]
     let total_scenarios_u32 = params.total_forward_passes as u32;
@@ -786,7 +786,7 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
             stage: t32,
             stage_idx: t.0,
             noise_buf: &mut raw_noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: total_scenarios_u32,
             noise_group_id: params.ctx.noise_group_id_at(t),
             node_opening_offset,
@@ -835,7 +835,7 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
     }
 
     ws.scratch.raw_noise_buf = raw_noise_buf;
-    ws.scratch.perm_scratch = perm_scratch;
+    ws.scratch.corr_scratch = corr_scratch;
     Ok(count)
 }
 

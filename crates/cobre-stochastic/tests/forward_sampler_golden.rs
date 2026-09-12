@@ -411,7 +411,7 @@ fn out_of_sample_point_method_golden_sequence() {
     let total_scenarios: u32 = 4;
 
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; total_scenarios as usize];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
 
     let mut idx = 0usize;
     for stage_idx in 0..3_usize {
@@ -431,7 +431,7 @@ fn out_of_sample_point_method_golden_sequence() {
                         stage: u32::try_from(stage_idx).unwrap(),
                         stage_idx,
                         noise_buf: &mut noise_buf,
-                        perm_scratch: &mut perm_scratch,
+                        corr_scratch: &mut corr_scratch,
                         total_scenarios,
                         noise_group_id,
                         node_opening_offset: 0,
@@ -459,18 +459,23 @@ fn out_of_sample_point_method_golden_sequence() {
 fn wide_correlation_group_opening_tree_golden() {
     let entity_ids: Vec<i32> = (1..=70).collect();
     let entity_order: Vec<EntityId> = entity_ids.iter().copied().map(EntityId).collect();
-    let corr = DecomposedCorrelation::build(&correlated_correlation(&entity_ids, 0.4)).unwrap();
+    let dims = ClassDimensions {
+        n_hydros: 70,
+        n_load_buses: 0,
+        n_ncs: 0,
+    };
+    let corr = DecomposedCorrelation::build(
+        &correlated_correlation(&entity_ids, 0.4),
+        &entity_order,
+        dims,
+    )
+    .unwrap();
 
     let stages = vec![
         make_stage(0, 0, 3, NoiseMethod::Saa),
         make_stage(1, 1, 3, NoiseMethod::Saa),
     ];
 
-    let dims = ClassDimensions {
-        n_hydros: 70,
-        n_load_buses: 0,
-        n_ncs: 0,
-    };
     let tree = generate_opening_tree(
         42,
         &stages,

@@ -207,8 +207,8 @@ pub(crate) struct ScenarioIds<'a> {
     pub(crate) total_scenarios: u32,
     /// Caller-owned buffer for raw noise output (reused across stages).
     pub(crate) raw_noise_buf: &'a mut [f64],
-    /// Caller-owned permutation scratch for LHS generation (reused across stages).
-    pub(crate) perm_scratch: &'a mut [usize],
+    /// Caller-owned gather/correlate scratch for wide correlation groups (reused across stages).
+    pub(crate) corr_scratch: &'a mut [f64],
     /// Noise sampler used to draw per-stage stochastic values.
     pub(crate) sampler: &'a ForwardSampler<'a>,
     /// Per-run scenario-invariant tables backing `sampler`'s `OutOfSample` draws.
@@ -933,7 +933,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             stage: stage_seed,
             stage_idx: t.0,
             noise_buf: ids.raw_noise_buf,
-            perm_scratch: ids.perm_scratch,
+            corr_scratch: ids.corr_scratch,
             total_scenarios: ids.total_scenarios,
             noise_group_id: ctx.noise_group_id_at(t),
             node_opening_offset,

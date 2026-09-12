@@ -11,11 +11,37 @@ use std::collections::{BTreeMap, HashMap};
 
 use cobre_core::{CorrelationModel, EntityId};
 
-use crate::{StochasticError, correlation::spectral::SpectralFactor};
+use crate::{ClassDimensions, StochasticError, correlation::spectral::SpectralFactor};
 
-/// Group dimension at or below which `apply_correlation` buffers are stack-allocated;
-/// larger groups fall back to heap allocation.
+/// Group dimension at or below which `apply_groups_for_class` buffers are
+/// stack-allocated; larger groups use the caller's scratch buffer instead.
 const MAX_STACK_DIM: usize = 64;
+
+/// Correlation-group entity class, parsed from the wire strings `"inflow"`,
+/// `"load"` and `"ncs"` by [`EntityClass::from_wire`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityClass {
+    /// Hydro inflow entities (`"inflow"`).
+    Inflow,
+    /// Stochastic load-bus entities (`"load"`).
+    Load,
+    /// Non-controllable source entities (`"ncs"`).
+    Ncs,
+}
+
+impl EntityClass {
+    /// Parses the wire string into a class; `None` for anything other than
+    /// exactly `"inflow"`, `"load"` or `"ncs"`.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "inflow" => Some(Self::Inflow),
+            "load" => Some(Self::Load),
+            "ncs" => Some(Self::Ncs),
+            _ => None,
+        }
+    }
+}
 
 /// A single correlation group's spectral factor with entity ID mapping.
 #[derive(Debug)]
@@ -24,14 +50,10 @@ pub struct GroupFactor {
     pub factor: SpectralFactor,
     /// Entity IDs in the order matching the factor rows/columns.
     pub entity_ids: Vec<EntityId>,
-    /// Entity type shared by all entities in this group (`"inflow"`, `"load"`, `"ncs"`).
-    pub entity_type: String,
-    /// Positions within the canonical full entity order; when `Some`,
-    /// `apply_correlation` skips the per-call linear scan.
-    positions: Option<Box<[usize]>>,
-    /// Positions within the per-class entity order; when `Some`,
-    /// `apply_correlation_for_class` skips the per-call linear scan.
-    class_positions: Option<Box<[usize]>>,
+    /// Entity class shared by all entities in this group.
+    pub entity_type: EntityClass,
+    /// Positions within this group's class segment, resolved once at construction.
+    class_positions: Box<[usize]>,
 }
 
 /// Pre-decomposed correlation data for all profiles, with stage-to-profile mapping.
@@ -50,10 +72,10 @@ pub struct DecomposedCorrelation {
 
 impl DecomposedCorrelation {
     /// Constructs an empty `DecomposedCorrelation` for systems with no stochastic
-    /// entities. [`apply_correlation`] is then a no-op; [`profile_for_stage`]
+    /// entities. [`groups_for_stage`] then returns an empty slice; [`profile_for_stage`]
     /// returns an empty string.
     ///
-    /// [`apply_correlation`]: Self::apply_correlation
+    /// [`groups_for_stage`]: Self::groups_for_stage
     /// [`profile_for_stage`]: Self::profile_for_stage
     #[must_use]
     pub fn empty() -> Self {
@@ -66,6 +88,10 @@ impl DecomposedCorrelation {
 
     /// Builds a `DecomposedCorrelation` from a [`CorrelationModel`].
     ///
+    /// `entity_order` is the canonical full entity order; `dims` splits it into
+    /// `[hydros | load buses | NCS]` segments used to resolve each group's
+    /// per-class positions.
+    ///
     /// # Errors
     ///
     /// - [`StochasticError::InvalidCorrelation`] if no `"default"` profile exists
@@ -77,6 +103,10 @@ impl DecomposedCorrelation {
     /// Non-positive-definite matrices do not cause an error; negative eigenvalues
     /// are clipped to 0.0 to produce the nearest positive-semidefinite approximation.
     ///
+    /// # Panics
+    ///
+    /// Panics if `dims.n_hydros + dims.n_load_buses + dims.n_ncs != entity_order.len()`.
+    ///
     /// # Examples
     ///
     /// ```
@@ -84,7 +114,7 @@ impl DecomposedCorrelation {
     /// use cobre_core::{EntityId, scenario::{
     ///     CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
     /// }};
-    /// use cobre_stochastic::correlation::resolve::DecomposedCorrelation;
+    /// use cobre_stochastic::{ClassDimensions, correlation::resolve::DecomposedCorrelation};
     ///
     /// let mut profiles = BTreeMap::new();
     /// profiles.insert("default".to_string(), CorrelationProfile {
@@ -98,9 +128,15 @@ impl DecomposedCorrelation {
     ///     }],
     /// });
     /// let model = CorrelationModel { method: "spectral".to_string(), profiles, schedule: vec![] };
-    /// let dc = DecomposedCorrelation::build(&model).unwrap();
+    /// let entity_order = [EntityId(1), EntityId(2)];
+    /// let dims = ClassDimensions { n_hydros: 2, n_load_buses: 0, n_ncs: 0 };
+    /// let dc = DecomposedCorrelation::build(&model, &entity_order, dims).unwrap();
     /// ```
-    pub fn build(model: &CorrelationModel) -> Result<Self, StochasticError> {
+    pub fn build(
+        model: &CorrelationModel,
+        entity_order: &[EntityId],
+        dims: ClassDimensions,
+    ) -> Result<Self, StochasticError> {
         if model.profiles.is_empty() {
             return Err(StochasticError::InvalidCorrelation {
                 profile_name: String::new(),
@@ -191,22 +227,30 @@ impl DecomposedCorrelation {
                 }
 
                 let entity_ids: Vec<EntityId> = group.entities.iter().map(|e| e.id).collect();
-                let entity_type = group
+                let entity_type_str = &group
                     .entities
                     .first()
                     .ok_or_else(|| StochasticError::InvalidCorrelation {
                         profile_name: profile_name.clone(),
                         reason: format!("correlation group '{}' has no entities", group.name),
                     })?
-                    .entity_type
-                    .clone();
+                    .entity_type;
+                let entity_type = EntityClass::from_wire(entity_type_str).ok_or_else(|| {
+                    StochasticError::InvalidCorrelation {
+                        profile_name: profile_name.clone(),
+                        reason: format!(
+                            "correlation group '{}' has unknown entity_type '{}'; \
+                             valid types are: inflow, load, ncs",
+                            group.name, entity_type_str,
+                        ),
+                    }
+                })?;
 
                 group_factors.push(GroupFactor {
                     factor,
                     entity_ids,
                     entity_type,
-                    positions: None,
-                    class_positions: None,
+                    class_positions: Box::default(),
                 });
             }
             factors.insert(profile_name.clone(), group_factors);
@@ -232,11 +276,52 @@ impl DecomposedCorrelation {
             .map(|entry| (entry.stage_id, entry.profile_name.clone()))
             .collect();
 
+        assert_eq!(
+            dims.n_hydros + dims.n_load_buses + dims.n_ncs,
+            entity_order.len(),
+            "entity_order length ({}) must equal dims.n_hydros + dims.n_load_buses + dims.n_ncs ({})",
+            entity_order.len(),
+            dims.n_hydros + dims.n_load_buses + dims.n_ncs,
+        );
+
+        let inflow_order = &entity_order[..dims.n_hydros];
+        let load_order = &entity_order[dims.n_hydros..dims.n_hydros + dims.n_load_buses];
+        let ncs_order = &entity_order[dims.n_hydros + dims.n_load_buses..];
+        for group_factors in factors.values_mut() {
+            Self::resolve_into(group_factors, inflow_order, EntityClass::Inflow);
+            Self::resolve_into(group_factors, load_order, EntityClass::Load);
+            Self::resolve_into(group_factors, ncs_order, EntityClass::Ncs);
+        }
+
         Ok(Self {
             factors,
             schedule,
             default_profile,
         })
+    }
+
+    fn resolve_into(
+        group_factors: &mut [GroupFactor],
+        class_order: &[EntityId],
+        class: EntityClass,
+    ) {
+        let id_to_pos: HashMap<EntityId, usize> = class_order
+            .iter()
+            .enumerate()
+            .map(|(i, &eid)| (eid, i))
+            .collect();
+
+        for gf in group_factors.iter_mut() {
+            if gf.entity_type != class {
+                continue;
+            }
+            let positions: Vec<usize> = gf
+                .entity_ids
+                .iter()
+                .filter_map(|eid| id_to_pos.get(eid).copied())
+                .collect();
+            gf.class_positions = positions.into_boxed_slice();
+        }
     }
 
     /// Returns the profile name active for `stage_id`, falling back to the default profile.
@@ -246,198 +331,66 @@ impl DecomposedCorrelation {
             .map_or(self.default_profile.as_str(), String::as_str)
     }
 
-    /// Pre-computes each group's entity positions within `entity_order`. Call once
-    /// before the [`Self::apply_correlation`] hot loop to eliminate its per-call
-    /// O(n) linear scan. Groups absent from `entity_order` get empty positions and
-    /// are skipped during application.
-    pub fn resolve_positions(&mut self, entity_order: &[EntityId]) {
-        let id_to_pos: HashMap<EntityId, usize> = entity_order
-            .iter()
-            .enumerate()
-            .map(|(i, &eid)| (eid, i))
-            .collect();
-
-        for group_factors in self.factors.values_mut() {
-            for gf in group_factors.iter_mut() {
-                let positions: Vec<usize> = gf
-                    .entity_ids
-                    .iter()
-                    .filter_map(|eid| id_to_pos.get(eid).copied())
-                    .collect();
-                gf.positions = Some(positions.into_boxed_slice());
-            }
-        }
-    }
-
-    /// Per-class counterpart to [`Self::resolve_positions`]: `class_entity_order`
-    /// holds only one class's entity IDs, and only groups matching `entity_type` are
-    /// updated. Call once per class before the [`Self::apply_correlation_for_class`]
-    /// hot loop. Groups absent from `class_entity_order` get empty positions and are
-    /// skipped during application.
-    pub fn resolve_class_positions(&mut self, class_entity_order: &[EntityId], entity_type: &str) {
-        let id_to_pos: HashMap<EntityId, usize> = class_entity_order
-            .iter()
-            .enumerate()
-            .map(|(i, &eid)| (eid, i))
-            .collect();
-
-        for group_factors in self.factors.values_mut() {
-            for gf in group_factors.iter_mut() {
-                if gf.entity_type != entity_type {
-                    continue;
-                }
-                let positions: Vec<usize> = gf
-                    .entity_ids
-                    .iter()
-                    .filter_map(|eid| id_to_pos.get(eid).copied())
-                    .collect();
-                gf.class_positions = Some(positions.into_boxed_slice());
-            }
-        }
-    }
-
-    /// Applies spatial correlation to `independent_noise` for `stage_id`. Entities
-    /// in no correlation group keep their independent values.
-    ///
-    /// Call [`resolve_positions`] once before the hot loop; with positions
-    /// pre-computed this performs zero heap allocations for groups of up to
-    /// `MAX_STACK_DIM` entities.
-    ///
-    /// [`resolve_positions`]: Self::resolve_positions
-    pub fn apply_correlation(
-        &self,
-        stage_id: i32,
-        independent_noise: &mut [f64],
-        entity_order: &[EntityId],
-    ) {
+    /// Groups active for `stage_id`'s correlation profile; empty when the
+    /// schedule has no matching profile.
+    #[must_use]
+    pub fn groups_for_stage(&self, stage_id: i32) -> &[GroupFactor] {
         let profile_name = self.profile_for_stage(stage_id);
-        let Some(group_factors) = self.factors.get(profile_name) else {
-            // Missing profile leaves noise unchanged rather than erroring.
-            return;
-        };
-
-        for gf in group_factors {
-            if let Some(ref precomputed) = gf.positions {
-                Self::apply_group_precomputed(&gf.factor, precomputed, independent_noise);
-            } else {
-                Self::apply_group_scan(&gf.factor, &gf.entity_ids, independent_noise, entity_order);
-            }
-        }
+        self.factors
+            .get(profile_name)
+            .map_or(&[], |gf| gf.as_slice())
     }
 
-    /// Per-class counterpart to [`apply_correlation`], applying only groups whose
-    /// `entity_type` matches. `class_noise` and `class_entity_order` hold only that
-    /// class's entities, so positions are relative to the class segment, NOT the
-    /// full noise vector.
+    /// Applies every `groups` entry whose class matches `class`, gathering from
+    /// and scattering into `class_noise` at each entry's `class_positions`.
+    /// Groups above `MAX_STACK_DIM` entities use `scratch`; smaller ones stay on
+    /// the stack. Allocates nothing at any width.
     ///
-    /// Call [`resolve_class_positions`] once per class before the hot loop for the
-    /// same allocation-free fast path as [`apply_correlation`].
+    /// # Panics
     ///
-    /// [`apply_correlation`]: Self::apply_correlation
-    /// [`resolve_class_positions`]: Self::resolve_class_positions
-    pub fn apply_correlation_for_class(
-        &self,
-        stage_id: i32,
+    /// Panics (debug-only) when `scratch` is smaller than twice the widest
+    /// matching group's entity count.
+    pub fn apply_groups_for_class(
+        groups: &[GroupFactor],
+        class: EntityClass,
         class_noise: &mut [f64],
-        class_entity_order: &[EntityId],
-        entity_type: &str,
+        scratch: &mut [f64],
     ) {
-        let profile_name = self.profile_for_stage(stage_id);
-        let Some(group_factors) = self.factors.get(profile_name) else {
-            // Missing profile leaves noise unchanged rather than erroring.
-            return;
-        };
-
-        for gf in group_factors {
-            if gf.entity_type != entity_type {
+        for gf in groups {
+            if gf.entity_type != class {
                 continue;
             }
-            if let Some(ref precomputed) = gf.class_positions {
-                Self::apply_group_precomputed(&gf.factor, precomputed, class_noise);
-            } else {
-                Self::apply_group_scan(&gf.factor, &gf.entity_ids, class_noise, class_entity_order);
-            }
-        }
-    }
-
-    fn apply_group_precomputed(factor: &SpectralFactor, positions: &[usize], noise: &mut [f64]) {
-        let n = positions.len();
-        if n == 0 || n != factor.dim() {
-            return;
-        }
-
-        if n <= MAX_STACK_DIM {
-            let mut gathered = [0.0_f64; MAX_STACK_DIM];
-            let mut correlated = [0.0_f64; MAX_STACK_DIM];
-            for (i, &pos) in positions.iter().enumerate() {
-                gathered[i] = noise[pos];
-            }
-            factor.transform(&gathered[..n], &mut correlated[..n]);
-            for (i, &pos) in positions.iter().enumerate() {
-                noise[pos] = correlated[i];
-            }
-        } else {
-            let gathered: Vec<f64> = positions.iter().map(|&pos| noise[pos]).collect();
-            let mut correlated = vec![0.0_f64; n];
-            factor.transform(&gathered, &mut correlated);
-            for (i, &pos) in positions.iter().enumerate() {
-                noise[pos] = correlated[i];
-            }
-        }
-    }
-
-    /// Linear-scan fallback for callers that did not pre-compute positions.
-    fn apply_group_scan(
-        factor: &SpectralFactor,
-        entity_ids: &[EntityId],
-        noise: &mut [f64],
-        entity_order: &[EntityId],
-    ) {
-        let entity_count = entity_ids.len();
-        if entity_count == 0 {
-            return;
-        }
-
-        if entity_count <= MAX_STACK_DIM {
-            let mut positions = [0_usize; MAX_STACK_DIM];
-            let mut gathered = [0.0_f64; MAX_STACK_DIM];
-            let mut correlated = [0.0_f64; MAX_STACK_DIM];
-
-            let mut n = 0;
-            for eid in entity_ids {
-                if let Some(pos) = entity_order.iter().position(|e| e == eid) {
-                    positions[n] = pos;
-                    n += 1;
-                }
-            }
-
-            if n == 0 || n != factor.dim() {
-                return;
-            }
-
-            for i in 0..n {
-                gathered[i] = noise[positions[i]];
-            }
-            factor.transform(&gathered[..n], &mut correlated[..n]);
-            for i in 0..n {
-                noise[positions[i]] = correlated[i];
-            }
-        } else {
-            let positions: Vec<usize> = entity_ids
-                .iter()
-                .filter_map(|eid| entity_order.iter().position(|e| e == eid))
-                .collect();
-
+            let positions = &gf.class_positions;
             let n = positions.len();
-            if n == 0 || n != factor.dim() {
-                return;
+            if n == 0 || n != gf.factor.dim() {
+                continue;
             }
 
-            let gathered: Vec<f64> = positions.iter().map(|&pos| noise[pos]).collect();
-            let mut correlated = vec![0.0_f64; n];
-            factor.transform(&gathered, &mut correlated);
-            for (i, &pos) in positions.iter().enumerate() {
-                noise[pos] = correlated[i];
+            if n <= MAX_STACK_DIM {
+                let mut gathered = [0.0_f64; MAX_STACK_DIM];
+                let mut correlated = [0.0_f64; MAX_STACK_DIM];
+                for (i, &pos) in positions.iter().enumerate() {
+                    gathered[i] = class_noise[pos];
+                }
+                gf.factor.transform(&gathered[..n], &mut correlated[..n]);
+                for (i, &pos) in positions.iter().enumerate() {
+                    class_noise[pos] = correlated[i];
+                }
+            } else {
+                debug_assert!(
+                    scratch.len() >= 2 * n,
+                    "correlation scratch too small: have {}, need {}",
+                    scratch.len(),
+                    2 * n,
+                );
+                let (gathered, correlated) = scratch.split_at_mut(n);
+                for (i, &pos) in positions.iter().enumerate() {
+                    gathered[i] = class_noise[pos];
+                }
+                gf.factor.transform(gathered, &mut correlated[..n]);
+                for (i, &pos) in positions.iter().enumerate() {
+                    class_noise[pos] = correlated[i];
+                }
             }
         }
     }
@@ -530,6 +483,22 @@ mod tests {
         }
     }
 
+    /// Builds against the two-entity inflow-only order shared by most fixtures
+    /// in this module.
+    fn build_two_entity_inflow(
+        model: &CorrelationModel,
+    ) -> Result<DecomposedCorrelation, StochasticError> {
+        DecomposedCorrelation::build(
+            model,
+            &[EntityId(1), EntityId(2)],
+            ClassDimensions {
+                n_hydros: 2,
+                n_load_buses: 0,
+                n_ncs: 0,
+            },
+        )
+    }
+
     // -----------------------------------------------------------------------
     // Build tests
     // -----------------------------------------------------------------------
@@ -537,7 +506,7 @@ mod tests {
     #[test]
     fn build_single_default_profile() {
         let model = single_profile_model("default", vec![identity_group("g1", &[1, 2])]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
+        let dc = build_two_entity_inflow(&model).unwrap();
         assert_eq!(dc.default_profile, "default");
         assert!(dc.factors.contains_key("default"));
     }
@@ -546,7 +515,16 @@ mod tests {
     fn build_single_non_default_profile_used_as_default() {
         // Exactly one profile named "wet" — should become the implicit default.
         let model = single_profile_model("wet", vec![identity_group("g1", &[1])]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
+        let dc = DecomposedCorrelation::build(
+            &model,
+            &[EntityId(1)],
+            ClassDimensions {
+                n_hydros: 1,
+                n_load_buses: 0,
+                n_ncs: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(dc.default_profile, "wet");
     }
 
@@ -557,7 +535,7 @@ mod tests {
             profiles: BTreeMap::new(),
             schedule: vec![],
         };
-        let result = DecomposedCorrelation::build(&model);
+        let result = build_two_entity_inflow(&model);
         assert!(
             matches!(result, Err(StochasticError::InvalidCorrelation { .. })),
             "Expected InvalidCorrelation, got: {result:?}"
@@ -584,7 +562,7 @@ mod tests {
             profiles,
             schedule: vec![],
         };
-        let result = DecomposedCorrelation::build(&model);
+        let result = build_two_entity_inflow(&model);
         assert!(
             matches!(result, Err(StochasticError::InvalidCorrelation { .. })),
             "Expected InvalidCorrelation, got: {result:?}"
@@ -615,179 +593,12 @@ mod tests {
                 profile_name: "wet".to_string(),
             }],
         };
-        let dc = DecomposedCorrelation::build(&model).unwrap();
+        let dc = build_two_entity_inflow(&model).unwrap();
 
         // Stage 0 should use "wet".
         assert_eq!(dc.profile_for_stage(0), "wet");
         // Stage 1 (not in schedule) should use "default".
         assert_eq!(dc.profile_for_stage(1), "default");
-    }
-
-    // -----------------------------------------------------------------------
-    // apply_correlation tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn apply_correlation_with_identity_factor_leaves_noise_unchanged() {
-        let model = single_profile_model("default", vec![identity_group("g1", &[1, 2])]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
-
-        let entity_order = [EntityId(1), EntityId(2)];
-        let mut noise = [3.0_f64, 5.0];
-        dc.apply_correlation(0, &mut noise, &entity_order);
-
-        assert!((noise[0] - 3.0).abs() < 1e-12, "noise[0]={}", noise[0]);
-        assert!((noise[1] - 5.0).abs() < 1e-12, "noise[1]={}", noise[1]);
-    }
-
-    #[test]
-    fn apply_correlation_with_known_factor() {
-        // Use [[1, 0.8],[0.8, 1]]. Eigenvalues: lambda_1=1.8, lambda_2=0.2.
-        // Eigenvectors: v1=[1,1]/sqrt(2), v2=[1,-1]/sqrt(2).
-        // D = V * diag(sqrt(1.8), sqrt(0.2)) * V^T:
-        //   D[0][0] = D[1][1] = (sqrt(1.8) + sqrt(0.2)) / 2 ~= 0.894427190999916
-        //   D[0][1] = D[1][0] = (sqrt(1.8) - sqrt(0.2)) / 2 ~= 0.447213595499958
-        // z=[1.0, 0.0] => result = [D[0][0], D[1][0]] ~= [0.894427, 0.447214].
-        let group = CorrelationGroup {
-            name: "g1".to_string(),
-            entities: vec![make_entity(1), make_entity(2)],
-            matrix: vec![vec![1.0, 0.8], vec![0.8, 1.0]],
-        };
-        let model = single_profile_model("default", vec![group]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
-
-        let entity_order = [EntityId(1), EntityId(2)];
-        let mut noise = [1.0_f64, 0.0];
-        dc.apply_correlation(0, &mut noise, &entity_order);
-
-        let d00 = f64::midpoint(f64::sqrt(1.8), f64::sqrt(0.2));
-        let d10 = (f64::sqrt(1.8) - f64::sqrt(0.2)) / 2.0;
-        assert!((noise[0] - d00).abs() < 1e-8, "noise[0]={}", noise[0]);
-        assert!((noise[1] - d10).abs() < 1e-8, "noise[1]={}", noise[1]);
-    }
-
-    #[test]
-    fn apply_correlation_leaves_unmatched_entities_unchanged() {
-        // entity_order has entities 1, 2, 3; group only covers 1 and 2.
-        let model = single_profile_model("default", vec![identity_group("g1", &[1, 2])]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
-
-        let entity_order = [EntityId(1), EntityId(2), EntityId(3)];
-        let mut noise = [1.0_f64, 2.0, 99.0];
-        dc.apply_correlation(0, &mut noise, &entity_order);
-
-        // Entity 3 (index 2) must be untouched.
-        assert!(
-            (noise[2] - 99.0).abs() < 1e-12,
-            "unmatched entity changed: {}",
-            noise[2]
-        );
-    }
-
-    #[test]
-    fn apply_correlation_with_reordered_entities() {
-        // The canonical order is [2, 1] but the group defines entities as [1, 2].
-        // Independent samples: noise[0] (entity 2) = 0.5, noise[1] (entity 1) = 1.0.
-        // Group matrix [[1,0.8],[0.8,1]] -- entities in group order [1, 2]:
-        //   entity 1 is at position 1 in entity_order
-        //   entity 2 is at position 0 in entity_order
-        // gathered = [noise[pos(1)]=noise[1]=1.0, noise[pos(2)]=noise[0]=0.5]
-        // Spectral factor: D[0][0]=D[1][1]=(sqrt(1.8)+sqrt(0.2))/2, D[0][1]=D[1][0]=(sqrt(1.8)-sqrt(0.2))/2
-        // correlated = D * [1.0, 0.5]:
-        //   correlated[0] = D[0][0]*1.0 + D[0][1]*0.5 ~= 1.118033988749895
-        //   correlated[1] = D[1][0]*1.0 + D[1][1]*0.5 ~= 0.894427190999916
-        // scattered: noise[1] = correlated[0] ~= 1.118034, noise[0] = correlated[1] ~= 0.894427
-        let group = CorrelationGroup {
-            name: "g1".to_string(),
-            entities: vec![make_entity(1), make_entity(2)],
-            matrix: vec![vec![1.0, 0.8], vec![0.8, 1.0]],
-        };
-        let model = single_profile_model("default", vec![group]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
-
-        // Canonical order: entity 2 first, entity 1 second.
-        let entity_order = [EntityId(2), EntityId(1)];
-        let mut noise = [0.5_f64, 1.0]; // noise[0]=entity2, noise[1]=entity1
-        dc.apply_correlation(0, &mut noise, &entity_order);
-
-        let d00 = f64::midpoint(f64::sqrt(1.8), f64::sqrt(0.2));
-        let d01 = (f64::sqrt(1.8) - f64::sqrt(0.2)) / 2.0;
-        // correlated[0] = D[0][0]*1.0 + D[0][1]*0.5; scattered to noise[1]
-        let expected_noise1 = d00 * 1.0 + d01 * 0.5;
-        // correlated[1] = D[1][0]*1.0 + D[1][1]*0.5; scattered to noise[0]
-        let expected_noise0 = d01 * 1.0 + d00 * 0.5;
-        assert!(
-            (noise[1] - expected_noise1).abs() < 1e-8,
-            "noise[1]={} expected {}",
-            noise[1],
-            expected_noise1
-        );
-        assert!(
-            (noise[0] - expected_noise0).abs() < 1e-8,
-            "noise[0]={} expected {}",
-            noise[0],
-            expected_noise0
-        );
-    }
-
-    #[test]
-    fn apply_correlation_uses_correct_profile_for_stage() {
-        // Stage 0 -> "wet" (rho=0.8), stage 1 -> "default" (identity).
-        let mut profiles = BTreeMap::new();
-        profiles.insert(
-            "default".to_string(),
-            CorrelationProfile {
-                groups: vec![identity_group("g1", &[1, 2])],
-            },
-        );
-        profiles.insert(
-            "wet".to_string(),
-            CorrelationProfile {
-                groups: vec![correlated_group("g1", &[1, 2], 0.8)],
-            },
-        );
-        let model = CorrelationModel {
-            method: "spectral".to_string(),
-            profiles,
-            schedule: vec![CorrelationScheduleEntry {
-                stage_id: 0,
-                profile_name: "wet".to_string(),
-            }],
-        };
-        let dc = DecomposedCorrelation::build(&model).unwrap();
-
-        let entity_order = [EntityId(1), EntityId(2)];
-
-        // Stage 0 uses "wet": z=[1,0] -> spectral D*[1,0]=[D[0][0], D[1][0]].
-        // For [[1,0.8],[0.8,1]]: D[0][0]=(sqrt(1.8)+sqrt(0.2))/2, D[1][0]=(sqrt(1.8)-sqrt(0.2))/2.
-        let d00 = f64::midpoint(f64::sqrt(1.8), f64::sqrt(0.2));
-        let d10 = (f64::sqrt(1.8) - f64::sqrt(0.2)) / 2.0;
-        let mut noise0 = [1.0_f64, 0.0];
-        dc.apply_correlation(0, &mut noise0, &entity_order);
-        assert!(
-            (noise0[0] - d00).abs() < 1e-8,
-            "stage0 noise0[0]={}",
-            noise0[0]
-        );
-        assert!(
-            (noise0[1] - d10).abs() < 1e-8,
-            "stage0 noise0[1]={}",
-            noise0[1]
-        );
-
-        // Stage 1 uses "default" (identity): z=[1,0] -> [1.0, 0.0].
-        let mut noise1 = [1.0_f64, 0.0];
-        dc.apply_correlation(1, &mut noise1, &entity_order);
-        assert!(
-            (noise1[0] - 1.0).abs() < 1e-12,
-            "stage1 noise1[0]={}",
-            noise1[0]
-        );
-        assert!(
-            (noise1[1] - 0.0).abs() < 1e-12,
-            "stage1 noise1[1]={}",
-            noise1[1]
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -815,7 +626,7 @@ mod tests {
     #[test]
     fn test_build_rejects_mixed_entity_types() {
         let model = single_profile_model("default", vec![mixed_type_group("mixed_group")]);
-        let result = DecomposedCorrelation::build(&model);
+        let result = build_two_entity_inflow(&model);
         match result {
             Err(StochasticError::InvalidCorrelation { reason, .. }) => {
                 assert!(
@@ -832,7 +643,16 @@ mod tests {
         // All "inflow" — must succeed without error.
         let model = single_profile_model("default", vec![identity_group("g1", &[1, 2, 3])]);
         assert!(
-            DecomposedCorrelation::build(&model).is_ok(),
+            DecomposedCorrelation::build(
+                &model,
+                &[EntityId(1), EntityId(2), EntityId(3)],
+                ClassDimensions {
+                    n_hydros: 3,
+                    n_load_buses: 0,
+                    n_ncs: 0,
+                },
+            )
+            .is_ok(),
             "same-type group should be accepted"
         );
     }
@@ -842,7 +662,16 @@ mod tests {
         // A single-entity group is trivially homogeneous.
         let model = single_profile_model("default", vec![identity_group("g1", &[1])]);
         assert!(
-            DecomposedCorrelation::build(&model).is_ok(),
+            DecomposedCorrelation::build(
+                &model,
+                &[EntityId(1)],
+                ClassDimensions {
+                    n_hydros: 1,
+                    n_load_buses: 0,
+                    n_ncs: 0,
+                },
+            )
+            .is_ok(),
             "single-entity group should be accepted"
         );
     }
@@ -850,7 +679,7 @@ mod tests {
     #[test]
     fn test_build_mixed_type_error_includes_group_name() {
         let model = single_profile_model("default", vec![mixed_type_group("mixed_group")]);
-        let result = DecomposedCorrelation::build(&model);
+        let result = build_two_entity_inflow(&model);
         match result {
             Err(StochasticError::InvalidCorrelation {
                 profile_name,
@@ -870,11 +699,72 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // apply_correlation_for_class tests
+    // Entity class parsing tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_apply_correlation_for_class_inflow_only() {
+    fn test_build_rejects_unknown_entity_type() {
+        let group = make_group_with_type("bad_group", &[1], 0.0, "hydro_unit_group");
+        let model = single_profile_model("default", vec![group]);
+        let result = build_two_entity_inflow(&model);
+        match result {
+            Err(StochasticError::InvalidCorrelation { reason, .. }) => {
+                assert!(
+                    reason.contains("bad_group")
+                        && reason.contains("hydro_unit_group")
+                        && reason.contains("inflow")
+                        && reason.contains("load")
+                        && reason.contains("ncs"),
+                    "expected group name, offending string and the three valid values \
+                     in reason, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidCorrelation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_parses_entity_type_to_class() {
+        let inflow_group = make_group_with_type("g_inflow", &[1], 0.0, "inflow");
+        let load_group = make_group_with_type("g_load", &[2], 0.0, "load");
+        let ncs_group = make_group_with_type("g_ncs", &[3], 0.0, "ncs");
+        let model = single_profile_model("default", vec![inflow_group, load_group, ncs_group]);
+        let dc = DecomposedCorrelation::build(
+            &model,
+            &[EntityId(1), EntityId(2), EntityId(3)],
+            ClassDimensions {
+                n_hydros: 1,
+                n_load_buses: 1,
+                n_ncs: 1,
+            },
+        )
+        .unwrap();
+
+        // BTreeMap preserves insertion order of the profile vec — the groups
+        // appear in the order they were pushed during build().
+        let group_factors = dc.factors.get("default").unwrap();
+        assert_eq!(
+            group_factors
+                .iter()
+                .map(|gf| gf.entity_type)
+                .collect::<Vec<_>>(),
+            vec![EntityClass::Inflow, EntityClass::Load, EntityClass::Ncs],
+        );
+    }
+
+    #[test]
+    fn test_entity_class_from_wire_rejects_unknown() {
+        assert_eq!(EntityClass::from_wire(""), None);
+        assert_eq!(EntityClass::from_wire("Inflow"), None);
+        assert_eq!(EntityClass::from_wire("hydro"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_groups_for_class tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_groups_for_class_inflow_only() {
         // Inflow group [EntityId(1), EntityId(2)] with rho=0.8 and a single-entity
         // load group [EntityId(3)].
         // Spectral factor of [[1,0.8],[0.8,1]]:
@@ -884,11 +774,26 @@ mod tests {
         let inflow_group = make_group_with_type("inflow_g", &[1, 2], 0.8, "inflow");
         let load_group = make_group_with_type("load_g", &[3], 0.0, "load");
         let model = single_profile_model("default", vec![inflow_group, load_group]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
+        let dc = DecomposedCorrelation::build(
+            &model,
+            &[EntityId(1), EntityId(2), EntityId(3)],
+            ClassDimensions {
+                n_hydros: 2,
+                n_load_buses: 1,
+                n_ncs: 0,
+            },
+        )
+        .unwrap();
 
-        let class_order = [EntityId(1), EntityId(2)];
         let mut inflow_noise = [1.0_f64, 0.0];
-        dc.apply_correlation_for_class(0, &mut inflow_noise, &class_order, "inflow");
+        let groups = dc.groups_for_stage(0);
+        let mut scratch = vec![0.0_f64; 2 * inflow_noise.len()];
+        DecomposedCorrelation::apply_groups_for_class(
+            groups,
+            EntityClass::Inflow,
+            &mut inflow_noise,
+            &mut scratch,
+        );
 
         let d00 = f64::midpoint(f64::sqrt(1.8), f64::sqrt(0.2));
         let d10 = (f64::sqrt(1.8) - f64::sqrt(0.2)) / 2.0;
@@ -905,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_correlation_for_class_skips_other_types() {
+    fn test_apply_groups_for_class_skips_other_types() {
         // Same setup as above: inflow group [1,2] with rho=0.8, load group [3].
         // Calling with entity_type="load" and load_noise=[5.0] should leave noise
         // unchanged (the single-entity identity group is a no-op AND this also
@@ -913,11 +818,26 @@ mod tests {
         let inflow_group = make_group_with_type("inflow_g", &[1, 2], 0.8, "inflow");
         let load_group = make_group_with_type("load_g", &[3], 0.0, "load");
         let model = single_profile_model("default", vec![inflow_group, load_group]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
+        let dc = DecomposedCorrelation::build(
+            &model,
+            &[EntityId(1), EntityId(2), EntityId(3)],
+            ClassDimensions {
+                n_hydros: 2,
+                n_load_buses: 1,
+                n_ncs: 0,
+            },
+        )
+        .unwrap();
 
-        let class_order = [EntityId(3)];
         let mut load_noise = [5.0_f64];
-        dc.apply_correlation_for_class(0, &mut load_noise, &class_order, "load");
+        let groups = dc.groups_for_stage(0);
+        let mut scratch = vec![0.0_f64; 2 * load_noise.len()];
+        DecomposedCorrelation::apply_groups_for_class(
+            groups,
+            EntityClass::Load,
+            &mut load_noise,
+            &mut scratch,
+        );
 
         // Identity group on a single entity leaves noise unchanged.
         assert!(
@@ -928,49 +848,157 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_correlation_for_class_no_matching_groups() {
+    fn test_apply_groups_for_class_no_matching_groups() {
         // Only inflow groups exist; calling with entity_type="ncs" must be a no-op.
         let inflow_group = make_group_with_type("inflow_g", &[1, 2], 0.8, "inflow");
 
         let model = single_profile_model("default", vec![inflow_group]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
+        let dc = build_two_entity_inflow(&model).unwrap();
 
-        let class_order: [EntityId; 0] = [];
         let mut noise: [f64; 0] = [];
-        dc.apply_correlation_for_class(0, &mut noise, &class_order, "ncs");
+        let groups = dc.groups_for_stage(0);
+        let mut scratch: Vec<f64> = vec![];
+        DecomposedCorrelation::apply_groups_for_class(
+            groups,
+            EntityClass::Ncs,
+            &mut noise,
+            &mut scratch,
+        );
         // No panic, no modification — test passes if we reach here.
     }
 
     #[test]
     fn test_group_factor_stores_entity_type() {
-        // Verify that each GroupFactor carries the correct entity_type string from
-        // the input CorrelationGroup.
         let inflow_group = make_group_with_type("g_inflow", &[1, 2], 0.0, "inflow");
         let load_group = make_group_with_type("g_load", &[3], 0.0, "load");
         let ncs_group = make_group_with_type("g_ncs", &[4], 0.0, "ncs");
         let model = single_profile_model("default", vec![inflow_group, load_group, ncs_group]);
-        let dc = DecomposedCorrelation::build(&model).unwrap();
+        let dc = DecomposedCorrelation::build(
+            &model,
+            &[EntityId(1), EntityId(2), EntityId(3), EntityId(4)],
+            ClassDimensions {
+                n_hydros: 2,
+                n_load_buses: 1,
+                n_ncs: 1,
+            },
+        )
+        .unwrap();
 
         let group_factors = dc.factors.get("default").unwrap();
         assert_eq!(group_factors.len(), 3);
 
         // BTreeMap preserves insertion order of the profile vec — the groups
         // appear in the order they were pushed during build().
-        let types: Vec<&str> = group_factors
-            .iter()
-            .map(|gf| gf.entity_type.as_str())
-            .collect();
+        let types: Vec<EntityClass> = group_factors.iter().map(|gf| gf.entity_type).collect();
         assert!(
-            types.contains(&"inflow"),
-            "expected 'inflow' group factor, got: {types:?}"
+            types.contains(&EntityClass::Inflow),
+            "expected Inflow group factor, got: {types:?}"
         );
         assert!(
-            types.contains(&"load"),
-            "expected 'load' group factor, got: {types:?}"
+            types.contains(&EntityClass::Load),
+            "expected Load group factor, got: {types:?}"
         );
         assert!(
-            types.contains(&"ncs"),
-            "expected 'ncs' group factor, got: {types:?}"
+            types.contains(&EntityClass::Ncs),
+            "expected Ncs group factor, got: {types:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-class position resolution tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_class_positions_match_linear_scan_three_class_model() {
+        let inflow_group = make_group_with_type("inflow_g", &[10, 30, 50], 0.5, "inflow");
+        let load_group = make_group_with_type("load_g", &[200, 100], 0.3, "load");
+        let ncs_group = make_group_with_type("ncs_g", &[2000], 0.0, "ncs");
+        let model = single_profile_model("default", vec![inflow_group, load_group, ncs_group]);
+
+        let entity_order = [
+            EntityId(10),
+            EntityId(20),
+            EntityId(30),
+            EntityId(40),
+            EntityId(50),
+            EntityId(100),
+            EntityId(200),
+            EntityId(300),
+            EntityId(1000),
+            EntityId(2000),
+        ];
+        let dims = ClassDimensions {
+            n_hydros: 5,
+            n_load_buses: 3,
+            n_ncs: 2,
+        };
+        let dc = DecomposedCorrelation::build(&model, &entity_order, dims).unwrap();
+
+        let inflow_order = &entity_order[..5];
+        let load_order = &entity_order[5..8];
+        let ncs_order = &entity_order[8..];
+
+        for gf in dc.factors.get("default").unwrap() {
+            let class_order = match gf.entity_type {
+                EntityClass::Inflow => inflow_order,
+                EntityClass::Load => load_order,
+                EntityClass::Ncs => ncs_order,
+            };
+            let expected: Vec<usize> = gf
+                .entity_ids
+                .iter()
+                .filter_map(|eid| class_order.iter().position(|e| e == eid))
+                .collect();
+            assert_eq!(
+                gf.class_positions.as_ref(),
+                expected.as_slice(),
+                "entity_type={:?}",
+                gf.entity_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_group_absent_from_class_slice_resolves_empty_and_is_noop() {
+        // Entity 99 does not appear in the two-entity inflow class slice.
+        let orphan_group = make_group_with_type("orphan_g", &[99], 0.0, "inflow");
+        let model = single_profile_model("default", vec![orphan_group]);
+        let dc = build_two_entity_inflow(&model).unwrap();
+
+        let group_factors = dc.factors.get("default").unwrap();
+        assert!(
+            group_factors[0].class_positions.is_empty(),
+            "expected empty class_positions for an entity absent from the class slice"
+        );
+
+        let mut class_noise = [7.0_f64, 9.0];
+        let groups = dc.groups_for_stage(0);
+        let mut scratch = vec![0.0_f64; 2 * class_noise.len()];
+        DecomposedCorrelation::apply_groups_for_class(
+            groups,
+            EntityClass::Inflow,
+            &mut class_noise,
+            &mut scratch,
+        );
+        assert_eq!(
+            class_noise,
+            [7.0, 9.0],
+            "class_noise must be untouched when the group resolves empty"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must equal")]
+    fn build_panics_when_class_dimensions_mismatch_entity_order_len() {
+        let model = single_profile_model("default", vec![identity_group("g1", &[1])]);
+        let _ = DecomposedCorrelation::build(
+            &model,
+            &[EntityId(1), EntityId(2)],
+            ClassDimensions {
+                n_hydros: 1,
+                n_load_buses: 0,
+                n_ncs: 0,
+            },
         );
     }
 }

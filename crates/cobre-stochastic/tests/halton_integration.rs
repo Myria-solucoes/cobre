@@ -127,13 +127,25 @@ fn correlation_model_from_matrix(entity_ids: &[i32], matrix: Vec<Vec<f64>>) -> C
     }
 }
 
+fn inflow_entity_order_and_dims(entity_ids: &[i32]) -> (Vec<EntityId>, ClassDimensions) {
+    (
+        entity_ids.iter().map(|&id| EntityId(id)).collect(),
+        ClassDimensions {
+            n_hydros: entity_ids.len(),
+            n_load_buses: 0,
+            n_ncs: 0,
+        },
+    )
+}
+
 fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
     let n = entity_ids.len();
     let matrix: Vec<Vec<f64>> = (0..n)
         .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
         .collect();
     let model = correlation_model_from_matrix(entity_ids, matrix);
-    DecomposedCorrelation::build(&model).unwrap()
+    let (entity_order, dims) = inflow_entity_order_and_dims(entity_ids);
+    DecomposedCorrelation::build(&model, &entity_order, dims).unwrap()
 }
 
 fn correlated_correlation(entity_ids: &[i32], rho: f64) -> DecomposedCorrelation {
@@ -142,7 +154,8 @@ fn correlated_correlation(entity_ids: &[i32], rho: f64) -> DecomposedCorrelation
         .map(|i| (0..n).map(|j| if i == j { 1.0 } else { rho }).collect())
         .collect();
     let model = correlation_model_from_matrix(entity_ids, matrix);
-    DecomposedCorrelation::build(&model).unwrap()
+    let (entity_order, dims) = inflow_entity_order_and_dims(entity_ids);
+    DecomposedCorrelation::build(&model, &entity_order, dims).unwrap()
 }
 
 fn identity_correlation_model(entity_ids: &[i32]) -> CorrelationModel {

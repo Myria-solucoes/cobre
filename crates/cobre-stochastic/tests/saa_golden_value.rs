@@ -77,7 +77,17 @@ fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
         profiles,
         schedule: vec![],
     };
-    DecomposedCorrelation::build(&model).unwrap()
+    let entity_order: Vec<EntityId> = entity_ids.iter().map(|&id| EntityId(id)).collect();
+    DecomposedCorrelation::build(
+        &model,
+        &entity_order,
+        ClassDimensions {
+            n_hydros: entity_ids.len(),
+            n_load_buses: 0,
+            n_ncs: 0,
+        },
+    )
+    .unwrap()
 }
 
 #[test]

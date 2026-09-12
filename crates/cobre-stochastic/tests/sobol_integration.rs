@@ -131,12 +131,25 @@ fn correlation_model(entity_ids: &[i32], rho: f64) -> CorrelationModel {
     }
 }
 
+fn inflow_entity_order_and_dims(entity_ids: &[i32]) -> (Vec<EntityId>, ClassDimensions) {
+    (
+        entity_ids.iter().map(|&id| EntityId(id)).collect(),
+        ClassDimensions {
+            n_hydros: entity_ids.len(),
+            n_load_buses: 0,
+            n_ncs: 0,
+        },
+    )
+}
+
 fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
-    DecomposedCorrelation::build(&correlation_model(entity_ids, 0.0)).unwrap()
+    let (entity_order, dims) = inflow_entity_order_and_dims(entity_ids);
+    DecomposedCorrelation::build(&correlation_model(entity_ids, 0.0), &entity_order, dims).unwrap()
 }
 
 fn correlated_correlation(entity_ids: &[i32], rho: f64) -> DecomposedCorrelation {
-    DecomposedCorrelation::build(&correlation_model(entity_ids, rho)).unwrap()
+    let (entity_order, dims) = inflow_entity_order_and_dims(entity_ids);
+    DecomposedCorrelation::build(&correlation_model(entity_ids, rho), &entity_order, dims).unwrap()
 }
 
 fn identity_correlation_model(entity_ids: &[i32]) -> CorrelationModel {

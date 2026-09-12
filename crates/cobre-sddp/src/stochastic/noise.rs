@@ -707,7 +707,7 @@ mod tests {
             recon_slot_lookup: Vec::new(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
+            corr_scratch: Vec::new(),
             current_node_buf: Vec::new(),
         }
     }

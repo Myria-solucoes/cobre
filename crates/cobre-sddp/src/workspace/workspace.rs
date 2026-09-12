@@ -374,8 +374,7 @@ pub struct WorkspaceSizing {
     /// Maximum forward-pass scenarios assigned to this rank; pre-sizes
     /// `ScratchBuffers::trajectory_costs_buf`.
     pub max_local_fwd: usize,
-    /// Total forward passes across all MPI ranks; pre-sizes
-    /// `ScratchBuffers::perm_scratch`.
+    /// Total forward passes across all MPI ranks.
     pub total_forward_passes: usize,
     /// Noise dimension for forward-pass sampling; pre-sizes
     /// `ScratchBuffers::raw_noise_buf`.
@@ -695,9 +694,11 @@ pub struct ScratchBuffers {
     /// inflow-patch path); the two never overlap within one `SolverWorkspace`.
     pub(crate) raw_noise_buf: Vec<f64>,
 
-    /// Per-worker permutation scratch for the forward-pass sampler and simulation
-    /// worker loop. Pre-sized to `total_forward_passes.max(1)`.
-    pub(crate) perm_scratch: Vec<usize>,
+    /// Per-worker gather and correlate scratch for a correlation group wider
+    /// than the applier's stack bound, sized `2 * noise_dim`: a group's width
+    /// never exceeds its class dimension, hence never `noise_dim`, and the
+    /// applier needs one gather array and one correlate array of that width.
+    pub(crate) corr_scratch: Vec<f64>,
 
     /// Per-trajectory sampled-walk node carrier: `current_node_buf[local_m]` is
     /// trajectory `local_m`'s [`crate::setup::node_graph::NodeGraph`] position at
@@ -798,7 +799,6 @@ impl ScratchBuffers {
             downstream_par_order,
             initial_pool_capacity,
             max_local_fwd,
-            total_forward_passes,
             noise_dim,
             // `n_anticipated`/`k_max` size the `PatchBuffer` anticipated region
             // (constructed separately); `n_state` and `max_openings` size
@@ -842,7 +842,7 @@ impl ScratchBuffers {
             recon_slot_lookup: vec![None; initial_pool_capacity],
             trajectory_costs_buf: Vec::with_capacity(max_local_fwd),
             raw_noise_buf: Vec::with_capacity(noise_dim),
-            perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
+            corr_scratch: Vec::with_capacity(2 * noise_dim),
             current_node_buf: Vec::with_capacity(max_local_fwd),
         }
     }

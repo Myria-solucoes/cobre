@@ -173,8 +173,8 @@ fn enumerated_sim_stage_worker<S: SolverInterface + Send>(
 
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(training_ctx.stochastic.dim(), 0.0_f64);
-    let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
-    perm_scratch.resize(params.total_scenarios.max(1) as usize, 0_usize);
+    let mut corr_scratch = std::mem::take(&mut ws.scratch.corr_scratch);
+    corr_scratch.resize(2 * training_ctx.stochastic.dim(), 0.0_f64);
 
     let mut count = 0usize;
     while let Some(u) = cursor.claim() {
@@ -214,7 +214,7 @@ fn enumerated_sim_stage_worker<S: SolverInterface + Send>(
             stage: t32,
             stage_idx: t.0,
             noise_buf: &mut raw_noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: params.total_scenarios,
             noise_group_id: params.ctx.noise_group_id_at(t),
             node_opening_offset,
@@ -272,7 +272,7 @@ fn enumerated_sim_stage_worker<S: SolverInterface + Send>(
     }
 
     ws.scratch.raw_noise_buf = raw_noise_buf;
-    ws.scratch.perm_scratch = perm_scratch;
+    ws.scratch.corr_scratch = corr_scratch;
     Ok(count)
 }
 

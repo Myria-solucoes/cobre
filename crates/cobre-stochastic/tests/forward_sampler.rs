@@ -275,7 +275,7 @@ fn insample_dispatch_returns_tree_slice_of_correct_dim() {
     let dim = ctx.dim();
 
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; 5];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
     let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result = sampler
@@ -285,7 +285,7 @@ fn insample_dispatch_returns_tree_slice_of_correct_dim() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -319,7 +319,7 @@ fn insample_copy_equivalence_matches_direct_call() {
     let dim = ctx.dim();
 
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; 5];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
     let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result = sampler
@@ -329,7 +329,7 @@ fn insample_copy_equivalence_matches_direct_call() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -375,7 +375,7 @@ fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
     let dim = ctx.dim();
 
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; 5];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
     let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result = sampler
@@ -385,7 +385,7 @@ fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut noise_buf,
-            perm_scratch: &mut perm_scratch,
+            corr_scratch: &mut corr_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -423,8 +423,8 @@ fn out_of_sample_is_deterministic() {
 
     let mut buf_a = vec![0.0f64; dim];
     let mut buf_b = vec![0.0f64; dim];
-    let mut perm_a = vec![0usize; 5];
-    let mut perm_b = vec![0usize; 5];
+    let mut corr_a = vec![0.0f64; 2 * dim];
+    let mut corr_b = vec![0.0f64; 2 * dim];
     let tables = tables_for(&sampler, 0, 5, &[]);
 
     let a = sampler
@@ -434,7 +434,7 @@ fn out_of_sample_is_deterministic() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_a,
-            perm_scratch: &mut perm_a,
+            corr_scratch: &mut corr_a,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -451,7 +451,7 @@ fn out_of_sample_is_deterministic() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_b,
-            perm_scratch: &mut perm_b,
+            corr_scratch: &mut corr_b,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -486,8 +486,8 @@ fn out_of_sample_scenario_changes_noise() {
 
     let mut buf_0 = vec![0.0f64; dim];
     let mut buf_1 = vec![0.0f64; dim];
-    let mut perm_0 = vec![0usize; 5];
-    let mut perm_1 = vec![0usize; 5];
+    let mut corr_0 = vec![0.0f64; 2 * dim];
+    let mut corr_1 = vec![0.0f64; 2 * dim];
     let tables = tables_for(&sampler, 0, 5, &[]);
 
     let result_0 = sampler
@@ -497,7 +497,7 @@ fn out_of_sample_scenario_changes_noise() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_0,
-            perm_scratch: &mut perm_0,
+            corr_scratch: &mut corr_0,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -514,7 +514,7 @@ fn out_of_sample_scenario_changes_noise() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_1,
-            perm_scratch: &mut perm_1,
+            corr_scratch: &mut corr_1,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -554,7 +554,7 @@ fn out_of_sample_noise_is_finite() {
     let total_scenarios: u32 = 100;
 
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; total_scenarios as usize];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
     let tables = tables_for(&sampler, 0, total_scenarios, &[]);
 
     for scenario in 0..total_scenarios {
@@ -565,7 +565,7 @@ fn out_of_sample_noise_is_finite() {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut noise_buf,
-                perm_scratch: &mut perm_scratch,
+                corr_scratch: &mut corr_scratch,
                 total_scenarios,
                 noise_group_id: 0,
                 node_opening_offset: 0,
@@ -604,7 +604,7 @@ fn out_of_sample_correlation_matches_target() {
 
     let n_scenarios: u32 = 2000;
     let mut noise_buf = vec![0.0f64; dim];
-    let mut perm_scratch = vec![0usize; n_scenarios as usize];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
 
     let mut pairs: Vec<(f64, f64)> = Vec::with_capacity(n_scenarios as usize);
     let tables = tables_for(&sampler, 0, n_scenarios, &[]);
@@ -617,7 +617,7 @@ fn out_of_sample_correlation_matches_target() {
                 stage: 0,
                 stage_idx: 0,
                 noise_buf: &mut noise_buf,
-                perm_scratch: &mut perm_scratch,
+                corr_scratch: &mut corr_scratch,
                 total_scenarios: n_scenarios,
                 noise_group_id: 0,
                 node_opening_offset: 0,
@@ -669,8 +669,7 @@ fn out_of_sample_per_stage_method_mixing() {
     let total_scenarios: u32 = 10;
 
     let mut noise_buf = vec![0.0f64; dim];
-    // LHS requires perm_scratch of length total_scenarios.
-    let mut perm_scratch = vec![0usize; total_scenarios as usize];
+    let mut corr_scratch = vec![0.0f64; 2 * dim];
     let tables = tables_for(&sampler, 0, total_scenarios, &[]);
 
     for stage_idx in 0..3_usize {
@@ -683,7 +682,7 @@ fn out_of_sample_per_stage_method_mixing() {
                     stage: stage_id,
                     stage_idx,
                     noise_buf: &mut noise_buf,
-                    perm_scratch: &mut perm_scratch,
+                    corr_scratch: &mut corr_scratch,
                     total_scenarios,
                     noise_group_id: stage_id,
                     node_opening_offset: 0,
@@ -803,8 +802,8 @@ fn out_of_sample_resume_invariance() {
 
     let mut buf_first = vec![0.0f64; dim];
     let mut buf_resume = vec![0.0f64; dim];
-    let mut perm_first = vec![0usize; 5];
-    let mut perm_resume = vec![0usize; 5];
+    let mut corr_first = vec![0.0f64; 2 * dim];
+    let mut corr_resume = vec![0.0f64; 2 * dim];
     let tables = tables_for(&sampler, 5, 5, &[]);
 
     let first = sampler
@@ -814,7 +813,7 @@ fn out_of_sample_resume_invariance() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_first,
-            perm_scratch: &mut perm_first,
+            corr_scratch: &mut corr_first,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,
@@ -832,7 +831,7 @@ fn out_of_sample_resume_invariance() {
             stage: 0,
             stage_idx: 0,
             noise_buf: &mut buf_resume,
-            perm_scratch: &mut perm_resume,
+            corr_scratch: &mut corr_resume,
             total_scenarios: 5,
             noise_group_id: 0,
             node_opening_offset: 0,

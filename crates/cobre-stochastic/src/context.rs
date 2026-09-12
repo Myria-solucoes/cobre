@@ -680,10 +680,16 @@ pub fn build_stochastic_context(
         par_lp
     };
 
+    let dims = ClassDimensions {
+        n_hydros: hydro_ids.len(),
+        n_load_buses,
+        n_ncs: n_stochastic_ncs,
+    };
+
     let correlation = if dim == 0 || system.correlation().profiles.is_empty() {
         DecomposedCorrelation::empty()
     } else {
-        DecomposedCorrelation::build(system.correlation())?
+        DecomposedCorrelation::build(system.correlation(), &entity_order, dims)?
     };
 
     let opening_tree = if let Some(tree) = user_opening_tree {
@@ -695,11 +701,7 @@ pub fn build_stochastic_context(
             dim,
             &correlation,
             &entity_order,
-            ClassDimensions {
-                n_hydros: hydro_ids.len(),
-                n_load_buses,
-                n_ncs: n_stochastic_ncs,
-            },
+            dims,
             &OpeningTreeGenerationInputs {
                 historical_library,
                 external_scenario_counts: external_scenario_counts.as_deref(),
