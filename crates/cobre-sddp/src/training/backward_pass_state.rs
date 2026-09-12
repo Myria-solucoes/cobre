@@ -4898,12 +4898,14 @@ mod tests {
         let sampler =
             crate::forward::build_sampler_from_ctx(&training_ctx).expect("forward sampler");
         let mut noise_tables = ForwardNoiseTables::default();
-        sampler.rebuild_noise_tables(
-            1,
-            u32::try_from(total_forward_passes).expect("fits u32"),
-            stage_ctx.noise_group_ids,
-            &mut noise_tables,
-        );
+        sampler
+            .rebuild_noise_tables(
+                1,
+                u32::try_from(total_forward_passes).expect("fits u32"),
+                stage_ctx.noise_group_ids,
+                &mut noise_tables,
+            )
+            .expect("test fixture never exceeds the Sobol dimension cap");
         let frozen: Vec<StageTemplate> = (0..node_graph.n_pools)
             .map(|p| stage_ctx.templates[node_graph.pool_stage[p].0].clone())
             .collect();

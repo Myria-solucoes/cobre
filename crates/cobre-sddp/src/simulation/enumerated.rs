@@ -593,12 +593,14 @@ mod tests {
         #[allow(clippy::cast_possible_truncation)]
         let total_scenarios_u32 = k as u32;
         let mut noise_tables = ForwardNoiseTables::default();
-        sampler.rebuild_noise_tables(
-            SIMULATION_ITERATION,
-            total_scenarios_u32,
-            stage_ctx.noise_group_ids,
-            &mut noise_tables,
-        );
+        sampler
+            .rebuild_noise_tables(
+                SIMULATION_ITERATION,
+                total_scenarios_u32,
+                stage_ctx.noise_group_ids,
+                &mut noise_tables,
+            )
+            .expect("test fixture never exceeds the Sobol dimension cap");
 
         let lookups = SimLookups::build(
             training_ctx.study_dims,

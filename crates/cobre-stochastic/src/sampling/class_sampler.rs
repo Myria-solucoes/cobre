@@ -239,8 +239,6 @@ impl ClassSampler<'_> {
     ///   `req.stage_idx` is out of bounds for the per-stage noise methods or
     ///   for `tables`, or `tables`'s resolved variant does not match the
     ///   stage's noise method.
-    /// - [`StochasticError::DimensionExceedsCapacity`] — when `OutOfSample`
-    ///   uses `QmcSobol` and `dim > MAX_SOBOL_DIM`.
     ///
     /// # Panics
     ///
@@ -389,7 +387,9 @@ mod tests {
     fn saa_tables(iteration: u32, total_scenarios: u32, groups: &[u32]) -> ClassNoiseTables {
         let mut tables = ClassNoiseTables::default();
         let methods = vec![NoiseMethod::Saa; groups.len()];
-        tables.refill(1, 1, iteration, total_scenarios, groups, &methods);
+        tables
+            .refill(1, 1, iteration, total_scenarios, groups, &methods)
+            .expect("Saa never exceeds the Sobol dimension cap");
         tables
     }
 

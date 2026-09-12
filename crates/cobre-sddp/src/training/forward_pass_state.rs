@@ -397,7 +397,7 @@ impl ForwardPassState {
             inputs.total_forward_passes as u32,
             inputs.ctx.noise_group_ids,
             &mut self.noise_tables,
-        );
+        )?;
 
         // Taken out for the match's duration so `self` stays freely `&mut`-usable
         // inside both arms (the `Enumerated` arm's `plan` borrows this local, not
@@ -1729,12 +1729,14 @@ mod tests {
         })
         .expect("sampler build must not error");
         let mut noise_tables = ForwardNoiseTables::default();
-        sampler.rebuild_noise_tables(
-            1,
-            u32::try_from(fx.n_scenarios).expect("fits u32"),
-            &[],
-            &mut noise_tables,
-        );
+        sampler
+            .rebuild_noise_tables(
+                1,
+                u32::try_from(fx.n_scenarios).expect("fits u32"),
+                &[],
+                &mut noise_tables,
+            )
+            .expect("test fixture never exceeds the Sobol dimension cap");
 
         let params = ForwardWorkerParams {
             forward_passes: fx.n_scenarios,
@@ -2312,7 +2314,9 @@ mod tests {
         })
         .expect("sampler build must not error");
         let mut noise_tables = ForwardNoiseTables::default();
-        sampler.rebuild_noise_tables(1, 1, &[], &mut noise_tables);
+        sampler
+            .rebuild_noise_tables(1, 1, &[], &mut noise_tables)
+            .expect("test fixture never exceeds the Sobol dimension cap");
 
         let params = ForwardWorkerParams {
             forward_passes: 1,
@@ -2622,12 +2626,14 @@ mod tests {
         let forward_passes = 6_usize;
         let pinned_iteration = 3_u64;
         let mut noise_tables = ForwardNoiseTables::default();
-        sampler.rebuild_noise_tables(
-            u32::try_from(pinned_iteration).expect("fits u32"),
-            u32::try_from(forward_passes).expect("fits u32"),
-            &[],
-            &mut noise_tables,
-        );
+        sampler
+            .rebuild_noise_tables(
+                u32::try_from(pinned_iteration).expect("fits u32"),
+                u32::try_from(forward_passes).expect("fits u32"),
+                &[],
+                &mut noise_tables,
+            )
+            .expect("test fixture never exceeds the Sobol dimension cap");
         let params = ForwardWorkerParams {
             forward_passes,
             total_forward_passes: forward_passes,

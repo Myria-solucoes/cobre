@@ -302,7 +302,7 @@ impl SimulationState {
             inputs.config.n_scenarios,
             inputs.ctx.noise_group_ids,
             &mut self.noise_tables,
-        );
+        )?;
 
         // Apply the simulation solver profile before the parallel region. For CLP
         // this selects the primal simplex, which eliminates the dual simplex's

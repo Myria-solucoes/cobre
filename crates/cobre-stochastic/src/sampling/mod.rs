@@ -196,8 +196,6 @@ impl ForwardSampler<'_> {
     ///
     /// # Errors
     ///
-    /// - [`StochasticError::DimensionExceedsCapacity`] — when any `OutOfSample`
-    ///   class uses `QmcSobol` and `dim > MAX_SOBOL_DIM`.
     /// - [`StochasticError::InsufficientData`] — when `stage_idx` is out of
     ///   bounds for any per-stage noise methods.
     //
@@ -265,52 +263,55 @@ impl ForwardSampler<'_> {
     /// its buffer capacity across iterations. A class not sampled out of
     /// sample is cleared, and its `table_at` calls return `None`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if an `OutOfSample` class uses `QmcSobol` with
-    /// `dim > MAX_SOBOL_DIM` (`SobolPrecomputed::new`); callers must reject
-    /// that combination ahead of this call, as `fill_uncorrelated` already
-    /// does for every draw.
+    /// Returns [`StochasticError::DimensionExceedsCapacity`] when an
+    /// `OutOfSample` class uses `QmcSobol` with `dim > MAX_SOBOL_DIM`.
     pub fn rebuild_noise_tables(
         &self,
         iteration: u32,
         total_scenarios: u32,
         noise_group_ids: &[u32],
         out: &mut ForwardNoiseTables,
-    ) {
+    ) -> Result<(), StochasticError> {
         rebuild_class_tables(
             &self.inflow,
             iteration,
             total_scenarios,
             noise_group_ids,
             &mut out.inflow,
-        );
+        )?;
         rebuild_class_tables(
             &self.load,
             iteration,
             total_scenarios,
             noise_group_ids,
             &mut out.load,
-        );
+        )?;
         rebuild_class_tables(
             &self.ncs,
             iteration,
             total_scenarios,
             noise_group_ids,
             &mut out.ncs,
-        );
+        )?;
+        Ok(())
     }
 }
 
 /// Refill one class's noise tables from its [`ClassSampler`], clearing them
 /// when the class is not sampled out of sample.
+///
+/// # Errors
+///
+/// Propagates [`ClassNoiseTables::refill`]'s error.
 fn rebuild_class_tables(
     sampler: &ClassSampler<'_>,
     iteration: u32,
     total_scenarios: u32,
     noise_group_ids: &[u32],
     out: &mut ClassNoiseTables,
-) {
+) -> Result<(), StochasticError> {
     if let ClassSampler::OutOfSample {
         forward_seed,
         dim,
@@ -324,9 +325,10 @@ fn rebuild_class_tables(
             total_scenarios,
             noise_group_ids,
             noise_methods,
-        );
+        )
     } else {
         out.clear();
+        Ok(())
     }
 }
 
@@ -703,6 +705,7 @@ mod tests {
     use super::{
         ClassNoiseTables, ClassSampleRequest, ClassSampler, ForwardNoise, ForwardNoiseTables,
         ForwardSampler, ForwardSamplerConfig, NoiseTable, SampleRequest, build_forward_sampler,
+        rebuild_class_tables,
     };
     use crate::{
         NoisePointSpec, StochasticContext, StochasticError,
@@ -947,7 +950,9 @@ mod tests {
         groups: &[u32],
     ) -> ForwardNoiseTables {
         let mut tables = ForwardNoiseTables::default();
-        sampler.rebuild_noise_tables(iteration, total, groups, &mut tables);
+        sampler
+            .rebuild_noise_tables(iteration, total, groups, &mut tables)
+            .expect("test fixtures never exceed the Sobol dimension cap");
         tables
     }
 
@@ -1680,7 +1685,9 @@ mod tests {
         let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
         let mut tables = ForwardNoiseTables::default();
 
-        sampler.rebuild_noise_tables(0, 8, &[0, 1, 2], &mut tables);
+        sampler
+            .rebuild_noise_tables(0, 8, &[0, 1, 2], &mut tables)
+            .expect("single-hydro dim never exceeds the Sobol dimension cap");
 
         assert!(matches!(
             tables.inflow().table_at(0),
@@ -1703,7 +1710,9 @@ mod tests {
         let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
         let mut tables = ForwardNoiseTables::default();
 
-        sampler.rebuild_noise_tables(0, 8, &[0, 0, 1], &mut tables);
+        sampler
+            .rebuild_noise_tables(0, 8, &[0, 0, 1], &mut tables)
+            .expect("Lhs never exceeds the Sobol dimension cap");
 
         let t0 = tables.inflow().table_at(0).expect("stage 0 has a table");
         let t1 = tables.inflow().table_at(1).expect("stage 1 has a table");
@@ -1727,7 +1736,9 @@ mod tests {
         let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
         let mut tables = ForwardNoiseTables::default();
 
-        sampler.rebuild_noise_tables(0, 8, &[0, 0, 0], &mut tables);
+        sampler
+            .rebuild_noise_tables(0, 8, &[0, 0, 0], &mut tables)
+            .expect("single-hydro dim never exceeds the Sobol dimension cap");
 
         assert!(matches!(
             tables.inflow().table_at(0),
@@ -1750,7 +1761,9 @@ mod tests {
         let sampler = build_forward_sampler(build_oos_inflow_config(&ctx, &stages)).unwrap();
         let mut tables = ForwardNoiseTables::default();
 
-        sampler.rebuild_noise_tables(0, 8, &[0, 0, 1], &mut tables);
+        sampler
+            .rebuild_noise_tables(0, 8, &[0, 0, 1], &mut tables)
+            .expect("Lhs never exceeds the Sobol dimension cap");
 
         let Some(NoiseTable::Lhs(lhs_ctx)) = tables.inflow().table_at(2) else {
             panic!("expected NoiseTable::Lhs for stage 2");
@@ -1780,6 +1793,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rebuild_class_tables_rejects_an_oversized_sobol_class_and_clears_non_out_of_sample() {
+        let mut out = ClassNoiseTables::default();
+
+        let oversized = ClassSampler::OutOfSample {
+            forward_seed: 1,
+            dim: 21_202, // one above the crate's Sobol dimension cap (21_201)
+            noise_methods: vec![NoiseMethod::QmcSobol].into(),
+        };
+        match rebuild_class_tables(&oversized, 0, 1, &[0], &mut out) {
+            Err(StochasticError::DimensionExceedsCapacity {
+                dim,
+                max_dim,
+                method,
+            }) => {
+                assert_eq!(dim, 21_202, "dim field");
+                assert_eq!(max_dim, 21_201, "max_dim field");
+                assert!(
+                    method.contains("sobol"),
+                    "method must contain 'sobol', got: {method}"
+                );
+            }
+            other => panic!("expected Err(DimensionExceedsCapacity), got {other:?}"),
+        }
+        assert!(out.table_at(0).is_none());
+
+        let tree = uniform_tree(1, 2, 3);
+        let in_sample = ClassSampler::InSample {
+            tree: tree.view(),
+            base_seed: 42,
+            offset: 0,
+            len: 2,
+        };
+        let result = rebuild_class_tables(&in_sample, 0, 1, &[], &mut out);
+        assert!(
+            result.is_ok(),
+            "expected Ok for a class not sampled out of sample, got: {result:?}"
+        );
+        assert!(out.table_at(0).is_none());
+    }
+
     // -----------------------------------------------------------------------
     // OutOfSample::fill stamp assertions
     // -----------------------------------------------------------------------
@@ -1794,7 +1848,9 @@ mod tests {
             noise_methods: vec![NoiseMethod::Saa].into_boxed_slice(),
         };
         let mut tables = ClassNoiseTables::default();
-        tables.refill(1, 2, 0, 4, &[0], &[NoiseMethod::Saa]);
+        tables
+            .refill(1, 2, 0, 4, &[0], &[NoiseMethod::Saa])
+            .expect("Saa never exceeds the Sobol dimension cap");
 
         let req = ClassSampleRequest {
             iteration: 1,
@@ -1822,7 +1878,9 @@ mod tests {
             noise_methods: methods.into(),
         };
         let mut tables = ClassNoiseTables::default();
-        tables.refill(1, 2, 0, 4, &[0, 0, 1], &methods);
+        tables
+            .refill(1, 2, 0, 4, &[0, 0, 1], &methods)
+            .expect("Saa never exceeds the Sobol dimension cap");
 
         let req = ClassSampleRequest {
             iteration: 0,

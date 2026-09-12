@@ -383,7 +383,9 @@ fn tables_for(
     groups: &[u32],
 ) -> ForwardNoiseTables {
     let mut tables = ForwardNoiseTables::default();
-    sampler.rebuild_noise_tables(iteration, total, groups, &mut tables);
+    sampler
+        .rebuild_noise_tables(iteration, total, groups, &mut tables)
+        .expect("test fixtures never exceed the Sobol dimension cap");
     tables
 }
 

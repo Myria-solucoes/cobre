@@ -4,8 +4,13 @@
 
 use cobre_core::temporal::NoiseMethod;
 
-use crate::tree::{
-    lhs::LhsPrecomputed, qmc_halton::HaltonPrecomputed, qmc_sobol::SobolPrecomputed,
+use crate::{
+    StochasticError,
+    tree::{
+        lhs::LhsPrecomputed,
+        qmc_halton::HaltonPrecomputed,
+        qmc_sobol::{MAX_SOBOL_DIM, SobolPrecomputed},
+    },
 };
 
 /// Precomputed scenario-invariant state for one `(noise_group_id,
@@ -77,10 +82,11 @@ impl ClassNoiseTables {
     /// [`Self::clear`], so a repeat call allocates only when a table itself
     /// grows.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `dim > MAX_SOBOL_DIM` and any stage uses `QmcSobol`
-    /// (`SobolPrecomputed::new`).
+    /// Returns [`StochasticError::DimensionExceedsCapacity`] when `dim >
+    /// MAX_SOBOL_DIM` and `noise_methods` contains `QmcSobol`; `slots`,
+    /// `tables`, and `keys` stay empty.
     pub(crate) fn refill(
         &mut self,
         seed: u64,
@@ -89,10 +95,17 @@ impl ClassNoiseTables {
         total_scenarios: u32,
         noise_group_ids: &[u32],
         noise_methods: &[NoiseMethod],
-    ) {
+    ) -> Result<(), StochasticError> {
         self.clear();
         self.iteration = iteration;
         self.total_scenarios = total_scenarios;
+        if dim > MAX_SOBOL_DIM && noise_methods.contains(&NoiseMethod::QmcSobol) {
+            return Err(StochasticError::DimensionExceedsCapacity {
+                dim,
+                max_dim: MAX_SOBOL_DIM,
+                method: "sobol".to_string(),
+            });
+        }
         for (stage_idx, &method) in noise_methods.iter().enumerate() {
             // An empty `noise_group_ids` means every stage is its own group —
             // mirrors `StageContext::noise_group_id_at`'s empty-slice behavior;
@@ -119,6 +132,7 @@ impl ClassNoiseTables {
             #[allow(clippy::cast_possible_truncation)]
             self.slots.push(slot as u32);
         }
+        Ok(())
     }
 }
 
@@ -196,7 +210,8 @@ impl ForwardNoiseTables {
 mod tests {
     use cobre_core::temporal::NoiseMethod;
 
-    use super::ClassNoiseTables;
+    use super::{ClassNoiseTables, NoiseTable};
+    use crate::{StochasticError, tree::qmc_sobol::MAX_SOBOL_DIM};
 
     #[test]
     fn table_at_returns_none_for_default_constructed() {
@@ -207,7 +222,9 @@ mod tests {
     #[test]
     fn table_at_returns_none_past_populated_range() {
         let mut tables = ClassNoiseTables::default();
-        tables.refill(1, 2, 0, 4, &[0, 1], &[NoiseMethod::Saa, NoiseMethod::Saa]);
+        tables
+            .refill(1, 2, 0, 4, &[0, 1], &[NoiseMethod::Saa, NoiseMethod::Saa])
+            .expect("Saa never exceeds the Sobol dimension cap");
         assert!(tables.table_at(2).is_none());
     }
 
@@ -216,7 +233,9 @@ mod tests {
         let mut tables = ClassNoiseTables::default();
         let methods = [NoiseMethod::Lhs, NoiseMethod::Lhs, NoiseMethod::Lhs];
         let groups = [0u32, 0, 1];
-        tables.refill(7, 2, 0, 8, &groups, &methods);
+        tables
+            .refill(7, 2, 0, 8, &groups, &methods)
+            .expect("Lhs never exceeds the Sobol dimension cap");
         assert_eq!(tables.slots, vec![0, 0, 1]);
         assert_eq!(tables.tables.len(), 2);
     }
@@ -226,7 +245,9 @@ mod tests {
         let mut tables = ClassNoiseTables::default();
         let methods = [NoiseMethod::Lhs, NoiseMethod::Lhs, NoiseMethod::Lhs];
         let groups = [0u32, 0, 1];
-        tables.refill(7, 2, 3, 8, &groups, &methods);
+        tables
+            .refill(7, 2, 3, 8, &groups, &methods)
+            .expect("Lhs never exceeds the Sobol dimension cap");
 
         assert_eq!(tables.built_for(), (3, 8));
         assert_eq!(tables.group_at(0), Some(0));
@@ -240,12 +261,52 @@ mod tests {
         let mut tables = ClassNoiseTables::default();
         let methods = [NoiseMethod::Lhs, NoiseMethod::Lhs, NoiseMethod::Lhs];
         let groups = [0u32, 0, 1];
-        tables.refill(7, 2, 0, 8, &groups, &methods);
+        tables
+            .refill(7, 2, 0, 8, &groups, &methods)
+            .expect("Lhs never exceeds the Sobol dimension cap");
         let first_slots = tables.slots.clone();
 
-        tables.refill(7, 2, 0, 8, &groups, &methods);
+        tables
+            .refill(7, 2, 0, 8, &groups, &methods)
+            .expect("Lhs never exceeds the Sobol dimension cap");
 
         assert_eq!(tables.slots, first_slots);
         assert_eq!(tables.tables.len(), 2);
+    }
+
+    #[test]
+    fn refill_rejects_a_sobol_class_wider_than_the_table() {
+        let mut tables = ClassNoiseTables::default();
+        let dim = MAX_SOBOL_DIM + 1;
+
+        let result = tables.refill(1, dim, 0, 1, &[0], &[NoiseMethod::QmcSobol]);
+
+        match result {
+            Err(StochasticError::DimensionExceedsCapacity {
+                dim: got_dim,
+                max_dim,
+                method,
+            }) => {
+                assert_eq!(got_dim, dim, "dim field");
+                assert_eq!(max_dim, MAX_SOBOL_DIM, "max_dim field");
+                assert!(
+                    method.contains("sobol"),
+                    "method must contain 'sobol', got: {method}"
+                );
+            }
+            other => panic!("expected Err(DimensionExceedsCapacity), got {other:?}"),
+        }
+        assert!(tables.table_at(0).is_none());
+    }
+
+    #[test]
+    fn refill_builds_a_wide_class_without_sobol() {
+        let mut tables = ClassNoiseTables::default();
+        let dim = MAX_SOBOL_DIM + 1;
+
+        let result = tables.refill(1, dim, 0, 1, &[0], &[NoiseMethod::Lhs]);
+
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert!(matches!(tables.table_at(0), Some(NoiseTable::Lhs(_))));
     }
 }

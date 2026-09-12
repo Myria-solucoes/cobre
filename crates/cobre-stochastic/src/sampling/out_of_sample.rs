@@ -16,9 +16,7 @@ use crate::{
     NoisePointSpec, NoiseTable, StochasticError,
     noise::{rng::rng_from_seed, seed::derive_forward_seed_grouped},
     tree::{
-        lhs::sample_lhs_point,
-        qmc_halton::scrambled_halton_point,
-        qmc_sobol::{MAX_SOBOL_DIM, scrambled_sobol_point},
+        lhs::sample_lhs_point, qmc_halton::scrambled_halton_point, qmc_sobol::scrambled_sobol_point,
     },
 };
 
@@ -40,11 +38,6 @@ pub(crate) struct FreshNoiseSpec {
 /// Fill `output[0..spec.dim]` with fresh N(0,1) noise, then apply spatial
 /// spectral correlation in-place.
 ///
-/// # Errors
-///
-/// Returns [`StochasticError::DimensionExceedsCapacity`] when `QmcSobol`
-/// and `spec.dim > MAX_SOBOL_DIM`.
-///
 /// # Panics
 ///
 /// Panics if `output.len() < spec.dim`.
@@ -55,7 +48,7 @@ pub(crate) fn sample_fresh(
     correlation: &DecomposedCorrelation,
     entity_order: &[EntityId],
 ) -> Result<(), StochasticError> {
-    let table = table_for_spec(spec);
+    let table = table_for_spec(spec)?;
     fill_uncorrelated(spec, &table, output)?;
     #[allow(clippy::cast_possible_wrap)]
     correlation.apply_correlation(spec.stage_id as i32, &mut output[..spec.dim], entity_order);
@@ -65,15 +58,8 @@ pub(crate) fn sample_fresh(
 /// Build the [`NoiseTable`] a single `spec` would resolve to under
 /// [`ClassNoiseTables::refill`], for tests that call [`fill_uncorrelated`]
 /// directly instead of through a driver's rebuilt tables.
-///
-/// Mirrors `fill_uncorrelated`'s own `QmcSobol` guard: skips
-/// `SobolPrecomputed::new` (which panics past `MAX_SOBOL_DIM`) so a
-/// dimension-exceeds test still reaches the graceful error instead of a panic.
 #[cfg(test)]
-fn table_for_spec(spec: FreshNoiseSpec) -> NoiseTable {
-    if spec.noise_method == NoiseMethod::QmcSobol && spec.dim > MAX_SOBOL_DIM {
-        return NoiseTable::Direct;
-    }
+fn table_for_spec(spec: FreshNoiseSpec) -> Result<NoiseTable, StochasticError> {
     let mut tables = ClassNoiseTables::default();
     tables.refill(
         spec.forward_seed,
@@ -82,8 +68,8 @@ fn table_for_spec(spec: FreshNoiseSpec) -> NoiseTable {
         spec.total_scenarios,
         &[spec.noise_group_id],
         &[spec.noise_method],
-    );
-    tables.table_at(0).cloned().unwrap_or(NoiseTable::Direct)
+    )?;
+    Ok(tables.table_at(0).cloned().unwrap_or(NoiseTable::Direct))
 }
 
 /// Fill `output[0..spec.dim]` with independent N(0,1) noise, omitting the
@@ -92,9 +78,8 @@ fn table_for_spec(spec: FreshNoiseSpec) -> NoiseTable {
 ///
 /// # Errors
 ///
-/// Returns [`StochasticError::DimensionExceedsCapacity`] when `QmcSobol`
-/// and `spec.dim > MAX_SOBOL_DIM`, and [`StochasticError::InsufficientData`]
-/// when `table`'s variant does not match `spec.noise_method`.
+/// Returns [`StochasticError::InsufficientData`] when `table`'s variant does
+/// not match `spec.noise_method`.
 ///
 /// # Panics
 ///
@@ -126,13 +111,6 @@ pub(crate) fn fill_uncorrelated(
             sample_lhs_point(&point_spec, ctx, output);
         }
         NoiseMethod::QmcSobol => {
-            if spec.dim > MAX_SOBOL_DIM {
-                return Err(StochasticError::DimensionExceedsCapacity {
-                    dim: spec.dim,
-                    max_dim: MAX_SOBOL_DIM,
-                    method: "sobol".to_string(),
-                });
-            }
             let NoiseTable::Sobol(ctx) = table else {
                 return Err(StochasticError::InsufficientData {
                     context: format!(
@@ -347,7 +325,7 @@ mod tests {
         let corr = identity_correlation(&[1]);
         let entity_order = make_entity_order(&[1]);
         let spec = FreshNoiseSpec {
-            dim: 21_202, // one above MAX_SOBOL_DIM = 21_201
+            dim: 21_202, // one above the crate's Sobol dimension cap (21_201)
             ..base_spec(NoiseMethod::QmcSobol)
         };
 
@@ -449,7 +427,7 @@ mod tests {
         let spec = base_spec(NoiseMethod::Saa);
         let mut out_a = vec![0.0f64; spec.dim];
         let mut out_b = vec![0.0f64; spec.dim];
-        let table = table_for_spec(spec);
+        let table = table_for_spec(spec).expect("Saa never exceeds the Sobol dimension cap");
 
         fill_uncorrelated(spec, &table, &mut out_a).unwrap();
         fill_uncorrelated(spec, &table, &mut out_b).unwrap();
@@ -463,13 +441,11 @@ mod tests {
     #[test]
     fn test_fill_uncorrelated_sobol_dim_exceeds_capacity() {
         let spec = FreshNoiseSpec {
-            dim: 21_202, // one above MAX_SOBOL_DIM = 21_201
+            dim: 21_202, // one above the crate's Sobol dimension cap (21_201)
             ..base_spec(NoiseMethod::QmcSobol)
         };
-        let mut output = vec![0.0f64; spec.dim];
-        let table = table_for_spec(spec);
 
-        let result = fill_uncorrelated(spec, &table, &mut output);
+        let result = table_for_spec(spec);
 
         match result {
             Err(StochasticError::DimensionExceedsCapacity {
@@ -484,7 +460,7 @@ mod tests {
                     "method must contain 'sobol', got: {method}"
                 );
             }
-            Ok(()) => panic!("expected Err(DimensionExceedsCapacity) but got Ok"),
+            Ok(_) => panic!("expected Err(DimensionExceedsCapacity) but got Ok"),
             Err(other) => panic!("expected DimensionExceedsCapacity, got {other:?}"),
         }
     }
@@ -505,7 +481,7 @@ mod tests {
                 ..base_spec(method)
             };
             let mut output = vec![0.0f64; spec.dim];
-            let table = table_for_spec(spec);
+            let table = table_for_spec(spec).expect("dim=3 never exceeds the Sobol dimension cap");
 
             let result = fill_uncorrelated(spec, &table, &mut output);
 
