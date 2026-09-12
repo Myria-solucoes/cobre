@@ -11,16 +11,11 @@
     clippy::cast_precision_loss
 )]
 
-use std::collections::BTreeMap;
-
 use chrono::NaiveDate;
 use cobre_core::{
     Bus, DeficitSegment, EntityId, SystemBuilder,
     entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
-    scenario::{
-        CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-        SamplingScheme,
-    },
+    scenario::{InflowModel, SamplingScheme},
     temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
@@ -29,10 +24,12 @@ use cobre_core::{
 use cobre_stochastic::tree::generate::OpeningTreeGenerationInputs;
 use cobre_stochastic::{
     ClassDimensions, ClassSchemes, NoisePointSpec, OpeningTreeInputs, build_stochastic_context,
-    correlation::resolve::DecomposedCorrelation,
     generate_opening_tree,
     tree::qmc_sobol::{SobolPrecomputed, scrambled_sobol_point},
 };
+
+mod common;
+use common::{correlated_correlation, identity_correlation, identity_correlation_model};
 
 // ---------------------------------------------------------------------------
 // Helpers shared across tests
@@ -100,60 +97,6 @@ fn make_stage_sobol_with_block(index: usize, id: i32, branching_factor: usize) -
             noise_method: NoiseMethod::QmcSobol,
         },
     }
-}
-
-fn correlation_model(entity_ids: &[i32], rho: f64) -> CorrelationModel {
-    let n = entity_ids.len();
-    let matrix: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { rho }).collect())
-        .collect();
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: entity_ids
-                    .iter()
-                    .map(|&id| CorrelationEntity {
-                        entity_type: "inflow".to_string(),
-                        id: EntityId(id),
-                    })
-                    .collect(),
-                matrix,
-            }],
-        },
-    );
-    CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    }
-}
-
-fn inflow_entity_order_and_dims(entity_ids: &[i32]) -> (Vec<EntityId>, ClassDimensions) {
-    (
-        entity_ids.iter().map(|&id| EntityId(id)).collect(),
-        ClassDimensions {
-            n_hydros: entity_ids.len(),
-            n_load_buses: 0,
-            n_ncs: 0,
-        },
-    )
-}
-
-fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
-    let (entity_order, dims) = inflow_entity_order_and_dims(entity_ids);
-    DecomposedCorrelation::build(&correlation_model(entity_ids, 0.0), &entity_order, dims).unwrap()
-}
-
-fn correlated_correlation(entity_ids: &[i32], rho: f64) -> DecomposedCorrelation {
-    let (entity_order, dims) = inflow_entity_order_and_dims(entity_ids);
-    DecomposedCorrelation::build(&correlation_model(entity_ids, rho), &entity_order, dims).unwrap()
-}
-
-fn identity_correlation_model(entity_ids: &[i32]) -> CorrelationModel {
-    correlation_model(entity_ids, 0.0)
 }
 
 fn make_bus(id: i32) -> Bus {

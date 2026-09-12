@@ -14,24 +14,23 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use chrono::NaiveDate;
 use cobre_core::{
-    Bus, DeficitSegment, EntityId, SystemBuilder,
-    entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+    DeficitSegment, EntityId, SystemBuilder,
+    entities::hydro::{Hydro, HydroPenalties},
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
         SamplingScheme,
     },
-    temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
-    },
+    temporal::{Block, NoiseMethod, ScenarioSourceConfig, Stage},
 };
 use cobre_stochastic::{
     ClassDimensions, ForwardNoiseTables, ForwardSamplerConfig, SampleRequest,
     build_forward_sampler,
     context::{ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context},
 };
+
+mod common;
+use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
 struct CountingAllocator;
 
@@ -71,46 +70,23 @@ fn reset_alloc_count() {
     ALLOC_COUNT.store(0, Ordering::Relaxed);
 }
 
-fn make_bus(id: i32) -> Bus {
-    Bus {
-        id: EntityId(id),
+fn make_bus_spec(id: i32) -> BusSpec {
+    BusSpec {
         name: format!("Bus{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
         }],
-        excess_cost: 0.0,
+        ..Default::default()
     }
 }
 
-fn make_hydro(id: i32) -> Hydro {
-    let mut hydro = Hydro {
-        unit_groups: Vec::new(),
-        id: EntityId(id),
+fn make_hydro_spec(id: i32) -> HydroSpec {
+    HydroSpec {
         name: format!("H{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        downstream_id: None,
-        travel_time_hours: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
         max_storage_hm3: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
         max_generation_mw: 100.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
         penalties: HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
@@ -129,33 +105,23 @@ fn make_hydro(id: i32) -> Hydro {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         },
-    };
-    hydro.declare_mirror_unit_group(EntityId(0));
-    hydro
+        ..Default::default()
+    }
 }
 
-fn make_stage(index: usize, id: i32, bf: usize, method: NoiseMethod) -> Stage {
-    Stage {
-        index,
-        id,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+fn make_stage_spec(bf: usize, method: NoiseMethod) -> StageSpec {
+    StageSpec {
         season_id: Some(0),
         blocks: vec![Block {
             index: 0,
             name: "SINGLE".to_string(),
             duration_hours: 744.0,
         }],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
-        },
-        risk_config: StageRiskConfig::Expectation,
         scenario_config: ScenarioSourceConfig {
             branching_factor: bf,
             noise_method: method,
         },
+        ..Default::default()
     }
 }
 
@@ -204,17 +170,19 @@ fn build_test_system(
     methods: [NoiseMethod; 3],
     correlation: CorrelationModel,
 ) -> cobre_core::System {
-    let hydros: Vec<Hydro> = (1..=70).map(make_hydro).collect();
+    let hydros: Vec<Hydro> = (1..=70)
+        .map(|id| make_hydro(EntityId(id), make_hydro_spec(id)))
+        .collect();
     let stages = vec![
-        make_stage(0, 0, 5, methods[0]),
-        make_stage(1, 1, 5, methods[1]),
-        make_stage(2, 2, 5, methods[2]),
+        make_stage(0, make_stage_spec(5, methods[0])),
+        make_stage(1, make_stage_spec(5, methods[1])),
+        make_stage(2, make_stage_spec(5, methods[2])),
     ];
     let inflow_models: Vec<InflowModel> = (1..=70)
         .flat_map(|hydro_id| (0..3).map(move |stage_id| make_inflow_model(hydro_id, stage_id)))
         .collect();
     SystemBuilder::new()
-        .buses(vec![make_bus(0)])
+        .buses(vec![make_bus(EntityId(0), make_bus_spec(0))])
         .hydros(hydros)
         .stages(stages)
         .inflow_models(inflow_models)
