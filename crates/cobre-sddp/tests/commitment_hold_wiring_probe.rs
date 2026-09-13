@@ -19,7 +19,7 @@ use chrono::{NaiveDate, TimeDelta};
 use cobre_core::entities::thermal::AnticipatedConfig;
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-    HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds, LineStagePenalties,
+    HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds, LineStagePenalties,
     NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
     ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
 };
@@ -125,7 +125,7 @@ fn build_system() -> System {
             n_stages: N_STAGES,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,

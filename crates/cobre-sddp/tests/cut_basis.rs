@@ -264,11 +264,11 @@ mod cut_subgradient_parity {
     use chrono::NaiveDate;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+        EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
         ThermalStageBounds,
-        entities::hydro::{HydroGenerationModel, HydroPenalties},
+        entities::hydro::HydroGenerationModel,
         scenario::{InflowModel, LoadModel},
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
@@ -469,7 +469,7 @@ mod cut_subgradient_parity {
                 n_stages: 1,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -2251,7 +2251,7 @@ mod range_warm_start_determinism {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ConstraintExpression,
         ContractBlockBounds, DeficitSegment, EntityId, GenericConstraint, HydroBlockBounds,
-        HydroStageBounds, HydroStagePenalties, LineBlockBounds, LineStagePenalties, LinearTerm,
+        HydroPenalties, HydroStageBounds, LineBlockBounds, LineStagePenalties, LinearTerm,
         NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
         ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties, SlackConfig,
         SystemBuilder, ThermalBlockBounds, ThermalStageBounds, VariableRef,
@@ -2580,7 +2580,7 @@ mod range_warm_start_determinism {
                 n_stages: 2,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,

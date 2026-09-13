@@ -1354,7 +1354,7 @@ mod transit_seed_output {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStagePenalties,
+        EntityId, HydroBlockBounds, HydroPastDefluence, HydroPenalties, HydroStageBounds,
         HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -1422,8 +1422,8 @@ mod transit_seed_output {
             .collect()
     }
 
-    fn hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -1753,7 +1753,7 @@ mod transit_seed_round_trip {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStagePenalties,
+        EntityId, HydroBlockBounds, HydroPastDefluence, HydroPenalties, HydroStageBounds,
         HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -1829,8 +1829,8 @@ mod transit_seed_round_trip {
             .collect()
     }
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -2321,7 +2321,7 @@ mod diversion_outflow_bounds {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage,
         InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -2411,12 +2411,12 @@ mod diversion_outflow_bounds {
     /// `Max`: spill cheaper than diversion, so the LP fills the natural channel to
     /// the cap and diverts only the forced surplus. The high violation costs make
     /// each bound bind rather than be paid off.
-    fn hydro_penalties(bound: Bound) -> HydroStagePenalties {
+    fn hydro_penalties(bound: Bound) -> HydroPenalties {
         let (spillage_cost, diversion_cost) = match bound {
             Bound::Min => (0.5, 0.0),
             Bound::Max => (0.01, 10.0),
         };
-        HydroStagePenalties {
+        HydroPenalties {
             spillage_cost,
             diversion_cost,
             turbined_cost: 0.0,
@@ -2945,9 +2945,10 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
     }
 
     fn penalties() -> cobre_core::resolved::ResolvedPenalties {
+        use cobre_core::HydroPenalties;
         use cobre_core::resolved::{
-            BusStagePenalties, HydroStagePenalties, LineStagePenalties, NcsStagePenalties,
-            PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,
+            BusStagePenalties, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+            PenaltiesDefaults, ResolvedPenalties,
         };
         ResolvedPenalties::new(
             &PenaltiesCountsSpec {
@@ -2958,7 +2959,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,

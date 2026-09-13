@@ -311,7 +311,8 @@ impl SystemBuilder {
     /// Sort every collection into canonical order, validate, and assemble the
     /// immutable [`System`]. Operational entities sort by
     /// `(operational_start_date, id)`; stages and generic constraints sort by
-    /// `id`. All validation errors are collected before returning — no
+    /// `id`; the resulting slice position is each entity's canonical index.
+    /// All validation errors are collected before returning — no
     /// short-circuiting on the first error.
     ///
     /// # Errors
@@ -362,6 +363,9 @@ impl SystemBuilder {
             |n| n.id.0,
         );
         self.stages.sort_by_key(|s| s.id);
+        for (idx, stage) in self.stages.iter_mut().enumerate() {
+            stage.index = idx;
+        }
         self.generic_constraints.sort_by_key(|c| c.id.0);
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -377,6 +381,24 @@ impl SystemBuilder {
             &mut errors,
         );
         check_duplicate_stages(&self.stages, &mut errors);
+        check_canonical_order(
+            &self.inflow_models,
+            |m| (m.hydro_id.0, m.stage_id),
+            "inflow_models",
+            &mut errors,
+        );
+        check_canonical_order(
+            &self.load_models,
+            |m| (m.bus_id.0, m.stage_id),
+            "load_models",
+            &mut errors,
+        );
+        check_canonical_order(
+            &self.ncs_models,
+            |m| (m.ncs_id.0, m.stage_id),
+            "ncs_models",
+            &mut errors,
+        );
 
         if !errors.is_empty() {
             return Err(errors);
@@ -490,10 +512,31 @@ fn sort_canonical<T>(entities: &mut [T], date: impl Fn(&T) -> NaiveDate, id: imp
     entities.sort_by_key(|e| (date(e), id(e)));
 }
 
+/// Validate that `rows` is non-decreasing under `key`, pushing at most one
+/// [`ValidationError::UnsortedModelTable`] naming `table` and the position of
+/// the first offending row. A duplicate key tuple is accepted: the scenario
+/// model tables are documented as sorted, not unique.
+pub(crate) fn check_canonical_order<T, K: Ord>(
+    rows: &[T],
+    key: impl Fn(&T) -> K,
+    table: &'static str,
+    errors: &mut Vec<ValidationError>,
+) {
+    if let Some(idx) = rows.windows(2).position(|w| key(&w[1]) < key(&w[0])) {
+        errors.push(ValidationError::UnsortedModelTable {
+            table,
+            position: idx + 1,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DeficitSegment, HydroGenerationModel, HydroPenalties};
+    use crate::{
+        Block, BlockMode, DeficitSegment, HydroGenerationModel, HydroPenalties, NoiseMethod,
+        ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
+    };
 
     fn bus(id: i32) -> Bus {
         Bus {
@@ -613,6 +656,164 @@ mod tests {
                 hydro_id: EntityId(2)
             }
         ));
+    }
+
+    fn stage_with_index(id: i32, index: usize) -> Stage {
+        Stage {
+            index,
+            id,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date"),
+            season_id: None,
+            blocks: vec![Block {
+                index: 0,
+                name: "B0".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// Given stages out of id order with a deliberately wrong incoming `index`,
+    /// `build()` overwrites `index` with the post-sort position instead of
+    /// preserving what it was handed.
+    #[test]
+    fn build_assigns_stage_index_by_post_sort_position() {
+        let stages = vec![
+            stage_with_index(2, 0),
+            stage_with_index(0, 0),
+            stage_with_index(1, 0),
+        ];
+
+        let system = SystemBuilder::new()
+            .stages(stages)
+            .build()
+            .expect("stage-only system is valid");
+
+        let ids: Vec<i32> = system.stages().iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![0, 1, 2]);
+        for (i, stage) in system.stages().iter().enumerate() {
+            assert_eq!(stage.index, i);
+        }
+    }
+
+    fn inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
+        InflowModel {
+            hydro_id: EntityId(hydro_id),
+            stage_id,
+            mean_m3s: 100.0,
+            std_m3s: 10.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        }
+    }
+
+    fn load_model(bus_id: i32, stage_id: i32) -> LoadModel {
+        LoadModel {
+            bus_id: EntityId(bus_id),
+            stage_id,
+            mean_mw: 50.0,
+            std_mw: 5.0,
+        }
+    }
+
+    fn ncs_model(ncs_id: i32, stage_id: i32) -> NcsModel {
+        NcsModel {
+            ncs_id: EntityId(ncs_id),
+            stage_id,
+            mean: 0.5,
+            std: 0.1,
+        }
+    }
+
+    /// Given `inflow_models` out of order by `(hydro_id, stage_id)`, `build()`
+    /// rejects it naming the offending position.
+    #[test]
+    fn build_rejects_out_of_order_inflow_models() {
+        let result = SystemBuilder::new()
+            .inflow_models(vec![inflow_model(2, 0), inflow_model(1, 0)])
+            .build();
+
+        let errors = result.expect_err("out-of-order inflow_models must be rejected");
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [ValidationError::UnsortedModelTable {
+                    table: "inflow_models",
+                    position: 1
+                }]
+            ),
+            "expected a single UnsortedModelTable(inflow_models, 1), got {errors:?}"
+        );
+    }
+
+    /// Given both `load_models` and `ncs_models` out of order, `build()` reports
+    /// one `UnsortedModelTable` for each table — the checks do not short-circuit.
+    #[test]
+    fn build_reports_unsorted_load_and_ncs_tables_together() {
+        let result = SystemBuilder::new()
+            .load_models(vec![load_model(2, 0), load_model(1, 0)])
+            .ncs_models(vec![ncs_model(2, 0), ncs_model(1, 0)])
+            .build();
+
+        let errors = result.expect_err("out-of-order load_models and ncs_models must be rejected");
+        assert_eq!(errors.len(), 2, "expected one error per table: {errors:?}");
+        assert!(matches!(
+            errors[0],
+            ValidationError::UnsortedModelTable {
+                table: "load_models",
+                position: 1
+            }
+        ));
+        assert!(matches!(
+            errors[1],
+            ValidationError::UnsortedModelTable {
+                table: "ncs_models",
+                position: 1
+            }
+        ));
+    }
+
+    /// Two `inflow_models` rows sharing the same `(hydro_id, stage_id)` are
+    /// accepted: the table is documented as sorted, not unique.
+    #[test]
+    fn build_accepts_duplicate_key_tuple_in_inflow_models() {
+        let system = SystemBuilder::new()
+            .inflow_models(vec![inflow_model(1, 0), inflow_model(1, 0)])
+            .build()
+            .expect("a duplicated key tuple must not be rejected as unsorted");
+
+        assert_eq!(system.inflow_models().len(), 2);
+    }
+
+    /// Correctly ordered tables for all three model families build
+    /// successfully — the happy path, so a too-strict comparison fails loudly.
+    #[test]
+    fn build_accepts_correctly_ordered_model_tables_for_all_three_families() {
+        let system = SystemBuilder::new()
+            .inflow_models(vec![
+                inflow_model(1, 0),
+                inflow_model(1, 1),
+                inflow_model(2, 0),
+            ])
+            .load_models(vec![load_model(1, 0), load_model(2, 0), load_model(2, 1)])
+            .ncs_models(vec![ncs_model(1, 0), ncs_model(1, 1), ncs_model(2, 0)])
+            .build()
+            .expect("correctly ordered model tables must build successfully");
+
+        assert_eq!(system.inflow_models().len(), 3);
+        assert_eq!(system.load_models().len(), 3);
+        assert_eq!(system.ncs_models().len(), 3);
     }
 }
 

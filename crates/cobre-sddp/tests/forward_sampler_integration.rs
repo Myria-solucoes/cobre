@@ -23,11 +23,11 @@ use std::collections::BTreeMap;
 use chrono::NaiveDate;
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-    EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+    EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
     LineStagePenalties, NcsStagePenalties, NonControllableSource, PenaltiesCountsSpec,
     PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, ScenarioSource,
     SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
-    entities::hydro::{HydroGenerationModel, HydroPenalties},
+    entities::hydro::HydroGenerationModel,
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, ExternalLoadRow,
         ExternalNcsRow, ExternalScenarioRow, InflowHistoryRow, InflowModel, LoadModel, NcsModel,
@@ -77,8 +77,8 @@ fn hydro_block_bounds() -> HydroBlockBounds {
     }
 }
 
-fn hydro_stage_penalties() -> HydroStagePenalties {
-    HydroStagePenalties {
+fn hydro_stage_penalties() -> HydroPenalties {
+    HydroPenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -469,6 +469,7 @@ fn build_two_hydro_system(
             });
         }
     }
+    inflow_models.sort_by_key(|m| (m.hydro_id.0, m.stage_id));
 
     // The CorrelationGroup entity-list order drives `entity_order` in
     // `build_stochastic_context` — this is the invariance path under test.

@@ -483,13 +483,13 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, HorizonGraph,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InitialConditions,
-        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
-        ThermalBlockBounds, ThermalStageBounds,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, InitialConditions, LineBlockBounds,
+        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
+        ThermalStageBounds,
         entities::{
             bus::{Bus, DeficitSegment},
-            hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+            hydro::{Hydro, HydroGenerationModel},
         },
         scenario::{
             ExternalLoadRow, ExternalScenarioRow, InflowHistoryRow, InflowModel, LoadModel,
@@ -800,7 +800,7 @@ mod tests {
                 n_stages: 5,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -1215,7 +1215,7 @@ mod tests {
                 n_stages: 12,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -1615,7 +1615,7 @@ mod tests {
                 n_stages,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,

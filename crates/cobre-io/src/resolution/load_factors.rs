@@ -14,9 +14,11 @@ use crate::scenarios::LoadFactorEntry;
 
 /// Build a resolved load factor table from parsed entries.
 ///
-/// `buses` and `stages` must be sorted: each entity's slice position becomes its
-/// 0-based table index. The stage axis spans study stages only (`id >= 0`); the
-/// block axis is sized to the largest per-stage block count.
+/// `buses` and `stages` must each be in the order
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) establishes;
+/// slice position becomes the entity index. The stage axis spans study
+/// stages only (`id >= 0`); the block axis is sized to the largest
+/// per-stage block count.
 #[must_use]
 pub fn resolve_load_factors(
     entries: &[LoadFactorEntry],

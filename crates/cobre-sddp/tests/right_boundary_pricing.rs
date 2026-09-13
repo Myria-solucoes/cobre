@@ -193,9 +193,10 @@ fn bounds() -> ResolvedBounds {
 }
 
 fn penalties() -> cobre_core::resolved::ResolvedPenalties {
+    use cobre_core::HydroPenalties;
     use cobre_core::resolved::{
-        BusStagePenalties, HydroStagePenalties, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,
+        BusStagePenalties, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, ResolvedPenalties,
     };
     ResolvedPenalties::new(
         &PenaltiesCountsSpec {
@@ -206,7 +207,7 @@ fn penalties() -> cobre_core::resolved::ResolvedPenalties {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,

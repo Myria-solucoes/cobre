@@ -13,17 +13,17 @@ use cobre_stochastic::season_cast::StageCalendar;
 use chrono::{Duration, NaiveDate};
 use cobre_core::{
     BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-    ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroStageBounds,
-    HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-    PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBlockBounds,
-    ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
+    ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroPenalties, HydroStageBounds,
+    LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+    PumpingBlockBounds, ResolvedBlockBounds, ResolvedBounds, ResolvedPenalties, ThermalBlockBounds,
+    ThermalStageBounds,
 };
 use cobre_core::{
     ContractType, EnergyContract, EntityId, HorizonGraph, HydroPastDefluence, InitialConditions,
     PostStudyStage, PostStudyStages, SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
-        hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+        hydro::{Hydro, HydroGenerationModel},
         thermal::{AnticipatedConfig, Thermal},
     },
     scenario::{InflowHistoryRow, InflowModel, LoadModel, SamplingScheme},
@@ -197,8 +197,8 @@ fn minimal_system_with_policy_graph(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -466,7 +466,7 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
             n_stages: n_st,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -1934,7 +1934,7 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
             n_stages: n_st,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -2285,9 +2285,10 @@ fn minimal_system_2_hydros_with_history(
         })
         .collect();
 
-    let inflow_models: Vec<InflowModel> = (0..n_stages)
-        .flat_map(|i| {
-            [1_i32, 2].map(|hid| InflowModel {
+    let inflow_models: Vec<InflowModel> = [1_i32, 2]
+        .into_iter()
+        .flat_map(|hid| {
+            (0..n_stages).map(move |i| InflowModel {
                 hydro_id: EntityId(hid),
                 stage_id: i as i32,
                 mean_m3s: 80.0,
@@ -2325,8 +2326,8 @@ fn minimal_system_2_hydros_with_history(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -2765,8 +2766,8 @@ fn staggered_dates_system_2_hydros(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -3104,8 +3105,8 @@ fn filling_system_2_hydros(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -3672,8 +3673,8 @@ fn system_with_anticipated_thermals(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -3938,8 +3939,8 @@ fn system_with_two_anticipated_thermals_staggered_dates(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -4755,8 +4756,8 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -5213,7 +5214,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -5482,7 +5483,7 @@ fn external_load_library_built_when_scheme_is_external() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -5706,6 +5707,8 @@ fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
             mean_mw: 100.0,
             std_mw: 10.0,
         });
+    }
+    for i in 0i32..2 {
         load_models.push(LoadModel {
             bus_id: EntityId(4),
             stage_id: i,
@@ -5783,7 +5786,7 @@ fn external_load_library_includes_zero_sigma_bus_when_scheme_is_external() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -6087,7 +6090,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -6346,7 +6349,7 @@ fn historical_library_fails_when_no_valid_windows() {
             n_stages: 2,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -6708,8 +6711,8 @@ fn minimal_system_with_anticipated_and_commitments(
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -7451,9 +7454,10 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
         })
         .collect();
 
-    let inflow_models: Vec<InflowModel> = (0..n_stages)
-        .flat_map(|i| {
-            [1_i32, 2].map(|hid| InflowModel {
+    let inflow_models: Vec<InflowModel> = [1_i32, 2]
+        .into_iter()
+        .flat_map(|hid| {
+            (0..n_stages).map(move |i| InflowModel {
                 hydro_id: EntityId(hid),
                 stage_id: i as i32,
                 mean_m3s: 80.0,
@@ -7493,8 +7497,8 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -8046,7 +8050,7 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
             n_stages: n_stages.max(1),
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -8898,7 +8902,7 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
             n_stages,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,

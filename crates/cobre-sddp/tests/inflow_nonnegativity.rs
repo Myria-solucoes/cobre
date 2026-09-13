@@ -26,7 +26,7 @@ use std::sync::mpsc;
 use chrono::NaiveDate;
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-    EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+    EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
     LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
     PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
     ThermalStageBounds,
@@ -220,19 +220,18 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    let inflow_models: Vec<InflowModel> = (0..N_STAGES)
-        .flat_map(|stage_idx| {
-            [EntityId(1), EntityId(2)]
-                .iter()
-                .map(move |&hydro_id| InflowModel {
-                    hydro_id,
-                    stage_id: stage_idx as i32,
-                    mean_m3s: 0.0,
-                    std_m3s: 30.0,
-                    ar_coefficients: vec![],
-                    residual_std_ratio: 1.0,
-                    annual: None,
-                })
+    let inflow_models: Vec<InflowModel> = [EntityId(1), EntityId(2)]
+        .iter()
+        .flat_map(|&hydro_id| {
+            (0..N_STAGES).map(move |stage_idx| InflowModel {
+                hydro_id,
+                stage_id: stage_idx as i32,
+                mean_m3s: 0.0,
+                std_m3s: 30.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
         })
         .collect();
 
@@ -307,7 +306,7 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    let hydro_penalties_default = HydroStagePenalties {
+    let hydro_penalties_default = HydroPenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -820,7 +819,7 @@ fn truncation_with_penalty_training_completes() {
 /// `100 * block_hours`, H2's `5000 * block_hours` (justifies the magic asserts).
 #[test]
 fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
-    let hydro_penalties_default = HydroStagePenalties {
+    let hydro_penalties_default = HydroPenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
         turbined_cost: 0.0,

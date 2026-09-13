@@ -29,7 +29,7 @@ use crate::{
         scalar_parameters::validate_scalar_parameters,
         schema::validate_schema,
         semantic::{validate_semantic_hydro_thermal, validate_semantic_stages_penalties_scenarios},
-        structural::validate_structure,
+        structural::{InputFile, validate_structure},
     },
 };
 
@@ -227,7 +227,7 @@ pub(crate) fn run_pipeline_with_artifacts(
 
     // Without tailrace curves the fit collapses to the constant entity tailrace,
     // which zeroes γ_S and emits sub-ULP LP coefficients.
-    let tailrace_curves = if manifest.system_tailrace_curves_parquet {
+    let tailrace_curves = if manifest.present(InputFile::SystemTailraceCurvesParquet) {
         let tailrace_path = path.join("system").join("tailrace_curves.parquet");
         load_tailrace_curves(Some(tailrace_path.as_path()))?
     } else {
@@ -284,9 +284,10 @@ pub(crate) fn run_pipeline_with_artifacts(
     Ok((LoadedCase { system, artifacts }, report))
 }
 
-/// Sorts `entities` into the same `(operational_start_date, id)` order as
-/// `SystemBuilder::build`'s `sort_canonical` — not `(id, date)` or `id` alone —
-/// so a resolver's `entity_idx` matches the position `System` will expose it at.
+/// Sorts `entities` into the order
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) establishes —
+/// not `(id, date)` or `id` alone — so a resolver's `entity_idx` matches the
+/// position `System` will expose it at.
 fn sort_into_canonical_order<T>(
     entities: &mut [T],
     date: impl Fn(&T) -> NaiveDate,

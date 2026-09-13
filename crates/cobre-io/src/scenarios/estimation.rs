@@ -58,7 +58,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{Months, NaiveDate};
-use cobre_core::{EntityId, SeasonMap, Stage, System};
+use cobre_core::{EntityId, SeasonMap, Stage, System, ValidationError};
 use cobre_stochastic::{
     StochasticError,
     par::aggregate::aggregate_observations_to_season,
@@ -74,7 +74,7 @@ use cobre_stochastic::{
 
 use crate::LoadError::ConstraintError;
 use crate::{
-    Config, FileManifest, LoadError, OrderSelectionMethod, ValidationContext,
+    Config, FileManifest, InputFile, LoadError, OrderSelectionMethod, ValidationContext,
     parse_inflow_ar_coefficients, parse_inflow_history,
     scenarios::{
         InflowAnnualComponentRow, InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow,
@@ -119,9 +119,9 @@ impl EstimationPath {
     #[must_use]
     pub fn resolve(manifest: &FileManifest) -> Self {
         match (
-            manifest.scenarios_inflow_history_parquet,
-            manifest.scenarios_inflow_seasonal_stats_parquet,
-            manifest.scenarios_inflow_ar_coefficients_parquet,
+            manifest.present(InputFile::ScenariosInflowHistoryParquet),
+            manifest.present(InputFile::ScenariosInflowSeasonalStatsParquet),
+            manifest.present(InputFile::ScenariosInflowArCoefficientsParquet),
         ) {
             // `_`: with no history, R is ignored — AR alone cannot drive estimation.
             (false, false, _) => Self::Deterministic,
@@ -159,6 +159,11 @@ pub enum EstimationError {
     /// Estimation failed due to insufficient data.
     #[error("estimation failed: {0}")]
     Stochastic(#[from] StochasticError),
+
+    /// The replacement `inflow_models` table produced by estimation is not
+    /// canonically ordered.
+    #[error("scenario model validation error: {0}")]
+    Validation(#[from] ValidationError),
 }
 
 /// Estimate or load PAR(p) model parameters based on the input file manifest.
@@ -171,6 +176,8 @@ pub enum EstimationError {
 /// - [`EstimationError::Load`] -- file read, parse, or validation failure.
 /// - [`EstimationError::Stochastic`] -- insufficient observations for any
 ///   `(entity, season)` group during AR or stats estimation.
+/// - [`EstimationError::Validation`] -- the estimated `inflow_models` table is
+///   not canonically ordered.
 pub fn estimate_from_history(
     system: System,
     case_dir: &Path,
@@ -254,7 +261,7 @@ fn run_estimation(
         },
     )?;
 
-    let correlation = if manifest.scenarios_correlation_json {
+    let correlation = if manifest.present(InputFile::ScenariosCorrelationJson) {
         system.correlation().clone()
     } else {
         estimate_correlation_with_season_map(
@@ -278,10 +285,8 @@ fn run_estimation(
     let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
     populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
-    Ok((
-        system.with_scenario_models(inflow_models, correlation),
-        estimation_report,
-    ))
+    let system = system.with_scenario_models(inflow_models, correlation)?;
+    Ok((system, estimation_report))
 }
 
 /// Partial estimation: history + user seasonal stats present, AR coefficients absent.
@@ -347,7 +352,7 @@ fn run_partial_estimation(
     let (white_noise_fallbacks, std_ratio_warnings) =
         validate_partial_estimation_coverage(&system, &fitting_stats, study_stages)?;
 
-    let correlation = if manifest.scenarios_correlation_json {
+    let correlation = if manifest.present(InputFile::ScenariosCorrelationJson) {
         system.correlation().clone()
     } else {
         estimate_correlation_with_season_map(
@@ -378,10 +383,8 @@ fn run_partial_estimation(
     estimation_report.white_noise_fallbacks = white_noise_fallbacks;
     estimation_report.std_ratio_warnings = std_ratio_warnings;
 
-    Ok((
-        system.with_scenario_models(inflow_models, correlation),
-        estimation_report,
-    ))
+    let system = system.with_scenario_models(inflow_models, correlation)?;
+    Ok((system, estimation_report))
 }
 
 /// Load inflow history from the case directory, gate each hydro's season
@@ -681,7 +684,7 @@ fn run_user_ar_estimation(
 
     let user_ar_estimates = ar_rows_to_estimates(&user_ar_rows, stages);
 
-    let correlation = if manifest.scenarios_correlation_json {
+    let correlation = if manifest.present(InputFile::ScenariosCorrelationJson) {
         system.correlation().clone()
     } else {
         estimate_correlation_with_season_map(
@@ -711,10 +714,8 @@ fn run_user_ar_estimation(
         std_ratio_warnings: Vec::new(),
     };
 
-    Ok((
-        system.with_scenario_models(inflow_models, correlation),
-        estimation_report,
-    ))
+    let system = system.with_scenario_models(inflow_models, correlation)?;
+    Ok((system, estimation_report))
 }
 
 /// Convert [`InflowArCoefficientRow`] entries to [`ArCoefficientEstimate`] values.

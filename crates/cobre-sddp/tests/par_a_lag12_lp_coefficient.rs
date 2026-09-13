@@ -38,11 +38,11 @@
 use chrono::NaiveDate;
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-    EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+    EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
     LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
     PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
     ThermalStageBounds,
-    entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+    entities::hydro::{Hydro, HydroGenerationModel},
     scenario::{AnnualComponent, InflowModel, LoadModel},
     temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -217,8 +217,8 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
 
     let mut all_inflow_models: Vec<InflowModel> = Vec::new();
 
-    for pre_id in [-2_i32, -1_i32] {
-        for &h_id in &hydro_ids {
+    for &h_id in &hydro_ids {
+        for pre_id in [-2_i32, -1_i32] {
             all_inflow_models.push(InflowModel {
                 hydro_id: h_id,
                 stage_id: pre_id,
@@ -229,10 +229,8 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
                 annual: Some(annual_component.clone()),
             });
         }
-    }
 
-    for i in 0..N_STUDY {
-        for &h_id in &hydro_ids {
+        for i in 0..N_STUDY {
             all_inflow_models.push(InflowModel {
                 hydro_id: h_id,
                 stage_id: i as i32,
@@ -293,7 +291,7 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         },
     );
 
-    let hydro_penalties_default = HydroStagePenalties {
+    let hydro_penalties_default = HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -458,8 +456,8 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
         .collect();
 
     let mut all_inflow_models: Vec<InflowModel> = Vec::new();
-    for pre_id in [-2_i32, -1_i32] {
-        for &h_id in &hydro_ids {
+    for &h_id in &hydro_ids {
+        for pre_id in [-2_i32, -1_i32] {
             all_inflow_models.push(InflowModel {
                 hydro_id: h_id,
                 stage_id: pre_id,
@@ -470,9 +468,8 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
                 annual: None,
             });
         }
-    }
-    for i in 0..N_STUDY {
-        for &h_id in &hydro_ids {
+
+        for i in 0..N_STUDY {
             all_inflow_models.push(InflowModel {
                 hydro_id: h_id,
                 stage_id: i as i32,
@@ -532,7 +529,7 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
             },
         },
     );
-    let hydro_penalties_default = HydroStagePenalties {
+    let hydro_penalties_default = HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
         turbined_cost: 0.0,

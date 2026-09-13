@@ -79,6 +79,13 @@ pub enum ValidationError {
         /// Why the penalty is invalid.
         reason: String,
     },
+    /// A scenario model table is not in its documented canonical order.
+    UnsortedModelTable {
+        /// Table that is out of order.
+        table: &'static str,
+        /// Position of the first element that is not greater than its predecessor.
+        position: usize,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -132,6 +139,10 @@ impl fmt::Display for ValidationError {
             } => write!(
                 f,
                 "{entity_type} with id {entity_id} has invalid penalty in field '{field_name}': {reason}"
+            ),
+            Self::UnsortedModelTable { table, position } => write!(
+                f,
+                "{table} is not sorted by its documented (id, stage_id) key: row {position} is out of order"
             ),
         }
     }

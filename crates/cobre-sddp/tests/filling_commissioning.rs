@@ -1305,7 +1305,7 @@ mod filling_cut_validity {
 
     use cobre_core::entities::{
         bus::DeficitSegment,
-        hydro::{FillingConfig, HydroGenerationModel, HydroPenalties},
+        hydro::{FillingConfig, HydroGenerationModel},
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -1314,7 +1314,7 @@ mod filling_cut_validity {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds, TrainingEvent,
@@ -1505,9 +1505,10 @@ mod filling_cut_validity {
             })
             .collect();
 
-        let inflow_models: Vec<InflowModel> = (0..N_STAGES)
-            .flat_map(|i| {
-                [HF1_ID, HF2_ID, HOP_ID, HCTL_ID].map(|hid| InflowModel {
+        let inflow_models: Vec<InflowModel> = [HF1_ID, HF2_ID, HOP_ID, HCTL_ID]
+            .into_iter()
+            .flat_map(|hid| {
+                (0..N_STAGES).map(move |i| InflowModel {
                     hydro_id: EntityId(hid),
                     stage_id: i as i32,
                     mean_m3s: 80.0,
@@ -1545,8 +1546,8 @@ mod filling_cut_validity {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,

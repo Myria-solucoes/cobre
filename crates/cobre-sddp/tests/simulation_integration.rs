@@ -1080,13 +1080,13 @@ impl SolverInterface for SizedMockSolver {
 /// Build a 1-hydro, 1-bus system with `min_outflow_m3s` > 0 for integration testing.
 #[allow(clippy::cast_possible_wrap)]
 fn make_min_outflow_system() -> cobre_core::System {
-    use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::scenario::InflowModel;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, HydroBlockBounds,
-        HydroStageBounds, HydroStagePenalties, LineBlockBounds, LineStagePenalties,
-        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
-        ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
+        HydroPenalties, HydroStageBounds, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
     };
 
     let bus = make_bus(
@@ -1254,7 +1254,7 @@ fn make_min_outflow_system() -> cobre_core::System {
             n_stages,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,

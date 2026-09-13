@@ -15,8 +15,10 @@ use crate::constraints::NcsBoundsRow;
 
 /// Build a resolved NCS bounds table from parsed override rows.
 ///
-/// `non_controllable_sources` must be sorted: slice position becomes the NCS index.
-/// With empty `overrides`, every cell holds the entity's installed-capacity default.
+/// `non_controllable_sources` must be in the order
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) establishes;
+/// slice position becomes the entity index. With empty `overrides`, every
+/// cell holds the entity's installed-capacity default.
 #[must_use]
 #[allow(clippy::implicit_hasher)]
 pub fn resolve_ncs_bounds(

@@ -47,7 +47,7 @@ use cobre_core::scenario::{CorrelationModel, InflowModel, LoadModel, NcsModel};
 
 use crate::LoadError;
 use crate::stages::parse_stages;
-use crate::validation::structural::FileManifest;
+use crate::validation::structural::{FileManifest, InputFile};
 use std::path::Path;
 
 /// Load `scenarios/inflow_seasonal_stats.parquet`, returning an empty `Vec` when absent.
@@ -285,12 +285,13 @@ pub struct ScenarioData {
 /// File paths are constructed as `case_root.join("scenarios/<filename>")`.
 ///
 /// `inflow_models[].residual_std_ratio` is closure-derived, never read from a
-/// file (see [`populate_derived_residual_ratios`]). When `manifest.stages_json`
-/// is set, this function parses `case_root.join("stages.json")` for stage/season
-/// context and runs the derivation over the assembled models, mirroring the
-/// four production call sites (`pipeline.rs`, `scenarios::estimation`). When
-/// `manifest.stages_json` is unset — this function has no other source of
-/// stage/season context — derivation is skipped and every model keeps
+/// file (see [`populate_derived_residual_ratios`]). When
+/// `manifest.present(InputFile::StagesJson)` is `true`, this function parses
+/// `case_root.join("stages.json")` for stage/season context and runs the
+/// derivation over the assembled models, mirroring the four production call
+/// sites (`pipeline.rs`, `scenarios::estimation`). When it is `false` — this
+/// function has no other source of stage/season context — derivation is
+/// skipped and every model keeps
 /// [`assemble_inflow_models`]'s placeholder `residual_std_ratio = 1.0`
 /// unresolved; a caller relying on the derived value in that case must call
 /// [`populate_derived_residual_ratios`] itself once stage data is available.
@@ -327,74 +328,74 @@ pub fn load_scenarios(
 
     let raw_stats = load_inflow_seasonal_stats(
         manifest
-            .scenarios_inflow_seasonal_stats_parquet
+            .present(InputFile::ScenariosInflowSeasonalStatsParquet)
             .then(|| scenarios_dir.join("inflow_seasonal_stats.parquet"))
             .as_deref(),
     )?;
     let raw_coefficients = load_inflow_ar_coefficients(
         manifest
-            .scenarios_inflow_ar_coefficients_parquet
+            .present(InputFile::ScenariosInflowArCoefficientsParquet)
             .then(|| scenarios_dir.join("inflow_ar_coefficients.parquet"))
             .as_deref(),
     )?;
     let raw_annual_components = load_inflow_annual_component(
         manifest
-            .scenarios_inflow_annual_component_parquet
+            .present(InputFile::ScenariosInflowAnnualComponentParquet)
             .then(|| scenarios_dir.join("inflow_annual_component.parquet"))
             .as_deref(),
     )?;
     let inflow_history = load_inflow_history(
         manifest
-            .scenarios_inflow_history_parquet
+            .present(InputFile::ScenariosInflowHistoryParquet)
             .then(|| scenarios_dir.join("inflow_history.parquet"))
             .as_deref(),
     )?;
     let raw_load_stats = load_load_seasonal_stats(
         manifest
-            .scenarios_load_seasonal_stats_parquet
+            .present(InputFile::ScenariosLoadSeasonalStatsParquet)
             .then(|| scenarios_dir.join("load_seasonal_stats.parquet"))
             .as_deref(),
     )?;
     let load_factors = load_load_factors(
         manifest
-            .scenarios_load_factors_json
+            .present(InputFile::ScenariosLoadFactorsJson)
             .then(|| scenarios_dir.join("load_factors.json"))
             .as_deref(),
     )?;
     let correlation = load_correlation(
         manifest
-            .scenarios_correlation_json
+            .present(InputFile::ScenariosCorrelationJson)
             .then(|| scenarios_dir.join("correlation.json"))
             .as_deref(),
     )?;
     let external_scenarios = load_external_inflow_scenarios(
         manifest
-            .scenarios_external_inflow_scenarios_parquet
+            .present(InputFile::ScenariosExternalInflowScenariosParquet)
             .then(|| scenarios_dir.join("external_inflow_scenarios.parquet"))
             .as_deref(),
     )?;
     let external_load_scenarios = load_external_load_scenarios(
         manifest
-            .scenarios_external_load_scenarios_parquet
+            .present(InputFile::ScenariosExternalLoadScenariosParquet)
             .then(|| scenarios_dir.join("external_load_scenarios.parquet"))
             .as_deref(),
     )?;
     let external_ncs_scenarios = load_external_ncs_scenarios(
         manifest
-            .scenarios_external_ncs_scenarios_parquet
+            .present(InputFile::ScenariosExternalNcsScenariosParquet)
             .then(|| scenarios_dir.join("external_ncs_scenarios.parquet"))
             .as_deref(),
     )?;
     let ncs_models = load_ncs_stats(
         manifest
-            .scenarios_non_controllable_stats_parquet
+            .present(InputFile::ScenariosNonControllableStatsParquet)
             .then(|| scenarios_dir.join("non_controllable_stats.parquet"))
             .as_deref(),
     )?;
 
     let mut inflow_models =
         assemble_inflow_models(raw_stats, raw_coefficients, raw_annual_components)?;
-    if manifest.stages_json {
+    if manifest.present(InputFile::StagesJson) {
         let stages_data = parse_stages(&case_root.join("stages.json"))?;
         let (stage_to_season, n_seasons) = resolve_stage_seasons(
             &stages_data.stages,
@@ -429,7 +430,7 @@ pub fn load_scenarios(
 )]
 mod tests {
     use super::*;
-    use crate::validation::structural::FileManifest;
+    use crate::validation::structural::{FileManifest, InputFile};
     use tempfile::TempDir;
 
     #[test]
@@ -554,7 +555,7 @@ mod tests {
         );
     }
 
-    /// With `stages.json` present (`manifest.stages_json = true`), an
+    /// With `stages.json` present (`manifest.present(InputFile::StagesJson)`), an
     /// order-bearing model's `residual_std_ratio` must come out closure-derived
     /// (`sqrt(1 - psi^2)` for this uniform-AR(1) fixture, per the closure's
     /// exact order-1 decoupling), not the [`assemble_inflow_models`] placeholder
@@ -614,12 +615,10 @@ mod tests {
         )
         .unwrap();
 
-        let manifest = FileManifest {
-            stages_json: true,
-            scenarios_inflow_seasonal_stats_parquet: true,
-            scenarios_inflow_ar_coefficients_parquet: true,
-            ..FileManifest::default()
-        };
+        let mut manifest = FileManifest::default();
+        manifest.set_present(InputFile::StagesJson);
+        manifest.set_present(InputFile::ScenariosInflowSeasonalStatsParquet);
+        manifest.set_present(InputFile::ScenariosInflowArCoefficientsParquet);
 
         let data = load_scenarios(dir.path(), &manifest).expect("load_scenarios must succeed");
 

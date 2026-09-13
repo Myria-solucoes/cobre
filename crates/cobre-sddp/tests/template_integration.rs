@@ -24,10 +24,10 @@
 
 use cobre_core::{
     AnticipatedConfig, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties,
-    ContractBlockBounds, DeficitSegment, EntityId, HydroBlockBounds, HydroStageBounds,
-    HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-    PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties,
-    SystemBuilder, ThermalBlockBounds, ThermalStageBounds, scenario::InflowModel,
+    ContractBlockBounds, DeficitSegment, EntityId, HydroBlockBounds, HydroPenalties,
+    HydroStageBounds, LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+    PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+    ThermalBlockBounds, ThermalStageBounds, scenario::InflowModel,
 };
 use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -97,8 +97,8 @@ fn default_hydro_block_bounds() -> HydroBlockBounds {
     }
 }
 
-fn default_hydro_penalties() -> HydroStagePenalties {
-    HydroStagePenalties {
+fn default_hydro_penalties() -> HydroPenalties {
+    HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -618,7 +618,7 @@ fn fpha_system_with_turbined_cost(
             n_stages: 1,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost,
@@ -829,22 +829,18 @@ fn two_bus_system_with_stochastic_load(
         .collect();
 
     let load_models: Vec<LoadModel> = (0..n_stages)
-        .flat_map(|s| {
-            [
-                LoadModel {
-                    bus_id: EntityId(10),
-                    stage_id: s as i32,
-                    mean_mw: 80.0,
-                    std_mw: 0.0, // B1: no noise
-                },
-                LoadModel {
-                    bus_id: EntityId(20),
-                    stage_id: s as i32,
-                    mean_mw: 120.0,
-                    std_mw: 15.0, // B2: stochastic
-                },
-            ]
+        .map(|s| LoadModel {
+            bus_id: EntityId(10),
+            stage_id: s as i32,
+            mean_mw: 80.0,
+            std_mw: 0.0, // B1: no noise
         })
+        .chain((0..n_stages).map(|s| LoadModel {
+            bus_id: EntityId(20),
+            stage_id: s as i32,
+            mean_mw: 120.0,
+            std_mw: 15.0, // B2: stochastic
+        }))
         .collect();
 
     let n_st = n_stages.max(1);
@@ -1722,7 +1718,7 @@ fn evap_hydro_system_with_violation_cost(
             n_stages: 1,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -2064,7 +2060,7 @@ fn one_hydro_system_with_withdrawal(
             n_stages: n_st,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -2773,7 +2769,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
             n_stages: n_st,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,

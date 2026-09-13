@@ -486,7 +486,7 @@ mod tests {
                 )
             })
             .collect();
-        let inflow_models: Vec<InflowModel> = hydro_order
+        let mut inflow_models: Vec<InflowModel> = hydro_order
             .iter()
             .flat_map(|&hydro_id| {
                 stages.iter().map(move |stage| {
@@ -494,6 +494,7 @@ mod tests {
                 })
             })
             .collect();
+        inflow_models.sort_by_key(|m| (m.hydro_id.0, m.stage_id));
 
         SystemBuilder::new()
             .buses(vec![bus])

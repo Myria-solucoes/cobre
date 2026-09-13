@@ -12,13 +12,14 @@ use crate::{
     InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
     NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
     ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, SamplingScheme, Stage, Thermal,
+    ResolvedPenalties, SamplingScheme, Stage, Thermal, ValidationError,
 };
 
 mod builder;
 mod validate;
 
 pub use builder::SystemBuilder;
+use builder::check_canonical_order;
 
 #[cfg(feature = "serde")]
 use validate::{build_index, build_stage_index};
@@ -429,13 +430,15 @@ impl System {
         &self.resolved_ncs_factors
     }
 
-    /// Returns all PAR(p) inflow models in canonical order (by hydro ID, then stage ID).
+    /// Returns all PAR(p) inflow models in canonical order (by hydro ID, then
+    /// stage ID), checked at construction rather than merely asserted.
     #[must_use]
     pub fn inflow_models(&self) -> &[InflowModel] {
         &self.inflow_models
     }
 
-    /// Returns all load models in canonical order (by bus ID, then stage ID).
+    /// Returns all load models in canonical order (by bus ID, then stage ID),
+    /// checked at construction rather than merely asserted.
     #[must_use]
     pub fn load_models(&self) -> &[LoadModel] {
         &self.load_models
@@ -463,7 +466,8 @@ impl System {
         ids
     }
 
-    /// Returns all NCS availability noise models in canonical order (by NCS ID, then stage ID).
+    /// Returns all NCS availability noise models in canonical order (by NCS ID,
+    /// then stage ID), checked at construction rather than merely asserted.
     #[must_use]
     pub fn ncs_models(&self) -> &[NcsModel] {
         &self.ncs_models
@@ -549,6 +553,11 @@ impl System {
     /// other fields preserved. The only supported post-construction update path for
     /// these fields, which are not public outside this crate.
     ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError::UnsortedModelTable`] if `inflow_models` is not
+    /// non-decreasing by `(hydro_id, stage_id)`; neither field is replaced.
+    ///
     /// # Examples
     ///
     /// ```
@@ -565,18 +574,29 @@ impl System {
     ///     residual_std_ratio: 1.0,
     ///     annual: None,
     /// };
-    /// let updated = system.with_scenario_models(vec![model], CorrelationModel::default());
+    /// let updated = system
+    ///     .with_scenario_models(vec![model], CorrelationModel::default())
+    ///     .expect("single-row table is trivially sorted");
     /// assert_eq!(updated.inflow_models().len(), 1);
     /// ```
-    #[must_use]
     pub fn with_scenario_models(
         mut self,
         inflow_models: Vec<InflowModel>,
         correlation: CorrelationModel,
-    ) -> Self {
+    ) -> Result<Self, ValidationError> {
+        let mut errors = Vec::new();
+        check_canonical_order(
+            &inflow_models,
+            |m| (m.hydro_id.0, m.stage_id),
+            "inflow_models",
+            &mut errors,
+        );
+        if let Some(error) = errors.into_iter().next() {
+            return Err(error);
+        }
         self.inflow_models = inflow_models;
         self.correlation = correlation;
-        self
+        Ok(self)
     }
 
     /// Rebuild all lookup indices from the entity collections.
@@ -1752,11 +1772,10 @@ mod tests {
             AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
             ConstraintExpression, ContractBlockBounds, CorrelationEntity, CorrelationGroup,
             CorrelationProfile, CorrelationScheduleEntry, DeficitSegment, HydroBlockBounds,
-            HydroPastDefluence, HydroStageBounds, HydroStagePenalties, HydroStorage,
-            LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
-            PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraphType, PumpingBlockBounds,
-            RecentObservation, SlackConfig, ThermalBlockBounds, ThermalStageBounds, Transition,
-            VariableRef,
+            HydroPastDefluence, HydroPenalties, HydroStageBounds, HydroStorage, LineBlockBounds,
+            LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec,
+            PenaltiesDefaults, PolicyGraphType, PumpingBlockBounds, RecentObservation, SlackConfig,
+            ThermalBlockBounds, ThermalStageBounds, Transition, VariableRef,
         };
 
         let bus1 = {
@@ -1844,7 +1863,7 @@ mod tests {
                 n_stages: 2,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.02,
                     turbined_cost: 0.03,
@@ -2198,5 +2217,55 @@ mod tests {
 
         assert_eq!(system.external_scenarios().len(), 1);
         assert_eq!(system.external_scenarios()[0], row);
+    }
+
+    #[test]
+    fn test_with_scenario_models_rejects_out_of_order_table() {
+        fn build_with(model: InflowModel) -> System {
+            SystemBuilder::new()
+                .inflow_models(vec![model])
+                .build()
+                .expect("valid system")
+        }
+
+        let original_model = InflowModel {
+            hydro_id: EntityId(1),
+            stage_id: 0,
+            mean_m3s: 100.0,
+            std_m3s: 10.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        };
+
+        let system = build_with(original_model.clone());
+        // System is not Clone; a second, independently built instance stands
+        // in for "the state `system` would still have" after the failed call.
+        let unchanged = build_with(original_model.clone());
+
+        let out_of_order = vec![
+            InflowModel {
+                hydro_id: EntityId(2),
+                ..original_model.clone()
+            },
+            InflowModel {
+                hydro_id: EntityId(1),
+                ..original_model.clone()
+            },
+        ];
+
+        let err = system
+            .with_scenario_models(out_of_order, CorrelationModel::default())
+            .expect_err("out-of-order inflow_models must be rejected");
+
+        assert!(matches!(
+            err,
+            ValidationError::UnsortedModelTable {
+                table: "inflow_models",
+                position: 1
+            }
+        ));
+        assert_eq!(unchanged.inflow_models(), &[original_model]);
+        assert_eq!(*unchanged.correlation(), CorrelationModel::default());
     }
 }

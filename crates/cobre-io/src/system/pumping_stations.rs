@@ -104,9 +104,10 @@ pub(crate) struct RawPumpingFlow {
 ///
 /// Reads the JSON file, deserializes it through intermediate serde types,
 /// performs post-deserialization validation, then converts to
-/// `Vec<PumpingStation>`. The result is sorted by `id` ascending, so parser output
-/// is deterministic regardless of file row order (declaration-order invariance);
-/// the builder applies the same id as its `(operational_start_date, id)` tiebreak.
+/// `Vec<PumpingStation>`. The result is sorted by `id` ascending, so parser
+/// output is deterministic regardless of file row order (declaration-order
+/// invariance); canonical order is
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build)'s to establish.
 ///
 /// # Errors
 ///

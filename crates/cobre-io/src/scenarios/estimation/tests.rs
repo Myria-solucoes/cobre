@@ -79,7 +79,9 @@ fn test_with_scenario_models_replaces_fields() {
         .collect();
     let new_corr = CorrelationModel::default();
 
-    let updated = system.with_scenario_models(new_models.clone(), new_corr.clone());
+    let updated = system
+        .with_scenario_models(new_models.clone(), new_corr.clone())
+        .expect("new_models is sorted by (hydro_id, stage_id)");
 
     assert_eq!(updated.inflow_models().len(), 4, "expected 4 inflow models");
     assert_eq!(
@@ -113,7 +115,9 @@ fn test_with_scenario_models_clears_when_empty() {
     let system = minimal_system_with_inflow_models(vec![model]);
     assert_eq!(system.inflow_models().len(), 1);
 
-    let updated = system.with_scenario_models(vec![], CorrelationModel::default());
+    let updated = system
+        .with_scenario_models(vec![], CorrelationModel::default())
+        .expect("empty inflow_models table is trivially sorted");
     assert!(updated.inflow_models().is_empty());
 }
 
@@ -196,13 +200,20 @@ fn test_estimate_no_history_returns_unchanged() {
 
 #[test]
 fn test_estimation_path_resolve_all_8_combinations() {
-    use crate::FileManifest;
+    use crate::{FileManifest, InputFile};
 
-    let make = |history: bool, stats: bool, ar: bool| FileManifest {
-        scenarios_inflow_history_parquet: history,
-        scenarios_inflow_seasonal_stats_parquet: stats,
-        scenarios_inflow_ar_coefficients_parquet: ar,
-        ..Default::default()
+    let make = |history: bool, stats: bool, ar: bool| {
+        let mut manifest = FileManifest::default();
+        if history {
+            manifest.set_present(InputFile::ScenariosInflowHistoryParquet);
+        }
+        if stats {
+            manifest.set_present(InputFile::ScenariosInflowSeasonalStatsParquet);
+        }
+        if ar {
+            manifest.set_present(InputFile::ScenariosInflowArCoefficientsParquet);
+        }
+        manifest
     };
 
     assert_eq!(

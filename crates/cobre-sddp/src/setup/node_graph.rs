@@ -1740,14 +1740,14 @@ mod tests {
     ) -> StochasticContext {
         use chrono::NaiveDate;
         use cobre_core::entities::bus::{Bus, DeficitSegment};
-        use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
+        use cobre_core::entities::hydro::{Hydro, HydroGenerationModel};
         use cobre_core::temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         };
         use cobre_core::{
             BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-            HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InflowModel, LineBlockBounds,
+            HydroBlockBounds, HydroPenalties, HydroStageBounds, InflowModel, LineBlockBounds,
             LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
             PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
             ThermalBlockBounds, ThermalStageBounds,
@@ -1838,9 +1838,9 @@ mod tests {
                 },
             })
             .collect();
-        let inflow_models: Vec<InflowModel> = (0..n_stages)
-            .flat_map(|i| {
-                (0..n_hydros).map(move |h| InflowModel {
+        let inflow_models: Vec<InflowModel> = (0..n_hydros)
+            .flat_map(|h| {
+                (0..n_stages).map(move |i| InflowModel {
                     hydro_id: EntityId(10 + h as i32),
                     stage_id: i as i32,
                     mean_m3s: 80.0,
@@ -1903,7 +1903,7 @@ mod tests {
                 n_stages: n_st,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,

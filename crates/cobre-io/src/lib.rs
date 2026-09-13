@@ -148,7 +148,7 @@ pub use system::{
 };
 pub use validation::scalar_parameters::validate_scalar_parameters;
 pub use validation::semantic::seed_lag_state_depth;
-pub use validation::structural::{FileManifest, validate_structure};
+pub use validation::structural::{FileManifest, InputFile, validate_structure};
 pub use validation::{ErrorKind, Severity, ValidationContext, ValidationEntry};
 
 use cobre_core::{ScalarParameter, System};
@@ -160,8 +160,10 @@ use std::path::Path;
 /// parquet/JSON rows, so downstream solver crates do not re-open the same files
 /// from disk after [`load_case`] returns.
 ///
-/// Fields are owned `Vec`s in deterministic (canonical) order. Empty vectors
-/// indicate the optional file was absent on disk.
+/// Fields are owned `Vec`s in the order
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) establishes;
+/// slice position becomes the entity index. Empty vectors indicate the
+/// optional file was absent on disk.
 #[derive(Debug, Clone, Default)]
 pub struct CaseArtifacts {
     /// File-presence manifest produced by Layer 1 (structural). Lets

@@ -17,9 +17,9 @@ use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, Transition};
 use cobre_core::{
     Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology,
     ContractBlockBounds, DeficitSegment, EntityId, HorizonGraph, Hydro, HydroBlockBounds,
-    HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties, HydroStorage,
-    HydroUnitGroup, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-    NoiseMethod, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+    HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStorage, HydroUnitGroup,
+    InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
+    PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
     ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
     ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, System,
     SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -1260,7 +1260,7 @@ fn fan_or_chain_system_ext(
             n_stages,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,

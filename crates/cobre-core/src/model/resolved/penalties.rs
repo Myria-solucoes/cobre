@@ -4,71 +4,7 @@
 //! `data[entity_idx * n_stages + stage_idx]`. Populated by `cobre-io` after the
 //! three-tier penalty cascade is applied; never modified after construction.
 
-/// Stage-resolved form of [`crate::HydroPenalties`] for a given (hydro, stage) pair.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_core::resolved::HydroStagePenalties;
-///
-/// let p = HydroStagePenalties {
-///     spillage_cost: 0.01,
-///     diversion_cost: 0.02,
-///     turbined_cost: 0.03,
-///     storage_violation_below_cost: 1000.0,
-///     filling_target_violation_cost: 5000.0,
-///     turbined_violation_below_cost: 500.0,
-///     outflow_violation_below_cost: 500.0,
-///     outflow_violation_above_cost: 500.0,
-///     generation_violation_below_cost: 500.0,
-///     evaporation_violation_cost: 500.0,
-///     water_withdrawal_violation_cost: 500.0,
-///     water_withdrawal_violation_pos_cost: 500.0,
-///     water_withdrawal_violation_neg_cost: 500.0,
-///     evaporation_violation_pos_cost: 500.0,
-///     evaporation_violation_neg_cost: 500.0,
-///     inflow_nonnegativity_cost: 1000.0,
-/// };
-/// let q = p;
-/// assert!((q.spillage_cost - 0.01).abs() < f64::EPSILON);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct HydroStagePenalties {
-    /// Spillage regularization cost \[$/m³/s\].
-    pub spillage_cost: f64,
-    /// Diversion regularization cost \[$/m³/s\].
-    pub diversion_cost: f64,
-    /// Turbined regularization cost \[$/`MWh`\], applied to every hydro's turbine
-    /// column. For FPHA hydros must be `> spillage_cost` to prevent interior solutions.
-    pub turbined_cost: f64,
-    /// Storage below dead volume \[$/hm³\].
-    pub storage_violation_below_cost: f64,
-    /// Missed dead-volume filling target \[$/hm³\]. Must be the highest penalty in the system.
-    pub filling_target_violation_cost: f64,
-    /// Turbined flow below minimum \[$/m³/s\].
-    pub turbined_violation_below_cost: f64,
-    /// Outflow below environmental minimum \[$/m³/s\].
-    pub outflow_violation_below_cost: f64,
-    /// Outflow above flood-control limit \[$/m³/s\].
-    pub outflow_violation_above_cost: f64,
-    /// Generation below contractual minimum \[$/MW\].
-    pub generation_violation_below_cost: f64,
-    /// Evaporation constraint violation \[$/mm\].
-    pub evaporation_violation_cost: f64,
-    /// Unmet water withdrawal \[$/m³/s\].
-    pub water_withdrawal_violation_cost: f64,
-    /// Over-withdrawal \[$/m³/s\].
-    pub water_withdrawal_violation_pos_cost: f64,
-    /// Under-withdrawal \[$/m³/s\].
-    pub water_withdrawal_violation_neg_cost: f64,
-    /// Over-evaporation \[$/mm\].
-    pub evaporation_violation_pos_cost: f64,
-    /// Under-evaporation \[$/mm\].
-    pub evaporation_violation_neg_cost: f64,
-    /// Inflow non-negativity slack \[$/m³/s\].
-    pub inflow_nonnegativity_cost: f64,
-}
+use crate::HydroPenalties;
 
 /// Bus penalty values for a given (bus, stage) pair.
 ///
@@ -134,12 +70,13 @@ pub struct NcsStagePenalties {
 /// # Examples
 ///
 /// ```
+/// use cobre_core::HydroPenalties;
 /// use cobre_core::resolved::{
-///     BusStagePenalties, HydroStagePenalties, LineStagePenalties,
-///     NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,
+///     BusStagePenalties, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+///     PenaltiesDefaults, ResolvedPenalties,
 /// };
 ///
-/// let hydro_default = HydroStagePenalties {
+/// let hydro_default = HydroPenalties {
 ///     spillage_cost: 0.01,
 ///     diversion_cost: 0.02,
 ///     turbined_cost: 0.03,
@@ -175,7 +112,7 @@ pub struct NcsStagePenalties {
 pub struct ResolvedPenalties {
     /// Stride for every entity table below: `data[entity_idx * n_stages + stage_idx]`.
     n_stages: usize,
-    hydro: Vec<HydroStagePenalties>,
+    hydro: Vec<HydroPenalties>,
     bus: Vec<BusStagePenalties>,
     line: Vec<LineStagePenalties>,
     ncs: Vec<NcsStagePenalties>,
@@ -200,7 +137,7 @@ pub struct PenaltiesCountsSpec {
 #[derive(Debug, Clone)]
 pub struct PenaltiesDefaults {
     /// Default hydro penalties for all (hydro, stage) cells.
-    pub hydro: HydroStagePenalties,
+    pub hydro: HydroPenalties,
     /// Default bus penalties for all (bus, stage) cells.
     pub bus: BusStagePenalties,
     /// Default line penalties for all (line, stage) cells.
@@ -250,7 +187,7 @@ impl ResolvedPenalties {
     /// Return the resolved penalties for a hydro plant at a specific stage.
     #[inline]
     #[must_use]
-    pub fn hydro_penalties(&self, hydro_index: usize, stage_index: usize) -> HydroStagePenalties {
+    pub fn hydro_penalties(&self, hydro_index: usize, stage_index: usize) -> HydroPenalties {
         self.hydro[hydro_index * self.n_stages + stage_index]
     }
 
@@ -281,7 +218,7 @@ impl ResolvedPenalties {
         &mut self,
         hydro_index: usize,
         stage_index: usize,
-    ) -> &mut HydroStagePenalties {
+    ) -> &mut HydroPenalties {
         &mut self.hydro[hydro_index * self.n_stages + stage_index]
     }
 
@@ -329,8 +266,8 @@ impl ResolvedPenalties {
 mod tests {
     use super::*;
 
-    fn make_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn make_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.02,
             turbined_cost: 0.03,

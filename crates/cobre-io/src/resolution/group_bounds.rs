@@ -22,15 +22,12 @@ use crate::constraints::HydroUnitGroupBoundsRow;
 
 /// Build a resolved hydro unit group bounds table from parsed override rows.
 ///
-/// `hydros` must already be in the order `SystemBuilder::build` assigns --
-/// `(operational_start_date, id)`, established by the pipeline's
-/// post-validation resort, not the parser's id-only sort, which coincides
-/// with it only when every entity shares one `operational_start_date` -- with
-/// each plant's `unit_groups` sorted by id (`Hydro::sort_unit_groups`, applied
-/// identically at parse time and by `SystemBuilder::build`, so that axis has
-/// no equivalent divergence). Slice/group position becomes the
-/// `hydro_idx`/`group_pos` pair used to address
-/// [`ResolvedHydroUnitGroupBounds`]; the regression test
+/// `hydros` must be in the order
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) establishes;
+/// slice position becomes the entity index. Each plant's `unit_groups` are
+/// sorted by id by `Hydro::sort_unit_groups`, applied identically at parse
+/// time and by `SystemBuilder::build`, so that axis has no equivalent
+/// divergence; the regression test
 /// `hydro_unit_group_bound_override_follows_declared_id_through_canonical_resort`
 /// falsifies a resolve-before-resort regression on the `hydros` ordering.
 /// `blocks_per_stage` and `stage_index` are the same tables

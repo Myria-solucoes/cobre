@@ -1316,12 +1316,12 @@ mod interior_storage_bound_tests {
     use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{
         Block, BlockMode, BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology,
-        ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroStageBounds,
-        HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, ThermalBlockBounds, ThermalStageBounds,
+        ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroPenalties, HydroStageBounds,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalBlockBounds,
+        ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -1440,7 +1440,7 @@ mod interior_storage_bound_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -1834,7 +1834,7 @@ mod diversion_bound_tests {
     use cobre_core::entities::hydro::{DiversionChannel, HydroGenerationModel};
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology, ContractBlockBounds,
-        EntityId, Hydro, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+        EntityId, Hydro, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
         ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalBlockBounds,
@@ -1957,7 +1957,7 @@ mod diversion_bound_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -2242,8 +2242,8 @@ mod filling_phase_gating_tests {
     use cobre_core::entities::hydro::{FillingConfig, HydroGenerationModel};
     use cobre_core::{
         BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroStageBounds,
-        HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroPenalties,
+        HydroStageBounds, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBlockBounds,
         ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
         ResolvedNcsFactors, ResolvedPenalties, Stage, ThermalBlockBounds, ThermalStageBounds,
@@ -2398,10 +2398,10 @@ mod filling_phase_gating_tests {
         )
     }
 
-    /// All-zero `HydroStagePenalties` — the per-stage resolved analogue of
+    /// All-zero `HydroPenalties` — the per-stage resolved analogue of
     /// `zero_hydro_penalties` (which produces a declaration-time `HydroPenalties`).
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -4334,7 +4334,7 @@ mod block_family_slack_tests {
     use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology, ContractBlockBounds,
-        EntityId, Hydro, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+        EntityId, Hydro, HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
         ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalBlockBounds,
@@ -4497,8 +4497,8 @@ mod block_family_slack_tests {
         }
     }
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -4866,12 +4866,12 @@ mod evaporation_slack_objective_tests {
     use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{
         Block, BlockMode, BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology,
-        ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroStageBounds,
-        HydroStagePenalties, LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, ThermalBlockBounds, ThermalStageBounds,
+        ContractBlockBounds, EntityId, Hydro, HydroBlockBounds, HydroPenalties, HydroStageBounds,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalBlockBounds,
+        ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -4984,7 +4984,7 @@ mod evaporation_slack_objective_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -6033,7 +6033,7 @@ mod line_contract_pumping_block_bound_tests {
     use cobre_core::{
         BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
         CascadeTopology, ContractBlockBounds, ContractBlockOverride, EntityId, HydroBlockBounds,
-        HydroStageBounds, HydroStagePenalties, Line, LineBlockBounds, LineBlockOverride,
+        HydroPenalties, HydroStageBounds, Line, LineBlockBounds, LineBlockOverride,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, PumpingBlockOverride, PumpingStation, ResolvedBlockBounds,
         ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
@@ -6160,7 +6160,7 @@ mod line_contract_pumping_block_bound_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -6765,7 +6765,7 @@ mod hydro_block_bound_tests {
     use cobre_core::{
         BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
         CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds,
-        HydroBlockOverride, HydroStageBounds, HydroStagePenalties, HydroUnitGroupBoundsCountsSpec,
+        HydroBlockOverride, HydroPenalties, HydroStageBounds, HydroUnitGroupBoundsCountsSpec,
         HydroUnitGroupOverride, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBlockBounds,
         ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedHydroUnitGroupBounds,
@@ -6863,8 +6863,8 @@ mod hydro_block_bound_tests {
         outflow_violation_above_cost: f64,
         turbined_violation_below_cost: f64,
         generation_violation_below_cost: f64,
-    ) -> HydroStagePenalties {
-        HydroStagePenalties {
+    ) -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost,
             turbined_cost,
@@ -7024,7 +7024,7 @@ mod hydro_block_bound_tests {
             *self.bounds.hydro_block_base_mut(h_idx, stage_idx) = hb;
         }
 
-        fn set_hydro_penalties(&mut self, h_idx: usize, stage_idx: usize, hp: HydroStagePenalties) {
+        fn set_hydro_penalties(&mut self, h_idx: usize, stage_idx: usize, hp: HydroPenalties) {
             *self.penalties.hydro_penalties_mut(h_idx, stage_idx) = hp;
         }
 
@@ -7825,7 +7825,7 @@ mod cell_column_bound_tests {
     use cobre_core::{
         BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
         CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds,
-        HydroBlockOverride, HydroStageBounds, HydroStagePenalties, HydroUnitGroup,
+        HydroBlockOverride, HydroPenalties, HydroStageBounds, HydroUnitGroup,
         HydroUnitGroupBoundsCountsSpec, HydroUnitGroupOverride, LineBlockBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, ResolvedBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
@@ -7994,8 +7994,8 @@ mod cell_column_bound_tests {
         }
     }
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -9037,7 +9037,7 @@ mod ncs_objective_tests {
     use std::collections::{BTreeMap, HashMap};
 
     use cobre_core::{
-        BusStagePenalties, EntityId, HydroStagePenalties, LineStagePenalties, NcsStagePenalties,
+        BusStagePenalties, EntityId, HydroPenalties, LineStagePenalties, NcsStagePenalties,
         NonControllableSource, PenaltiesCountsSpec, PenaltiesDefaults, ResolvedBounds,
         ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
         ResolvedNcsFactors, ResolvedPenalties,
@@ -9084,7 +9084,7 @@ mod ncs_objective_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,

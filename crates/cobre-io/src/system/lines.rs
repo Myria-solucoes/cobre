@@ -117,8 +117,8 @@ pub(crate) struct RawLineCapacity {
 /// performs post-deserialization validation, then converts to `Vec<Line>` using
 /// the two-tier penalty resolution cascade (global → entity) for `exchange_cost`.
 /// The result is sorted by `id` ascending, so parser output is deterministic
-/// regardless of file row order (declaration-order invariance); the builder applies
-/// the same id as its `(operational_start_date, id)` canonical tiebreak.
+/// regardless of file row order (declaration-order invariance); canonical order is
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build)'s to establish.
 ///
 /// # Errors
 ///

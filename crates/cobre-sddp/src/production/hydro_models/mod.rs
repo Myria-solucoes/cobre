@@ -23,6 +23,7 @@ use cobre_core::EntityId;
 use cobre_core::System;
 use cobre_io::CaseArtifacts;
 use cobre_io::HydroGeometryRow;
+use cobre_io::InputFile;
 use cobre_io::ValidationContext;
 use cobre_io::extensions::load_tailrace_curves;
 use cobre_io::load_fpha_hyperplanes;
@@ -162,17 +163,17 @@ fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<CaseArtifacts, Sdd
     // surface as a confusing downstream parse error or silent default.
     ctx.into_result().map_err(SddpError::from)?;
 
-    let prod_path = if manifest.system_hydro_production_models_json {
+    let prod_path = if manifest.present(InputFile::SystemHydroProductionModelsJson) {
         Some(case_dir.join("system").join("hydro_production_models.json"))
     } else {
         None
     };
-    let geom_path = if manifest.system_hydro_geometry_parquet {
+    let geom_path = if manifest.present(InputFile::SystemHydroGeometryParquet) {
         Some(case_dir.join("system").join("hydro_geometry.parquet"))
     } else {
         None
     };
-    let fpha_path = if manifest.system_fpha_hyperplanes_parquet {
+    let fpha_path = if manifest.present(InputFile::SystemFphaHyperplanesParquet) {
         Some(case_dir.join("system").join("fpha_hyperplanes.parquet"))
     } else {
         None
@@ -185,7 +186,7 @@ fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<CaseArtifacts, Sdd
     } else {
         None
     };
-    let tailrace_path = if manifest.system_tailrace_curves_parquet {
+    let tailrace_path = if manifest.present(InputFile::SystemTailraceCurvesParquet) {
         Some(case_dir.join("system").join("tailrace_curves.parquet"))
     } else {
         None

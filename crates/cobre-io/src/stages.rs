@@ -808,12 +808,8 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
         });
     }
 
-    // Sort by id ascending (declaration-order invariance), then assign index.
+    // Sort by id ascending (declaration-order invariance).
     all_stages.sort_by_key(|s| s.id);
-
-    for (idx, stage) in all_stages.iter_mut().enumerate() {
-        stage.index = idx;
-    }
 
     Ok(StagesData {
         stages: all_stages,
@@ -1345,11 +1341,6 @@ mod tests {
         assert_eq!(data.stages[5].id, -1);
         assert_eq!(data.stages[6].id, 0);
         assert_eq!(data.stages[8].id, 2);
-
-        // Index must match position after sort
-        for (i, stage) in data.stages.iter().enumerate() {
-            assert_eq!(stage.index, i, "stage index must match sort position");
-        }
 
         // Pre-study stage defaults: empty blocks, Parallel, storage=true, inflow_lags=false
         let pss = &data.stages[0];

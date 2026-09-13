@@ -5934,9 +5934,9 @@ mod chronological_telescoping {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
         EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
-        HydroStagePenalties, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
-        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
-        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -5961,8 +5961,8 @@ mod chronological_telescoping {
     const N_ITERATIONS: u32 = 12;
     const HYDRO_ID: i32 = 1;
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -6612,9 +6612,9 @@ mod chronological_attribution {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
         EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
-        HydroStagePenalties, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
-        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
-        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
@@ -6674,8 +6674,8 @@ mod chronological_attribution {
         }
     }
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -8333,7 +8333,7 @@ mod enumerated_external {
     use chrono::NaiveDate;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HorizonGraph, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        EntityId, HorizonGraph, HydroBlockBounds, HydroPenalties, HydroStageBounds,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, System,
         SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -8558,7 +8558,7 @@ mod enumerated_external {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -10031,7 +10031,7 @@ mod enumerated_cvar_gap {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
-        EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage,
         InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -10057,8 +10057,8 @@ mod enumerated_cvar_gap {
         lambda: 0.4,
     };
 
-    fn zero_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,

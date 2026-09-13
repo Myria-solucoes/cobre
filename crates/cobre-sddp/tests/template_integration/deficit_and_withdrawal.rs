@@ -739,7 +739,7 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
     bounds.hydro_bounds_mut(0, 0).water_withdrawal_m3s = 8.0;
     bounds.hydro_bounds_mut(1, 0).water_withdrawal_m3s = 12.0;
 
-    let hydro_penalties_default = HydroStagePenalties {
+    let hydro_penalties_default = HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -1057,7 +1057,7 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
             n_stages: 1,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
