@@ -1086,25 +1086,33 @@ audit does not re-raise it.
 **Owner.** The `cobre-io` validation and output owners and the LP-builder owner (as executed).
 **Trigger.** None — done.
 
-### Scheduled — forward-sampler hot path under out-of-sample QMC/LHS and wide correlation groups
+### Fixed — forward-sampler hot path under out-of-sample QMC/LHS and wide correlation groups (2026-09-12)
 
-**What it is.** Under `scheme: out_of_sample`, every forward draw with Sobol noise rebuilds the
-direction matrix and scramble parameters on the heap; with Halton noise it re-runs the prime sieve
-and rebuilds the nested scramble tables; with LHS it reshuffles the full stratification permutation
-set per scenario, quadratic in the scenario count per stage. With a correlation group wider than
-the stack fast-path bound, every opening allocates transient gather/correlate scratch and
-re-resolves entity positions by linear scan because the position precompute has no caller. The
-default sample-average scheme, the in-sample schemes and narrow correlation groups are
-allocation-free. All of it is scenario-invariant state that a caller-owned per-(iteration, stage)
-scratch — the existing permutation-scratch precedent on the sample request — can hold, bit-for-bit
-neutral. The same change retires the duplicated full-vector correlation applier and the
-triplicated point-spec parameter struct.
+- **No forward draw rebuilds scenario-invariant sampling state.** Under `scheme: out_of_sample`
+  every Sobol draw rebuilt the direction matrix and scramble parameters on the heap, every Halton
+  draw re-ran the prime sieve and rebuilt its scramble tables, and every LHS draw reshuffled the
+  full stratification permutation set, quadratic in the scenario count per stage. Each driver now
+  builds one table per entity class and per distinct (noise group, noise method) pair once per
+  iteration and hands a shared reference down through the sample request; a draw reads its table.
+  The direct generators survive only as test-only reference oracles that pin the precomputed
+  paths bit-for-bit, and the table records the iteration and scenario count it was built for so a
+  debug build fails loudly on a stale table.
+- **The correlation applier is one code path with positions resolved at construction.** The
+  decomposition takes the canonical entity order and class dimensions at build, parses each
+  group's entity class into a closed enum, and resolves per-class positions once; the full-vector
+  twin, the linear-scan fallback and the differential oracles that existed only to pin them are
+  gone. A group of any width is correlated from caller-owned scratch that the per-worker scratch
+  struct sizes at twice the noise dimension.
+- **An out-of-sample class wider than the Sobol direction table is rejected when the tables are
+  built.** Moving the Sobol construction ahead of the draw had turned the graceful dimension error
+  into a panic; the table build is fallible and both drivers propagate the error.
+- **A counting-allocator guard pins the draw.** One integration binary asserts zero heap
+  allocations across Sobol, Halton and LHS stages with a correlation group wider than the stack
+  fast path. It must be the only test in its binary, so it includes the shared fixture builders
+  file directly rather than the aggregator module.
 
-**Owner.** The `cobre-stochastic` sampling and tree-noise owners; the training engine's per-thread
-workspace owns the scratch.
-
-**Trigger.** Before QMC or LHS noise is recommended to users. The sample-average golden value, the
-three QMC/LHS integration suites and the reproducibility suite pin the bits any hoist must reproduce.
+**Owner.** The `cobre-stochastic` sampling and tree-noise owners; the training and simulation
+state structs own the tables (as executed). **Trigger.** None — done.
 
 ### Scheduled — latent footguns, one change each
 
@@ -1118,9 +1126,18 @@ three QMC/LHS integration suites and the reproducibility suite pin the bits any 
 - **Penalty twin type.** Two structurally identical per-stage hydro penalty types; a type alias
   closes it without touching the ~130 construction sites. *Owner:* `cobre-core` model owner.
   *Trigger:* opportunistic.
-- **Typed entity class in the correlation sampler.** The class tag is a string matched at the
-  sampling gate (a typo fails loudly, so not user-visible). *Owner:* `cobre-stochastic` sampling
-  owner. *Trigger:* the hot-path change above touches the same files.
+- **Typed entity class at the sampler gate.** The correlation side now parses the class into a
+  closed enum once at build (2026-09-12); the sampler-side gate that selects historical replay for the
+  inflow class only still matches a string label (a typo fails loudly, so not user-visible).
+  *Owner:* `cobre-stochastic` sampling owner. *Trigger:* the next sampler touch; the enum exists.
+- **The shared point-spec's stage field carries the noise-group id.** Every forward-path producer
+  writes the noise group into the field named for the stage; the opening-tree producers write a
+  stage id. *Owner:* `cobre-stochastic` tree-noise owner. *Trigger:* a narrow rename on its own,
+  because it touches every precomputed-vs-direct equivalence test.
+- **Unsupported forward noise methods warn per draw.** Two noise methods that the forward pass
+  does not implement log a warning on every draw before falling back to the sample-average
+  method. *Owner:* `cobre-stochastic` sampling owner. *Trigger:* warn once at sampler
+  construction or reject at validation.
 
 ### Structural lever — a shared test-fixture surface in `cobre-core`
 
@@ -1129,7 +1146,11 @@ every consumer crate hand-copies entity literals (one hydro literal is byte-iden
 sites; the stochastic integration binaries carry hundreds of duplicated helper lines). A
 parameterized builder surface behind that feature resolves most of the test-corpus findings at
 once. The order-invariance and reproducibility tests are load-bearing and are relocated, never
-deleted.
+deleted. Since 2026-09-12 the stochastic integration binaries share their correlation-model and
+entity-order fixtures through a `tests/common` module; the entity literals are still copied per
+binary. The engine crate's shared test module carries its own tests, so a binary that owns
+process-global state cannot include it and takes the builders file directly instead — the shared
+module should carry no tests of its own.
 
 **Owner.** The testing-architecture owner. **Trigger.** Ratification of the homing threshold and
 `test-support` convention proposed in `docs/design/testing-architecture.md` §5; the extractor
