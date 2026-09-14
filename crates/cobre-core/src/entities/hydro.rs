@@ -60,7 +60,9 @@ pub struct HydroPenalties {
     pub spillage_cost: f64,
     /// Penalty per m³/s of water diverted beyond diversion channel limits \[$/m³/s\].
     pub diversion_cost: f64,
-    /// Penalty per `MWh` of turbined generation \[$/`MWh`\].
+    /// Penalty per `MWh` of turbined generation \[$/`MWh`\]. For FPHA hydros,
+    /// should exceed `spillage_cost` to avoid interior solutions; not enforced
+    /// by validation.
     pub turbined_cost: f64,
     /// Penalty per hm³ of storage below minimum bound \[$/hm³\].
     pub storage_violation_below_cost: f64,

@@ -331,7 +331,6 @@ impl ClassSampler<'_> {
                     noise_method,
                     iteration: req.iteration,
                     scenario: req.scenario,
-                    stage_id: req.stage,
                     noise_group_id: req.noise_group_id,
                     dim: *dim,
                     total_scenarios: req.total_scenarios,
@@ -1231,34 +1230,33 @@ mod tests {
     #[test]
     fn test_debug_all_variants() {
         let tree = uniform_tree(1, 2, 3);
-        let variants: Vec<Box<dyn Fn() -> String>> = vec![
-            Box::new(|| {
-                format!(
-                    "{:?}",
-                    ClassSampler::InSample {
-                        tree: tree.view(),
-                        base_seed: 1,
-                        offset: 0,
-                        len: 2,
-                    }
-                )
-            }),
-            Box::new(|| {
-                format!(
-                    "{:?}",
-                    ClassSampler::OutOfSample {
-                        forward_seed: 2,
-                        dim: 3,
-                        noise_methods: vec![NoiseMethod::Saa].into_boxed_slice(),
-                    }
-                )
-            }),
-        ];
 
-        for fmt_fn in &variants {
-            let s = fmt_fn();
-            assert!(!s.is_empty(), "Debug output must not be empty");
-        }
+        let in_sample_debug = format!(
+            "{:?}",
+            ClassSampler::InSample {
+                tree: tree.view(),
+                base_seed: 1,
+                offset: 0,
+                len: 2,
+            }
+        );
+        assert!(
+            !in_sample_debug.is_empty(),
+            "Debug output must not be empty"
+        );
+
+        let out_of_sample_debug = format!(
+            "{:?}",
+            ClassSampler::OutOfSample {
+                forward_seed: 2,
+                dim: 3,
+                noise_methods: vec![NoiseMethod::Saa].into_boxed_slice(),
+            }
+        );
+        assert!(
+            !out_of_sample_debug.is_empty(),
+            "Debug output must not be empty"
+        );
 
         let hist_lib = make_historical_library();
         let ext_lib = make_external_library();

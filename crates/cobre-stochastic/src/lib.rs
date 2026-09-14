@@ -58,7 +58,7 @@ pub use sampling::{
     standardize_external_inflow, standardize_external_load, standardize_external_ncs,
     standardize_historical_windows, validate_external_library, validate_historical_library,
 };
-pub use seeds::{DerivedInflowSeeds, derive_inflow_seeds};
+pub use seeds::{DerivedInflowSeeds, DerivedSeed, derive_inflow_seeds};
 pub use tree::{
     ClassDimensions, NoisePointSpec, OpeningTree, OpeningTreeView, SweepDirection,
     generate_opening_tree,

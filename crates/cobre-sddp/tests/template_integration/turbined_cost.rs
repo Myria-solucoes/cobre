@@ -63,7 +63,7 @@ fn turbined_cost_multi_block_uses_per_block_hours() {
 fn turbined_cost_mixed_system_all_hydros_carry_cost() {
     let (system, production) = four_hydro_mixed_system();
 
-    let hydro_pen = HydroStagePenalties {
+    let hydro_pen = HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
         turbined_cost: 1.0,

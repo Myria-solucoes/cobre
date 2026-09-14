@@ -13,6 +13,8 @@
 use siphasher::sip::SipHasher13;
 use std::hash::Hasher;
 
+use crate::EntityClass;
+
 /// Derive a deterministic seed for forward-pass noise from
 /// `(base_seed, iteration, scenario, stage)`.
 #[must_use]
@@ -64,7 +66,7 @@ pub fn derive_forward_seed_grouped(
     group_id: u32,
 ) -> u64 {
     let mut hasher = SipHasher13::new();
-    hasher.write(&[0x01]); // domain separator — absent in derive_forward_seed
+    hasher.write(&[0x01]);
     hasher.write(&base_seed.to_le_bytes());
     hasher.write(&iteration.to_le_bytes());
     hasher.write(&scenario.to_le_bytes());
@@ -73,15 +75,15 @@ pub fn derive_forward_seed_grouped(
 }
 
 /// Derive one entity class's forward seed from the study's root forward seed
-/// and the class tag (`"load"`, `"ncs"`). Classes sampled out of sample draw
-/// independent streams only because their seeds differ here; the `0x02` prefix
-/// separates the output from the un-prefixed numeric variants.
+/// and the class. Classes sampled out of sample draw independent streams only
+/// because their seeds differ here; the `0x02` prefix separates the output
+/// from the un-prefixed numeric variants.
 #[must_use]
-pub fn derive_class_forward_seed(forward_seed: u64, class: &str) -> u64 {
+pub fn derive_class_forward_seed(forward_seed: u64, class: EntityClass) -> u64 {
     let mut hasher = SipHasher13::new();
     hasher.write(&[0x02]);
     hasher.write(&forward_seed.to_le_bytes());
-    hasher.write(class.as_bytes());
+    hasher.write(class.as_str().as_bytes());
     hasher.finish()
 }
 
@@ -91,6 +93,7 @@ mod tests {
         derive_class_forward_seed, derive_forward_seed, derive_forward_seed_grouped,
         derive_opening_seed, derive_stage_seed,
     };
+    use crate::EntityClass;
 
     // -------------------------------------------------------------------------
     // derive_forward_seed: determinism
@@ -266,8 +269,8 @@ mod tests {
     #[test]
     fn test_derive_class_forward_seed_deterministic() {
         assert_eq!(
-            derive_class_forward_seed(42, "load"),
-            derive_class_forward_seed(42, "load"),
+            derive_class_forward_seed(42, EntityClass::Load),
+            derive_class_forward_seed(42, EntityClass::Load),
         );
     }
 
@@ -276,19 +279,19 @@ mod tests {
     #[test]
     fn class_forward_seed_golden_value() {
         assert_eq!(
-            derive_class_forward_seed(42, "load"),
+            derive_class_forward_seed(42, EntityClass::Load),
             14_604_737_007_079_072_421_u64
         );
         assert_eq!(
-            derive_class_forward_seed(42, "ncs"),
+            derive_class_forward_seed(42, EntityClass::Ncs),
             8_293_717_529_204_897_878_u64
         );
     }
 
     #[test]
     fn test_derive_class_forward_seed_separates_classes_and_root() {
-        let load = derive_class_forward_seed(42, "load");
-        let ncs = derive_class_forward_seed(42, "ncs");
+        let load = derive_class_forward_seed(42, EntityClass::Load);
+        let ncs = derive_class_forward_seed(42, EntityClass::Ncs);
         assert_ne!(load, ncs);
         assert_ne!(load, 42);
         assert_ne!(ncs, 42);

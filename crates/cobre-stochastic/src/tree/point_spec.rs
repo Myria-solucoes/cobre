@@ -10,8 +10,9 @@ pub struct NoisePointSpec {
     pub iteration: u32,
     /// Global scenario index in `0..total_scenarios`.
     pub scenario: u32,
-    /// Stage domain identifier.
-    pub stage_id: u32,
+    /// Seed-tuple stream identifier: forward-pass producers pass the
+    /// `noise_group_id`, opening-tree producers pass the stage id.
+    pub stream_id: u32,
     /// Total forward scenarios per iteration (= N strata for LHS).
     pub total_scenarios: u32,
     /// Noise vector dimension.

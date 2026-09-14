@@ -83,9 +83,7 @@ mod anticipated_5stage_k2_smoke {
     //! commitment-hold carry, and basis-cache capture.
 
     use cobre_core::entities::{
-        bus::DeficitSegment,
-        hydro::{HydroGenerationModel, HydroPenalties},
-        thermal::AnticipatedConfig,
+        bus::DeficitSegment, hydro::HydroGenerationModel, thermal::AnticipatedConfig,
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -94,7 +92,7 @@ mod anticipated_5stage_k2_smoke {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -295,8 +293,8 @@ mod anticipated_5stage_k2_smoke {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -541,9 +539,7 @@ mod anticipated_two_plants_smoke {
     //! exercises a genuine forward-to-forward hold advancement.
 
     use cobre_core::entities::{
-        bus::DeficitSegment,
-        hydro::{HydroGenerationModel, HydroPenalties},
-        thermal::AnticipatedConfig,
+        bus::DeficitSegment, hydro::HydroGenerationModel, thermal::AnticipatedConfig,
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -552,7 +548,7 @@ mod anticipated_two_plants_smoke {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -772,8 +768,8 @@ mod anticipated_two_plants_smoke {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -1050,9 +1046,7 @@ mod anticipated_simulation_ring_buffer {
     use std::sync::mpsc;
 
     use cobre_core::entities::{
-        bus::DeficitSegment,
-        hydro::{HydroGenerationModel, HydroPenalties},
-        thermal::AnticipatedConfig,
+        bus::DeficitSegment, hydro::HydroGenerationModel, thermal::AnticipatedConfig,
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -1061,7 +1055,7 @@ mod anticipated_simulation_ring_buffer {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -1268,8 +1262,8 @@ mod anticipated_simulation_ring_buffer {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -1651,8 +1645,8 @@ mod anticipated_generic_constraint_e2e {
     use chrono::NaiveDate;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ConstraintExpression,
-        ContractBlockBounds, EntityId, GenericConstraint, HydroBlockBounds, HydroStageBounds,
-        HydroStagePenalties, InitialConditions, LineBlockBounds, LineStagePenalties, LinearTerm,
+        ContractBlockBounds, EntityId, GenericConstraint, HydroBlockBounds, HydroPenalties,
+        HydroStageBounds, InitialConditions, LineBlockBounds, LineStagePenalties, LinearTerm,
         NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
         ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties, SlackConfig,
         SystemBuilder, ThermalBlockBounds, ThermalStageBounds, VariableRef,
@@ -1869,7 +1863,7 @@ mod anticipated_generic_constraint_e2e {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -2647,9 +2641,7 @@ mod anticipated_commitment_at_cap {
     //! studies whose commitments drift abort on a false infeasibility.
 
     use cobre_core::entities::{
-        bus::DeficitSegment,
-        hydro::{HydroGenerationModel, HydroPenalties},
-        thermal::AnticipatedConfig,
+        bus::DeficitSegment, hydro::HydroGenerationModel, thermal::AnticipatedConfig,
     };
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
@@ -2658,7 +2650,7 @@ mod anticipated_commitment_at_cap {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, HydroStorage, InitialConditions,
         LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
         ThermalBlockBounds, ThermalStageBounds,
@@ -2900,7 +2892,7 @@ mod anticipated_commitment_at_cap {
                 n_stages,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,
@@ -3072,7 +3064,7 @@ mod faithful_resolution {
     };
     use cobre_core::{
         AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        ContractBlockBounds, EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds,
         InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PostStudyStage, PostStudyStages,
         PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
@@ -3283,7 +3275,7 @@ mod faithful_resolution {
                 n_stages: N_STUDY_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,

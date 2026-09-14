@@ -22,6 +22,7 @@ use cobre_core::{
 
 use crate::StochasticError;
 use crate::par::precompute::PrecomputedPar;
+use crate::seeds::DerivedSeed;
 
 use super::eta_inversion::run_eta_inversion;
 
@@ -211,8 +212,8 @@ fn stage_id_to_index(stages: &[Stage]) -> std::collections::HashMap<i32, usize> 
 /// For each (stage, scenario, hydro), inverts the PAR(p) model via
 /// [`solve_par_noise`](crate::par::evaluate::solve_par_noise) to produce the
 /// noise `η` that the forward PAR pass would turn back into the raw external
-/// value, using a lag chain seeded from `derived_lag_values` and advanced by
-/// the `stage_lag_transitions` accumulate/finalize pattern (lags frozen
+/// value, using a lag chain seeded from `seed` ([`DerivedSeed`]) and advanced
+/// by the `stage_lag_transitions` accumulate/finalize pattern (lags frozen
 /// within a period; shifted with the period's weighted-average raw value at
 /// each `finalize_period` boundary).
 ///
@@ -236,16 +237,7 @@ fn stage_id_to_index(stages: &[Stage]) -> std::collections::HashMap<i32, usize> 
 /// - `library` — destination, must have `n_entities() == hydro_ids.len()`
 /// - `external_rows` — raw rows sorted by `(stage_id, scenario_id, hydro_id)`
 /// - `hydro_ids` — canonical-order hydro entity IDs
-/// - `derived_lag_values` — entity-major stage-0 lag seed
-///   (`derived_lag_values[pos * l_state + lag]`, lag `0` = most recent),
-///   pre-ordered by canonical hydro position so `hydro_ids`' position `pos` is
-///   used directly with no id lookup
-/// - `l_state` — per-hydro stride of `derived_lag_values`
-/// - `derived_accum` / `derived_weight` — per-hydro mid-period accumulator seed
-///   (length `n_hydros`, same canonical position as `derived_lag_values`),
-///   copied into the per-scenario accumulator/weight-accumulator at reset;
-///   empty means "no seed" — the accumulator resets to zero, matching a
-///   period-boundary start
+/// - `seed` — stage-0 lag/accumulator seed; see [`DerivedSeed`]
 /// - `stage_lag_transitions` — one per stage, same length as `stages`
 /// - `downstream_par_order` — PAR order of the downstream (coarser) resolution;
 ///   `0` for uniform-resolution studies. Reuse the same value the forward pass
@@ -255,9 +247,10 @@ fn stage_id_to_index(stages: &[Stage]) -> std::collections::HashMap<i32, usize> 
 /// # Panics
 ///
 /// Panics in debug builds if dimension mismatches are detected.
-// Rationale: the accumulator seed pair joins the lag-values seed pair; no
-// natural sub-grouping exists that would not just relocate the arity into a
-// literal struct.
+// Rationale: `seed` folds the former lag/accum/weight arguments into one
+// aggregate; the remaining library/rows/entity-list/stage-list/par-model/
+// lag-transition/downstream-order inputs are independent, with no further
+// shared aggregate.
 #[allow(clippy::too_many_arguments)]
 pub fn standardize_external_inflow(
     library: &mut ExternalScenarioLibrary,
@@ -265,10 +258,7 @@ pub fn standardize_external_inflow(
     hydro_ids: &[EntityId],
     stages: &[Stage],
     par: &PrecomputedPar,
-    derived_lag_values: &[f64],
-    l_state: usize,
-    derived_accum: &[f64],
-    derived_weight: &[f64],
+    seed: DerivedSeed<'_>,
     stage_lag_transitions: &[StageLagTransition],
     downstream_par_order: usize,
 ) {
@@ -357,10 +347,7 @@ pub fn standardize_external_inflow(
         n_hydros,
         max_order,
         par,
-        derived_lag_values,
-        l_state,
-        derived_accum,
-        derived_weight,
+        seed,
         stage_lag_transitions,
         downstream_par_order,
         |t, scenario, h| raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h],
@@ -908,8 +895,8 @@ mod tests {
     };
 
     use super::{
-        ExternalScenarioLibrary, derive_external_sample_moments, standardize_external_inflow,
-        standardize_external_load, standardize_external_ncs,
+        DerivedSeed, ExternalScenarioLibrary, derive_external_sample_moments,
+        standardize_external_inflow, standardize_external_load, standardize_external_ncs,
     };
     use crate::derive_inflow_seeds;
     use crate::par::{
@@ -1031,10 +1018,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             0,
         );
@@ -1101,10 +1090,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &derived_lag_values,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived_lag_values,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             0,
         );
@@ -1233,10 +1224,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &derived_lag_values,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived_lag_values,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             0,
         );
@@ -1357,10 +1350,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &derived_lag_values,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived_lag_values,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             0,
         );
@@ -1473,10 +1468,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             1, // downstream_par_order: one completed quarter needed to rebuild
         );
@@ -1831,7 +1828,6 @@ mod tests {
         assert_eq!(lib.n_stages(), 12);
         assert_eq!(lib.n_scenarios(), 50);
         assert_eq!(lib.n_entities(), 5);
-        // Verify each accessor slice has the correct length.
         assert_eq!(lib.eta_slice(0, 0).len(), 5);
         assert_eq!(lib.eta_slice(11, 49).len(), 5);
     }
@@ -2226,10 +2222,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &derived_lag_values,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived_lag_values,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &stage_lag_transitions,
             0,
         );
@@ -2636,10 +2634,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &derived.lag_values,
-            l_state,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived.lag_values,
+                l_state,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             0,
         );
@@ -2829,10 +2829,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &derived.lag_values,
-            l_state,
-            &derived.accum,
-            &derived.weight,
+            DerivedSeed {
+                lag_values: &derived.lag_values,
+                l_state,
+                accum: &derived.accum,
+                weight: &derived.weight,
+            },
             &stage_lag_transitions,
             0,
         );
@@ -2988,10 +2990,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &derived.lag_values,
-            l_state,
-            &derived.accum,
-            &derived.weight,
+            DerivedSeed {
+                lag_values: &derived.lag_values,
+                l_state,
+                accum: &derived.accum,
+                weight: &derived.weight,
+            },
             &stage_lag_transitions,
             0,
         );

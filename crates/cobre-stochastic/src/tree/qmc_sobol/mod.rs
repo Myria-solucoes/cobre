@@ -70,7 +70,6 @@ fn build_direction_matrix(dim: usize) -> Vec<[u32; 32]> {
         let mut v = [0u32; 32];
 
         if d == 0 {
-            // Dimension 1: van der Corput.
             for (j, slot) in v.iter_mut().enumerate() {
                 *slot = 1u32 << (31 - j);
             }
@@ -169,7 +168,7 @@ pub fn generate_qmc_sobol(
 }
 
 /// Direction matrix and scramble parameters built once per
-/// (`sampling_seed`, `iteration`, `stage_id`, `dim`) tuple and reused across all
+/// (`sampling_seed`, `iteration`, `stream_id`, `dim`) tuple and reused across all
 /// scenarios at that stage.
 #[derive(Debug, Clone)]
 pub struct SobolPrecomputed {
@@ -184,8 +183,8 @@ impl SobolPrecomputed {
     ///
     /// Panics if `dim > MAX_SOBOL_DIM`.
     #[must_use]
-    pub fn new(sampling_seed: u64, iteration: u32, stage_id: u32, dim: usize) -> Self {
-        let seed = derive_opening_seed(sampling_seed, iteration, stage_id);
+    pub fn new(sampling_seed: u64, iteration: u32, stream_id: u32, dim: usize) -> Self {
+        let seed = derive_opening_seed(sampling_seed, iteration, stream_id);
         let directions = build_direction_matrix(dim);
         let scramble = derive_scramble_params(seed, dim);
         Self {
@@ -252,7 +251,7 @@ pub(crate) fn scrambled_sobol_point_reference(spec: &NoisePointSpec, output: &mu
         return;
     }
 
-    let seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stage_id);
+    let seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stream_id);
     let directions = build_direction_matrix(spec.dim);
     let scramble = derive_scramble_params(seed, spec.dim);
 
@@ -366,7 +365,7 @@ mod tests {
             sampling_seed: 42,
             iteration: 0,
             scenario: 0,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: 64,
             dim,
         };
@@ -385,7 +384,7 @@ mod tests {
             sampling_seed: 42,
             iteration: 0,
             scenario: 5,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: 64,
             dim,
         };
@@ -415,7 +414,7 @@ mod tests {
                 sampling_seed: 42,
                 iteration: 0,
                 scenario: scenario as u32,
-                stage_id: 1,
+                stream_id: 1,
                 total_scenarios: n as u32,
                 dim,
             };
@@ -444,7 +443,7 @@ mod tests {
                     sampling_seed: 42,
                     iteration: 1,
                     scenario,
-                    stage_id: 3,
+                    stream_id: 3,
                     total_scenarios,
                     dim,
                 };

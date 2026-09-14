@@ -16,9 +16,11 @@ use crate::scenarios::NcsFactorEntry;
 
 /// Build a resolved NCS factor table from parsed entries.
 ///
-/// `non_controllable_sources` and `stages` must be sorted: each entity's slice
-/// position becomes its 0-based table index. The stage axis spans study stages
-/// only (`id >= 0`); the block axis is sized to the largest per-stage block count.
+/// `non_controllable_sources` and `stages` must each be in the order
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) establishes;
+/// slice position becomes the entity index. The stage axis spans study
+/// stages only (`id >= 0`); the block axis is sized to the largest
+/// per-stage block count.
 #[must_use]
 pub fn resolve_ncs_factors(
     entries: &[NcsFactorEntry],

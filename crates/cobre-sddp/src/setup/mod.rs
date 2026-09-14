@@ -36,6 +36,7 @@ use cobre_io::Config;
 use cobre_io::config::BackwardScheduler;
 use cobre_solver::ActiveProfile;
 use cobre_stochastic::DerivedInflowSeeds;
+use cobre_stochastic::DerivedSeed;
 use cobre_stochastic::derive_inflow_seeds;
 use cobre_stochastic::noise_entity_order;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
@@ -600,10 +601,7 @@ impl StudySetup {
             simulation_source,
             forward_passes,
             downstream_par_order,
-            &derived_inflow_seeds.lag_values,
-            state_layout.max_par_order,
-            &derived_inflow_seeds.accum,
-            &derived_inflow_seeds.weight,
+            derived_inflow_seeds.as_seed(state_layout.max_par_order),
         )?;
 
         // G1: binds after `build_scenario_libraries` — an `External`-bound
@@ -1835,10 +1833,7 @@ fn build_scenario_libraries(
     simulation_source: &ScenarioSource,
     forward_passes: u32,
     downstream_par_order: usize,
-    derived_lag_values: &[f64],
-    l_state: usize,
-    derived_accum: &[f64],
-    derived_weight: &[f64],
+    seed: DerivedSeed<'_>,
 ) -> Result<ScenarioLibraries, SddpError> {
     let inflow_scheme = training_source.inflow_scheme;
     let load_scheme = training_source.load_scheme;
@@ -1858,10 +1853,7 @@ fn build_scenario_libraries(
                 stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
-                derived_lag_values,
-                l_state,
-                derived_accum,
-                derived_weight,
+                seed,
                 stage_lag_transitions,
                 training_source.historical_years.as_ref(),
                 forward_passes,
@@ -1878,10 +1870,7 @@ fn build_scenario_libraries(
                 hydro_ids,
                 stages,
                 stochastic.par(),
-                derived_lag_values,
-                l_state,
-                derived_accum,
-                derived_weight,
+                seed,
                 stage_lag_transitions,
                 forward_passes,
                 downstream_par_order,
@@ -1925,10 +1914,7 @@ fn build_scenario_libraries(
                 stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
-                derived_lag_values,
-                l_state,
-                derived_accum,
-                derived_weight,
+                seed,
                 stage_lag_transitions,
                 simulation_source.historical_years.as_ref(),
                 forward_passes,
@@ -1945,10 +1931,7 @@ fn build_scenario_libraries(
                 hydro_ids,
                 stages,
                 stochastic.par(),
-                derived_lag_values,
-                l_state,
-                derived_accum,
-                derived_weight,
+                seed,
                 stage_lag_transitions,
                 forward_passes,
                 downstream_par_order,

@@ -128,6 +128,9 @@ impl From<EstimationError> for SddpError {
         match err {
             EstimationError::Load(load_err) => Self::Io(load_err),
             EstimationError::Stochastic(stoch_err) => Self::Stochastic(stoch_err),
+            EstimationError::Validation(validation_err) => {
+                Self::Validation(validation_err.to_string())
+            }
         }
     }
 }

@@ -1714,11 +1714,11 @@ mod parameter_resolution_tests {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CoefficientRef,
         ConstraintExpression, ContractBlockBounds, DeficitSegment, EntityId, GenericConstraint,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
-        LineStagePenalties, NcsStagePenalties, ParameterKind, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
-        ResolvedPenalties, ScalarParameter, SlackConfig, StageId, SystemBuilder,
-        ThermalBlockBounds, ThermalStageBounds,
+        HydroBlockBounds, HydroPenalties, HydroStageBounds, LineBlockBounds, LineStagePenalties,
+        NcsStagePenalties, ParameterKind, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties,
+        ScalarParameter, SlackConfig, StageId, SystemBuilder, ThermalBlockBounds,
+        ThermalStageBounds,
     };
     use cobre_core::{LinearTerm, VariableRef};
     use cobre_stochastic::normal::precompute::PrecomputedNormal;
@@ -1767,8 +1767,8 @@ mod parameter_resolution_tests {
         }
     }
 
-    fn default_hydro_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn default_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -3508,7 +3508,7 @@ mod pumping_water_tests {
         BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology,
         CoefficientRef, ConstraintExpression, ContractBlockBounds, ContractType, DeficitSegment,
         EnergyContract, EntityId, GenericConstraint, Hydro, HydroBlockBounds, HydroGenerationModel,
-        HydroStageBounds, HydroStagePenalties, HydroUnitGroup, Line, LineBlockBounds,
+        HydroPenalties, HydroStageBounds, HydroUnitGroup, Line, LineBlockBounds,
         LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingBlockBounds, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
         ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig,
@@ -4065,7 +4065,7 @@ mod pumping_water_tests {
         /// `ResolvedPenalties::empty()` because `build_stage_matrix_entries` never
         /// reads penalties; the solver-backed duals test needs this.
         fn with_resolved_penalties(mut self) -> Self {
-            let hydro = HydroStagePenalties {
+            let hydro = HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -4107,7 +4107,7 @@ mod pumping_water_tests {
         /// violation costs so the per-block `f_evap_plus`/`f_evap_minus` slack
         /// objectives are observable in the column build.
         fn with_evap_penalties(mut self, neg_cost: f64, pos_cost: f64) -> Self {
-            let hydro = HydroStagePenalties {
+            let hydro = HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -5625,7 +5625,7 @@ mod pumping_water_tests {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,

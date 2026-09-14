@@ -17,11 +17,11 @@ use cobre_core::scenario::SamplingScheme;
 use cobre_core::{
     AnticipatedConfig, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties,
     ContractBlockBounds, ContractType, DeficitSegment, EnergyContract, EntityId, Hydro,
-    HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
-    LineBlockBounds, LineStagePenalties, LoadModel, NcsStagePenalties, NoiseMethod,
-    PenaltiesCountsSpec, PenaltiesDefaults, PostStudyStage, PostStudyStages, PostStudyThermalBound,
-    PumpingBlockBounds, PumpingStation, ResolvedBounds, ResolvedPenalties, ScenarioSourceConfig,
-    Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal, ThermalBlockBounds,
+    HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds, LineBlockBounds,
+    LineStagePenalties, LoadModel, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+    PenaltiesDefaults, PostStudyStage, PostStudyStages, PostStudyThermalBound, PumpingBlockBounds,
+    PumpingStation, ResolvedBounds, ResolvedPenalties, ScenarioSourceConfig, Stage,
+    StageRiskConfig, StageStateConfig, SystemBuilder, Thermal, ThermalBlockBounds,
     ThermalStageBounds,
 };
 use cobre_stochastic::PrecomputedNormal;
@@ -67,8 +67,8 @@ fn default_hydro_block_bounds() -> HydroBlockBounds {
     }
 }
 
-fn default_hydro_penalties() -> HydroStagePenalties {
-    HydroStagePenalties {
+fn default_hydro_penalties() -> HydroPenalties {
+    HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
         turbined_cost: 0.0,
@@ -2777,7 +2777,7 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
             n_stages: n_st,
         },
         &PenaltiesDefaults {
-            hydro: HydroStagePenalties {
+            hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,
@@ -4630,9 +4630,10 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
         })
         .collect();
 
-    let inflow_models: Vec<InflowModel> = (0..FILL_N_STAGES)
-        .flat_map(|i| {
-            [FILL_PRE_HYDRO_ID, FILL_FILL_HYDRO_ID].map(|hid| InflowModel {
+    let inflow_models: Vec<InflowModel> = [FILL_PRE_HYDRO_ID, FILL_FILL_HYDRO_ID]
+        .into_iter()
+        .flat_map(|hid| {
+            (0..FILL_N_STAGES).map(move |i| InflowModel {
                 hydro_id: EntityId(hid),
                 stage_id: i as i32,
                 mean_m3s: 80.0,

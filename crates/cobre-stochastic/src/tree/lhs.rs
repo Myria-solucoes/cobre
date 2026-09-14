@@ -119,14 +119,14 @@ pub(crate) fn sample_lhs_point_reference(
         output.len(),
     );
 
-    let perm_seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stage_id);
+    let perm_seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stream_id);
     let mut perm_rng = rng_from_seed(perm_seed);
 
     let draw_seed = derive_forward_seed(
         spec.sampling_seed,
         spec.iteration,
         spec.scenario,
-        spec.stage_id,
+        spec.stream_id,
     );
     let mut draw_rng = rng_from_seed(draw_seed);
 
@@ -149,8 +149,8 @@ pub(crate) fn sample_lhs_point_reference(
 }
 
 /// Per-dimension stratum permutations built once per
-/// (`sampling_seed`, `iteration`, `stage_id`, `dim`, `total_scenarios`) tuple and
-/// reused across all scenarios at that stage. `strata` is row-major: `strata[d *
+/// (`sampling_seed`, `iteration`, `stream_id`, `dim`, `total_scenarios`) tuple and
+/// reused across all scenarios for that stream. `strata` is row-major: `strata[d *
 /// n + k]` is the stratum assigned to scenario `k` in dimension `d`.
 #[derive(Debug, Clone)]
 pub struct LhsPrecomputed {
@@ -160,16 +160,16 @@ pub struct LhsPrecomputed {
 }
 
 impl LhsPrecomputed {
-    /// Precompute for a given (seed, iteration, stage, dim, `total_scenarios`) combination.
+    /// Builds the permutation tables described on [`LhsPrecomputed`].
     #[must_use]
     pub fn new(
         sampling_seed: u64,
         iteration: u32,
-        stage_id: u32,
+        stream_id: u32,
         dim: usize,
         total_scenarios: u32,
     ) -> Self {
-        let perm_seed = derive_opening_seed(sampling_seed, iteration, stage_id);
+        let perm_seed = derive_opening_seed(sampling_seed, iteration, stream_id);
         let mut perm_rng = rng_from_seed(perm_seed);
 
         let n = total_scenarios as usize;
@@ -219,7 +219,7 @@ pub fn sample_lhs_point(spec: &NoisePointSpec, ctx: &LhsPrecomputed, output: &mu
         spec.sampling_seed,
         spec.iteration,
         spec.scenario,
-        spec.stage_id,
+        spec.stream_id,
     );
     let mut draw_rng = rng_from_seed(draw_seed);
 
@@ -450,7 +450,7 @@ mod tests {
             sampling_seed: 42,
             iteration: 0,
             scenario: 0,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: n as u32,
             dim,
         };
@@ -479,7 +479,7 @@ mod tests {
                 sampling_seed: 42,
                 iteration: 0,
                 scenario: 0,
-                stage_id: 0,
+                stream_id: 0,
                 total_scenarios: n as u32,
                 dim,
             },
@@ -491,7 +491,7 @@ mod tests {
                 sampling_seed: 43,
                 iteration: 0,
                 scenario: 0,
-                stage_id: 0,
+                stream_id: 0,
                 total_scenarios: n as u32,
                 dim,
             },
@@ -520,7 +520,7 @@ mod tests {
                     sampling_seed: 42,
                     iteration: 0,
                     scenario: scenario as u32,
-                    stage_id: 0,
+                    stream_id: 0,
                     total_scenarios: n as u32,
                     dim,
                 },
@@ -561,7 +561,7 @@ mod tests {
                     sampling_seed: 42,
                     iteration: 0,
                     scenario: scenario as u32,
-                    stage_id: 0,
+                    stream_id: 0,
                     total_scenarios: n as u32,
                     dim,
                 },
@@ -601,7 +601,7 @@ mod tests {
                     sampling_seed: 11,
                     iteration: 2,
                     scenario,
-                    stage_id: 1,
+                    stream_id: 1,
                     total_scenarios,
                     dim,
                 };

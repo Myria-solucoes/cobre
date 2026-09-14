@@ -79,6 +79,14 @@ pub enum ValidationError {
         /// Why the penalty is invalid.
         reason: String,
     },
+    /// A scenario model table is not in its documented canonical order.
+    UnsortedModelTable {
+        /// Table that is out of order.
+        table: &'static str,
+        /// Position of the first element that is less than its predecessor;
+        /// equal adjacent keys are allowed.
+        position: usize,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -95,9 +103,7 @@ impl fmt::Display for ValidationError {
                 "{source_entity_type} with id {source_id} has invalid cross-reference \
                  in field '{field_name}': referenced {expected_type} id {referenced_id} does not exist"
             ),
-            Self::DuplicateId { entity_type, id } => {
-                write!(f, "duplicate {entity_type} id: {id}")
-            }
+            Self::DuplicateId { entity_type, id } => write!(f, "duplicate {entity_type} id: {id}"),
             Self::CascadeCycle { cycle_ids } => {
                 let ids = cycle_ids
                     .iter()
@@ -106,24 +112,18 @@ impl fmt::Display for ValidationError {
                     .join(", ");
                 write!(f, "hydro cascade contains a cycle: [{ids}]")
             }
-            Self::InvalidFillingConfig { hydro_id, reason } => {
-                write!(
-                    f,
-                    "hydro {hydro_id} has invalid filling configuration: {reason}"
-                )
-            }
-            Self::MissingUnitGroups { hydro_id } => {
-                write!(
-                    f,
-                    "hydro {hydro_id} declares no unit groups: at least one unit group is required"
-                )
-            }
-            Self::DisconnectedBus { bus_id } => {
-                write!(
-                    f,
-                    "bus {bus_id} is disconnected (no lines, generators, or loads)"
-                )
-            }
+            Self::InvalidFillingConfig { hydro_id, reason } => write!(
+                f,
+                "hydro {hydro_id} has invalid filling configuration: {reason}"
+            ),
+            Self::MissingUnitGroups { hydro_id } => write!(
+                f,
+                "hydro {hydro_id} declares no unit groups: at least one unit group is required"
+            ),
+            Self::DisconnectedBus { bus_id } => write!(
+                f,
+                "bus {bus_id} is disconnected (no lines, generators, or loads)"
+            ),
             Self::InvalidPenalty {
                 entity_type,
                 entity_id,
@@ -132,6 +132,10 @@ impl fmt::Display for ValidationError {
             } => write!(
                 f,
                 "{entity_type} with id {entity_id} has invalid penalty in field '{field_name}': {reason}"
+            ),
+            Self::UnsortedModelTable { table, position } => write!(
+                f,
+                "{table} is not sorted by its documented (id, stage_id) key: row {position} is out of order"
             ),
         }
     }

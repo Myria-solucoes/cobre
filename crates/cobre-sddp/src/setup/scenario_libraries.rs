@@ -3,6 +3,8 @@
 //! Builders are not factored generically because external types have different
 //! standardization semantics.
 
+use std::collections::HashSet;
+
 use cobre_core::{
     EntityId, InflowHistoryRow, Stage, System,
     scenario::{ExternalScenarioRow, HistoricalYears, LoadModel, NcsModel, SamplingScheme},
@@ -10,10 +12,10 @@ use cobre_core::{
 };
 use cobre_io::StageIdResolver;
 use cobre_stochastic::{
-    ExternalScenarioLibrary, HistoricalScenarioLibrary, PrecomputedNormal, PrecomputedPar,
-    discover_historical_windows, pad_library_to_uniform, standardize_external_inflow,
-    standardize_external_load, standardize_external_ncs, standardize_historical_windows,
-    validate_external_library, validate_historical_library,
+    DerivedSeed, ExternalScenarioLibrary, HistoricalScenarioLibrary, PrecomputedNormal,
+    PrecomputedPar, discover_historical_windows, pad_library_to_uniform,
+    standardize_external_inflow, standardize_external_load, standardize_external_ncs,
+    standardize_historical_windows, validate_external_library, validate_historical_library,
 };
 
 use crate::SddpError;
@@ -21,18 +23,18 @@ use crate::lp_builder::models_from_normal;
 
 /// Build and validate a [`HistoricalScenarioLibrary`] for inflow.
 ///
-/// `derived_lag_values`/`derived_accum`/`derived_weight` and
-/// `stage_lag_transitions` seed the rolling η-inversion chain (mirroring
-/// `build_external_inflow_library`). Pass the shared
-/// `StudySetup::derived_inflow_seeds` fields and the pre-computed transitions
-/// so that every forward pass starting from the same derived seed exactly
-/// reconstructs the raw historical observations.
+/// `seed` ([`DerivedSeed`]) and `stage_lag_transitions` seed the rolling
+/// η-inversion chain (mirroring `build_external_inflow_library`). Pass the
+/// shared `StudySetup::derived_inflow_seeds` view and the pre-computed
+/// transitions so that every forward pass starting from the same derived
+/// seed exactly reconstructs the raw historical observations.
 ///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on window discovery or validation failure.
-// Rationale: mirrors standardize_historical_windows's own arity; a context
-// struct would just relocate the arity, not reduce it.
+// Rationale: mirrors standardize_historical_windows's own arity, whose stage-0
+// seed already travels as one `DerivedSeed`; the remaining inputs are
+// independent and still exceed the threshold.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_historical_inflow_library(
     inflow_history: &[InflowHistoryRow],
@@ -40,10 +42,7 @@ pub(crate) fn build_historical_inflow_library(
     stages: &[Stage],
     par: &PrecomputedPar,
     season_map: Option<&SeasonMap>,
-    derived_lag_values: &[f64],
-    l_state: usize,
-    derived_accum: &[f64],
-    derived_weight: &[f64],
+    seed: DerivedSeed<'_>,
     stage_lag_transitions: &[StageLagTransition],
     user_pool: Option<&HistoricalYears>,
     forward_passes: u32,
@@ -75,10 +74,7 @@ pub(crate) fn build_historical_inflow_library(
         par,
         &window_years,
         season_map,
-        derived_lag_values,
-        l_state,
-        derived_accum,
-        derived_weight,
+        seed,
         stage_lag_transitions,
         downstream_par_order,
     );
@@ -95,44 +91,52 @@ pub(crate) fn build_historical_inflow_library(
     Ok(library)
 }
 
+fn per_stage_scenario_counts(
+    stage_ids: impl Iterator<Item = i32>,
+    stages: &[Stage],
+    n_entities: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let resolver =
+        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
+    let n_stages = stages.len();
+    let mut rows_per_stage = vec![0usize; n_stages];
+    for stage_id in stage_ids {
+        if let Some(idx) = resolver.resolve(stage_id) {
+            rows_per_stage[idx] += 1;
+        }
+    }
+    let per_stage_scenarios = if n_entities > 0 {
+        rows_per_stage.iter().map(|&r| r / n_entities).collect()
+    } else {
+        vec![0usize; n_stages]
+    };
+    (rows_per_stage, per_stage_scenarios)
+}
+
 /// Build and validate an [`ExternalScenarioLibrary`] for inflow.
 ///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on validation failure.
-// Rationale: mirrors standardize_external_inflow's own arity; a context
-// struct would just relocate the arity, not reduce it.
+// Rationale: mirrors standardize_external_inflow's own arity, whose stage-0
+// seed already travels as one `DerivedSeed`; the remaining inputs are
+// independent and still exceed the threshold.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_external_inflow_library(
     external_rows: &[ExternalScenarioRow],
     hydro_ids: &[EntityId],
     stages: &[Stage],
     par: &PrecomputedPar,
-    derived_lag_values: &[f64],
-    l_state: usize,
-    derived_accum: &[f64],
-    derived_weight: &[f64],
+    seed: DerivedSeed<'_>,
     stage_lag_transitions: &[StageLagTransition],
     forward_passes: u32,
     downstream_par_order: usize,
 ) -> Result<ExternalScenarioLibrary, SddpError> {
     let n_stages = stages.len();
     let n_hydros = hydro_ids.len();
-    let row_entity_ids: std::collections::HashSet<EntityId> =
-        external_rows.iter().map(|r| r.hydro_id).collect();
-    let resolver =
-        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
-    let mut rows_per_stage = vec![0usize; n_stages];
-    for row in external_rows {
-        if let Some(idx) = resolver.resolve(row.stage_id) {
-            rows_per_stage[idx] += 1;
-        }
-    }
-    let per_stage_scenarios: Vec<usize> = if n_hydros > 0 {
-        rows_per_stage.iter().map(|&r| r / n_hydros).collect()
-    } else {
-        vec![0usize; n_stages]
-    };
+    let row_entity_ids: HashSet<EntityId> = external_rows.iter().map(|r| r.hydro_id).collect();
+    let (rows_per_stage, per_stage_scenarios) =
+        per_stage_scenario_counts(external_rows.iter().map(|r| r.stage_id), stages, n_hydros);
     let n_scenarios_ext = per_stage_scenarios.iter().copied().max().unwrap_or(0);
     let mut library = ExternalScenarioLibrary::new(
         n_stages,
@@ -147,10 +151,7 @@ pub(crate) fn build_external_inflow_library(
         hydro_ids,
         stages,
         par,
-        derived_lag_values,
-        l_state,
-        derived_accum,
-        derived_weight,
+        seed,
         stage_lag_transitions,
         downstream_par_order,
     );
@@ -204,21 +205,9 @@ pub(crate) fn build_external_load_library(
     let n_stages = stages.len();
     let bus_ids = system.load_noise_member_bus_ids(load_scheme);
     let n_buses = bus_ids.len();
-    let row_entity_ids: std::collections::HashSet<EntityId> =
-        external_rows.iter().map(|r| r.bus_id).collect();
-    let resolver =
-        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
-    let mut rows_per_stage = vec![0usize; n_stages];
-    for row in external_rows {
-        if let Some(idx) = resolver.resolve(row.stage_id) {
-            rows_per_stage[idx] += 1;
-        }
-    }
-    let per_stage_scenarios: Vec<usize> = if n_buses > 0 {
-        rows_per_stage.iter().map(|&r| r / n_buses).collect()
-    } else {
-        vec![0usize; n_stages]
-    };
+    let row_entity_ids: HashSet<EntityId> = external_rows.iter().map(|r| r.bus_id).collect();
+    let (rows_per_stage, per_stage_scenarios) =
+        per_stage_scenario_counts(external_rows.iter().map(|r| r.stage_id), stages, n_buses);
     let n_scenarios_ext = per_stage_scenarios.iter().copied().max().unwrap_or(0);
     let mut library = ExternalScenarioLibrary::new(
         n_stages,
@@ -286,21 +275,9 @@ pub(crate) fn build_external_ncs_library(
     let n_stages = stages.len();
     let ncs_ids = system.ncs_noise_member_ids(SamplingScheme::External);
     let n_ncs = ncs_ids.len();
-    let row_entity_ids: std::collections::HashSet<EntityId> =
-        external_rows.iter().map(|r| r.ncs_id).collect();
-    let resolver =
-        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
-    let mut rows_per_stage = vec![0usize; n_stages];
-    for row in external_rows {
-        if let Some(idx) = resolver.resolve(row.stage_id) {
-            rows_per_stage[idx] += 1;
-        }
-    }
-    let per_stage_scenarios: Vec<usize> = if n_ncs > 0 {
-        rows_per_stage.iter().map(|&r| r / n_ncs).collect()
-    } else {
-        vec![0usize; n_stages]
-    };
+    let row_entity_ids: HashSet<EntityId> = external_rows.iter().map(|r| r.ncs_id).collect();
+    let (rows_per_stage, per_stage_scenarios) =
+        per_stage_scenario_counts(external_rows.iter().map(|r| r.stage_id), stages, n_ncs);
     let n_scenarios_ext = per_stage_scenarios.iter().copied().max().unwrap_or(0);
     let mut library =
         ExternalScenarioLibrary::new(n_stages, n_scenarios_ext, n_ncs, "ncs", per_stage_scenarios);
@@ -346,8 +323,9 @@ mod tests {
     use cobre_stochastic::{PrecomputedNormal, StochasticError, derive_external_sample_moments};
 
     use super::{
-        EntityId, ExternalScenarioRow, LoadModel, PrecomputedPar, SamplingScheme, SddpError, Stage,
-        StageLagTransition, build_external_inflow_library, build_external_load_library,
+        DerivedSeed, EntityId, ExternalScenarioRow, LoadModel, PrecomputedPar, SamplingScheme,
+        SddpError, Stage, StageLagTransition, build_external_inflow_library,
+        build_external_load_library,
     };
 
     fn single_stage(id: i32) -> Stage {
@@ -425,10 +403,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             1,
             0,
@@ -478,10 +458,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             1,
             0,
@@ -724,10 +706,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             2,
             0,
@@ -827,10 +811,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &derived_lag_values,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived_lag_values,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             2,
             0,
@@ -1028,10 +1014,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             1,
             0,

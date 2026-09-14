@@ -54,7 +54,10 @@ use crate::{
         load_energy_contracts, load_non_controllable_sources, load_pumping_stations, parse_buses,
         parse_hydros, parse_lines, parse_thermals,
     },
-    validation::{ErrorKind, ValidationContext, structural::FileManifest},
+    validation::{
+        ErrorKind, ValidationContext,
+        structural::{FileManifest, InputFile},
+    },
 };
 
 // ── ParsedData ────────────────────────────────────────────────────────────────
@@ -261,7 +264,7 @@ pub(crate) fn validate_schema(
 
     // `Option` (not the aggregate): callers distinguish "no file" from an empty deck.
     let post_study_stages: Option<PostStudyStages> = optional_or_error(
-        manifest.post_study_stages_json,
+        manifest.present(InputFile::PostStudyStagesJson),
         || parse_post_study_stages(&case_root.join("post_study_stages.json")).map(Some),
         || None,
         "post_study_stages.json",
@@ -297,7 +300,7 @@ pub(crate) fn validate_schema(
     );
 
     let non_controllable_sources = optional_or_error(
-        manifest.system_non_controllable_sources_json,
+        manifest.present(InputFile::SystemNonControllableSourcesJson),
         || {
             load_non_controllable_sources(
                 Some(&case_root.join("system/non_controllable_sources.json")),
@@ -310,7 +313,7 @@ pub(crate) fn validate_schema(
     );
 
     let pumping_stations = optional_or_error(
-        manifest.system_pumping_stations_json,
+        manifest.present(InputFile::SystemPumpingStationsJson),
         || load_pumping_stations(Some(&case_root.join("system/pumping_stations.json"))),
         Vec::new,
         "system/pumping_stations.json",
@@ -318,7 +321,7 @@ pub(crate) fn validate_schema(
     );
 
     let energy_contracts = optional_or_error(
-        manifest.system_energy_contracts_json,
+        manifest.present(InputFile::SystemEnergyContractsJson),
         || load_energy_contracts(Some(&case_root.join("system/energy_contracts.json"))),
         Vec::new,
         "system/energy_contracts.json",
@@ -326,7 +329,7 @@ pub(crate) fn validate_schema(
     );
 
     let hydro_geometry = optional_or_error(
-        manifest.system_hydro_geometry_parquet,
+        manifest.present(InputFile::SystemHydroGeometryParquet),
         || parse_hydro_geometry(&case_root.join("system/hydro_geometry.parquet")),
         Vec::new,
         "system/hydro_geometry.parquet",
@@ -337,7 +340,7 @@ pub(crate) fn validate_schema(
         configs: production_models,
         plane_reduction,
     } = optional_or_error(
-        manifest.system_hydro_production_models_json,
+        manifest.present(InputFile::SystemHydroProductionModelsJson),
         || load_production_models(Some(&case_root.join("system/hydro_production_models.json"))),
         ProductionModelFile::default,
         "system/hydro_production_models.json",
@@ -345,7 +348,7 @@ pub(crate) fn validate_schema(
     );
 
     let hydro_energy_productivity_rows = optional_or_error(
-        manifest.system_hydro_energy_productivity_parquet,
+        manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
         || {
             load_hydro_energy_productivity(Some(
                 &case_root.join("system/hydro_energy_productivity.parquet"),
@@ -357,7 +360,7 @@ pub(crate) fn validate_schema(
     );
 
     let fpha_hyperplanes = optional_or_error(
-        manifest.system_fpha_hyperplanes_parquet,
+        manifest.present(InputFile::SystemFphaHyperplanesParquet),
         || load_fpha_hyperplanes(Some(&case_root.join("system/fpha_hyperplanes.parquet"))),
         Vec::new,
         "system/fpha_hyperplanes.parquet",
@@ -365,7 +368,7 @@ pub(crate) fn validate_schema(
     );
 
     let inflow_history = optional_or_error(
-        manifest.scenarios_inflow_history_parquet,
+        manifest.present(InputFile::ScenariosInflowHistoryParquet),
         || load_inflow_history(Some(&case_root.join("scenarios/inflow_history.parquet"))),
         Vec::new,
         "scenarios/inflow_history.parquet",
@@ -373,7 +376,7 @@ pub(crate) fn validate_schema(
     );
 
     let inflow_seasonal_stats = optional_or_error(
-        manifest.scenarios_inflow_seasonal_stats_parquet,
+        manifest.present(InputFile::ScenariosInflowSeasonalStatsParquet),
         || {
             load_inflow_seasonal_stats(Some(
                 &case_root.join("scenarios/inflow_seasonal_stats.parquet"),
@@ -385,7 +388,7 @@ pub(crate) fn validate_schema(
     );
 
     let inflow_ar_coefficients = optional_or_error(
-        manifest.scenarios_inflow_ar_coefficients_parquet,
+        manifest.present(InputFile::ScenariosInflowArCoefficientsParquet),
         || {
             load_inflow_ar_coefficients(Some(
                 &case_root.join("scenarios/inflow_ar_coefficients.parquet"),
@@ -397,7 +400,7 @@ pub(crate) fn validate_schema(
     );
 
     let inflow_annual_components = optional_or_error(
-        manifest.scenarios_inflow_annual_component_parquet,
+        manifest.present(InputFile::ScenariosInflowAnnualComponentParquet),
         || {
             load_inflow_annual_component(Some(
                 &case_root.join("scenarios/inflow_annual_component.parquet"),
@@ -409,7 +412,7 @@ pub(crate) fn validate_schema(
     );
 
     let external_scenarios = optional_or_error(
-        manifest.scenarios_external_inflow_scenarios_parquet,
+        manifest.present(InputFile::ScenariosExternalInflowScenariosParquet),
         || {
             load_external_inflow_scenarios(Some(
                 &case_root.join("scenarios/external_inflow_scenarios.parquet"),
@@ -421,7 +424,7 @@ pub(crate) fn validate_schema(
     );
 
     let external_load_scenarios = optional_or_error(
-        manifest.scenarios_external_load_scenarios_parquet,
+        manifest.present(InputFile::ScenariosExternalLoadScenariosParquet),
         || {
             load_external_load_scenarios(Some(
                 &case_root.join("scenarios/external_load_scenarios.parquet"),
@@ -433,7 +436,7 @@ pub(crate) fn validate_schema(
     );
 
     let external_ncs_scenarios = optional_or_error(
-        manifest.scenarios_external_ncs_scenarios_parquet,
+        manifest.present(InputFile::ScenariosExternalNcsScenariosParquet),
         || {
             load_external_ncs_scenarios(Some(
                 &case_root.join("scenarios/external_ncs_scenarios.parquet"),
@@ -445,7 +448,7 @@ pub(crate) fn validate_schema(
     );
 
     let load_seasonal_stats = optional_or_error(
-        manifest.scenarios_load_seasonal_stats_parquet,
+        manifest.present(InputFile::ScenariosLoadSeasonalStatsParquet),
         || {
             load_load_seasonal_stats(Some(
                 &case_root.join("scenarios/load_seasonal_stats.parquet"),
@@ -457,7 +460,7 @@ pub(crate) fn validate_schema(
     );
 
     let load_factors = optional_or_error(
-        manifest.scenarios_load_factors_json,
+        manifest.present(InputFile::ScenariosLoadFactorsJson),
         || load_load_factors(Some(&case_root.join("scenarios/load_factors.json"))),
         Vec::new,
         "scenarios/load_factors.json",
@@ -466,7 +469,7 @@ pub(crate) fn validate_schema(
 
     // `Option` (not `Vec`) so callers distinguish "no file" from "empty model".
     let correlation: Option<CorrelationModel> = optional_or_error(
-        manifest.scenarios_correlation_json,
+        manifest.present(InputFile::ScenariosCorrelationJson),
         || load_correlation(Some(&case_root.join("scenarios/correlation.json"))).map(Some),
         || None,
         "scenarios/correlation.json",
@@ -474,7 +477,7 @@ pub(crate) fn validate_schema(
     );
 
     let non_controllable_factors = optional_or_error(
-        manifest.scenarios_non_controllable_factors_json,
+        manifest.present(InputFile::ScenariosNonControllableFactorsJson),
         || {
             load_non_controllable_factors(Some(
                 &case_root.join("scenarios/non_controllable_factors.json"),
@@ -486,7 +489,7 @@ pub(crate) fn validate_schema(
     );
 
     let ncs_models = optional_or_error(
-        manifest.scenarios_non_controllable_stats_parquet,
+        manifest.present(InputFile::ScenariosNonControllableStatsParquet),
         || {
             load_ncs_stats(Some(
                 &case_root.join("scenarios/non_controllable_stats.parquet"),
@@ -498,7 +501,7 @@ pub(crate) fn validate_schema(
     );
 
     let thermal_bounds = optional_or_error(
-        manifest.constraints_thermal_bounds_parquet,
+        manifest.present(InputFile::ConstraintsThermalBoundsParquet),
         || load_thermal_bounds(Some(&case_root.join("constraints/thermal_bounds.parquet"))),
         Vec::new,
         "constraints/thermal_bounds.parquet",
@@ -506,7 +509,7 @@ pub(crate) fn validate_schema(
     );
 
     let hydro_bounds = optional_or_error(
-        manifest.constraints_hydro_bounds_parquet,
+        manifest.present(InputFile::ConstraintsHydroBoundsParquet),
         || load_hydro_bounds(Some(&case_root.join("constraints/hydro_bounds.parquet"))),
         Vec::new,
         "constraints/hydro_bounds.parquet",
@@ -514,7 +517,7 @@ pub(crate) fn validate_schema(
     );
 
     let line_bounds = optional_or_error(
-        manifest.constraints_line_bounds_parquet,
+        manifest.present(InputFile::ConstraintsLineBoundsParquet),
         || load_line_bounds(Some(&case_root.join("constraints/line_bounds.parquet"))),
         Vec::new,
         "constraints/line_bounds.parquet",
@@ -522,7 +525,7 @@ pub(crate) fn validate_schema(
     );
 
     let pumping_bounds = optional_or_error(
-        manifest.constraints_pumping_bounds_parquet,
+        manifest.present(InputFile::ConstraintsPumpingBoundsParquet),
         || load_pumping_bounds(Some(&case_root.join("constraints/pumping_bounds.parquet"))),
         Vec::new,
         "constraints/pumping_bounds.parquet",
@@ -530,7 +533,7 @@ pub(crate) fn validate_schema(
     );
 
     let contract_bounds = optional_or_error(
-        manifest.constraints_contract_bounds_parquet,
+        manifest.present(InputFile::ConstraintsContractBoundsParquet),
         || load_contract_bounds(Some(&case_root.join("constraints/contract_bounds.parquet"))),
         Vec::new,
         "constraints/contract_bounds.parquet",
@@ -540,7 +543,7 @@ pub(crate) fn validate_schema(
     // Must load BEFORE generic_constraints below: it resolves the `@name` sigils
     // in constraint expressions. Reordering breaks that resolution.
     let scalar_parameters: Vec<ScalarParameter> = optional_or_error(
-        manifest.constraints_generic_parameters_json,
+        manifest.present(InputFile::ConstraintsGenericParametersJson),
         || parse_scalar_parameters_json(&case_root.join("constraints/generic_parameters.json")),
         Vec::new,
         "constraints/generic_parameters.json",
@@ -555,7 +558,7 @@ pub(crate) fn validate_schema(
         .collect();
 
     let generic_constraints = optional_or_error(
-        manifest.constraints_generic_constraints_json,
+        manifest.present(InputFile::ConstraintsGenericConstraintsJson),
         || {
             let line_pair_index = build_line_bus_pair_index(lines.as_deref().unwrap_or(&[]))?;
             load_generic_constraints(
@@ -570,7 +573,7 @@ pub(crate) fn validate_schema(
     );
 
     let generic_constraint_bounds = optional_or_error(
-        manifest.constraints_generic_constraint_bounds_parquet,
+        manifest.present(InputFile::ConstraintsGenericConstraintBoundsParquet),
         || {
             load_generic_constraint_bounds(Some(
                 &case_root.join("constraints/generic_constraint_bounds.parquet"),
@@ -582,7 +585,7 @@ pub(crate) fn validate_schema(
     );
 
     let penalty_overrides_bus = optional_or_error(
-        manifest.constraints_penalty_overrides_bus_parquet,
+        manifest.present(InputFile::ConstraintsPenaltyOverridesBusParquet),
         || {
             load_penalty_overrides_bus(Some(
                 &case_root.join("constraints/penalty_overrides_bus.parquet"),
@@ -594,7 +597,7 @@ pub(crate) fn validate_schema(
     );
 
     let penalty_overrides_line = optional_or_error(
-        manifest.constraints_penalty_overrides_line_parquet,
+        manifest.present(InputFile::ConstraintsPenaltyOverridesLineParquet),
         || {
             load_penalty_overrides_line(Some(
                 &case_root.join("constraints/penalty_overrides_line.parquet"),
@@ -606,7 +609,7 @@ pub(crate) fn validate_schema(
     );
 
     let penalty_overrides_hydro = optional_or_error(
-        manifest.constraints_penalty_overrides_hydro_parquet,
+        manifest.present(InputFile::ConstraintsPenaltyOverridesHydroParquet),
         || {
             load_penalty_overrides_hydro(Some(
                 &case_root.join("constraints/penalty_overrides_hydro.parquet"),
@@ -618,7 +621,7 @@ pub(crate) fn validate_schema(
     );
 
     let penalty_overrides_ncs = optional_or_error(
-        manifest.constraints_penalty_overrides_ncs_parquet,
+        manifest.present(InputFile::ConstraintsPenaltyOverridesNcsParquet),
         || {
             load_penalty_overrides_ncs(Some(
                 &case_root.join("constraints/penalty_overrides_ncs.parquet"),
@@ -630,7 +633,7 @@ pub(crate) fn validate_schema(
     );
 
     let ncs_bounds = optional_or_error(
-        manifest.constraints_ncs_bounds_parquet,
+        manifest.present(InputFile::ConstraintsNcsBoundsParquet),
         || load_ncs_bounds(Some(&case_root.join("constraints/ncs_bounds.parquet"))),
         Vec::new,
         "constraints/ncs_bounds.parquet",
@@ -638,7 +641,7 @@ pub(crate) fn validate_schema(
     );
 
     let hydro_unit_group_bounds = optional_or_error(
-        manifest.constraints_hydro_unit_group_bounds_parquet,
+        manifest.present(InputFile::ConstraintsHydroUnitGroupBoundsParquet),
         || {
             load_hydro_unit_group_bounds(Some(
                 &case_root.join("constraints/hydro_unit_group_bounds.parquet"),
@@ -1054,7 +1057,7 @@ mod tests {
         let manifest = validate_structure(dir.path(), &mut ctx);
         assert!(!ctx.has_errors(), "structural validation should pass");
         assert!(
-            !manifest.scenarios_correlation_json,
+            !manifest.present(InputFile::ScenariosCorrelationJson),
             "manifest should show correlation.json absent"
         );
 
@@ -1265,7 +1268,7 @@ mod tests {
         let manifest = validate_structure(dir.path(), &mut ctx);
         assert!(!ctx.has_errors(), "structural validation should pass");
         assert!(
-            manifest.system_hydro_energy_productivity_parquet,
+            manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
             "manifest should detect the parquet"
         );
 
@@ -1303,7 +1306,7 @@ mod tests {
         let manifest = validate_structure(dir.path(), &mut ctx);
         assert!(!ctx.has_errors(), "structural validation should pass");
         assert!(
-            !manifest.system_hydro_energy_productivity_parquet,
+            !manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
             "manifest should show parquet absent"
         );
 
@@ -1337,7 +1340,7 @@ mod tests {
         let manifest = validate_structure(dir.path(), &mut ctx);
         assert!(!ctx.has_errors(), "structural validation should pass");
         assert!(
-            manifest.system_hydro_energy_productivity_parquet,
+            manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
             "manifest should detect the parquet"
         );
 

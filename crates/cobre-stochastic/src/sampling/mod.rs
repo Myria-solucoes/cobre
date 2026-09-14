@@ -362,45 +362,55 @@ pub struct ForwardSamplerConfig<'a> {
 // Factory
 // ---------------------------------------------------------------------------
 
+/// Resolved scenario source for the inflow class — the only class allowed to
+/// replay historical windows.
+enum InflowSource<'a> {
+    InSample,
+    OutOfSample,
+    Historical(&'a HistoricalScenarioLibrary),
+    External(&'a ExternalScenarioLibrary),
+}
+
+/// Resolved scenario source for the load and NCS classes. Historical replay
+/// is inflow-only, so this set carries no `Historical` variant.
+enum ClassSource<'a> {
+    InSample,
+    OutOfSample,
+    External(&'a ExternalScenarioLibrary),
+}
+
 /// Inputs to [`build_class_sampler`] for one entity class.
 struct ClassSamplerParams<'a, 'b> {
-    class_name: &'b str,
-    scheme: SamplingScheme,
+    source: ClassSource<'a>,
     offset: usize,
     len: usize,
     forward_seed: Option<u64>,
     noise_methods: &'b [NoiseMethod],
     tree: Option<OpeningTreeView<'a>>,
     base_seed: u64,
-    historical_library: Option<&'a HistoricalScenarioLibrary>,
-    external_library: Option<&'a ExternalScenarioLibrary>,
 }
 
-/// Build a [`ClassSampler`] for one entity class. `class_name` is used only in
-/// error messages.
+/// Build a [`ClassSampler`] for one entity class from its resolved
+/// [`ClassSource`].
 ///
 /// # Errors
 ///
-/// Returns [`StochasticError::MissingScenarioSource`] when `OutOfSample` lacks a
-/// `forward_seed`, when `Historical`/`External` lacks its library, or when
-/// `Historical` is requested for a class other than `"inflow"`.
+/// Returns [`StochasticError::MissingScenarioSource`] when `InSample` lacks
+/// an opening tree or `OutOfSample` lacks a `forward_seed`.
 fn build_class_sampler<'a>(
     p: ClassSamplerParams<'a, '_>,
 ) -> Result<ClassSampler<'a>, StochasticError> {
     let ClassSamplerParams {
-        class_name,
-        scheme,
+        source,
         offset,
         len,
         forward_seed,
         noise_methods,
         tree,
         base_seed,
-        historical_library,
-        external_library,
     } = p;
-    match scheme {
-        SamplingScheme::InSample => {
+    match source {
+        ClassSource::InSample => {
             let tree = tree.ok_or_else(|| StochasticError::MissingScenarioSource {
                 scheme: "in_sample".to_string(),
                 reason: "opening tree not available for InSample class sampler".to_string(),
@@ -412,7 +422,7 @@ fn build_class_sampler<'a>(
                 len,
             })
         }
-        SamplingScheme::OutOfSample => {
+        ClassSource::OutOfSample => {
             let forward_seed =
                 forward_seed.ok_or_else(|| StochasticError::MissingScenarioSource {
                     scheme: "out_of_sample".to_string(),
@@ -426,16 +436,26 @@ fn build_class_sampler<'a>(
                 noise_methods: noise_methods.into(),
             })
         }
+        ClassSource::External(library) => Ok(ClassSampler::External { library }),
+    }
+}
+
+/// Resolve the inflow class's sampling scheme against the historical and
+/// external inflow libraries into an [`InflowSource`].
+///
+/// # Errors
+///
+/// Returns [`StochasticError::MissingScenarioSource`] when `Historical` or
+/// `External` is selected but its library was not loaded.
+fn resolve_inflow_source<'a>(
+    scheme: SamplingScheme,
+    historical_library: Option<&'a HistoricalScenarioLibrary>,
+    external_library: Option<&'a ExternalScenarioLibrary>,
+) -> Result<InflowSource<'a>, StochasticError> {
+    match scheme {
+        SamplingScheme::InSample => Ok(InflowSource::InSample),
+        SamplingScheme::OutOfSample => Ok(InflowSource::OutOfSample),
         SamplingScheme::Historical => {
-            if class_name != "inflow" {
-                return Err(StochasticError::MissingScenarioSource {
-                    scheme: format!("historical_{class_name}"),
-                    reason: format!(
-                        "historical replay is only supported for the inflow class; \
-                         requested for class '{class_name}'"
-                    ),
-                });
-            }
             let library =
                 historical_library.ok_or_else(|| StochasticError::MissingScenarioSource {
                     scheme: "historical".to_string(),
@@ -443,20 +463,114 @@ fn build_class_sampler<'a>(
                              was loaded; provide historical_windows in the study config"
                         .to_string(),
                 })?;
-            Ok(ClassSampler::Historical { library })
+            Ok(InflowSource::Historical(library))
         }
         SamplingScheme::External => {
             let library =
                 external_library.ok_or_else(|| StochasticError::MissingScenarioSource {
-                    scheme: format!("external_{class_name}"),
+                    scheme: format!("external_{}", EntityClass::Inflow.as_str()),
                     reason: format!(
-                        "external scenario scheme selected for class '{class_name}' but no \
-                     external library was loaded; provide the external scenario file"
+                        "external scenario scheme selected for class '{}' but no \
+                     external library was loaded; provide the external scenario file",
+                        EntityClass::Inflow.as_str()
                     ),
                 })?;
-            Ok(ClassSampler::External { library })
+            Ok(InflowSource::External(library))
         }
     }
+}
+
+/// Resolve a non-inflow class's sampling scheme against its external library
+/// into a [`ClassSource`]. `ClassSource` carries no `Historical` variant, so
+/// selecting `Historical` here always errors.
+///
+/// # Errors
+///
+/// Returns [`StochasticError::MissingScenarioSource`] when `Historical` is
+/// selected (unsupported outside inflow) or `External` names no loaded
+/// library.
+fn resolve_class_source(
+    scheme: SamplingScheme,
+    class: EntityClass,
+    external_library: Option<&ExternalScenarioLibrary>,
+) -> Result<ClassSource<'_>, StochasticError> {
+    match scheme {
+        SamplingScheme::InSample => Ok(ClassSource::InSample),
+        SamplingScheme::OutOfSample => Ok(ClassSource::OutOfSample),
+        SamplingScheme::Historical => Err(StochasticError::MissingScenarioSource {
+            scheme: format!("historical_{}", class.as_str()),
+            reason: format!(
+                "historical replay is only supported for the inflow class; \
+                 requested for class '{}'",
+                class.as_str()
+            ),
+        }),
+        SamplingScheme::External => {
+            let library =
+                external_library.ok_or_else(|| StochasticError::MissingScenarioSource {
+                    scheme: format!("external_{}", class.as_str()),
+                    reason: format!(
+                        "external scenario scheme selected for class '{}' but no \
+                     external library was loaded; provide the external scenario file",
+                        class.as_str()
+                    ),
+                })?;
+            Ok(ClassSource::External(library))
+        }
+    }
+}
+
+/// Emits at most one `tracing::warn!` naming `class` and every stage id whose
+/// `noise_method` is `Selective` or `HistoricalResiduals` — methods
+/// `fill_uncorrelated` does not implement and instead falls back to SAA.
+/// Skips a class whose resolved `scheme` never reaches `fill_uncorrelated`.
+fn warn_unsupported_forward_noise_methods(
+    class: EntityClass,
+    scheme: SamplingScheme,
+    stages: &[Stage],
+    noise_methods: &[NoiseMethod],
+) {
+    if scheme != SamplingScheme::OutOfSample {
+        return;
+    }
+    let unsupported: Vec<(i32, NoiseMethod)> = stages
+        .iter()
+        .zip(noise_methods)
+        .filter_map(|(stage, &method)| {
+            matches!(
+                method,
+                NoiseMethod::Selective | NoiseMethod::HistoricalResiduals
+            )
+            .then_some((stage.id, method))
+        })
+        .collect();
+    if unsupported.is_empty() {
+        return;
+    }
+
+    let stage_ids: Vec<i32> = unsupported.iter().map(|&(id, _)| id).collect();
+    let mut methods: Vec<&'static str> = Vec::new();
+    if unsupported
+        .iter()
+        .any(|&(_, method)| method == NoiseMethod::Selective)
+    {
+        methods.push("selective");
+    }
+    if unsupported
+        .iter()
+        .any(|&(_, method)| method == NoiseMethod::HistoricalResiduals)
+    {
+        methods.push("historical_residuals");
+    }
+    let methods = methods.join(" or ");
+    let class_str = class.as_str();
+    let count = stage_ids.len();
+
+    tracing::warn!(
+        "class '{class_str}' has {count} out-of-sample forward stage(s) selecting \
+         {methods} noise, not implemented in the forward pass; falling back to the \
+         sample-average method for stage id(s) {stage_ids:?}"
+    );
 }
 
 /// Build a composite [`ForwardSampler`] from a [`ForwardSamplerConfig`].
@@ -491,8 +605,10 @@ pub fn build_forward_sampler(
     // Inflow keeps the root seed: deriving it too would change every shipped
     // inflow-only deck.
     let inflow_forward_seed = ctx.forward_seed();
-    let load_forward_seed = inflow_forward_seed.map(|s| derive_class_forward_seed(s, "load"));
-    let ncs_forward_seed = inflow_forward_seed.map(|s| derive_class_forward_seed(s, "ncs"));
+    let load_forward_seed =
+        inflow_forward_seed.map(|s| derive_class_forward_seed(s, EntityClass::Load));
+    let ncs_forward_seed =
+        inflow_forward_seed.map(|s| derive_class_forward_seed(s, EntityClass::Ncs));
     let base_seed = ctx.base_seed();
 
     let noise_methods: Box<[NoiseMethod]> = stages
@@ -502,43 +618,51 @@ pub fn build_forward_sampler(
 
     let correlation = ctx.correlation();
 
-    let inflow = build_class_sampler(ClassSamplerParams {
-        class_name: "inflow",
-        scheme: inflow_scheme,
-        offset: 0,
-        len: dims.n_hydros,
-        forward_seed: inflow_forward_seed,
-        noise_methods: &noise_methods,
-        tree: Some(ctx.tree_view()),
-        base_seed,
-        historical_library,
-        external_library: external_inflow_library,
-    })?;
+    warn_unsupported_forward_noise_methods(
+        EntityClass::Inflow,
+        inflow_scheme,
+        stages,
+        &noise_methods,
+    );
+    let build_inflow = |source| {
+        build_class_sampler(ClassSamplerParams {
+            source,
+            offset: 0,
+            len: dims.n_hydros,
+            forward_seed: inflow_forward_seed,
+            noise_methods: &noise_methods,
+            tree: Some(ctx.tree_view()),
+            base_seed,
+        })
+    };
+    let inflow =
+        match resolve_inflow_source(inflow_scheme, historical_library, external_inflow_library)? {
+            InflowSource::Historical(library) => ClassSampler::Historical { library },
+            InflowSource::InSample => build_inflow(ClassSource::InSample)?,
+            InflowSource::OutOfSample => build_inflow(ClassSource::OutOfSample)?,
+            InflowSource::External(library) => build_inflow(ClassSource::External(library))?,
+        };
 
+    warn_unsupported_forward_noise_methods(EntityClass::Load, load_scheme, stages, &noise_methods);
     let load = build_class_sampler(ClassSamplerParams {
-        class_name: "load",
-        scheme: load_scheme,
+        source: resolve_class_source(load_scheme, EntityClass::Load, external_load_library)?,
         offset: dims.n_hydros,
         len: dims.n_load_buses,
         forward_seed: load_forward_seed,
         noise_methods: &noise_methods,
         tree: Some(ctx.tree_view()),
         base_seed,
-        historical_library: None,
-        external_library: external_load_library,
     })?;
 
+    warn_unsupported_forward_noise_methods(EntityClass::Ncs, ncs_scheme, stages, &noise_methods);
     let ncs = build_class_sampler(ClassSamplerParams {
-        class_name: "ncs",
-        scheme: ncs_scheme,
+        source: resolve_class_source(ncs_scheme, EntityClass::Ncs, external_ncs_library)?,
         offset: dims.n_hydros + dims.n_load_buses,
         len: dims.n_ncs,
         forward_seed: ncs_forward_seed,
         noise_methods: &noise_methods,
         tree: Some(ctx.tree_view()),
         base_seed,
-        historical_library: None,
-        external_library: external_ncs_library,
     })?;
 
     // Correlation refs are set only for OutOfSample; pre-correlated sources must
@@ -653,7 +777,10 @@ pub(crate) fn build_observation_sequence(
     clippy::float_cmp
 )]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
 
     use chrono::NaiveDate;
     use cobre_core::{
@@ -668,6 +795,7 @@ mod tests {
             StageStateConfig,
         },
     };
+    use tracing::{Event, Level, Metadata, Subscriber, span};
 
     use super::{
         ClassNoiseTables, ClassSampleRequest, ClassSampler, ForwardNoise, ForwardNoiseTables,
@@ -682,6 +810,71 @@ mod tests {
         tree::lhs::{sample_lhs_point, sample_lhs_point_reference},
         tree::opening_tree::OpeningTree,
     };
+
+    // -----------------------------------------------------------------------
+    // Minimal WARN-capturing subscriber for use in tests.
+    // -----------------------------------------------------------------------
+
+    /// Records all WARN-level event messages into a shared `Vec<String>`.
+    struct WarnRecorder {
+        messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl WarnRecorder {
+        fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+            let messages = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    messages: Arc::clone(&messages),
+                },
+                messages,
+            )
+        }
+    }
+
+    impl Subscriber for WarnRecorder {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() <= Level::WARN
+        }
+
+        fn new_span(&self, _attrs: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            if *event.metadata().level() == Level::WARN {
+                struct MessageVisitor(String);
+                impl tracing::field::Visit for MessageVisitor {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        if field.name() == "message" {
+                            self.0 = value.to_string();
+                        }
+                    }
+                }
+                let mut visitor = MessageVisitor(String::new());
+                event.record(&mut visitor);
+                self.messages.lock().unwrap().push(visitor.0);
+            }
+        }
+
+        fn enter(&self, _span: &span::Id) {}
+
+        fn exit(&self, _span: &span::Id) {}
+    }
 
     fn make_bus(id: i32) -> Bus {
         Bus {
@@ -980,6 +1173,75 @@ mod tests {
         assert!(
             result.is_ok(),
             "expected Ok for Historical inflow with library, got: {result:?}"
+        );
+    }
+
+    /// When both `historical_library` and `external_inflow_library` are
+    /// `Some` for a `Historical` inflow scheme, the fold must still pick the
+    /// historical library and ignore the external one, exactly as the
+    /// pre-fold `scheme`-keyed match did.
+    #[test]
+    fn test_build_historical_with_library_ignores_external_library() {
+        use super::{ExternalScenarioLibrary, HistoricalScenarioLibrary};
+        let (ctx, stages) = build_test_ctx(None);
+        let dims = dims_from_ctx(&ctx);
+        // A single window makes historical window selection deterministic
+        // (hash % 1 == 0) without reaching into ClassSampler's private
+        // window-selection helper.
+        let mut historical_lib =
+            HistoricalScenarioLibrary::new(1, stages.len(), dims.n_hydros, 1, vec![2000]);
+        for stage in 0..stages.len() {
+            historical_lib.eta_slice_mut(0, stage).fill(7.0);
+        }
+        let external_lib = ExternalScenarioLibrary::new(
+            stages.len(),
+            10,
+            dims.n_hydros,
+            "inflow",
+            vec![10usize; stages.len()],
+        );
+        let config = super::ForwardSamplerConfig {
+            class_schemes: ClassSchemes {
+                inflow: Some(SamplingScheme::Historical),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+            ctx: &ctx,
+            stages: &stages,
+            dims,
+            historical_library: Some(&historical_lib),
+            external_inflow_library: Some(&external_lib),
+            external_load_library: None,
+            external_ncs_library: None,
+        };
+        let sampler = build_forward_sampler(config)
+            .expect("Historical inflow with both libraries set must still succeed");
+
+        let mut noise_buf = vec![0.0f64; ctx.dim()];
+        let mut corr_scratch = vec![0.0f64; 2 * ctx.dim()];
+        let tables = tables_for(&sampler, 0, 5, &[]);
+        let noise = sampler
+            .sample(SampleRequest {
+                iteration: 0,
+                scenario: 0,
+                stage: 0,
+                stage_idx: 0,
+                noise_buf: &mut noise_buf,
+                corr_scratch: &mut corr_scratch,
+                total_scenarios: 5,
+                noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: ctx.tree_view().n_openings(0),
+                pinned_scenario: None,
+                tables: &tables,
+            })
+            .expect("expected Ok noise from Historical inflow");
+
+        assert_eq!(
+            noise.as_slice()[0],
+            7.0,
+            "inflow slot must replay the historical library's value, not the \
+             zero-filled external one"
         );
     }
 
@@ -1706,7 +1968,7 @@ mod tests {
                 sampling_seed: forward_seed,
                 iteration: 0,
                 scenario,
-                stage_id: 1,
+                stream_id: 1,
                 total_scenarios: 8,
                 dim: 1,
             };
@@ -1826,5 +2088,251 @@ mod tests {
         };
         let mut output = vec![0.0f64; 2];
         let _ = sampler.fill(&req, &tables, &mut output);
+    }
+
+    // -----------------------------------------------------------------------
+    // Unsupported forward noise method warnings
+    // -----------------------------------------------------------------------
+
+    /// Build a single-hydro, out-of-sample inflow study whose stages carry the
+    /// given `(id, method)` pairs; load and NCS default to `InSample`.
+    fn build_inflow_oos_ctx_with_stage_ids(
+        stage_specs: &[(i32, NoiseMethod)],
+    ) -> (StochasticContext, Vec<Stage>) {
+        let hydros = vec![make_hydro(1)];
+        let stages: Vec<Stage> = stage_specs
+            .iter()
+            .enumerate()
+            .map(|(idx, &(id, method))| make_stage_with_method(idx, id, 5, method))
+            .collect();
+        let inflow_models: Vec<InflowModel> = stage_specs
+            .iter()
+            .map(|&(id, _)| make_inflow_model(1, id))
+            .collect();
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(hydros)
+            .stages(stages.clone())
+            .inflow_models(inflow_models)
+            .correlation(identity_correlation(&[1]))
+            .build()
+            .unwrap();
+        // Selective is unsupported by the opening tree generator regardless of
+        // the forward scheme (`generate_stage_raw_noise`), so a study with any
+        // Selective stage must supply a pre-built tree to bypass generation.
+        let user_tree = uniform_tree(stages.len(), 5, 1);
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            Some(99),
+            &[],
+            &[],
+            OpeningTreeInputs {
+                user_tree: Some(user_tree),
+                historical_library: None,
+                external_scenario_counts: None,
+                noise_group_ids: None,
+            },
+            ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+        (ctx, stages)
+    }
+
+    #[test]
+    fn test_warn_once_names_class_and_every_unsupported_stage_id() {
+        let (ctx, stages) = build_inflow_oos_ctx_with_stage_ids(&[
+            (2, NoiseMethod::Selective),
+            (5, NoiseMethod::Selective),
+        ]);
+        let config = build_oos_inflow_config(&ctx, &stages);
+
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            let sampler =
+                build_forward_sampler(config).expect("Selective falls back to SAA, not an error");
+
+            {
+                let recorded = messages.lock().unwrap();
+                assert_eq!(
+                    recorded.len(),
+                    1,
+                    "expected exactly one WARN, got: {recorded:?}"
+                );
+                let message = &recorded[0];
+                assert!(message.contains("inflow"), "message: {message}");
+                assert!(message.contains('2'), "message: {message}");
+                assert!(message.contains('5'), "message: {message}");
+            }
+
+            let dim = ctx.dim();
+            let mut noise_buf = vec![0.0f64; dim];
+            let mut corr_scratch = vec![0.0f64; 2 * dim];
+            let tables = tables_for(&sampler, 0, 5, &[]);
+            sampler
+                .sample(SampleRequest {
+                    iteration: 0,
+                    scenario: 0,
+                    stage: 2,
+                    stage_idx: 0,
+                    noise_buf: &mut noise_buf,
+                    corr_scratch: &mut corr_scratch,
+                    total_scenarios: 5,
+                    noise_group_id: 0,
+                    node_opening_offset: 0,
+                    node_opening_len: ctx.tree_view().n_openings(0),
+                    pinned_scenario: None,
+                    tables: &tables,
+                })
+                .expect("Selective fallback sample() must still succeed");
+        });
+
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            1,
+            "ForwardSampler::sample must not add a WARN after construction"
+        );
+    }
+
+    #[test]
+    fn test_warn_once_covers_both_unsupported_methods_in_one_class() {
+        let (ctx, stages) = build_inflow_oos_ctx_with_stage_ids(&[
+            (0, NoiseMethod::Selective),
+            (1, NoiseMethod::HistoricalResiduals),
+        ]);
+        let config = build_oos_inflow_config(&ctx, &stages);
+
+        let (subscriber, messages) = WarnRecorder::new();
+        let result =
+            tracing::subscriber::with_default(subscriber, || build_forward_sampler(config));
+
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            1,
+            "a Selective stage and a HistoricalResiduals stage in the same class \
+             must still produce exactly one WARN"
+        );
+    }
+
+    #[test]
+    fn test_warn_skips_class_not_sampled_out_of_sample() {
+        let hydros = vec![make_hydro(1)];
+        let stages = vec![
+            make_stage_with_method(0, 0, 5, NoiseMethod::Selective),
+            make_stage_with_method(1, 1, 5, NoiseMethod::Selective),
+        ];
+        let inflow_models = vec![make_inflow_model(1, 0), make_inflow_model(1, 1)];
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(hydros)
+            .stages(stages.clone())
+            .inflow_models(inflow_models)
+            .correlation(identity_correlation(&[1]))
+            .build()
+            .unwrap();
+        let user_tree = uniform_tree(stages.len(), 5, 1);
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs {
+                user_tree: Some(user_tree),
+                historical_library: None,
+                external_scenario_counts: None,
+                noise_group_ids: None,
+            },
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap();
+        let config = all_classes_config(SamplingScheme::InSample, &ctx, &stages);
+
+        let (subscriber, messages) = WarnRecorder::new();
+        let result =
+            tracing::subscriber::with_default(subscriber, || build_forward_sampler(config));
+
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert!(
+            messages.lock().unwrap().is_empty(),
+            "an InSample class must never warn about its stages' noise methods"
+        );
+    }
+
+    #[test]
+    fn test_warn_once_per_class_for_three_out_of_sample_classes() {
+        let stages = vec![
+            make_stage_with_method(0, 0, 5, NoiseMethod::Selective),
+            make_stage_with_method(1, 1, 5, NoiseMethod::Selective),
+        ];
+        let load_model = |stage_id: i32| LoadModel {
+            bus_id: EntityId(0),
+            stage_id,
+            mean_mw: 100.0,
+            std_mw: 10.0,
+        };
+        let ncs_model = |stage_id: i32| NcsModel {
+            ncs_id: EntityId(20),
+            stage_id,
+            mean: 0.7,
+            std: 0.1,
+        };
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0)])
+            .hydros(vec![make_hydro(1)])
+            .stages(stages.clone())
+            .inflow_models(vec![make_inflow_model(1, 0), make_inflow_model(1, 1)])
+            .load_models(vec![load_model(0), load_model(1)])
+            .ncs_models(vec![ncs_model(0), ncs_model(1)])
+            .correlation(identity_correlation(&[1]))
+            .build()
+            .unwrap();
+        let user_tree = uniform_tree(stages.len(), 5, 3);
+        let ctx = build_stochastic_context(
+            &system,
+            42,
+            Some(99),
+            &[],
+            &[],
+            OpeningTreeInputs {
+                user_tree: Some(user_tree),
+                historical_library: None,
+                external_scenario_counts: None,
+                noise_group_ids: None,
+            },
+            ClassSchemes {
+                inflow: Some(SamplingScheme::OutOfSample),
+                load: Some(SamplingScheme::OutOfSample),
+                ncs: Some(SamplingScheme::OutOfSample),
+            },
+        )
+        .unwrap();
+        assert_eq!(ctx.n_load_buses(), 1);
+        assert_eq!(ctx.n_stochastic_ncs(), 1);
+        let config = all_classes_config(SamplingScheme::OutOfSample, &ctx, &stages);
+
+        let (subscriber, messages) = WarnRecorder::new();
+        let result =
+            tracing::subscriber::with_default(subscriber, || build_forward_sampler(config));
+
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        let recorded = messages.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            3,
+            "expected exactly three WARNs, got: {recorded:?}"
+        );
+        assert!(recorded.iter().any(|m| m.contains("inflow")));
+        assert!(recorded.iter().any(|m| m.contains("load")));
+        assert!(recorded.iter().any(|m| m.contains("ncs")));
     }
 }

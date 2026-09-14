@@ -1025,8 +1025,8 @@ mod determinism {
             .collect();
 
         let mut inflow_models: Vec<InflowModel> = Vec::new();
-        for stage_idx in 0..n_stages {
-            for hydro_id in [1i32, 2, 3] {
+        for hydro_id in [1i32, 2, 3] {
+            for stage_idx in 0..n_stages {
                 inflow_models.push(InflowModel {
                     hydro_id: EntityId(hydro_id),
                     stage_id: stage_idx as i32,
@@ -1945,9 +1945,9 @@ mod water_travel_time_no_arc_byte_identity {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
         EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
-        HydroStagePenalties, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
-        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
-        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_sddp::{
         StudySetup,
@@ -1986,8 +1986,8 @@ mod water_travel_time_no_arc_byte_identity {
         }
     }
 
-    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
-        HydroStagePenalties {
+    fn zero_hydro_stage_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,

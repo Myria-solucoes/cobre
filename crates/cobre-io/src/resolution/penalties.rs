@@ -8,20 +8,18 @@
 use std::collections::HashMap;
 
 use cobre_core::{
-    EntityId,
+    EntityId, HydroPenalties,
     entities::{Bus, Hydro, Line, NonControllableSource},
-    resolved::{
-        BusStagePenalties, HydroStagePenalties, LineStagePenalties, NcsStagePenalties,
-        ResolvedPenalties,
-    },
+    resolved::{BusStagePenalties, LineStagePenalties, NcsStagePenalties, ResolvedPenalties},
 };
 
 use crate::constraints::{
     BusPenaltyOverrideRow, HydroPenaltyOverrideRow, LinePenaltyOverrideRow, NcsPenaltyOverrideRow,
 };
 
-/// Entity slices for penalties resolution. Each must be sorted by ID — the slice
-/// position becomes the entity's `entity_index` (declaration-order invariance).
+/// Entity slices for penalties resolution. Each must be in the order
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) establishes;
+/// slice position becomes the entity index.
 pub struct PenaltiesEntitySlices<'a> {
     /// Hydro plants.
     pub hydros: &'a [Hydro],
@@ -163,10 +161,6 @@ pub fn resolve_penalties(
     let buses = entities.buses;
     let lines = entities.lines;
     let ncs_sources = entities.ncs_sources;
-    let hydro_overrides = overrides.hydro;
-    let bus_overrides = overrides.bus;
-    let line_overrides = overrides.line;
-    let ncs_overrides = overrides.ncs;
 
     let hydro_index: HashMap<EntityId, usize> = hydros
         .iter()
@@ -192,7 +186,7 @@ pub fn resolve_penalties(
     // ResolvedPenalties::new fills every cell with one repeated default; the per-entity
     // fill loop below overwrites them all, so this default is allocation-only.
     let hydro_default = hydros.first().map_or(
-        HydroStagePenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -210,7 +204,7 @@ pub fn resolve_penalties(
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         },
-        hydro_stage_penalties,
+        |h| h.penalties,
     );
     let bus_default = buses
         .first()
@@ -260,7 +254,7 @@ pub fn resolve_penalties(
     }
 
     for (entity_idx, hydro) in hydros.iter().enumerate() {
-        let hp = hydro_stage_penalties(hydro);
+        let hp = hydro.penalties;
         for stage_idx in 0..n_stages {
             *table.hydro_penalties_mut(entity_idx, stage_idx) = hp;
         }
@@ -293,7 +287,7 @@ pub fn resolve_penalties(
         }
     }
 
-    for row in hydro_overrides {
+    for row in overrides.hydro {
         let Some(&entity_idx) = hydro_index.get(&row.hydro_id) else {
             continue;
         };
@@ -351,7 +345,7 @@ pub fn resolve_penalties(
         }
     }
 
-    for row in bus_overrides {
+    for row in overrides.bus {
         let Some(&entity_idx) = bus_index.get(&row.bus_id) else {
             continue;
         };
@@ -364,7 +358,7 @@ pub fn resolve_penalties(
         }
     }
 
-    for row in line_overrides {
+    for row in overrides.line {
         let Some(&entity_idx) = line_index.get(&row.line_id) else {
             continue;
         };
@@ -377,7 +371,7 @@ pub fn resolve_penalties(
         }
     }
 
-    for row in ncs_overrides {
+    for row in overrides.ncs {
         let Some(&entity_idx) = ncs_index.get(&row.source_id) else {
             continue;
         };
@@ -391,31 +385,6 @@ pub fn resolve_penalties(
     }
 
     table
-}
-
-/// Convert a `Hydro`'s entity-level `HydroPenalties` to the per-cell
-/// `HydroStagePenalties` — identical fields, distinct types.
-#[inline]
-fn hydro_stage_penalties(hydro: &Hydro) -> HydroStagePenalties {
-    let p = &hydro.penalties;
-    HydroStagePenalties {
-        spillage_cost: p.spillage_cost,
-        diversion_cost: p.diversion_cost,
-        turbined_cost: p.turbined_cost,
-        storage_violation_below_cost: p.storage_violation_below_cost,
-        filling_target_violation_cost: p.filling_target_violation_cost,
-        turbined_violation_below_cost: p.turbined_violation_below_cost,
-        outflow_violation_below_cost: p.outflow_violation_below_cost,
-        outflow_violation_above_cost: p.outflow_violation_above_cost,
-        generation_violation_below_cost: p.generation_violation_below_cost,
-        evaporation_violation_cost: p.evaporation_violation_cost,
-        water_withdrawal_violation_cost: p.water_withdrawal_violation_cost,
-        water_withdrawal_violation_pos_cost: p.water_withdrawal_violation_pos_cost,
-        water_withdrawal_violation_neg_cost: p.water_withdrawal_violation_neg_cost,
-        evaporation_violation_pos_cost: p.evaporation_violation_pos_cost,
-        evaporation_violation_neg_cost: p.evaporation_violation_neg_cost,
-        inflow_nonnegativity_cost: p.inflow_nonnegativity_cost,
-    }
 }
 
 #[cfg(test)]

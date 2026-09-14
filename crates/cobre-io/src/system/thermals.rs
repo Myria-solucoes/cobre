@@ -133,8 +133,8 @@ pub(crate) enum RawAnticipatedConfig {
 /// Load and validate `system/thermals.json` from `path`.
 ///
 /// The result is sorted by `id` ascending, so parser output is deterministic
-/// regardless of file row order (declaration-order invariance); the builder applies
-/// the same id as its `(operational_start_date, id)` canonical tiebreak.
+/// regardless of file row order (declaration-order invariance); canonical order is
+/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build)'s to establish.
 ///
 /// Semantic validation (cross-field) is performed by
 /// `validation::semantic::thermal`; cross-reference validation (e.g., `bus_id`

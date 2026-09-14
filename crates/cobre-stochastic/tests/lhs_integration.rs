@@ -466,7 +466,7 @@ fn lhs_point_wise_stratum_consistency() {
             sampling_seed: 77,
             iteration: 3,
             scenario: scenario as u32,
-            stage_id: 1,
+            stream_id: 1,
             total_scenarios: n as u32,
             dim,
         };

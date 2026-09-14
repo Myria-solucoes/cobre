@@ -803,7 +803,7 @@ mod cell_partition_gates {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, ContractBlockBounds,
-        DeficitSegment, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        DeficitSegment, EntityId, HydroBlockBounds, HydroPenalties, HydroStageBounds,
         HydroUnitGroup, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
@@ -1023,7 +1023,7 @@ mod cell_partition_gates {
         ResolvedPenalties::new(
             counts,
             &PenaltiesDefaults {
-                hydro: HydroStagePenalties {
+                hydro: HydroPenalties {
                     spillage_cost: 0.0,
                     diversion_cost: 0.0,
                     turbined_cost: 0.0,

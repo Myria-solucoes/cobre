@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING — the per-(hydro, stage) penalty type that duplicated
+  `cobre_core::HydroPenalties`' sixteen fields is removed from
+  `cobre_core::resolved`.** The resolved penalty table's `hydro` field, and
+  `ResolvedPenalties::hydro_penalties`/`hydro_penalties_mut`, now read and
+  write `cobre_core::HydroPenalties` directly — the same type already used
+  for entity-level hydro penalties — instead of copying into a separate
+  per-stage twin. Code importing the removed type from `cobre_core::resolved`
+  should import `HydroPenalties` from the crate root instead; field names and
+  resolved values are unchanged.
+
 - **BREAKING — a bound-override row naming a `stage_id` that is not a
   declared study stage is now rejected at validation, for every bound
   family.** The hydro, line, pumping, contract and hydro-unit-group families
@@ -31,6 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correlation applier's separate full-vector code path is removed in favor of a
   single applier that handles every group width from caller-owned scratch.
   Results are unchanged.
+
+- **BREAKING — the three scenario model tables (`inflow_models`, `load_models`,
+  `ncs_models`) now have their documented canonical order checked at
+  construction instead of merely asserted.** `SystemBuilder::build` rejects a
+  table whose `(entity_id, stage_id)` key sequence decreases anywhere, and
+  `System::with_scenario_models` now returns `Result<Self, ValidationError>`
+  instead of `Self`, applying the same check to its replacement
+  `inflow_models` table. `EstimationError` gains a `Validation` variant for
+  callers that match it exhaustively. No deck `cobre-io` can load is affected:
+  `cobre-io` already emits all three tables pre-sorted.
 
 ### Fixed
 

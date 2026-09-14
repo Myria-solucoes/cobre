@@ -2243,11 +2243,11 @@ mod tests {
         use cobre_core::{
             Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties,
             ContractBlockBounds, DeficitSegment, EntityId, FillingConfig, Hydro, HydroBlockBounds,
-            HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
-            LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
-            PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-            ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
-            SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+            HydroGenerationModel, HydroPenalties, HydroStageBounds, LineBlockBounds,
+            LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+            PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties,
+            ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, SystemBuilder,
+            ThermalBlockBounds, ThermalStageBounds,
         };
         use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2355,19 +2355,18 @@ mod tests {
 
         // White-noise inflow models (non-zero std so the Operating/Filling
         // noise_scale is non-zero where the PreFilling zeroing is the contrast).
-        let inflow_models: Vec<InflowModel> = (0..n_stages)
-            .flat_map(|s| {
-                [EntityId(3), EntityId(4)]
-                    .into_iter()
-                    .map(move |hid| InflowModel {
-                        hydro_id: hid,
-                        stage_id: s as i32,
-                        mean_m3s: 80.0,
-                        std_m3s: 20.0,
-                        ar_coefficients: vec![],
-                        residual_std_ratio: 1.0,
-                        annual: None,
-                    })
+        let inflow_models: Vec<InflowModel> = [EntityId(3), EntityId(4)]
+            .into_iter()
+            .flat_map(|hid| {
+                (0..n_stages).map(move |s| InflowModel {
+                    hydro_id: hid,
+                    stage_id: s as i32,
+                    mean_m3s: 80.0,
+                    std_m3s: 20.0,
+                    ar_coefficients: vec![],
+                    residual_std_ratio: 1.0,
+                    annual: None,
+                })
             })
             .collect();
 
@@ -2388,8 +2387,8 @@ mod tests {
             }
         }
 
-        fn default_hydro_penalties() -> HydroStagePenalties {
-            HydroStagePenalties {
+        fn default_hydro_penalties() -> HydroPenalties {
+            HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
                 turbined_cost: 0.0,

@@ -7,319 +7,398 @@
 //! ([`ErrorKind::BusinessRuleViolation`]).
 //!
 //! Call [`validate_structure`] with a path to the case root and a mutable
-//! [`ValidationContext`].  It returns a [`FileManifest`] with one field per
-//! `FILE_ENTRIES` row, zipped positionally.  Missing required files produce
-//! [`ErrorKind::FileNotFound`] entries in the context.  Missing optional files
-//! leave the corresponding manifest field `false` without adding any error.
+//! [`ValidationContext`].  It returns a [`FileManifest`] recording, for each
+//! [`InputFile`], whether that file was found on disk.  Missing required files
+//! produce [`ErrorKind::FileNotFound`] entries in the context.  Missing
+//! optional files leave [`FileManifest::present`] `false` for that key without
+//! adding any error.
 //!
 //! # Examples
 //!
 //! ```no_run
 //! use std::path::Path;
-//! use cobre_io::validation::{ValidationContext, structural::validate_structure};
+//! use cobre_io::validation::{ValidationContext, structural::{InputFile, validate_structure}};
 //!
 //! let mut ctx = ValidationContext::new();
 //! let manifest = validate_structure(Path::new("/path/to/case"), &mut ctx);
 //! assert!(!ctx.has_errors());
-//! assert!(manifest.config_json);
+//! assert!(manifest.present(InputFile::ConfigJson));
 //! ```
 
 use std::path::Path;
 
 use super::{ErrorKind, ValidationContext};
 
-// ── FileManifest ─────────────────────────────────────────────────────────────
+// ── InputFile ────────────────────────────────────────────────────────────────
 
-/// Records whether each input file (one field per `FILE_ENTRIES` row) is
-/// present in the case directory.
-///
-/// Fields default to `false`; [`validate_structure`] sets each to `true` if the
-/// corresponding file was found on disk.
-#[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Default)]
-pub struct FileManifest {
-    /// `config.json` — required
-    pub config_json: bool,
-    /// `penalties.json` — required
-    pub penalties_json: bool,
-    /// `stages.json` — required
-    pub stages_json: bool,
-    /// `initial_conditions.json` — required
-    pub initial_conditions_json: bool,
-    /// `post_study_stages.json` — optional
-    pub post_study_stages_json: bool,
+/// The single registry of every case-directory input file. Each variant names
+/// one file; the private `INPUT_FILES` table pairs it with its relative path
+/// and required flag, and `FileManifest::present` reports whether
+/// [`validate_structure`] found it on disk. A file is declared here and only
+/// here — no other list repeats the file set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputFile {
+    /// `config.json`.
+    ConfigJson,
+    /// `penalties.json`.
+    PenaltiesJson,
+    /// `stages.json`.
+    StagesJson,
+    /// `initial_conditions.json`.
+    InitialConditionsJson,
+    /// `post_study_stages.json`.
+    PostStudyStagesJson,
 
-    /// `system/buses.json` — required
-    pub system_buses_json: bool,
-    /// `system/lines.json` — required
-    pub system_lines_json: bool,
-    /// `system/hydros.json` — required
-    pub system_hydros_json: bool,
-    /// `system/thermals.json` — required
-    pub system_thermals_json: bool,
-    /// `system/non_controllable_sources.json` — optional
-    pub system_non_controllable_sources_json: bool,
-    /// `system/pumping_stations.json` — optional
-    pub system_pumping_stations_json: bool,
-    /// `system/energy_contracts.json` — optional
-    pub system_energy_contracts_json: bool,
-    /// `system/hydro_geometry.parquet` — optional
-    pub system_hydro_geometry_parquet: bool,
-    /// `system/hydro_production_models.json` — optional
-    pub system_hydro_production_models_json: bool,
-    /// `system/fpha_hyperplanes.parquet` — optional
-    pub system_fpha_hyperplanes_parquet: bool,
-    /// `system/hydro_energy_productivity.parquet` — optional
-    pub system_hydro_energy_productivity_parquet: bool,
-    /// `system/tailrace_curves.parquet` — optional
-    pub system_tailrace_curves_parquet: bool,
+    /// `system/buses.json`.
+    SystemBusesJson,
+    /// `system/lines.json`.
+    SystemLinesJson,
+    /// `system/hydros.json`.
+    SystemHydrosJson,
+    /// `system/thermals.json`.
+    SystemThermalsJson,
+    /// `system/non_controllable_sources.json`.
+    SystemNonControllableSourcesJson,
+    /// `system/pumping_stations.json`.
+    SystemPumpingStationsJson,
+    /// `system/energy_contracts.json`.
+    SystemEnergyContractsJson,
+    /// `system/hydro_geometry.parquet`.
+    SystemHydroGeometryParquet,
+    /// `system/hydro_production_models.json`.
+    SystemHydroProductionModelsJson,
+    /// `system/fpha_hyperplanes.parquet`.
+    SystemFphaHyperplanesParquet,
+    /// `system/hydro_energy_productivity.parquet`.
+    SystemHydroEnergyProductivityParquet,
+    /// `system/tailrace_curves.parquet`.
+    SystemTailraceCurvesParquet,
 
-    /// `scenarios/inflow_history.parquet` — optional
-    pub scenarios_inflow_history_parquet: bool,
-    /// `scenarios/inflow_seasonal_stats.parquet` — optional
-    pub scenarios_inflow_seasonal_stats_parquet: bool,
-    /// `scenarios/inflow_ar_coefficients.parquet` — optional
-    pub scenarios_inflow_ar_coefficients_parquet: bool,
-    /// `scenarios/inflow_annual_component.parquet` — optional
-    pub scenarios_inflow_annual_component_parquet: bool,
-    /// `scenarios/external_inflow_scenarios.parquet` — optional
-    pub scenarios_external_inflow_scenarios_parquet: bool,
-    /// `scenarios/external_load_scenarios.parquet` — optional
-    pub scenarios_external_load_scenarios_parquet: bool,
-    /// `scenarios/external_ncs_scenarios.parquet` — optional
-    pub scenarios_external_ncs_scenarios_parquet: bool,
-    /// `scenarios/load_seasonal_stats.parquet` — optional
-    pub scenarios_load_seasonal_stats_parquet: bool,
-    /// `scenarios/load_factors.json` — optional
-    pub scenarios_load_factors_json: bool,
-    /// `scenarios/correlation.json` — optional
-    pub scenarios_correlation_json: bool,
-    /// `scenarios/non_controllable_factors.json` — optional
-    pub scenarios_non_controllable_factors_json: bool,
-    /// `scenarios/non_controllable_stats.parquet` — optional
-    pub scenarios_non_controllable_stats_parquet: bool,
+    /// `scenarios/inflow_history.parquet`.
+    ScenariosInflowHistoryParquet,
+    /// `scenarios/inflow_seasonal_stats.parquet`.
+    ScenariosInflowSeasonalStatsParquet,
+    /// `scenarios/inflow_ar_coefficients.parquet`.
+    ScenariosInflowArCoefficientsParquet,
+    /// `scenarios/inflow_annual_component.parquet`.
+    ScenariosInflowAnnualComponentParquet,
+    /// `scenarios/external_inflow_scenarios.parquet`.
+    ScenariosExternalInflowScenariosParquet,
+    /// `scenarios/external_load_scenarios.parquet`.
+    ScenariosExternalLoadScenariosParquet,
+    /// `scenarios/external_ncs_scenarios.parquet`.
+    ScenariosExternalNcsScenariosParquet,
+    /// `scenarios/load_seasonal_stats.parquet`.
+    ScenariosLoadSeasonalStatsParquet,
+    /// `scenarios/load_factors.json`.
+    ScenariosLoadFactorsJson,
+    /// `scenarios/correlation.json`.
+    ScenariosCorrelationJson,
+    /// `scenarios/non_controllable_factors.json`.
+    ScenariosNonControllableFactorsJson,
+    /// `scenarios/non_controllable_stats.parquet`.
+    ScenariosNonControllableStatsParquet,
 
-    /// `constraints/thermal_bounds.parquet` — optional
-    pub constraints_thermal_bounds_parquet: bool,
-    /// `constraints/hydro_bounds.parquet` — optional
-    pub constraints_hydro_bounds_parquet: bool,
-    /// `constraints/line_bounds.parquet` — optional
-    pub constraints_line_bounds_parquet: bool,
-    /// `constraints/pumping_bounds.parquet` — optional
-    pub constraints_pumping_bounds_parquet: bool,
-    /// `constraints/contract_bounds.parquet` — optional
-    pub constraints_contract_bounds_parquet: bool,
-    /// `constraints/generic_constraints.json` — optional
-    pub constraints_generic_constraints_json: bool,
-    /// `constraints/generic_constraint_bounds.parquet` — optional
-    pub constraints_generic_constraint_bounds_parquet: bool,
-    /// `constraints/generic_parameters.json` — optional
-    pub constraints_generic_parameters_json: bool,
-    /// `constraints/penalty_overrides_bus.parquet` — optional
-    pub constraints_penalty_overrides_bus_parquet: bool,
-    /// `constraints/penalty_overrides_line.parquet` — optional
-    pub constraints_penalty_overrides_line_parquet: bool,
-    /// `constraints/penalty_overrides_hydro.parquet` — optional
-    pub constraints_penalty_overrides_hydro_parquet: bool,
-    /// `constraints/penalty_overrides_ncs.parquet` — optional
-    pub constraints_penalty_overrides_ncs_parquet: bool,
-    /// `constraints/ncs_bounds.parquet` — optional
-    pub constraints_ncs_bounds_parquet: bool,
-    /// `constraints/hydro_unit_group_bounds.parquet` — optional
-    pub constraints_hydro_unit_group_bounds_parquet: bool,
+    /// `constraints/thermal_bounds.parquet`.
+    ConstraintsThermalBoundsParquet,
+    /// `constraints/hydro_bounds.parquet`.
+    ConstraintsHydroBoundsParquet,
+    /// `constraints/line_bounds.parquet`.
+    ConstraintsLineBoundsParquet,
+    /// `constraints/pumping_bounds.parquet`.
+    ConstraintsPumpingBoundsParquet,
+    /// `constraints/contract_bounds.parquet`.
+    ConstraintsContractBoundsParquet,
+    /// `constraints/generic_constraints.json`.
+    ConstraintsGenericConstraintsJson,
+    /// `constraints/generic_constraint_bounds.parquet`.
+    ConstraintsGenericConstraintBoundsParquet,
+    /// `constraints/generic_parameters.json`.
+    ConstraintsGenericParametersJson,
+    /// `constraints/penalty_overrides_bus.parquet`.
+    ConstraintsPenaltyOverridesBusParquet,
+    /// `constraints/penalty_overrides_line.parquet`.
+    ConstraintsPenaltyOverridesLineParquet,
+    /// `constraints/penalty_overrides_hydro.parquet`.
+    ConstraintsPenaltyOverridesHydroParquet,
+    /// `constraints/penalty_overrides_ncs.parquet`.
+    ConstraintsPenaltyOverridesNcsParquet,
+    /// `constraints/ncs_bounds.parquet`.
+    ConstraintsNcsBoundsParquet,
+    /// `constraints/hydro_unit_group_bounds.parquet`.
+    ConstraintsHydroUnitGroupBoundsParquet,
 }
 
-// ── validate_structure ────────────────────────────────────────────────────────
-
-/// Describes a single file entry for the structural check.
+/// One row of the input-file registry: the compiler-checked key, its path
+/// relative to the case root, and whether it is required.
 struct FileEntry {
-    /// Path relative to the case root.
+    key: InputFile,
     relative: &'static str,
     required: bool,
 }
 
-/// Every input file in canonical order — one row per [`FileManifest`] field,
-/// zipped positionally by [`manifest_fields_mut`].
-const FILE_ENTRIES: &[FileEntry] = &[
+/// Every input file, keyed by [`InputFile`] in declaration order — the single
+/// source [`validate_structure`] iterates and [`FileManifest`] indexes by
+/// ordinal.
+const INPUT_FILES: &[FileEntry] = &[
     // Root-level — required
     FileEntry {
+        key: InputFile::ConfigJson,
         relative: "config.json",
         required: true,
     },
     FileEntry {
+        key: InputFile::PenaltiesJson,
         relative: "penalties.json",
         required: true,
     },
     FileEntry {
+        key: InputFile::StagesJson,
         relative: "stages.json",
         required: true,
     },
     FileEntry {
+        key: InputFile::InitialConditionsJson,
         relative: "initial_conditions.json",
         required: true,
     },
     // Root-level — optional
     FileEntry {
+        key: InputFile::PostStudyStagesJson,
         relative: "post_study_stages.json",
         required: false,
     },
     // system/ — required
     FileEntry {
+        key: InputFile::SystemBusesJson,
         relative: "system/buses.json",
         required: true,
     },
     FileEntry {
+        key: InputFile::SystemLinesJson,
         relative: "system/lines.json",
         required: true,
     },
     FileEntry {
+        key: InputFile::SystemHydrosJson,
         relative: "system/hydros.json",
         required: true,
     },
     FileEntry {
+        key: InputFile::SystemThermalsJson,
         relative: "system/thermals.json",
         required: true,
     },
     // system/ — optional
     FileEntry {
+        key: InputFile::SystemNonControllableSourcesJson,
         relative: "system/non_controllable_sources.json",
         required: false,
     },
     FileEntry {
+        key: InputFile::SystemPumpingStationsJson,
         relative: "system/pumping_stations.json",
         required: false,
     },
     FileEntry {
+        key: InputFile::SystemEnergyContractsJson,
         relative: "system/energy_contracts.json",
         required: false,
     },
     FileEntry {
+        key: InputFile::SystemHydroGeometryParquet,
         relative: "system/hydro_geometry.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::SystemHydroProductionModelsJson,
         relative: "system/hydro_production_models.json",
         required: false,
     },
     FileEntry {
+        key: InputFile::SystemFphaHyperplanesParquet,
         relative: "system/fpha_hyperplanes.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::SystemHydroEnergyProductivityParquet,
         relative: "system/hydro_energy_productivity.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::SystemTailraceCurvesParquet,
         relative: "system/tailrace_curves.parquet",
         required: false,
     },
     // scenarios/ — optional
     FileEntry {
+        key: InputFile::ScenariosInflowHistoryParquet,
         relative: "scenarios/inflow_history.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosInflowSeasonalStatsParquet,
         relative: "scenarios/inflow_seasonal_stats.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosInflowArCoefficientsParquet,
         relative: "scenarios/inflow_ar_coefficients.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosInflowAnnualComponentParquet,
         relative: "scenarios/inflow_annual_component.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosExternalInflowScenariosParquet,
         relative: "scenarios/external_inflow_scenarios.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosExternalLoadScenariosParquet,
         relative: "scenarios/external_load_scenarios.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosExternalNcsScenariosParquet,
         relative: "scenarios/external_ncs_scenarios.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosLoadSeasonalStatsParquet,
         relative: "scenarios/load_seasonal_stats.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosLoadFactorsJson,
         relative: "scenarios/load_factors.json",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosCorrelationJson,
         relative: "scenarios/correlation.json",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosNonControllableFactorsJson,
         relative: "scenarios/non_controllable_factors.json",
         required: false,
     },
     FileEntry {
+        key: InputFile::ScenariosNonControllableStatsParquet,
         relative: "scenarios/non_controllable_stats.parquet",
         required: false,
     },
     // constraints/ — optional
     FileEntry {
+        key: InputFile::ConstraintsThermalBoundsParquet,
         relative: "constraints/thermal_bounds.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsHydroBoundsParquet,
         relative: "constraints/hydro_bounds.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsLineBoundsParquet,
         relative: "constraints/line_bounds.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsPumpingBoundsParquet,
         relative: "constraints/pumping_bounds.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsContractBoundsParquet,
         relative: "constraints/contract_bounds.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsGenericConstraintsJson,
         relative: "constraints/generic_constraints.json",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsGenericConstraintBoundsParquet,
         relative: "constraints/generic_constraint_bounds.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsGenericParametersJson,
         relative: "constraints/generic_parameters.json",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsPenaltyOverridesBusParquet,
         relative: "constraints/penalty_overrides_bus.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsPenaltyOverridesLineParquet,
         relative: "constraints/penalty_overrides_line.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsPenaltyOverridesHydroParquet,
         relative: "constraints/penalty_overrides_hydro.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsPenaltyOverridesNcsParquet,
         relative: "constraints/penalty_overrides_ncs.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsNcsBoundsParquet,
         relative: "constraints/ncs_bounds.parquet",
         required: false,
     },
     FileEntry {
+        key: InputFile::ConstraintsHydroUnitGroupBoundsParquet,
         relative: "constraints/hydro_unit_group_bounds.parquet",
         required: false,
     },
 ];
+
+const INPUT_FILE_COUNT: usize = INPUT_FILES.len();
+
+// ── FileManifest ─────────────────────────────────────────────────────────────
+
+/// Records which [`InputFile`]s are present in the case directory.
+///
+/// Flags default to `false`; [`validate_structure`] sets one to `true` for
+/// each file found on disk. Read with [`FileManifest::present`].
+#[derive(Debug, Clone)]
+pub struct FileManifest {
+    flags: [bool; INPUT_FILE_COUNT],
+}
+
+impl Default for FileManifest {
+    fn default() -> Self {
+        Self {
+            flags: [false; INPUT_FILE_COUNT],
+        }
+    }
+}
+
+impl FileManifest {
+    /// Returns whether `file` was found in the case directory.
+    #[must_use]
+    pub fn present(&self, file: InputFile) -> bool {
+        self.flags[file as usize]
+    }
+
+    /// Records that `file` was found on disk.
+    pub(crate) fn set_present(&mut self, file: InputFile) {
+        self.flags[file as usize] = true;
+    }
+}
+
+// ── validate_structure ────────────────────────────────────────────────────────
 
 /// Describes an input file no longer read; `replacement` names its migration
 /// in the rejection message.
@@ -350,9 +429,9 @@ const REMOVED_FILES: &[RemovedFile] = &[
 /// Performs Layer 1 structural validation on the case directory at `case_root`,
 /// returning a [`FileManifest`] of which files are present.
 ///
-/// A present file sets its manifest field to `true`. An absent **required** file
+/// A present file sets its manifest flag to `true`. An absent **required** file
 /// adds an [`ErrorKind::FileNotFound`] error; an absent **optional** file leaves
-/// its field `false` with no error. A present file listed in `REMOVED_FILES`
+/// its flag `false` with no error. A present file listed in `REMOVED_FILES`
 /// adds an [`ErrorKind::BusinessRuleViolation`] error naming its replacement.
 /// This function does **not** read or parse any file content.
 #[must_use]
@@ -373,9 +452,9 @@ pub fn validate_structure(case_root: &Path, ctx: &mut ValidationContext) -> File
         }
     }
 
-    for (entry, present) in FILE_ENTRIES.iter().zip(manifest_fields_mut(&mut manifest)) {
+    for entry in INPUT_FILES {
         if case_root.join(entry.relative).exists() {
-            *present = true;
+            manifest.set_present(entry.key);
         } else if entry.required {
             ctx.add_error(
                 ErrorKind::FileNotFound,
@@ -390,62 +469,6 @@ pub fn validate_structure(case_root: &Path, ctx: &mut ValidationContext) -> File
     }
 
     manifest
-}
-
-/// Returns mutable references to every `bool` field of [`FileManifest`] in the
-/// same order as [`FILE_ENTRIES`] — `validate_structure` zips the two positionally,
-/// so a divergence here silently misassigns presence flags.
-fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
-    [
-        // Root
-        &mut m.config_json,
-        &mut m.penalties_json,
-        &mut m.stages_json,
-        &mut m.initial_conditions_json,
-        &mut m.post_study_stages_json,
-        // system/ required
-        &mut m.system_buses_json,
-        &mut m.system_lines_json,
-        &mut m.system_hydros_json,
-        &mut m.system_thermals_json,
-        // system/ optional
-        &mut m.system_non_controllable_sources_json,
-        &mut m.system_pumping_stations_json,
-        &mut m.system_energy_contracts_json,
-        &mut m.system_hydro_geometry_parquet,
-        &mut m.system_hydro_production_models_json,
-        &mut m.system_fpha_hyperplanes_parquet,
-        &mut m.system_hydro_energy_productivity_parquet,
-        &mut m.system_tailrace_curves_parquet,
-        // scenarios/
-        &mut m.scenarios_inflow_history_parquet,
-        &mut m.scenarios_inflow_seasonal_stats_parquet,
-        &mut m.scenarios_inflow_ar_coefficients_parquet,
-        &mut m.scenarios_inflow_annual_component_parquet,
-        &mut m.scenarios_external_inflow_scenarios_parquet,
-        &mut m.scenarios_external_load_scenarios_parquet,
-        &mut m.scenarios_external_ncs_scenarios_parquet,
-        &mut m.scenarios_load_seasonal_stats_parquet,
-        &mut m.scenarios_load_factors_json,
-        &mut m.scenarios_correlation_json,
-        &mut m.scenarios_non_controllable_factors_json,
-        &mut m.scenarios_non_controllable_stats_parquet,
-        // constraints/
-        &mut m.constraints_thermal_bounds_parquet,
-        &mut m.constraints_hydro_bounds_parquet,
-        &mut m.constraints_line_bounds_parquet,
-        &mut m.constraints_pumping_bounds_parquet,
-        &mut m.constraints_contract_bounds_parquet,
-        &mut m.constraints_generic_constraints_json,
-        &mut m.constraints_generic_constraint_bounds_parquet,
-        &mut m.constraints_generic_parameters_json,
-        &mut m.constraints_penalty_overrides_bus_parquet,
-        &mut m.constraints_penalty_overrides_line_parquet,
-        &mut m.constraints_penalty_overrides_hydro_parquet,
-        &mut m.constraints_penalty_overrides_ncs_parquet,
-        &mut m.constraints_ncs_bounds_parquet,
-        &mut m.constraints_hydro_unit_group_bounds_parquet,
-    ]
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -485,27 +508,36 @@ mod tests {
             ctx.errors()
         );
 
-        assert!(manifest.config_json, "config.json should be present");
-        assert!(manifest.penalties_json, "penalties.json should be present");
-        assert!(manifest.stages_json, "stages.json should be present");
         assert!(
-            manifest.initial_conditions_json,
+            manifest.present(InputFile::ConfigJson),
+            "config.json should be present"
+        );
+        assert!(
+            manifest.present(InputFile::PenaltiesJson),
+            "penalties.json should be present"
+        );
+        assert!(
+            manifest.present(InputFile::StagesJson),
+            "stages.json should be present"
+        );
+        assert!(
+            manifest.present(InputFile::InitialConditionsJson),
             "initial_conditions.json should be present"
         );
         assert!(
-            manifest.system_buses_json,
+            manifest.present(InputFile::SystemBusesJson),
             "system/buses.json should be present"
         );
         assert!(
-            manifest.system_lines_json,
+            manifest.present(InputFile::SystemLinesJson),
             "system/lines.json should be present"
         );
         assert!(
-            manifest.system_hydros_json,
+            manifest.present(InputFile::SystemHydrosJson),
             "system/hydros.json should be present"
         );
         assert!(
-            manifest.system_thermals_json,
+            manifest.present(InputFile::SystemThermalsJson),
             "system/thermals.json should be present"
         );
     }
@@ -536,8 +568,8 @@ mod tests {
             entry.file.display()
         );
         assert!(
-            !manifest.system_hydros_json,
-            "manifest.system_hydros_json should be false"
+            !manifest.present(InputFile::SystemHydrosJson),
+            "manifest.present(SystemHydrosJson) should be false"
         );
     }
 
@@ -556,11 +588,11 @@ mod tests {
         );
 
         // Verify representative optional files are false
-        assert!(!manifest.system_non_controllable_sources_json);
-        assert!(!manifest.system_hydro_geometry_parquet);
-        assert!(!manifest.scenarios_inflow_history_parquet);
-        assert!(!manifest.constraints_thermal_bounds_parquet);
-        assert!(!manifest.scenarios_correlation_json);
+        assert!(!manifest.present(InputFile::SystemNonControllableSourcesJson));
+        assert!(!manifest.present(InputFile::SystemHydroGeometryParquet));
+        assert!(!manifest.present(InputFile::ScenariosInflowHistoryParquet));
+        assert!(!manifest.present(InputFile::ConstraintsThermalBoundsParquet));
+        assert!(!manifest.present(InputFile::ScenariosCorrelationJson));
     }
 
     #[test]
@@ -576,7 +608,7 @@ mod tests {
 
         assert!(!ctx.has_errors());
         assert!(
-            manifest.scenarios_correlation_json,
+            manifest.present(InputFile::ScenariosCorrelationJson),
             "present optional file should be marked true in manifest"
         );
     }
@@ -609,16 +641,54 @@ mod tests {
         }
     }
 
+    /// Registry invariants: every row's relative path is unique, the table
+    /// covers every [`InputFile`] variant exactly once in declaration order,
+    /// and the required set is exactly the eight files documented above.
     #[test]
-    fn test_structural_manifest_fields_count() {
-        // validate_structure zips FILE_ENTRIES with manifest_fields_mut positionally;
-        // the invariant is that the two stay the same length, not any specific count.
-        let mut manifest = FileManifest::default();
-        let fields = manifest_fields_mut(&mut manifest);
+    fn test_input_files_registry_invariants() {
         assert_eq!(
-            FILE_ENTRIES.len(),
-            fields.len(),
-            "FILE_ENTRIES and manifest_fields_mut must return the same length"
+            INPUT_FILES.len(),
+            INPUT_FILE_COUNT,
+            "INPUT_FILES must have one row per InputFile variant"
+        );
+
+        let mut seen_paths = std::collections::HashSet::new();
+        for entry in INPUT_FILES {
+            assert!(
+                seen_paths.insert(entry.relative),
+                "duplicate relative path in INPUT_FILES: {}",
+                entry.relative
+            );
+        }
+
+        for (index, entry) in INPUT_FILES.iter().enumerate() {
+            assert_eq!(
+                entry.key as usize, index,
+                "INPUT_FILES row {index} ({}) is out of variant-declaration order",
+                entry.relative
+            );
+        }
+
+        let required_paths: std::collections::HashSet<&'static str> = INPUT_FILES
+            .iter()
+            .filter(|entry| entry.required)
+            .map(|entry| entry.relative)
+            .collect();
+        let expected_required: std::collections::HashSet<&'static str> = [
+            "config.json",
+            "penalties.json",
+            "stages.json",
+            "initial_conditions.json",
+            "system/buses.json",
+            "system/lines.json",
+            "system/hydros.json",
+            "system/thermals.json",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            required_paths, expected_required,
+            "the required set must be exactly the eight files documented today"
         );
     }
 
@@ -646,12 +716,12 @@ mod tests {
             "no errors expected when all required files present"
         );
         assert!(
-            manifest.constraints_generic_parameters_json,
-            "constraints_generic_parameters_json should be true"
+            manifest.present(InputFile::ConstraintsGenericParametersJson),
+            "constraints/generic_parameters.json should be present"
         );
         assert!(
-            manifest.system_hydro_energy_productivity_parquet,
-            "system_hydro_energy_productivity_parquet should be true"
+            manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
+            "system/hydro_energy_productivity.parquet should be present"
         );
     }
 
@@ -669,17 +739,17 @@ mod tests {
             "absent optional files must not produce errors"
         );
         assert!(
-            !manifest.constraints_generic_parameters_json,
-            "constraints_generic_parameters_json should be false when file is absent"
+            !manifest.present(InputFile::ConstraintsGenericParametersJson),
+            "constraints/generic_parameters.json should be false when file is absent"
         );
         assert!(
-            !manifest.system_hydro_energy_productivity_parquet,
-            "system_hydro_energy_productivity_parquet should be false when file is absent"
+            !manifest.present(InputFile::SystemHydroEnergyProductivityParquet),
+            "system/hydro_energy_productivity.parquet should be false when file is absent"
         );
     }
 
     /// AC: a case directory containing `constraints/generic_parameters.json` must set
-    /// `manifest.constraints_generic_parameters_json == true`.
+    /// `manifest.present(InputFile::ConstraintsGenericParametersJson) == true`.
     #[test]
     fn manifest_detects_scalar_parameters_json_when_present() {
         let dir = TempDir::new().unwrap();
@@ -699,13 +769,13 @@ mod tests {
             "no errors expected when all required files are present"
         );
         assert!(
-            manifest.constraints_generic_parameters_json,
-            "constraints_generic_parameters_json must be true when constraints/generic_parameters.json exists"
+            manifest.present(InputFile::ConstraintsGenericParametersJson),
+            "constraints/generic_parameters.json must be true when constraints/generic_parameters.json exists"
         );
     }
 
     /// AC: a case directory with no scalar parameter file must report
-    /// `manifest.constraints_generic_parameters_json == false` without producing an error.
+    /// `manifest.present(InputFile::ConstraintsGenericParametersJson) == false` without producing an error.
     #[test]
     fn manifest_reports_absent_when_no_parameter_file() {
         let dir = TempDir::new().unwrap();
@@ -720,8 +790,8 @@ mod tests {
             "absent optional file must not produce errors"
         );
         assert!(
-            !manifest.constraints_generic_parameters_json,
-            "constraints_generic_parameters_json must be false when constraints/generic_parameters.json is absent"
+            !manifest.present(InputFile::ConstraintsGenericParametersJson),
+            "constraints/generic_parameters.json must be false when constraints/generic_parameters.json is absent"
         );
     }
 
@@ -739,8 +809,8 @@ mod tests {
             "present optional file should not produce errors"
         );
         assert!(
-            manifest.system_tailrace_curves_parquet,
-            "system_tailrace_curves_parquet should be true when file is present"
+            manifest.present(InputFile::SystemTailraceCurvesParquet),
+            "system/tailrace_curves.parquet should be true when file is present"
         );
     }
 
@@ -758,8 +828,8 @@ mod tests {
             "absent optional file should not produce errors"
         );
         assert!(
-            !manifest.system_tailrace_curves_parquet,
-            "system_tailrace_curves_parquet should be false when file is absent"
+            !manifest.present(InputFile::SystemTailraceCurvesParquet),
+            "system/tailrace_curves.parquet should be false when file is absent"
         );
     }
 
@@ -780,8 +850,8 @@ mod tests {
             "present optional file should not produce errors"
         );
         assert!(
-            manifest.scenarios_inflow_annual_component_parquet,
-            "scenarios_inflow_annual_component_parquet should be true when file is present"
+            manifest.present(InputFile::ScenariosInflowAnnualComponentParquet),
+            "scenarios/inflow_annual_component.parquet should be true when file is present"
         );
     }
 
@@ -800,8 +870,8 @@ mod tests {
             "absent optional file should not produce errors"
         );
         assert!(
-            !manifest.scenarios_inflow_annual_component_parquet,
-            "scenarios_inflow_annual_component_parquet should be false when file is absent"
+            !manifest.present(InputFile::ScenariosInflowAnnualComponentParquet),
+            "scenarios/inflow_annual_component.parquet should be false when file is absent"
         );
     }
 
@@ -823,8 +893,8 @@ mod tests {
             "present optional file should not produce errors"
         );
         assert!(
-            manifest.constraints_hydro_unit_group_bounds_parquet,
-            "constraints_hydro_unit_group_bounds_parquet should be true when file is present"
+            manifest.present(InputFile::ConstraintsHydroUnitGroupBoundsParquet),
+            "constraints/hydro_unit_group_bounds.parquet should be true when file is present"
         );
 
         let absent_dir = TempDir::new().unwrap();
@@ -838,8 +908,8 @@ mod tests {
             "absent optional file should not produce errors"
         );
         assert!(
-            !absent_manifest.constraints_hydro_unit_group_bounds_parquet,
-            "constraints_hydro_unit_group_bounds_parquet should be false when file is absent"
+            !absent_manifest.present(InputFile::ConstraintsHydroUnitGroupBoundsParquet),
+            "constraints/hydro_unit_group_bounds.parquet should be false when file is absent"
         );
     }
 
@@ -971,46 +1041,46 @@ mod tests {
 
         // The three named optional files stay tracked in the manifest; the
         // removed file itself carries no manifest field — REMOVED_FILES is a
-        // separate rejection loop, not a FILE_ENTRIES row.
-        assert!(manifest.constraints_line_bounds_parquet);
-        assert!(manifest.constraints_hydro_bounds_parquet);
-        assert!(manifest.scenarios_load_factors_json);
+        // separate rejection loop, not an INPUT_FILES row.
+        assert!(manifest.present(InputFile::ConstraintsLineBoundsParquet));
+        assert!(manifest.present(InputFile::ConstraintsHydroBoundsParquet));
+        assert!(manifest.present(InputFile::ScenariosLoadFactorsJson));
 
         // Every other optional flag stays false — pins that the removed-file
-        // loop did not shift the FILE_ENTRIES / manifest_fields_mut positional zip.
-        assert!(!manifest.system_non_controllable_sources_json);
-        assert!(!manifest.system_pumping_stations_json);
-        assert!(!manifest.system_energy_contracts_json);
-        assert!(!manifest.system_hydro_geometry_parquet);
-        assert!(!manifest.system_hydro_production_models_json);
-        assert!(!manifest.system_fpha_hyperplanes_parquet);
-        assert!(!manifest.system_hydro_energy_productivity_parquet);
-        assert!(!manifest.system_tailrace_curves_parquet);
+        // loop did not shift the INPUT_FILES / FileManifest ordinal keying.
+        assert!(!manifest.present(InputFile::SystemNonControllableSourcesJson));
+        assert!(!manifest.present(InputFile::SystemPumpingStationsJson));
+        assert!(!manifest.present(InputFile::SystemEnergyContractsJson));
+        assert!(!manifest.present(InputFile::SystemHydroGeometryParquet));
+        assert!(!manifest.present(InputFile::SystemHydroProductionModelsJson));
+        assert!(!manifest.present(InputFile::SystemFphaHyperplanesParquet));
+        assert!(!manifest.present(InputFile::SystemHydroEnergyProductivityParquet));
+        assert!(!manifest.present(InputFile::SystemTailraceCurvesParquet));
 
-        assert!(!manifest.scenarios_inflow_history_parquet);
-        assert!(!manifest.scenarios_inflow_seasonal_stats_parquet);
-        assert!(!manifest.scenarios_inflow_ar_coefficients_parquet);
-        assert!(!manifest.scenarios_inflow_annual_component_parquet);
-        assert!(!manifest.scenarios_external_inflow_scenarios_parquet);
-        assert!(!manifest.scenarios_external_load_scenarios_parquet);
-        assert!(!manifest.scenarios_external_ncs_scenarios_parquet);
-        assert!(!manifest.scenarios_load_seasonal_stats_parquet);
-        assert!(!manifest.scenarios_correlation_json);
-        assert!(!manifest.scenarios_non_controllable_factors_json);
-        assert!(!manifest.scenarios_non_controllable_stats_parquet);
+        assert!(!manifest.present(InputFile::ScenariosInflowHistoryParquet));
+        assert!(!manifest.present(InputFile::ScenariosInflowSeasonalStatsParquet));
+        assert!(!manifest.present(InputFile::ScenariosInflowArCoefficientsParquet));
+        assert!(!manifest.present(InputFile::ScenariosInflowAnnualComponentParquet));
+        assert!(!manifest.present(InputFile::ScenariosExternalInflowScenariosParquet));
+        assert!(!manifest.present(InputFile::ScenariosExternalLoadScenariosParquet));
+        assert!(!manifest.present(InputFile::ScenariosExternalNcsScenariosParquet));
+        assert!(!manifest.present(InputFile::ScenariosLoadSeasonalStatsParquet));
+        assert!(!manifest.present(InputFile::ScenariosCorrelationJson));
+        assert!(!manifest.present(InputFile::ScenariosNonControllableFactorsJson));
+        assert!(!manifest.present(InputFile::ScenariosNonControllableStatsParquet));
 
-        assert!(!manifest.constraints_thermal_bounds_parquet);
-        assert!(!manifest.constraints_pumping_bounds_parquet);
-        assert!(!manifest.constraints_contract_bounds_parquet);
-        assert!(!manifest.constraints_generic_constraints_json);
-        assert!(!manifest.constraints_generic_constraint_bounds_parquet);
-        assert!(!manifest.constraints_generic_parameters_json);
-        assert!(!manifest.constraints_penalty_overrides_bus_parquet);
-        assert!(!manifest.constraints_penalty_overrides_line_parquet);
-        assert!(!manifest.constraints_penalty_overrides_hydro_parquet);
-        assert!(!manifest.constraints_penalty_overrides_ncs_parquet);
-        assert!(!manifest.constraints_ncs_bounds_parquet);
-        assert!(!manifest.constraints_hydro_unit_group_bounds_parquet);
+        assert!(!manifest.present(InputFile::ConstraintsThermalBoundsParquet));
+        assert!(!manifest.present(InputFile::ConstraintsPumpingBoundsParquet));
+        assert!(!manifest.present(InputFile::ConstraintsContractBoundsParquet));
+        assert!(!manifest.present(InputFile::ConstraintsGenericConstraintsJson));
+        assert!(!manifest.present(InputFile::ConstraintsGenericConstraintBoundsParquet));
+        assert!(!manifest.present(InputFile::ConstraintsGenericParametersJson));
+        assert!(!manifest.present(InputFile::ConstraintsPenaltyOverridesBusParquet));
+        assert!(!manifest.present(InputFile::ConstraintsPenaltyOverridesLineParquet));
+        assert!(!manifest.present(InputFile::ConstraintsPenaltyOverridesHydroParquet));
+        assert!(!manifest.present(InputFile::ConstraintsPenaltyOverridesNcsParquet));
+        assert!(!manifest.present(InputFile::ConstraintsNcsBoundsParquet));
+        assert!(!manifest.present(InputFile::ConstraintsHydroUnitGroupBoundsParquet));
     }
 
     #[test]

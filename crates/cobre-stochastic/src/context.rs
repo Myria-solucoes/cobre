@@ -1408,21 +1408,21 @@ mod tests {
                 make_inflow_model(2, 0, 20.0, vec![]),
             ])
             .load_models(vec![
-                make_load_model(10, 0, 100.0, 10.0),
                 make_load_model(0, 0, 50.0, 0.0),
+                make_load_model(10, 0, 100.0, 10.0),
             ])
             .ncs_models(vec![
-                NcsModel {
-                    ncs_id: EntityId(21),
-                    stage_id: 0,
-                    mean: 0.8,
-                    std: 0.0,
-                },
                 NcsModel {
                     ncs_id: EntityId(20),
                     stage_id: 0,
                     mean: 0.7,
                     std: 0.1,
+                },
+                NcsModel {
+                    ncs_id: EntityId(21),
+                    stage_id: 0,
+                    mean: 0.8,
+                    std: 0.0,
                 },
             ])
             .correlation(identity_correlation(&[1, 2]))
@@ -1464,8 +1464,8 @@ mod tests {
             .stages(vec![make_stage(0, 0, 3)])
             .inflow_models(vec![make_inflow_model(1, 0, 30.0, vec![])])
             .load_models(vec![
-                make_load_model(10, 0, 100.0, 10.0),
                 make_load_model(0, 0, 50.0, 0.0),
+                make_load_model(10, 0, 100.0, 10.0),
             ])
             .correlation(identity_correlation(&[1]))
             .build()
