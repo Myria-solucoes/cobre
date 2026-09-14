@@ -1172,11 +1172,15 @@ impl ResolvedBounds {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BlockBoundsCountsSpec, HydroUnitGroupBoundsCountsSpec};
+    use super::super::BlockBoundsCountsSpec;
+    #[cfg(feature = "serde")]
+    use super::super::HydroUnitGroupBoundsCountsSpec;
+    #[cfg(feature = "serde")]
+    use super::ResolvedHydroUnitGroupBounds;
     use super::{
         BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, HydroBlockBounds, HydroStageBounds,
         LineBlockBounds, PumpingBlockBounds, ResolvedBlockBounds, ResolvedBounds,
-        ResolvedHydroUnitGroupBounds, ThermalBlockBounds, ThermalStageBounds,
+        ThermalBlockBounds, ThermalStageBounds,
     };
     use crate::test_support::{f64_bits_eq, opt_f64_bits_eq};
 
