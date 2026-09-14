@@ -28,16 +28,16 @@ fn make_inflow_model(
     })
 }
 
-fn shared_fixture() -> cobre_core::System {
+fn fixture_with_openings(n_openings: usize) -> cobre_core::System {
     let hydros = vec![sized_hydro(1), sized_hydro(2)];
 
     // Stage id=-1 is pre-study (excluded from the opening tree); it supplies the
     // lag-1 statistics the PAR coefficient conversion needs.
     let stages = vec![
-        saa_stage(0, -1, 5),
-        saa_stage(1, 0, 5),
-        saa_stage(2, 1, 5),
-        saa_stage(3, 2, 5),
+        saa_stage(0, -1, n_openings),
+        saa_stage(1, 0, n_openings),
+        saa_stage(2, 1, n_openings),
+        saa_stage(3, 2, n_openings),
     ];
 
     let inflow_models = vec![
@@ -58,14 +58,16 @@ fn shared_fixture() -> cobre_core::System {
         .inflow_models(inflow_models)
         .correlation(identity_correlation_model(&[1, 2]))
         .build()
-        .expect("shared_fixture: system build must succeed")
+        .expect("fixture_with_openings: system build must succeed")
 }
 
-#[test]
-fn pipeline_builds_with_correct_dimensions() {
-    let system = shared_fixture();
-    let ctx = build_stochastic_context(
-        &system,
+fn shared_fixture() -> cobre_core::System {
+    fixture_with_openings(5)
+}
+
+fn build_shared_ctx(system: &cobre_core::System) -> cobre_stochastic::StochasticContext {
+    build_stochastic_context(
+        system,
         42,
         None,
         &[],
@@ -77,7 +79,13 @@ fn pipeline_builds_with_correct_dimensions() {
             ncs: Some(SamplingScheme::InSample),
         },
     )
-    .expect("build_stochastic_context must succeed for the shared fixture");
+    .expect("build_stochastic_context must succeed for the shared fixture")
+}
+
+#[test]
+fn pipeline_builds_with_correct_dimensions() {
+    let system = shared_fixture();
+    let ctx = build_shared_ctx(&system);
 
     assert_eq!(ctx.dim(), 2, "expected dim=2 (two hydros)");
     assert_eq!(ctx.n_stages(), 3, "expected n_stages=3 (study stages only)");
@@ -103,20 +111,7 @@ fn pipeline_builds_with_correct_dimensions() {
 #[test]
 fn par_lp_coefficients_match_hand_computed() {
     let system = shared_fixture();
-    let ctx = build_stochastic_context(
-        &system,
-        42,
-        None,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .expect("build_stochastic_context must succeed for the shared fixture");
+    let ctx = build_shared_ctx(&system);
 
     let par = ctx.par();
     let tol = 1e-10;
@@ -171,20 +166,7 @@ fn par_lp_coefficients_match_hand_computed() {
 #[test]
 fn opening_tree_structure_correct() {
     let system = shared_fixture();
-    let ctx = build_stochastic_context(
-        &system,
-        42,
-        None,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .expect("build_stochastic_context must succeed for the shared fixture");
+    let ctx = build_shared_ctx(&system);
 
     let tree = ctx.opening_tree();
 
@@ -209,20 +191,7 @@ fn opening_tree_structure_correct() {
 #[test]
 fn sample_forward_returns_valid_output() {
     let system = shared_fixture();
-    let ctx = build_stochastic_context(
-        &system,
-        42,
-        None,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .expect("build_stochastic_context must succeed for the shared fixture");
+    let ctx = build_shared_ctx(&system);
 
     let view = ctx.tree_view();
     let base_seed = ctx.base_seed();
@@ -261,33 +230,7 @@ fn sample_forward_returns_valid_output() {
 #[allow(clippy::cast_precision_loss)]
 fn opening_tree_marginal_statistics() {
     let n_openings = 500_usize;
-
-    let hydros = vec![sized_hydro(1), sized_hydro(2)];
-    let stages = vec![
-        saa_stage(0, -1, n_openings),
-        saa_stage(1, 0, n_openings),
-        saa_stage(2, 1, n_openings),
-        saa_stage(3, 2, n_openings),
-    ];
-    let inflow_models = vec![
-        make_inflow_model(1, -1, 100.0, 30.0, vec![], 1.0),
-        make_inflow_model(1, 0, 100.0, 30.0, vec![0.3], 0.954),
-        make_inflow_model(1, 1, 100.0, 30.0, vec![0.3], 0.954),
-        make_inflow_model(1, 2, 100.0, 30.0, vec![0.3], 0.954),
-        make_inflow_model(2, -1, 200.0, 40.0, vec![], 1.0),
-        make_inflow_model(2, 0, 200.0, 40.0, vec![0.4], 0.917),
-        make_inflow_model(2, 1, 200.0, 40.0, vec![0.4], 0.917),
-        make_inflow_model(2, 2, 200.0, 40.0, vec![0.4], 0.917),
-    ];
-
-    let system = SystemBuilder::new()
-        .buses(vec![deficit_bus(0)])
-        .hydros(hydros)
-        .stages(stages)
-        .inflow_models(inflow_models)
-        .correlation(identity_correlation_model(&[1, 2]))
-        .build()
-        .expect("system build must succeed for marginal statistics test");
+    let system = fixture_with_openings(n_openings);
 
     let ctx = build_stochastic_context(
         &system,

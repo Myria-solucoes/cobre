@@ -12,7 +12,7 @@
 //!
 //! [`solve_par_noise`]: crate::par::evaluate::solve_par_noise
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use cobre_core::{
     EntityId,
@@ -199,7 +199,7 @@ impl ExternalScenarioLibrary {
 /// the value is a declared domain id, "not a 0-based index" — every
 /// External-row consumer below resolves through this map, never casts
 /// `stage_id as usize` directly.
-fn stage_id_to_index(stages: &[Stage]) -> std::collections::HashMap<i32, usize> {
+fn stage_id_to_index(stages: &[Stage]) -> HashMap<i32, usize> {
     stages.iter().enumerate().map(|(i, s)| (s.id, i)).collect()
 }
 
@@ -293,7 +293,7 @@ pub fn standardize_external_inflow(
         return;
     }
 
-    let hydro_index: std::collections::HashMap<EntityId, usize> = hydro_ids
+    let hydro_index: HashMap<EntityId, usize> = hydro_ids
         .iter()
         .enumerate()
         .map(|(i, &id)| (id, i))
@@ -317,16 +317,18 @@ pub fn standardize_external_inflow(
         };
         #[allow(clippy::cast_sign_loss)]
         let scenario_idx = row.scenario_id as usize;
-        if let Some(&h_idx) = hydro_index.get(&row.hydro_id) {
-            // Defensive bound: cobre-io's A1 (exact scenario_id set) is the
-            // load-bearing guard that rejects an out-of-range scenario_id at
-            // load; this keeps a stray index from writing into a neighbouring
-            // stage's realization 0 instead of being caught.
-            if scenario_idx < n_scenarios {
-                raw_values[stage_idx * n_scenarios * n_hydros + scenario_idx * n_hydros + h_idx] =
-                    row.value_m3s;
-            }
+        let Some(&h_idx) = hydro_index.get(&row.hydro_id) else {
+            continue;
+        };
+        // Defensive bound: cobre-io's A1 (exact scenario_id set) is the
+        // load-bearing guard that rejects an out-of-range scenario_id at
+        // load; this keeps a stray index from writing into a neighbouring
+        // stage's realization 0 instead of being caught.
+        if scenario_idx >= n_scenarios {
+            continue;
         }
+        raw_values[stage_idx * n_scenarios * n_hydros + scenario_idx * n_hydros + h_idx] =
+            row.value_m3s;
     }
 
     for (stage_idx, &raw_count) in library
@@ -418,7 +420,7 @@ fn standardize_external_simple<R, M, FM, FR>(
         return;
     }
 
-    let entity_index: std::collections::HashMap<EntityId, usize> = entity_ids
+    let entity_index: HashMap<EntityId, usize> = entity_ids
         .iter()
         .enumerate()
         .map(|(i, &id)| (id, i))
@@ -443,20 +445,22 @@ fn standardize_external_simple<R, M, FM, FR>(
             continue;
         };
         let scenario_idx = scenario_id as usize;
-        if let Some(&e_idx) = entity_index.get(&entity_id) {
-            // Defensive bound: cobre-io's A1 is the load-bearing guard that
-            // rejects an out-of-range scenario_id at load; this keeps a stray
-            // index from writing into a neighbouring stage's realization 0.
-            if scenario_idx < n_scenarios {
-                let (mean, std) = mean_std[stage_idx * n_entities + e_idx];
-                let eta = if std == 0.0 {
-                    0.0
-                } else {
-                    (value - mean) / std
-                };
-                library.eta_slice_mut(stage_idx, scenario_idx)[e_idx] = eta;
-            }
+        let Some(&e_idx) = entity_index.get(&entity_id) else {
+            continue;
+        };
+        // Defensive bound: cobre-io's A1 is the load-bearing guard that
+        // rejects an out-of-range scenario_id at load; this keeps a stray
+        // index from writing into a neighbouring stage's realization 0.
+        if scenario_idx >= n_scenarios {
+            continue;
         }
+        let (mean, std) = mean_std[stage_idx * n_entities + e_idx];
+        let eta = if std == 0.0 {
+            0.0
+        } else {
+            (value - mean) / std
+        };
+        library.eta_slice_mut(stage_idx, scenario_idx)[e_idx] = eta;
     }
 }
 
@@ -512,7 +516,7 @@ where
         return moments;
     }
 
-    let entity_index: std::collections::HashMap<EntityId, usize> = entity_ids
+    let entity_index: HashMap<EntityId, usize> = entity_ids
         .iter()
         .enumerate()
         .map(|(i, &id)| (id, i))
@@ -532,9 +536,10 @@ where
             continue;
         };
         let stage_idx = stage_id as usize;
-        if stage_idx < n_stages {
-            cells[stage_idx * n_entities + e_idx].push((scenario_id, value));
+        if stage_idx >= n_stages {
+            continue;
         }
+        cells[stage_idx * n_entities + e_idx].push((scenario_id, value));
     }
 
     for (cell_idx, cell) in cells.iter_mut().enumerate() {
@@ -2439,10 +2444,6 @@ mod tests {
     // the forward pass, so z == v.
     // -----------------------------------------------------------------------
 
-    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(y, m, day).unwrap()
-    }
-
     fn dated_stage(
         index: usize,
         id: i32,
@@ -2488,7 +2489,7 @@ mod tests {
         let hydros = vec![make_hydro(1), make_hydro(2)];
         let season_map = monthly_season_map(MonthlyLabels::OneBased);
 
-        let stages = vec![dated_stage(0, 0, d(2024, 1, 1), d(2024, 2, 1), 0)];
+        let stages = vec![dated_stage(0, 0, date(2024, 1, 1), date(2024, 2, 1), 0)];
         let first_stage = stages[0].clone();
 
         let models = vec![
@@ -2502,26 +2503,26 @@ mod tests {
         let record = vec![
             InflowHistoryRow {
                 hydro_id: h1,
-                start_date: d(2023, 12, 1),
-                end_date: d(2024, 1, 1),
+                start_date: date(2023, 12, 1),
+                end_date: date(2024, 1, 1),
                 value_m3s: 110.0,
             },
             InflowHistoryRow {
                 hydro_id: h1,
-                start_date: d(2023, 11, 1),
-                end_date: d(2023, 12, 1),
+                start_date: date(2023, 11, 1),
+                end_date: date(2023, 12, 1),
                 value_m3s: 120.0,
             },
             InflowHistoryRow {
                 hydro_id: h2,
-                start_date: d(2023, 12, 1),
-                end_date: d(2024, 1, 1),
+                start_date: date(2023, 12, 1),
+                end_date: date(2024, 1, 1),
                 value_m3s: 210.0,
             },
             InflowHistoryRow {
                 hydro_id: h2,
-                start_date: d(2023, 11, 1),
-                end_date: d(2023, 12, 1),
+                start_date: date(2023, 11, 1),
+                end_date: date(2023, 12, 1),
                 value_m3s: 220.0,
             },
         ];
@@ -2602,10 +2603,10 @@ mod tests {
         let season_map = monthly_season_map(MonthlyLabels::OneBased);
 
         let stages = vec![
-            dated_stage(0, 0, d(2026, 4, 1), d(2026, 5, 1), 3),
-            dated_stage(1, 1, d(2026, 5, 1), d(2026, 6, 1), 4),
-            dated_stage(2, 2, d(2026, 6, 1), d(2026, 7, 1), 5),
-            dated_stage(3, 3, d(2026, 7, 1), d(2026, 8, 1), 6),
+            dated_stage(0, 0, date(2026, 4, 1), date(2026, 5, 1), 3),
+            dated_stage(1, 1, date(2026, 5, 1), date(2026, 6, 1), 4),
+            dated_stage(2, 2, date(2026, 6, 1), date(2026, 7, 1), 5),
+            dated_stage(3, 3, date(2026, 7, 1), date(2026, 8, 1), 6),
         ];
         let first_stage = stages[0].clone();
 
@@ -2661,11 +2662,11 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, &(year, month))| {
-                let start = d(year, month, 1);
+                let start = date(year, month, 1);
                 let end = if month == 12 {
-                    d(year + 1, 1, 1)
+                    date(year + 1, 1, 1)
                 } else {
-                    d(year, month + 1, 1)
+                    date(year, month + 1, 1)
                 };
                 InflowHistoryRow {
                     hydro_id,
@@ -2682,14 +2683,14 @@ mod tests {
         let conditioning = vec![
             RecentObservation {
                 hydro_id,
-                start_date: d(2026, 2, 1),
-                end_date: d(2026, 3, 1),
+                start_date: date(2026, 2, 1),
+                end_date: date(2026, 3, 1),
                 value_m3s: 555.0,
             },
             RecentObservation {
                 hydro_id,
-                start_date: d(2026, 3, 1),
-                end_date: d(2026, 4, 1),
+                start_date: date(2026, 3, 1),
+                end_date: date(2026, 4, 1),
                 value_m3s: 777.0,
             },
         ];
@@ -2796,8 +2797,8 @@ mod tests {
         // April 11) is non-empty, and the remaining 20 of April's 30 days
         // still finalize within stage 0.
         let stages = vec![
-            dated_stage(0, 0, d(2026, 4, 11), d(2026, 5, 1), 3),
-            dated_stage(1, 1, d(2026, 5, 1), d(2026, 6, 1), 4),
+            dated_stage(0, 0, date(2026, 4, 11), date(2026, 5, 1), 3),
+            dated_stage(1, 1, date(2026, 5, 1), date(2026, 6, 1), 4),
         ];
         let first_stage = stages[0].clone();
 
@@ -2812,14 +2813,14 @@ mod tests {
         let record = vec![
             InflowHistoryRow {
                 hydro_id,
-                start_date: d(2026, 3, 1),
-                end_date: d(2026, 4, 1),
+                start_date: date(2026, 3, 1),
+                end_date: date(2026, 4, 1),
                 value_m3s: 300.0,
             },
             InflowHistoryRow {
                 hydro_id,
-                start_date: d(2026, 4, 1),
-                end_date: d(2026, 4, 11),
+                start_date: date(2026, 4, 1),
+                end_date: date(2026, 4, 11),
                 value_m3s: 200.0,
             },
         ];

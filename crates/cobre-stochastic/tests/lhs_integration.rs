@@ -12,8 +12,7 @@
 )]
 
 use cobre_core::{
-    EntityId, SystemBuilder,
-    entities::hydro::Hydro,
+    EntityId, Hydro, SystemBuilder,
     scenario::{InflowModel, SamplingScheme},
     temporal::{NoiseMethod, ScenarioSourceConfig, Stage},
 };

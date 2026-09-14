@@ -86,11 +86,8 @@ pub struct ForwardSampler<'a> {
     ncs: ClassSampler<'a>,
     /// Per-class entity counts that define the buffer split.
     dims: ClassDimensions,
-    /// Correlation ref for the inflow class.
     inflow_correlation: Option<&'a DecomposedCorrelation>,
-    /// Correlation ref for the load class.
     load_correlation: Option<&'a DecomposedCorrelation>,
-    /// Correlation ref for the NCS class.
     ncs_correlation: Option<&'a DecomposedCorrelation>,
 }
 

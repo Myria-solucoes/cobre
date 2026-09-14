@@ -127,17 +127,7 @@ pub fn default_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
 /// The shared SAA [`Stage`]: one `"SINGLE"` 744-hour block, season `0`.
 #[must_use]
 pub fn saa_stage(index: usize, id: i32, branching_factor: usize) -> Stage {
-    make_stage(StageSpec {
-        id,
-        index: Some(index),
-        season_id: Some(0),
-        blocks: single_block("SINGLE", 744.0),
-        scenario_config: ScenarioSourceConfig {
-            branching_factor,
-            noise_method: NoiseMethod::Saa,
-        },
-        ..Default::default()
-    })
+    method_stage(index, id, branching_factor, NoiseMethod::Saa)
 }
 
 /// The forward-sampler stage preset: one `"SINGLE"` 744-hour block, season 0,

@@ -579,7 +579,6 @@ fn out_of_sample_resume_invariance() {
             tables: &tables,
         })
         .unwrap();
-    let first_values: Vec<f64> = first.as_slice().to_vec();
 
     let resumed = sampler
         .sample(SampleRequest {
@@ -599,7 +598,7 @@ fn out_of_sample_resume_invariance() {
         .unwrap();
 
     assert_eq!(
-        first_values.as_slice(),
+        first.as_slice(),
         resumed.as_slice(),
         "OutOfSample noise must be identical for a resumed call with the same (iteration, scenario, stage)"
     );

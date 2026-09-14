@@ -113,9 +113,6 @@ pub fn quarterly_season_map() -> SeasonMap {
 /// A weekly [`SeasonMap`] (52 seasons, `Week1`..`Week52`,
 /// [`SeasonCycleType::Weekly`]).
 #[must_use]
-#[allow(clippy::cast_possible_truncation)]
-// Rationale: `i` is bounded to 0..52 by the loop range, so the cast to
-// `usize` cannot truncate.
 pub fn weekly_season_map() -> SeasonMap {
     let seasons: Vec<SeasonDefinition> = (0..52u32)
         .map(|i| SeasonDefinition {

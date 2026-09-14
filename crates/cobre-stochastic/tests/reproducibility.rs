@@ -10,7 +10,7 @@
     clippy::float_cmp
 )]
 
-use cobre_core::{SystemBuilder, entities::hydro::Hydro, scenario::SamplingScheme};
+use cobre_core::{Hydro, SystemBuilder, scenario::SamplingScheme};
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context, sample_forward};
 
 mod common;

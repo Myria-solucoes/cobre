@@ -64,8 +64,6 @@ fn permute_case_reorders_a_whitelisted_registry_and_seeds_differ() {
     );
 }
 
-/// Every non-whitelisted file copies byte-for-byte and the gitignored
-/// `output/` subtree never appears in the permuted copy.
 #[test]
 fn permute_case_copies_non_whitelisted_files_byte_for_byte_and_skips_output() {
     let base_dir = fixture_dir();
@@ -83,8 +81,6 @@ fn permute_case_copies_non_whitelisted_files_byte_for_byte_and_skips_output() {
     );
 }
 
-/// An unclassified top-level array-of-objects key panics naming the file
-/// and key.
 #[test]
 #[should_panic(expected = "unclassified array")]
 fn permute_case_panics_on_unclassified_array() {
