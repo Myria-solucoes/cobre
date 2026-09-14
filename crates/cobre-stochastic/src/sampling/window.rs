@@ -247,12 +247,13 @@ mod tests {
         EntityId,
         scenario::{HistoricalYears, InflowHistoryRow},
         temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
-            SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+            StageStateConfig,
         },
     };
 
     use super::discover_historical_windows;
+    use crate::test_support::{MonthlyLabels, monthly_season_map, quarterly_season_map};
 
     // -----------------------------------------------------------------------
     // Test helpers
@@ -487,25 +488,6 @@ mod tests {
     // Test helpers for SeasonMap construction
     // -----------------------------------------------------------------------
 
-    /// Build a standard monthly `SeasonMap` (12 seasons, IDs 0–11).
-    fn monthly_season_map() -> SeasonMap {
-        let seasons = (0_usize..12)
-            .map(|i| SeasonDefinition {
-                id: i,
-                label: format!("Month{i}"),
-                #[allow(clippy::cast_possible_truncation)]
-                month_start: (i as u32) + 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        }
-    }
-
     /// Build quarterly stages (4 stages, each 3 months, `season_ids` 0–3).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn four_quarterly_stages() -> Vec<Stage> {
@@ -569,47 +551,6 @@ mod tests {
             .collect()
     }
 
-    /// Build a quarterly `SeasonMap` (4 seasons, IDs 0–3).
-    fn quarterly_season_map() -> SeasonMap {
-        SeasonMap {
-            cycle_type: SeasonCycleType::Custom,
-            seasons: vec![
-                SeasonDefinition {
-                    id: 0,
-                    label: "Q1".to_string(),
-                    month_start: 1,
-                    day_start: Some(1),
-                    month_end: Some(3),
-                    day_end: Some(31),
-                },
-                SeasonDefinition {
-                    id: 1,
-                    label: "Q2".to_string(),
-                    month_start: 4,
-                    day_start: Some(1),
-                    month_end: Some(6),
-                    day_end: Some(30),
-                },
-                SeasonDefinition {
-                    id: 2,
-                    label: "Q3".to_string(),
-                    month_start: 7,
-                    day_start: Some(1),
-                    month_end: Some(9),
-                    day_end: Some(30),
-                },
-                SeasonDefinition {
-                    id: 3,
-                    label: "Q4".to_string(),
-                    month_start: 10,
-                    day_start: Some(1),
-                    month_end: Some(12),
-                    day_end: Some(31),
-                },
-            ],
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Test 8: monthly SeasonMap produces identical results to month0() (None)
     // -----------------------------------------------------------------------
@@ -624,7 +565,7 @@ mod tests {
         history.extend(monthly_history(hydro2, 1990, 2010));
         let stages = twelve_monthly_stages();
 
-        let sm = monthly_season_map();
+        let sm = monthly_season_map(MonthlyLabels::ZeroBased);
 
         let windows_none =
             discover_historical_windows(&history, &[hydro1, hydro2], &stages, 2, None, None, 10)
@@ -730,7 +671,7 @@ mod tests {
         let mut history = monthly_history(hydro1, 1990, 2010);
         history.extend(monthly_history(hydro2, 1990, 2010));
         let stages = twelve_monthly_stages();
-        let sm = monthly_season_map();
+        let sm = monthly_season_map(MonthlyLabels::ZeroBased);
 
         let windows_none =
             discover_historical_windows(&history, &[hydro1, hydro2], &stages, 2, None, None, 10)

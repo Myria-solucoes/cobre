@@ -883,15 +883,13 @@ pub fn pad_library_to_uniform(library: &mut ExternalScenarioLibrary) {
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        EntityId, Hydro, HydroGenerationModel, HydroPenalties, InflowHistoryRow, RecentObservation,
+        EntityId, Hydro, InflowHistoryRow, RecentObservation,
         scenario::{
             AnnualComponent, ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, InflowModel,
             LoadModel, NcsModel,
         },
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
-            SeasonMap, Stage, StageLagTransition, StageRiskConfig, StageStateConfig,
-        },
+        temporal::{Stage, StageLagTransition},
+        test_support::{HydroSpec, MirrorUnitGroup, StageSpec, date, single_block},
     };
 
     use super::{
@@ -905,6 +903,7 @@ mod tests {
         precompute::PrecomputedPar,
         precompute_stage_lag_transitions,
     };
+    use crate::test_support::{MonthlyLabels, monthly_season_map};
 
     /// Build `n_stages` uniform-monthly transitions: each stage finalizes its own
     /// period with full weight and no spillover (the simple per-stage path).
@@ -929,29 +928,13 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_stage(index: usize, id: i32, season_id: usize) -> Stage {
-        let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: date,
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            index: Some(index),
             season_id: Some(season_id),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
+            blocks: single_block("SINGLE", 744.0),
+            ..Default::default()
+        })
     }
 
     fn make_inflow_model(
@@ -2460,23 +2443,6 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
-    fn monthly_season_map() -> SeasonMap {
-        let seasons: Vec<SeasonDefinition> = (0..12u32)
-            .map(|i| SeasonDefinition {
-                id: i as usize,
-                label: format!("Month{}", i + 1),
-                month_start: i + 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        }
-    }
-
     fn dated_stage(
         index: usize,
         id: i32,
@@ -2484,76 +2450,28 @@ mod tests {
         end: NaiveDate,
         season_id: usize,
     ) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
+            index: Some(index),
             start_date: start,
             end_date: end,
             season_id: Some(season_id),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
+            blocks: single_block("SINGLE", 744.0),
+            ..Default::default()
+        })
     }
 
     fn make_hydro(id: i32) -> Hydro {
-        Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
+        cobre_core::test_support::make_hydro(HydroSpec {
+            id,
             name: format!("H{id}"),
-            operational_start_date: d(2020, 1, 1),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
             max_storage_hm3: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 0.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-        }
+            operational_start_date: date(2020, 1, 1),
+            mirror_unit_group: MirrorUnitGroup::None,
+            ..Default::default()
+        })
     }
 
     /// With no conditioning, the derived lag seed carries exactly the same
@@ -2568,7 +2486,7 @@ mod tests {
         let h2 = EntityId(2);
         let hydro_ids = vec![h1, h2];
         let hydros = vec![make_hydro(1), make_hydro(2)];
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
 
         let stages = vec![dated_stage(0, 0, d(2024, 1, 1), d(2024, 2, 1), 0)];
         let first_stage = stages[0].clone();
@@ -2681,7 +2599,7 @@ mod tests {
         let hydro_id = EntityId(1);
         let hydro_ids = vec![hydro_id];
         let hydros = vec![make_hydro(1)];
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
 
         let stages = vec![
             dated_stage(0, 0, d(2026, 4, 1), d(2026, 5, 1), 3),
@@ -2872,7 +2790,7 @@ mod tests {
         let hydro_id = EntityId(1);
         let hydro_ids = vec![hydro_id];
         let hydros = vec![make_hydro(1)];
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
 
         // Stage 0 starts April 11: the in-progress occurrence [April 1,
         // April 11) is non-empty, and the remaining 20 of April's 30 days

@@ -657,6 +657,7 @@ version = "0.15.0"
 dependencies = [
  "chrono",
  "cobre-core",
+ "cobre-stochastic",
  "proptest",
  "rand 0.10.1",
  "rand_distr",

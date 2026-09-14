@@ -298,45 +298,27 @@ impl Default for PrecomputedNormal {
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
     use cobre_core::{
         EntityId,
         scenario::LoadModel,
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-            StageStateConfig,
-        },
+        temporal::{NoiseMethod, ScenarioSourceConfig, Stage},
+        test_support::{StageSpec, single_block},
     };
 
     use super::{BlockFactorPair, EntityFactorEntry, PrecomputedNormal};
 
-    fn dummy_date(year: i32, month: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(year, month, day).unwrap()
-    }
-
     fn make_stage(index: usize, id: i32) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: dummy_date(2024, 1, 1),
-            end_date: dummy_date(2024, 2, 1),
+            index: Some(index),
             season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
+            blocks: single_block("SINGLE", 744.0),
             scenario_config: ScenarioSourceConfig {
                 branching_factor: 10,
                 noise_method: NoiseMethod::Saa,
             },
-        }
+            ..Default::default()
+        })
     }
 
     fn make_model(entity_id: i32, stage_id: i32, mean: f64, std: f64) -> LoadModel {

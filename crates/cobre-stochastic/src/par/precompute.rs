@@ -613,41 +613,28 @@ fn fill_stage_arrays(
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
     use cobre_core::{
         EntityId,
         scenario::InflowModel,
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-            StageStateConfig,
-        },
+        temporal::{NoiseMethod, ScenarioSourceConfig, Stage},
+        test_support::{StageSpec, single_block},
     };
 
     use super::{PrecomputedPar, resolve_season_id};
+    use crate::test_support::InflowModelSpec;
 
     fn make_stage(index: usize, id: i32, season_id: Option<usize>) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            index: Some(index),
             season_id,
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
+            blocks: single_block("SINGLE", 744.0),
             scenario_config: ScenarioSourceConfig {
                 branching_factor: 10,
                 noise_method: NoiseMethod::Saa,
             },
-        }
+            ..Default::default()
+        })
     }
 
     fn make_model(
@@ -658,15 +645,15 @@ mod tests {
         coeffs: Vec<f64>,
         residual_ratio: f64,
     ) -> InflowModel {
-        InflowModel {
-            hydro_id: EntityId(hydro_id),
+        crate::test_support::make_inflow_model(InflowModelSpec {
+            hydro_id,
             stage_id,
             mean_m3s: mean,
             std_m3s: std,
             ar_coefficients: coeffs,
             residual_std_ratio: residual_ratio,
-            annual: None,
-        }
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -1511,15 +1498,15 @@ mod tests {
         residual_ratio: f64,
         annual: AnnualComponent,
     ) -> InflowModel {
-        InflowModel {
-            hydro_id: EntityId(hydro_id),
+        crate::test_support::make_inflow_model(InflowModelSpec {
+            hydro_id,
             stage_id,
             mean_m3s: mean,
             std_m3s: std,
             ar_coefficients: coeffs,
             residual_std_ratio: residual_ratio,
             annual: Some(annual),
-        }
+        })
     }
 
     #[test]

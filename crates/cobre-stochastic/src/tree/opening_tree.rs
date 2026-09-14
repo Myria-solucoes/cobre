@@ -438,15 +438,7 @@ fn is_permutation(order: &[u32], n: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn uniform_tree(n_stages: usize, openings: usize, dim: usize) -> OpeningTree {
-        let total = n_stages * openings * dim;
-        let data: Vec<f64> = (0_u32..u32::try_from(total).expect("total fits in u32"))
-            .map(f64::from)
-            .collect();
-        let ops = vec![openings; n_stages];
-        OpeningTree::from_parts(data, ops, dim)
-    }
+    use crate::test_support::uniform_tree;
 
     #[test]
     fn opening_stage0_opening0_returns_first_dim_elements() {

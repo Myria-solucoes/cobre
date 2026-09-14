@@ -887,6 +887,7 @@ mod tests {
                         branching_factor: 50,
                         noise_method: NoiseMethod::Saa,
                     },
+                    ..Default::default()
                 }),
                 make_stage(StageSpec {
                     id: 0,
@@ -900,6 +901,7 @@ mod tests {
                         branching_factor: 50,
                         noise_method: NoiseMethod::Saa,
                     },
+                    ..Default::default()
                 }),
             ])
             .build();
@@ -1885,6 +1887,7 @@ mod tests {
                 branching_factor: 50,
                 noise_method: NoiseMethod::Saa,
             },
+            ..Default::default()
         });
         let s1 = make_stage(StageSpec {
             id: 1,
@@ -1898,6 +1901,7 @@ mod tests {
                 branching_factor: 50,
                 noise_method: NoiseMethod::Saa,
             },
+            ..Default::default()
         });
 
         let system = SystemBuilder::new()
@@ -1935,6 +1939,7 @@ mod tests {
                         branching_factor: 50,
                         noise_method: NoiseMethod::Saa,
                     },
+                    ..Default::default()
                 })
             })
             .collect();
@@ -1989,6 +1994,7 @@ mod tests {
                     branching_factor: 50,
                     noise_method: NoiseMethod::Saa,
                 },
+                ..Default::default()
             }),
             make_stage(StageSpec {
                 id: 1,
@@ -2002,6 +2008,7 @@ mod tests {
                     branching_factor: 50,
                     noise_method: NoiseMethod::Saa,
                 },
+                ..Default::default()
             }),
         ];
         let policy_graph = HorizonGraph {
@@ -2277,6 +2284,7 @@ mod tests {
                 branching_factor: 50,
                 noise_method: NoiseMethod::Saa,
             },
+            ..Default::default()
         });
         let stage1 = make_stage(StageSpec {
             id: 1,
@@ -2290,6 +2298,7 @@ mod tests {
                 branching_factor: 50,
                 noise_method: NoiseMethod::Saa,
             },
+            ..Default::default()
         });
 
         let policy_graph = HorizonGraph {

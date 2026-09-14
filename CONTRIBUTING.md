@@ -166,6 +166,11 @@ No external dependencies or feature flags needed. Conformance tests verify PAR(p
 preprocessing (tolerance 1e-10); reproducibility tests verify seed determinism and
 declaration-order invariance.
 
+cobre-stochastic also declares a `test-support` feature, exposing its crate-internal
+fixture builders — `OpeningTree`, `SeasonMap`, and `InflowModel` construction helpers
+used by its own unit tests — to `tests/` integration binaries and downstream crates'
+tests.
+
 ### Testing cobre-sddp
 
 Initialize the HiGHS submodule first:

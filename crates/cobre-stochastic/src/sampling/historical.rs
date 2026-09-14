@@ -664,12 +664,13 @@ mod tests {
 
     use chrono::{Datelike, Months, NaiveDate};
     use cobre_core::{
-        EntityId, Hydro, HydroGenerationModel, HydroPenalties,
+        EntityId, Hydro,
         scenario::{InflowHistoryRow, InflowModel},
         temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
-            SeasonMap, StageLagTransition, StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageLagTransition,
+            StageRiskConfig, StageStateConfig,
         },
+        test_support::{HydroSpec, MirrorUnitGroup, StageSpec, date, single_block},
     };
 
     use super::{DerivedSeed, Stage, standardize_historical_windows};
@@ -680,6 +681,7 @@ mod tests {
         precompute::PrecomputedPar,
         precompute_stage_lag_transitions,
     };
+    use crate::test_support::{MonthlyLabels, monthly_season_map, quarterly_season_map};
 
     /// Build a monthly stage with the given array index and 0-based `season_id` (0=Jan..11=Dec).
     ///
@@ -1264,25 +1266,6 @@ mod tests {
     // Helpers for SeasonMap-aware standardize tests
     // -----------------------------------------------------------------------
 
-    /// Build a standard monthly `SeasonMap` (12 seasons, IDs 0–11).
-    fn monthly_season_map() -> SeasonMap {
-        let seasons = (0_usize..12)
-            .map(|i| SeasonDefinition {
-                id: i,
-                label: format!("Month{i}"),
-                #[allow(clippy::cast_possible_truncation)]
-                month_start: (i as u32) + 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Test 6: monthly SeasonMap produces bit-for-bit identical eta values
     // -----------------------------------------------------------------------
@@ -1324,7 +1307,7 @@ mod tests {
             make_row(hydro, 2000, 1, 45.0),
         ];
 
-        let sm = monthly_season_map();
+        let sm = monthly_season_map(MonthlyLabels::ZeroBased);
 
         // Run with None (month0 fallback).
         let mut lib_none = HistoricalScenarioLibrary::new(1, 2, 1, 0, vec![2000]);
@@ -1409,46 +1392,6 @@ mod tests {
                 branching_factor: 1,
                 noise_method: NoiseMethod::Saa,
             },
-        }
-    }
-
-    fn quarterly_season_map() -> SeasonMap {
-        SeasonMap {
-            cycle_type: SeasonCycleType::Custom,
-            seasons: vec![
-                SeasonDefinition {
-                    id: 0,
-                    label: "Q1".to_string(),
-                    month_start: 1,
-                    day_start: Some(1),
-                    month_end: Some(3),
-                    day_end: Some(31),
-                },
-                SeasonDefinition {
-                    id: 1,
-                    label: "Q2".to_string(),
-                    month_start: 4,
-                    day_start: Some(1),
-                    month_end: Some(6),
-                    day_end: Some(30),
-                },
-                SeasonDefinition {
-                    id: 2,
-                    label: "Q3".to_string(),
-                    month_start: 7,
-                    day_start: Some(1),
-                    month_end: Some(9),
-                    day_end: Some(30),
-                },
-                SeasonDefinition {
-                    id: 3,
-                    label: "Q4".to_string(),
-                    month_start: 10,
-                    day_start: Some(1),
-                    month_end: Some(12),
-                    day_end: Some(31),
-                },
-            ],
         }
     }
 
@@ -1903,51 +1846,16 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_hydro(id: i32) -> Hydro {
-        Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
+        cobre_core::test_support::make_hydro(HydroSpec {
+            id,
             name: format!("H{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
             max_storage_hm3: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 0.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-        }
+            operational_start_date: date(2020, 1, 1),
+            mirror_unit_group: MirrorUnitGroup::None,
+            ..Default::default()
+        })
     }
 
     /// With no conditioning, the derived lag seed carries exactly the same
@@ -1962,7 +1870,7 @@ mod tests {
         let h2 = EntityId(2);
         let hydro_ids = vec![h1, h2];
         let hydros = vec![make_hydro(1), make_hydro(2)];
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::ZeroBased);
 
         // Two monthly study stages (Jan, Feb) so lag lookups resolve through
         // the ordinary multi-season path rather than the single-season
@@ -2104,28 +2012,15 @@ mod tests {
         end: NaiveDate,
         season_id: usize,
     ) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
+            index: Some(index),
             start_date: start,
             end_date: end,
             season_id: Some(season_id),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
+            blocks: single_block("SINGLE", 744.0),
+            ..Default::default()
+        })
     }
 
     /// The historical-replay analogue of `external_eta_round_trip_exact_mid_coarse_period`
@@ -2141,7 +2036,7 @@ mod tests {
         let hydro_id = EntityId(1);
         let hydro_ids = vec![hydro_id];
         let hydros = vec![make_hydro(1)];
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::ZeroBased);
 
         // Stage 0 starts April 11: the in-progress occurrence [April 1,
         // April 11) is non-empty, and the remaining 20 of April's 30 days

@@ -11,10 +11,8 @@ use super::{
 use chrono::{Datelike, NaiveDate};
 use cobre_core::{
     EntityId,
-    temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
-    },
+    temporal::Stage,
+    test_support::{StageSpec, date, single_block},
 };
 
 use super::estimate_seasonal_stats;
@@ -30,28 +28,15 @@ fn make_stage(
     month_end: u32,
     season_id: Option<usize>,
 ) -> Stage {
-    Stage {
-        index,
+    cobre_core::test_support::make_stage(StageSpec {
         id,
-        start_date: NaiveDate::from_ymd_opt(year_start, month_start, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(year_end, month_end, 1).unwrap(),
+        index: Some(index),
+        start_date: date(year_start, month_start, 1),
+        end_date: date(year_end, month_end, 1),
         season_id,
-        blocks: vec![Block {
-            index: 0,
-            name: "SINGLE".to_string(),
-            duration_hours: 744.0,
-        }],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
-        },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor: 1,
-            noise_method: NoiseMethod::Saa,
-        },
-    }
+        blocks: single_block("SINGLE", 744.0),
+        ..Default::default()
+    })
 }
 
 /// Build a 12-stage monthly cycle starting at `base_year`, spanning `n_years`.

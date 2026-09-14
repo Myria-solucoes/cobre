@@ -152,10 +152,11 @@ pub fn validate_par_parameters(
 
 #[cfg(test)]
 mod tests {
-    use cobre_core::{EntityId, scenario::InflowModel};
+    use cobre_core::InflowModel;
 
     use super::{ParWarning, validate_par_parameters};
     use crate::StochasticError;
+    use crate::test_support::InflowModelSpec;
 
     fn make_model(
         hydro_id: i32,
@@ -164,15 +165,14 @@ mod tests {
         ar_coefficients: Vec<f64>,
         residual_std_ratio: f64,
     ) -> InflowModel {
-        InflowModel {
-            hydro_id: EntityId(hydro_id),
+        crate::test_support::make_inflow_model(InflowModelSpec {
+            hydro_id,
             stage_id,
-            mean_m3s: 100.0,
             std_m3s,
             ar_coefficients,
             residual_std_ratio,
-            annual: None,
-        }
+            ..Default::default()
+        })
     }
 
     fn make_model_with_annual(
@@ -183,10 +183,9 @@ mod tests {
         residual_std_ratio: f64,
     ) -> InflowModel {
         use cobre_core::scenario::AnnualComponent;
-        InflowModel {
-            hydro_id: EntityId(hydro_id),
+        crate::test_support::make_inflow_model(InflowModelSpec {
+            hydro_id,
             stage_id,
-            mean_m3s: 100.0,
             std_m3s,
             ar_coefficients,
             residual_std_ratio,
@@ -195,7 +194,8 @@ mod tests {
                 mean_m3s: 90.0,
                 std_m3s: 12.0,
             }),
-        }
+            ..Default::default()
+        })
     }
 
     #[test]

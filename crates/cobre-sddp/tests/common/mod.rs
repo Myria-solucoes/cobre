@@ -3,7 +3,7 @@
 //! [`build_setup_for_case`] is a drop-in replacement for `StudySetup::new` that
 //! drives the same construction pipeline as the CLI.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
+#![allow(clippy::expect_used, dead_code)]
 
 use std::path::Path;
 use std::sync::mpsc;

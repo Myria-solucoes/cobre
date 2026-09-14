@@ -577,6 +577,13 @@ pub fn make_unit_group(
 pub struct StageSpec {
     /// Stage identifier.
     pub id: i32,
+    /// Positional index. `None` derives it from `id` — the behaviour every
+    /// fixture with contiguous non-negative stage ids wants.
+    pub index: Option<usize>,
+    /// Stage start date (inclusive).
+    pub start_date: NaiveDate,
+    /// Stage end date (exclusive).
+    pub end_date: NaiveDate,
     /// Season index; `None` for stages without seasonal structure.
     pub season_id: Option<usize>,
     /// Load blocks, sorted by index.
@@ -589,6 +596,9 @@ impl Default for StageSpec {
     fn default() -> Self {
         Self {
             id: 0,
+            index: None,
+            start_date: date(2024, 1, 1),
+            end_date: date(2024, 2, 1),
             season_id: None,
             blocks: vec![Block {
                 index: 0,
@@ -608,16 +618,19 @@ impl Default for StageSpec {
 pub fn make_stage(
     StageSpec {
         id,
+        index,
+        start_date,
+        end_date,
         season_id,
         blocks,
         scenario_config,
     }: StageSpec,
 ) -> Stage {
     Stage {
-        index: usize::try_from(id.max(0)).unwrap_or(0),
+        index: index.unwrap_or_else(|| usize::try_from(id.max(0)).unwrap_or(0)),
         id,
-        start_date: date(2024, 1, 1),
-        end_date: date(2024, 2, 1),
+        start_date,
+        end_date,
         season_id,
         blocks,
         block_mode: BlockMode::Parallel,
@@ -628,6 +641,36 @@ pub fn make_stage(
         risk_config: StageRiskConfig::Expectation,
         scenario_config,
     }
+}
+
+/// A one-block vector — the shape nearly every single-block stage fixture
+/// needs — with `index` 0.
+#[must_use]
+pub fn single_block(name: &str, duration_hours: f64) -> Vec<Block> {
+    vec![Block {
+        index: 0,
+        name: name.to_string(),
+        duration_hours,
+    }]
+}
+
+/// Approximate `erf(x)` using the Horner-form rational approximation
+/// (Abramowitz & Stegun 7.1.26, max error 1.5e-7).
+#[must_use]
+pub fn approx_erf(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0_f64 } else { 1.0_f64 };
+    let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
+    let poly = t
+        * (0.254_829_592
+            + t * (-0.284_496_736
+                + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
+    sign * (1.0 - poly * (-x * x).exp())
+}
+
+/// The standard normal CDF, via [`approx_erf`].
+#[must_use]
+pub fn norm_cdf(z: f64) -> f64 {
+    0.5 * (1.0 + approx_erf(z / std::f64::consts::SQRT_2))
 }
 
 #[cfg(test)]
@@ -659,5 +702,41 @@ mod tests {
         });
         assert_eq!(fixed.unit_groups.len(), 1);
         assert_eq!(fixed.unit_groups[0].bus_id, EntityId(42));
+    }
+
+    #[test]
+    fn make_stage_index_and_dates_are_axes() {
+        let derived = make_stage(StageSpec {
+            id: 5,
+            ..Default::default()
+        });
+        assert_eq!(derived.index, 5);
+        assert_eq!(derived.start_date, date(2024, 1, 1));
+        assert_eq!(derived.end_date, date(2024, 2, 1));
+
+        let negative_id = make_stage(StageSpec {
+            id: -1,
+            ..Default::default()
+        });
+        assert_eq!(negative_id.index, 0);
+
+        let overridden = make_stage(StageSpec {
+            id: 5,
+            index: Some(1),
+            start_date: date(2020, 3, 1),
+            end_date: date(2020, 4, 1),
+            ..Default::default()
+        });
+        assert_eq!(overridden.index, 1);
+        assert_eq!(overridden.start_date, date(2020, 3, 1));
+        assert_eq!(overridden.end_date, date(2020, 4, 1));
+    }
+
+    #[test]
+    fn approx_erf_and_norm_cdf_match_known_values() {
+        assert!((norm_cdf(0.0) - 0.5).abs() < 1e-8);
+        assert!(approx_erf(0.0).abs() < 1e-8);
+        assert!((norm_cdf(1.96) - 0.975).abs() < 1e-4);
+        assert!((approx_erf(-0.7) + approx_erf(0.7)).abs() < 1e-12);
     }
 }

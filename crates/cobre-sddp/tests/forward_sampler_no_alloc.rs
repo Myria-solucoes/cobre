@@ -29,10 +29,8 @@ use cobre_stochastic::{
     context::{ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context},
 };
 
-#[allow(dead_code)]
-#[path = "common/builders.rs"]
-mod builders;
-use builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
+mod common;
+use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
 struct CountingAllocator;
 

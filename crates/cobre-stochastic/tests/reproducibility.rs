@@ -10,173 +10,31 @@
     clippy::float_cmp
 )]
 
-use std::collections::BTreeMap;
-
-use chrono::NaiveDate;
-use cobre_core::{
-    Bus, DeficitSegment, EntityId, SystemBuilder,
-    entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
-    scenario::{
-        CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-        SamplingScheme,
-    },
-    temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
-    },
-};
+use cobre_core::{SystemBuilder, entities::hydro::Hydro, scenario::SamplingScheme};
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context, sample_forward};
 
-fn make_bus(id: i32) -> Bus {
-    Bus {
-        id: EntityId(id),
-        name: format!("Bus{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1000.0,
-        }],
-        excess_cost: 0.0,
-    }
-}
-
-fn make_stage(index: usize, id: i32, branching_factor: usize) -> Stage {
-    Stage {
-        index,
-        id,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        season_id: Some(0),
-        blocks: vec![Block {
-            index: 0,
-            name: "SINGLE".to_string(),
-            duration_hours: 744.0,
-        }],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
-        },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor,
-            noise_method: NoiseMethod::Saa,
-        },
-    }
-}
-
-fn make_hydro(id: i32) -> Hydro {
-    let mut hydro = Hydro {
-        unit_groups: Vec::new(),
-        id: EntityId(id),
-        name: format!("H{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        downstream_id: None,
-        travel_time_hours: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        },
-    };
-    hydro.declare_mirror_unit_group(EntityId(0));
-    hydro
-}
-
-fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
-    InflowModel {
-        hydro_id: EntityId(hydro_id),
-        stage_id,
-        mean_m3s: 100.0,
-        std_m3s: 30.0,
-        ar_coefficients: vec![],
-        residual_std_ratio: 1.0,
-        annual: None,
-    }
-}
-
-fn identity_correlation(entity_ids: &[i32]) -> CorrelationModel {
-    let n = entity_ids.len();
-    let matrix: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
-        .collect();
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: entity_ids
-                    .iter()
-                    .map(|&id| CorrelationEntity {
-                        entity_type: "inflow".to_string(),
-                        id: EntityId(id),
-                    })
-                    .collect(),
-                matrix,
-            }],
-        },
-    );
-    CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    }
-}
+mod common;
+use common::{
+    default_inflow_model, deficit_bus, identity_correlation_model, saa_stage, sized_hydro,
+};
 
 fn build_fixture(hydros: Vec<Hydro>, base_seed: u64) -> cobre_stochastic::StochasticContext {
-    let stages = vec![
-        make_stage(0, 0, 5),
-        make_stage(1, 1, 5),
-        make_stage(2, 2, 5),
-    ];
+    let stages = vec![saa_stage(0, 0, 5), saa_stage(1, 1, 5), saa_stage(2, 2, 5)];
     let inflow_models = vec![
-        make_inflow_model(1, 0),
-        make_inflow_model(1, 1),
-        make_inflow_model(1, 2),
-        make_inflow_model(2, 0),
-        make_inflow_model(2, 1),
-        make_inflow_model(2, 2),
+        default_inflow_model(1, 0),
+        default_inflow_model(1, 1),
+        default_inflow_model(1, 2),
+        default_inflow_model(2, 0),
+        default_inflow_model(2, 1),
+        default_inflow_model(2, 2),
     ];
 
     let system = SystemBuilder::new()
-        .buses(vec![make_bus(0)])
+        .buses(vec![deficit_bus(0)])
         .hydros(hydros)
         .stages(stages)
         .inflow_models(inflow_models)
-        .correlation(identity_correlation(&[1, 2]))
+        .correlation(identity_correlation_model(&[1, 2]))
         .build()
         .expect("build_fixture: system build must succeed");
 
@@ -198,7 +56,7 @@ fn build_fixture(hydros: Vec<Hydro>, base_seed: u64) -> cobre_stochastic::Stocha
 
 #[test]
 fn deterministic_reproducibility() {
-    let hydros = vec![make_hydro(1), make_hydro(2)];
+    let hydros = vec![sized_hydro(1), sized_hydro(2)];
 
     let ctx_a = build_fixture(hydros.clone(), 42);
     let ctx_b = build_fixture(hydros, 42);
@@ -275,8 +133,8 @@ fn deterministic_reproducibility() {
 /// tree, because `SystemBuilder` sorts hydros by `EntityId` internally.
 #[test]
 fn declaration_order_invariance() {
-    let hydros_forward = vec![make_hydro(1), make_hydro(2)];
-    let hydros_reversed = vec![make_hydro(2), make_hydro(1)];
+    let hydros_forward = vec![sized_hydro(1), sized_hydro(2)];
+    let hydros_reversed = vec![sized_hydro(2), sized_hydro(1)];
 
     let ctx_forward = build_fixture(hydros_forward, 42);
     let ctx_reversed = build_fixture(hydros_reversed, 42);
@@ -309,7 +167,7 @@ fn declaration_order_invariance() {
 
 #[test]
 fn seed_sensitivity() {
-    let hydros = vec![make_hydro(1), make_hydro(2)];
+    let hydros = vec![sized_hydro(1), sized_hydro(2)];
 
     let ctx_42 = build_fixture(hydros.clone(), 42);
     let ctx_99 = build_fixture(hydros, 99);

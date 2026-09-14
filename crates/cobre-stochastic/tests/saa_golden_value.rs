@@ -9,18 +9,29 @@
     clippy::float_cmp
 )]
 
-use std::collections::BTreeMap;
+use cobre_core::{EntityId, NoiseMethod, ScenarioSourceConfig, Stage};
+use cobre_stochastic::{ClassDimensions, generate_opening_tree, tree::OpeningTreeGenerationInputs};
 
-use chrono::NaiveDate;
-use cobre_core::{
-    EntityId, Stage,
-    scenario::{CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile},
-    temporal::{BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig},
-};
-use cobre_stochastic::tree::generate::OpeningTreeGenerationInputs;
-use cobre_stochastic::{
-    ClassDimensions, correlation::resolve::DecomposedCorrelation, generate_opening_tree,
-};
+mod common;
+use common::{StageSpec, identity_correlation};
+
+/// The blockless SAA stage this golden regression was produced from:
+/// `generate_opening_tree` reads the branching factor, not the load blocks,
+/// but a blocked stage is a different fixture and would move the constants
+/// below.
+fn make_stage(index: usize, id: i32, branching_factor: usize) -> Stage {
+    common::make_stage(StageSpec {
+        id,
+        index: Some(index),
+        season_id: Some(0),
+        blocks: Vec::new(),
+        scenario_config: ScenarioSourceConfig {
+            branching_factor,
+            noise_method: NoiseMethod::Saa,
+        },
+        ..Default::default()
+    })
+}
 
 const GOLDEN_S0_O0_D0: f64 = 4.009_893_649_649_564_6e-1;
 const GOLDEN_S0_O0_D1: f64 = 2.279_255_881_585_980_4e-1;
@@ -28,67 +39,6 @@ const GOLDEN_S0_O1_D0: f64 = -1.395_412_177_608_524_4;
 const GOLDEN_S0_O1_D1: f64 = -2.693_936_692_173_674_6e-1;
 const GOLDEN_S0_O2_D0: f64 = 8.337_031_709_056_368e-1;
 const GOLDEN_S0_O2_D1: f64 = -1.619_991_803_182_488_7;
-
-fn make_stage(index: usize, id: i32, branching_factor: usize) -> Stage {
-    Stage {
-        index,
-        id,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        season_id: Some(0),
-        blocks: vec![],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
-        },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor,
-            noise_method: NoiseMethod::Saa,
-        },
-    }
-}
-
-fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {
-    let n = entity_ids.len();
-    let matrix: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
-        .collect();
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "default".to_string(),
-        CorrelationProfile {
-            groups: vec![CorrelationGroup {
-                name: "g1".to_string(),
-                entities: entity_ids
-                    .iter()
-                    .map(|&id| CorrelationEntity {
-                        entity_type: "inflow".to_string(),
-                        id: EntityId(id),
-                    })
-                    .collect(),
-                matrix,
-            }],
-        },
-    );
-    let model = CorrelationModel {
-        method: "spectral".to_string(),
-        profiles,
-        schedule: vec![],
-    };
-    let entity_order: Vec<EntityId> = entity_ids.iter().map(|&id| EntityId(id)).collect();
-    DecomposedCorrelation::build(
-        &model,
-        &entity_order,
-        ClassDimensions {
-            n_hydros: entity_ids.len(),
-            n_load_buses: 0,
-            n_ncs: 0,
-        },
-    )
-    .unwrap()
-}
 
 #[test]
 fn saa_golden_value_regression() {

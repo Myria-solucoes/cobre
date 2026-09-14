@@ -782,18 +782,14 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use chrono::NaiveDate;
     use cobre_core::{
-        Bus, DeficitSegment, EntityId, SystemBuilder,
-        entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+        Bus, DeficitSegment, EntityId, Hydro, SystemBuilder,
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
             LoadModel, NcsModel, SamplingScheme,
         },
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-            StageStateConfig,
-        },
+        temporal::{NoiseMethod, ScenarioSourceConfig, Stage},
+        test_support::{BusSpec, HydroSpec, StageSpec, single_block},
     };
     use tracing::{Event, Level, Metadata, Subscriber, span};
 
@@ -806,9 +802,9 @@ mod tests {
         NoisePointSpec, StochasticContext, StochasticError,
         context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context},
         sample_forward,
+        test_support::uniform_tree,
         tree::generate::ClassDimensions,
         tree::lhs::{sample_lhs_point, sample_lhs_point_reference},
-        tree::opening_tree::OpeningTree,
     };
 
     // -----------------------------------------------------------------------
@@ -877,16 +873,15 @@ mod tests {
     }
 
     fn make_bus(id: i32) -> Bus {
-        Bus {
-            id: EntityId(id),
+        cobre_core::test_support::make_bus(BusSpec {
+            id,
             name: format!("Bus{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
             }],
-            excess_cost: 0.0,
-        }
+            ..Default::default()
+        })
     }
 
     fn make_stage(index: usize, id: i32, bf: usize) -> Stage {
@@ -894,78 +889,28 @@ mod tests {
     }
 
     fn make_stage_with_method(index: usize, id: i32, bf: usize, method: NoiseMethod) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            index: Some(index),
             season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
+            blocks: single_block("SINGLE", 744.0),
             scenario_config: ScenarioSourceConfig {
                 branching_factor: bf,
                 noise_method: method,
             },
-        }
+            ..Default::default()
+        })
     }
 
     fn make_hydro(id: i32) -> Hydro {
-        let mut hydro = Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
+        cobre_core::test_support::make_hydro(HydroSpec {
+            id,
             name: format!("H{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
             max_storage_hm3: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 0.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-        };
-        hydro.declare_mirror_unit_group(EntityId(0));
-        hydro
+            ..Default::default()
+        })
     }
 
     fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
@@ -1036,15 +981,6 @@ mod tests {
         )
         .unwrap();
         (ctx, stages)
-    }
-
-    /// Build a uniform opening tree for testing.
-    fn uniform_tree(n_stages: usize, openings: usize, dim: usize) -> OpeningTree {
-        let total = n_stages * openings * dim;
-        let data: Vec<f64> = (0_u32..u32::try_from(total).unwrap())
-            .map(f64::from)
-            .collect();
-        OpeningTree::from_parts(data, vec![openings; n_stages], dim)
     }
 
     // -----------------------------------------------------------------------

@@ -29,6 +29,8 @@ pub mod provenance;
 pub mod sampling;
 pub mod season_cast;
 pub mod seeds;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod tree;
 
 pub use context::{
