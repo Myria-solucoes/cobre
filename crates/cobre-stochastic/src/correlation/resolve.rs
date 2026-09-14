@@ -41,6 +41,17 @@ impl EntityClass {
             _ => None,
         }
     }
+
+    /// Returns the wire spelling that [`EntityClass::from_wire`] parses back
+    /// into this variant: `"inflow"`, `"load"` or `"ncs"`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inflow => "inflow",
+            Self::Load => "load",
+            Self::Ncs => "ncs",
+        }
+    }
 }
 
 /// A single correlation group's spectral factor with entity ID mapping.
@@ -791,6 +802,20 @@ mod tests {
         assert_eq!(EntityClass::from_wire(""), None);
         assert_eq!(EntityClass::from_wire("Inflow"), None);
         assert_eq!(EntityClass::from_wire("hydro"), None);
+    }
+
+    #[test]
+    fn test_entity_class_as_str() {
+        assert_eq!(EntityClass::Inflow.as_str(), "inflow");
+        assert_eq!(EntityClass::Load.as_str(), "load");
+        assert_eq!(EntityClass::Ncs.as_str(), "ncs");
+    }
+
+    #[test]
+    fn test_entity_class_from_wire_as_str_round_trip() {
+        for class in [EntityClass::Inflow, EntityClass::Load, EntityClass::Ncs] {
+            assert_eq!(EntityClass::from_wire(class.as_str()), Some(class));
+        }
     }
 
     // -----------------------------------------------------------------------

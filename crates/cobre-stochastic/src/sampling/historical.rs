@@ -51,6 +51,7 @@ use std::hash::Hasher as _;
 use crate::{
     StochasticError,
     par::{fitting::find_season_for_date, precompute::PrecomputedPar},
+    seeds::DerivedSeed,
 };
 
 use super::eta_inversion::run_eta_inversion;
@@ -247,14 +248,14 @@ impl HistoricalScenarioLibrary {
 // ---------------------------------------------------------------------------
 
 /// Populate a [`HistoricalScenarioLibrary`] with pre-standardized η values whose
-/// lag chain is seeded from `derived_lag_values` and advanced by the same
+/// lag chain is seeded from `seed` ([`DerivedSeed`]) and advanced by the same
 /// accumulate/finalize pattern as `standardize_external_inflow`.
 ///
 /// Replay is exact only if the forward pass starts from the same derived seed;
 /// see the module docs for the inductive argument.
 /// `ClassSampler::Historical::apply_initial_state` is a no-op, so that is the
-/// caller's responsibility. The η values depend on `derived_lag_values`; a
-/// change requires re-standardising, which `seed_digest` lets callers detect.
+/// caller's responsibility. The η values depend on `seed`; a change requires
+/// re-standardising, which `seed_digest` lets callers detect.
 ///
 /// The full accumulate/finalize/spillover/downstream-ring pattern is supported,
 /// via the same [`advance_lag_chain`](crate::par::advance_lag_chain) kernel the
@@ -269,16 +270,8 @@ impl HistoricalScenarioLibrary {
 ///   1. dates within a stage's `[start_date, end_date)` → that stage's season;
 ///   2. otherwise `season_map.season_for_date(date)` when `Some`;
 ///   3. when `None`, `month0()`. Unmappable observations are skipped.
-/// - `derived_lag_values` — entity-major stage-0 lag seed
-///   (`derived_lag_values[pos * l_state + lag]`, lag `0` = most recent),
-///   pre-ordered by canonical hydro position so `hydro_ids`' position `pos` is
-///   used directly with no id lookup; absent slots default to `0.0`.
-/// - `l_state` — per-hydro stride of `derived_lag_values`.
-/// - `derived_accum` / `derived_weight` — per-hydro mid-period accumulator seed
-///   (length `n_hydros`, same canonical position as `derived_lag_values`),
-///   copied into the per-window accumulator/weight-accumulator at reset;
-///   empty means "no seed" — the accumulator resets to zero, matching a
-///   period-boundary start.
+/// - `seed` — stage-0 lag/accumulator seed; see [`DerivedSeed`]. Absent lag
+///   slots default to `0.0`.
 /// - `stage_lag_transitions` — one per stage, same length as `stages`.
 /// - `downstream_par_order` — PAR order of the downstream (coarser) resolution;
 ///   `0` for uniform-resolution studies. Reuse the same value the forward pass
@@ -289,9 +282,9 @@ impl HistoricalScenarioLibrary {
 ///
 /// Panics in debug builds if dimension mismatches between `library`, `par`,
 /// `stages`, or `stage_lag_transitions` are detected.
-// Rationale: mirrors standardize_external_inflow's inputs plus the season map
-// and window years this scheme also needs; no natural sub-grouping exists that
-// would not just relocate the arity into a literal.
+// Rationale: mirrors standardize_external_inflow's arity (including its own
+// `seed: DerivedSeed`) plus the two additional inputs this scheme alone
+// needs, window_years and season_map.
 #[allow(clippy::too_many_arguments)]
 pub fn standardize_historical_windows(
     library: &mut HistoricalScenarioLibrary,
@@ -301,10 +294,7 @@ pub fn standardize_historical_windows(
     par: &PrecomputedPar,
     window_years: &[i32],
     season_map: Option<&SeasonMap>,
-    derived_lag_values: &[f64],
-    l_state: usize,
-    derived_accum: &[f64],
-    derived_weight: &[f64],
+    seed: DerivedSeed<'_>,
     stage_lag_transitions: &[StageLagTransition],
     downstream_par_order: usize,
 ) {
@@ -420,7 +410,7 @@ pub fn standardize_historical_windows(
     // Digest over little-endian f64 bytes so it is reproducible across runs.
     {
         let mut hasher = SipHasher13::new();
-        for &v in derived_lag_values {
+        for &v in seed.lag_values {
             hasher.write(&v.to_le_bytes());
         }
         library.seed_digest = hasher.finish();
@@ -432,10 +422,7 @@ pub fn standardize_historical_windows(
         n_hydros,
         max_order,
         par,
-        derived_lag_values,
-        l_state,
-        derived_accum,
-        derived_weight,
+        seed,
         stage_lag_transitions,
         downstream_par_order,
         |t, w, h| {
@@ -689,7 +676,7 @@ mod tests {
         },
     };
 
-    use super::{Stage, standardize_historical_windows};
+    use super::{DerivedSeed, Stage, standardize_historical_windows};
     use crate::derive_inflow_seeds;
     use crate::par::{
         DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain,
@@ -809,10 +796,12 @@ mod tests {
             &par,
             &[1990],
             None,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -918,10 +907,12 @@ mod tests {
             &par,
             &[1990],
             None,
-            &derived_lag_values,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived_lag_values,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -1025,10 +1016,12 @@ mod tests {
             &par,
             &[1990, 1991],
             None,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -1092,10 +1085,12 @@ mod tests {
             &par,
             &[2000],
             None,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -1345,10 +1340,12 @@ mod tests {
             &par,
             &[2000],
             None,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -1363,10 +1360,12 @@ mod tests {
             &par,
             &[2000],
             Some(&sm),
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -1515,10 +1514,12 @@ mod tests {
             &par,
             &[2000],
             Some(&sm),
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -1641,10 +1642,12 @@ mod tests {
             &par,
             &[window_year],
             None,
-            &derived_lag_values,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived_lag_values,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             1, // downstream_par_order: one completed quarter needed to rebuild
         );
@@ -1738,10 +1741,12 @@ mod tests {
             &par,
             &[1995],
             None,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -1859,10 +1864,12 @@ mod tests {
             &par,
             &window_years,
             Some(&sm),
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -2057,10 +2064,12 @@ mod tests {
             &par,
             &[2024],
             Some(&season_map),
-            &derived.lag_values,
-            l_state,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived.lag_values,
+                l_state,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -2282,10 +2291,12 @@ mod tests {
             &par,
             &[window_year],
             Some(&season_map),
-            &derived.lag_values,
-            l_state,
-            &derived.accum,
-            &derived.weight,
+            DerivedSeed {
+                lag_values: &derived.lag_values,
+                l_state,
+                accum: &derived.accum,
+                weight: &derived.weight,
+            },
             &stage_lag_transitions,
             0,
         );
@@ -2383,10 +2394,12 @@ mod tests {
             &par,
             &[2024],
             None,
-            &seed_a,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &seed_a,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );
@@ -2400,10 +2413,12 @@ mod tests {
             &par,
             &[2024],
             None,
-            &seed_b,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &seed_b,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &[],
             0,
         );

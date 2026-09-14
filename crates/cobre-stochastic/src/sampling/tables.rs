@@ -136,9 +136,6 @@ impl ClassNoiseTables {
     }
 }
 
-/// Build the [`NoiseTable`] for one `(group, method)` pair, passing `group`
-/// into the `stage_id` position exactly as `fill_uncorrelated` passes
-/// `noise_group_id` there for every non-`Direct` method.
 fn build_table(
     seed: u64,
     dim: usize,

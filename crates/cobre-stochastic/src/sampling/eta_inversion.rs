@@ -10,13 +10,14 @@ use crate::par::{
     DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain, evaluate::solve_par_noise,
     precompute::PrecomputedPar, resolve_stage_lag_transition,
 };
+use crate::seeds::DerivedSeed;
 
 /// Run the PAR(p) η-inversion loop shared by the external-scenario and
-/// historical-window sampling schemes: seed the lag chain from
-/// `derived_lag_values`/`derived_accum`/`derived_weight`, then for every
-/// `(outer, stage, hydro)` triple invert the PAR(p) model via
-/// [`solve_par_noise`] and advance the lag chain via [`advance_lag_chain`],
-/// resetting to the same derived seed at each `outer` boundary.
+/// historical-window sampling schemes: seed the lag chain from `seed`
+/// ([`DerivedSeed`]), then for every `(outer, stage, hydro)` triple invert
+/// the PAR(p) model via [`solve_par_noise`] and advance the lag chain via
+/// [`advance_lag_chain`], resetting to the same derived seed at each `outer`
+/// boundary.
 ///
 /// `raw_target(t, outer, h)` supplies the raw value to invert;
 /// `write_eta(t, outer, h, eta)` stores the result — each caller supplies its
@@ -30,9 +31,10 @@ use crate::par::{
 // (outer × stage × entity) loop in strict sequence; extracting further
 // helpers would pass them by mutable ref across several call boundaries.
 #[allow(clippy::too_many_lines)]
-// Rationale: the accumulator seed pair joins the lag-values seed pair; no
-// natural sub-grouping exists that would not just relocate the arity into a
-// literal struct.
+// Rationale: `seed` folds the former lag/accum/weight arguments into one
+// aggregate; the remaining dimension counts, the PAR model, the
+// lag-transition table, and the two per-scheme callbacks are independent
+// inputs with no further shared aggregate.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_eta_inversion<F, W>(
     n_stages: usize,
@@ -40,10 +42,7 @@ pub(super) fn run_eta_inversion<F, W>(
     n_hydros: usize,
     max_order: usize,
     par: &PrecomputedPar,
-    derived_lag_values: &[f64],
-    l_state: usize,
-    derived_accum: &[f64],
-    derived_weight: &[f64],
+    seed: DerivedSeed<'_>,
     stage_lag_transitions: &[StageLagTransition],
     downstream_par_order: usize,
     raw_target: F,
@@ -58,11 +57,12 @@ pub(super) fn run_eta_inversion<F, W>(
     for h in 0..n_hydros {
         // Fill up to `max_order` slots so PAR(p)-A annual contributions
         // (widened across the `psi` slice) see real lag values, not zeros.
-        // `max_order.min(l_state)` truncates silently when `max_order`
-        // under-covers `l_state` — the caller must pass a `max_order` already
-        // widened to the intended lag depth, never rely on this `min` to raise it.
-        for lag in 0..max_order.min(l_state) {
-            past_lag_buf[h * safe_max_order + lag] = derived_lag_values[h * l_state + lag];
+        // `max_order.min(seed.l_state)` truncates silently when `max_order`
+        // under-covers `seed.l_state` — the caller must pass a `max_order`
+        // already widened to the intended lag depth, never rely on this `min`
+        // to raise it.
+        for lag in 0..max_order.min(seed.l_state) {
+            past_lag_buf[h * safe_max_order + lag] = seed.lag_values[h * seed.l_state + lag];
         }
     }
 
@@ -93,12 +93,12 @@ pub(super) fn run_eta_inversion<F, W>(
     for outer in 0..outer_count {
         // Each outer iteration starts from the same derived-seed lag state.
         lag_state.copy_from_slice(&past_lag_buf);
-        if derived_accum.is_empty() {
+        if seed.accum.is_empty() {
             lag_accum.fill(0.0);
             lag_weight_accum.fill(0.0);
         } else {
-            lag_accum[..derived_accum.len()].copy_from_slice(derived_accum);
-            lag_weight_accum[..derived_weight.len()].copy_from_slice(derived_weight);
+            lag_accum[..seed.accum.len()].copy_from_slice(seed.accum);
+            lag_weight_accum[..seed.weight.len()].copy_from_slice(seed.weight);
         }
         downstream_accumulator.fill(0.0);
         downstream_completed_lags.fill(0.0);

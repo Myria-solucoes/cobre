@@ -33,6 +33,41 @@ impl DerivedInflowSeeds {
             weight: vec![0.0_f64; n_hydros],
         }
     }
+
+    /// The [`DerivedSeed`] view over this owned seed, paired with the
+    /// caller's own `l_state` (the widened lag-state depth, supplied
+    /// separately because this struct does not itself carry it).
+    #[must_use]
+    pub fn as_seed(&self, l_state: usize) -> DerivedSeed<'_> {
+        DerivedSeed {
+            lag_values: &self.lag_values,
+            l_state,
+            accum: &self.accum,
+            weight: &self.weight,
+        }
+    }
+}
+
+/// Borrowed, [`Copy`] view of a stage-0 derived seed — the four values that
+/// describe it travel together and reset at the same outer boundary. Every
+/// slice is ordered by canonical hydro position, the same order
+/// [`derive_inflow_seeds`] walks `hydros` in, so a caller indexes with that
+/// position directly and needs no id lookup. An empty `accum`/`weight` means
+/// "no seed": the accumulator resets to zero, matching a period-boundary
+/// start.
+#[derive(Debug, Clone, Copy)]
+pub struct DerivedSeed<'a> {
+    /// Lag-slot seed, entity-major: `lag_values[pos * l_state + lag]`, lag
+    /// `0` is the most recent.
+    pub lag_values: &'a [f64],
+    /// Per-hydro stride of `lag_values`.
+    pub l_state: usize,
+    /// Per-hydro mid-period accumulator seed, same canonical position as
+    /// `lag_values`.
+    pub accum: &'a [f64],
+    /// Per-hydro coverage-fraction seed, same canonical position as
+    /// `lag_values`.
+    pub weight: &'a [f64],
 }
 
 /// Derive [`DerivedInflowSeeds`] from the layered `record`/`conditioning`
@@ -445,5 +480,24 @@ mod tests {
             seeds.lag_values[1], 500.0,
             "hydro id=0 (canonical position 1) lag should be its own record value"
         );
+    }
+
+    #[test]
+    fn test_as_seed_aliases_owned_contents_and_carries_l_state() {
+        let owned = DerivedInflowSeeds {
+            lag_values: vec![1.0, 2.0, 3.0, 4.0],
+            accum: vec![5.0, 6.0],
+            weight: vec![7.0, 8.0],
+        };
+
+        let seed = owned.as_seed(2);
+
+        assert_eq!(seed.l_state, 2);
+        assert_eq!(seed.lag_values, owned.lag_values.as_slice());
+        assert_eq!(seed.accum, owned.accum.as_slice());
+        assert_eq!(seed.weight, owned.weight.as_slice());
+        assert_eq!(seed.lag_values.as_ptr(), owned.lag_values.as_ptr());
+        assert_eq!(seed.accum.as_ptr(), owned.accum.as_ptr());
+        assert_eq!(seed.weight.as_ptr(), owned.weight.as_ptr());
     }
 }

@@ -10,10 +10,10 @@ use cobre_core::{
 };
 use cobre_io::StageIdResolver;
 use cobre_stochastic::{
-    ExternalScenarioLibrary, HistoricalScenarioLibrary, PrecomputedNormal, PrecomputedPar,
-    discover_historical_windows, pad_library_to_uniform, standardize_external_inflow,
-    standardize_external_load, standardize_external_ncs, standardize_historical_windows,
-    validate_external_library, validate_historical_library,
+    DerivedSeed, ExternalScenarioLibrary, HistoricalScenarioLibrary, PrecomputedNormal,
+    PrecomputedPar, discover_historical_windows, pad_library_to_uniform,
+    standardize_external_inflow, standardize_external_load, standardize_external_ncs,
+    standardize_historical_windows, validate_external_library, validate_historical_library,
 };
 
 use crate::SddpError;
@@ -21,12 +21,11 @@ use crate::lp_builder::models_from_normal;
 
 /// Build and validate a [`HistoricalScenarioLibrary`] for inflow.
 ///
-/// `derived_lag_values`/`derived_accum`/`derived_weight` and
-/// `stage_lag_transitions` seed the rolling η-inversion chain (mirroring
-/// `build_external_inflow_library`). Pass the shared
-/// `StudySetup::derived_inflow_seeds` fields and the pre-computed transitions
-/// so that every forward pass starting from the same derived seed exactly
-/// reconstructs the raw historical observations.
+/// `seed` ([`DerivedSeed`]) and `stage_lag_transitions` seed the rolling
+/// η-inversion chain (mirroring `build_external_inflow_library`). Pass the
+/// shared `StudySetup::derived_inflow_seeds` view and the pre-computed
+/// transitions so that every forward pass starting from the same derived
+/// seed exactly reconstructs the raw historical observations.
 ///
 /// # Errors
 ///
@@ -40,10 +39,7 @@ pub(crate) fn build_historical_inflow_library(
     stages: &[Stage],
     par: &PrecomputedPar,
     season_map: Option<&SeasonMap>,
-    derived_lag_values: &[f64],
-    l_state: usize,
-    derived_accum: &[f64],
-    derived_weight: &[f64],
+    seed: DerivedSeed<'_>,
     stage_lag_transitions: &[StageLagTransition],
     user_pool: Option<&HistoricalYears>,
     forward_passes: u32,
@@ -75,10 +71,7 @@ pub(crate) fn build_historical_inflow_library(
         par,
         &window_years,
         season_map,
-        derived_lag_values,
-        l_state,
-        derived_accum,
-        derived_weight,
+        seed,
         stage_lag_transitions,
         downstream_par_order,
     );
@@ -108,10 +101,7 @@ pub(crate) fn build_external_inflow_library(
     hydro_ids: &[EntityId],
     stages: &[Stage],
     par: &PrecomputedPar,
-    derived_lag_values: &[f64],
-    l_state: usize,
-    derived_accum: &[f64],
-    derived_weight: &[f64],
+    seed: DerivedSeed<'_>,
     stage_lag_transitions: &[StageLagTransition],
     forward_passes: u32,
     downstream_par_order: usize,
@@ -147,10 +137,7 @@ pub(crate) fn build_external_inflow_library(
         hydro_ids,
         stages,
         par,
-        derived_lag_values,
-        l_state,
-        derived_accum,
-        derived_weight,
+        seed,
         stage_lag_transitions,
         downstream_par_order,
     );
@@ -346,8 +333,9 @@ mod tests {
     use cobre_stochastic::{PrecomputedNormal, StochasticError, derive_external_sample_moments};
 
     use super::{
-        EntityId, ExternalScenarioRow, LoadModel, PrecomputedPar, SamplingScheme, SddpError, Stage,
-        StageLagTransition, build_external_inflow_library, build_external_load_library,
+        DerivedSeed, EntityId, ExternalScenarioRow, LoadModel, PrecomputedPar, SamplingScheme,
+        SddpError, Stage, StageLagTransition, build_external_inflow_library,
+        build_external_load_library,
     };
 
     fn single_stage(id: i32) -> Stage {
@@ -425,10 +413,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             1,
             0,
@@ -478,10 +468,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             1,
             0,
@@ -724,10 +716,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             2,
             0,
@@ -827,10 +821,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &derived_lag_values,
-            1,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &derived_lag_values,
+                l_state: 1,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             2,
             0,
@@ -1028,10 +1024,12 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &[],
-            0,
-            &[],
-            &[],
+            DerivedSeed {
+                lag_values: &[],
+                l_state: 0,
+                accum: &[],
+                weight: &[],
+            },
             &transitions,
             1,
             0,

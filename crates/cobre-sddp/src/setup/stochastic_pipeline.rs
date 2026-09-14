@@ -267,10 +267,7 @@ fn build_opening_tree_library(
         &par,
         &window_years,
         season_map_ref,
-        &derived_inflow_seeds.lag_values,
-        max_order,
-        &derived_inflow_seeds.accum,
-        &derived_inflow_seeds.weight,
+        derived_inflow_seeds.as_seed(max_order),
         &stage_lag_transitions,
         downstream_par_order,
     );
@@ -1354,8 +1351,8 @@ mod tests {
 
     /// Given a declared lag depth (24) exceeding the fitted AR(0) order,
     /// `derive_inflow_seeds` — the function `build_opening_tree_library` calls
-    /// to build the `derived_lag_values`/`l_state` pair `run_eta_inversion`'s
-    /// `max_order.min(l_state)` copy loop reads — must actually seed the
+    /// to build the `DerivedSeed` `run_eta_inversion`'s
+    /// `max_order.min(seed.l_state)` copy loop reads — must actually seed the
     /// DEEPEST declared lag slot from real history, not merely report a wider
     /// `max_order()`. Complements
     /// `build_opening_tree_library_and_resolve_state_layout_agree_at_declared_depth`'s

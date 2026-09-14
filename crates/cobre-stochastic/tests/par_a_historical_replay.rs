@@ -28,7 +28,7 @@ use cobre_core::{
     },
 };
 use cobre_stochastic::{
-    HistoricalScenarioLibrary, evaluate_par_batch, par::precompute::PrecomputedPar,
+    DerivedSeed, HistoricalScenarioLibrary, evaluate_par_batch, par::precompute::PrecomputedPar,
     standardize_historical_windows,
 };
 
@@ -167,10 +167,12 @@ fn par_a_historical_replay_roundtrip() {
         &par,
         &[window_year],
         None,
-        &past_values_m3s,
-        max_order,
-        &[],
-        &[],
+        DerivedSeed {
+            lag_values: &past_values_m3s,
+            l_state: max_order,
+            accum: &[],
+            weight: &[],
+        },
         &transitions,
         0,
     );
@@ -275,10 +277,12 @@ fn t2_derived_seed_differs_from_window_lags_roundtrip() {
         &par,
         &[window_year],
         None,
-        &past_values_m3s,
-        max_order,
-        &[],
-        &[],
+        DerivedSeed {
+            lag_values: &past_values_m3s,
+            l_state: max_order,
+            accum: &[],
+            weight: &[],
+        },
         &transitions,
         0,
     );
@@ -373,10 +377,12 @@ fn t3_ar0_par_a_roundtrip() {
         &par,
         &[window_year],
         None,
-        &past_values_m3s,
-        max_order,
-        &[],
-        &[],
+        DerivedSeed {
+            lag_values: &past_values_m3s,
+            l_state: max_order,
+            accum: &[],
+            weight: &[],
+        },
         &transitions,
         0,
     );
@@ -479,10 +485,12 @@ fn t4_derived_seed_shorter_than_max_order_roundtrip() {
         &par,
         &[window_year],
         None,
-        &derived_lag_values,
-        1,
-        &[],
-        &[],
+        DerivedSeed {
+            lag_values: &derived_lag_values,
+            l_state: 1,
+            accum: &[],
+            weight: &[],
+        },
         &transitions,
         0,
     );
@@ -580,10 +588,12 @@ fn t5_two_windows_shared_derived_seed_roundtrip() {
         &par,
         &window_years,
         None,
-        &past_values_m3s,
-        max_order,
-        &[],
-        &[],
+        DerivedSeed {
+            lag_values: &past_values_m3s,
+            l_state: max_order,
+            accum: &[],
+            weight: &[],
+        },
         &transitions,
         0,
     );

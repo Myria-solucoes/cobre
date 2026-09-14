@@ -331,7 +331,6 @@ impl ClassSampler<'_> {
                     noise_method,
                     iteration: req.iteration,
                     scenario: req.scenario,
-                    stage_id: req.stage,
                     noise_group_id: req.noise_group_id,
                     dim: *dim,
                     total_scenarios: req.total_scenarios,

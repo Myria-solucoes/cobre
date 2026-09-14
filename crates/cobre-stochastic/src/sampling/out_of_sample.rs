@@ -25,7 +25,6 @@ pub(crate) struct FreshNoiseSpec {
     pub noise_method: NoiseMethod,
     pub iteration: u32,
     pub scenario: u32,
-    pub stage_id: u32,
     /// Seed-derivation identifier: stages sharing a `(season_id, year)` bucket
     /// share a `noise_group_id` so their noise draws are identical.
     pub noise_group_id: u32,
@@ -45,11 +44,11 @@ pub(crate) fn sample_fresh(
     spec: FreshNoiseSpec,
     output: &mut [f64],
     correlation: &DecomposedCorrelation,
+    stage_id: i32,
 ) -> Result<(), StochasticError> {
     let table = table_for_spec(spec)?;
     fill_uncorrelated(spec, &table, output)?;
-    #[allow(clippy::cast_possible_wrap)]
-    let groups = correlation.groups_for_stage(spec.stage_id as i32);
+    let groups = correlation.groups_for_stage(stage_id);
     let mut scratch = vec![0.0_f64; 2 * spec.dim];
     DecomposedCorrelation::apply_groups_for_class(
         groups,
@@ -98,7 +97,7 @@ pub(crate) fn fill_uncorrelated(
         sampling_seed: spec.forward_seed,
         iteration: spec.iteration,
         scenario: spec.scenario,
-        stage_id: spec.noise_group_id,
+        stream_id: spec.noise_group_id,
         total_scenarios: spec.total_scenarios,
         dim: spec.dim,
     };
@@ -137,20 +136,7 @@ pub(crate) fn fill_uncorrelated(
             };
             scrambled_halton_point(&point_spec, ctx, output);
         }
-        NoiseMethod::Selective => {
-            tracing::warn!(
-                stage_id = spec.stage_id,
-                "selective noise method not supported in forward pass; falling back to SAA at stage {}",
-                spec.stage_id,
-            );
-            fill_saa(spec, output);
-        }
-        NoiseMethod::HistoricalResiduals => {
-            tracing::warn!(
-                stage_id = spec.stage_id,
-                "historical_residuals noise method not yet wired in forward pass; falling back to SAA at stage {}",
-                spec.stage_id,
-            );
+        NoiseMethod::Selective | NoiseMethod::HistoricalResiduals => {
             fill_saa(spec, output);
         }
     }
@@ -240,7 +226,6 @@ mod tests {
             noise_method,
             iteration: 0,
             scenario: 0,
-            stage_id: 0,
             noise_group_id: 0,
             dim: 3,
             total_scenarios: 10,
@@ -255,8 +240,8 @@ mod tests {
         let mut out_a = vec![0.0f64; spec.dim];
         let mut out_b = vec![0.0f64; spec.dim];
 
-        sample_fresh(spec, &mut out_a, &corr).unwrap();
-        sample_fresh(spec, &mut out_b, &corr).unwrap();
+        sample_fresh(spec, &mut out_a, &corr, 0).unwrap();
+        sample_fresh(spec, &mut out_b, &corr, 0).unwrap();
 
         assert_eq!(
             out_a, out_b,
@@ -281,8 +266,8 @@ mod tests {
         let mut out_a = vec![0.0f64; spec_a.dim];
         let mut out_b = vec![0.0f64; spec_b.dim];
 
-        sample_fresh(spec_a, &mut out_a, &corr_a).unwrap();
-        sample_fresh(spec_b, &mut out_b, &corr_b).unwrap();
+        sample_fresh(spec_a, &mut out_a, &corr_a, 0).unwrap();
+        sample_fresh(spec_b, &mut out_b, &corr_b, 0).unwrap();
 
         assert_ne!(
             out_a, out_b,
@@ -300,7 +285,7 @@ mod tests {
 
         let mut output = vec![0.0f64; spec.dim];
 
-        let result = sample_fresh(spec, &mut output, &corr);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         assert!(result.is_ok(), "LHS must return Ok(()), got {result:?}");
         for (i, &v) in output.iter().enumerate() {
@@ -315,7 +300,7 @@ mod tests {
 
         let mut output = vec![0.0f64; spec.dim];
 
-        let result = sample_fresh(spec, &mut output, &corr);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         assert!(
             result.is_ok(),
@@ -336,7 +321,7 @@ mod tests {
 
         let mut output = vec![0.0f64; spec.dim];
 
-        let result = sample_fresh(spec, &mut output, &corr);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         match result {
             Err(StochasticError::DimensionExceedsCapacity {
@@ -363,7 +348,7 @@ mod tests {
 
         let mut output = vec![0.0f64; spec.dim];
 
-        let result = sample_fresh(spec, &mut output, &corr);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         assert!(
             result.is_ok(),
@@ -381,7 +366,7 @@ mod tests {
 
         let mut output = vec![0.0f64; spec.dim];
 
-        let result = sample_fresh(spec, &mut output, &corr);
+        let result = sample_fresh(spec, &mut output, &corr, 0);
 
         assert!(
             result.is_ok(),
@@ -400,7 +385,6 @@ mod tests {
         let spec = FreshNoiseSpec {
             iteration: 1,
             scenario: 2,
-            stage_id: 3,
             ..base_spec(NoiseMethod::Selective)
         };
         let spec_saa = FreshNoiseSpec {
@@ -411,8 +395,8 @@ mod tests {
         let mut out_selective = vec![0.0f64; spec.dim];
         let mut out_saa = vec![0.0f64; spec.dim];
 
-        sample_fresh(spec, &mut out_selective, &corr_a).unwrap();
-        sample_fresh(spec_saa, &mut out_saa, &corr_b).unwrap();
+        sample_fresh(spec, &mut out_selective, &corr_a, 3).unwrap();
+        sample_fresh(spec_saa, &mut out_saa, &corr_b, 3).unwrap();
 
         assert_eq!(
             out_selective, out_saa,

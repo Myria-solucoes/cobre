@@ -227,7 +227,7 @@ pub fn generate_qmc_halton(
 }
 
 /// Prime table and scramble tables built once per
-/// (`sampling_seed`, `iteration`, `stage_id`, `dim`, `total_scenarios`) tuple and
+/// (`sampling_seed`, `iteration`, `stream_id`, `dim`, `total_scenarios`) tuple and
 /// reused across all scenarios at that stage.
 #[derive(Debug, Clone)]
 pub struct HaltonPrecomputed {
@@ -241,11 +241,11 @@ impl HaltonPrecomputed {
     pub fn new(
         sampling_seed: u64,
         iteration: u32,
-        stage_id: u32,
+        stream_id: u32,
         dim: usize,
         total_scenarios: u32,
     ) -> Self {
-        let seed = derive_opening_seed(sampling_seed, iteration, stage_id);
+        let seed = derive_opening_seed(sampling_seed, iteration, stream_id);
         let primes = sieve_primes(dim);
         let tables = build_scramble_tables(seed, &primes, total_scenarios as usize);
         Self { primes, tables }
@@ -310,7 +310,7 @@ pub(crate) fn scrambled_halton_point_reference(spec: &NoisePointSpec, output: &m
         return;
     }
 
-    let seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stage_id);
+    let seed = derive_opening_seed(spec.sampling_seed, spec.iteration, spec.stream_id);
     let primes = sieve_primes(spec.dim);
     let tables = build_scramble_tables(seed, &primes, spec.total_scenarios as usize);
 
@@ -517,7 +517,7 @@ mod tests {
             sampling_seed: 42,
             iteration: 0,
             scenario: 0,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: 64,
             dim,
         };
@@ -536,7 +536,7 @@ mod tests {
             sampling_seed: 42,
             iteration: 0,
             scenario: 5,
-            stage_id: 0,
+            stream_id: 0,
             total_scenarios: 64,
             dim,
         };
@@ -567,7 +567,7 @@ mod tests {
                 iteration: 0,
                 #[allow(clippy::cast_possible_truncation)]
                 scenario: scenario as u32,
-                stage_id: 1,
+                stream_id: 1,
                 #[allow(clippy::cast_possible_truncation)]
                 total_scenarios: n as u32,
                 dim,
@@ -597,7 +597,7 @@ mod tests {
                     sampling_seed: 42,
                     iteration: 1,
                     scenario,
-                    stage_id: 3,
+                    stream_id: 3,
                     total_scenarios,
                     dim,
                 };
