@@ -93,6 +93,33 @@ pub struct HydroPenalties {
     pub inflow_nonnegativity_cost: f64,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl HydroPenalties {
+    /// Every penalty field set to `v`; a fixture needing a different value for
+    /// one field overrides it with a functional update.
+    #[must_use]
+    pub fn uniform(v: f64) -> Self {
+        Self {
+            spillage_cost: v,
+            diversion_cost: v,
+            turbined_cost: v,
+            storage_violation_below_cost: v,
+            filling_target_violation_cost: v,
+            turbined_violation_below_cost: v,
+            outflow_violation_below_cost: v,
+            outflow_violation_above_cost: v,
+            generation_violation_below_cost: v,
+            evaporation_violation_cost: v,
+            water_withdrawal_violation_cost: v,
+            water_withdrawal_violation_pos_cost: v,
+            water_withdrawal_violation_neg_cost: v,
+            evaporation_violation_pos_cost: v,
+            evaporation_violation_neg_cost: v,
+            inflow_nonnegativity_cost: v,
+        }
+    }
+}
+
 /// Production function model selector for a hydro plant.
 ///
 /// A pure selector carrying no numeric coefficients: the productivity coefficient
@@ -297,22 +324,8 @@ mod tests {
 
     fn penalties_all(v: f64) -> HydroPenalties {
         HydroPenalties {
-            spillage_cost: v,
-            diversion_cost: v,
-            turbined_cost: v,
-            storage_violation_below_cost: v,
-            filling_target_violation_cost: v,
-            turbined_violation_below_cost: v,
-            outflow_violation_below_cost: v,
-            outflow_violation_above_cost: v,
-            generation_violation_below_cost: v,
-            evaporation_violation_cost: v,
-            water_withdrawal_violation_cost: v,
-            water_withdrawal_violation_pos_cost: v,
-            water_withdrawal_violation_neg_cost: v,
-            evaporation_violation_pos_cost: v,
-            evaporation_violation_neg_cost: v,
             inflow_nonnegativity_cost: 1000.0,
+            ..HydroPenalties::uniform(v)
         }
     }
     fn minimal_hydro(model: HydroGenerationModel) -> Hydro {

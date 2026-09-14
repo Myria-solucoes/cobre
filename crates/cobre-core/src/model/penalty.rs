@@ -29,6 +29,24 @@ pub struct GlobalPenaltyDefaults {
     pub ncs_curtailment_cost: f64,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl GlobalPenaltyDefaults {
+    /// Every scalar penalty set to `v`, with one uncapped deficit segment at `v`.
+    #[must_use]
+    pub fn uniform(v: f64) -> Self {
+        Self {
+            bus_deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: v,
+            }],
+            bus_excess_cost: v,
+            line_exchange_cost: v,
+            hydro: HydroPenalties::uniform(v),
+            ncs_curtailment_cost: v,
+        }
+    }
+}
+
 /// Optional entity-level hydro penalty overrides.
 ///
 /// Each field mirrors a [`HydroPenalties`] field. `None` falls back to the global

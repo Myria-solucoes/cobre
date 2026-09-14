@@ -24,8 +24,9 @@ serde = ["dep:serde", "chrono/serde"]
 ## auto-generated JSON Schemas (e.g. `ComputedParameter` embedded in
 ## `constraints/generic_parameters.json`). Implies the `serde` feature.
 schema = ["serde", "dep:schemars"]
-## Expose test-only fixture scaffolding (`Hydro::declare_mirror_unit_group`)
-## to other crates' tests. Must NOT be enabled in production builds.
+## Expose test-only fixture scaffolding (the `test_support` entity builder
+## family, mirror-unit-group declaration, uniform penalty constructors) to
+## other crates' tests. Must NOT be enabled in production builds.
 test-support = []
 
 [dependencies]

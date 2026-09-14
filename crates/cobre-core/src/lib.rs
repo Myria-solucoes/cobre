@@ -47,6 +47,8 @@ pub mod error;
 pub mod model;
 pub mod stats;
 pub mod system;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod topology;
 
 // Crate-root module aliases so `cobre_core::<module>::Symbol` paths resolve for

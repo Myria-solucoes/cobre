@@ -1178,6 +1178,7 @@ mod tests {
         LineBlockBounds, PumpingBlockBounds, ResolvedBlockBounds, ResolvedBounds,
         ResolvedHydroUnitGroupBounds, ThermalBlockBounds, ThermalStageBounds,
     };
+    use crate::test_support::{f64_bits_eq, opt_f64_bits_eq};
 
     fn make_hydro_bounds() -> HydroStageBounds {
         HydroStageBounds {
@@ -1880,53 +1881,114 @@ mod tests {
 
     // ─── Block overlay tests (bound-precedence layer 1) ─────────────────────
 
-    fn opt_f64_bits_eq(a: Option<f64>, b: Option<f64>) -> bool {
-        match (a, b) {
-            (None, None) => true,
-            (Some(x), Some(y)) => x.to_bits() == y.to_bits(),
-            _ => false,
-        }
-    }
-
     fn hydro_stage_bounds_bits_eq(a: &HydroStageBounds, b: &HydroStageBounds) -> bool {
-        a.min_storage_hm3.to_bits() == b.min_storage_hm3.to_bits()
-            && a.max_storage_hm3.to_bits() == b.max_storage_hm3.to_bits()
-            && a.filling_min_rate_m3s.to_bits() == b.filling_min_rate_m3s.to_bits()
-            && a.water_withdrawal_m3s.to_bits() == b.water_withdrawal_m3s.to_bits()
+        let HydroStageBounds {
+            min_storage_hm3: a_min_storage_hm3,
+            max_storage_hm3: a_max_storage_hm3,
+            filling_min_rate_m3s: a_filling_min_rate_m3s,
+            water_withdrawal_m3s: a_water_withdrawal_m3s,
+        } = a;
+        let HydroStageBounds {
+            min_storage_hm3: b_min_storage_hm3,
+            max_storage_hm3: b_max_storage_hm3,
+            filling_min_rate_m3s: b_filling_min_rate_m3s,
+            water_withdrawal_m3s: b_water_withdrawal_m3s,
+        } = b;
+        f64_bits_eq(*a_min_storage_hm3, *b_min_storage_hm3)
+            && f64_bits_eq(*a_max_storage_hm3, *b_max_storage_hm3)
+            && f64_bits_eq(*a_filling_min_rate_m3s, *b_filling_min_rate_m3s)
+            && f64_bits_eq(*a_water_withdrawal_m3s, *b_water_withdrawal_m3s)
     }
 
     fn hydro_block_bounds_bits_eq(a: &HydroBlockBounds, b: &HydroBlockBounds) -> bool {
-        a.min_turbined_m3s.to_bits() == b.min_turbined_m3s.to_bits()
-            && a.max_turbined_m3s.to_bits() == b.max_turbined_m3s.to_bits()
-            && a.min_outflow_m3s.to_bits() == b.min_outflow_m3s.to_bits()
-            && opt_f64_bits_eq(a.max_outflow_m3s, b.max_outflow_m3s)
-            && a.min_generation_mw.to_bits() == b.min_generation_mw.to_bits()
-            && a.max_generation_mw.to_bits() == b.max_generation_mw.to_bits()
-            && opt_f64_bits_eq(a.min_diversion_m3s, b.min_diversion_m3s)
-            && opt_f64_bits_eq(a.max_diversion_m3s, b.max_diversion_m3s)
-            && opt_f64_bits_eq(a.min_spillage_m3s, b.min_spillage_m3s)
-            && opt_f64_bits_eq(a.max_spillage_m3s, b.max_spillage_m3s)
+        let HydroBlockBounds {
+            min_turbined_m3s: a_min_turbined_m3s,
+            max_turbined_m3s: a_max_turbined_m3s,
+            min_outflow_m3s: a_min_outflow_m3s,
+            max_outflow_m3s: a_max_outflow_m3s,
+            min_generation_mw: a_min_generation_mw,
+            max_generation_mw: a_max_generation_mw,
+            min_diversion_m3s: a_min_diversion_m3s,
+            max_diversion_m3s: a_max_diversion_m3s,
+            min_spillage_m3s: a_min_spillage_m3s,
+            max_spillage_m3s: a_max_spillage_m3s,
+        } = a;
+        let HydroBlockBounds {
+            min_turbined_m3s: b_min_turbined_m3s,
+            max_turbined_m3s: b_max_turbined_m3s,
+            min_outflow_m3s: b_min_outflow_m3s,
+            max_outflow_m3s: b_max_outflow_m3s,
+            min_generation_mw: b_min_generation_mw,
+            max_generation_mw: b_max_generation_mw,
+            min_diversion_m3s: b_min_diversion_m3s,
+            max_diversion_m3s: b_max_diversion_m3s,
+            min_spillage_m3s: b_min_spillage_m3s,
+            max_spillage_m3s: b_max_spillage_m3s,
+        } = b;
+        f64_bits_eq(*a_min_turbined_m3s, *b_min_turbined_m3s)
+            && f64_bits_eq(*a_max_turbined_m3s, *b_max_turbined_m3s)
+            && f64_bits_eq(*a_min_outflow_m3s, *b_min_outflow_m3s)
+            && opt_f64_bits_eq(*a_max_outflow_m3s, *b_max_outflow_m3s)
+            && f64_bits_eq(*a_min_generation_mw, *b_min_generation_mw)
+            && f64_bits_eq(*a_max_generation_mw, *b_max_generation_mw)
+            && opt_f64_bits_eq(*a_min_diversion_m3s, *b_min_diversion_m3s)
+            && opt_f64_bits_eq(*a_max_diversion_m3s, *b_max_diversion_m3s)
+            && opt_f64_bits_eq(*a_min_spillage_m3s, *b_min_spillage_m3s)
+            && opt_f64_bits_eq(*a_max_spillage_m3s, *b_max_spillage_m3s)
     }
 
     fn thermal_block_bounds_bits_eq(a: &ThermalBlockBounds, b: &ThermalBlockBounds) -> bool {
-        a.min_generation_mw.to_bits() == b.min_generation_mw.to_bits()
-            && a.max_generation_mw.to_bits() == b.max_generation_mw.to_bits()
+        let ThermalBlockBounds {
+            min_generation_mw: a_min_generation_mw,
+            max_generation_mw: a_max_generation_mw,
+        } = a;
+        let ThermalBlockBounds {
+            min_generation_mw: b_min_generation_mw,
+            max_generation_mw: b_max_generation_mw,
+        } = b;
+        f64_bits_eq(*a_min_generation_mw, *b_min_generation_mw)
+            && f64_bits_eq(*a_max_generation_mw, *b_max_generation_mw)
     }
 
     fn line_bounds_bits_eq(a: &LineBlockBounds, b: &LineBlockBounds) -> bool {
-        a.direct_mw.to_bits() == b.direct_mw.to_bits()
-            && a.reverse_mw.to_bits() == b.reverse_mw.to_bits()
+        let LineBlockBounds {
+            direct_mw: a_direct_mw,
+            reverse_mw: a_reverse_mw,
+        } = a;
+        let LineBlockBounds {
+            direct_mw: b_direct_mw,
+            reverse_mw: b_reverse_mw,
+        } = b;
+        f64_bits_eq(*a_direct_mw, *b_direct_mw) && f64_bits_eq(*a_reverse_mw, *b_reverse_mw)
     }
 
     fn pumping_bounds_bits_eq(a: &PumpingBlockBounds, b: &PumpingBlockBounds) -> bool {
-        a.min_flow_m3s.to_bits() == b.min_flow_m3s.to_bits()
-            && a.max_flow_m3s.to_bits() == b.max_flow_m3s.to_bits()
+        let PumpingBlockBounds {
+            min_flow_m3s: a_min_flow_m3s,
+            max_flow_m3s: a_max_flow_m3s,
+        } = a;
+        let PumpingBlockBounds {
+            min_flow_m3s: b_min_flow_m3s,
+            max_flow_m3s: b_max_flow_m3s,
+        } = b;
+        f64_bits_eq(*a_min_flow_m3s, *b_min_flow_m3s)
+            && f64_bits_eq(*a_max_flow_m3s, *b_max_flow_m3s)
     }
 
     fn contract_bounds_bits_eq(a: &ContractBlockBounds, b: &ContractBlockBounds) -> bool {
-        a.min_mw.to_bits() == b.min_mw.to_bits()
-            && a.max_mw.to_bits() == b.max_mw.to_bits()
-            && a.price_per_mwh.to_bits() == b.price_per_mwh.to_bits()
+        let ContractBlockBounds {
+            min_mw: a_min_mw,
+            max_mw: a_max_mw,
+            price_per_mwh: a_price_per_mwh,
+        } = a;
+        let ContractBlockBounds {
+            min_mw: b_min_mw,
+            max_mw: b_max_mw,
+            price_per_mwh: b_price_per_mwh,
+        } = b;
+        f64_bits_eq(*a_min_mw, *b_min_mw)
+            && f64_bits_eq(*a_max_mw, *b_max_mw)
+            && f64_bits_eq(*a_price_per_mwh, *b_price_per_mwh)
     }
 
     /// Builds a table with distinct per-(entity, stage) values for every family
@@ -2427,6 +2489,37 @@ mod tests {
         assert!(
             hydro_stage_bounds_bits_eq(&stage_before, &stage_after),
             "installing a block overlay must not perturb the stage cell"
+        );
+    }
+
+    #[test]
+    fn test_hydro_stage_bounds_bits_eq_distinguishes_signed_zero_and_equates_nan() {
+        let positive_zero = HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let negative_zero = HydroStageBounds {
+            min_storage_hm3: -0.0,
+            ..positive_zero
+        };
+        assert!(
+            !hydro_stage_bounds_bits_eq(&positive_zero, &negative_zero),
+            "+0.0 and -0.0 carry different bit patterns and must compare unequal"
+        );
+
+        let nan_a = HydroStageBounds {
+            min_storage_hm3: f64::NAN,
+            ..positive_zero
+        };
+        let nan_b = HydroStageBounds {
+            min_storage_hm3: f64::NAN,
+            ..positive_zero
+        };
+        assert!(
+            hydro_stage_bounds_bits_eq(&nan_a, &nan_b),
+            "two NaN bit patterns must compare equal even though NaN != NaN under =="
         );
     }
 

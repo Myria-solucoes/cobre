@@ -202,157 +202,11 @@ impl NetworkTopology {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{ContractType, HydroGenerationModel, HydroPenalties, HydroUnitGroup};
-    use chrono::NaiveDate;
-
-    fn make_bus(id: i32) -> Bus {
-        Bus {
-            id: EntityId(id),
-            name: String::new(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![],
-            excess_cost: 0.0,
-        }
-    }
-
-    fn make_line(id: i32, source_bus_id: i32, target_bus_id: i32) -> Line {
-        Line {
-            id: EntityId(id),
-            name: String::new(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            source_bus_id: EntityId(source_bus_id),
-            target_bus_id: EntityId(target_bus_id),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            direct_capacity_mw: 100.0,
-            reverse_capacity_mw: 100.0,
-            losses_percent: 0.0,
-            exchange_cost: 0.0,
-        }
-    }
-
-    fn make_hydro(id: i32, bus_id: i32) -> Hydro {
-        let zero_penalties = HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        };
-        let mut hydro = Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
-            name: String::new(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 1.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 1.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 1.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: zero_penalties,
-        };
-        hydro.declare_mirror_unit_group(EntityId(bus_id));
-        hydro
-    }
-
-    fn make_thermal(id: i32, bus_id: i32) -> Thermal {
-        Thermal {
-            id: EntityId(id),
-            name: String::new(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            cost_per_mwh: 50.0,
-            min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
-            anticipated_config: None,
-        }
-    }
-
-    fn make_ncs(id: i32, bus_id: i32) -> NonControllableSource {
-        NonControllableSource {
-            id: EntityId(id),
-            name: String::new(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            max_generation_mw: 50.0,
-            allow_curtailment: true,
-            curtailment_cost: 0.0,
-        }
-    }
-
-    fn make_contract(id: i32, bus_id: i32) -> EnergyContract {
-        EnergyContract {
-            id: EntityId(id),
-            name: String::new(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
-            contract_type: ContractType::Import,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            price_per_mwh: 0.0,
-            min_mw: 0.0,
-            max_mw: 100.0,
-        }
-    }
-
-    fn make_group(id: i32, bus_id: i32) -> HydroUnitGroup {
-        HydroUnitGroup {
-            id: EntityId(id),
-            name: String::new(),
-            bus_id: EntityId(bus_id),
-            min_generation_mw: 0.0,
-            max_generation_mw: 1.0,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 1.0,
-        }
-    }
-
-    fn make_pumping_station(id: i32, bus_id: i32) -> PumpingStation {
-        PumpingStation {
-            id: EntityId(id),
-            name: String::new(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
-            source_hydro_id: EntityId(0),
-            destination_hydro_id: EntityId(1),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            consumption_mw_per_m3s: 0.5,
-            min_flow_m3s: 0.0,
-            max_flow_m3s: 10.0,
-        }
-    }
+    use crate::test_support::{
+        BusSpec, ContractSpec, HydroSpec, LineSpec, NcsSpec, PumpingSpec, ThermalSpec,
+        UnitGroupSpec, make_bus, make_contract, make_hydro, make_line, make_ncs,
+        make_pumping_station, make_thermal, make_unit_group,
+    };
 
     #[test]
     fn test_empty_network() {
@@ -368,8 +222,22 @@ mod tests {
 
     #[test]
     fn test_single_line() {
-        let buses = vec![make_bus(0), make_bus(1)];
-        let lines = vec![make_line(0, 0, 1)];
+        let buses = vec![
+            make_bus(BusSpec {
+                id: 0,
+                ..Default::default()
+            }),
+            make_bus(BusSpec {
+                id: 1,
+                ..Default::default()
+            }),
+        ];
+        let lines = vec![make_line(LineSpec {
+            id: 0,
+            source_bus_id: 0,
+            target_bus_id: 1,
+            ..Default::default()
+        })];
         let topo = NetworkTopology::build(&buses, &lines, &[], &[], &[], &[], &[]);
 
         let conns_0 = topo.bus_lines(EntityId(0));
@@ -385,8 +253,44 @@ mod tests {
 
     #[test]
     fn test_multiple_lines_same_bus() {
-        let buses = vec![make_bus(0), make_bus(1), make_bus(2), make_bus(3)];
-        let lines = vec![make_line(0, 0, 1), make_line(1, 0, 2), make_line(2, 0, 3)];
+        let buses = vec![
+            make_bus(BusSpec {
+                id: 0,
+                ..Default::default()
+            }),
+            make_bus(BusSpec {
+                id: 1,
+                ..Default::default()
+            }),
+            make_bus(BusSpec {
+                id: 2,
+                ..Default::default()
+            }),
+            make_bus(BusSpec {
+                id: 3,
+                ..Default::default()
+            }),
+        ];
+        let lines = vec![
+            make_line(LineSpec {
+                id: 0,
+                source_bus_id: 0,
+                target_bus_id: 1,
+                ..Default::default()
+            }),
+            make_line(LineSpec {
+                id: 1,
+                source_bus_id: 0,
+                target_bus_id: 2,
+                ..Default::default()
+            }),
+            make_line(LineSpec {
+                id: 2,
+                source_bus_id: 0,
+                target_bus_id: 3,
+                ..Default::default()
+            }),
+        ];
         let topo = NetworkTopology::build(&buses, &lines, &[], &[], &[], &[], &[]);
 
         let conns = topo.bus_lines(EntityId(0));
@@ -399,10 +303,38 @@ mod tests {
 
     #[test]
     fn test_generators_per_bus() {
-        let buses = vec![make_bus(0), make_bus(1)];
-        let hydros = vec![make_hydro(0, 0), make_hydro(1, 0)];
-        let thermals = vec![make_thermal(0, 0)];
-        let ncs = vec![make_ncs(0, 1)];
+        let buses = vec![
+            make_bus(BusSpec {
+                id: 0,
+                ..Default::default()
+            }),
+            make_bus(BusSpec {
+                id: 1,
+                ..Default::default()
+            }),
+        ];
+        let hydros = vec![
+            make_hydro(HydroSpec {
+                id: 0,
+                bus_id: 0,
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 1,
+                bus_id: 0,
+                ..Default::default()
+            }),
+        ];
+        let thermals = vec![make_thermal(ThermalSpec {
+            id: 0,
+            bus_id: 0,
+            ..Default::default()
+        })];
+        let ncs = vec![make_ncs(NcsSpec {
+            id: 0,
+            bus_id: 1,
+            ..Default::default()
+        })];
         let topo = NetworkTopology::build(&buses, &[], &hydros, &thermals, &ncs, &[], &[]);
 
         let gen0 = topo.bus_generators(EntityId(0));
@@ -419,9 +351,20 @@ mod tests {
 
     #[test]
     fn test_loads_per_bus() {
-        let buses = vec![make_bus(0)];
-        let contracts = vec![make_contract(0, 0)];
-        let stations = vec![make_pumping_station(0, 0)];
+        let buses = vec![make_bus(BusSpec {
+            id: 0,
+            ..Default::default()
+        })];
+        let contracts = vec![make_contract(ContractSpec {
+            id: 0,
+            bus_id: 0,
+            ..Default::default()
+        })];
+        let stations = vec![make_pumping_station(PumpingSpec {
+            id: 0,
+            bus_id: 0,
+            ..Default::default()
+        })];
         let topo = NetworkTopology::build(&buses, &[], &[], &[], &[], &contracts, &stations);
 
         let loads0 = topo.bus_loads(EntityId(0));
@@ -433,7 +376,10 @@ mod tests {
 
     #[test]
     fn test_bus_no_connections() {
-        let buses = vec![make_bus(0)];
+        let buses = vec![make_bus(BusSpec {
+            id: 0,
+            ..Default::default()
+        })];
         let topo = NetworkTopology::build(&buses, &[], &[], &[], &[], &[], &[]);
 
         assert_eq!(topo.bus_lines(EntityId(0)), &[]);
@@ -448,10 +394,51 @@ mod tests {
 
     #[test]
     fn test_deterministic_ordering() {
-        let buses = vec![make_bus(0)];
-        let hydros = vec![make_hydro(5, 0), make_hydro(3, 0), make_hydro(1, 0)];
-        let thermals = vec![make_thermal(4, 0), make_thermal(2, 0)];
-        let contracts = vec![make_contract(10, 0), make_contract(7, 0)];
+        let buses = vec![make_bus(BusSpec {
+            id: 0,
+            ..Default::default()
+        })];
+        let hydros = vec![
+            make_hydro(HydroSpec {
+                id: 5,
+                bus_id: 0,
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 3,
+                bus_id: 0,
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 1,
+                bus_id: 0,
+                ..Default::default()
+            }),
+        ];
+        let thermals = vec![
+            make_thermal(ThermalSpec {
+                id: 4,
+                bus_id: 0,
+                ..Default::default()
+            }),
+            make_thermal(ThermalSpec {
+                id: 2,
+                bus_id: 0,
+                ..Default::default()
+            }),
+        ];
+        let contracts = vec![
+            make_contract(ContractSpec {
+                id: 10,
+                bus_id: 0,
+                ..Default::default()
+            }),
+            make_contract(ContractSpec {
+                id: 7,
+                bus_id: 0,
+                ..Default::default()
+            }),
+        ];
         let topo = NetworkTopology::build(&buses, &[], &hydros, &thermals, &[], &contracts, &[]);
 
         let generators = topo.bus_generators(EntityId(0));
@@ -467,9 +454,32 @@ mod tests {
 
     #[test]
     fn test_bus_generators_same_bus_groups_collapse_to_one_hydro_id() {
-        let buses = vec![make_bus(0)];
-        let mut hydro = make_hydro(10, 0);
-        hydro.unit_groups = vec![make_group(0, 0), make_group(1, 0), make_group(2, 0)];
+        let buses = vec![make_bus(BusSpec {
+            id: 0,
+            ..Default::default()
+        })];
+        let mut hydro = make_hydro(HydroSpec {
+            id: 10,
+            bus_id: 0,
+            ..Default::default()
+        });
+        hydro.unit_groups = vec![
+            make_unit_group(UnitGroupSpec {
+                id: 0,
+                bus_id: 0,
+                ..Default::default()
+            }),
+            make_unit_group(UnitGroupSpec {
+                id: 1,
+                bus_id: 0,
+                ..Default::default()
+            }),
+            make_unit_group(UnitGroupSpec {
+                id: 2,
+                bus_id: 0,
+                ..Default::default()
+            }),
+        ];
         let topo = NetworkTopology::build(&buses, &[], &[hydro], &[], &[], &[], &[]);
 
         assert_eq!(
@@ -480,14 +490,53 @@ mod tests {
 
     #[test]
     fn test_bus_generators_group_bus_listing_is_declaration_order_invariant() {
-        let buses = vec![make_bus(1), make_bus(2)];
+        let buses = vec![
+            make_bus(BusSpec {
+                id: 1,
+                ..Default::default()
+            }),
+            make_bus(BusSpec {
+                id: 2,
+                ..Default::default()
+            }),
+        ];
 
-        let mut hydro_fwd = make_hydro(10, 1);
-        hydro_fwd.unit_groups = vec![make_group(2, 1), make_group(5, 2)];
+        let mut hydro_fwd = make_hydro(HydroSpec {
+            id: 10,
+            bus_id: 1,
+            ..Default::default()
+        });
+        hydro_fwd.unit_groups = vec![
+            make_unit_group(UnitGroupSpec {
+                id: 2,
+                bus_id: 1,
+                ..Default::default()
+            }),
+            make_unit_group(UnitGroupSpec {
+                id: 5,
+                bus_id: 2,
+                ..Default::default()
+            }),
+        ];
         let topo_fwd = NetworkTopology::build(&buses, &[], &[hydro_fwd], &[], &[], &[], &[]);
 
-        let mut hydro_rev = make_hydro(10, 1);
-        hydro_rev.unit_groups = vec![make_group(5, 2), make_group(2, 1)];
+        let mut hydro_rev = make_hydro(HydroSpec {
+            id: 10,
+            bus_id: 1,
+            ..Default::default()
+        });
+        hydro_rev.unit_groups = vec![
+            make_unit_group(UnitGroupSpec {
+                id: 5,
+                bus_id: 2,
+                ..Default::default()
+            }),
+            make_unit_group(UnitGroupSpec {
+                id: 2,
+                bus_id: 1,
+                ..Default::default()
+            }),
+        ];
         let topo_rev = NetworkTopology::build(&buses, &[], &[hydro_rev], &[], &[], &[], &[]);
 
         assert_eq!(
@@ -511,10 +560,32 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_topology_serde_roundtrip_network() {
-        let buses = vec![make_bus(0), make_bus(1)];
-        let lines = vec![make_line(0, 0, 1)];
-        let hydros = vec![make_hydro(0, 0)];
-        let thermals = vec![make_thermal(0, 1)];
+        let buses = vec![
+            make_bus(BusSpec {
+                id: 0,
+                ..Default::default()
+            }),
+            make_bus(BusSpec {
+                id: 1,
+                ..Default::default()
+            }),
+        ];
+        let lines = vec![make_line(LineSpec {
+            id: 0,
+            source_bus_id: 0,
+            target_bus_id: 1,
+            ..Default::default()
+        })];
+        let hydros = vec![make_hydro(HydroSpec {
+            id: 0,
+            bus_id: 0,
+            ..Default::default()
+        })];
+        let thermals = vec![make_thermal(ThermalSpec {
+            id: 0,
+            bus_id: 1,
+            ..Default::default()
+        })];
         let topo = NetworkTopology::build(&buses, &lines, &hydros, &thermals, &[], &[], &[]);
         let json = serde_json::to_string(&topo).unwrap();
         let deserialized: NetworkTopology = serde_json::from_str(&json).unwrap();
