@@ -624,7 +624,6 @@ fn validate_partial_estimation_coverage(
         .collect();
     white_noise_fallbacks.sort();
 
-    // Cross-season std-ratio divergence check (advisory only).
     let std_ratio_warnings = check_std_ratio_divergence(system, fitting_stats, stages);
     for w in &std_ratio_warnings {
         tracing::warn!(

@@ -52,6 +52,14 @@ pub struct PrepareStochasticResult {
     pub estimation_path: EstimationPath,
 }
 
+fn class_schemes_for(training_source: &ScenarioSource) -> ClassSchemes {
+    ClassSchemes {
+        inflow: Some(training_source.inflow_scheme),
+        load: Some(training_source.load_scheme),
+        ncs: Some(training_source.ncs_scheme),
+    }
+}
+
 /// Load and validate a user-supplied opening tree when
 /// `training.scenario_source.openings` declares `{source: file}`, reading the
 /// convention-located `scenarios/noise_openings.parquet` — consumed by
@@ -88,11 +96,7 @@ fn load_user_opening_tree_inner(
 
             let rows = load_noise_openings(Some(&path))?;
 
-            let schemes = ClassSchemes {
-                inflow: Some(training_source.inflow_scheme),
-                load: Some(training_source.load_scheme),
-                ncs: Some(training_source.ncs_scheme),
-            };
+            let schemes = class_schemes_for(training_source);
             let expected_dim = noise_entity_order(system, &schemes).dim();
 
             let (study_stage_ids, expected_openings_per_stage): (Vec<i32>, Vec<usize>) = system
@@ -323,11 +327,7 @@ fn compute_external_scenario_counts(
         return None;
     }
     let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
-    let schemes = ClassSchemes {
-        inflow: Some(training_source.inflow_scheme),
-        load: Some(training_source.load_scheme),
-        ncs: Some(training_source.ncs_scheme),
-    };
+    let schemes = class_schemes_for(training_source);
     let noise_order = noise_entity_order(system, &schemes);
 
     let inflow_counts = class_scenario_counts(
@@ -461,11 +461,7 @@ pub fn build_stochastic_context_for_study(
             external_scenario_counts,
             noise_group_ids: Some(study_stage_noise_group_ids(system)),
         },
-        ClassSchemes {
-            inflow: Some(training_source.inflow_scheme),
-            load: Some(training_source.load_scheme),
-            ncs: Some(training_source.ncs_scheme),
-        },
+        class_schemes_for(training_source),
     )?;
     Ok(stochastic)
 }

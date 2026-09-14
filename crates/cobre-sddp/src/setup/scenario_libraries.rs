@@ -32,8 +32,9 @@ use crate::lp_builder::models_from_normal;
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on window discovery or validation failure.
-// Rationale: mirrors standardize_historical_windows's own arity; a context
-// struct would just relocate the arity, not reduce it.
+// Rationale: mirrors standardize_historical_windows's own arity, whose stage-0
+// seed already travels as one `DerivedSeed`; the remaining inputs are
+// independent and still exceed the threshold.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_historical_inflow_library(
     inflow_history: &[InflowHistoryRow],
@@ -90,13 +91,36 @@ pub(crate) fn build_historical_inflow_library(
     Ok(library)
 }
 
+fn per_stage_scenario_counts(
+    stage_ids: impl Iterator<Item = i32>,
+    stages: &[Stage],
+    n_entities: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let resolver =
+        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
+    let n_stages = stages.len();
+    let mut rows_per_stage = vec![0usize; n_stages];
+    for stage_id in stage_ids {
+        if let Some(idx) = resolver.resolve(stage_id) {
+            rows_per_stage[idx] += 1;
+        }
+    }
+    let per_stage_scenarios = if n_entities > 0 {
+        rows_per_stage.iter().map(|&r| r / n_entities).collect()
+    } else {
+        vec![0usize; n_stages]
+    };
+    (rows_per_stage, per_stage_scenarios)
+}
+
 /// Build and validate an [`ExternalScenarioLibrary`] for inflow.
 ///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on validation failure.
-// Rationale: mirrors standardize_external_inflow's own arity; a context
-// struct would just relocate the arity, not reduce it.
+// Rationale: mirrors standardize_external_inflow's own arity, whose stage-0
+// seed already travels as one `DerivedSeed`; the remaining inputs are
+// independent and still exceed the threshold.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_external_inflow_library(
     external_rows: &[ExternalScenarioRow],
@@ -111,19 +135,8 @@ pub(crate) fn build_external_inflow_library(
     let n_stages = stages.len();
     let n_hydros = hydro_ids.len();
     let row_entity_ids: HashSet<EntityId> = external_rows.iter().map(|r| r.hydro_id).collect();
-    let resolver =
-        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
-    let mut rows_per_stage = vec![0usize; n_stages];
-    for row in external_rows {
-        if let Some(idx) = resolver.resolve(row.stage_id) {
-            rows_per_stage[idx] += 1;
-        }
-    }
-    let per_stage_scenarios: Vec<usize> = if n_hydros > 0 {
-        rows_per_stage.iter().map(|&r| r / n_hydros).collect()
-    } else {
-        vec![0usize; n_stages]
-    };
+    let (rows_per_stage, per_stage_scenarios) =
+        per_stage_scenario_counts(external_rows.iter().map(|r| r.stage_id), stages, n_hydros);
     let n_scenarios_ext = per_stage_scenarios.iter().copied().max().unwrap_or(0);
     let mut library = ExternalScenarioLibrary::new(
         n_stages,
@@ -193,19 +206,8 @@ pub(crate) fn build_external_load_library(
     let bus_ids = system.load_noise_member_bus_ids(load_scheme);
     let n_buses = bus_ids.len();
     let row_entity_ids: HashSet<EntityId> = external_rows.iter().map(|r| r.bus_id).collect();
-    let resolver =
-        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
-    let mut rows_per_stage = vec![0usize; n_stages];
-    for row in external_rows {
-        if let Some(idx) = resolver.resolve(row.stage_id) {
-            rows_per_stage[idx] += 1;
-        }
-    }
-    let per_stage_scenarios: Vec<usize> = if n_buses > 0 {
-        rows_per_stage.iter().map(|&r| r / n_buses).collect()
-    } else {
-        vec![0usize; n_stages]
-    };
+    let (rows_per_stage, per_stage_scenarios) =
+        per_stage_scenario_counts(external_rows.iter().map(|r| r.stage_id), stages, n_buses);
     let n_scenarios_ext = per_stage_scenarios.iter().copied().max().unwrap_or(0);
     let mut library = ExternalScenarioLibrary::new(
         n_stages,
@@ -274,19 +276,8 @@ pub(crate) fn build_external_ncs_library(
     let ncs_ids = system.ncs_noise_member_ids(SamplingScheme::External);
     let n_ncs = ncs_ids.len();
     let row_entity_ids: HashSet<EntityId> = external_rows.iter().map(|r| r.ncs_id).collect();
-    let resolver =
-        StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
-    let mut rows_per_stage = vec![0usize; n_stages];
-    for row in external_rows {
-        if let Some(idx) = resolver.resolve(row.stage_id) {
-            rows_per_stage[idx] += 1;
-        }
-    }
-    let per_stage_scenarios: Vec<usize> = if n_ncs > 0 {
-        rows_per_stage.iter().map(|&r| r / n_ncs).collect()
-    } else {
-        vec![0usize; n_stages]
-    };
+    let (rows_per_stage, per_stage_scenarios) =
+        per_stage_scenario_counts(external_rows.iter().map(|r| r.stage_id), stages, n_ncs);
     let n_scenarios_ext = per_stage_scenarios.iter().copied().max().unwrap_or(0);
     let mut library =
         ExternalScenarioLibrary::new(n_stages, n_scenarios_ext, n_ncs, "ncs", per_stage_scenarios);

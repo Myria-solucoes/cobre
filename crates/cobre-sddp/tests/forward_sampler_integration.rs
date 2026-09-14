@@ -727,7 +727,7 @@ fn build_historical_system(
     );
     let id = EntityId(hydro_raw_id);
     let hydro = make_hydro(
-        EntityId(hydro_raw_id),
+        id,
         HydroSpec {
             name: format!("H{hydro_raw_id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -956,7 +956,7 @@ fn build_external_system(
     );
     let id = EntityId(hydro_raw_id);
     let hydro = make_hydro(
-        EntityId(hydro_raw_id),
+        id,
         HydroSpec {
             name: format!("H{hydro_raw_id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

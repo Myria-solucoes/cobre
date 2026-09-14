@@ -199,6 +199,21 @@ pub fn precompute_stage_lag_transitions(
     result
 }
 
+/// Sum of hours across the 3 months from `start_month`, wrapping into
+/// `start_year + 1` for a month index that spills past December.
+fn quarter_hours(start_year: i32, start_month: u32) -> f64 {
+    (start_month..=start_month + 2)
+        .map(|m| {
+            let (y, mo) = if m > 12 {
+                (start_year + 1, m - 12)
+            } else {
+                (start_year, m)
+            };
+            month_total_hours(y, mo)
+        })
+        .sum()
+}
+
 /// Populate downstream accumulation fields on the pre-transition window entries
 /// in `transitions`.
 ///
@@ -233,21 +248,12 @@ fn compute_downstream_transitions(
         let month = u32::try_from(season_id % 12 + 1)
             .unwrap_or_else(|_| unreachable!("season_id % 12 always fits in u32"));
 
-        let quarter_start_month: u32 = ((month - 1) / 3) * 3 + 1; // 1, 4, 7, or 10
+        let quarter_start_month: u32 = ((month - 1) / 3) * 3 + 1;
         let quarter_end_month: u32 = quarter_start_month + 2;
 
         let year = find_season_year_monthly(stage.start_date, stage.end_date, month);
 
-        let quarter_total_hours: f64 = (quarter_start_month..=quarter_end_month)
-            .map(|m| {
-                let (y, mo) = if m > 12 {
-                    (year + 1, m - 12)
-                } else {
-                    (year, m)
-                };
-                month_total_hours(y, mo)
-            })
-            .sum();
+        let quarter_total_hours = quarter_hours(year, quarter_start_month);
 
         let quarter_period_start = NaiveDate::from_ymd_opt(year, quarter_start_month, 1)
             .unwrap_or_else(|| unreachable!("quarter start date is always valid"));
@@ -256,25 +262,15 @@ fn compute_downstream_transitions(
             single_period_overlap_hours(stage, quarter_period_start, quarter_total_hours)
                 / quarter_total_hours;
 
-        let next_quarter_start_month = quarter_end_month + 1; // may be 13 → wrap to next year
+        let next_quarter_start_month = quarter_end_month + 1;
         let (next_q_year, next_q_start_month) = if next_quarter_start_month > 12 {
             (year + 1, next_quarter_start_month - 12)
         } else {
             (year, next_quarter_start_month)
         };
-        let next_quarter_end_month = next_q_start_month + 2;
         let next_quarter_start = NaiveDate::from_ymd_opt(next_q_year, next_q_start_month, 1)
             .unwrap_or_else(|| unreachable!("next quarter start date is always valid"));
-        let next_quarter_total_hours: f64 = (next_q_start_month..=next_quarter_end_month)
-            .map(|m| {
-                let (y, mo) = if m > 12 {
-                    (next_q_year + 1, m - 12)
-                } else {
-                    (next_q_year, m)
-                };
-                month_total_hours(y, mo)
-            })
-            .sum();
+        let next_quarter_total_hours = quarter_hours(next_q_year, next_q_start_month);
 
         let downstream_spillover_weight =
             single_period_overlap_hours(stage, next_quarter_start, next_quarter_total_hours)

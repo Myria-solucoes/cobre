@@ -2798,7 +2798,7 @@ mod tests {
     /// its own "later occurrences" scan (since `.skip(0 + 1)` always starts
     /// from position 1) and report `false`.
     #[test]
-    fn test_prestudy_lag_transition_uses_position_not_prebuild_index() {
+    fn test_prebuild_lag_transition_uses_position_not_index() {
         let json = r#"{
           "season_definitions": {
             "cycle_type": "monthly",
