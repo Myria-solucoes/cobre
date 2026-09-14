@@ -937,7 +937,6 @@ fn test_canonical_order_stable_under_name_changes() {
         .build()
         .expect("system must be valid");
 
-    // Rename both hydros (ids and dates unchanged), and reverse the input order.
     let mut a_renamed = hydro_a;
     a_renamed.name = "zulu".to_string();
     let mut b_renamed = hydro_b;
