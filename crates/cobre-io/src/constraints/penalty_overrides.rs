@@ -844,23 +844,13 @@ pub fn parse_penalty_overrides_ncs(path: &Path) -> Result<Vec<NcsPenaltyOverride
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Shared test helpers ───────────────────────────────────────────────────
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
 
     // ── BusPenaltyOverrideRow tests ───────────────────────────────────────────
 

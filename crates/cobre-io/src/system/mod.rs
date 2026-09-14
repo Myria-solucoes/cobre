@@ -105,44 +105,7 @@ pub fn load_energy_contracts(path: Option<&Path>) -> Result<Vec<EnergyContract>,
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use cobre_core::entities::{DeficitSegment, HydroPenalties};
-
-    /// Build a canonical `GlobalPenaltyDefaults` for test use.
-    fn make_global() -> GlobalPenaltyDefaults {
-        GlobalPenaltyDefaults {
-            bus_deficit_segments: vec![
-                DeficitSegment {
-                    depth_mw: Some(500.0),
-                    cost_per_mwh: 1000.0,
-                },
-                DeficitSegment {
-                    depth_mw: None,
-                    cost_per_mwh: 5000.0,
-                },
-            ],
-            bus_excess_cost: 100.0,
-            line_exchange_cost: 2.0,
-            hydro: HydroPenalties {
-                spillage_cost: 0.01,
-                turbined_cost: 0.05,
-                diversion_cost: 0.1,
-                storage_violation_below_cost: 10_000.0,
-                filling_target_violation_cost: 50_000.0,
-                turbined_violation_below_cost: 500.0,
-                outflow_violation_below_cost: 500.0,
-                outflow_violation_above_cost: 500.0,
-                generation_violation_below_cost: 1_000.0,
-                evaporation_violation_cost: 5_000.0,
-                water_withdrawal_violation_cost: 1_000.0,
-                water_withdrawal_violation_pos_cost: 1_000.0,
-                water_withdrawal_violation_neg_cost: 1_000.0,
-                evaporation_violation_pos_cost: 5_000.0,
-                evaporation_violation_neg_cost: 5_000.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-            ncs_curtailment_cost: 0.005,
-        }
-    }
+    use crate::test_support::make_global;
 
     // ── AC: optional file wrapper returns empty vec for None ──────────────────
 

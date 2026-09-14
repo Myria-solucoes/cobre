@@ -820,8 +820,8 @@ pub(super) fn check_sampling_method_meaningfulness(data: &ParsedData, ctx: &mut 
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
+    use crate::test_support::*;
     use crate::validation::schema::ParsedData;
     use cobre_core::EntityId;
     use cobre_core::scenario::ExternalScenarioRow;

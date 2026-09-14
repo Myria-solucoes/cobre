@@ -593,6 +593,7 @@ dependencies = [
  "arrow",
  "chrono",
  "cobre-core",
+ "cobre-io",
  "cobre-stochastic",
  "csv",
  "flatbuffers",

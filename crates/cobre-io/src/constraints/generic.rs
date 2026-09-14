@@ -1747,18 +1747,9 @@ fn build_variable_ref(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_json;
     use cobre_core::CoefficientRef;
     use std::fmt::Write as _;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().expect("tempfile");
-        f.write_all(content.as_bytes()).expect("write");
-        f
-    }
 
     fn lit(term: &LinearTerm) -> f64 {
         match term.coefficient {

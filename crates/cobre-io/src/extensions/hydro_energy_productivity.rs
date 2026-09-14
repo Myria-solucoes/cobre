@@ -287,6 +287,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::test_support::write_parquet;
 
     fn make_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -325,15 +326,6 @@ mod tests {
             ],
         )
         .expect("valid batch construction")
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     /// Round-trip: three rows matching the acceptance criterion fixture.

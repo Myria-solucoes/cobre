@@ -324,12 +324,12 @@ fn validate_finite(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
+    use crate::test_support::write_parquet_batches;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -414,28 +414,6 @@ mod tests {
             outflow_max_m3s: 1500.0,
             a_cf: [320.0, 1.0e-3, -3.1521e-17, 0.0, 0.0],
         }
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
-
-    fn write_parquet_batches(batches: &[RecordBatch]) -> NamedTempFile {
-        assert!(!batches.is_empty(), "must provide at least one batch");
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer =
-            ArrowWriter::try_new(tmp.reopen().expect("reopen"), batches[0].schema(), None)
-                .expect("ArrowWriter");
-        for batch in batches {
-            writer.write(batch).expect("write batch");
-        }
-        writer.close().expect("close writer");
-        tmp
     }
 
     // ── AC: multi-segment family sorted ascending by segment_id ────────────────

@@ -1364,6 +1364,7 @@ fn bounds_schema() -> Schema {
 )]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use arrow::array::Array;
     use chrono::NaiveDate;
     use cobre_core::{
@@ -2408,8 +2409,6 @@ mod tests {
 
     #[test]
     fn bounds_parquet_roundtrip() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let system = make_system_1h_2stages(100.0, 500.0);
         let tmp = tempfile::tempdir().unwrap();
         let config = ParquetWriterConfig::default();
@@ -2420,10 +2419,7 @@ mod tests {
         let path = tmp.path().join("bounds.parquet");
         assert!(path.exists(), "bounds.parquet must exist");
 
-        let file = std::fs::File::open(&path).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&path);
 
         // 1 hydro, 2 stages, 7 bound types per stage (no max_outflow) = 14
         // plant rows, plus `make_hydro`'s 1 mirror unit group × 2 stages × 4
@@ -2494,8 +2490,6 @@ mod tests {
 
     #[test]
     fn bounds_parquet_emits_no_block_rows_when_overlay_empty() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let system = make_system_2h_2t_blocks(ResolvedBlockBounds::empty());
         let tmp = tempfile::tempdir().unwrap();
         let config = ParquetWriterConfig::default();
@@ -2503,10 +2497,7 @@ mod tests {
         write_bounds_parquet(tmp.path(), &system, &config)
             .expect("write_bounds_parquet must succeed");
 
-        let file = std::fs::File::open(tmp.path().join("bounds.parquet")).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&tmp.path().join("bounds.parquet"));
 
         // 2 hydros x 2 stages x 7 stage-level bounds (no max_outflow) = 28,
         // plus 2 thermals x 2 stages x 2 stage-level bounds = 8, plus each
@@ -2529,8 +2520,6 @@ mod tests {
 
     #[test]
     fn bounds_parquet_emits_per_block_override_rows() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let system = make_system_2h_2t_blocks(make_two_block_overrides());
         let tmp = tempfile::tempdir().unwrap();
         let config = ParquetWriterConfig::default();
@@ -2538,10 +2527,7 @@ mod tests {
         write_bounds_parquet(tmp.path(), &system, &config)
             .expect("write_bounds_parquet must succeed");
 
-        let file = std::fs::File::open(tmp.path().join("bounds.parquet")).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&tmp.path().join("bounds.parquet"));
 
         let entity_type_col = batch
             .column_by_name("entity_type_code")
@@ -2639,13 +2625,8 @@ mod tests {
 
     #[test]
     fn bounds_parquet_stage_rows_unchanged_by_overlay() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         fn read_null_block_rows(path: &std::path::Path) -> Vec<(i8, i32, i32, i8, u64)> {
-            let file = std::fs::File::open(path).unwrap();
-            let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-            let mut reader = builder.build().unwrap();
-            let batch = reader.next().expect("must have rows").expect("batch Ok");
+            let batch = read_first_batch(path);
 
             let entity_type_col = batch
                 .column_by_name("entity_type_code")
@@ -2715,8 +2696,6 @@ mod tests {
 
     #[test]
     fn bounds_parquet_emits_per_block_override_rows_for_line_pumping_contract() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let system = make_system_lines_pumping_contracts_blocks(
             make_line_pumping_contract_block_overrides(),
         );
@@ -2726,10 +2705,7 @@ mod tests {
         write_bounds_parquet(tmp.path(), &system, &config)
             .expect("write_bounds_parquet must succeed");
 
-        let file = std::fs::File::open(tmp.path().join("bounds.parquet")).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&tmp.path().join("bounds.parquet"));
 
         let entity_type_col = batch
             .column_by_name("entity_type_code")
@@ -2951,12 +2927,7 @@ mod tests {
         arrow::array::Int8Array,
         arrow::array::Int32Array,
     ) {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-        let file = std::fs::File::open(path).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(path);
 
         let entity_type_col = batch
             .column_by_name("entity_type_code")

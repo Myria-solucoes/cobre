@@ -762,6 +762,7 @@ pub fn write_fitting_report(path: &Path, report: &FittingReport) -> Result<(), O
 )]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use cobre_core::EntityId;
     use cobre_stochastic::OpeningTree;
 
@@ -930,7 +931,6 @@ mod tests {
     #[test]
     fn write_correct_row_tuples() {
         use arrow::array::{Float64Array, Int32Array, UInt32Array};
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let tree = make_tree_2s_2d();
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
@@ -938,12 +938,7 @@ mod tests {
 
         write_noise_openings(&path, &tree).expect("write must succeed");
 
-        let file = std::fs::File::open(&path).expect("file must open");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("builder")
-            .build()
-            .expect("reader");
-        let batch = reader.next().expect("must have a batch").expect("batch Ok");
+        let batch = read_first_batch(&path);
 
         let stage_col = batch
             .column_by_name("stage_id")

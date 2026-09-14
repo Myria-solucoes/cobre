@@ -189,6 +189,7 @@ fn parse_date32(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Date32Array, Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -196,9 +197,7 @@ mod tests {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     fn schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -215,15 +214,6 @@ mod tests {
             Field::new("date", DataType::Date32, false),
             Field::new("value_m3s", DataType::Float64, false),
         ]))
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     fn naive_date_to_date32(date: NaiveDate) -> i32 {

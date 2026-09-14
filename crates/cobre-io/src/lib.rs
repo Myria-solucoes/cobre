@@ -62,6 +62,8 @@ pub mod scenarios;
 pub mod stage_resolve;
 pub mod stages;
 pub mod system;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod validation;
 pub(crate) mod windowed_history;
 

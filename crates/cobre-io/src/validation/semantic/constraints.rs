@@ -215,10 +215,10 @@ mod tests {
         temporal::{Block, BlockMode},
     };
 
-    use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use crate::ValidationEntry;
     use crate::constraints::GenericConstraintBoundsRow;
+    use crate::test_support::*;
     use crate::validation::schema::ParsedData;
     use crate::validation::{ErrorKind, ValidationContext};
 

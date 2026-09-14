@@ -118,8 +118,8 @@ fn build_fixed_delivery_batch(rows: &[FixedDeliveryRow]) -> Result<RecordBatch, 
 #[allow(clippy::expect_used, clippy::float_cmp, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use arrow::array::{Date32Array, Float64Array, Int32Array};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use tempfile::tempdir;
 
     fn sample_rows() -> Vec<FixedDeliveryRow> {
@@ -139,13 +139,6 @@ mod tests {
         ]
     }
 
-    fn read_batch(path: &Path) -> RecordBatch {
-        let file = std::fs::File::open(path).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        reader.next().unwrap().unwrap()
-    }
-
     #[test]
     fn fixed_delivery_round_trip_preserves_rows_in_order() {
         let rows = sample_rows();
@@ -158,7 +151,7 @@ mod tests {
             .join("fixed_deliveries.parquet");
         assert!(path.exists(), "file must exist after non-empty write");
 
-        let batch = read_batch(&path);
+        let batch = read_first_batch(&path);
         assert_eq!(batch.num_columns(), 4, "must have 4 columns");
         assert_eq!(batch.num_rows(), rows.len(), "one row per input record");
 

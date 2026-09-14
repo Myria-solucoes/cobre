@@ -208,12 +208,11 @@ pub fn parse_generic_constraint_bounds(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -232,15 +231,6 @@ mod tests {
             Field::new("constraint_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
         ]))
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     /// Build a full 5-column batch: `constraint_id`, `stage_id`, `block_id`,

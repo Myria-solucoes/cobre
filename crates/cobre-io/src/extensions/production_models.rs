@@ -909,16 +909,7 @@ fn convert_plane_reduction(raw: &RawPlaneReductionConfig) -> PlaneReductionConfi
 )]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    // ── helpers ───────────────────────────────────────────────────────────────
-
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
+    use crate::test_support::write_json;
 
     // ── AC: valid stage_ranges mode ───────────────────────────────────────────
 

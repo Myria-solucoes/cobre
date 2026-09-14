@@ -155,78 +155,29 @@ pub fn parse_load_seasonal_stats(path: &Path) -> Result<Vec<LoadSeasonalStatsRow
 )]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, Int32Array};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
-    use std::sync::Arc;
-    use tempfile::NamedTempFile;
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("bus_id", DataType::Int32, false),
-            Field::new("stage_id", DataType::Int32, false),
-            Field::new("mean_mw", DataType::Float64, false),
-            Field::new("std_mw", DataType::Float64, false),
-        ]))
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
-
-    fn make_batch(bus_ids: &[i32], stage_ids: &[i32], means: &[f64], stds: &[f64]) -> RecordBatch {
-        RecordBatch::try_new(
-            schema(),
-            vec![
-                Arc::new(Int32Array::from(bus_ids.to_vec())),
-                Arc::new(Int32Array::from(stage_ids.to_vec())),
-                Arc::new(Float64Array::from(means.to_vec())),
-                Arc::new(Float64Array::from(stds.to_vec())),
-            ],
-        )
-        .expect("valid batch")
-    }
+    use crate::test_support::{
+        assert_stats_empty_file, assert_stats_happy_path, assert_stats_missing_column,
+        assert_stats_nan_mean, assert_stats_negative_std, make_stats_batch, write_parquet,
+    };
 
     // ── AC: valid file with 4 rows, verify sort order and field values ─────────
 
     #[test]
     fn test_valid_4_rows_sorted_by_bus_stage() {
-        // Input order: (3,1), (1,0), (3,0), (1,1) — out of sort order.
-        let batch = make_batch(
-            &[3, 1, 3, 1],
-            &[1, 0, 0, 1],
-            &[700.0, 500.0, 650.0, 520.0],
-            &[70.0, 50.0, 65.0, 52.0],
+        assert_stats_happy_path(
+            parse_load_seasonal_stats,
+            "bus_id",
+            "mean_mw",
+            "std_mw",
+            |row| (row.bus_id.0, row.stage_id, row.mean_mw, row.std_mw),
         );
-        let tmp = write_parquet(&batch);
-        let rows = parse_load_seasonal_stats(tmp.path()).unwrap();
-
-        assert_eq!(rows.len(), 4);
-        assert_eq!(rows[0].bus_id, EntityId::from(1));
-        assert_eq!(rows[0].stage_id, 0);
-        assert!((rows[0].mean_mw - 500.0).abs() < 1e-10);
-        assert!((rows[0].std_mw - 50.0).abs() < 1e-10);
-        assert_eq!(rows[1].bus_id, EntityId::from(1));
-        assert_eq!(rows[1].stage_id, 1);
-        assert_eq!(rows[2].bus_id, EntityId::from(3));
-        assert_eq!(rows[2].stage_id, 0);
-        assert_eq!(rows[3].bus_id, EntityId::from(3));
-        assert_eq!(rows[3].stage_id, 1);
     }
 
     // ── AC: std_mw = 0.0 (deterministic) is accepted ─────────────────────────
 
     #[test]
     fn test_zero_std_mw_is_accepted() {
-        let batch = make_batch(&[1], &[0], &[500.0], &[0.0]);
+        let batch = make_stats_batch("bus_id", "mean_mw", "std_mw", &[1], &[0], &[500.0], &[0.0]);
         let tmp = write_parquet(&batch);
         let rows = parse_load_seasonal_stats(tmp.path()).unwrap();
 
@@ -238,97 +189,47 @@ mod tests {
 
     #[test]
     fn test_negative_std_mw() {
-        let batch = make_batch(&[1], &[0], &[500.0], &[-5.0]);
-        let tmp = write_parquet(&batch);
-        let err = parse_load_seasonal_stats(tmp.path()).unwrap_err();
-
-        match &err {
-            LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("std_mw"),
-                    "field should contain 'std_mw', got: {field}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        assert_stats_negative_std(parse_load_seasonal_stats, "bus_id", "mean_mw", "std_mw");
     }
 
     // ── AC: mean_mw NaN -> SchemaError ───────────────────────────────────────
 
     #[test]
     fn test_nan_mean_mw() {
-        let batch = make_batch(&[1], &[0], &[f64::NAN], &[50.0]);
-        let tmp = write_parquet(&batch);
-        let err = parse_load_seasonal_stats(tmp.path()).unwrap_err();
-
-        match &err {
-            LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("mean_mw"),
-                    "field should contain 'mean_mw', got: {field}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        assert_stats_nan_mean(parse_load_seasonal_stats, "bus_id", "mean_mw", "std_mw");
     }
 
     // ── AC: missing required column -> SchemaError ────────────────────────────
 
     #[test]
     fn test_missing_mean_mw_column() {
-        let schema_no_mean = Arc::new(Schema::new(vec![
-            Field::new("bus_id", DataType::Int32, false),
-            Field::new("stage_id", DataType::Int32, false),
-            Field::new("std_mw", DataType::Float64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema_no_mean,
-            vec![
-                Arc::new(Int32Array::from(vec![1_i32])),
-                Arc::new(Int32Array::from(vec![0_i32])),
-                Arc::new(Float64Array::from(vec![50.0])),
-            ],
-        )
-        .unwrap();
-        let tmp = write_parquet(&batch);
-        let err = parse_load_seasonal_stats(tmp.path()).unwrap_err();
-
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert!(
-                    field.contains("mean_mw"),
-                    "field should contain 'mean_mw', got: {field}"
-                );
-                assert!(
-                    message.contains("missing required column"),
-                    "message should mention missing column, got: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        assert_stats_missing_column(parse_load_seasonal_stats, "bus_id", "mean_mw", "std_mw");
     }
 
     // ── AC: empty file -> Ok(vec![]) ──────────────────────────────────────────
 
     #[test]
     fn test_empty_parquet_returns_empty_vec() {
-        let batch = make_batch(&[], &[], &[], &[]);
-        let tmp = write_parquet(&batch);
-        let rows = parse_load_seasonal_stats(tmp.path()).unwrap();
-        assert!(rows.is_empty());
+        assert_stats_empty_file(parse_load_seasonal_stats, "bus_id", "mean_mw", "std_mw");
     }
 
     // ── AC: declaration-order invariance ─────────────────────────────────────
 
     #[test]
     fn test_declaration_order_invariance() {
-        let batch_asc = make_batch(
+        let batch_asc = make_stats_batch(
+            "bus_id",
+            "mean_mw",
+            "std_mw",
             &[1, 1, 5, 5],
             &[0, 1, 0, 1],
             &[100.0, 110.0, 200.0, 210.0],
             &[10.0, 11.0, 20.0, 21.0],
         );
-        let batch_desc = make_batch(
+        let batch_desc = make_stats_batch(
+            "bus_id",
+            "mean_mw",
+            "std_mw",
             &[5, 5, 1, 1],
             &[1, 0, 1, 0],
             &[210.0, 200.0, 110.0, 100.0],

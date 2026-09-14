@@ -408,9 +408,9 @@ fn warn_unresolvable_first_stage_season(data: &ParsedData, ctx: &mut ValidationC
     clippy::cast_precision_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::*;
     use crate::scenarios::InflowAnnualComponentRow;
+    use crate::test_support::*;
     use cobre_core::{RecentObservation, SeasonCycleType, SeasonMap};
 
     fn d(y: i32, m: u32, day: u32) -> chrono::NaiveDate {

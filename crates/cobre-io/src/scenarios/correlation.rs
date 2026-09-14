@@ -410,17 +410,7 @@ fn convert(raw: RawCorrelationFile) -> CorrelationModel {
 )]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /// Write a JSON string to a temp file and return the handle (keeps it alive).
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
+    use crate::test_support::write_json;
 
     /// Canonical valid JSON for error-path tests (1 profile, 1 group, 2x2 matrix).
     const VALID_JSON: &str = r#"{

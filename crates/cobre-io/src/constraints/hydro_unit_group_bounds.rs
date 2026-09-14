@@ -230,21 +230,11 @@ pub fn parse_hydro_unit_group_bounds(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
 
     /// AC: scrambled declaration order — hydro=1 declares group 5 before group 2
     /// at the same stage, and a `block_id = None` row precedes its

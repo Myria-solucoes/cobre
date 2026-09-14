@@ -415,21 +415,11 @@ pub fn parse_external_ncs_scenarios(path: &Path) -> Result<Vec<ExternalNcsRow>, 
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
 
     fn inflow_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![

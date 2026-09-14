@@ -369,14 +369,7 @@ fn convert(raw: RawPenalties) -> GlobalPenaltyDefaults {
 )]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
+    use crate::test_support::write_json;
 
     const VALID_JSON: &str = r#"{
       "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/penalties.schema.json",

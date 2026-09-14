@@ -224,12 +224,11 @@ pub fn parse_fpha_hyperplanes(path: &Path) -> Result<Vec<FphaHyperplaneRow>, Loa
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -260,16 +259,6 @@ mod tests {
             Field::new("valid_v_max_hm3", DataType::Float64, true),
             Field::new("valid_q_max_m3s", DataType::Float64, true),
         ]))
-    }
-
-    /// Write a single [`RecordBatch`] to a temporary Parquet file.
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     /// Build a minimal required-column batch with the given data.

@@ -1235,15 +1235,7 @@ fn days_in_month(year: i32, month: u32) -> i64 {
 )]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    /// Write a string to a temp file and return the file handle (keeps it alive).
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
+    use crate::test_support::write_json;
 
     /// Canonical minimal valid `stages.json` used as a baseline for error tests.
     const VALID_JSON: &str = r#"{

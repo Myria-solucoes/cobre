@@ -368,6 +368,7 @@ mod tests {
     use super::*;
     use crate::MetadataTrainingSolveStats;
     use crate::output::{RowPoolStatistics, TrainingOutput};
+    use crate::test_support::output::read_first_batch;
 
     fn make_record(iteration: u32, gap: Option<f64>) -> IterationRecord {
         IterationRecord {
@@ -513,7 +514,6 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn iteration_timing_columns_six_decomposed_overhead() {
         use arrow::array::Int64Array;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("training/timing")).unwrap();
@@ -592,12 +592,7 @@ mod tests {
         let timing_path = tmp.path().join("training/timing/iterations.parquet");
         assert!(timing_path.exists(), "iterations.parquet must exist");
 
-        let file = std::fs::File::open(&timing_path).expect("file must open");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("builder")
-            .build()
-            .expect("reader");
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&timing_path);
 
         assert_eq!(batch.num_rows(), 3);
         assert_eq!(batch.num_columns(), 19);
@@ -650,8 +645,6 @@ mod tests {
 
     #[test]
     fn write_convergence_parquet_roundtrip() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let records: Vec<IterationRecord> = (1..=5).map(|i| make_record(i, Some(1.0))).collect();
         let batch = build_convergence_batch(&records, "statistical").expect("batch must be built");
 
@@ -663,15 +656,7 @@ mod tests {
         assert!(path.exists(), "convergence.parquet must exist after write");
 
         // Read back and verify row count + column values.
-        let file = std::fs::File::open(&path).expect("file must open");
-        let builder =
-            ParquetRecordBatchReaderBuilder::try_new(file).expect("builder must be created");
-        let mut reader = builder.build().expect("reader must be built");
-
-        let read_batch = reader
-            .next()
-            .expect("must have at least one batch")
-            .expect("batch must be Ok");
+        let read_batch = read_first_batch(&path);
         assert_eq!(read_batch.num_rows(), 5, "must have 5 rows");
 
         let expected_schema = convergence_schema();
@@ -798,8 +783,6 @@ mod tests {
 
     #[test]
     fn writer_writes_five_records() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("training/timing")).unwrap();
         let config = ParquetWriterConfig::default();
@@ -815,30 +798,18 @@ mod tests {
         writer.write(&training).expect("write must succeed");
 
         let conv_path = tmp.path().join("training/convergence.parquet");
-        let file = std::fs::File::open(&conv_path).expect("file must open");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("builder")
-            .build()
-            .expect("reader");
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&conv_path);
         assert_eq!(batch.num_rows(), 5);
         assert_eq!(batch.num_columns(), 15);
 
         let timing_path = tmp.path().join("training/timing/iterations.parquet");
-        let file = std::fs::File::open(&timing_path).expect("file must open");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("builder")
-            .build()
-            .expect("reader");
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&timing_path);
         assert_eq!(batch.num_rows(), 5);
         assert_eq!(batch.num_columns(), 19, "timing schema has 19 columns");
     }
 
     #[test]
     fn writer_gap_percent_null_at_correct_row() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("training/timing")).unwrap();
         let config = ParquetWriterConfig::default();
@@ -856,12 +827,7 @@ mod tests {
         writer.write(&training).expect("write must succeed");
 
         let conv_path = tmp.path().join("training/convergence.parquet");
-        let file = std::fs::File::open(&conv_path).expect("file must open");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("builder")
-            .build()
-            .expect("reader");
-        let batch = reader.next().expect("must have rows").expect("batch Ok");
+        let batch = read_first_batch(&conv_path);
 
         let gap_col = batch
             .column_by_name("gap_percent")
@@ -926,12 +892,7 @@ mod tests {
         let path = tmp.path().join("training/cut_selection/iterations.parquet");
         assert!(path.exists());
 
-        let file = std::fs::File::open(&path).unwrap();
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-            .unwrap()
-            .build()
-            .unwrap();
-        let batch: RecordBatch = reader.into_iter().next().unwrap().unwrap();
+        let batch = read_first_batch(&path);
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 10);
     }
@@ -939,7 +900,6 @@ mod tests {
     #[test]
     fn write_cut_selection_with_budget_columns_roundtrip() {
         use super::super::RowSelectionRecord;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let tmp = tempfile::tempdir().unwrap();
         let config = ParquetWriterConfig::default();
@@ -975,12 +935,7 @@ mod tests {
         let path = tmp.path().join("training/cut_selection/iterations.parquet");
         assert!(path.exists());
 
-        let file = std::fs::File::open(&path).unwrap();
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .unwrap()
-            .build()
-            .unwrap();
-        let batch = reader.next().unwrap().unwrap();
+        let batch = read_first_batch(&path);
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 10);
 

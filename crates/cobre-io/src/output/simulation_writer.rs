@@ -2031,6 +2031,7 @@ fn build_anticipated_lanes_batch<'a>(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use chrono::NaiveDate;
     use cobre_core::{
         Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
@@ -2631,7 +2632,6 @@ mod tests {
     #[test]
     fn entity_rows_carry_node_id_and_scenario_id_columns() {
         use arrow::array::Array;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
@@ -2649,14 +2649,7 @@ mod tests {
         let path = tmp
             .path()
             .join("simulation/hydros/scenario_id=0003/data.parquet");
-        let file = std::fs::File::open(&path).expect("hydros parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         for col in &["scenario_id", "stage_id", "node_id"] {
             let field = batch
@@ -2712,8 +2705,6 @@ mod tests {
 
     #[test]
     fn write_paths_is_three_int32_columns_sorted_canonically() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
 
         // Deliberately out of (scenario_id, stage_id) order to pin the canonical sort.
@@ -2741,14 +2732,7 @@ mod tests {
             path.exists(),
             "simulation/paths.parquet must exist (unpartitioned)"
         );
-        let file = std::fs::File::open(&path).expect("paths parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         let schema = batch.schema();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -2789,21 +2773,12 @@ mod tests {
         arrow::array::Float64Array,
         arrow::array::Float64Array,
     ) {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let path = dir.join("simulation/scenario_summary.parquet");
         assert!(
             path.exists(),
             "simulation/scenario_summary.parquet must exist (unpartitioned)"
         );
-        let file = std::fs::File::open(&path).expect("scenario_summary parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         let schema = batch.schema();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -2954,8 +2929,6 @@ mod tests {
 
     #[test]
     fn write_scenario_writes_pumping_partition_for_populated_system() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3013,14 +2986,7 @@ mod tests {
         );
 
         // Read the written Parquet back with the crate's existing reader helper.
-        let file = std::fs::File::open(&path).expect("pumping parquet must exist");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         // Written schema is field-for-field equal to pumping_stations_schema().
         let expected = pumping_stations_schema();
@@ -3148,8 +3114,6 @@ mod tests {
 
     #[test]
     fn write_scenario_parquet_roundtrip_costs_row_count() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3168,24 +3132,13 @@ mod tests {
         let path = tmp
             .path()
             .join("simulation/costs/scenario_id=0000/data.parquet");
-        let file = std::fs::File::open(&path).expect("parquet file must exist");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build");
-
-        let batch = reader
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
         assert_eq!(batch.num_rows(), 2, "costs parquet must have 2 rows");
         assert_eq!(batch.num_columns(), 29, "costs schema has 29 columns");
     }
 
     #[test]
     fn write_scenario_parquet_roundtrip_hydros_derived_mwh() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3204,16 +3157,7 @@ mod tests {
         let path = tmp
             .path()
             .join("simulation/hydros/scenario_id=0000/data.parquet");
-        let file = std::fs::File::open(&path).expect("hydros parquet must exist");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build");
-
-        let batch = reader
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
         assert_eq!(
             batch.num_rows(),
             4,
@@ -3281,8 +3225,6 @@ mod tests {
     /// 3 stages and 2 entity types (costs + hydros) — no flat Vec materialisation.
     #[test]
     fn write_scenario_does_not_materialize_flat_vecs() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3310,28 +3252,14 @@ mod tests {
             .join("simulation/hydros/scenario_id=0000/data.parquet");
         assert!(hydros_path.exists(), "hydros parquet must be written");
 
-        let costs_file = std::fs::File::open(&costs_path).expect("costs file must exist");
-        let costs_batch = ParquetRecordBatchReaderBuilder::try_new(costs_file)
-            .expect("builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let costs_batch = read_first_batch(&costs_path);
         assert_eq!(
             costs_batch.num_rows(),
             3,
             "costs must have 3 rows (3 stages)"
         );
 
-        let hydros_file = std::fs::File::open(&hydros_path).expect("hydros file must exist");
-        let hydros_batch = ParquetRecordBatchReaderBuilder::try_new(hydros_file)
-            .expect("builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let hydros_batch = read_first_batch(&hydros_path);
         assert_eq!(
             hydros_batch.num_rows(),
             6,
@@ -3378,8 +3306,6 @@ mod tests {
 
     #[test]
     fn hydros_batch_round_trips_new_columns() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3403,14 +3329,7 @@ mod tests {
         let path = tmp
             .path()
             .join("simulation/hydros/scenario_id=0000/data.parquet");
-        let file = std::fs::File::open(&path).expect("hydros parquet must exist");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         let read_f64 = |col_name: &str| -> f64 {
             batch
@@ -3526,8 +3445,6 @@ mod tests {
 
     #[test]
     fn write_scenario_writes_in_transit_partition_round_trip() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3590,14 +3507,7 @@ mod tests {
             .join("simulation/in_transit/scenario_id=0000/data.parquet");
         assert!(path.exists(), "in_transit parquet must exist");
 
-        let file = std::fs::File::open(&path).expect("in_transit parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         assert_eq!(
             batch.schema().fields(),
@@ -3668,7 +3578,6 @@ mod tests {
     #[test]
     fn hydro_bus_generation_directory_created_for_a_hydro_system() {
         use arrow::array::Array;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
@@ -3736,19 +3645,7 @@ mod tests {
             })
             .expect("write_scenario must succeed");
 
-        let read_batch = |path: &std::path::Path| {
-            let file =
-                std::fs::File::open(path).unwrap_or_else(|e| panic!("{path:?} must open: {e}"));
-            ParquetRecordBatchReaderBuilder::try_new(file)
-                .expect("reader builder must succeed")
-                .build()
-                .expect("reader must build")
-                .next()
-                .expect("must have rows")
-                .expect("batch must be Ok")
-        };
-
-        let hydros_batch = read_batch(
+        let hydros_batch = read_first_batch(
             &tmp.path()
                 .join("simulation/hydros/scenario_id=0000/data.parquet"),
         );
@@ -3756,7 +3653,7 @@ mod tests {
             .path()
             .join("simulation/hydro_bus_generation/scenario_id=0000/data.parquet");
         assert!(bus_path.exists(), "hydro_bus_generation parquet must exist");
-        let bus_batch = read_batch(&bus_path);
+        let bus_batch = read_first_batch(&bus_path);
 
         assert_eq!(
             bus_batch.num_rows(),
@@ -3777,8 +3674,6 @@ mod tests {
 
     #[test]
     fn write_scenario_writes_hydro_bus_generation_partition_round_trip() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3864,14 +3759,7 @@ mod tests {
             .join("simulation/hydro_bus_generation/scenario_id=0000/data.parquet");
         assert!(path.exists(), "hydro_bus_generation parquet must exist");
 
-        let file = std::fs::File::open(&path).expect("hydro_bus_generation parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         assert_eq!(
             batch.schema().fields(),

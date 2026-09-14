@@ -512,20 +512,9 @@ fn convert_per_stage_block(
     clippy::unwrap_used
 )]
 mod tests {
-    use std::io::Write;
-
     use super::*;
+    use crate::test_support::write_json;
     use cobre_core::EntityId;
-    use tempfile::NamedTempFile;
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /// Write a JSON string to a temporary file and return the file handle.
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut tmp = NamedTempFile::new().expect("tempfile");
-        tmp.write_all(content.as_bytes()).expect("write JSON");
-        tmp
-    }
 
     // ── Test 1: happy path — all four variants ─────────────────────────────────
 

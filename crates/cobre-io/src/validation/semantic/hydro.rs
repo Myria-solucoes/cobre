@@ -752,10 +752,10 @@ pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationCon
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use crate::FphaHyperplaneRow;
     use crate::constraints::HydroBoundsRow;
+    use crate::test_support::*;
     use crate::validation::{ErrorKind, ValidationContext};
     use chrono::NaiveDate;
     use cobre_core::DiversionChannel;

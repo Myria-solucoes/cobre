@@ -23,6 +23,14 @@ slow-tests = []
 ## suite because `flatc` is not a build-time dependency of cobre and is
 ## not always available in CI.
 flatc-conformance = []
+## Expose crate-internal test fixtures to other crates' tests and to this
+## crate's `tests/` binaries.
+##
+## The shared `test_support` builders are gated on
+## `#[cfg(any(test, feature = "test-support"))]`, so plain `cargo test` sees
+## them via `test` and downstream integration tests see them via this feature.
+## Must NOT be enabled in production builds.
+test-support = ["cobre-core/test-support", "dep:tempfile"]
 
 [dependencies]
 cobre-core = { version = "0.15.0", path = "../cobre-core", features = ["serde"] }
@@ -35,6 +43,7 @@ postcard = { version = "1", features = ["alloc"] }
 schemars = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = { version = "3", optional = true }
 thiserror = "2"
 tracing = "0.1"
 flatbuffers = "25"
@@ -42,6 +51,7 @@ gethostname = "1.1.0"
 
 [dev-dependencies]
 cobre-core = { version = "0.15.0", path = "../cobre-core", features = ["test-support"] }
+cobre-io = { path = ".", features = ["test-support"] }
 parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
 proptest = "1"
 tempfile = "3"

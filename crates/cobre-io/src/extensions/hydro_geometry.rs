@@ -220,12 +220,12 @@ fn validate_non_negative(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
+    use crate::test_support::write_parquet_batches;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -251,29 +251,6 @@ mod tests {
             ],
         )
         .expect("valid batch construction")
-    }
-
-    /// Returns the temp handle so the file stays alive until the caller drops it.
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
-
-    fn write_parquet_batches(batches: &[RecordBatch]) -> NamedTempFile {
-        assert!(!batches.is_empty(), "must provide at least one batch");
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer =
-            ArrowWriter::try_new(tmp.reopen().expect("reopen"), batches[0].schema(), None)
-                .expect("ArrowWriter");
-        for batch in batches {
-            writer.write(batch).expect("write batch");
-        }
-        writer.close().expect("close writer");
-        tmp
     }
 
     // ── AC: valid single-hydro file ───────────────────────────────────────────

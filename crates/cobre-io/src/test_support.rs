@@ -1,10 +1,18 @@
-//! Shared test helpers for semantic-validation unit tests, `pub(super)` to all
-//! sibling modules. Single-use helpers stay in their own module's `mod tests`
-//! block to keep the blast radius small.
+//! Crate-internal test fixture builders shared across this crate's unit tests
+//! and reachable from `tests/` integration binaries and downstream crates'
+//! tests via the `test-support` feature. Compiles only under `cfg(test)` or
+//! that feature; must never be enabled in a production build.
+//!
+//! Entity builders, `ParsedData` skeletons, and `Config` variants for the
+//! semantic-validation unit tests. Single-use helpers stay in their own
+//! module's `mod tests` block to keep the blast radius small.
+//!
+//! Builders returning the crate-private `ParsedData` (`base_parsed_data`,
+//! `make_data`, `make_data_5b`, `make_data_estimation`) are additionally
+//! gated `#[cfg(test)]`, since no `test-support`-feature-only caller outside
+//! this crate's own `#[cfg(test)]` modules can name that type.
 
 #![allow(
-    clippy::unwrap_used,
-    clippy::panic,
     clippy::doc_markdown,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -12,35 +20,476 @@
     clippy::cast_precision_loss
 )]
 
+use arrow::array::{Float64Array, Int32Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use cobre_core::{
     CorrelationGroup, CorrelationModel, EntityId, HorizonGraph, SeasonMap,
     entities::{
-        Bus, DeficitSegment, Hydro, HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line,
-        Thermal,
+        Bus, DeficitSegment, Hydro, HydroGenerationModel, HydroPenalties, HydroUnitGroup, Thermal,
     },
-    initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
     temporal::{
         Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     },
 };
+#[cfg(test)]
+use cobre_core::{entities::Line, initial_conditions::InitialConditions};
 
 use crate::{
-    InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow,
+    InflowArCoefficientRow, InflowHistoryRow, LoadError,
     config::Config,
     extensions::{FphaHyperplaneRow, HydroGeometryRow},
     parse_config,
     stages::StagesData,
-    validation::schema::ParsedData,
 };
+#[cfg(test)]
+use crate::{InflowSeasonalStatsRow, validation::schema::ParsedData};
+use parquet::arrow::ArrowWriter;
+use std::fmt::Debug;
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::sync::Arc;
+use tempfile::{NamedTempFile, TempDir};
+
+/// The `NaiveDate` for a calendar-valid `(year, month, day)` triple.
+///
+/// # Panics
+///
+/// Never for the literal triples the builders below pass.
+#[must_use]
+#[allow(clippy::expect_used)]
+// Rationale: every call site below passes a calendar-valid literal triple, so
+// `from_ymd_opt` cannot return `None`.
+pub fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).expect("caller passes a calendar-valid triple")
+}
+
+// ── Parquet fixture writers ───────────────────────────────────────────────────
+
+/// A temporary parquet file holding `batch`.
+///
+/// # Panics
+///
+/// If the test host cannot create, reopen, or write to a temporary file.
+#[must_use]
+#[allow(clippy::expect_used)]
+// Rationale: a failure here means the test host cannot create a temporary
+// file — an environment fault, not a fixture condition.
+pub fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
+    let tmp = NamedTempFile::new().expect("tempfile");
+    let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
+        .expect("ArrowWriter");
+    writer.write(batch).expect("write batch");
+    writer.close().expect("close writer");
+    tmp
+}
+
+/// A temporary parquet file holding `batches` as consecutive row groups.
+///
+/// # Panics
+///
+/// If `batches` is empty, or if the test host cannot create, reopen, or write
+/// to a temporary file.
+#[must_use]
+#[allow(clippy::expect_used)]
+// Rationale: a failure here means the test host cannot create a temporary
+// file — an environment fault, not a fixture condition.
+pub fn write_parquet_batches(batches: &[RecordBatch]) -> NamedTempFile {
+    assert!(!batches.is_empty(), "must provide at least one batch");
+    let tmp = NamedTempFile::new().expect("tempfile");
+    let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batches[0].schema(), None)
+        .expect("ArrowWriter");
+    for batch in batches {
+        writer.write(batch).expect("write batch");
+    }
+    writer.close().expect("close writer");
+    tmp
+}
+
+// ── Stats-parser fixtures ─────────────────────────────────────────────────────
+
+/// A four-column seasonal-stats record batch: an id column, `stage_id`, a
+/// mean column and a std column, with the id/mean/std column names supplied
+/// by the caller so one builder serves the inflow, load and NCS parsers.
+///
+/// # Panics
+///
+/// If `ids`, `stage_ids`, `means` and `stds` do not share one length — a
+/// defect in the calling test.
+#[must_use]
+#[allow(clippy::expect_used)]
+// Rationale: the arrays are built from the caller's own slices and the
+// schema from the caller's own names, so a `try_new` failure means the
+// slices have mismatched lengths — a defect in the calling test.
+pub fn make_stats_batch(
+    id_column: &str,
+    mean_column: &str,
+    std_column: &str,
+    ids: &[i32],
+    stage_ids: &[i32],
+    means: &[f64],
+    stds: &[f64],
+) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(id_column, DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new(mean_column, DataType::Float64, false),
+        Field::new(std_column, DataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int32Array::from(ids.to_vec())),
+            Arc::new(Int32Array::from(stage_ids.to_vec())),
+            Arc::new(Float64Array::from(means.to_vec())),
+            Arc::new(Float64Array::from(stds.to_vec())),
+        ],
+    )
+    .expect("caller's slices share one length")
+}
+
+/// Assert that `err` is a [`LoadError::SchemaError`] whose `field` contains
+/// `field_substr`, and — when given — whose `message` contains
+/// `message_substr`.
+fn assert_schema_error_shape(err: &LoadError, field_substr: &str, message_substr: Option<&str>) {
+    assert!(
+        matches!(err, LoadError::SchemaError { .. }),
+        "expected SchemaError, got: {err:?}"
+    );
+    if let LoadError::SchemaError { field, message, .. } = err {
+        assert!(
+            field.contains(field_substr),
+            "field should contain '{field_substr}', got: {field}"
+        );
+        if let Some(expected) = message_substr {
+            assert!(
+                message.contains(expected),
+                "message should mention '{expected}', got: {message}"
+            );
+        }
+    }
+}
+
+/// Assert that `parse` accepts a valid four-row batch built from
+/// `id_column`/`mean_column`/`std_column` and sorts it by `(id, stage)`,
+/// extracting `(id, stage_id, mean, std)` from each parsed row via
+/// `extract`.
+///
+/// # Panics
+///
+/// If `parse` rejects the batch, or the parsed rows do not match the
+/// expected sort order or the first row's mean/std.
+#[allow(clippy::expect_used)]
+// Rationale: `parse` is handed a batch this helper just built and wrote
+// itself, so a rejection means the parser under test is broken, not a
+// fixture condition the caller can supply differently.
+pub fn assert_stats_happy_path<T>(
+    parse: impl Fn(&Path) -> Result<Vec<T>, LoadError>,
+    id_column: &str,
+    mean_column: &str,
+    std_column: &str,
+    extract: impl Fn(&T) -> (i32, i32, f64, f64),
+) {
+    let batch = make_stats_batch(
+        id_column,
+        mean_column,
+        std_column,
+        &[3, 1, 3, 1],
+        &[1, 0, 0, 1],
+        &[0.5, 0.3, 0.45, 0.35],
+        &[0.05, 0.03, 0.045, 0.035],
+    );
+    let tmp = write_parquet(&batch);
+    let rows = parse(tmp.path()).expect("fixture batch built above must parse");
+
+    assert_eq!(rows.len(), 4);
+    let keys: Vec<(i32, i32)> = rows
+        .iter()
+        .map(|row| {
+            let (id, stage, ..) = extract(row);
+            (id, stage)
+        })
+        .collect();
+    assert_eq!(keys, vec![(1, 0), (1, 1), (3, 0), (3, 1)]);
+
+    let (_, _, mean, std) = extract(&rows[0]);
+    assert!((mean - 0.3).abs() < 1e-10);
+    assert!((std - 0.03).abs() < 1e-10);
+}
+
+/// Assert that `parse` rejects a batch missing `mean_column`: a
+/// [`LoadError::SchemaError`] whose `field` names it and whose `message`
+/// says the column is missing.
+///
+/// # Panics
+///
+/// If `parse` accepts the batch, or the rejection is not the expected
+/// [`LoadError::SchemaError`] shape.
+#[allow(clippy::expect_used)]
+// Rationale: the batch this helper builds always omits `mean_column`, so a
+// non-error result means the parser under test is broken, not a fixture
+// condition the caller can supply differently.
+pub fn assert_stats_missing_column<T: Debug>(
+    parse: impl Fn(&Path) -> Result<Vec<T>, LoadError>,
+    id_column: &str,
+    mean_column: &str,
+    std_column: &str,
+) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(id_column, DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new(std_column, DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int32Array::from(vec![1_i32])),
+            Arc::new(Int32Array::from(vec![0_i32])),
+            Arc::new(Float64Array::from(vec![0.5])),
+        ],
+    )
+    .expect("literal single-row arrays share one length");
+    let tmp = write_parquet(&batch);
+    let err = parse(tmp.path()).expect_err("batch omitting the mean column must be rejected");
+    assert_schema_error_shape(&err, mean_column, Some("missing required column"));
+}
+
+/// Assert that `parse` rejects a single row whose std is negative: a
+/// [`LoadError::SchemaError`] whose `field` names `std_column`.
+///
+/// # Panics
+///
+/// If `parse` accepts the batch, or the rejection is not the expected
+/// [`LoadError::SchemaError`] shape.
+#[allow(clippy::expect_used)]
+// Rationale: the batch this helper builds always carries a negative std, so
+// a non-error result means the parser under test is broken, not a fixture
+// condition the caller can supply differently.
+pub fn assert_stats_negative_std<T: Debug>(
+    parse: impl Fn(&Path) -> Result<Vec<T>, LoadError>,
+    id_column: &str,
+    mean_column: &str,
+    std_column: &str,
+) {
+    let batch = make_stats_batch(
+        id_column,
+        mean_column,
+        std_column,
+        &[1],
+        &[0],
+        &[0.5],
+        &[-0.5],
+    );
+    let tmp = write_parquet(&batch);
+    let err = parse(tmp.path()).expect_err("negative std must be rejected");
+    assert_schema_error_shape(&err, std_column, None);
+}
+
+/// Assert that `parse` rejects a single row whose mean is NaN: a
+/// [`LoadError::SchemaError`] whose `field` names `mean_column`.
+///
+/// # Panics
+///
+/// If `parse` accepts the batch, or the rejection is not the expected
+/// [`LoadError::SchemaError`] shape.
+#[allow(clippy::expect_used)]
+// Rationale: the batch this helper builds always carries a NaN mean, so a
+// non-error result means the parser under test is broken, not a fixture
+// condition the caller can supply differently.
+pub fn assert_stats_nan_mean<T: Debug>(
+    parse: impl Fn(&Path) -> Result<Vec<T>, LoadError>,
+    id_column: &str,
+    mean_column: &str,
+    std_column: &str,
+) {
+    let batch = make_stats_batch(
+        id_column,
+        mean_column,
+        std_column,
+        &[1],
+        &[0],
+        &[f64::NAN],
+        &[0.5],
+    );
+    let tmp = write_parquet(&batch);
+    let err = parse(tmp.path()).expect_err("NaN mean must be rejected");
+    assert_schema_error_shape(&err, mean_column, None);
+}
+
+/// Assert that `parse` accepts an empty batch and returns an empty vector.
+///
+/// # Panics
+///
+/// If `parse` rejects the empty batch, or returns a non-empty vector.
+#[allow(clippy::expect_used)]
+// Rationale: the batch this helper builds carries zero rows over a valid
+// schema, so a rejection means the parser under test is broken, not a
+// fixture condition the caller can supply differently.
+pub fn assert_stats_empty_file<T>(
+    parse: impl Fn(&Path) -> Result<Vec<T>, LoadError>,
+    id_column: &str,
+    mean_column: &str,
+    std_column: &str,
+) {
+    let batch = make_stats_batch(id_column, mean_column, std_column, &[], &[], &[], &[]);
+    let tmp = write_parquet(&batch);
+    let rows = parse(tmp.path()).expect("empty batch must parse");
+    assert!(rows.is_empty());
+}
+
+// ── JSON fixture writer ───────────────────────────────────────────────────────
+
+/// A temporary file holding `content`.
+///
+/// # Panics
+///
+/// If the test host cannot create or write to a temporary file.
+#[must_use]
+#[allow(clippy::expect_used)]
+// Rationale: a failure here means the test host cannot write a temporary
+// file — an environment fault, not a fixture condition.
+pub fn write_json(content: &str) -> NamedTempFile {
+    let mut tmp = NamedTempFile::new().expect("tempfile");
+    tmp.write_all(content.as_bytes()).expect("write JSON");
+    tmp
+}
+
+// ── Minimal case corpus ───────────────────────────────────────────────────────
+
+/// config.json: `training.stopping_rules[].type` = "iteration_limit",
+/// field name is "limit" (not "max_iterations").
+pub const VALID_CONFIG_JSON: &str = r#"{
+        "training": {
+            "selection": {"method": "sampled", "forward_passes": 10},
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ]
+        }
+    }"#;
+
+/// penalties.json: top-level keys are "bus", "line", "hydro",
+/// "non_controllable_source". Under "bus": "deficit_segments" (not
+/// "segments") and "excess_cost". Under each segment: "cost" (not
+/// "cost_per_mwh"). Under "line": "exchange_cost". Under "hydro": plain
+/// field names without unit suffixes. Under "non_controllable_source":
+/// "curtailment_cost". See src/penalties.rs for the raw serde types.
+pub const VALID_PENALTIES_JSON: &str = r#"{
+        "bus": {
+            "deficit_segments": [
+                { "depth_mw": 500.0, "cost": 1000.0 },
+                { "depth_mw": null,  "cost": 5000.0 }
+            ],
+            "excess_cost": 100.0
+        },
+        "line": { "exchange_cost": 2.0 },
+        "hydro": {
+            "spillage_cost": 0.01,
+            "turbined_cost": 0.05,
+            "diversion_cost": 0.1,
+            "storage_violation_below_cost": 10000.0,
+            "filling_target_violation_cost": 50000.0,
+            "turbined_violation_below_cost": 500.0,
+            "outflow_violation_below_cost": 500.0,
+            "outflow_violation_above_cost": 500.0,
+            "generation_violation_below_cost": 1000.0,
+            "evaporation_violation_cost": 5000.0,
+            "water_withdrawal_violation_cost": 1000.0
+        },
+        "non_controllable_source": { "curtailment_cost": 0.005 }
+    }"#;
+
+/// stages.json: `target_id` in transitions must be an integer (not null).
+/// For a single-stage finite horizon we omit transitions entirely.
+/// Only mandatory per-stage fields: id, start_date, end_date, blocks,
+/// num_openings. season_id, block_mode, state_variables, risk_measure,
+/// sampling_method all have serde defaults and are optional.
+pub const VALID_STAGES_JSON: &str = r#"{
+        "policy_graph": {
+            "type": "finite_horizon",
+            "annual_discount_rate": 0.06,
+            "transitions": []
+        },
+        "stages": [
+            {
+                "id": 0,
+                "start_date": "2024-01-01",
+                "end_date": "2024-02-01",
+                "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
+                "num_openings": 50
+            }
+        ]
+    }"#;
+
+/// Minimal valid `initial_conditions.json`.
+pub const VALID_INITIAL_CONDITIONS_JSON: &str = r#"{
+        "storage": [],
+        "filling_storage": []
+    }"#;
+
+/// buses.json: mandatory fields are "id" and "name" only.
+/// "base_kv" does not exist in the actual Bus raw type.
+pub const VALID_BUSES_JSON: &str =
+    r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#;
+
+/// Empty lines array.
+pub const VALID_LINES_JSON: &str = r#"{ "lines": [] }"#;
+
+/// Empty hydros array.
+pub const VALID_HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
+
+/// Empty thermals array.
+pub const VALID_THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
+
+/// Write `content` to `root.join(relative)`, creating all parent directories.
+///
+/// # Panics
+///
+/// If the filesystem refuses to create the parent directories or write the
+/// file.
+#[allow(clippy::expect_used)]
+// Rationale: a failure here means the filesystem refused a create/write —
+// an environment fault, not a fixture condition.
+pub fn write_file(root: &Path, relative: &str, content: &str) {
+    let full = root.join(relative);
+    if let Some(parent) = full.parent() {
+        fs::create_dir_all(parent).expect("create parent directories");
+    }
+    fs::write(&full, content).expect("write fixture file");
+}
+
+/// Populate `dir` with the eight required JSON files for a minimal valid
+/// case: 1 bus, 0 lines/hydros/thermals, 1 finite-horizon stage with no
+/// transitions.
+///
+/// # Panics
+///
+/// Propagates any panic from [`write_file`].
+pub fn make_minimal_case(dir: &TempDir) {
+    let root = dir.path();
+    write_file(root, "config.json", VALID_CONFIG_JSON);
+    write_file(root, "penalties.json", VALID_PENALTIES_JSON);
+    write_file(root, "stages.json", VALID_STAGES_JSON);
+    write_file(
+        root,
+        "initial_conditions.json",
+        VALID_INITIAL_CONDITIONS_JSON,
+    );
+    write_file(root, "system/buses.json", VALID_BUSES_JSON);
+    write_file(root, "system/lines.json", VALID_LINES_JSON);
+    write_file(root, "system/hydros.json", VALID_HYDROS_JSON);
+    write_file(root, "system/thermals.json", VALID_THERMALS_JSON);
+}
 
 // ── Penalty helpers ───────────────────────────────────────────────────────────
 
 /// Build `HydroPenalties` with every field set to `v` except
 /// `inflow_nonnegativity_cost`.
-pub(super) fn penalties_all(v: f64) -> HydroPenalties {
+#[must_use]
+pub fn penalties_all(v: f64) -> HydroPenalties {
     HydroPenalties {
         spillage_cost: v,
         diversion_cost: v,
@@ -62,7 +511,8 @@ pub(super) fn penalties_all(v: f64) -> HydroPenalties {
 }
 
 /// Minimal `GlobalPenaltyDefaults` required to fill `ParsedData`.
-pub(super) fn minimal_global_penalties() -> GlobalPenaltyDefaults {
+#[must_use]
+pub fn minimal_global_penalties() -> GlobalPenaltyDefaults {
     GlobalPenaltyDefaults {
         bus_deficit_segments: vec![DeficitSegment {
             depth_mw: None,
@@ -75,19 +525,59 @@ pub(super) fn minimal_global_penalties() -> GlobalPenaltyDefaults {
     }
 }
 
+/// A `GlobalPenaltyDefaults` with a two-segment deficit curve and a
+/// non-uniform hydro penalty set.
+#[must_use]
+pub fn make_global() -> GlobalPenaltyDefaults {
+    GlobalPenaltyDefaults {
+        bus_deficit_segments: vec![
+            DeficitSegment {
+                depth_mw: Some(500.0),
+                cost_per_mwh: 1000.0,
+            },
+            DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 5000.0,
+            },
+        ],
+        bus_excess_cost: 100.0,
+        line_exchange_cost: 2.0,
+        hydro: HydroPenalties {
+            spillage_cost: 0.01,
+            turbined_cost: 0.05,
+            diversion_cost: 0.1,
+            storage_violation_below_cost: 10_000.0,
+            filling_target_violation_cost: 50_000.0,
+            turbined_violation_below_cost: 500.0,
+            outflow_violation_below_cost: 500.0,
+            outflow_violation_above_cost: 500.0,
+            generation_violation_below_cost: 1_000.0,
+            evaporation_violation_cost: 5_000.0,
+            water_withdrawal_violation_cost: 1_000.0,
+            water_withdrawal_violation_pos_cost: 1_000.0,
+            water_withdrawal_violation_neg_cost: 1_000.0,
+            evaporation_violation_pos_cost: 5_000.0,
+            evaporation_violation_neg_cost: 5_000.0,
+            inflow_nonnegativity_cost: 1000.0,
+        },
+        ncs_curtailment_cost: 0.005,
+    }
+}
+
 // ── Entity builders ───────────────────────────────────────────────────────────
 
 /// Build a minimal valid `Hydro` using default sensible values, with an empty
 /// `unit_groups` — callers that need groups declare them directly, or route
-/// through [`make_data`] / [`make_data_5b`] / [`make_data_estimation`], which
+/// through `make_data` / `make_data_5b` / `make_data_estimation`, which
 /// sort at the same boundary `convert_hydros` and `SystemBuilder::build` do
 /// (after the hydros' own field values are final).
-pub(super) fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
+#[must_use]
+pub fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
     Hydro {
         unit_groups: Vec::new(),
         id: EntityId::from(id),
         name: format!("Hydro {id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: date(2024, 1, 1),
         downstream_id: downstream_id.map(EntityId::from),
         travel_time_hours: None,
         entry_stage_id: None,
@@ -114,7 +604,8 @@ pub(super) fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
 }
 
 /// Build a `HydroUnitGroup` with the given id, bus, and four bounds.
-pub(super) fn make_unit_group(
+#[must_use]
+pub fn make_unit_group(
     id: i32,
     bus_id: i32,
     min_generation_mw: f64,
@@ -134,11 +625,12 @@ pub(super) fn make_unit_group(
 }
 
 /// Build a minimal valid `Thermal`.
-pub(super) fn make_thermal(id: i32, min_mw: f64, max_mw: f64) -> Thermal {
+#[must_use]
+pub fn make_thermal(id: i32, min_mw: f64, max_mw: f64) -> Thermal {
     Thermal {
         id: EntityId::from(id),
         name: format!("Thermal {id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: date(2024, 1, 1),
         bus_id: EntityId::from(1),
         entry_stage_id: None,
         exit_stage_id: None,
@@ -150,12 +642,13 @@ pub(super) fn make_thermal(id: i32, min_mw: f64, max_mw: f64) -> Thermal {
 }
 
 /// Build one study stage with the given `id`.
-pub(super) fn make_stage(id: i32) -> Stage {
+#[must_use]
+pub fn make_stage(id: i32) -> Stage {
     Stage {
         id,
         index: 0,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        start_date: date(2024, 1, 1),
+        end_date: date(2024, 2, 1),
         season_id: None,
         blocks: vec![],
         block_mode: BlockMode::Parallel,
@@ -173,7 +666,8 @@ pub(super) fn make_stage(id: i32) -> Stage {
 
 /// Build a stage with `id` and `n` blocks of equal duration, reusing
 /// [`make_stage`] for every other field so the two builders cannot drift.
-pub(super) fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
+#[must_use]
+pub fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
     let mut stage = make_stage(id);
     stage.blocks = (0..n)
         .map(|index| Block {
@@ -186,7 +680,8 @@ pub(super) fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
 }
 
 /// Build a minimal valid `StagesData` with the given stage IDs.
-pub(super) fn make_stages(ids: Vec<i32>) -> StagesData {
+#[must_use]
+pub fn make_stages(ids: Vec<i32>) -> StagesData {
     StagesData {
         openings_declared: std::collections::HashSet::new(),
         stages: ids.into_iter().map(make_stage).collect(),
@@ -203,8 +698,10 @@ pub(super) fn make_stages(ids: Vec<i32>) -> StagesData {
 
 // ── Layer 5a data builder (hydro + thermal) ───────────────────────────────────
 
-/// `ParsedData` skeleton: one `BUS_1` bus, every other field empty or `None`.
-fn base_parsed_data(stages: StagesData) -> ParsedData {
+/// `ParsedData` skeleton with the caller-supplied stages and buses; every
+/// other field empty or `None`.
+#[cfg(test)]
+pub(crate) fn base_parsed_data(stages: StagesData, buses: Vec<Bus>) -> ParsedData {
     ParsedData {
         config: minimal_config(),
         penalties: minimal_global_penalties(),
@@ -217,13 +714,7 @@ fn base_parsed_data(stages: StagesData) -> ParsedData {
             past_defluences: vec![],
         },
         post_study_stages: None,
-        buses: vec![Bus {
-            id: EntityId::from(1),
-            name: "BUS_1".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![],
-            excess_cost: 100.0,
-        }],
+        buses,
         thermals: vec![],
         hydros: vec![],
         lines: vec![],
@@ -264,6 +755,19 @@ fn base_parsed_data(stages: StagesData) -> ParsedData {
     }
 }
 
+/// The one-`BUS_1` vector `base_parsed_data`'s in-module callers pass when
+/// they have no bus fixture of their own to supply.
+#[cfg(test)]
+fn base_bus() -> Vec<Bus> {
+    vec![Bus {
+        id: EntityId::from(1),
+        name: "BUS_1".to_string(),
+        operational_start_date: date(2024, 1, 1),
+        deficit_segments: vec![],
+        excess_cost: 100.0,
+    }]
+}
+
 /// Build a minimal `ParsedData` with the provided hydros, thermals, stages,
 /// geometry, and FPHA rows.  All other fields are empty/minimal.
 ///
@@ -272,7 +776,8 @@ fn base_parsed_data(stages: StagesData) -> ParsedData {
 /// hydros' own field values are final. Sorting inside `make_hydro` instead
 /// would snapshot a stale group order for any caller that mutates
 /// `unit_groups` afterward.
-pub(super) fn make_data(
+#[cfg(test)]
+pub(crate) fn make_data(
     mut hydros: Vec<Hydro>,
     thermals: Vec<Thermal>,
     lines: Vec<Line>,
@@ -289,7 +794,7 @@ pub(super) fn make_data(
         lines,
         hydro_geometry,
         fpha_hyperplanes,
-        ..base_parsed_data(stages)
+        ..base_parsed_data(stages, base_bus())
     }
 }
 
@@ -298,9 +803,10 @@ pub(super) fn make_data(
 /// Build a minimal valid `ParsedData` for Layer 5b tests.
 /// All hydro penalties satisfy the ordering hierarchy by default.
 ///
-/// Sorts `hydros` here, at the boundary — see [`make_data`]'s doc for why
+/// Sorts `hydros` here, at the boundary — see `make_data`'s doc for why
 /// this must not happen inside `make_hydro`.
-pub(super) fn make_data_5b(
+#[cfg(test)]
+pub(crate) fn make_data_5b(
     mut hydros: Vec<Hydro>,
     stages: StagesData,
     buses: Vec<Bus>,
@@ -317,12 +823,13 @@ pub(super) fn make_data_5b(
         inflow_seasonal_stats: inflow_stats,
         inflow_ar_coefficients: inflow_ar,
         correlation,
-        ..base_parsed_data(stages)
+        ..base_parsed_data(stages, base_bus())
     }
 }
 
 /// Build a hydro with penalties satisfying the ordering hierarchy.
-pub(super) fn make_hydro_ordered_penalties(id: i32) -> Hydro {
+#[must_use]
+pub fn make_hydro_ordered_penalties(id: i32) -> Hydro {
     let mut h = make_hydro(id, None);
     h.penalties = HydroPenalties {
         filling_target_violation_cost: 1000.0,
@@ -345,16 +852,20 @@ pub(super) fn make_hydro_ordered_penalties(id: i32) -> Hydro {
     h
 }
 
-pub(super) fn make_stages_5b(ids: Vec<i32>) -> StagesData {
+/// Build a minimal valid `StagesData` for Layer 5b tests, delegating to
+/// [`make_stages`].
+#[must_use]
+pub fn make_stages_5b(ids: Vec<i32>) -> StagesData {
     make_stages(ids)
 }
 
 /// Build a bus with a single deficit segment at the given cost.
-pub(super) fn make_bus_with_deficit(id: i32, cost_per_mwh: f64) -> Bus {
+#[must_use]
+pub fn make_bus_with_deficit(id: i32, cost_per_mwh: f64) -> Bus {
     Bus {
         id: EntityId::from(id),
         name: format!("Bus {id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        operational_start_date: date(2024, 1, 1),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh,
@@ -366,11 +877,8 @@ pub(super) fn make_bus_with_deficit(id: i32, cost_per_mwh: f64) -> Bus {
 // ── Geometry and FPHA row builders ────────────────────────────────────────────
 
 /// Build a minimal `FphaHyperplaneRow` with the given parameters.
-pub(super) fn make_fpha_row(
-    hydro_id: i32,
-    stage_id: Option<i32>,
-    plane_id: i32,
-) -> FphaHyperplaneRow {
+#[must_use]
+pub fn make_fpha_row(hydro_id: i32, stage_id: Option<i32>, plane_id: i32) -> FphaHyperplaneRow {
     FphaHyperplaneRow {
         hydro_id: EntityId::from(hydro_id),
         stage_id,
@@ -387,7 +895,8 @@ pub(super) fn make_fpha_row(
 }
 
 /// Build a minimal `HydroGeometryRow`.
-pub(super) fn make_geom_row(
+#[must_use]
+pub fn make_geom_row(
     hydro_id: i32,
     volume_hm3: f64,
     height_m: f64,
@@ -404,7 +913,8 @@ pub(super) fn make_geom_row(
 // ── Correlation helpers ───────────────────────────────────────────────────────
 
 /// Build a valid 2x2 symmetric correlation group.
-pub(super) fn make_corr_group(name: &str, matrix: Vec<Vec<f64>>) -> CorrelationGroup {
+#[must_use]
+pub fn make_corr_group(name: &str, matrix: Vec<Vec<f64>>) -> CorrelationGroup {
     use cobre_core::scenario::CorrelationEntity;
     CorrelationGroup {
         name: name.to_string(),
@@ -424,7 +934,8 @@ pub(super) fn make_corr_group(name: &str, matrix: Vec<Vec<f64>>) -> CorrelationG
 
 /// Build a `CorrelationModel` with a single "default" profile containing the
 /// given group.
-pub(super) fn make_correlation(group: CorrelationGroup) -> CorrelationModel {
+#[must_use]
+pub fn make_correlation(group: CorrelationGroup) -> CorrelationModel {
     use cobre_core::scenario::CorrelationProfile;
     use std::collections::BTreeMap;
     let mut profiles = BTreeMap::new();
@@ -445,14 +956,19 @@ pub(super) fn make_correlation(group: CorrelationGroup) -> CorrelationModel {
 
 /// Parse `json` into a `Config` via a scratch temp file — the shared
 /// write-then-parse path every fixture builder below uses.
-fn config_from_json(json: &str) -> Config {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), json).unwrap();
-    parse_config(tmp.path()).unwrap()
+#[allow(clippy::expect_used)]
+// Rationale: the JSON literals are the fixtures' own, parsed by the production
+// `parse_config` the crate ships, so a failure here is a fixture defect, not a
+// runtime condition.
+pub(crate) fn config_from_json(json: &str) -> Config {
+    let tmp = tempfile::NamedTempFile::new().expect("scratch temp file creation cannot fail");
+    std::fs::write(tmp.path(), json).expect("write to a fresh scratch temp file cannot fail");
+    parse_config(tmp.path()).expect("fixture JSON literal is valid Config input")
 }
 
 /// Minimal `Config` required to fill `ParsedData`.
-pub(super) fn minimal_config() -> Config {
+#[must_use]
+pub fn minimal_config() -> Config {
     let json = r#"{
         "training": {
             "selection": {"method": "sampled", "forward_passes": 10},
@@ -465,7 +981,8 @@ pub(super) fn minimal_config() -> Config {
 }
 
 /// Build a `Config` with `training.scenario_source.inflow.scheme = "external"`.
-pub(super) fn config_with_training_external_inflow() -> Config {
+#[must_use]
+pub fn config_with_training_external_inflow() -> Config {
     let json = r#"{
         "training": {
             "selection": {"method": "sampled", "forward_passes": 10},
@@ -484,7 +1001,8 @@ pub(super) fn config_with_training_external_inflow() -> Config {
 /// Build a `Config` with `training.selection = enumerated` and
 /// `training.scenario_source.inflow.scheme = "external"` — the enumerated
 /// external-openings case rule 36/37 governs.
-pub(super) fn config_enumerated_external_inflow() -> Config {
+#[must_use]
+pub fn config_enumerated_external_inflow() -> Config {
     let json = r#"{
         "training": {
             "stopping_rules": [
@@ -503,7 +1021,8 @@ pub(super) fn config_enumerated_external_inflow() -> Config {
 /// Build a `Config` with `training.selection = enumerated` and every class at
 /// its default (in-sample) scheme — an enumerated study carrying no external
 /// class, where a node `scenario_id` is meaningless.
-pub(super) fn config_enumerated() -> Config {
+#[must_use]
+pub fn config_enumerated() -> Config {
     let json = r#"{
         "training": {
             "stopping_rules": [
@@ -517,7 +1036,8 @@ pub(super) fn config_enumerated() -> Config {
 
 /// Build a `Config` whose training scenario source sets the `external` scheme for
 /// each requested class, leaving the rest at their default (in-sample) scheme.
-pub(super) fn config_with_training_external(inflow: bool, load: bool, ncs: bool) -> Config {
+#[must_use]
+pub fn config_with_training_external(inflow: bool, load: bool, ncs: bool) -> Config {
     let mut classes: Vec<&str> = Vec::new();
     if inflow {
         classes.push(r#""inflow": { "scheme": "external" }"#);
@@ -543,7 +1063,8 @@ pub(super) fn config_with_training_external(inflow: bool, load: bool, ncs: bool)
 
 /// Build a sampled `Config` declaring `training.scenario_source.openings =
 /// {source: file}` — the user-supplied opening-tree file arm.
-pub(super) fn config_sampled_file_openings() -> Config {
+#[must_use]
+pub fn config_sampled_file_openings() -> Config {
     let json = r#"{
         "training": {
             "selection": {"method": "sampled", "forward_passes": 10},
@@ -560,7 +1081,8 @@ pub(super) fn config_sampled_file_openings() -> Config {
 
 /// Build an enumerated `Config` declaring `training.scenario_source.openings =
 /// {source: file}` — the file arm is rejected under enumerated selection.
-pub(super) fn config_enumerated_file_openings() -> Config {
+#[must_use]
+pub fn config_enumerated_file_openings() -> Config {
     let json = r#"{
         "training": {
             "stopping_rules": [
@@ -576,7 +1098,8 @@ pub(super) fn config_enumerated_file_openings() -> Config {
 }
 
 /// Build a `Config` with `simulation.scenario_source.load.scheme = "external"`.
-pub(super) fn config_with_simulation_external_load() -> Config {
+#[must_use]
+pub fn config_with_simulation_external_load() -> Config {
     let json = r#"{
         "training": {
             "selection": {"method": "sampled", "forward_passes": 10},
@@ -597,7 +1120,8 @@ pub(super) fn config_with_simulation_external_load() -> Config {
 // ── Season / estimation data builders ────────────────────────────────────────
 
 /// Build a monthly `SeasonMap` with 12 seasons (January=0 .. December=11).
-pub(super) fn make_monthly_season_map() -> SeasonMap {
+#[must_use]
+pub fn make_monthly_season_map() -> SeasonMap {
     use cobre_core::temporal::{SeasonCycleType, SeasonDefinition};
     let seasons = (0..12u32)
         .map(|m| SeasonDefinition {
@@ -617,16 +1141,16 @@ pub(super) fn make_monthly_season_map() -> SeasonMap {
 
 /// Build `n_obs` `InflowHistoryRow` records for `hydro_id`, one per calendar
 /// month starting from January 2000.
-pub(super) fn make_history_rows(hydro_id: i32, n_obs: usize) -> Vec<InflowHistoryRow> {
+#[must_use]
+pub fn make_history_rows(hydro_id: i32, n_obs: usize) -> Vec<InflowHistoryRow> {
     let mut rows = Vec::with_capacity(n_obs);
     for i in 0..n_obs {
         let year = 2000 + (i / 12) as i32;
         let month = (i % 12) as u32 + 1;
-        let start_date = NaiveDate::from_ymd_opt(year, month, 15).unwrap();
         rows.push(InflowHistoryRow {
             hydro_id: EntityId::from(hydro_id),
-            start_date,
-            end_date: start_date.succ_opt().unwrap(),
+            start_date: date(year, month, 15),
+            end_date: date(year, month, 16),
             value_m3s: 100.0,
         });
     }
@@ -636,7 +1160,8 @@ pub(super) fn make_history_rows(hydro_id: i32, n_obs: usize) -> Vec<InflowHistor
 /// Build a `StagesData` whose stages cover `n_months` monthly periods
 /// starting from January 2000, each with `season_id = month_index % 12`.
 /// The policy graph includes a `SeasonMap` when `with_season_map` is `true`.
-pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -> StagesData {
+#[must_use]
+pub fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -> StagesData {
     let mut stages = Vec::with_capacity(n_months);
     for i in 0..n_months {
         let year = 2000 + (i / 12) as i32;
@@ -648,8 +1173,8 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
         };
         let mut stage = make_stage(i as i32);
         stage.index = i;
-        stage.start_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
-        stage.end_date = NaiveDate::from_ymd_opt(end_year, end_month, 1).unwrap();
+        stage.start_date = date(year, month, 1);
+        stage.end_date = date(end_year, end_month, 1);
         stage.season_id = Some(i % 12);
         stages.push(stage);
     }
@@ -671,9 +1196,10 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
 ///
 /// `inflow_history` rows are provided directly; `inflow_seasonal_stats` is
 /// empty (triggering the estimation path when history is non-empty).
-/// Sorts `hydros` here, at the boundary — see [`make_data`]'s doc for why
+/// Sorts `hydros` here, at the boundary — see `make_data`'s doc for why
 /// this must not happen inside `make_hydro`.
-pub(super) fn make_data_estimation(
+#[cfg(test)]
+pub(crate) fn make_data_estimation(
     mut hydros: Vec<Hydro>,
     stages: StagesData,
     inflow_history: Vec<InflowHistoryRow>,
@@ -684,16 +1210,174 @@ pub(super) fn make_data_estimation(
     ParsedData {
         hydros,
         inflow_history,
-        ..base_parsed_data(stages)
+        ..base_parsed_data(stages, base_bus())
     }
 }
 
 /// Build an `InflowArCoefficientRow` with the given hydro_id, stage_id, and lag.
-pub(super) fn make_ar_row(hydro_id: i32, stage_id: i32, lag: i32) -> InflowArCoefficientRow {
+#[must_use]
+pub fn make_ar_row(hydro_id: i32, stage_id: i32, lag: i32) -> InflowArCoefficientRow {
     InflowArCoefficientRow {
         hydro_id: EntityId::from(hydro_id),
         stage_id,
         lag,
         coefficient: 0.5,
+    }
+}
+
+// ── Output fixtures ───────────────────────────────────────────────────────────
+
+/// Fixtures for the output writers and readers.
+pub mod output {
+    use arrow::record_batch::RecordBatch;
+    use cobre_core::{System, SystemBuilder};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::path::Path;
+
+    use crate::Config;
+    use crate::output::{DistributionInfo, OutputContext};
+
+    /// An empty but valid `System`.
+    ///
+    /// # Panics
+    ///
+    /// Never for an empty system.
+    #[must_use]
+    #[allow(clippy::expect_used)]
+    // Rationale: `SystemBuilder::new().build()` cannot fail on an empty
+    // builder; a panic here means the invariant broke, not a fixture condition.
+    pub fn make_system() -> System {
+        SystemBuilder::new()
+            .build()
+            .expect("empty system must be valid")
+    }
+
+    /// The `Config` the output writers' tests run against.
+    #[must_use]
+    pub fn make_config() -> Config {
+        use crate::config::{
+            CheckpointingConfig, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+            ModelingConfig, ParallelismConfig, PolicyConfig, PolicyMode, RowSelectionConfig,
+            SimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
+            TrainingSolverConfig, UpperBoundEvaluationConfig,
+        };
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig::default(),
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: None,
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
+                stopping_mode: StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 4 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig {
+                path: "./policy".to_string(),
+                mode: PolicyMode::Fresh,
+                checkpointing: CheckpointingConfig::default(),
+                boundary: None,
+            },
+            simulation: SimulationConfig {
+                enabled: false,
+                io_channel_capacity: 64,
+                scenario_source: None,
+                solver: None,
+                selection: None,
+            },
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// The `OutputContext` the output writers' tests run against.
+    #[must_use]
+    pub fn make_output_context() -> OutputContext {
+        OutputContext {
+            hostname: "test-host".to_string(),
+            solver: "highs".to_string(),
+            solver_version: None,
+            started_at: "2026-01-17T08:00:00Z".to_string(),
+            completed_at: "2026-01-17T12:30:00Z".to_string(),
+            distribution: DistributionInfo {
+                backend: "local".to_string(),
+                world_size: 1,
+                ranks_participated: 1,
+                num_hosts: 1,
+                threads_per_rank: 1,
+                mpi_library: None,
+                mpi_standard: None,
+                thread_level: None,
+                slurm_job_id: None,
+                hosts: Vec::new(),
+            },
+            setup: None,
+            production_fit_deviation: None,
+        }
+    }
+
+    /// The first record batch of the parquet file at `path`.
+    ///
+    /// # Panics
+    ///
+    /// If the file cannot be opened, its parquet reader cannot be built or
+    /// run, or the file carries no record batch.
+    #[must_use]
+    #[allow(clippy::expect_used)]
+    // Rationale: each caller supplies a parquet file it just wrote itself, so
+    // a failure here means the test host or the writer under test is broken,
+    // not a fixture condition.
+    pub fn read_first_batch(path: &Path) -> RecordBatch {
+        let file = std::fs::File::open(path).expect("open parquet");
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("parquet reader");
+        let mut reader = builder.build().expect("build reader");
+        reader.next().expect("first batch").expect("first batch")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        EstimationConfig, ExportsConfig, ModelingConfig, ParallelismConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
+        TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+
+    #[test]
+    fn test_minimal_config_equals_validation_phase_struct_literal() -> serde_json::Result<()> {
+        let literal = Config {
+            schema: None,
+            modeling: ModelingConfig::default(),
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: None,
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 100 }]),
+                stopping_mode: StoppingMode::Any,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                parallelism: ParallelismConfig::default(),
+                scenario_source: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 10 }),
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: SimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&literal)?,
+            serde_json::to_value(minimal_config())?,
+        );
+        Ok(())
     }
 }

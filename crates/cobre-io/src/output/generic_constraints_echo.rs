@@ -167,6 +167,7 @@ fn build_generic_constraint_echo_batch(
 #[allow(clippy::expect_used, clippy::float_cmp, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use arrow::array::{Array, BooleanArray, Float64Array, Int32Array, StringArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use tempfile::tempdir;
@@ -224,13 +225,6 @@ mod tests {
         ]
     }
 
-    fn read_batch(path: &Path) -> RecordBatch {
-        let file = std::fs::File::open(path).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        reader.next().unwrap().unwrap()
-    }
-
     #[test]
     fn generic_constraint_echo_round_trip_band_cap_floor_rows() {
         let rows = sample_rows();
@@ -240,7 +234,7 @@ mod tests {
         write_generic_constraint_echo(&path, &rows).expect("write must succeed");
         assert!(path.exists(), "file must exist after write");
 
-        let batch = read_batch(&path);
+        let batch = read_first_batch(&path);
         assert_eq!(batch.num_columns(), 13, "must have 13 columns");
         assert_eq!(batch.num_rows(), 3, "must have 3 rows");
 

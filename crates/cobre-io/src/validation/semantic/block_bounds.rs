@@ -835,7 +835,6 @@ mod tests {
 
     use chrono::NaiveDate;
 
-    use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use crate::ValidationEntry;
     use crate::constraints::{
@@ -843,6 +842,7 @@ mod tests {
         PumpingBoundsRow, ThermalBoundsRow,
     };
     use crate::stages::StagesData;
+    use crate::test_support::*;
     use crate::validation::schema::ParsedData;
     use crate::validation::{ErrorKind, ValidationContext};
 

@@ -347,9 +347,9 @@ pub(super) fn check_season_contiguity(
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
     use super::*;
+    use crate::test_support::*;
     use crate::{
         scenarios::{InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow},
         stages::StagesData,

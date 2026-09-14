@@ -1181,9 +1181,9 @@ pub(super) fn check_filling_sufficiency(data: &ParsedData, ctx: &mut ValidationC
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
     use super::M3S_TO_HM3;
+    use crate::test_support::*;
     use crate::{
         scenarios::{
             BlockFactor, InflowAnnualComponentRow, InflowArCoefficientRow, InflowHistoryRow,

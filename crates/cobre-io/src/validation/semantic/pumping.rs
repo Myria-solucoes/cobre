@@ -36,8 +36,8 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{EntityId, entities::PumpingStation};
 
-    use super::super::test_support::{make_data, make_hydro, make_stages};
     use super::super::validate_semantic_hydro_thermal;
+    use crate::test_support::{make_data, make_hydro, make_stages};
     use crate::validation::{ErrorKind, ValidationContext};
 
     /// Build a `PumpingStation` with the given bus and source/destination hydros.

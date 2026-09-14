@@ -1,124 +1,17 @@
 //! Fixture builders that construct case directories in a [`TempDir`].
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::too_many_lines,
-    clippy::doc_markdown,
-    dead_code
-)]
+#![allow(clippy::too_many_lines, dead_code, unused_imports)]
+// Rationale: too_many_lines — make_multi_entity_case's JSON literals keep it
+// long. dead_code / unused_imports — each of the six binaries below calls only
+// a subset of the two case builders and the re-exported corpus names; both
+// lints fire per test binary, not crate-wide.
 
-use std::fs;
-use std::path::Path;
 use tempfile::TempDir;
 
-// ── JSON content constants ────────────────────────────────────────────────────
-//
-// Redefined here because the equivalent constants in the schema-validation unit
-// tests are private and cannot be imported.
-
-/// Minimal valid `config.json`.
-pub const VALID_CONFIG_JSON: &str = r#"{
-    "training": {
-        "selection": {"method": "sampled", "forward_passes": 10},
-        "stopping_rules": [
-            { "type": "iteration_limit", "limit": 100 }
-        ]
-    }
-}"#;
-
-/// Minimal valid `penalties.json` with all required top-level sections.
-pub const VALID_PENALTIES_JSON: &str = r#"{
-    "bus": {
-        "deficit_segments": [
-            { "depth_mw": 500.0, "cost": 1000.0 },
-            { "depth_mw": null,  "cost": 5000.0 }
-        ],
-        "excess_cost": 100.0
-    },
-    "line": { "exchange_cost": 2.0 },
-    "hydro": {
-        "spillage_cost": 0.01,
-        "turbined_cost": 0.05,
-        "diversion_cost": 0.1,
-        "storage_violation_below_cost": 10000.0,
-        "filling_target_violation_cost": 50000.0,
-        "turbined_violation_below_cost": 500.0,
-        "outflow_violation_below_cost": 500.0,
-        "outflow_violation_above_cost": 500.0,
-        "generation_violation_below_cost": 1000.0,
-        "evaporation_violation_cost": 5000.0,
-        "water_withdrawal_violation_cost": 1000.0
-    },
-    "non_controllable_source": { "curtailment_cost": 0.005 }
-}"#;
-
-/// Single-stage finite-horizon `stages.json` with no transitions.
-const VALID_STAGES_JSON: &str = r#"{
-    "policy_graph": {
-        "type": "finite_horizon",
-        "annual_discount_rate": 0.06,
-        "transitions": []
-    },
-    "stages": [
-        {
-            "id": 0,
-            "start_date": "2024-01-01",
-            "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_openings": 50
-        }
-    ]
-}"#;
-
-/// Minimal valid `initial_conditions.json`.
-pub const VALID_INITIAL_CONDITIONS_JSON: &str = r#"{
-    "storage": [],
-    "filling_storage": []
-}"#;
-
-/// Single-bus `buses.json`.
-const VALID_BUSES_JSON: &str =
-    r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#;
-
-/// Empty lines array.
-const VALID_LINES_JSON: &str = r#"{ "lines": [] }"#;
-
-/// Empty hydros array.
-const VALID_HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
-
-/// Empty thermals array.
-const VALID_THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
-
-// ── write_file ────────────────────────────────────────────────────────────────
-
-/// Write `content` to `root.join(relative)`, creating all parent directories.
-pub fn write_file(root: &Path, relative: &str, content: &str) {
-    let full = root.join(relative);
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(&full, content).unwrap();
-}
-
-// ── make_minimal_case ─────────────────────────────────────────────────────────
-
-/// Populate `dir` with the 8 required JSON files for a minimal valid case:
-/// 1 bus, 0 lines/hydros/thermals, 1 finite-horizon stage with no transitions.
-pub fn make_minimal_case(dir: &TempDir) {
-    let root = dir.path();
-    write_file(root, "config.json", VALID_CONFIG_JSON);
-    write_file(root, "penalties.json", VALID_PENALTIES_JSON);
-    write_file(root, "stages.json", VALID_STAGES_JSON);
-    write_file(
-        root,
-        "initial_conditions.json",
-        VALID_INITIAL_CONDITIONS_JSON,
-    );
-    write_file(root, "system/buses.json", VALID_BUSES_JSON);
-    write_file(root, "system/lines.json", VALID_LINES_JSON);
-    write_file(root, "system/hydros.json", VALID_HYDROS_JSON);
-    write_file(root, "system/thermals.json", VALID_THERMALS_JSON);
-}
+pub use cobre_io::test_support::{
+    VALID_BUSES_JSON, VALID_CONFIG_JSON, VALID_HYDROS_JSON, VALID_INITIAL_CONDITIONS_JSON,
+    VALID_LINES_JSON, VALID_PENALTIES_JSON, VALID_STAGES_JSON, VALID_THERMALS_JSON,
+    make_minimal_case, write_file,
+};
 
 // ── make_multi_entity_case ────────────────────────────────────────────────────
 
