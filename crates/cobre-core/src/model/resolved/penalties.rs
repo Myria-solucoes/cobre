@@ -17,7 +17,7 @@ use crate::HydroPenalties;
 /// use cobre_core::resolved::BusStagePenalties;
 ///
 /// let p = BusStagePenalties { excess_cost: 0.01 };
-/// let q = p; // Copy
+/// let q = p;
 /// assert!((q.excess_cost - 0.01).abs() < f64::EPSILON);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,7 +35,7 @@ pub struct BusStagePenalties {
 /// use cobre_core::resolved::LineStagePenalties;
 ///
 /// let p = LineStagePenalties { exchange_cost: 0.5 };
-/// let q = p; // Copy
+/// let q = p;
 /// assert!((q.exchange_cost - 0.5).abs() < f64::EPSILON);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,7 +53,7 @@ pub struct LineStagePenalties {
 /// use cobre_core::resolved::NcsStagePenalties;
 ///
 /// let p = NcsStagePenalties { curtailment_cost: 10.0 };
-/// let q = p; // Copy
+/// let q = p;
 /// assert!((q.curtailment_cost - 10.0).abs() < f64::EPSILON);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]

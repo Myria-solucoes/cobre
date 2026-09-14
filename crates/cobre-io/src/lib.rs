@@ -160,10 +160,9 @@ use std::path::Path;
 /// parquet/JSON rows, so downstream solver crates do not re-open the same files
 /// from disk after [`load_case`] returns.
 ///
-/// Fields are owned `Vec`s in the order
-/// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) establishes;
-/// slice position becomes the entity index. Empty vectors indicate the
-/// optional file was absent on disk.
+/// Each field is a row table carrying its own key column (e.g. `hydro_id`),
+/// ordered per that row type's own parser, not by a shared entity index.
+/// Empty vectors indicate the optional file was absent on disk.
 #[derive(Debug, Clone, Default)]
 pub struct CaseArtifacts {
     /// File-presence manifest produced by Layer 1 (structural). Lets

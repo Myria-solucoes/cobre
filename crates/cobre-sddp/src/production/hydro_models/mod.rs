@@ -163,34 +163,22 @@ fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<CaseArtifacts, Sdd
     // surface as a confusing downstream parse error or silent default.
     ctx.into_result().map_err(SddpError::from)?;
 
-    let prod_path = if manifest.present(InputFile::SystemHydroProductionModelsJson) {
-        Some(case_dir.join("system").join("hydro_production_models.json"))
-    } else {
-        None
-    };
-    let geom_path = if manifest.present(InputFile::SystemHydroGeometryParquet) {
-        Some(case_dir.join("system").join("hydro_geometry.parquet"))
-    } else {
-        None
-    };
-    let fpha_path = if manifest.present(InputFile::SystemFphaHyperplanesParquet) {
-        Some(case_dir.join("system").join("fpha_hyperplanes.parquet"))
-    } else {
-        None
-    };
+    let prod_path = manifest
+        .present(InputFile::SystemHydroProductionModelsJson)
+        .then(|| case_dir.join("system").join("hydro_production_models.json"));
+    let geom_path = manifest
+        .present(InputFile::SystemHydroGeometryParquet)
+        .then(|| case_dir.join("system").join("hydro_geometry.parquet"));
+    let fpha_path = manifest
+        .present(InputFile::SystemFphaHyperplanesParquet)
+        .then(|| case_dir.join("system").join("fpha_hyperplanes.parquet"));
     let prod_eff_path = case_dir
         .join("system")
         .join("hydro_energy_productivity.parquet");
-    let prod_eff_path_opt = if prod_eff_path.exists() {
-        Some(prod_eff_path.as_path())
-    } else {
-        None
-    };
-    let tailrace_path = if manifest.present(InputFile::SystemTailraceCurvesParquet) {
-        Some(case_dir.join("system").join("tailrace_curves.parquet"))
-    } else {
-        None
-    };
+    let prod_eff_path_opt = prod_eff_path.exists().then_some(prod_eff_path.as_path());
+    let tailrace_path = manifest
+        .present(InputFile::SystemTailraceCurvesParquet)
+        .then(|| case_dir.join("system").join("tailrace_curves.parquet"));
 
     let production_file = load_production_models(prod_path.as_deref())?;
 

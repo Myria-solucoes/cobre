@@ -666,6 +666,172 @@ fn test_partial_estimation_returns_report() {
     );
 }
 
+/// One-hydro, partial-year (4 monthly stages, seasons 8-11 = Sep-Dec) system
+/// with pre-loaded user stats and a real monthly [`SeasonMap`] — unlike
+/// [`build_system_with_user_stats`], `synthesize_prestudy_stages` is
+/// non-empty here (season_map present, `max_order > 0`), exercising the
+/// `run_partial_estimation` branch that appends negative prestudy ids after
+/// the positive user ids.
+fn build_partial_year_system_with_user_stats() -> System {
+    use cobre_core::entities::hydro::HydroGenerationModel;
+    use cobre_core::scenario::InflowModel;
+    use cobre_core::{Bus, DeficitSegment, EntityId, HorizonGraph, PolicyGraphType, SystemBuilder};
+
+    let hydro_id = EntityId(1);
+    let bus = Bus {
+        id: EntityId(10),
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: Some(f64::INFINITY),
+            cost_per_mwh: 3000.0,
+        }],
+        excess_cost: 0.0,
+    };
+
+    let stages = partial_year_stages(8, 4, 2000);
+
+    let inflow_models: Vec<InflowModel> = stages
+        .iter()
+        .map(|s| InflowModel {
+            hydro_id,
+            stage_id: s.id,
+            mean_m3s: 100.0,
+            std_m3s: 10.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        })
+        .collect();
+
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
+        id: hydro_id,
+        name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+        downstream_id: None,
+        travel_time_hours: None,
+        entry_stage_id: None,
+        exit_stage_id: None,
+        min_storage_hm3: 0.0,
+        max_storage_hm3: 5000.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 1000.0,
+        specific_productivity_mw_per_m3s_per_m: None,
+        min_generation_mw: 0.0,
+        max_generation_mw: 900.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: None,
+        penalties: HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 1000.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        },
+    };
+    hydro.declare_mirror_unit_group(EntityId(10));
+
+    let policy_graph = HorizonGraph {
+        stage_discount_rate_overrides: std::collections::HashMap::new(),
+        graph_type: PolicyGraphType::FiniteHorizon,
+        annual_discount_rate: 0.0,
+        transitions: vec![],
+        nodes: Vec::new(),
+        season_map: Some(monthly_season_map()),
+    };
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(vec![hydro])
+        .stages(stages)
+        .policy_graph(policy_graph)
+        .inflow_models(inflow_models)
+        .build()
+        .expect("valid partial-year system with user stats")
+}
+
+/// `run_partial_estimation` extends the positive-id user stats with
+/// negative-id prestudy rows; without a re-sort, `with_scenario_models`
+/// rejects the concatenation as `UnsortedModelTable` for every partial-year
+/// study with `max_order > 0` — a case `test_partial_estimation_preserves_user_stats`
+/// does not cover (its system has `season_map = None`, so
+/// `synthesize_prestudy_stages` is always empty there). This test drives the
+/// real `estimate_from_history` entry point end to end and asserts both
+/// success and canonical ordering.
+#[test]
+fn test_partial_estimation_partial_year_study_orders_canonically() {
+    use tempfile::TempDir;
+
+    const N_YEARS: usize = 30;
+    let dir = TempDir::new().unwrap();
+    let case_dir = dir.path();
+
+    create_required_files(case_dir);
+    let scenarios = case_dir.join("scenarios");
+    std::fs::create_dir_all(&scenarios).unwrap();
+    write_full_month_history_one_hydro(
+        &scenarios.join("inflow_history.parquet"),
+        EntityId(1),
+        N_YEARS,
+    );
+    std::fs::write(scenarios.join("inflow_seasonal_stats.parquet"), b"sentinel")
+        .expect("write sentinel");
+
+    let system = build_partial_year_system_with_user_stats();
+    let config = default_config();
+
+    let (updated, report, path) = estimate_from_history(system, case_dir, &config)
+        .expect("partial estimation over a genuine partial-year study must succeed");
+
+    assert_eq!(
+        path,
+        EstimationPath::PartialEstimation,
+        "expected PartialEstimation path"
+    );
+    assert!(
+        report.is_some(),
+        "PartialEstimation must return Some(report)"
+    );
+
+    let models = updated.inflow_models();
+    let stage_ids: Vec<i32> = models.iter().map(|m| m.stage_id).collect();
+    assert!(
+        stage_ids.iter().any(|&id| id < 0),
+        "expected pre-study (negative stage_id) models from the synthesized lag \
+         window, got {stage_ids:?}"
+    );
+
+    let mut sorted = models.to_vec();
+    sorted.sort_by_key(|m| (m.hydro_id.0, m.stage_id));
+    assert_eq!(
+        models,
+        sorted.as_slice(),
+        "inflow_models must come back canonically ordered by (hydro_id, stage_id) \
+         even though prestudy (negative id) rows are computed after user \
+         (positive id) rows"
+    );
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 fn default_config() -> Config {

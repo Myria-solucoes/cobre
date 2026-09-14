@@ -94,6 +94,7 @@ pub fn resolve_stage_lag_transition(
 /// finalize arithmetic generalized across `Monthly`/`Weekly`/`Custom` cycles.
 pub(crate) fn compute_period_transition(
     stage: &Stage,
+    position: usize,
     season_map: &SeasonMap,
     season_def: &SeasonDefinition,
     all_stages: &[Stage],
@@ -111,7 +112,7 @@ pub(crate) fn compute_period_transition(
     let year = resolved_year(season_map, season_def, stage);
     let finalize_period = !all_stages
         .iter()
-        .skip(stage.index + 1)
+        .skip(position + 1)
         .filter(|s| s.season_id == Some(season_def.id))
         .any(|s| resolved_year(season_map, season_def, s) == year);
 
@@ -177,7 +178,8 @@ pub fn precompute_stage_lag_transitions(
 ) -> Vec<StageLagTransition> {
     let mut result: Vec<StageLagTransition> = stages
         .iter()
-        .map(|stage| {
+        .enumerate()
+        .map(|(position, stage)| {
             let Some(season_id) = stage.season_id else {
                 return noop_transition();
             };
@@ -186,7 +188,7 @@ pub fn precompute_stage_lag_transitions(
                 return noop_transition();
             };
 
-            compute_period_transition(stage, season_map, season_def, stages)
+            compute_period_transition(stage, position, season_map, season_def, stages)
         })
         .collect();
 
@@ -305,7 +307,7 @@ fn compute_downstream_transitions(
 /// monthly PAR noise).
 ///
 /// Stages with `season_id = Some(id)` group by `(id, start_date.year())`,
-/// consecutive IDs from 0 in stage-index order of first occurrence; a
+/// consecutive IDs from 0 in slice order of first occurrence; a
 /// `season_id = None` stage each receives its own unique ID (no sharing). For a
 /// uniform monthly study the result is `[0, 1, …, n-1]`.
 #[must_use]

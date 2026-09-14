@@ -281,9 +281,11 @@ pub struct ScenarioSourceConfig {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Stage {
     /// 0-based array position in the canonical-ordered stages vector. The sole
-    /// writer is [`SystemBuilder::build`](crate::SystemBuilder::build), which
-    /// assigns it after sorting the stage vector by `id`; not meaningful on a
-    /// `Stage` that has not been through the builder.
+    /// writer for a `Stage` reachable via
+    /// [`System::stages`](crate::System::stages) is
+    /// [`SystemBuilder::build`](crate::SystemBuilder::build), which assigns it
+    /// after sorting the stage vector by `id`; not meaningful on a `Stage`
+    /// that has not been through the builder.
     pub index: usize,
 
     /// Unique domain-level stage identifier from `stages.json`; non-negative for

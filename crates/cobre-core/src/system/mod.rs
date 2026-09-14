@@ -2239,9 +2239,6 @@ mod tests {
         };
 
         let system = build_with(original_model.clone());
-        // System is not Clone; a second, independently built instance stands
-        // in for "the state `system` would still have" after the failed call.
-        let unchanged = build_with(original_model.clone());
 
         let out_of_order = vec![
             InflowModel {
@@ -2265,7 +2262,5 @@ mod tests {
                 position: 1
             }
         ));
-        assert_eq!(unchanged.inflow_models(), &[original_model]);
-        assert_eq!(*unchanged.correlation(), CorrelationModel::default());
     }
 }

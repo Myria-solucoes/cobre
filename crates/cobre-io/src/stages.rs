@@ -696,7 +696,7 @@ fn validate_risk_measure(
 // ── Conversion ────────────────────────────────────────────────────────────────
 
 /// Convert validated raw stages data into [`StagesData`], sorting all stages by
-/// `id` ascending and assigning `index` after the sort.
+/// `id` ascending. `index` is not assigned here — see [`Stage::index`].
 fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadError> {
     let season_map = convert_season_definitions(raw.season_definitions, path)?;
 
@@ -2781,6 +2781,76 @@ mod tests {
         assert!(
             message.contains("source 0") && message.contains("non-finite"),
             "message must name the source and the non-finite sum, got: {message}"
+        );
+    }
+
+    // ── pre-build lag-transition window (position, not `Stage.index`) ──────
+
+    /// `precompute_stage_lag_transitions` must derive its "stages after this
+    /// one" window from each stage's own position in the slice passed to it,
+    /// not from `Stage.index` — [`Stage::index`](cobre_core::temporal::Stage)
+    /// is 0 for every stage `parse_stages`/`convert_stages` produces, since
+    /// [`SystemBuilder::build`](cobre_core::SystemBuilder::build) is the only
+    /// writer. Three single-occurrence-per-season monthly stages are each the
+    /// last (and only) occurrence of their season within the year, so
+    /// `finalize_period` must be `true` for all three; an index-trusting
+    /// implementation has every stage after the first wrongly match itself in
+    /// its own "later occurrences" scan (since `.skip(0 + 1)` always starts
+    /// from position 1) and report `false`.
+    #[test]
+    fn test_prestudy_lag_transition_uses_position_not_prebuild_index() {
+        let json = r#"{
+          "season_definitions": {
+            "cycle_type": "monthly",
+            "seasons": [
+              { "id": 0, "label": "Jan", "month_start": 1 },
+              { "id": 1, "label": "Feb", "month_start": 2 },
+              { "id": 2, "label": "Mar", "month_start": 3 }
+            ]
+          },
+          "policy_graph": {
+            "type": "finite_horizon",
+            "annual_discount_rate": 0.0,
+            "transitions": [
+              { "source_id": 0, "target_id": 1, "probability": 1.0 },
+              { "source_id": 1, "target_id": 2, "probability": 1.0 }
+            ]
+          },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "season_id": 0, "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
+              "num_openings": 1 },
+            { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
+              "season_id": 1, "blocks": [{ "id": 0, "name": "S", "hours": 696.0 }],
+              "num_openings": 1 },
+            { "id": 2, "start_date": "2024-03-01", "end_date": "2024-04-01",
+              "season_id": 2, "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
+              "num_openings": 1 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let data = parse_stages(f.path()).unwrap();
+
+        assert!(
+            data.stages.iter().all(|s| s.index == 0),
+            "pre-build stages must all carry index == 0 -- the precondition the \
+             bug traded on"
+        );
+
+        let season_map = data
+            .policy_graph
+            .season_map
+            .as_ref()
+            .expect("season_definitions parsed into a SeasonMap");
+        let transitions =
+            cobre_stochastic::par::precompute_stage_lag_transitions(&data.stages, season_map, 0);
+
+        let finalize: Vec<bool> = transitions.iter().map(|t| t.finalize_period).collect();
+        assert_eq!(
+            finalize,
+            vec![true, true, true],
+            "each stage is the only occurrence of its season within its year, so \
+             finalize_period must be true for all three regardless of position"
         );
     }
 }

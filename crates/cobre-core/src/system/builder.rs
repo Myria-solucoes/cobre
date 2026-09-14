@@ -324,6 +324,8 @@ impl SystemBuilder {
     /// - The hydro cascade graph contains a cycle.
     /// - Any hydro filling configuration is invalid (non-positive inflow or missing
     ///   `entry_stage_id`).
+    /// - Any of `inflow_models`, `load_models`, `ncs_models` is not in its documented
+    ///   canonical order.
     // Rationale: sort, duplicate/cross-ref/cycle checks, and `System` assembly share
     // one `errors` accumulator and the intermediate index maps; splitting them would
     // thread those through every call and lose the fail-fast-on-duplicates short-circuit.

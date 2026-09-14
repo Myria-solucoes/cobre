@@ -161,10 +161,6 @@ pub fn resolve_penalties(
     let buses = entities.buses;
     let lines = entities.lines;
     let ncs_sources = entities.ncs_sources;
-    let hydro_overrides = overrides.hydro;
-    let bus_overrides = overrides.bus;
-    let line_overrides = overrides.line;
-    let ncs_overrides = overrides.ncs;
 
     let hydro_index: HashMap<EntityId, usize> = hydros
         .iter()
@@ -291,7 +287,7 @@ pub fn resolve_penalties(
         }
     }
 
-    for row in hydro_overrides {
+    for row in overrides.hydro {
         let Some(&entity_idx) = hydro_index.get(&row.hydro_id) else {
             continue;
         };
@@ -349,7 +345,7 @@ pub fn resolve_penalties(
         }
     }
 
-    for row in bus_overrides {
+    for row in overrides.bus {
         let Some(&entity_idx) = bus_index.get(&row.bus_id) else {
             continue;
         };
@@ -362,7 +358,7 @@ pub fn resolve_penalties(
         }
     }
 
-    for row in line_overrides {
+    for row in overrides.line {
         let Some(&entity_idx) = line_index.get(&row.line_id) else {
             continue;
         };
@@ -375,7 +371,7 @@ pub fn resolve_penalties(
         }
     }
 
-    for row in ncs_overrides {
+    for row in overrides.ncs {
         let Some(&entity_idx) = ncs_index.get(&row.source_id) else {
             continue;
         };

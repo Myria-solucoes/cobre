@@ -123,7 +123,6 @@ impl EstimationPath {
             manifest.present(InputFile::ScenariosInflowSeasonalStatsParquet),
             manifest.present(InputFile::ScenariosInflowArCoefficientsParquet),
         ) {
-            // `_`: with no history, R is ignored — AR alone cannot drive estimation.
             (false, false, _) => Self::Deterministic,
             (false, true, false) => Self::UserStatsWhiteNoise,
             (false, true, true) => Self::UserProvidedNoHistory,
@@ -230,8 +229,6 @@ fn run_estimation(
     let season_map = system.policy_graph().season_map.as_ref();
     let max_order = config.estimation.max_order as usize;
 
-    // Empty for a full-year study, so `stages == study_stages` and the estimation
-    // is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
     let stages: Vec<Stage> = study_stages
         .iter()
@@ -306,8 +303,6 @@ fn run_partial_estimation(
     let season_map = system.policy_graph().season_map.as_ref();
     let max_order = config.estimation.max_order as usize;
 
-    // Empty for a full-year study, so `stages == study_stages` and the partial
-    // estimation is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
     let stages_owned: Vec<Stage> = study_stages
         .iter()
@@ -372,6 +367,8 @@ fn run_partial_estimation(
     // stage_id rather than zeroing the lag. In-window wrap lags stay on the
     // Tier-2 → user-stat path. Empty for full-year.
     stats_rows.extend(prestudy_seasonal_rows(&fitting_stats, &prestudy));
+    // `extend` appends negative prestudy ids after the positive user ids above.
+    stats_rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id));
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
     let mut inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
@@ -663,8 +660,6 @@ fn run_user_ar_estimation(
     let season_map = system.policy_graph().season_map.as_ref();
     let max_order = config.estimation.max_order as usize;
 
-    // Empty for a full-year study, so `extended == stages` and the estimation
-    // is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(stages, max_order, season_map);
     let extended: Vec<Stage> = stages
         .iter()
