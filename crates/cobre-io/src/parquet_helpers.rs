@@ -7,9 +7,6 @@ use std::path::Path;
 
 use crate::LoadError;
 
-/// Extract a required column as [`Int32Array`] by name.
-///
-/// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
 pub(crate) fn extract_required_int32<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -34,9 +31,6 @@ pub(crate) fn extract_required_int32<'a>(
         })
 }
 
-/// Extract a required column as [`Float64Array`] by name.
-///
-/// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
 pub(crate) fn extract_required_float64<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -61,9 +55,6 @@ pub(crate) fn extract_required_float64<'a>(
         })
 }
 
-/// Extract an optional column as [`Int32Array`] by name, returning `None` if absent.
-///
-/// Returns `SchemaError` if the column exists but has the wrong Arrow type.
 pub(crate) fn extract_optional_int32<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -86,9 +77,6 @@ pub(crate) fn extract_optional_int32<'a>(
     Ok(Some(arr))
 }
 
-/// Extract an optional column as [`Float64Array`] by name, returning `None` if absent.
-///
-/// Returns `SchemaError` if the column exists but has the wrong Arrow type.
 pub(crate) fn extract_optional_float64<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -111,9 +99,6 @@ pub(crate) fn extract_optional_float64<'a>(
     Ok(Some(arr))
 }
 
-/// Extract a required column as [`UInt32Array`] by name.
-///
-/// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
 pub(crate) fn extract_required_uint32<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -138,9 +123,6 @@ pub(crate) fn extract_required_uint32<'a>(
         })
 }
 
-/// Extract a required column as [`Date32Array`] by name.
-///
-/// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
 pub(crate) fn extract_required_date32<'a>(
     batch: &'a RecordBatch,
     name: &str,

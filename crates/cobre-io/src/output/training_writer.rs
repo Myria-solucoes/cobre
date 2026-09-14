@@ -85,24 +85,8 @@ impl TrainingParquetWriter {
         let training_dir = output_dir.join("training");
         let timing_dir = output_dir.join("training/timing");
 
-        if !training_dir.exists() {
-            return Err(OutputError::io(
-                &training_dir,
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "training/ directory does not exist",
-                ),
-            ));
-        }
-        if !timing_dir.exists() {
-            return Err(OutputError::io(
-                &timing_dir,
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "training/timing/ directory does not exist",
-                ),
-            ));
-        }
+        require_dir_exists(&training_dir, "training/")?;
+        require_dir_exists(&timing_dir, "training/timing/")?;
 
         Ok(Self {
             output_dir: output_dir.to_path_buf(),
@@ -134,6 +118,19 @@ impl TrainingParquetWriter {
 
         Ok(())
     }
+}
+
+fn require_dir_exists(dir: &Path, label: &str) -> Result<(), OutputError> {
+    if dir.exists() {
+        return Ok(());
+    }
+    Err(OutputError::io(
+        dir,
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{label} directory does not exist"),
+        ),
+    ))
 }
 
 /// Build a `RecordBatch` for `training/convergence.parquet` from iteration records.

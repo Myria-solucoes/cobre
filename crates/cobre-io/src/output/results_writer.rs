@@ -780,8 +780,6 @@ mod tests {
         );
     }
 
-    /// Read the sole `upper_bound_kind` value and the `upper_bound_std` null-count
-    /// from a written `training/convergence.parquet`.
     fn read_convergence_kind_and_std_nulls(dir: &std::path::Path) -> (String, usize) {
         use arrow::array::{Array, Float64Array, StringArray};
         let path = dir.join("training/convergence.parquet");
@@ -821,7 +819,6 @@ mod tests {
         )
         .expect("write must succeed");
 
-        // convergence.parquet: kind "exact", std all-NULL.
         let (kind, std_nulls) = read_convergence_kind_and_std_nulls(tmp.path());
         assert_eq!(kind, "exact", "convergence upper_bound_kind must be exact");
         assert_eq!(
@@ -829,7 +826,6 @@ mod tests {
             "every upper_bound_std must be NULL under exact"
         );
 
-        // metadata.json.bounds: same kind, std None.
         let metadata = read_training_metadata(&tmp.path().join("training/metadata.json")).unwrap();
         assert_eq!(metadata.bounds.final_upper_bound_kind, "exact");
         assert_eq!(metadata.bounds.final_upper_bound_std, None);
@@ -852,7 +848,6 @@ mod tests {
         )
         .expect("write must succeed");
 
-        // convergence.parquet: kind "statistical", std populated (no NULLs).
         let (kind, std_nulls) = read_convergence_kind_and_std_nulls(tmp.path());
         assert_eq!(kind, "statistical");
         assert_eq!(
@@ -860,7 +855,6 @@ mod tests {
             "upper_bound_std must be populated under statistical"
         );
 
-        // metadata.json.bounds: same kind, std Some.
         let metadata = read_training_metadata(&tmp.path().join("training/metadata.json")).unwrap();
         assert_eq!(metadata.bounds.final_upper_bound_kind, "statistical");
         assert_eq!(metadata.bounds.final_upper_bound_std, Some(0.5));

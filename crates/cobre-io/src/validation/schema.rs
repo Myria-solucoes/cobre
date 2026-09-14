@@ -1028,6 +1028,21 @@ mod tests {
 
     // ── hydro_energy_productivity.parquet in Layer 2 ──────────────────────────
 
+    fn write_parquet_batch(dest: &Path, batch: &arrow::record_batch::RecordBatch) {
+        use parquet::arrow::ArrowWriter;
+
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dest)
+            .expect("create parquet file");
+        let mut writer =
+            ArrowWriter::try_new(file, batch.schema(), None).expect("ArrowWriter::try_new");
+        writer.write(batch).expect("write batch");
+        writer.close().expect("close writer");
+    }
+
     /// Write a minimal valid `system/hydro_energy_productivity.parquet` with the
     /// given rows to a path inside `root`.
     fn write_hydro_energy_productivity_parquet(
@@ -1039,7 +1054,6 @@ mod tests {
         use arrow::array::{Float64Array, Int32Array};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("hydro_id", DataType::Int32, false),
@@ -1077,16 +1091,7 @@ mod tests {
         .expect("valid batch");
 
         let dest = root.join("system/hydro_energy_productivity.parquet");
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&dest)
-            .expect("create parquet file");
-        let mut writer =
-            ArrowWriter::try_new(file, batch.schema(), None).expect("ArrowWriter::try_new");
-        writer.write(&batch).expect("write batch");
-        writer.close().expect("close writer");
+        write_parquet_batch(&dest, &batch);
     }
 
     /// Write a `system/hydro_energy_productivity.parquet` with a NULL `hydro_id`
@@ -1097,7 +1102,6 @@ mod tests {
         use arrow::array::{Float64Array, Int32Array};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
 
         // Use a nullable hydro_id column so we can insert a NULL value.
         let schema = Arc::new(Schema::new(vec![
@@ -1131,16 +1135,7 @@ mod tests {
         .expect("valid batch");
 
         let dest = root.join("system/hydro_energy_productivity.parquet");
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&dest)
-            .expect("create parquet file");
-        let mut writer =
-            ArrowWriter::try_new(file, batch.schema(), None).expect("ArrowWriter::try_new");
-        writer.write(&batch).expect("write batch");
-        writer.close().expect("close writer");
+        write_parquet_batch(&dest, &batch);
     }
 
     /// Given a case directory with a valid 2-row `system/hydro_energy_productivity.parquet`,

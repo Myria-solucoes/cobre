@@ -3,9 +3,10 @@
 //! tests via the `test-support` feature. Compiles only under `cfg(test)` or
 //! that feature; must never be enabled in a production build.
 //!
-//! Entity builders, `ParsedData` skeletons, and `Config` variants for the
-//! semantic-validation unit tests. Single-use helpers stay in their own
-//! module's `mod tests` block to keep the blast radius small.
+//! Entity builders, `ParsedData` skeletons, `Config` variants, input-file
+//! writers, the minimal-case corpus, output fixtures and stats-parser
+//! templates. Single-use helpers stay in their own module's `mod tests` block
+//! to keep the blast radius small.
 //!
 //! Builders returning the crate-private `ParsedData` (`base_parsed_data`,
 //! `make_data`, `make_data_5b`, `make_data_estimation`) are additionally

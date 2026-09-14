@@ -1,9 +1,8 @@
 //! Fixture builders that construct case directories in a [`TempDir`].
-#![allow(clippy::too_many_lines, dead_code, unused_imports)]
-// Rationale: too_many_lines — make_multi_entity_case's JSON literals keep it
-// long. dead_code / unused_imports — each of the six binaries below calls only
-// a subset of the two case builders and the re-exported corpus names; both
-// lints fire per test binary, not crate-wide.
+#![allow(dead_code, unused_imports)]
+// Rationale: each of the six binaries below calls only a subset of the two
+// case builders and the re-exported corpus names; both lints fire per test
+// binary, not crate-wide.
 
 use tempfile::TempDir;
 
