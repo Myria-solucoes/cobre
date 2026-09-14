@@ -16,94 +16,113 @@ use cobre_core::test_support::{
     make_unit_group,
 };
 use cobre_core::{
-    DeficitSegment, DiversionChannel, EntityId, FillingConfig, SystemBuilder, ValidationError,
+    Bus, DeficitSegment, DiversionChannel, EnergyContract, EntityId, FillingConfig, Hydro,
+    HydroUnitGroup, Line, NonControllableSource, PumpingStation, SystemBuilder, Thermal,
+    ValidationError,
 };
 
-#[test]
-fn test_declaration_order_invariance() {
-    let buses_fwd = vec![
-        make_bus(BusSpec {
-            id: 1,
-            name: format!("bus-{}", 1),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        }),
-        make_bus(BusSpec {
-            id: 2,
-            name: format!("bus-{}", 2),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        }),
-    ];
-    let lines_fwd = vec![make_line(LineSpec {
-        id: 10,
-        name: format!("line-{}", 10),
-        source_bus_id: 1,
-        target_bus_id: 2,
-        direct_capacity_mw: 200.0,
-        reverse_capacity_mw: 200.0,
+fn deficit_bus(id: i32) -> Bus {
+    make_bus(BusSpec {
+        id,
+        name: format!("bus-{id}"),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: Some(100.0),
+            cost_per_mwh: 500.0,
+        }],
         ..Default::default()
-    })];
-    let hydros_fwd = vec![
-        make_hydro(HydroSpec {
-            id: 20,
-            name: format!("hydro-{}", 20),
-            bus_id: 1,
-            downstream_id: Some(21),
-            max_storage_hm3: 100.0,
-            max_turbined_m3s: 500.0,
-            max_generation_mw: 450.0,
-            ..Default::default()
-        }),
-        make_hydro(HydroSpec {
-            id: 21,
-            name: format!("hydro-{}", 21),
-            bus_id: 1,
-            max_storage_hm3: 100.0,
-            max_turbined_m3s: 500.0,
-            max_generation_mw: 450.0,
-            ..Default::default()
-        }),
-    ];
-    let thermals_fwd = vec![make_thermal(ThermalSpec {
-        id: 30,
-        name: format!("thermal-{}", 30),
-        bus_id: 2,
+    })
+}
+
+fn sized_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
+    make_hydro(HydroSpec {
+        id,
+        name: format!("hydro-{id}"),
+        bus_id,
+        downstream_id,
+        max_storage_hm3: 100.0,
+        max_turbined_m3s: 500.0,
+        max_generation_mw: 450.0,
+        ..Default::default()
+    })
+}
+
+fn sized_thermal(id: i32, bus_id: i32) -> Thermal {
+    make_thermal(ThermalSpec {
+        id,
+        name: format!("thermal-{id}"),
+        bus_id,
         cost_per_mwh: 80.0,
         max_generation_mw: 300.0,
         ..Default::default()
-    })];
-    let pumping_fwd = vec![make_pumping_station(PumpingSpec {
-        id: 40,
-        name: format!("ps-{}", 40),
-        bus_id: 2,
-        source_hydro_id: 20,
-        destination_hydro_id: 21,
-        max_flow_m3s: 20.0,
-        ..Default::default()
-    })];
-    let contracts_fwd = vec![make_contract(ContractSpec {
-        id: 50,
-        name: format!("contract-{}", 50),
-        bus_id: 1,
-        price_per_mwh: 50.0,
-        max_mw: 150.0,
-        ..Default::default()
-    })];
-    let ncs_fwd = vec![make_ncs(NcsSpec {
-        id: 60,
-        name: format!("ncs-{}", 60),
-        bus_id: 2,
+    })
+}
+
+fn sized_ncs(id: i32, bus_id: i32) -> NonControllableSource {
+    make_ncs(NcsSpec {
+        id,
+        name: format!("ncs-{id}"),
+        bus_id,
         max_generation_mw: 80.0,
         curtailment_cost: 5.0,
         ..Default::default()
-    })];
+    })
+}
+
+fn sized_contract(id: i32, bus_id: i32) -> EnergyContract {
+    make_contract(ContractSpec {
+        id,
+        name: format!("contract-{id}"),
+        bus_id,
+        price_per_mwh: 50.0,
+        max_mw: 150.0,
+        ..Default::default()
+    })
+}
+
+fn sized_pumping(id: i32, source_hydro_id: i32, destination_hydro_id: i32) -> PumpingStation {
+    make_pumping_station(PumpingSpec {
+        id,
+        name: format!("ps-{id}"),
+        bus_id: 2,
+        source_hydro_id,
+        destination_hydro_id,
+        max_flow_m3s: 20.0,
+        ..Default::default()
+    })
+}
+
+fn sized_line(id: i32, source_bus_id: i32, target_bus_id: i32) -> Line {
+    make_line(LineSpec {
+        id,
+        name: format!("line-{id}"),
+        source_bus_id,
+        target_bus_id,
+        direct_capacity_mw: 200.0,
+        reverse_capacity_mw: 200.0,
+        ..Default::default()
+    })
+}
+
+fn sized_unit_group(id: i32, bus_id: i32) -> HydroUnitGroup {
+    make_unit_group(UnitGroupSpec {
+        id,
+        name: format!("group-{id}"),
+        bus_id,
+        max_generation_mw: 450.0,
+        max_turbined_m3s: 500.0,
+        ..Default::default()
+    })
+}
+
+#[test]
+fn test_declaration_order_invariance() {
+    let buses_fwd = vec![deficit_bus(1), deficit_bus(2)];
+    let lines_fwd = vec![sized_line(10, 1, 2)];
+    let hydros_fwd = vec![sized_hydro(20, 1, Some(21)), sized_hydro(21, 1, None)];
+    let thermals_fwd = vec![sized_thermal(30, 2)];
+    let pumping_fwd = vec![sized_pumping(40, 20, 21)];
+    let contracts_fwd = vec![sized_contract(50, 1)];
+    let ncs_fwd = vec![sized_ncs(60, 2)];
 
     let system_fwd = SystemBuilder::new()
         .buses(buses_fwd)
@@ -116,89 +135,13 @@ fn test_declaration_order_invariance() {
         .build()
         .expect("forward-order system must be valid");
 
-    let buses_rev = vec![
-        make_bus(BusSpec {
-            id: 2,
-            name: format!("bus-{}", 2),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        }),
-        make_bus(BusSpec {
-            id: 1,
-            name: format!("bus-{}", 1),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        }),
-    ];
-    let lines_rev = vec![make_line(LineSpec {
-        id: 10,
-        name: format!("line-{}", 10),
-        source_bus_id: 1,
-        target_bus_id: 2,
-        direct_capacity_mw: 200.0,
-        reverse_capacity_mw: 200.0,
-        ..Default::default()
-    })];
-    let hydros_rev = vec![
-        make_hydro(HydroSpec {
-            id: 21,
-            name: format!("hydro-{}", 21),
-            bus_id: 1,
-            max_storage_hm3: 100.0,
-            max_turbined_m3s: 500.0,
-            max_generation_mw: 450.0,
-            ..Default::default()
-        }),
-        make_hydro(HydroSpec {
-            id: 20,
-            name: format!("hydro-{}", 20),
-            bus_id: 1,
-            downstream_id: Some(21),
-            max_storage_hm3: 100.0,
-            max_turbined_m3s: 500.0,
-            max_generation_mw: 450.0,
-            ..Default::default()
-        }),
-    ];
-    let thermals_rev = vec![make_thermal(ThermalSpec {
-        id: 30,
-        name: format!("thermal-{}", 30),
-        bus_id: 2,
-        cost_per_mwh: 80.0,
-        max_generation_mw: 300.0,
-        ..Default::default()
-    })];
-    let pumping_rev = vec![make_pumping_station(PumpingSpec {
-        id: 40,
-        name: format!("ps-{}", 40),
-        bus_id: 2,
-        source_hydro_id: 20,
-        destination_hydro_id: 21,
-        max_flow_m3s: 20.0,
-        ..Default::default()
-    })];
-    let contracts_rev = vec![make_contract(ContractSpec {
-        id: 50,
-        name: format!("contract-{}", 50),
-        bus_id: 1,
-        price_per_mwh: 50.0,
-        max_mw: 150.0,
-        ..Default::default()
-    })];
-    let ncs_rev = vec![make_ncs(NcsSpec {
-        id: 60,
-        name: format!("ncs-{}", 60),
-        bus_id: 2,
-        max_generation_mw: 80.0,
-        curtailment_cost: 5.0,
-        ..Default::default()
-    })];
+    let buses_rev = vec![deficit_bus(2), deficit_bus(1)];
+    let lines_rev = vec![sized_line(10, 1, 2)];
+    let hydros_rev = vec![sized_hydro(21, 1, None), sized_hydro(20, 1, Some(21))];
+    let thermals_rev = vec![sized_thermal(30, 2)];
+    let pumping_rev = vec![sized_pumping(40, 20, 21)];
+    let contracts_rev = vec![sized_contract(50, 1)];
+    let ncs_rev = vec![sized_ncs(60, 2)];
 
     let system_rev = SystemBuilder::new()
         .buses(buses_rev)
@@ -219,133 +162,21 @@ fn test_declaration_order_invariance() {
 
 #[test]
 fn test_realistic_multi_entity_system() {
-    let mut hydro_10 = make_hydro(HydroSpec {
-        id: 10,
-        name: format!("hydro-{}", 10),
-        bus_id: 1,
-        downstream_id: Some(12),
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
-    let mut hydro_11 = make_hydro(HydroSpec {
-        id: 11,
-        name: format!("hydro-{}", 11),
-        bus_id: 2,
-        downstream_id: Some(12),
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
-    let hydro_12 = make_hydro(HydroSpec {
-        id: 12,
-        name: format!("hydro-{}", 12),
-        bus_id: 3,
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
+    let mut hydro_10 = sized_hydro(10, 1, Some(12));
+    let mut hydro_11 = sized_hydro(11, 2, Some(12));
+    let hydro_12 = sized_hydro(12, 3, None);
 
     hydro_10.name = "upstream-A".to_string();
     hydro_11.name = "upstream-B".to_string();
 
     let system = SystemBuilder::new()
-        .buses(vec![
-            make_bus(BusSpec {
-                id: 1,
-                name: format!("bus-{}", 1),
-                deficit_segments: vec![DeficitSegment {
-                    depth_mw: Some(100.0),
-                    cost_per_mwh: 500.0,
-                }],
-                ..Default::default()
-            }),
-            make_bus(BusSpec {
-                id: 2,
-                name: format!("bus-{}", 2),
-                deficit_segments: vec![DeficitSegment {
-                    depth_mw: Some(100.0),
-                    cost_per_mwh: 500.0,
-                }],
-                ..Default::default()
-            }),
-            make_bus(BusSpec {
-                id: 3,
-                name: format!("bus-{}", 3),
-                deficit_segments: vec![DeficitSegment {
-                    depth_mw: Some(100.0),
-                    cost_per_mwh: 500.0,
-                }],
-                ..Default::default()
-            }),
-        ])
-        .lines(vec![
-            make_line(LineSpec {
-                id: 100,
-                name: format!("line-{}", 100),
-                source_bus_id: 1,
-                target_bus_id: 2,
-                direct_capacity_mw: 200.0,
-                reverse_capacity_mw: 200.0,
-                ..Default::default()
-            }),
-            make_line(LineSpec {
-                id: 101,
-                name: format!("line-{}", 101),
-                source_bus_id: 2,
-                target_bus_id: 3,
-                direct_capacity_mw: 200.0,
-                reverse_capacity_mw: 200.0,
-                ..Default::default()
-            }),
-        ])
+        .buses(vec![deficit_bus(1), deficit_bus(2), deficit_bus(3)])
+        .lines(vec![sized_line(100, 1, 2), sized_line(101, 2, 3)])
         .hydros(vec![hydro_10, hydro_11, hydro_12])
-        .thermals(vec![
-            make_thermal(ThermalSpec {
-                id: 20,
-                name: format!("thermal-{}", 20),
-                bus_id: 1,
-                cost_per_mwh: 80.0,
-                max_generation_mw: 300.0,
-                ..Default::default()
-            }),
-            make_thermal(ThermalSpec {
-                id: 21,
-                name: format!("thermal-{}", 21),
-                bus_id: 3,
-                cost_per_mwh: 80.0,
-                max_generation_mw: 300.0,
-                ..Default::default()
-            }),
-        ])
-        .pumping_stations(vec![make_pumping_station(PumpingSpec {
-            id: 30,
-            name: format!("ps-{}", 30),
-            bus_id: 2,
-            source_hydro_id: 10,
-            destination_hydro_id: 12,
-            max_flow_m3s: 20.0,
-            ..Default::default()
-        })])
-        .contracts(vec![make_contract(ContractSpec {
-            id: 40,
-            name: format!("contract-{}", 40),
-            bus_id: 1,
-            price_per_mwh: 50.0,
-            max_mw: 150.0,
-            ..Default::default()
-        })])
-        .non_controllable_sources(vec![make_ncs(NcsSpec {
-            id: 50,
-            name: format!("ncs-{}", 50),
-            bus_id: 3,
-            max_generation_mw: 80.0,
-            curtailment_cost: 5.0,
-            ..Default::default()
-        })])
+        .thermals(vec![sized_thermal(20, 1), sized_thermal(21, 3)])
+        .pumping_stations(vec![sized_pumping(30, 10, 12)])
+        .contracts(vec![sized_contract(40, 1)])
+        .non_controllable_sources(vec![sized_ncs(50, 3)])
         .build()
         .expect("realistic multi-entity system must be valid");
 
@@ -473,55 +304,11 @@ fn test_realistic_multi_entity_system() {
 
 #[test]
 fn test_hydro_with_groups_on_multiple_buses_lists_under_each() {
-    let mut hydro = make_hydro(HydroSpec {
-        id: 10,
-        name: format!("hydro-{}", 10),
-        bus_id: 1,
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
-    hydro.unit_groups = vec![
-        make_unit_group(UnitGroupSpec {
-            id: 0,
-            name: format!("group-{}", 0),
-            bus_id: 1,
-            max_generation_mw: 450.0,
-            max_turbined_m3s: 500.0,
-            ..Default::default()
-        }),
-        make_unit_group(UnitGroupSpec {
-            id: 1,
-            name: format!("group-{}", 1),
-            bus_id: 2,
-            max_generation_mw: 450.0,
-            max_turbined_m3s: 500.0,
-            ..Default::default()
-        }),
-    ];
+    let mut hydro = sized_hydro(10, 1, None);
+    hydro.unit_groups = vec![sized_unit_group(0, 1), sized_unit_group(1, 2)];
 
     let system = SystemBuilder::new()
-        .buses(vec![
-            make_bus(BusSpec {
-                id: 1,
-                name: format!("bus-{}", 1),
-                deficit_segments: vec![DeficitSegment {
-                    depth_mw: Some(100.0),
-                    cost_per_mwh: 500.0,
-                }],
-                ..Default::default()
-            }),
-            make_bus(BusSpec {
-                id: 2,
-                name: format!("bus-{}", 2),
-                deficit_segments: vec![DeficitSegment {
-                    depth_mw: Some(100.0),
-                    cost_per_mwh: 500.0,
-                }],
-                ..Default::default()
-            }),
-        ])
+        .buses(vec![deficit_bus(1), deficit_bus(2)])
         .hydros(vec![hydro])
         .build()
         .expect("hydro with groups on two buses must be valid");
@@ -539,52 +326,15 @@ fn test_hydro_with_groups_on_multiple_buses_lists_under_each() {
 
 #[test]
 fn test_hydro_with_same_bus_groups_appears_once() {
-    let mut hydro = make_hydro(HydroSpec {
-        id: 10,
-        name: format!("hydro-{}", 10),
-        bus_id: 1,
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
+    let mut hydro = sized_hydro(10, 1, None);
     hydro.unit_groups = vec![
-        make_unit_group(UnitGroupSpec {
-            id: 0,
-            name: format!("group-{}", 0),
-            bus_id: 1,
-            max_generation_mw: 450.0,
-            max_turbined_m3s: 500.0,
-            ..Default::default()
-        }),
-        make_unit_group(UnitGroupSpec {
-            id: 1,
-            name: format!("group-{}", 1),
-            bus_id: 1,
-            max_generation_mw: 450.0,
-            max_turbined_m3s: 500.0,
-            ..Default::default()
-        }),
-        make_unit_group(UnitGroupSpec {
-            id: 2,
-            name: format!("group-{}", 2),
-            bus_id: 1,
-            max_generation_mw: 450.0,
-            max_turbined_m3s: 500.0,
-            ..Default::default()
-        }),
+        sized_unit_group(0, 1),
+        sized_unit_group(1, 1),
+        sized_unit_group(2, 1),
     ];
 
     let system = SystemBuilder::new()
-        .buses(vec![make_bus(BusSpec {
-            id: 1,
-            name: format!("bus-{}", 1),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        })])
+        .buses(vec![deficit_bus(1)])
         .hydros(vec![hydro])
         .build()
         .expect("hydro with three same-bus groups must be valid");
@@ -598,34 +348,11 @@ fn test_hydro_with_same_bus_groups_appears_once() {
 
 #[test]
 fn test_hydro_on_unknown_bus_is_accepted_groups_own_the_bus() {
-    let mut hydro = make_hydro(HydroSpec {
-        id: 1,
-        name: format!("hydro-{}", 1),
-        bus_id: 999,
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
-    hydro.unit_groups = vec![make_unit_group(UnitGroupSpec {
-        id: 0,
-        name: format!("group-{}", 0),
-        bus_id: 1,
-        max_generation_mw: 450.0,
-        max_turbined_m3s: 500.0,
-        ..Default::default()
-    })];
+    let mut hydro = sized_hydro(1, 999, None);
+    hydro.unit_groups = vec![sized_unit_group(0, 1)];
 
     let result = SystemBuilder::new()
-        .buses(vec![make_bus(BusSpec {
-            id: 1,
-            name: format!("bus-{}", 1),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        })])
+        .buses(vec![deficit_bus(1)])
         .hydros(vec![hydro])
         .build();
 
@@ -639,37 +366,11 @@ fn test_hydro_on_unknown_bus_is_accepted_groups_own_the_bus() {
 
 #[test]
 fn test_cascade_cycle_rejected() {
-    let hydro_1 = make_hydro(HydroSpec {
-        id: 1,
-        name: format!("hydro-{}", 1),
-        bus_id: 1,
-        downstream_id: Some(2),
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
-    let hydro_2 = make_hydro(HydroSpec {
-        id: 2,
-        name: format!("hydro-{}", 2),
-        bus_id: 1,
-        downstream_id: Some(1),
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
+    let hydro_1 = sized_hydro(1, 1, Some(2));
+    let hydro_2 = sized_hydro(2, 1, Some(1));
 
     let result = SystemBuilder::new()
-        .buses(vec![make_bus(BusSpec {
-            id: 1,
-            name: format!("bus-{}", 1),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        })])
+        .buses(vec![deficit_bus(1)])
         .hydros(vec![hydro_1, hydro_2])
         .build();
 
@@ -687,102 +388,20 @@ fn test_cascade_cycle_rejected() {
 #[test]
 fn test_large_order_invariance() {
     let make_system = |bus_order: Vec<i32>, hydro_order: Vec<(i32, Option<i32>)>| {
-        let buses = bus_order
-            .into_iter()
-            .map(|id| {
-                make_bus(BusSpec {
-                    id,
-                    name: format!("bus-{id}"),
-                    deficit_segments: vec![DeficitSegment {
-                        depth_mw: Some(100.0),
-                        cost_per_mwh: 500.0,
-                    }],
-                    ..Default::default()
-                })
-            })
-            .collect();
+        let buses = bus_order.into_iter().map(deficit_bus).collect();
         let hydros = hydro_order
             .into_iter()
-            .map(|(id, ds)| {
-                make_hydro(HydroSpec {
-                    id,
-                    name: format!("hydro-{id}"),
-                    bus_id: 1,
-                    downstream_id: ds,
-                    max_storage_hm3: 100.0,
-                    max_turbined_m3s: 500.0,
-                    max_generation_mw: 450.0,
-                    ..Default::default()
-                })
-            })
+            .map(|(id, ds)| sized_hydro(id, 1, ds))
             .collect();
 
         SystemBuilder::new()
             .buses(buses)
-            .lines(vec![
-                make_line(LineSpec {
-                    id: 10,
-                    name: format!("line-{}", 10),
-                    source_bus_id: 1,
-                    target_bus_id: 2,
-                    direct_capacity_mw: 200.0,
-                    reverse_capacity_mw: 200.0,
-                    ..Default::default()
-                }),
-                make_line(LineSpec {
-                    id: 11,
-                    name: format!("line-{}", 11),
-                    source_bus_id: 2,
-                    target_bus_id: 3,
-                    direct_capacity_mw: 200.0,
-                    reverse_capacity_mw: 200.0,
-                    ..Default::default()
-                }),
-            ])
+            .lines(vec![sized_line(10, 1, 2), sized_line(11, 2, 3)])
             .hydros(hydros)
-            .thermals(vec![
-                make_thermal(ThermalSpec {
-                    id: 20,
-                    name: format!("thermal-{}", 20),
-                    bus_id: 2,
-                    cost_per_mwh: 80.0,
-                    max_generation_mw: 300.0,
-                    ..Default::default()
-                }),
-                make_thermal(ThermalSpec {
-                    id: 21,
-                    name: format!("thermal-{}", 21),
-                    bus_id: 3,
-                    cost_per_mwh: 80.0,
-                    max_generation_mw: 300.0,
-                    ..Default::default()
-                }),
-            ])
-            .pumping_stations(vec![make_pumping_station(PumpingSpec {
-                id: 30,
-                name: format!("ps-{}", 30),
-                bus_id: 2,
-                source_hydro_id: 1,
-                destination_hydro_id: 3,
-                max_flow_m3s: 20.0,
-                ..Default::default()
-            })])
-            .contracts(vec![make_contract(ContractSpec {
-                id: 40,
-                name: format!("contract-{}", 40),
-                bus_id: 1,
-                price_per_mwh: 50.0,
-                max_mw: 150.0,
-                ..Default::default()
-            })])
-            .non_controllable_sources(vec![make_ncs(NcsSpec {
-                id: 50,
-                name: format!("ncs-{}", 50),
-                bus_id: 3,
-                max_generation_mw: 80.0,
-                curtailment_cost: 5.0,
-                ..Default::default()
-            })])
+            .thermals(vec![sized_thermal(20, 2), sized_thermal(21, 3)])
+            .pumping_stations(vec![sized_pumping(30, 1, 3)])
+            .contracts(vec![sized_contract(40, 1)])
+            .non_controllable_sources(vec![sized_ncs(50, 3)])
             .build()
             .expect("system must be valid")
     };
@@ -798,15 +417,7 @@ fn test_large_order_invariance() {
 
 #[test]
 fn test_invalid_filling_config_rejected() {
-    let mut hydro = make_hydro(HydroSpec {
-        id: 1,
-        name: format!("hydro-{}", 1),
-        bus_id: 1,
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
+    let mut hydro = sized_hydro(1, 1, None);
     hydro.entry_stage_id = Some(0);
     hydro.filling = Some(FillingConfig {
         start_stage_id: 0,
@@ -814,15 +425,7 @@ fn test_invalid_filling_config_rejected() {
     });
 
     let result = SystemBuilder::new()
-        .buses(vec![make_bus(BusSpec {
-            id: 1,
-            name: format!("bus-{}", 1),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        })])
+        .buses(vec![deficit_bus(1)])
         .hydros(vec![hydro])
         .build();
 
@@ -846,30 +449,14 @@ fn test_invalid_filling_config_rejected() {
 
 #[test]
 fn test_diversion_invalid_reference_rejected() {
-    let mut hydro = make_hydro(HydroSpec {
-        id: 1,
-        name: format!("hydro-{}", 1),
-        bus_id: 1,
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
+    let mut hydro = sized_hydro(1, 1, None);
     hydro.diversion = Some(DiversionChannel {
         downstream_id: EntityId(999),
         max_flow_m3s: 10.0,
     });
 
     let result = SystemBuilder::new()
-        .buses(vec![make_bus(BusSpec {
-            id: 1,
-            name: format!("bus-{}", 1),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        })])
+        .buses(vec![deficit_bus(1)])
         .hydros(vec![hydro])
         .build();
 
@@ -900,39 +487,15 @@ fn test_canonical_order_stable_under_name_changes() {
     // user-chosen and must not influence the layout.
     let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
-    let mut hydro_a = make_hydro(HydroSpec {
-        id: 1,
-        name: format!("hydro-{}", 1),
-        bus_id: 1,
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
+    let mut hydro_a = sized_hydro(1, 1, None);
     hydro_a.name = "alpha".to_string();
     hydro_a.operational_start_date = date;
-    let mut hydro_b = make_hydro(HydroSpec {
-        id: 2,
-        name: format!("hydro-{}", 2),
-        bus_id: 1,
-        max_storage_hm3: 100.0,
-        max_turbined_m3s: 500.0,
-        max_generation_mw: 450.0,
-        ..Default::default()
-    });
+    let mut hydro_b = sized_hydro(2, 1, None);
     hydro_b.name = "bravo".to_string();
     hydro_b.operational_start_date = date;
 
     let system_a = SystemBuilder::new()
-        .buses(vec![make_bus(BusSpec {
-            id: 1,
-            name: format!("bus-{}", 1),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        })])
+        .buses(vec![deficit_bus(1)])
         .hydros(vec![hydro_a.clone(), hydro_b.clone()])
         .build()
         .expect("system must be valid");
@@ -943,15 +506,7 @@ fn test_canonical_order_stable_under_name_changes() {
     b_renamed.name = "alfa".to_string();
 
     let system_b = SystemBuilder::new()
-        .buses(vec![make_bus(BusSpec {
-            id: 1,
-            name: format!("bus-{}", 1),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(100.0),
-                cost_per_mwh: 500.0,
-            }],
-            ..Default::default()
-        })])
+        .buses(vec![deficit_bus(1)])
         .hydros(vec![b_renamed, a_renamed])
         .build()
         .expect("system must be valid");
@@ -974,25 +529,9 @@ fn test_canonical_order_sorts_by_distinct_date() {
     let early = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let late = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
 
-    let mut bus_late = make_bus(BusSpec {
-        id: 1,
-        name: format!("bus-{}", 1),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: Some(100.0),
-            cost_per_mwh: 500.0,
-        }],
-        ..Default::default()
-    });
+    let mut bus_late = deficit_bus(1);
     bus_late.operational_start_date = late;
-    let mut bus_early = make_bus(BusSpec {
-        id: 2,
-        name: format!("bus-{}", 2),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: Some(100.0),
-            cost_per_mwh: 500.0,
-        }],
-        ..Default::default()
-    });
+    let mut bus_early = deficit_bus(2);
     bus_early.operational_start_date = early;
 
     let system = SystemBuilder::new()
@@ -1012,26 +551,10 @@ fn test_canonical_order_id_tiebreak_on_equal_date() {
 
     // id 1 has the name that sorts LAST ("B"); id 2 the name that sorts first ("A").
     // The id tiebreak must win, so id 1 comes first regardless of name.
-    let mut bus_b = make_bus(BusSpec {
-        id: 1,
-        name: format!("bus-{}", 1),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: Some(100.0),
-            cost_per_mwh: 500.0,
-        }],
-        ..Default::default()
-    });
+    let mut bus_b = deficit_bus(1);
     bus_b.name = "B".to_string();
     bus_b.operational_start_date = date;
-    let mut bus_a = make_bus(BusSpec {
-        id: 2,
-        name: format!("bus-{}", 2),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: Some(100.0),
-            cost_per_mwh: 500.0,
-        }],
-        ..Default::default()
-    });
+    let mut bus_a = deficit_bus(2);
     bus_a.name = "A".to_string();
     bus_a.operational_start_date = date;
 

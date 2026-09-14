@@ -136,7 +136,7 @@ impl CascadeTopology {
 mod tests {
     use super::CascadeTopology;
     use crate::EntityId;
-    use crate::test_support::{HydroSpec, MirrorUnitGroup, make_hydro};
+    use crate::test_support::{HydroSpec, make_hydro};
 
     #[test]
     fn test_empty_cascade() {
@@ -150,7 +150,6 @@ mod tests {
     fn test_single_hydro_terminal() {
         let hydros = vec![make_hydro(HydroSpec {
             id: 1,
-            mirror_unit_group: MirrorUnitGroup::FixedBus(0),
             ..Default::default()
         })];
         let topo = CascadeTopology::build(&hydros);
@@ -169,18 +168,15 @@ mod tests {
             make_hydro(HydroSpec {
                 id: 0,
                 downstream_id: Some(1),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 1,
                 downstream_id: Some(2),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 2,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
         ];
@@ -209,18 +205,15 @@ mod tests {
             make_hydro(HydroSpec {
                 id: 0,
                 downstream_id: Some(2),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 1,
                 downstream_id: Some(2),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 2,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
         ];
@@ -252,23 +245,19 @@ mod tests {
             make_hydro(HydroSpec {
                 id: 0,
                 downstream_id: Some(1),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 1,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 2,
                 downstream_id: Some(3),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 3,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
         ];
@@ -291,17 +280,14 @@ mod tests {
         let hydros = vec![
             make_hydro(HydroSpec {
                 id: 1,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 2,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 3,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
         ];
@@ -325,18 +311,15 @@ mod tests {
             make_hydro(HydroSpec {
                 id: 5,
                 downstream_id: Some(10),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 3,
                 downstream_id: Some(10),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 10,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
         ];
@@ -353,18 +336,15 @@ mod tests {
             make_hydro(HydroSpec {
                 id: 0,
                 downstream_id: Some(2),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 1,
                 downstream_id: Some(2),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 2,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
         ];
@@ -380,18 +360,15 @@ mod tests {
             make_hydro(HydroSpec {
                 id: 0,
                 downstream_id: Some(2),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 1,
                 downstream_id: Some(2),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 2,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
         ];
@@ -407,18 +384,15 @@ mod tests {
             make_hydro(HydroSpec {
                 id: 0,
                 downstream_id: Some(1),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 1,
                 downstream_id: Some(2),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 2,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
         ];
@@ -433,18 +407,15 @@ mod tests {
             make_hydro(HydroSpec {
                 id: 0,
                 downstream_id: Some(1),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 1,
                 downstream_id: Some(2),
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
             make_hydro(HydroSpec {
                 id: 2,
-                mirror_unit_group: MirrorUnitGroup::FixedBus(0),
                 ..Default::default()
             }),
         ];
