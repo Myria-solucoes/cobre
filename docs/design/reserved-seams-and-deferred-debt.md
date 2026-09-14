@@ -1114,30 +1114,39 @@ audit does not re-raise it.
 **Owner.** The `cobre-stochastic` sampling and tree-noise owners; the training and simulation
 state structs own the tables (as executed). **Trigger.** None — done.
 
-### Scheduled — latent footguns, one change each
+### Fixed — latent footguns, one change each (2026-09-14)
 
-- **Canonical order is set by the builder, not re-derived by the loader.** The stage index is
-  reassigned in the loader after the builder has already sorted; the three model tables are sorted
-  rather than validated as canonical. *Owner:* `cobre-core` system-builder owner. *Trigger:* the
-  next `cobre-core` or loader touch; validate-not-sort keeps bytes identical.
-- **Input-file registry keyed by name, not position.** The structural layer zips a file table with
-  the manifest's mutable fields positionally (they match today). *Owner:* `cobre-io` validation
-  owner. *Trigger:* the next input file added.
-- **Penalty twin type.** Two structurally identical per-stage hydro penalty types; a type alias
-  closes it without touching the ~130 construction sites. *Owner:* `cobre-core` model owner.
-  *Trigger:* opportunistic.
-- **Typed entity class at the sampler gate.** The correlation side now parses the class into a
-  closed enum once at build (2026-09-12); the sampler-side gate that selects historical replay for the
-  inflow class only still matches a string label (a typo fails loudly, so not user-visible).
-  *Owner:* `cobre-stochastic` sampling owner. *Trigger:* the next sampler touch; the enum exists.
-- **The shared point-spec's stage field carries the noise-group id.** Every forward-path producer
-  writes the noise group into the field named for the stage; the opening-tree producers write a
-  stage id. *Owner:* `cobre-stochastic` tree-noise owner. *Trigger:* a narrow rename on its own,
-  because it touches every precomputed-vs-direct equivalence test.
-- **Unsupported forward noise methods warn per draw.** Two noise methods that the forward pass
-  does not implement log a warning on every draw before falling back to the sample-average
-  method. *Owner:* `cobre-stochastic` sampling owner. *Trigger:* warn once at sampler
-  construction or reject at validation.
+- **The builder owns canonical order.** `SystemBuilder::build` assigns each stage's index from its
+  own sort instead of the loader; the three scenario model tables are validated as canonically
+  ordered at construction (a new validation error; `System::with_scenario_models` is now fallible)
+  rather than sorted, so every deck the loader emits is byte-identical. The canonical key is stated
+  once, on the builder, and every resolver and parser doc points at it. Closing this exposed two
+  pre-existing violations of the order contract: the pre-build lag-transition precompute in the
+  inflow-seeding validation read the stage index the loader no longer writes (it now derives the
+  window from slice position, which also corrects a latent over-skip when pre-study stages exist),
+  and the partial-estimation path appended pre-study rows unsorted (now sorted). Both carry regression
+  tests through the real parser and estimation entry points.
+- **The input-file registry is keyed, not positional.** One enum keys the structural file table and
+  the presence manifest; a reordering is a compile error or a registry-test failure, never a silent
+  flag misassignment. The manifest exposes one read accessor.
+- **One hydro penalty type.** The per-stage twin is removed; the resolved table stores the entity
+  type and the sixteen-field copy is a move. The forward-hydro-production clause on the turbined-cost
+  field now says it is not enforced by validation, which is true.
+- **The sampler's class identity is typed end to end.** The factory carries the entity-class enum,
+  the historical-replay gate matches a variant, and the load and non-controllable-source forward seeds
+  derive from the enum's wire label so both pinned seed constants are unchanged. Each class's scheme
+  and library are one per-class source inside the factory, with no historical variant for load and
+  non-controllable sources; every missing-source diagnostic keeps its text and raise order.
+- **The stage-0 derived seed travels as one aggregate** through the three standardizers and their two
+  library builders, removing the adjacent same-typed slice hazard; every argument-count suppression
+  stays with a rationale that is true.
+- **The shared noise point spec names its key for the slot it fills** (a noise group on the forward
+  path, a stage on the opening-tree path).
+- **An unsupported forward noise method warns once per class at sampler construction**, naming the
+  affected stages; the draw arms are silent fallbacks and allocate nothing.
+
+**Owner.** The `cobre-core` builder owner, the `cobre-io` validation owner and the `cobre-stochastic`
+sampling owner (as executed). **Trigger.** None — done.
 
 ### Structural lever — a shared test-fixture surface in `cobre-core`
 
