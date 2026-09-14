@@ -4,10 +4,11 @@
 
 use cobre_core::{Hydro, InflowHistoryRow, RecentObservation, SeasonMap, Stage};
 
-use crate::season_cast::{RealizedWindow, StageCalendar, merge_layered_windows};
-
 #[cfg(test)]
-use crate::season_cast::{cast, nth_previous_occurrence, season_period_window};
+use crate::season_cast::nth_previous_occurrence;
+use crate::season_cast::{
+    RealizedWindow, StageCalendar, cast, merge_layered_windows, season_period_window,
+};
 
 /// Per-hydro PAR lag-slot and accumulator seeds, indexed by canonical hydro
 /// position — the iteration order [`derive_inflow_seeds`] walks `hydros` in.
@@ -102,6 +103,7 @@ pub fn derive_inflow_seeds(
     };
 
     let calendar = StageCalendar::new(std::slice::from_ref(first_stage));
+    let in_progress = season_period_window(season_map, season_def, first_stage);
 
     let mut seeds = DerivedInflowSeeds::zero(n_hydros, l_state);
 
@@ -126,13 +128,7 @@ pub fn derive_inflow_seeds(
             .collect();
         let merged = merge_layered_windows(&record_windows, &conditioning_windows);
 
-        let in_progress_projection = calendar
-            .season_occurrence(season_map, season_def, &merged, 0)
-            .unwrap_or_else(|| {
-                unreachable!(
-                    "k=0 always resolves the in-progress occurrence for a non-empty calendar"
-                )
-            });
+        let in_progress_projection = cast(&merged, &in_progress);
         seeds.accum[pos] = in_progress_projection.value * in_progress_projection.coverage;
         seeds.weight[pos] = in_progress_projection.coverage;
 

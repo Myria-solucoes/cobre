@@ -517,8 +517,12 @@ pub fn build_season_stage_map(stages: &[Stage]) -> HashMap<i32, usize> {
 
 fn validate_raw_stages(raw: &RawStagesFile, path: &Path) -> Result<(), LoadError> {
     validate_annual_discount_rate(raw.policy_graph.annual_discount_rate, path)?;
-    validate_no_duplicate_stage_ids(&raw.stages, path)?;
-    validate_no_duplicate_pre_study_stage_ids(&raw.pre_study_stages, path)?;
+    validate_no_duplicate_ids(raw.stages.iter().map(|s| s.id), "stages", path)?;
+    validate_no_duplicate_ids(
+        raw.pre_study_stages.iter().map(|s| s.id),
+        "pre_study_stages",
+        path,
+    )?;
     validate_no_id_collision_between_sets(&raw.stages, &raw.pre_study_stages, path)?;
     let nodes_declared = !raw.policy_graph.nodes.is_empty();
     for (i, stage) in raw.stages.iter().enumerate() {
@@ -543,31 +547,18 @@ fn validate_annual_discount_rate(rate: f64, path: &Path) -> Result<(), LoadError
     Ok(())
 }
 
-fn validate_no_duplicate_stage_ids(stages: &[RawStage], path: &Path) -> Result<(), LoadError> {
-    let mut seen: HashSet<i32> = HashSet::new();
-    for (i, stage) in stages.iter().enumerate() {
-        if !seen.insert(stage.id) {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("stages[{i}].id"),
-                message: format!("duplicate id {} in stages array", stage.id),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_no_duplicate_pre_study_stage_ids(
-    stages: &[RawPreStudyStage],
+fn validate_no_duplicate_ids(
+    ids: impl Iterator<Item = i32>,
+    array_name: &str,
     path: &Path,
 ) -> Result<(), LoadError> {
     let mut seen: HashSet<i32> = HashSet::new();
-    for (i, stage) in stages.iter().enumerate() {
-        if !seen.insert(stage.id) {
+    for (i, id) in ids.enumerate() {
+        if !seen.insert(id) {
             return Err(LoadError::SchemaError {
                 path: path.to_path_buf(),
-                field: format!("pre_study_stages[{i}].id"),
-                message: format!("duplicate id {} in pre_study_stages array", stage.id),
+                field: format!("{array_name}[{i}].id"),
+                message: format!("duplicate id {id} in {array_name} array"),
             });
         }
     }
