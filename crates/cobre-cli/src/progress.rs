@@ -1015,12 +1015,12 @@ mod tests {
             + (300.0_f64 - 300.0_f64).powi(2)
             + (400.0_f64 - 300.0_f64).powi(2)
             + (500.0_f64 - 300.0_f64).powi(2))
-            / 5.0_f64)
+            / 4.0_f64)
             .sqrt();
         assert!(
-            (acc.std_dev() - expected_std).abs() < 1e-6,
-            "WelfordAccumulator std_dev must be ~{expected_std:.3}, got {}",
-            acc.std_dev()
+            (acc.sample_std_dev() - expected_std).abs() < 1e-6,
+            "WelfordAccumulator sample_std_dev must be ~{expected_std:.3}, got {}",
+            acc.sample_std_dev()
         );
     }
 

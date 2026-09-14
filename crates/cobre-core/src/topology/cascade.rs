@@ -15,7 +15,7 @@ use crate::{EntityId, Hydro};
 /// from hydro `downstream_id` fields during System construction and immutable
 /// thereafter. Traversing in topological order guarantees every upstream
 /// inflow is computed before the downstream plant that receives it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CascadeTopology {
     /// Terminal nodes (no downstream) are absent from the map.

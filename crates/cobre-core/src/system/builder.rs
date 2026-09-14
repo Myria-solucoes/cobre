@@ -12,10 +12,10 @@ use super::validate::{
 use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
-    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
-    NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal, ValidationError,
+    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NonControllableSource,
+    PostStudyStages, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
+    ValidationError,
 };
 
 /// Builder for constructing a validated, immutable [`System`].
@@ -452,16 +452,6 @@ impl SystemBuilder {
             return Err(errors);
         }
 
-        let network = NetworkTopology::build(
-            &self.buses,
-            &self.lines,
-            &self.hydros,
-            &self.thermals,
-            &self.non_controllable_sources,
-            &self.contracts,
-            &self.pumping_stations,
-        );
-
         let stage_index = build_stage_index(&self.stages);
 
         Ok(System {
@@ -480,7 +470,6 @@ impl SystemBuilder {
             contract_index,
             non_controllable_source_index,
             cascade,
-            network,
             stages: self.stages,
             policy_graph: self.policy_graph,
             stage_index,

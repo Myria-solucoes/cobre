@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING — three narrowly-used `cobre_core` surfaces are removed.**
+  `ValidationError` no longer carries the two variants no validation path
+  ever produced (a disconnected-bus report and an entity-penalty report).
+  `WelfordAccumulator` now exposes only the sample-statistics estimators its
+  callers use: the population variance, population standard deviation, and
+  population confidence-interval half-width, the separate sample-variance
+  accessor, and the observation counter are removed; the reported mean,
+  sample standard deviation, and 95% confidence-interval half-width are
+  unchanged. The network-topology type family (`NetworkTopology`,
+  `BusGenerators`, `BusLineConnection`, `BusLoads`), `System::network()`, and
+  their crate-root exports are removed: the resolved bus/line/generator/load
+  adjacency is no longer built or carried on `System`. A caller that needs it
+  derives it from `System::buses()`/`lines()`/`hydros()`/`thermals()`/
+  `non_controllable_sources()`/`contracts()`/`pumping_stations()`. The hydro
+  cascade is unchanged and still reachable through `System::cascade()`, now
+  rebuilt on deserialize instead of carried on the wire. The MPI broadcast
+  payload is smaller, with no deck-visible behaviour change.
+
 - **BREAKING — the per-(hydro, stage) penalty type that duplicated
   `cobre_core::HydroPenalties`' sixteen fields is removed from
   `cobre_core::resolved`.** The resolved penalty table's `hydro` field, and

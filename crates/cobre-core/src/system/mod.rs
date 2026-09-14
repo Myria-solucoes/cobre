@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
-    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
-    NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, SamplingScheme, Stage, Thermal, ValidationError,
+    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NonControllableSource,
+    PostStudyStages, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SamplingScheme,
+    Stage, Thermal, ValidationError,
 };
 
 mod builder;
@@ -63,10 +63,11 @@ pub struct System {
     non_controllable_sources: Vec<NonControllableSource>,
 
     // Not serialized: `HashMap` iteration order is unstable, so serializing an
-    // index would make the wire payload non-reproducible for identical content.
-    // `serde(from = "SystemRepr")` above is `Deserialize`'s sole entry point and
-    // rebuilds them unconditionally — without it every lookup on a deserialized
-    // `System` silently returns `None`.
+    // index or the cascade topology would make the wire payload
+    // non-reproducible for identical content. `serde(from = "SystemRepr")`
+    // above is `Deserialize`'s sole entry point and rebuilds them all
+    // unconditionally — without it every lookup on a deserialized `System`
+    // silently returns `None`, and the cascade is empty.
     #[cfg_attr(feature = "serde", serde(skip))]
     bus_index: HashMap<EntityId, usize>,
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -83,9 +84,8 @@ pub struct System {
     non_controllable_source_index: HashMap<EntityId, usize>,
 
     /// Resolved hydro cascade graph.
+    #[cfg_attr(feature = "serde", serde(skip))]
     cascade: CascadeTopology,
-    /// Resolved transmission network topology.
-    network: NetworkTopology,
 
     /// Ordered list of stages (study + pre-study), sorted by `id` (canonical order).
     stages: Vec<Stage>,
@@ -155,8 +155,6 @@ struct SystemRepr {
     pumping_stations: Vec<PumpingStation>,
     contracts: Vec<EnergyContract>,
     non_controllable_sources: Vec<NonControllableSource>,
-    cascade: CascadeTopology,
-    network: NetworkTopology,
     stages: Vec<Stage>,
     policy_graph: HorizonGraph,
     penalties: ResolvedPenalties,
@@ -196,8 +194,7 @@ impl From<SystemRepr> for System {
             pumping_station_index: HashMap::new(),
             contract_index: HashMap::new(),
             non_controllable_source_index: HashMap::new(),
-            cascade: repr.cascade,
-            network: repr.network,
+            cascade: CascadeTopology::default(),
             stages: repr.stages,
             policy_graph: repr.policy_graph,
             stage_index: HashMap::new(),
@@ -359,12 +356,6 @@ impl System {
     #[must_use]
     pub fn cascade(&self) -> &CascadeTopology {
         &self.cascade
-    }
-
-    /// Returns a reference to the transmission network topology.
-    #[must_use]
-    pub fn network(&self) -> &NetworkTopology {
-        &self.network
     }
 
     /// Returns all stages in canonical ID order (study and pre-study stages).
@@ -599,7 +590,7 @@ impl System {
         Ok(self)
     }
 
-    /// Rebuild all lookup indices from the entity collections.
+    /// Rebuild all lookup indices from the entity collections, and the cascade topology.
     ///
     /// Sole caller: `From<SystemRepr>` (`Deserialize`'s entry point).
     /// `SystemBuilder::build` needs the same maps earlier, for cross-reference
@@ -614,6 +605,7 @@ impl System {
         self.contract_index = build_index(&self.contracts);
         self.non_controllable_source_index = build_index(&self.non_controllable_sources);
         self.stage_index = build_stage_index(&self.stages);
+        self.cascade = CascadeTopology::build(&self.hydros);
     }
 }
 
@@ -1023,36 +1015,6 @@ mod tests {
             .position(|&id| id == EntityId(2))
             .expect("EntityId(2) must be in topological order");
         assert!(pos_0 < pos_2, "EntityId(0) must precede EntityId(2)");
-    }
-
-    #[test]
-    fn test_network_accessible() {
-        let system = SystemBuilder::new()
-            .buses(vec![
-                make_bus(BusSpec {
-                    id: 0,
-                    name: format!("bus-{}", 0),
-                    ..Default::default()
-                }),
-                make_bus(BusSpec {
-                    id: 1,
-                    name: format!("bus-{}", 1),
-                    ..Default::default()
-                }),
-            ])
-            .lines(vec![make_line(LineSpec {
-                id: 0,
-                name: format!("line-{}", 0),
-                source_bus_id: 0,
-                target_bus_id: 1,
-                ..Default::default()
-            })])
-            .build()
-            .expect("valid system");
-
-        let connections = system.network().bus_lines(EntityId(0));
-        assert!(!connections.is_empty(), "bus 0 must have connections");
-        assert_eq!(connections[0].line_id, EntityId(0));
     }
 
     #[test]
@@ -2086,6 +2048,73 @@ mod tests {
             deserialized.thermal(EntityId(20)).map(|t| t.id),
             Some(EntityId(20))
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn postcard_roundtrip_rebuilds_cascade_topology_bit_equal() {
+        let hydro_12 = make_hydro(HydroSpec {
+            id: 12,
+            name: format!("hydro-{}", 12),
+            bus_id: 0,
+            ..Default::default()
+        });
+        let hydro_11 = make_hydro(HydroSpec {
+            id: 11,
+            name: format!("hydro-{}", 11),
+            bus_id: 0,
+            downstream_id: Some(12),
+            ..Default::default()
+        });
+        let hydro_10 = make_hydro(HydroSpec {
+            id: 10,
+            name: format!("hydro-{}", 10),
+            bus_id: 0,
+            downstream_id: Some(12),
+            ..Default::default()
+        });
+
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(BusSpec {
+                id: 0,
+                name: format!("bus-{}", 0),
+                ..Default::default()
+            })])
+            .hydros(vec![hydro_12, hydro_11, hydro_10])
+            .build()
+            .expect("fork-merge cascade must be valid");
+
+        let expected_order = [EntityId(10), EntityId(11), EntityId(12)];
+        assert_eq!(system.cascade().topological_order(), &expected_order);
+
+        let bytes = postcard::to_allocvec(&system).unwrap();
+        let deserialized: System = postcard::from_bytes(&bytes).unwrap();
+
+        assert_eq!(deserialized.cascade(), system.cascade());
+        assert_eq!(
+            deserialized.cascade().topological_order(),
+            system.cascade().topological_order()
+        );
+        assert_eq!(deserialized.cascade().len(), system.cascade().len());
+
+        for id in expected_order {
+            assert_eq!(
+                deserialized.cascade().downstream(id),
+                system.cascade().downstream(id)
+            );
+            assert_eq!(
+                deserialized.cascade().upstream(id),
+                system.cascade().upstream(id)
+            );
+            assert_eq!(
+                deserialized.cascade().is_headwater(id),
+                system.cascade().is_headwater(id)
+            );
+            assert_eq!(
+                deserialized.cascade().is_terminal(id),
+                system.cascade().is_terminal(id)
+            );
+        }
     }
 
     #[cfg(feature = "serde")]

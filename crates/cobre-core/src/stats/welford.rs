@@ -1,7 +1,7 @@
 //! Online accumulator for running mean and variance using Welford's algorithm,
 //! which avoids the catastrophic cancellation of the two-pass naive formula.
 
-/// Running mean and variance via Welford's single-pass online update.
+/// Running mean and sample standard deviation via Welford's single-pass online update.
 #[derive(Debug)]
 pub struct WelfordAccumulator {
     count: u64,
@@ -32,74 +32,22 @@ impl WelfordAccumulator {
         self.m2 += delta * delta2;
     }
 
-    /// Number of observations accumulated so far.
-    #[must_use]
-    pub fn count(&self) -> u64 {
-        self.count
-    }
-
     /// Running mean of all observed values, or `0.0` if no observations.
     #[must_use]
     pub fn mean(&self) -> f64 {
         self.mean
     }
 
-    /// Population variance (`m2 / n`), or `0.0` if fewer than 2 observations.
-    #[must_use]
-    pub fn variance(&self) -> f64 {
-        if self.count < 2 {
-            0.0
-        } else {
-            #[allow(clippy::cast_precision_loss)]
-            let count_f64 = self.count as f64;
-            self.m2 / count_f64
-        }
-    }
-
-    /// Population standard deviation, or `0.0` if fewer than 2 observations.
-    #[must_use]
-    pub fn std_dev(&self) -> f64 {
-        self.variance().sqrt()
-    }
-
-    /// Sample variance (`m2 / (n-1)`) with Bessel's correction, or `0.0` if
-    /// fewer than 2 observations.
-    ///
-    /// Prefer this over [`variance`] when the data are a sample of a larger
-    /// population, not the whole population.
-    ///
-    /// [`variance`]: WelfordAccumulator::variance
-    #[must_use]
-    pub fn sample_variance(&self) -> f64 {
-        if self.count < 2 {
-            0.0
-        } else {
-            #[allow(clippy::cast_precision_loss)]
-            let count_f64 = self.count as f64;
-            self.m2 / (count_f64 - 1.0)
-        }
-    }
-
-    /// Sample standard deviation (square root of [`sample_variance`]), or
-    /// `0.0` if fewer than 2 observations.
-    ///
-    /// [`sample_variance`]: WelfordAccumulator::sample_variance
+    /// Sample standard deviation with Bessel's correction
+    /// (`sqrt(m2 / (n - 1))`), or `0.0` if fewer than 2 observations.
     #[must_use]
     pub fn sample_std_dev(&self) -> f64 {
-        self.sample_variance().sqrt()
-    }
-
-    /// Half-width of the 95% confidence interval (`1.96 * std / sqrt(n)`).
-    ///
-    /// Returns `0.0` when fewer than 2 observations are available.
-    #[must_use]
-    pub fn ci_95_half_width(&self) -> f64 {
         if self.count < 2 {
             0.0
         } else {
             #[allow(clippy::cast_precision_loss)]
             let count_f64 = self.count as f64;
-            1.96 * self.std_dev() / count_f64.sqrt()
+            (self.m2 / (count_f64 - 1.0)).sqrt()
         }
     }
 
@@ -130,9 +78,9 @@ mod tests {
     use super::WelfordAccumulator;
 
     /// Known dataset: `[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]`
-    /// Expected: mean=5.0, variance=4.0, `std_dev`=2.0.
+    /// Expected: mean=5.0, `sample_std_dev`=`sqrt(32/7)`.
     #[test]
-    fn welford_known_dataset_mean_variance_std() {
+    fn welford_known_dataset_mean_and_sample_std_dev() {
         let values = [2.0_f64, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
         let mut acc = WelfordAccumulator::new();
         for &v in &values {
@@ -144,14 +92,9 @@ mod tests {
             acc.mean()
         );
         assert!(
-            (acc.variance() - 4.0).abs() < 1e-10,
-            "variance: expected 4.0, got {}",
-            acc.variance()
-        );
-        assert!(
-            (acc.std_dev() - 2.0).abs() < 1e-10,
-            "std_dev: expected 2.0, got {}",
-            acc.std_dev()
+            (acc.sample_std_dev() - (32.0_f64 / 7.0).sqrt()).abs() < 1e-10,
+            "sample_std_dev: expected 2.138089935299395, got {}",
+            acc.sample_std_dev()
         );
     }
 
@@ -165,12 +108,12 @@ mod tests {
             acc.mean()
         );
         assert_eq!(
-            acc.std_dev(),
+            acc.sample_std_dev(),
             0.0,
-            "std_dev must be 0.0 with one observation"
+            "sample_std_dev must be 0.0 with one observation"
         );
         assert_eq!(
-            acc.ci_95_half_width(),
+            acc.sample_ci_95_half_width(),
             0.0,
             "ci_95_half_width must be 0.0 with one observation"
         );
@@ -181,19 +124,9 @@ mod tests {
         let acc = WelfordAccumulator::new();
         assert_eq!(acc.mean(), 0.0, "mean must be 0.0 with no observations");
         assert_eq!(
-            acc.std_dev(),
+            acc.sample_std_dev(),
             0.0,
-            "std_dev must be 0.0 with no observations"
+            "sample_std_dev must be 0.0 with no observations"
         );
-    }
-
-    #[test]
-    fn welford_count_tracks_updates() {
-        let mut acc = WelfordAccumulator::new();
-        assert_eq!(acc.count(), 0, "count must be 0 before any updates");
-        acc.update(1.0);
-        acc.update(2.0);
-        acc.update(3.0);
-        assert_eq!(acc.count(), 3, "count must be 3 after 3 updates");
     }
 }
