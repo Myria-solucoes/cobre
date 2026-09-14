@@ -511,7 +511,6 @@ pub fn validate_historical_library(
     user_pool: Option<&HistoricalYears>,
     forward_passes: u32,
 ) -> Result<(), StochasticError> {
-    // V2.1 — every study stage must have season_id: Some(_).
     for stage in stages {
         if stage.season_id.is_none() {
             return Err(StochasticError::InsufficientData {
@@ -524,7 +523,6 @@ pub fn validate_historical_library(
         }
     }
 
-    // V2.9 — hydro_ids length must equal library.n_hydros().
     if hydro_ids.len() != library.n_hydros() {
         return Err(StochasticError::InsufficientData {
             context: format!(
@@ -536,7 +534,6 @@ pub fn validate_historical_library(
         });
     }
 
-    // V2.5 — at least 1 window when user_pool is None.
     if user_pool.is_none() && library.n_windows() == 0 {
         return Err(StochasticError::InsufficientData {
             context: "V2.5: historical library has 0 windows after auto-discovery; \
@@ -571,7 +568,6 @@ pub fn validate_historical_library(
         library.max_order(),
     );
 
-    // V2.6 — warn (do not fail) when windows < forward passes.
     if library.n_windows() < forward_passes as usize {
         tracing::warn!(
             n_windows = library.n_windows(),

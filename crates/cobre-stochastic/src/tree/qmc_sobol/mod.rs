@@ -70,7 +70,6 @@ fn build_direction_matrix(dim: usize) -> Vec<[u32; 32]> {
         let mut v = [0u32; 32];
 
         if d == 0 {
-            // Dimension 1: van der Corput.
             for (j, slot) in v.iter_mut().enumerate() {
                 *slot = 1u32 << (31 - j);
             }

@@ -1828,7 +1828,6 @@ mod tests {
         assert_eq!(lib.n_stages(), 12);
         assert_eq!(lib.n_scenarios(), 50);
         assert_eq!(lib.n_entities(), 5);
-        // Verify each accessor slice has the correct length.
         assert_eq!(lib.eta_slice(0, 0).len(), 5);
         assert_eq!(lib.eta_slice(11, 49).len(), 5);
     }

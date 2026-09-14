@@ -3,6 +3,8 @@
 //! Builders are not factored generically because external types have different
 //! standardization semantics.
 
+use std::collections::HashSet;
+
 use cobre_core::{
     EntityId, InflowHistoryRow, Stage, System,
     scenario::{ExternalScenarioRow, HistoricalYears, LoadModel, NcsModel, SamplingScheme},
@@ -108,8 +110,7 @@ pub(crate) fn build_external_inflow_library(
 ) -> Result<ExternalScenarioLibrary, SddpError> {
     let n_stages = stages.len();
     let n_hydros = hydro_ids.len();
-    let row_entity_ids: std::collections::HashSet<EntityId> =
-        external_rows.iter().map(|r| r.hydro_id).collect();
+    let row_entity_ids: HashSet<EntityId> = external_rows.iter().map(|r| r.hydro_id).collect();
     let resolver =
         StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
     let mut rows_per_stage = vec![0usize; n_stages];
@@ -191,8 +192,7 @@ pub(crate) fn build_external_load_library(
     let n_stages = stages.len();
     let bus_ids = system.load_noise_member_bus_ids(load_scheme);
     let n_buses = bus_ids.len();
-    let row_entity_ids: std::collections::HashSet<EntityId> =
-        external_rows.iter().map(|r| r.bus_id).collect();
+    let row_entity_ids: HashSet<EntityId> = external_rows.iter().map(|r| r.bus_id).collect();
     let resolver =
         StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
     let mut rows_per_stage = vec![0usize; n_stages];
@@ -273,8 +273,7 @@ pub(crate) fn build_external_ncs_library(
     let n_stages = stages.len();
     let ncs_ids = system.ncs_noise_member_ids(SamplingScheme::External);
     let n_ncs = ncs_ids.len();
-    let row_entity_ids: std::collections::HashSet<EntityId> =
-        external_rows.iter().map(|r| r.ncs_id).collect();
+    let row_entity_ids: HashSet<EntityId> = external_rows.iter().map(|r| r.ncs_id).collect();
     let resolver =
         StageIdResolver::from_study_stage_ids(&stages.iter().map(|s| s.id).collect::<Vec<_>>());
     let mut rows_per_stage = vec![0usize; n_stages];

@@ -66,7 +66,7 @@ pub fn derive_forward_seed_grouped(
     group_id: u32,
 ) -> u64 {
     let mut hasher = SipHasher13::new();
-    hasher.write(&[0x01]); // domain separator — absent in derive_forward_seed
+    hasher.write(&[0x01]);
     hasher.write(&base_seed.to_le_bytes());
     hasher.write(&iteration.to_le_bytes());
     hasher.write(&scenario.to_le_bytes());

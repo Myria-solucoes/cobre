@@ -184,6 +184,14 @@ fn scrambled_radical_inverse(n: u32, base: u32, perm_table: &[Vec<u32>]) -> f64 
     result
 }
 
+/// Combines the scrambled radical inverse at `(n, base)` with the inverse-CDF
+/// transform to a standard-normal sample.
+fn scrambled_normal_sample(n: u32, base: u32, perm_table: &[Vec<u32>]) -> f64 {
+    let u = scrambled_radical_inverse(n, base, perm_table);
+    let u = u.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+    norm_quantile(u)
+}
+
 /// Fill `output` with `n_openings × dim` standard-normal N(0,1) values using
 /// scrambled Halton QMC. Output layout: opening-major
 /// `output[opening * dim + entity]`. The scramble tables derive from the
@@ -219,9 +227,7 @@ pub fn generate_qmc_halton(
         #[allow(clippy::cast_possible_truncation)]
         let n_u32 = n as u32;
         for d in 0..dim {
-            let u = scrambled_radical_inverse(n_u32, primes[d], &tables[d]);
-            let u = u.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-            output[n * dim + d] = norm_quantile(u);
+            output[n * dim + d] = scrambled_normal_sample(n_u32, primes[d], &tables[d]);
         }
     }
 }
@@ -236,7 +242,7 @@ pub struct HaltonPrecomputed {
 }
 
 impl HaltonPrecomputed {
-    /// Precompute for a given (seed, iteration, stage, dim, `total_scenarios`) combination.
+    /// Builds the primes and scramble tables described on [`HaltonPrecomputed`].
     #[must_use]
     pub fn new(
         sampling_seed: u64,
@@ -278,9 +284,7 @@ pub fn scrambled_halton_point(spec: &NoisePointSpec, ctx: &HaltonPrecomputed, ou
     }
 
     for (d, out) in output.iter_mut().enumerate().take(spec.dim) {
-        let u = scrambled_radical_inverse(spec.scenario, ctx.primes[d], &ctx.tables[d]);
-        let u = u.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
-        *out = norm_quantile(u);
+        *out = scrambled_normal_sample(spec.scenario, ctx.primes[d], &ctx.tables[d]);
     }
 }
 

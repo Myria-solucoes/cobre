@@ -150,7 +150,7 @@ pub(crate) fn sample_lhs_point_reference(
 
 /// Per-dimension stratum permutations built once per
 /// (`sampling_seed`, `iteration`, `stream_id`, `dim`, `total_scenarios`) tuple and
-/// reused across all scenarios at that stage. `strata` is row-major: `strata[d *
+/// reused across all scenarios for that stream. `strata` is row-major: `strata[d *
 /// n + k]` is the stratum assigned to scenario `k` in dimension `d`.
 #[derive(Debug, Clone)]
 pub struct LhsPrecomputed {
@@ -160,7 +160,7 @@ pub struct LhsPrecomputed {
 }
 
 impl LhsPrecomputed {
-    /// Precompute for a given (seed, iteration, stage, dim, `total_scenarios`) combination.
+    /// Builds the permutation tables described on [`LhsPrecomputed`].
     #[must_use]
     pub fn new(
         sampling_seed: u64,

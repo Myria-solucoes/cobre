@@ -143,7 +143,6 @@ pub(crate) fn fill_uncorrelated(
     Ok(())
 }
 
-/// Fill `output[0..spec.dim]` with independent N(0,1) draws using SAA.
 fn fill_saa(spec: FreshNoiseSpec, output: &mut [f64]) {
     let seed = derive_forward_seed_grouped(
         spec.forward_seed,

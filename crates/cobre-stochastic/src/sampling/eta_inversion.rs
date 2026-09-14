@@ -91,7 +91,6 @@ pub(super) fn run_eta_inversion<F, W>(
     };
 
     for outer in 0..outer_count {
-        // Each outer iteration starts from the same derived-seed lag state.
         lag_state.copy_from_slice(&past_lag_buf);
         if seed.accum.is_empty() {
             lag_accum.fill(0.0);

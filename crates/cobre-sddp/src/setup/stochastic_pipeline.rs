@@ -211,11 +211,8 @@ fn build_opening_tree_library(
         .cloned()
         .collect();
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-    let cycle_len = system
-        .policy_graph()
-        .season_map
-        .as_ref()
-        .map(|sm| sm.seasons.len());
+    let season_map_ref = system.policy_graph().season_map.as_ref();
+    let cycle_len = season_map_ref.map(|sm| sm.seasons.len());
     let par = PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
     let max_order = widen_lag_state_depth(par.max_order(), declared_lag_depth);
     let user_pool = training_source.historical_years.as_ref();
@@ -225,7 +222,7 @@ fn build_opening_tree_library(
         &study_stages,
         max_order,
         user_pool,
-        system.policy_graph().season_map.as_ref(),
+        season_map_ref,
         1,
     )?;
     let mut lib = HistoricalScenarioLibrary::new(
@@ -237,7 +234,6 @@ fn build_opening_tree_library(
     );
     // η-inversion rolling chain must match the forward-pass lag accumulator;
     // `max_order` width covers all AR lags.
-    let season_map_ref = system.policy_graph().season_map.as_ref();
     // `precompute_stage_lag_transitions` requires a non-optional &SeasonMap.
     let noop_season_map = SeasonMap {
         cycle_type: Monthly,
