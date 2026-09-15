@@ -114,19 +114,6 @@ fn resolve_delivery_stage<'a>(
     delivery_stages.get(m).map(|&stage| (m, stage))
 }
 
-/// Day-01 delivery anchor of the stage `current_stage_idx + offset` against
-/// `stages`: the `YYYYMMDD` anchor of that stage's `start_date`, or the sentinel
-/// when the current stage is unknown or the target lands past `stages`. Callers
-/// pass the calendar the slot's ring dates against (the extended delivery
-/// calendar for the anticipated ring; study stages only for the water ring).
-fn calendar_anchor_at(current_stage_idx: Option<usize>, stages: &[&Stage], offset: usize) -> i32 {
-    current_stage_idx
-        .and_then(|t| stages.get(t + offset))
-        .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |s| {
-            year_month_day_anchor(s.start_date)
-        })
-}
-
 /// The inflow-lag slot's reference stage: pool `p` prices the state leaving
 /// stage `p` (`training::backward`'s stage convention, the same outgoing state
 /// `cut::row` prices into each cut row), so 1-based lag `1` (`lag == 0` here) is
@@ -241,12 +228,10 @@ pub fn build_stage_entity_manifest(
     // stage instead of the sentinel.
     let post_study_calendar = post_study_delivery_calendar(system);
     let delivery_stages = extended_delivery_stages(&study_stages, &post_study_calendar);
-    // The anticipated ring dates against the EXTENDED calendar (study stages
-    // then the post-study continuation, `delivery_stages`, via
-    // `resolve_delivery_stage`); `bucket_anchor_at` walks STUDY STAGES ONLY.
-    // The two are kept distinct on purpose — see the `Buckets` arm.
-    let bucket_anchor_at =
-        |offset: usize| calendar_anchor_at(current_stage_idx, &study_stages, offset);
+    // The water ring now dates against the SAME extended calendar as the
+    // anticipated ring — `b_d^out(t)` arrives at stage `t + d`, never `t + 1 + d`.
+    let bucket_arrival_stage =
+        |lag: usize| current_stage_idx.and_then(|t| delivery_stages.get(t + lag).copied());
 
     let anticipated_slot = |offset: usize| -> EntitySlot {
         let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
@@ -352,6 +337,21 @@ pub fn build_stage_entity_manifest(
             StateRegion::Buckets => {
                 let (plant_idx, lag) = global_layout.transit_bucket_column_order[offset];
                 let hydro = &hydros[plant_idx];
+                let (delivery_date, interval_start, interval_end) = bucket_arrival_stage(lag)
+                    .map_or(
+                        (
+                            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                        ),
+                        |stage| {
+                            (
+                                year_month_day_anchor(stage.start_date),
+                                full_date_anchor(stage.start_date),
+                                full_date_anchor(stage.end_date),
+                            )
+                        },
+                    );
                 EntitySlot::transit_bucket(
                     hydro.id.0,
                     lag as u32,
@@ -362,12 +362,8 @@ pub fn build_stage_entity_manifest(
                         stage_id,
                     ),
                 )
-                // Study-only dating (`bucket_anchor_at`, never the
-                // anticipated ring's extended delivery calendar): a bucket lag
-                // landing past the study horizon stays sentinel — §W1, the
-                // water ring's dating is unchanged by post-study stages
-                // (Terminal credit deferred).
-                .with_delivery_date(bucket_anchor_at(lag))
+                .with_delivery_date(delivery_date)
+                .with_interval(interval_start, interval_end)
             }
             StateRegion::CommitmentHold => anticipated_slot(offset),
         };
@@ -1373,16 +1369,14 @@ mod tests {
         );
     }
 
-    /// §W1 — the water ring's dating is unchanged by post-study stages. A
-    /// transit-bucket lag maturing past the STUDY horizon dates to the sentinel
-    /// even when the study declares a post-study calendar: the bucket arm anchors
-    /// on study stages only (`bucket_anchor_at`), never the extended
-    /// `delivery_anchor_at` the anticipated ring uses. On this single-study-stage
-    /// fixture both bucket lags (1 and 2) target past the horizon, so both stay
-    /// sentinel; re-broadening the bucket arm to the extended calendar would date
-    /// the lag-1 slot onto the declared post-study stage — the regression this pins.
+    /// A transit-bucket lag reaching a declared post-study stage now dates onto
+    /// that stage's own `[start, end)` interval, exactly as the anticipated
+    /// ring already does; a lag past the extended calendar still stays
+    /// sentinel in every date field. On this single-study-stage fixture lag 1
+    /// (`t + lag == 1`) resolves to the declared post-study stage while lag 2
+    /// (`t + lag == 2`) lands past it.
     #[test]
-    fn transit_bucket_past_study_horizon_stays_sentinel_with_post_study_stages() {
+    fn transit_bucket_dates_onto_the_post_study_calendar_and_sentinels_past_it() {
         let post_study_start = chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
         let system = system_2h_1ant(
             (None, None),
@@ -1393,17 +1387,33 @@ mod tests {
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+        let post_study_end = post_study_delivery_calendar(&system)[0].end_date;
 
-        for slot in [6, 7] {
+        assert_eq!(
+            manifest[6].entity_type,
+            StateFamily::HydroTransitBucket.code(),
+            "slot 6 must be a transit-bucket slot"
+        );
+        assert_eq!(
+            manifest[6].delivery_date, 20_240_201,
+            "lag 1 dates onto the declared post-study stage's month anchor"
+        );
+        assert_eq!(manifest[6].interval_start, 20_240_201);
+        assert_eq!(manifest[6].interval_end, full_date_anchor(post_study_end));
+
+        assert_eq!(
+            manifest[7].entity_type,
+            StateFamily::HydroTransitBucket.code(),
+            "slot 7 must be a transit-bucket slot"
+        );
+        for (field, name) in [
+            (manifest[7].delivery_date, "delivery_date"),
+            (manifest[7].interval_start, "interval_start"),
+            (manifest[7].interval_end, "interval_end"),
+        ] {
             assert_eq!(
-                manifest[slot].entity_type,
-                StateFamily::HydroTransitBucket.code(),
-                "slot {slot} must be a transit-bucket slot"
-            );
-            assert_eq!(
-                manifest[slot].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                "a transit-bucket lag past the study horizon must stay sentinel, never \
-                 date onto the post-study calendar"
+                field, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                "lag 2 lands past the extended calendar, so {name} must stay sentinel"
             );
         }
     }

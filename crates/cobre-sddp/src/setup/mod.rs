@@ -1498,11 +1498,12 @@ fn first_fanned_plant_id(
         })
 }
 
-/// Study stage durations ([`bucket_topology::study_stage_durations`]) followed
-/// by every declared post-study stage's own duration — the extended delivery
-/// axis [`DeliveryAxis::stage_lengths_hours`] must carry so `n_delivery` spans
-/// `n_stages + n_post`. No post-study stages leaves this byte-identical to the
-/// study-only vector.
+/// The study calendar followed by every declared post-study stage duration;
+/// byte-identical to the study-only vector when none is declared. Two
+/// consumers derive their own extended calendar from this one vector: the
+/// anticipated delivery axis ([`DeliveryAxis::stage_lengths_hours`], where it
+/// lets `n_delivery` span `n_stages + n_post`) and the water ring's arrival
+/// resolution ([`bucket_topology::extend_for_resolution`]'s base calendar).
 fn delivery_stage_durations(mut study_durations: Vec<f64>, system: &System) -> Vec<f64> {
     if let Some(post_study) = system.post_study_stages() {
         study_durations.extend(post_study.stages.iter().map(|s| s.duration_hours));

@@ -1301,15 +1301,24 @@ presence so this drop stays byte-for-byte for a zero-terminal-value study. This
 under-values end-of-horizon upstream release; it is a documented target-stage
 imprecision, not a bug to patch by capping
 `TransitBucketTopology::per_plant_depth`/`column_order` too — those size from the
-global max over every anchor and must retain what the earliest stages need.
+global max over every anchor and must retain what the earliest stages need. Both
+drop sites (`fill_arc_release_block_entries`, `fill_arc_release_chrono_block_entries`)
+now assert the confinement directly: a debug-only check at the `None` row-lookup
+arm requires the dropped lag `d` at stage `t` to satisfy `t + d >= n_stages`,
+so the drop is provably confined to a target past the horizon and unreachable
+once `boundary_present` un-caps the mask; the `HashMap` lookup the check needs
+lives inside the `debug_assert!` argument, so it does not exist in release.
 Read: `setup/bucket_topology.rs` (`horizon_cap_active`), `lp/builder/layout.rs`
 (`build_transit_bucket_row_pos`), `lp/builder/columns.rs` (`fill_transit_bucket_columns`).
 Pinned by the horizon-depth-cap regression (the last stage's active-lag cap
 reaches zero, so no slot targets past the horizon), `build_transit_bucket_row_pos`'s
 own consumption regression (that same cap sequence emitting correspondingly
-fewer rows), and a sub-stage-delay case's last-stage release, whose dropped
+fewer rows), a sub-stage-delay case's last-stage release, whose dropped
 share surfaces as an uneven per-stage delivery split rather than a credited
-one.
+one, and `transit_bucket_mask_covers_every_arc_deposit_depth_under_boundary`
+(`setup/bucket_topology.rs`), which asserts `per_stage_mask` dominates every
+arc's deposit depth on both the parallel and chronological tables under
+`boundary_present` and is strictly exceeded at some stage without it.
 
 ### Sub-contracts: mode-independent sizing, aggregation consistency, fixed delivery density
 
@@ -1317,10 +1326,11 @@ The bucket state stays a pure function of stage lengths, never of
 `n_blks`/`block_mode`, only because each of the following holds:
 
 - **Depth from stage lengths alone.** Bucket depth and `n_buckets` derive from
-  the per-stage calendar and the pre-study anchor alone
-  (`study_stage_durations`, `build_transit_bucket_topology`) — never from `n_blks` or
-  `block_mode`. Deriving any part of the depth inside a block-aware code path
-  re-couples the state dimension to how a stage happens to be resolved.
+  the per-stage calendar, the declared post-study calendar, and the pre-study
+  anchor alone (`study_stage_durations`, `delivery_stage_durations`,
+  `build_transit_bucket_topology`) — never from `n_blks` or `block_mode`.
+  Deriving any part of the depth inside a block-aware code path re-couples the
+  state dimension to how a stage happens to be resolved.
 - **Shared arrival density.** A chronological stage's per-block deposit shares
   `block_deposits`/`within_stage_routing` and the stage-level `stage_weights`
   come from the same shared arrival density (`resolve_spread`'s
