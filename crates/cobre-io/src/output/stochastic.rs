@@ -88,13 +88,18 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Builder, Int32Builder, RecordBatch, UInt32Builder};
-use arrow::datatypes::{DataType, Field, Schema};
+#[cfg(test)]
+use arrow::datatypes::DataType;
 use cobre_core::scenario::{CorrelationModel, CorrelationScheduleEntry};
 use cobre_stochastic::OpeningTree;
 use serde::Serialize;
 
 use crate::output::atomic::{ensure_parent_dir, write_batch_atomic, write_bytes_atomic};
 use crate::output::error::OutputError;
+use crate::output::schemas::{
+    inflow_annual_component_schema, inflow_ar_coefficients_schema, inflow_seasonal_stats_schema,
+    load_seasonal_stats_schema, noise_openings_schema,
+};
 use crate::scenarios::{
     InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow, LoadSeasonalStatsRow,
 };
@@ -435,17 +440,6 @@ pub fn write_load_seasonal_stats(
     write_batch_atomic(path, &batch)
 }
 
-// ── Schema builders ───────────────────────────────────────────────────────────
-
-fn noise_openings_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("stage_id", DataType::Int32, false),
-        Field::new("opening_index", DataType::UInt32, false),
-        Field::new("entity_index", DataType::UInt32, false),
-        Field::new("value", DataType::Float64, false),
-    ])
-}
-
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn build_noise_openings_batch(tree: &OpeningTree) -> Result<RecordBatch, OutputError> {
     let n_rows: usize = (0..tree.n_stages())
@@ -484,15 +478,6 @@ fn build_noise_openings_batch(tree: &OpeningTree) -> Result<RecordBatch, OutputE
     .map_err(|e| OutputError::serialization("noise_openings", e.to_string()))
 }
 
-fn inflow_seasonal_stats_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("hydro_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, false),
-        Field::new("mean_m3s", DataType::Float64, false),
-        Field::new("std_m3s", DataType::Float64, false),
-    ])
-}
-
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn build_inflow_seasonal_stats_batch(
     rows: &[InflowSeasonalStatsRow],
@@ -522,15 +507,6 @@ fn build_inflow_seasonal_stats_batch(
     .map_err(|e| OutputError::serialization("inflow_seasonal_stats", e.to_string()))
 }
 
-fn inflow_ar_coefficients_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("hydro_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, false),
-        Field::new("lag", DataType::Int32, false),
-        Field::new("coefficient", DataType::Float64, false),
-    ])
-}
-
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn build_inflow_ar_coefficients_batch(
     rows: &[InflowArCoefficientRow],
@@ -558,16 +534,6 @@ fn build_inflow_ar_coefficients_batch(
         ],
     )
     .map_err(|e| OutputError::serialization("inflow_ar_coefficients", e.to_string()))
-}
-
-fn inflow_annual_component_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("hydro_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, false),
-        Field::new("annual_coefficient", DataType::Float64, false),
-        Field::new("annual_mean_m3s", DataType::Float64, false),
-        Field::new("annual_std_m3s", DataType::Float64, false),
-    ])
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -600,15 +566,6 @@ fn build_inflow_annual_component_batch(
         ],
     )
     .map_err(|e| OutputError::serialization("inflow_annual_component", e.to_string()))
-}
-
-fn load_seasonal_stats_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("bus_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, false),
-        Field::new("mean_mw", DataType::Float64, false),
-        Field::new("std_mw", DataType::Float64, false),
-    ])
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]

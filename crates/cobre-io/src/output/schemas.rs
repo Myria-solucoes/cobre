@@ -1,5 +1,11 @@
 //! Arrow schema definitions for all Parquet output files per output-schemas spec
 //! (SS5.1–5.11 and SS6.1–6.3).
+//!
+//! Every `*_schema()` function in this module has exactly one row in
+//! [`OUTPUT_SCHEMAS`], the crate-internal registry that pairs each schema with
+//! the relative path of the file it describes; that table is the single
+//! source both the axis-spelling gate test and `variables.csv` generation
+//! derive from.
 
 use arrow::datatypes::{DataType, Field, Schema};
 
@@ -553,6 +559,278 @@ pub(crate) fn generic_constraint_echo_schema() -> Schema {
         Field::new("slack_penalty", DataType::Float64, true),
     ])
 }
+
+/// Schema for `hydro_models/fpha_hyperplanes.parquet` — fitted FPHA hyperplane
+/// coefficients, mirroring the `system/fpha_hyperplanes.parquet` input schema.
+pub(crate) fn fpha_hyperplanes_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, true),
+        Field::new("plane_id", DataType::Int32, false),
+        Field::new("gamma_0", DataType::Float64, false),
+        Field::new("gamma_v", DataType::Float64, false),
+        Field::new("gamma_q", DataType::Float64, false),
+        Field::new("gamma_s", DataType::Float64, false),
+        Field::new("kappa", DataType::Float64, true),
+        Field::new("valid_v_min_hm3", DataType::Float64, true),
+        Field::new("valid_v_max_hm3", DataType::Float64, true),
+        Field::new("valid_q_max_m3s", DataType::Float64, true),
+    ])
+}
+
+/// Schema for `hydro_models/evaporation_models.parquet` — per-hydro
+/// evaporation model coefficients.
+pub(crate) fn evaporation_models_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, true),
+        Field::new("intercept_m3s", DataType::Float64, false),
+        Field::new("volume_slope_m3s_per_hm3", DataType::Float64, false),
+        Field::new("reference_volume_hm3", DataType::Float64, false),
+        Field::new("source", DataType::Utf8, false),
+    ])
+}
+
+/// Schema for `hydro_models/fpha_deviation_points.parquet` — per-(hydro,
+/// stage) FPHA fit deviation diagnostics.
+pub(crate) fn fpha_deviation_points_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, true),
+        Field::new("v", DataType::Float64, false),
+        Field::new("q", DataType::Float64, false),
+        Field::new("fph_exact", DataType::Float64, false),
+        Field::new("fpha_fitted", DataType::Float64, false),
+        Field::new("deviation", DataType::Float64, false),
+        Field::new("relative", DataType::Float64, false),
+    ])
+}
+
+/// Schema for `stochastic/noise_openings.parquet` — per-(stage, opening,
+/// entity) noise realizations.
+pub(crate) fn noise_openings_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("opening_index", DataType::UInt32, false),
+        Field::new("entity_index", DataType::UInt32, false),
+        Field::new("value", DataType::Float64, false),
+    ])
+}
+
+/// Schema for `stochastic/inflow_seasonal_stats.parquet` — fitted
+/// per-(hydro, stage) seasonal inflow statistics.
+pub(crate) fn inflow_seasonal_stats_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("mean_m3s", DataType::Float64, false),
+        Field::new("std_m3s", DataType::Float64, false),
+    ])
+}
+
+/// Schema for `stochastic/inflow_ar_coefficients.parquet` — fitted
+/// per-(hydro, stage, lag) AR coefficients.
+pub(crate) fn inflow_ar_coefficients_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("lag", DataType::Int32, false),
+        Field::new("coefficient", DataType::Float64, false),
+    ])
+}
+
+/// Schema for `stochastic/inflow_annual_component.parquet` — fitted
+/// per-(hydro, stage) annual inflow component.
+pub(crate) fn inflow_annual_component_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("annual_coefficient", DataType::Float64, false),
+        Field::new("annual_mean_m3s", DataType::Float64, false),
+        Field::new("annual_std_m3s", DataType::Float64, false),
+    ])
+}
+
+/// Schema for `stochastic/load_seasonal_stats.parquet` — fitted per-(bus,
+/// stage) seasonal load statistics.
+pub(crate) fn load_seasonal_stats_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("bus_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("mean_mw", DataType::Float64, false),
+        Field::new("std_mw", DataType::Float64, false),
+    ])
+}
+
+/// Schema for `training/dictionaries/bounds.parquet` — per-entity, per-stage
+/// resolved bound values.
+pub(crate) fn bounds_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("entity_type_code", DataType::Int8, false),
+        Field::new("entity_id", DataType::Int32, false),
+        Field::new("hydro_id", DataType::Int32, true),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("block_id", DataType::Int32, true),
+        Field::new("bound_type_code", DataType::Int8, false),
+        Field::new("bound_value", DataType::Float64, false),
+    ])
+}
+
+/// One row of the crate-internal registry of every output-schema function: a
+/// schema's constructor paired with its optional `training/dictionaries/variables.csv`
+/// grouping label. Each schema fn's own doc names the output path it
+/// describes; this table does not repeat it.
+pub(crate) struct SchemaRegistryEntry {
+    /// `file` column label in `variables.csv`, or `None` when this schema is
+    /// not enumerated there.
+    pub(crate) csv_label: Option<&'static str>,
+    /// The schema constructor itself.
+    pub(crate) schema_fn: fn() -> Schema,
+}
+
+/// The single owner of the output-schema family: every `*_schema()` function
+/// in this module appears here exactly once. The gate test
+/// [`one_spelling_per_axis_across_every_output_schema`] and
+/// [`super::dictionary::variables_csv_schemas`] both derive from this table
+/// rather than maintaining their own copies of the schema set.
+pub(crate) const OUTPUT_SCHEMAS: &[SchemaRegistryEntry] = &[
+    SchemaRegistryEntry {
+        csv_label: Some("costs"),
+        schema_fn: costs_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("hydros"),
+        schema_fn: hydros_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("hydro_bus_generation"),
+        schema_fn: hydro_bus_generation_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("thermals"),
+        schema_fn: thermals_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("exchanges"),
+        schema_fn: exchanges_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("buses"),
+        schema_fn: buses_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("pumping_stations"),
+        schema_fn: pumping_stations_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("contracts"),
+        schema_fn: contracts_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("non_controllables"),
+        schema_fn: non_controllables_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("inflow_lags"),
+        schema_fn: inflow_lags_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("in_transit"),
+        schema_fn: in_transit_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("transit_seed"),
+        schema_fn: transit_seed_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("generic_violations"),
+        schema_fn: generic_violations_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("paths"),
+        schema_fn: paths_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("scenario_summary"),
+        schema_fn: scenario_summary_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("convergence"),
+        schema_fn: convergence_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("iteration_timing"),
+        schema_fn: iteration_timing_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("rank_timing"),
+        schema_fn: rank_timing_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("cut_selection"),
+        schema_fn: row_selection_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("solver_iterations"),
+        schema_fn: solver_iterations_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("retry_histogram"),
+        schema_fn: retry_histogram_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: Some("hydro_energy_productivity"),
+        schema_fn: hydro_energy_productivity_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: fixed_delivery_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: anticipated_lanes_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: generic_constraint_echo_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: bounds_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: fpha_hyperplanes_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: evaporation_models_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: fpha_deviation_points_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: noise_openings_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: inflow_seasonal_stats_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: inflow_ar_coefficients_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: inflow_annual_component_schema,
+    },
+    SchemaRegistryEntry {
+        csv_label: None,
+        schema_fn: load_seasonal_stats_schema,
+    },
+];
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
@@ -1347,32 +1625,15 @@ mod tests {
         // Every output parquet spells each axis with a single canonical name.
         // A renamed axis's OLD spelling must never reappear in any schema, and a
         // later file cannot reintroduce a variant without failing this one test.
-        let schemas: Vec<Schema> = vec![
-            costs_schema(),
-            hydros_schema(),
-            hydro_bus_generation_schema(),
-            thermals_schema(),
-            exchanges_schema(),
-            buses_schema(),
-            pumping_stations_schema(),
-            contracts_schema(),
-            non_controllables_schema(),
-            inflow_lags_schema(),
-            in_transit_schema(),
-            generic_violations_schema(),
-            paths_schema(),
-            convergence_schema(),
-            iteration_timing_schema(),
-            rank_timing_schema(),
-            row_selection_schema(),
-            solver_iterations_schema(),
-            retry_histogram_schema(),
-            hydro_energy_productivity_schema(),
-            generic_constraint_echo_schema(),
-        ];
-        let names: Vec<String> = schemas
+        let names: Vec<String> = OUTPUT_SCHEMAS
             .iter()
-            .flat_map(|s| s.fields().iter().map(|f| f.name().clone()))
+            .flat_map(|entry| {
+                (entry.schema_fn)()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect::<Vec<_>>()
+            })
             .collect();
 
         // Forbidden variant spellings, each superseded by one canonical axis.
@@ -1401,6 +1662,32 @@ mod tests {
                 names.iter().any(|n| n == canonical),
                 "canonical axis '{canonical}' must be spelled somewhere in the family"
             );
+        }
+    }
+
+    /// `OUTPUT_SCHEMAS` is the single owner of the output-schema family: every
+    /// `*_schema()` function in this module must have exactly one row. This
+    /// count is a manual pin, not a reflection-derived count (Rust has no
+    /// runtime enumeration of a module's functions) — adding or removing a
+    /// schema function must add or remove its row and update this count in
+    /// the same change.
+    #[test]
+    fn output_schema_registry_has_no_duplicate_or_missing_rows() {
+        const EXPECTED_SCHEMA_COUNT: usize = 34;
+        assert_eq!(
+            OUTPUT_SCHEMAS.len(),
+            EXPECTED_SCHEMA_COUNT,
+            "OUTPUT_SCHEMAS must list every *_schema() function in this module exactly once"
+        );
+
+        let mut seen_fns: Vec<usize> = Vec::with_capacity(OUTPUT_SCHEMAS.len());
+        for entry in OUTPUT_SCHEMAS {
+            let fn_ptr = entry.schema_fn as usize;
+            assert!(
+                !seen_fns.contains(&fn_ptr),
+                "a schema fn appears more than once in OUTPUT_SCHEMAS"
+            );
+            seen_fns.push(fn_ptr);
         }
     }
 

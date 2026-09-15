@@ -3,9 +3,13 @@
 //! This module provides Hive-partitioned Parquet writers for simulation pipeline
 //! output and `FlatBuffers` policy writers.
 //!
-//! The top-level entry point is [`write_results`], which mirrors [`crate::load_case`]:
-//! it accepts aggregate result types and writes all output artifacts to the
-//! specified directory.
+//! The top-level entry point is [`write_results`]: it writes the training
+//! result tables, the training dictionaries, and the training/simulation
+//! completion metadata. It does not write the simulation scenario Parquet
+//! data, the policy checkpoint, provenance, hydro-model exports, stochastic
+//! echoes, or solver-stats sidecars — each caller writes those directly
+//! through the individual writer modules in this crate, and the CLI and the
+//! Python bindings must stay in parity on the full artifact set.
 
 use chrono::{Datelike, NaiveDate};
 

@@ -7,8 +7,10 @@
 //!
 //! - [`load_case`] — reads a case directory and produces a fully-validated
 //!   [`cobre_core::System`] ready for use by the solver.
-//! - [`write_results`] — accepts aggregate result types and writes all output
-//!   artifacts to a specified root directory.
+//! - [`write_results`] — writes the training result tables, the training
+//!   dictionaries, and the training/simulation completion metadata under a
+//!   root directory; the remaining artifacts are written by the callers through
+//!   the individual [`output`] writer modules.
 //!
 //! ## Loading pipeline
 //!

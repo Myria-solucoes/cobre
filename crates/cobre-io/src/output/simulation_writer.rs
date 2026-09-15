@@ -17,15 +17,17 @@
 //!   non_controllables/scenario_id=0000/data.parquet
 //!   inflow_lags/scenario_id=0000/data.parquet
 //!   in_transit/scenario_id=0000/data.parquet
+//!   transit_seed/scenario_id=0000/data.parquet
 //!   violations/generic/scenario_id=0000/data.parquet
 //!   anticipated_lanes/scenario_id=0000/data.parquet
 //! ```
 //!
-//! The `in_transit/` partition is present only when the system declares a
-//! travel-time arc; a non-travel-time study writes no such directory or file.
-//! The `anticipated_lanes/` partition is present only when the system
-//! declares post-study stages; without them, no such directory or file is
-//! written.
+//! The `in_transit/` and `transit_seed/` partitions are present only when the
+//! system declares a travel-time arc; a non-travel-time study writes neither
+//! directory nor file. The `anticipated_lanes/` partition is present only when
+//! the system declares post-study stages; without them, no such directory or
+//! file is written. [`SIMULATION_FAMILIES`] is the single table of every
+//! family and the condition that declares it.
 //!
 //! Every record's `node_id` below is the declared node visited at that stage —
 //! the degenerate per-stage id on a chain — and must never be gated on whether
@@ -557,8 +559,9 @@ const _: fn() = || {
 impl SimulationParquetWriter {
     /// Create a new writer targeting `output_dir`.
     ///
-    /// Creates the `simulation/` subdirectory and one entity subdirectory per
-    /// entity type with a non-zero count.
+    /// Creates the `simulation/` subdirectory and, for each family in
+    /// [`SIMULATION_FAMILIES`] the system declares (see
+    /// [`SimulationFamily::declared`]), that family's top-level directory.
     ///
     /// # Errors
     ///
@@ -582,63 +585,11 @@ impl SimulationParquetWriter {
             .map(|l| (l.id.0, 1.0 - l.losses_percent / 100.0))
             .collect();
 
-        let create_subdir = |name: &str| -> Result<(), OutputError> {
-            let dir = sim_dir.join(name);
-            std::fs::create_dir_all(&dir).map_err(|e| OutputError::io(&dir, e))
-        };
-
-        // costs is unconditional (every system has stages); siblings gate on count > 0.
-        create_subdir("costs")?;
-
-        if system.n_hydros() > 0 {
-            create_subdir("hydros")?;
-            // inflow_lags is gated on hydro count, not its own.
-            create_subdir("inflow_lags")?;
-            // Gated on hydro count, not a multi-bus predicate: every hydro
-            // study emits this file, single-bus systems included.
-            create_subdir("hydro_bus_generation")?;
-        }
-        if system.n_thermals() > 0 {
-            create_subdir("thermals")?;
-        }
-        if system.n_lines() > 0 {
-            create_subdir("exchanges")?;
-        }
-        if system.n_buses() > 0 {
-            create_subdir("buses")?;
-        }
-        if system.n_pumping_stations() > 0 {
-            create_subdir("pumping_stations")?;
-        }
-        if system.n_contracts() > 0 {
-            create_subdir("contracts")?;
-        }
-        if system.n_non_controllable_sources() > 0 {
-            create_subdir("non_controllables")?;
-        }
-        // Gate on a declared travel-time arc, not on hydro count: a non-travel-time
-        // study must emit no `in_transit` directory (byte-neutral). Mirrors
-        // `bucket_topology`'s arc predicate (`travel_time_hours > 0` and a
-        // downstream target).
-        let declares_travel_time = system
-            .hydros()
-            .iter()
-            .any(|h| h.travel_time_hours.is_some_and(|t| t > 0.0) && h.downstream_id.is_some());
-        if declares_travel_time {
-            create_subdir("in_transit")?;
-            create_subdir("transit_seed")?;
-        }
-        if !system.generic_constraints().is_empty() {
-            create_subdir("violations/generic")?;
-        }
-        // Gate on declared post-study stages, not on thermal count: a study with
-        // no post-study stages must emit no `anticipated_lanes` directory
-        // (byte-neutral).
-        let declares_post_study = system
-            .post_study_stages()
-            .is_some_and(|ps| !ps.stages.is_empty());
-        if declares_post_study {
-            create_subdir("anticipated_lanes")?;
+        for family in SIMULATION_FAMILIES {
+            if (family.declared)(system) {
+                let dir = sim_dir.join(family.subpath);
+                std::fs::create_dir_all(&dir).map_err(|e| OutputError::io(&dir, e))?;
+            }
         }
 
         Ok(Self {
@@ -680,15 +631,15 @@ impl SimulationParquetWriter {
 
     /// Write one scenario's results to Hive-partitioned Parquet files.
     ///
-    /// Entity types with empty Vecs (zero entities in the system) are skipped
-    /// entirely — no directory is created and no file is written.
+    /// Iterates [`SIMULATION_FAMILIES`]: a partition is written for a family
+    /// only when this scenario's payload carries at least one row for it (see
+    /// [`SimulationFamily`] for the full directory-vs-partition contract).
     ///
     /// # Errors
     ///
     /// - [`OutputError::SerializationError`] if a `RecordBatch` cannot be
     ///   constructed (array length mismatch).
     /// - [`OutputError::IoError`] if any filesystem operation fails.
-    #[allow(clippy::too_many_lines)] // 13 entity types, each its own skip-if-empty block
     #[allow(clippy::needless_pass_by_value)] // consuming by value is intentional: payload drives output
     #[allow(clippy::cast_possible_wrap)] // scenario/stage ids are small non-negative indices
     pub fn write_scenario(&mut self, result: ScenarioWritePayload) -> Result<(), OutputError> {
@@ -704,196 +655,10 @@ impl SimulationParquetWriter {
                 node_id: s.node_id,
             }));
 
-        if result.stages.iter().any(|s| !s.costs.is_empty()) {
-            let n: usize = result.stages.iter().map(|s| s.costs.len()).sum();
-            let batch = build_costs_batch(
-                result.stages.iter().flat_map(|s| s.costs.iter()),
-                scenario_id,
-                n,
-            )?;
-            self.write_partition("costs", &partition_suffix, &batch)?;
-        }
-
-        if result.stages.iter().any(|s| !s.hydros.is_empty()) {
-            let n: usize = result.stages.iter().map(|s| s.hydros.len()).sum();
-            let batch = build_hydros_batch(
-                result.stages.iter().flat_map(|s| s.hydros.iter()),
-                scenario_id,
-                &self.block_durations,
-                n,
-            )?;
-            self.write_partition("hydros", &partition_suffix, &batch)?;
-        }
-
-        if result
-            .stages
-            .iter()
-            .any(|s| !s.hydro_bus_generation.is_empty())
-        {
-            let n: usize = result
-                .stages
-                .iter()
-                .map(|s| s.hydro_bus_generation.len())
-                .sum();
-            let batch = build_hydro_bus_generation_batch(
-                result
-                    .stages
-                    .iter()
-                    .flat_map(|s| s.hydro_bus_generation.iter()),
-                scenario_id,
-                &self.block_durations,
-                n,
-            )?;
-            self.write_partition("hydro_bus_generation", &partition_suffix, &batch)?;
-        }
-
-        if result.stages.iter().any(|s| !s.thermals.is_empty()) {
-            let n: usize = result.stages.iter().map(|s| s.thermals.len()).sum();
-            let batch = build_thermals_batch(
-                result.stages.iter().flat_map(|s| s.thermals.iter()),
-                scenario_id,
-                &self.block_durations,
-                n,
-            )?;
-            self.write_partition("thermals", &partition_suffix, &batch)?;
-        }
-
-        if result.stages.iter().any(|s| !s.exchanges.is_empty()) {
-            let n: usize = result.stages.iter().map(|s| s.exchanges.len()).sum();
-            let batch = build_exchanges_batch(
-                result.stages.iter().flat_map(|s| s.exchanges.iter()),
-                scenario_id,
-                &self.block_durations,
-                &self.loss_factors,
-                n,
-            )?;
-            self.write_partition("exchanges", &partition_suffix, &batch)?;
-        }
-
-        if result.stages.iter().any(|s| !s.buses.is_empty()) {
-            let n: usize = result.stages.iter().map(|s| s.buses.len()).sum();
-            let batch = build_buses_batch(
-                result.stages.iter().flat_map(|s| s.buses.iter()),
-                scenario_id,
-                &self.block_durations,
-                n,
-            )?;
-            self.write_partition("buses", &partition_suffix, &batch)?;
-        }
-
-        if result.stages.iter().any(|s| !s.pumping_stations.is_empty()) {
-            let n: usize = result.stages.iter().map(|s| s.pumping_stations.len()).sum();
-            let batch = build_pumping_batch(
-                result.stages.iter().flat_map(|s| s.pumping_stations.iter()),
-                scenario_id,
-                &self.block_durations,
-                n,
-            )?;
-            self.write_partition("pumping_stations", &partition_suffix, &batch)?;
-        }
-
-        if result.stages.iter().any(|s| !s.contracts.is_empty()) {
-            let n: usize = result.stages.iter().map(|s| s.contracts.len()).sum();
-            let batch = build_contracts_batch(
-                result.stages.iter().flat_map(|s| s.contracts.iter()),
-                scenario_id,
-                &self.block_durations,
-                n,
-            )?;
-            self.write_partition("contracts", &partition_suffix, &batch)?;
-        }
-
-        if result
-            .stages
-            .iter()
-            .any(|s| !s.non_controllables.is_empty())
-        {
-            let n: usize = result
-                .stages
-                .iter()
-                .map(|s| s.non_controllables.len())
-                .sum();
-            let batch = build_non_controllables_batch(
-                result
-                    .stages
-                    .iter()
-                    .flat_map(|s| s.non_controllables.iter()),
-                scenario_id,
-                &self.block_durations,
-                n,
-            )?;
-            self.write_partition("non_controllables", &partition_suffix, &batch)?;
-        }
-
-        if result.stages.iter().any(|s| !s.inflow_lags.is_empty()) {
-            let n: usize = result.stages.iter().map(|s| s.inflow_lags.len()).sum();
-            let batch = build_inflow_lags_batch(
-                result.stages.iter().flat_map(|s| s.inflow_lags.iter()),
-                scenario_id,
-                n,
-            )?;
-            self.write_partition("inflow_lags", &partition_suffix, &batch)?;
-        }
-
-        if result.stages.iter().any(|s| !s.transit_buckets.is_empty()) {
-            let n: usize = result.stages.iter().map(|s| s.transit_buckets.len()).sum();
-            let batch = build_in_transit_batch(
-                result.stages.iter().flat_map(|s| s.transit_buckets.iter()),
-                scenario_id,
-                n,
-            )?;
-            self.write_partition("in_transit", &partition_suffix, &batch)?;
-        }
-
-        if !result.transit_seed.is_empty() {
-            let batch = build_transit_seed_batch(
-                result.transit_seed.iter(),
-                scenario_id,
-                result.transit_seed.len(),
-            )?;
-            self.write_partition("transit_seed", &partition_suffix, &batch)?;
-        }
-
-        if result
-            .stages
-            .iter()
-            .any(|s| !s.generic_violations.is_empty())
-        {
-            let n: usize = result
-                .stages
-                .iter()
-                .map(|s| s.generic_violations.len())
-                .sum();
-            let batch = build_generic_violations_batch(
-                result
-                    .stages
-                    .iter()
-                    .flat_map(|s| s.generic_violations.iter()),
-                scenario_id,
-                n,
-            )?;
-            self.write_partition("violations/generic", &partition_suffix, &batch)?;
-        }
-
-        if result
-            .stages
-            .iter()
-            .any(|s| !s.anticipated_lanes.is_empty())
-        {
-            let n: usize = result
-                .stages
-                .iter()
-                .map(|s| s.anticipated_lanes.len())
-                .sum();
-            let batch = build_anticipated_lanes_batch(
-                result
-                    .stages
-                    .iter()
-                    .flat_map(|s| s.anticipated_lanes.iter()),
-                scenario_id,
-                n,
-            )?;
-            self.write_partition("anticipated_lanes", &partition_suffix, &batch)?;
+        for family in SIMULATION_FAMILIES {
+            if let Some(batch) = (family.build)(self, &result, scenario_id)? {
+                self.write_partition(family.subpath, &partition_suffix, &batch)?;
+            }
         }
 
         self.scenarios_written += 1;
@@ -929,6 +694,462 @@ impl SimulationParquetWriter {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Entity family table
+// ---------------------------------------------------------------------------
+
+/// One row of the entity-family table: the single owner of which
+/// Hive-partitioned entity types this writer knows about.
+///
+/// [`SimulationParquetWriter::new`] iterates [`SIMULATION_FAMILIES`] to create
+/// each declared family's top-level directory; [`SimulationParquetWriter::write_scenario`]
+/// iterates the same table to build and write each family's per-scenario
+/// partition. A family's directory is created once, at construction, when
+/// `declared` is true for the system — independent of any one scenario's
+/// payload; a partition is written only when `build` returns `Some`, i.e. this
+/// scenario's payload carries at least one row for the family. A declared
+/// family can therefore end up with an empty top-level directory (no
+/// partitions at all) if every scenario's payload happens to carry no rows for
+/// it — nothing downstream of this writer assumes otherwise.
+struct SimulationFamily {
+    /// Directory subpath under `simulation/` (`"costs"`, `"violations/generic"`, …).
+    subpath: &'static str,
+    /// Whether the system declares this family at all; gates directory
+    /// creation in [`SimulationParquetWriter::new`].
+    declared: fn(&System) -> bool,
+    /// Builds this scenario's batch for the family, or `None` when the
+    /// scenario's payload carries no rows for it.
+    build: fn(
+        &SimulationParquetWriter,
+        &ScenarioWritePayload,
+        i32,
+    ) -> Result<Option<RecordBatch>, OutputError>,
+}
+
+fn family_always_declared(_system: &System) -> bool {
+    true
+}
+
+fn family_has_hydros(system: &System) -> bool {
+    system.n_hydros() > 0
+}
+
+fn family_has_thermals(system: &System) -> bool {
+    system.n_thermals() > 0
+}
+
+fn family_has_lines(system: &System) -> bool {
+    system.n_lines() > 0
+}
+
+fn family_has_buses(system: &System) -> bool {
+    system.n_buses() > 0
+}
+
+fn family_has_pumping_stations(system: &System) -> bool {
+    system.n_pumping_stations() > 0
+}
+
+fn family_has_contracts(system: &System) -> bool {
+    system.n_contracts() > 0
+}
+
+fn family_has_non_controllables(system: &System) -> bool {
+    system.n_non_controllable_sources() > 0
+}
+
+/// A declared travel-time arc: `travel_time_hours > 0` and a downstream
+/// target. Mirrors `bucket_topology`'s arc predicate.
+fn family_declares_travel_time(system: &System) -> bool {
+    system
+        .hydros()
+        .iter()
+        .any(|h| h.travel_time_hours.is_some_and(|t| t > 0.0) && h.downstream_id.is_some())
+}
+
+fn family_has_generic_constraints(system: &System) -> bool {
+    !system.generic_constraints().is_empty()
+}
+
+fn family_declares_post_study(system: &System) -> bool {
+    system
+        .post_study_stages()
+        .is_some_and(|ps| !ps.stages.is_empty())
+}
+
+fn scenario_batch_costs(
+    _writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result.stages.iter().any(|s| !s.costs.is_empty()) {
+        return Ok(None);
+    }
+    let n: usize = result.stages.iter().map(|s| s.costs.len()).sum();
+    let batch = build_costs_batch(
+        result.stages.iter().flat_map(|s| s.costs.iter()),
+        scenario_id,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_hydros(
+    writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result.stages.iter().any(|s| !s.hydros.is_empty()) {
+        return Ok(None);
+    }
+    let n: usize = result.stages.iter().map(|s| s.hydros.len()).sum();
+    let batch = build_hydros_batch(
+        result.stages.iter().flat_map(|s| s.hydros.iter()),
+        scenario_id,
+        &writer.block_durations,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_hydro_bus_generation(
+    writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result
+        .stages
+        .iter()
+        .any(|s| !s.hydro_bus_generation.is_empty())
+    {
+        return Ok(None);
+    }
+    let n: usize = result
+        .stages
+        .iter()
+        .map(|s| s.hydro_bus_generation.len())
+        .sum();
+    let batch = build_hydro_bus_generation_batch(
+        result
+            .stages
+            .iter()
+            .flat_map(|s| s.hydro_bus_generation.iter()),
+        scenario_id,
+        &writer.block_durations,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_thermals(
+    writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result.stages.iter().any(|s| !s.thermals.is_empty()) {
+        return Ok(None);
+    }
+    let n: usize = result.stages.iter().map(|s| s.thermals.len()).sum();
+    let batch = build_thermals_batch(
+        result.stages.iter().flat_map(|s| s.thermals.iter()),
+        scenario_id,
+        &writer.block_durations,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_exchanges(
+    writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result.stages.iter().any(|s| !s.exchanges.is_empty()) {
+        return Ok(None);
+    }
+    let n: usize = result.stages.iter().map(|s| s.exchanges.len()).sum();
+    let batch = build_exchanges_batch(
+        result.stages.iter().flat_map(|s| s.exchanges.iter()),
+        scenario_id,
+        &writer.block_durations,
+        &writer.loss_factors,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_buses(
+    writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result.stages.iter().any(|s| !s.buses.is_empty()) {
+        return Ok(None);
+    }
+    let n: usize = result.stages.iter().map(|s| s.buses.len()).sum();
+    let batch = build_buses_batch(
+        result.stages.iter().flat_map(|s| s.buses.iter()),
+        scenario_id,
+        &writer.block_durations,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_pumping_stations(
+    writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result.stages.iter().any(|s| !s.pumping_stations.is_empty()) {
+        return Ok(None);
+    }
+    let n: usize = result.stages.iter().map(|s| s.pumping_stations.len()).sum();
+    let batch = build_pumping_batch(
+        result.stages.iter().flat_map(|s| s.pumping_stations.iter()),
+        scenario_id,
+        &writer.block_durations,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_contracts(
+    writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result.stages.iter().any(|s| !s.contracts.is_empty()) {
+        return Ok(None);
+    }
+    let n: usize = result.stages.iter().map(|s| s.contracts.len()).sum();
+    let batch = build_contracts_batch(
+        result.stages.iter().flat_map(|s| s.contracts.iter()),
+        scenario_id,
+        &writer.block_durations,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_non_controllables(
+    writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result
+        .stages
+        .iter()
+        .any(|s| !s.non_controllables.is_empty())
+    {
+        return Ok(None);
+    }
+    let n: usize = result
+        .stages
+        .iter()
+        .map(|s| s.non_controllables.len())
+        .sum();
+    let batch = build_non_controllables_batch(
+        result
+            .stages
+            .iter()
+            .flat_map(|s| s.non_controllables.iter()),
+        scenario_id,
+        &writer.block_durations,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+// inflow_lags is gated on hydro count, not its own; hydro_bus_generation above
+// is gated on hydro count too, not a multi-bus predicate — every hydro study
+// emits it, single-bus systems included.
+fn scenario_batch_inflow_lags(
+    _writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result.stages.iter().any(|s| !s.inflow_lags.is_empty()) {
+        return Ok(None);
+    }
+    let n: usize = result.stages.iter().map(|s| s.inflow_lags.len()).sum();
+    let batch = build_inflow_lags_batch(
+        result.stages.iter().flat_map(|s| s.inflow_lags.iter()),
+        scenario_id,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_in_transit(
+    _writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result.stages.iter().any(|s| !s.transit_buckets.is_empty()) {
+        return Ok(None);
+    }
+    let n: usize = result.stages.iter().map(|s| s.transit_buckets.len()).sum();
+    let batch = build_in_transit_batch(
+        result.stages.iter().flat_map(|s| s.transit_buckets.iter()),
+        scenario_id,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+/// Scenario-level, not per-stage: unlike every other family, `transit_seed`'s
+/// payload carries no stage axis, so its own predicate reads `result`
+/// directly rather than folding over `result.stages`.
+fn scenario_batch_transit_seed(
+    _writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if result.transit_seed.is_empty() {
+        return Ok(None);
+    }
+    let batch = build_transit_seed_batch(
+        result.transit_seed.iter(),
+        scenario_id,
+        result.transit_seed.len(),
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_generic_violations(
+    _writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result
+        .stages
+        .iter()
+        .any(|s| !s.generic_violations.is_empty())
+    {
+        return Ok(None);
+    }
+    let n: usize = result
+        .stages
+        .iter()
+        .map(|s| s.generic_violations.len())
+        .sum();
+    let batch = build_generic_violations_batch(
+        result
+            .stages
+            .iter()
+            .flat_map(|s| s.generic_violations.iter()),
+        scenario_id,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+fn scenario_batch_anticipated_lanes(
+    _writer: &SimulationParquetWriter,
+    result: &ScenarioWritePayload,
+    scenario_id: i32,
+) -> Result<Option<RecordBatch>, OutputError> {
+    if !result
+        .stages
+        .iter()
+        .any(|s| !s.anticipated_lanes.is_empty())
+    {
+        return Ok(None);
+    }
+    let n: usize = result
+        .stages
+        .iter()
+        .map(|s| s.anticipated_lanes.len())
+        .sum();
+    let batch = build_anticipated_lanes_batch(
+        result
+            .stages
+            .iter()
+            .flat_map(|s| s.anticipated_lanes.iter()),
+        scenario_id,
+        n,
+    )?;
+    Ok(Some(batch))
+}
+
+/// The single owner of the entity-family set: every family this writer knows
+/// about — directory creation ([`SimulationParquetWriter::new`]) and
+/// per-scenario partitioning ([`SimulationParquetWriter::write_scenario`]) both
+/// iterate this table rather than keeping their own family lists.
+const SIMULATION_FAMILIES: &[SimulationFamily] = &[
+    SimulationFamily {
+        subpath: "costs",
+        declared: family_always_declared,
+        build: scenario_batch_costs,
+    },
+    SimulationFamily {
+        subpath: "hydros",
+        declared: family_has_hydros,
+        build: scenario_batch_hydros,
+    },
+    SimulationFamily {
+        subpath: "hydro_bus_generation",
+        declared: family_has_hydros,
+        build: scenario_batch_hydro_bus_generation,
+    },
+    SimulationFamily {
+        subpath: "thermals",
+        declared: family_has_thermals,
+        build: scenario_batch_thermals,
+    },
+    SimulationFamily {
+        subpath: "exchanges",
+        declared: family_has_lines,
+        build: scenario_batch_exchanges,
+    },
+    SimulationFamily {
+        subpath: "buses",
+        declared: family_has_buses,
+        build: scenario_batch_buses,
+    },
+    SimulationFamily {
+        subpath: "pumping_stations",
+        declared: family_has_pumping_stations,
+        build: scenario_batch_pumping_stations,
+    },
+    SimulationFamily {
+        subpath: "contracts",
+        declared: family_has_contracts,
+        build: scenario_batch_contracts,
+    },
+    SimulationFamily {
+        subpath: "non_controllables",
+        declared: family_has_non_controllables,
+        build: scenario_batch_non_controllables,
+    },
+    SimulationFamily {
+        subpath: "inflow_lags",
+        declared: family_has_hydros,
+        build: scenario_batch_inflow_lags,
+    },
+    SimulationFamily {
+        subpath: "in_transit",
+        declared: family_declares_travel_time,
+        build: scenario_batch_in_transit,
+    },
+    SimulationFamily {
+        subpath: "transit_seed",
+        declared: family_declares_travel_time,
+        build: scenario_batch_transit_seed,
+    },
+    SimulationFamily {
+        subpath: "violations/generic",
+        declared: family_has_generic_constraints,
+        build: scenario_batch_generic_violations,
+    },
+    SimulationFamily {
+        subpath: "anticipated_lanes",
+        declared: family_declares_post_study,
+        build: scenario_batch_anticipated_lanes,
+    },
+];
 
 /// Write the run-level, unpartitioned `simulation/paths.parquet` from the
 /// per-`(scenario, stage)` node-path rows.
@@ -3746,5 +3967,31 @@ mod tests {
             1.0 * 744.0,
             "row 2 generation_mwh must equal generation_mw * its OWN (stage 1) duration"
         );
+    }
+
+    /// `SIMULATION_FAMILIES` must list every entity family exactly once: the
+    /// 13 `Vec` fields of `StageWritePayload` plus `ScenarioWritePayload`'s own
+    /// scenario-level `transit_seed`. This count is a manual pin, not a
+    /// reflection-derived count (Rust has no runtime enumeration of a struct's
+    /// fields) — adding or removing a family must add or remove its row and
+    /// update this count in the same change.
+    #[test]
+    fn simulation_family_table_has_no_duplicate_or_missing_rows() {
+        const EXPECTED_FAMILY_COUNT: usize = 14;
+        assert_eq!(
+            SIMULATION_FAMILIES.len(),
+            EXPECTED_FAMILY_COUNT,
+            "SIMULATION_FAMILIES must list every entity family exactly once"
+        );
+
+        let mut seen_subpaths: Vec<&str> = Vec::with_capacity(SIMULATION_FAMILIES.len());
+        for family in SIMULATION_FAMILIES {
+            assert!(
+                !seen_subpaths.contains(&family.subpath),
+                "subpath '{}' appears more than once in SIMULATION_FAMILIES",
+                family.subpath
+            );
+            seen_subpaths.push(family.subpath);
+        }
     }
 }

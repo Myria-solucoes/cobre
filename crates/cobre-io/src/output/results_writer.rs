@@ -156,9 +156,15 @@ pub fn write_simulation_results(
     Ok(())
 }
 
-/// Write all output artifacts (training + simulation) to the output directory.
+/// Write the training result tables and, when supplied, the simulation
+/// completion metadata to the output directory.
 ///
-/// Simulation artifacts are written only when `simulation_output` is `Some`.
+/// This delegates to [`write_training_results`] and [`write_simulation_results`];
+/// it does not write the simulation scenario Parquet data itself, the policy
+/// checkpoint, or any of the other artifacts the CLI and the Python bindings
+/// write directly (provenance, hydro-model exports, stochastic echoes,
+/// solver-stats sidecars). Simulation metadata is written only when
+/// `simulation_output` is `Some`.
 ///
 /// # Errors
 ///

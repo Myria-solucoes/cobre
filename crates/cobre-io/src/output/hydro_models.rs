@@ -28,13 +28,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Builder, Int32Builder, RecordBatch, StringBuilder};
-use arrow::datatypes::{DataType, Field, Schema};
+#[cfg(test)]
+use arrow::datatypes::DataType;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::extensions::{EvaporationModelRow, FphaDeviationPointRow, FphaHyperplaneRow};
 use crate::output::atomic::{ensure_parent_dir, write_batch_atomic, write_json_atomic};
 use crate::output::error::OutputError;
+use crate::output::schemas::{
+    evaporation_models_schema, fpha_deviation_points_schema, fpha_hyperplanes_schema,
+};
 
 /// Write a slice of [`FphaHyperplaneRow`] to a Parquet file at `path`,
 /// re-readable as `system/fpha_hyperplanes.parquet` by
@@ -83,24 +87,6 @@ use crate::output::error::OutputError;
 pub fn write_fpha_hyperplanes(path: &Path, rows: &[FphaHyperplaneRow]) -> Result<(), OutputError> {
     let batch = build_fpha_hyperplanes_batch(rows)?;
     write_batch_atomic(path, &batch)
-}
-
-// ── Schema builder ────────────────────────────────────────────────────────────
-
-fn fpha_hyperplanes_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("hydro_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, true),
-        Field::new("plane_id", DataType::Int32, false),
-        Field::new("gamma_0", DataType::Float64, false),
-        Field::new("gamma_v", DataType::Float64, false),
-        Field::new("gamma_q", DataType::Float64, false),
-        Field::new("gamma_s", DataType::Float64, false),
-        Field::new("kappa", DataType::Float64, true),
-        Field::new("valid_v_min_hm3", DataType::Float64, true),
-        Field::new("valid_v_max_hm3", DataType::Float64, true),
-        Field::new("valid_q_max_m3s", DataType::Float64, true),
-    ])
 }
 
 // ── Batch builder ─────────────────────────────────────────────────────────────
@@ -202,17 +188,6 @@ pub fn write_evaporation_models(
     write_batch_atomic(path, &batch)
 }
 
-fn evaporation_models_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("hydro_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, true),
-        Field::new("intercept_m3s", DataType::Float64, false),
-        Field::new("volume_slope_m3s_per_hm3", DataType::Float64, false),
-        Field::new("reference_volume_hm3", DataType::Float64, false),
-        Field::new("source", DataType::Utf8, false),
-    ])
-}
-
 fn build_evaporation_models_batch(
     rows: &[EvaporationModelRow],
 ) -> Result<RecordBatch, OutputError> {
@@ -296,19 +271,6 @@ pub fn write_fpha_deviation_points(
 ) -> Result<(), OutputError> {
     let batch = build_fpha_deviation_points_batch(rows)?;
     write_batch_atomic(path, &batch)
-}
-
-fn fpha_deviation_points_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("hydro_id", DataType::Int32, false),
-        Field::new("stage_id", DataType::Int32, true),
-        Field::new("v", DataType::Float64, false),
-        Field::new("q", DataType::Float64, false),
-        Field::new("fph_exact", DataType::Float64, false),
-        Field::new("fpha_fitted", DataType::Float64, false),
-        Field::new("deviation", DataType::Float64, false),
-        Field::new("relative", DataType::Float64, false),
-    ])
 }
 
 fn build_fpha_deviation_points_batch(

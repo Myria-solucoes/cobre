@@ -10,20 +10,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Schema};
 use cobre_core::System;
 
 use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
-use crate::output::schemas::{
-    buses_schema, contracts_schema, convergence_schema, costs_schema, exchanges_schema,
-    generic_violations_schema, hydro_bus_generation_schema, hydro_energy_productivity_schema,
-    hydros_schema, in_transit_schema, inflow_lags_schema, iteration_timing_schema,
-    non_controllables_schema, paths_schema, pumping_stations_schema, rank_timing_schema,
-    retry_histogram_schema, row_selection_schema, scenario_summary_schema,
-    solver_iterations_schema, thermals_schema, transit_seed_schema,
-};
+use crate::output::schemas::{OUTPUT_SCHEMAS, bounds_schema};
+#[cfg(test)]
+use crate::output::schemas::{hydro_bus_generation_schema, hydros_schema};
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
 
@@ -220,33 +215,10 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
 /// Every `(file, schema)` pair `variables.csv` documents — the single owner of
 /// the list, shared with the no-empty-description test that guards it.
 fn variables_csv_schemas() -> Vec<(&'static str, Schema)> {
-    vec![
-        ("costs", costs_schema()),
-        ("hydros", hydros_schema()),
-        ("hydro_bus_generation", hydro_bus_generation_schema()),
-        ("thermals", thermals_schema()),
-        ("exchanges", exchanges_schema()),
-        ("buses", buses_schema()),
-        ("pumping_stations", pumping_stations_schema()),
-        ("contracts", contracts_schema()),
-        ("non_controllables", non_controllables_schema()),
-        ("inflow_lags", inflow_lags_schema()),
-        ("in_transit", in_transit_schema()),
-        ("transit_seed", transit_seed_schema()),
-        ("generic_violations", generic_violations_schema()),
-        ("paths", paths_schema()),
-        ("scenario_summary", scenario_summary_schema()),
-        ("convergence", convergence_schema()),
-        ("iteration_timing", iteration_timing_schema()),
-        ("rank_timing", rank_timing_schema()),
-        ("cut_selection", row_selection_schema()),
-        ("solver_iterations", solver_iterations_schema()),
-        ("retry_histogram", retry_histogram_schema()),
-        (
-            "hydro_energy_productivity",
-            hydro_energy_productivity_schema(),
-        ),
-    ]
+    OUTPUT_SCHEMAS
+        .iter()
+        .filter_map(|entry| entry.csv_label.map(|label| (label, (entry.schema_fn)())))
+        .collect()
 }
 
 /// Write `variables.csv`, one row per column across every output schema, grouped
@@ -1330,18 +1302,6 @@ fn write_bounds_parquet(
 
     let parquet_path = path.join("bounds.parquet");
     write_parquet_atomic(&parquet_path, &batch, config)
-}
-
-fn bounds_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("entity_type_code", DataType::Int8, false),
-        Field::new("entity_id", DataType::Int32, false),
-        Field::new("hydro_id", DataType::Int32, true),
-        Field::new("stage_id", DataType::Int32, false),
-        Field::new("block_id", DataType::Int32, true),
-        Field::new("bound_type_code", DataType::Int8, false),
-        Field::new("bound_value", DataType::Float64, false),
-    ])
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
