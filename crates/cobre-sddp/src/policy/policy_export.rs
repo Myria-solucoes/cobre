@@ -96,6 +96,27 @@ fn full_date_anchor(date: NaiveDate) -> i32 {
         + i32::try_from(date.day()).unwrap_or(1)
 }
 
+/// The sentinel-or-dated `(delivery_date, interval_start, interval_end)` triple
+/// for a resolved delivery `stage`: sentinel when `None`; otherwise the
+/// `YYYYMM01` month anchor ([`year_month_day_anchor`]) and the day-accurate
+/// `YYYYMMDD` interval endpoints ([`full_date_anchor`]) of `start_date`/`end_date`.
+fn slot_date_triple(stage: Option<&Stage>) -> (i32, i32, i32) {
+    stage.map_or(
+        (
+            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        ),
+        |stage| {
+            (
+                year_month_day_anchor(stage.start_date),
+                full_date_anchor(stage.start_date),
+                full_date_anchor(stage.end_date),
+            )
+        },
+    )
+}
+
 /// Resolves ring slot `slot_idx`'s reachable physical delivery target through
 /// [`reachable_delivery_target`] against `outgoing_anchor`, then reads that
 /// target's own delivery stage out of `delivery_stages` — the single step
@@ -259,35 +280,25 @@ pub fn build_stage_entity_manifest(
             )
             .map(|(m, stage)| (t, m, stage))
         });
-        let (delivery_date, interval_start, interval_end) = resolved.map_or(
-            (
-                ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            ),
-            |(t, m, stage)| {
-                // Defensive cross-check against the resolver (the single owner
-                // of c(m), from `resolve_point`): a within-study decider must
-                // have already fired by `t`; a pre-study (IC-seeded) delivery
-                // has no decider entry and is exempt.
-                debug_assert!(
-                    global_layout
-                        .anticipated_resolution
-                        .per_plant
-                        .get(plant_pos)
-                        .and_then(|resolution| resolution.decider.get(m))
-                        .copied()
-                        .flatten()
-                        .is_none_or(|decided_at| decided_at <= t),
-                    "anticipated delivery {m} observed at stage {t} was not yet decided"
-                );
-                (
-                    year_month_day_anchor(stage.start_date),
-                    full_date_anchor(stage.start_date),
-                    full_date_anchor(stage.end_date),
-                )
-            },
-        );
+        if let Some((t, m, _)) = resolved {
+            // Defensive cross-check against the resolver (the single owner
+            // of c(m), from `resolve_point`): a within-study decider must
+            // have already fired by `t`; a pre-study (IC-seeded) delivery
+            // has no decider entry and is exempt.
+            debug_assert!(
+                global_layout
+                    .anticipated_resolution
+                    .per_plant
+                    .get(plant_pos)
+                    .and_then(|resolution| resolution.decider.get(m))
+                    .copied()
+                    .flatten()
+                    .is_none_or(|decided_at| decided_at <= t),
+                "anticipated delivery {m} observed at stage {t} was not yet decided"
+            );
+        }
+        let (delivery_date, interval_start, interval_end) =
+            slot_date_triple(resolved.map(|(_, _, stage)| stage));
         EntitySlot::anticipated(
             plant.id.0,
             slot_idx as u32,
@@ -337,21 +348,8 @@ pub fn build_stage_entity_manifest(
             StateRegion::Buckets => {
                 let (plant_idx, lag) = global_layout.transit_bucket_column_order[offset];
                 let hydro = &hydros[plant_idx];
-                let (delivery_date, interval_start, interval_end) = bucket_arrival_stage(lag)
-                    .map_or(
-                        (
-                            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                        ),
-                        |stage| {
-                            (
-                                year_month_day_anchor(stage.start_date),
-                                full_date_anchor(stage.start_date),
-                                full_date_anchor(stage.end_date),
-                            )
-                        },
-                    );
+                let (delivery_date, interval_start, interval_end) =
+                    slot_date_triple(bucket_arrival_stage(lag));
                 EntitySlot::transit_bucket(
                     hydro.id.0,
                     lag as u32,
@@ -836,37 +834,29 @@ pub fn build_stage_cuts_payloads<'a>(
 /// Returns `(col_status_bytes, row_status_bytes)`.
 #[must_use]
 pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-    let col = training_result
+    training_result
         .basis_cache
         .iter()
         .map(|opt| {
-            opt.as_ref()
-                .map(|cb| {
-                    cb.basis
-                        .col_status
-                        .iter()
-                        .map(|status| status.to_discriminant_code())
-                        .collect()
-                })
-                .unwrap_or_default()
+            opt.as_ref().map_or_else(
+                || (Vec::new(), Vec::new()),
+                |cb| {
+                    (
+                        cb.basis
+                            .col_status
+                            .iter()
+                            .map(|status| status.to_discriminant_code())
+                            .collect(),
+                        cb.basis
+                            .row_status
+                            .iter()
+                            .map(|status| status.to_discriminant_code())
+                            .collect(),
+                    )
+                },
+            )
         })
-        .collect();
-    let row = training_result
-        .basis_cache
-        .iter()
-        .map(|opt| {
-            opt.as_ref()
-                .map(|cb| {
-                    cb.basis
-                        .row_status
-                        .iter()
-                        .map(|status| status.to_discriminant_code())
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-        .collect();
-    (col, row)
+        .unzip()
 }
 
 /// Build per-node [`PolicyBasisRecord`] references from pre-converted basis data.

@@ -427,12 +427,11 @@ mod self_reproducibility_regression {
 
         let params = StudyParams::from_config(&config_with_sim)
             .expect("StudyParams::from_config must succeed");
-        let construction = params;
 
         let mut setup = StudySetup::from_broadcast_params(
             &system,
             stochastic,
-            construction,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,
@@ -1985,27 +1984,6 @@ mod water_travel_time_no_arc_byte_identity {
         }
     }
 
-    fn zero_hydro_stage_penalties() -> HydroPenalties {
-        HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 0.0,
-        }
-    }
-
     /// One bus, one standalone hydro (no `downstream_id`/`travel_time_hours` —
     /// no arc declared) with a backup thermal, `N_STAGES` stages each carrying a
     /// single default-length block (`StageSpec::default()`'s block: the `K = 1`
@@ -2137,7 +2115,7 @@ mod water_travel_time_no_arc_byte_identity {
                 n_stages: N_STAGES,
             },
             &PenaltiesDefaults {
-                hydro: zero_hydro_stage_penalties(),
+                hydro: zero_hydro_penalties(),
                 bus: BusStagePenalties { excess_cost: 0.0 },
                 line: LineStagePenalties { exchange_cost: 0.0 },
                 ncs: NcsStagePenalties {
@@ -2398,12 +2376,11 @@ mod water_travel_time_no_arc_byte_identity {
 
         let params =
             StudyParams::from_config(&config).expect("StudyParams::from_config must succeed");
-        let construction = params;
 
         StudySetup::from_broadcast_params(
             &system,
             stochastic,
-            construction,
+            params,
             hydro_models,
             &training_source,
             &simulation_source,
