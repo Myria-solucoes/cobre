@@ -1162,13 +1162,12 @@ mod tests {
     use cobre_core::{
         EntityId,
         entities::{
-            Bus, DiversionChannel, Hydro, HydroGenerationModel, HydroPenalties, HydroUnitGroup,
-            Line, NonControllableSource, PumpingStation, Thermal,
+            Bus, DiversionChannel, HydroUnitGroup, Line, NonControllableSource, PumpingStation,
+            Thermal,
         },
         scenario::{CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile},
     };
     use std::collections::BTreeMap;
-    use std::fs;
     use tempfile::TempDir;
 
     use crate::{
@@ -1182,97 +1181,12 @@ mod tests {
             BlockFactor, InflowSeasonalStatsRow, LoadFactorEntry, LoadSeasonalStatsRow,
             NcsFactorEntry,
         },
+        test_support::{make_hydro, make_minimal_case, make_unit_group},
         validation::{
             schema::{ParsedData, validate_schema},
             structural::validate_structure,
         },
     };
-
-    const VALID_CONFIG_JSON: &str = r#"{
-        "training": {
-            "selection": {"method": "sampled", "forward_passes": 10},
-            "stopping_rules": [
-                { "type": "iteration_limit", "limit": 100 }
-            ]
-        }
-    }"#;
-
-    const VALID_PENALTIES_JSON: &str = r#"{
-        "bus": {
-            "deficit_segments": [
-                { "depth_mw": 500.0, "cost": 1000.0 },
-                { "depth_mw": null,  "cost": 5000.0 }
-            ],
-            "excess_cost": 100.0
-        },
-        "line": { "exchange_cost": 2.0 },
-        "hydro": {
-            "spillage_cost": 0.01,
-            "turbined_cost": 0.05,
-            "diversion_cost": 0.1,
-            "storage_violation_below_cost": 10000.0,
-            "filling_target_violation_cost": 50000.0,
-            "turbined_violation_below_cost": 500.0,
-            "outflow_violation_below_cost": 500.0,
-            "outflow_violation_above_cost": 500.0,
-            "generation_violation_below_cost": 1000.0,
-            "evaporation_violation_cost": 5000.0,
-            "water_withdrawal_violation_cost": 1000.0
-        },
-        "non_controllable_source": { "curtailment_cost": 0.005 }
-    }"#;
-
-    const VALID_STAGES_JSON: &str = r#"{
-        "policy_graph": {
-            "type": "finite_horizon",
-            "annual_discount_rate": 0.06,
-            "transitions": []
-        },
-        "stages": [
-            {
-                "id": 0,
-                "start_date": "2024-01-01",
-                "end_date": "2024-02-01",
-                "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-                "num_openings": 50
-            }
-        ]
-    }"#;
-
-    const VALID_INITIAL_CONDITIONS_JSON: &str = r#"{
-        "storage": [],
-        "filling_storage": []
-    }"#;
-
-    /// Write a string to a relative path under `root`, creating parent dirs.
-    fn write_file(root: &std::path::Path, relative: &str, content: &str) {
-        let full = root.join(relative);
-        if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&full, content).unwrap();
-    }
-
-    /// Build a minimal case directory with buses=[1], hydros=[], thermals=[], lines=[].
-    fn make_minimal_case(dir: &TempDir) {
-        let root = dir.path();
-        write_file(root, "config.json", VALID_CONFIG_JSON);
-        write_file(root, "penalties.json", VALID_PENALTIES_JSON);
-        write_file(root, "stages.json", VALID_STAGES_JSON);
-        write_file(
-            root,
-            "initial_conditions.json",
-            VALID_INITIAL_CONDITIONS_JSON,
-        );
-        write_file(
-            root,
-            "system/buses.json",
-            r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#,
-        );
-        write_file(root, "system/lines.json", r#"{ "lines": [] }"#);
-        write_file(root, "system/hydros.json", r#"{ "hydros": [] }"#);
-        write_file(root, "system/thermals.json", r#"{ "thermals": [] }"#);
-    }
 
     /// Parse the case directory at `dir` and return `ParsedData`.
     /// Panics if validation fails — all test cases start from valid data.
@@ -1292,60 +1206,6 @@ mod tests {
             ctx.errors()
         );
         data
-    }
-
-    fn hydro_penalties() -> HydroPenalties {
-        HydroPenalties {
-            spillage_cost: 1.0,
-            diversion_cost: 1.0,
-            turbined_cost: 1.0,
-            storage_violation_below_cost: 1.0,
-            filling_target_violation_cost: 1.0,
-            turbined_violation_below_cost: 1.0,
-            outflow_violation_below_cost: 1.0,
-            outflow_violation_above_cost: 1.0,
-            generation_violation_below_cost: 1.0,
-            evaporation_violation_cost: 1.0,
-            water_withdrawal_violation_cost: 1.0,
-            water_withdrawal_violation_pos_cost: 1.0,
-            water_withdrawal_violation_neg_cost: 1.0,
-            evaporation_violation_pos_cost: 1.0,
-            evaporation_violation_neg_cost: 1.0,
-            inflow_nonnegativity_cost: 1000.0,
-        }
-    }
-
-    fn make_hydro(id: i32) -> Hydro {
-        let mut hydro = Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId::from(id),
-            name: format!("Hydro_{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 1000.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 1000.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 1000.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: hydro_penalties(),
-        };
-        hydro.sort_unit_groups();
-        hydro
     }
 
     fn make_line(id: i32, source_bus: i32, target_bus: i32) -> Line {
@@ -1391,25 +1251,6 @@ mod tests {
             consumption_mw_per_m3s: 0.5,
             min_flow_m3s: 0.0,
             max_flow_m3s: 100.0,
-        }
-    }
-
-    fn make_unit_group(
-        id: i32,
-        bus_id: i32,
-        min_generation_mw: f64,
-        max_generation_mw: f64,
-        min_turbined_m3s: f64,
-        max_turbined_m3s: f64,
-    ) -> HydroUnitGroup {
-        HydroUnitGroup {
-            id: EntityId::from(id),
-            name: format!("Group {id}"),
-            bus_id: EntityId::from(bus_id),
-            min_generation_mw,
-            max_generation_mw,
-            min_turbined_m3s,
-            max_turbined_m3s,
         }
     }
 
@@ -1471,7 +1312,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(3);
+        let mut hydro = make_hydro(3, None);
         hydro.downstream_id = Some(EntityId::from(100)); // hydro 100 does not exist
         data.hydros = vec![hydro];
         let mut ctx = ValidationContext::new();
@@ -1575,7 +1416,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10)];
+        data.hydros = vec![make_hydro(10, None)];
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
         assert!(!ctx.has_errors());
@@ -1589,7 +1430,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(10);
+        let mut hydro = make_hydro(10, None);
         hydro.unit_groups = vec![make_unit_group(0, 1, 0.0, 100.0, 0.0, 100.0)]; // group bus 1 exists
         data.hydros = vec![hydro];
         let mut ctx = ValidationContext::new();
@@ -1605,7 +1446,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(10);
+        let mut hydro = make_hydro(10, None);
         hydro.unit_groups = vec![make_unit_group(0, 999, 0.0, 100.0, 0.0, 100.0)]; // group bus also 999
         data.hydros = vec![hydro];
         let mut ctx = ValidationContext::new();
@@ -1627,7 +1468,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(10);
+        let mut hydro = make_hydro(10, None);
         hydro.downstream_id = None;
         data.hydros = vec![hydro];
         let mut ctx = ValidationContext::new();
@@ -1644,7 +1485,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(10);
+        let mut hydro = make_hydro(10, None);
         hydro.diversion = None;
         data.hydros = vec![hydro];
         let mut ctx = ValidationContext::new();
@@ -1661,7 +1502,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(10);
+        let mut hydro = make_hydro(10, None);
         hydro.diversion = Some(DiversionChannel {
             downstream_id: EntityId::from(999), // does not exist
             max_flow_m3s: 100.0,
@@ -1698,7 +1539,7 @@ mod tests {
             excess_cost: 100.0,
         });
 
-        let mut hydro1 = make_hydro(1);
+        let mut hydro1 = make_hydro(1, None);
         hydro1.unit_groups = vec![HydroUnitGroup {
             id: EntityId::from(4),
             name: "Group A".to_string(),
@@ -1709,7 +1550,7 @@ mod tests {
             max_turbined_m3s: 100.0,
         }];
 
-        let mut hydro2 = make_hydro(2);
+        let mut hydro2 = make_hydro(2, None);
         hydro2.unit_groups = vec![HydroUnitGroup {
             id: EntityId::from(7),
             name: "Group B".to_string(),
@@ -1755,7 +1596,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10)];
+        data.hydros = vec![make_hydro(10, None)];
         data.pumping_stations = vec![make_pumping(1, 1, 10, 10)]; // bus 1, hydros 10,10 all exist
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
@@ -1768,7 +1609,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10)];
+        data.hydros = vec![make_hydro(10, None)];
         // source hydro 999 missing, destination hydro 10 exists
         data.pumping_stations = vec![make_pumping(1, 1, 999, 10)];
         let mut ctx = ValidationContext::new();
@@ -1790,7 +1631,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10)];
+        data.hydros = vec![make_hydro(10, None)];
         // bus 777 missing; source/destination hydro 10 exists
         data.pumping_stations = vec![make_pumping(1, 777, 10, 10)];
         let mut ctx = ValidationContext::new();
@@ -1812,7 +1653,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10)];
+        data.hydros = vec![make_hydro(10, None)];
         // source hydro 10 exists; destination hydro 999 missing
         data.pumping_stations = vec![make_pumping(1, 1, 10, 999)];
         let mut ctx = ValidationContext::new();
@@ -1940,7 +1781,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10)];
+        data.hydros = vec![make_hydro(10, None)];
         let mut profiles = BTreeMap::new();
         profiles.insert(
             "profile1".to_string(),
@@ -2031,12 +1872,12 @@ mod tests {
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
 
-        let mut hydro7 = make_hydro(7);
+        let mut hydro7 = make_hydro(7, None);
         hydro7.unit_groups = vec![
             make_unit_group(0, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(3, 1, 0.0, 100.0, 0.0, 100.0),
         ];
-        let mut hydro2 = make_hydro(2);
+        let mut hydro2 = make_hydro(2, None);
         hydro2.unit_groups = vec![make_unit_group(4, 1, 0.0, 100.0, 0.0, 100.0)];
         data.hydros = vec![hydro7, hydro2];
 
@@ -2079,7 +1920,7 @@ mod tests {
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
 
-        let mut hydro7 = make_hydro(7);
+        let mut hydro7 = make_hydro(7, None);
         hydro7.unit_groups = vec![
             make_unit_group(0, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(3, 1, 0.0, 100.0, 0.0, 100.0),
@@ -2125,12 +1966,12 @@ mod tests {
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
 
-        let mut hydro5 = make_hydro(5);
+        let mut hydro5 = make_hydro(5, None);
         hydro5.unit_groups = vec![
             make_unit_group(7, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(2, 1, 0.0, 100.0, 0.0, 100.0),
         ];
-        let mut hydro6 = make_hydro(6);
+        let mut hydro6 = make_hydro(6, None);
         hydro6.unit_groups = vec![
             make_unit_group(10, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(20, 1, 0.0, 100.0, 0.0, 100.0),
@@ -3220,13 +3061,13 @@ mod tests {
             excess_cost: 100.0,
         });
 
-        let mut hydro7 = make_hydro(7);
+        let mut hydro7 = make_hydro(7, None);
         hydro7.unit_groups = vec![
             make_unit_group(20, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(21, 4, 0.0, 100.0, 0.0, 100.0),
         ];
 
-        let mut hydro8 = make_hydro(8);
+        let mut hydro8 = make_hydro(8, None);
         hydro8.unit_groups = vec![make_unit_group(30, 9, 0.0, 100.0, 0.0, 100.0)];
 
         data.hydros = vec![hydro7, hydro8];

@@ -1,6 +1,6 @@
 # Uniform Testing Architecture
 
-> **Status:** Proposal — target standard, not yet implemented. Snapshot figures are calibration-time context; re-measure before acting.
+> **Status:** Partially adopted (§5.2); the rest Proposal — target standard, not yet implemented. Snapshot figures are calibration-time context; re-measure before acting.
 
 **Scope:** the whole workspace's test strategy — layering, per-crate structure,
 shared fixtures, comparators, runner, CI tiering, and correctness hardening.
@@ -421,6 +421,14 @@ The convention:
   reach it, not just sddp's own `tests/`.
 - **`cobre-python` dev-depends on `cobre-sddp`'s `test-support`**, which (with the
   §5.11 CI wiring) lets its Rust tests share the same fixtures.
+
+**Adoption (2026-09-15).** The convention is the adopted standard for the crates that own
+shareable fixtures: each exposes them behind its own `test-support` feature under the gate
+above, and consumers enable it as a dev-dependency feature. Two of its bullets are not yet
+carried out: `crates/cobre-sddp/tests/common/` still holds its own fixture directory rather
+than collapsing into the crate's `test-support` surface, and `crates/cobre-python/Cargo.toml`'s
+`[dev-dependencies]` does not yet name `cobre-sddp` with that feature. Until both land, the
+status line above reads "partially adopted" rather than "adopted".
 
 A dedicated crate wins in exactly one case — heavy test-only dependencies you
 want kept out of every production crate's dev-graph, or a pristine

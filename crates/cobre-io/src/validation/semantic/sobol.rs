@@ -56,8 +56,8 @@ pub(super) fn check_sobol_power_of_2(data: &ParsedData, ctx: &mut ValidationCont
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
+    use crate::test_support::*;
     use cobre_core::temporal::{NoiseMethod, ScenarioSourceConfig};
 
     use crate::validation::{ErrorKind, ValidationContext};

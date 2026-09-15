@@ -606,22 +606,23 @@ fn check_recombinable_signature(
         let mut seen: HashMap<&str, usize> = HashMap::new();
         let mut warned = false;
         for (pos, s) in sig.iter().enumerate() {
-            if stage_index[pos] == Some(t) {
-                let count = seen.entry(s.as_str()).or_insert(0);
-                *count += 1;
-                if *count == 2 && !warned {
-                    warned = true;
-                    ctx.add_warning(
-                        ErrorKind::ModelQuality,
-                        "stages.json",
-                        Some(format!("stage {sid}")),
-                        format!(
-                            "stage {sid} carries multiple nodes with structurally identical \
-                             subtrees (same shape and realization pointers); without recombination \
-                             this trains independent chains with fewer cuts each"
-                        ),
-                    );
-                }
+            if stage_index[pos] != Some(t) {
+                continue;
+            }
+            let count = seen.entry(s.as_str()).or_insert(0);
+            *count += 1;
+            if *count == 2 && !warned {
+                warned = true;
+                ctx.add_warning(
+                    ErrorKind::ModelQuality,
+                    "stages.json",
+                    Some(format!("stage {sid}")),
+                    format!(
+                        "stage {sid} carries multiple nodes with structurally identical \
+                         subtrees (same shape and realization pointers); without recombination \
+                         this trains independent chains with fewer cuts each"
+                    ),
+                );
             }
         }
     }
@@ -820,8 +821,8 @@ pub(super) fn check_sampling_method_meaningfulness(data: &ParsedData, ctx: &mut 
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
+    use crate::test_support::*;
     use crate::validation::schema::ParsedData;
     use cobre_core::EntityId;
     use cobre_core::scenario::ExternalScenarioRow;

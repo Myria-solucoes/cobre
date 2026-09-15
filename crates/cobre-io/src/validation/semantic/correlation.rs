@@ -129,8 +129,8 @@ pub(super) fn check_correlation_same_type(data: &ParsedData, ctx: &mut Validatio
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
+    use crate::test_support::*;
 
     use crate::validation::{ErrorKind, ValidationContext};
 

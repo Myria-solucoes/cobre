@@ -903,7 +903,6 @@ fn train_simulate_write_cycle() {
         completed: 2,
         failed: 0,
         total_time_ms: 0,
-        partitions_written: vec![],
         cost: None,
         solve_stats: MetadataSimulationSolveStats::default(),
     };

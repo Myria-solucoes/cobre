@@ -130,8 +130,6 @@ fn build_cut_table(
     builder.end_table(tab)
 }
 
-/// Build one `EntitySlot` nested table. Has no inner vector, so — unlike
-/// [`build_cut_table`] — nothing precedes the `start_table`/`end_table` pair.
 fn build_entity_slot_table(
     builder: &mut FlatBufferBuilder<'_>,
     slot: &EntitySlot,
@@ -147,8 +145,6 @@ fn build_entity_slot_table(
     builder.end_table(tab)
 }
 
-/// Build one `ManifestNode` nested table. No inner vector, so nothing precedes
-/// the `start_table`/`end_table` pair.
 fn build_manifest_node_table(
     builder: &mut FlatBufferBuilder<'_>,
     node: &ManifestNode,
@@ -162,7 +158,6 @@ fn build_manifest_node_table(
     builder.end_table(tab)
 }
 
-/// Build one `ManifestEdge` nested table.
 fn build_manifest_edge_table(
     builder: &mut FlatBufferBuilder<'_>,
     edge: &ManifestEdge,
@@ -567,27 +562,6 @@ fn follow_uoffset(buf: &[u8], pos: usize) -> Option<usize> {
     pos.checked_add(off as usize)
 }
 
-/// Read a `f32` vector stored at `vec_pos` and return its elements as `f64`.
-// Rationale: the f32 vector reader is the symmetric counterpart to `read_f64_vector`; retaining
-// it keeps the codec complete against the full FlatBuffers type palette and avoids re-deriving
-// the safe byte-level parsing pattern from scratch when an f32 field is added to the schema.
-#[allow(dead_code)]
-fn read_f32_vector_as_f64(buf: &[u8], vec_pos: usize) -> Option<Vec<f64>> {
-    let len = read_u32_le(buf, vec_pos)? as usize;
-    let data_start = vec_pos.checked_add(4)?;
-    let data_end = data_start.checked_add(len.checked_mul(4)?)?;
-    if data_end > buf.len() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        let pos = data_start + i * 4;
-        let bits = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
-        out.push(f64::from(f32::from_bits(bits)));
-    }
-    Some(out)
-}
-
 fn read_f64_vector(buf: &[u8], vec_pos: usize) -> Option<Vec<f64>> {
     let len = read_u32_le(buf, vec_pos)? as usize;
     let data_start = vec_pos.checked_add(4)?;
@@ -736,7 +710,6 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
 // share one absence contract: a field missing from the vtable yields an empty
 // `String`/`Vec`, never an error (graceful absence).
 
-/// Read a string field at vtable `slot`.
 fn read_string_field(
     buf: &[u8],
     table_pos: usize,
@@ -753,7 +726,6 @@ fn read_string_field(
         .ok_or_else(|| OutputError::serialization(ctx, "string field truncated or not UTF-8"))
 }
 
-/// Read a `[uint32]` field at vtable `slot`.
 fn read_u32_vector_field(
     buf: &[u8],
     table_pos: usize,
@@ -770,7 +742,6 @@ fn read_u32_vector_field(
         .ok_or_else(|| OutputError::serialization(ctx, "uint32 vector truncated or corrupt"))
 }
 
-/// Read a `[string]` field at vtable `slot`.
 fn read_string_vector_field(
     buf: &[u8],
     table_pos: usize,
@@ -795,7 +766,6 @@ fn read_string_vector_field(
     Ok(out)
 }
 
-/// Read a `[ManifestNode]` field at vtable `slot`.
 fn read_manifest_nodes(
     buf: &[u8],
     table_pos: usize,
@@ -820,7 +790,6 @@ fn read_manifest_nodes(
     Ok(out)
 }
 
-/// Read a `[ManifestEdge]` field at vtable `slot`.
 fn read_manifest_edges(
     buf: &[u8],
     table_pos: usize,

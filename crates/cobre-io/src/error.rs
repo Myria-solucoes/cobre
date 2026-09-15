@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 /// Errors that can occur during case loading.
 ///
 /// Variants are ordered by the pipeline phase in which they typically occur:
-/// I/O read → parse → schema validation → cross-reference validation → semantic
-/// constraint validation → warm-start policy compatibility.
+/// I/O read → parse → schema validation → semantic constraint validation →
+/// warm-start policy compatibility.
 ///
 /// # Examples
 ///
@@ -55,25 +55,6 @@ pub enum LoadError {
         field: String,
         /// Human-readable description of the schema violation.
         message: String,
-    },
-
-    /// Cross-reference validation failure (dangling entity ID, broken foreign key).
-    #[error(
-        "cross-reference error: {source_entity} in {source_file} references \
-         non-existent {target_entity} in {target_collection}"
-    )]
-    CrossReferenceError {
-        /// Path to the file that contains the dangling reference.
-        source_file: PathBuf,
-        /// String identifier of the entity that holds the broken reference
-        /// (e.g., `"Hydro 'H1'"`).
-        source_entity: String,
-        /// Name of the collection that was expected to contain `target_entity`
-        /// (e.g., `"bus registry"`).
-        target_collection: String,
-        /// String identifier of the entity that could not be found
-        /// (e.g., `"BUS_99"`).
-        target_entity: String,
     },
 
     /// Semantic constraint violation (acyclic cascade, complete coverage, consistency).
@@ -200,29 +181,28 @@ mod tests {
     }
 
     #[test]
-    fn test_load_error_cross_reference_display() {
-        let err = LoadError::CrossReferenceError {
-            source_file: PathBuf::from("system/hydros.json"),
-            source_entity: "Hydro 'H1'".to_string(),
-            target_collection: "bus registry".to_string(),
-            target_entity: "BUS_99".to_string(),
+    fn test_load_error_policy_incompatible_display() {
+        let err = LoadError::PolicyIncompatible {
+            check: "hydro count".to_string(),
+            policy_value: "12".to_string(),
+            system_value: "15".to_string(),
         };
         let display = err.to_string();
         assert!(
-            display.contains("Hydro 'H1'"),
-            "display should contain source_entity, got: {display}"
+            display.contains("policy incompatible"),
+            "display should contain policy incompatible, got: {display}"
         );
         assert!(
-            display.contains("system/hydros.json"),
-            "display should contain source_file, got: {display}"
+            display.contains("hydro count"),
+            "display should contain check, got: {display}"
         );
         assert!(
-            display.contains("BUS_99"),
-            "display should contain target_entity, got: {display}"
+            display.contains("12"),
+            "display should contain policy_value, got: {display}"
         );
         assert!(
-            display.contains("bus registry"),
-            "display should contain target_collection, got: {display}"
+            display.contains("15"),
+            "display should contain system_value, got: {display}"
         );
     }
 

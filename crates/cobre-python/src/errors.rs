@@ -237,7 +237,6 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
             LoadError::IoError { .. } => case_io_error(py, &err.to_string()),
             LoadError::ParseError { .. }
             | LoadError::SchemaError { .. }
-            | LoadError::CrossReferenceError { .. }
             | LoadError::ConstraintError { .. } => validation_error(py, &err.to_string()),
             LoadError::PolicyIncompatible { .. } => {
                 new_leaf_err(py, &POLICY_INCOMPATIBLE_ERROR, &err.to_string())

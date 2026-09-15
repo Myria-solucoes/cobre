@@ -16,7 +16,6 @@
 //! | `LoadError::IoError`                | `CaseIoError` (`OSError`)       |
 //! | `LoadError::ParseError`             | `ValidationError` (`ValueError`) |
 //! | `LoadError::SchemaError`            | `ValidationError` (`ValueError`) |
-//! | `LoadError::CrossReferenceError`    | `ValidationError` (`ValueError`) |
 //! | `LoadError::ConstraintError`        | `ValidationError` (`ValueError`) |
 //! | `LoadError::PolicyIncompatible`     | `PolicyIncompatibleError` (`ValueError`) |
 //!
@@ -46,13 +45,11 @@ use crate::model::PySystem;
 
 // ── Error conversion ──────────────────────────────────────────────────────────
 
-/// Map a [`LoadError`] variant to its `&'static str` kind name.
 fn load_error_kind(err: &LoadError) -> &'static str {
     match err {
         LoadError::IoError { .. } => "IoError",
         LoadError::ParseError { .. } => "ParseError",
         LoadError::SchemaError { .. } => "SchemaError",
-        LoadError::CrossReferenceError { .. } => "CrossReferenceError",
         LoadError::ConstraintError { .. } => "ConstraintError",
         LoadError::PolicyIncompatible { .. } => "PolicyIncompatible",
     }
@@ -82,8 +79,6 @@ fn load_validate_config(
     }
 }
 
-/// Convert a [`LoadError`] to the appropriate Python exception — a thin shim over
-/// the single [`crate::errors::convert_error`] mapping site.
 fn convert_load_error(err: &LoadError) -> PyErr {
     convert_error(Load(err))
 }

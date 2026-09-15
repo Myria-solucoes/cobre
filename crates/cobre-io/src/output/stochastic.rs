@@ -93,9 +93,8 @@ use cobre_core::scenario::{CorrelationModel, CorrelationScheduleEntry};
 use cobre_stochastic::OpeningTree;
 use serde::Serialize;
 
-use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
+use crate::output::atomic::{ensure_parent_dir, write_batch_atomic, write_bytes_atomic};
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
 use crate::scenarios::{
     InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow, LoadSeasonalStatsRow,
 };
@@ -128,10 +127,8 @@ use crate::scenarios::{
 /// # }
 /// ```
 pub fn write_noise_openings(path: &Path, tree: &OpeningTree) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_noise_openings_batch(tree)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 /// Write a slice of [`InflowSeasonalStatsRow`] to a Parquet file at `path`,
@@ -172,10 +169,8 @@ pub fn write_inflow_seasonal_stats(
     path: &Path,
     rows: &[InflowSeasonalStatsRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_inflow_seasonal_stats_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 /// Write a slice of [`InflowArCoefficientRow`] to a Parquet file at `path`,
@@ -216,10 +211,8 @@ pub fn write_inflow_ar_coefficients(
     path: &Path,
     rows: &[InflowArCoefficientRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_inflow_ar_coefficients_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 /// Write a slice of [`InflowAnnualComponentRow`] to a Parquet file at `path`,
@@ -262,10 +255,8 @@ pub fn write_inflow_annual_component(
     path: &Path,
     rows: &[InflowAnnualComponentRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_inflow_annual_component_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 // ── Intermediate serde types for correlation JSON output ──────────────────────
@@ -440,19 +431,8 @@ pub fn write_load_seasonal_stats(
     path: &Path,
     rows: &[LoadSeasonalStatsRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_load_seasonal_stats_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
-}
-
-// ── Shared helpers ────────────────────────────────────────────────────────────
-
-pub(crate) fn ensure_parent_dir(path: &Path) -> Result<(), OutputError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
-    }
-    Ok(())
+    write_batch_atomic(path, &batch)
 }
 
 // ── Schema builders ───────────────────────────────────────────────────────────
@@ -762,6 +742,7 @@ pub fn write_fitting_report(path: &Path, report: &FittingReport) -> Result<(), O
 )]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use cobre_core::EntityId;
     use cobre_stochastic::OpeningTree;
 
@@ -817,7 +798,6 @@ mod tests {
     fn write_creates_parent_directory() {
         let tree = make_tree_2s_2d();
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        // Nested path — neither intermediate directory exists yet.
         let path = tmp.path().join("output/stochastic/noise_openings.parquet");
 
         assert!(
@@ -930,7 +910,6 @@ mod tests {
     #[test]
     fn write_correct_row_tuples() {
         use arrow::array::{Float64Array, Int32Array, UInt32Array};
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let tree = make_tree_2s_2d();
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
@@ -938,12 +917,7 @@ mod tests {
 
         write_noise_openings(&path, &tree).expect("write must succeed");
 
-        let file = std::fs::File::open(&path).expect("file must open");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("builder")
-            .build()
-            .expect("reader");
-        let batch = reader.next().expect("must have a batch").expect("batch Ok");
+        let batch = read_first_batch(&path);
 
         let stage_col = batch
             .column_by_name("stage_id")

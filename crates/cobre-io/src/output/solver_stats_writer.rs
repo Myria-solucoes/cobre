@@ -267,6 +267,7 @@ fn write_solver_stats_to(dir: &Path, rows: &[SolverStatsRow]) -> Result<(), Outp
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use arrow::array::{Array, Float64Array, Int32Array, StringArray, UInt32Array, UInt64Array};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -325,13 +326,6 @@ mod tests {
         ]
     }
 
-    fn read_parquet(path: &std::path::Path) -> RecordBatch {
-        let file = std::fs::File::open(path).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let mut reader = builder.build().unwrap();
-        reader.next().unwrap().unwrap()
-    }
-
     #[test]
     fn write_and_read_back() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -341,7 +335,7 @@ mod tests {
 
         let iter_path = dir.path().join("training/solver/iterations.parquet");
         assert!(iter_path.exists());
-        let batch = read_parquet(&iter_path);
+        let batch = read_first_batch(&iter_path);
 
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 19);
@@ -430,7 +424,7 @@ mod tests {
         ];
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
+        let batch = read_first_batch(&dir.path().join("training/solver/iterations.parquet"));
         let stage = batch
             .column_by_name("stage_id")
             .unwrap()
@@ -480,7 +474,7 @@ mod tests {
         ];
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
+        let batch = read_first_batch(&dir.path().join("training/solver/iterations.parquet"));
         let iter_col = batch
             .column_by_name("iteration")
             .unwrap()
@@ -525,7 +519,7 @@ mod tests {
         write_solver_stats(dir.path(), &rows).unwrap();
 
         let hist_path = dir.path().join("training/solver/retry_histogram.parquet");
-        let batch = read_parquet(&hist_path);
+        let batch = read_first_batch(&hist_path);
 
         // Only 2 nonzero entries: (forward, level 0, 5) and (forward, level 2, 1);
         // the all-zero backward row contributes nothing.
@@ -628,7 +622,7 @@ mod tests {
         write_solver_stats(dir.path(), &rows).unwrap();
 
         let hist_path = dir.path().join("training/solver/retry_histogram.parquet");
-        let batch = read_parquet(&hist_path);
+        let batch = read_first_batch(&hist_path);
 
         // Aggregated unique tuples, canonical order (phase sorts "backward" < "forward"):
         //   (1, backward, 0, level 0) = 2 + 1 = 3
@@ -689,7 +683,7 @@ mod tests {
 
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
+        let batch = read_first_batch(&dir.path().join("training/solver/iterations.parquet"));
         let opening_col = batch
             .column_by_name("opening_index")
             .unwrap()
@@ -714,7 +708,7 @@ mod tests {
 
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
+        let batch = read_first_batch(&dir.path().join("training/solver/iterations.parquet"));
         assert_eq!(batch.num_columns(), 19);
 
         assert_eq!(
@@ -761,7 +755,7 @@ mod tests {
 
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
+        let batch = read_first_batch(&dir.path().join("training/solver/iterations.parquet"));
         assert_eq!(batch.num_rows(), 4);
 
         let lp_col = batch
@@ -817,7 +811,7 @@ mod tests {
 
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        let batch = read_parquet(&dir.path().join("training/solver/iterations.parquet"));
+        let batch = read_first_batch(&dir.path().join("training/solver/iterations.parquet"));
         assert_eq!(batch.num_rows(), 3, "one forward row per stage");
 
         let opening_col = batch

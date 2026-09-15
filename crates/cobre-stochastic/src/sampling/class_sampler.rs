@@ -372,7 +372,7 @@ mod tests {
     use crate::{
         StochasticError, sample_forward,
         sampling::{ClassNoiseTables, ExternalScenarioLibrary, HistoricalScenarioLibrary},
-        tree::opening_tree::OpeningTree,
+        test_support::uniform_tree,
     };
 
     use super::{ClassSampleRequest, ClassSampler, select_transition_child};
@@ -482,14 +482,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
-
-    fn uniform_tree(n_stages: usize, openings: usize, dim: usize) -> OpeningTree {
-        let total = n_stages * openings * dim;
-        let data: Vec<f64> = (0_u32..u32::try_from(total).unwrap())
-            .map(f64::from)
-            .collect();
-        OpeningTree::from_parts(data, vec![openings; n_stages], dim)
-    }
 
     fn base_req() -> ClassSampleRequest {
         ClassSampleRequest {

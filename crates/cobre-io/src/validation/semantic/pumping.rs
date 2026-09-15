@@ -36,11 +36,10 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{EntityId, entities::PumpingStation};
 
-    use super::super::test_support::{make_data, make_hydro, make_stages};
     use super::super::validate_semantic_hydro_thermal;
+    use crate::test_support::{make_data, make_hydro, make_stages};
     use crate::validation::{ErrorKind, ValidationContext};
 
-    /// Build a `PumpingStation` with the given bus and source/destination hydros.
     fn make_pumping(id: i32, bus_id: i32, src_hydro: i32, dst_hydro: i32) -> PumpingStation {
         PumpingStation {
             id: EntityId::from(id),

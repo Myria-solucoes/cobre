@@ -282,7 +282,6 @@ fn print_sim_summary(
 
 /// Merge each rank's local [`SimulationOutput`](cobre_io::SimulationOutput) via
 /// MPI collectives.
-#[allow(clippy::cast_possible_truncation)]
 fn merge_simulation_metadata<C: Communicator>(
     comm: &C,
     local: &SimulationOutput,
@@ -302,16 +301,32 @@ fn merge_simulation_metadata<C: Communicator>(
             message: format!("simulation metadata time allreduce error: {e}"),
         })?;
 
-    let local_paths_bytes = local.partitions_written.join("\n").into_bytes();
+    Ok(SimulationOutput {
+        n_scenarios: merged_counts[0],
+        completed: merged_counts[1],
+        failed: merged_counts[2],
+        total_time_ms: merged_time[0],
+        cost: None,
+        solve_stats: MetadataSimulationSolveStats::default(),
+    })
+}
 
-    let send_len = [local_paths_bytes.len() as u64];
+// Rationale: per-rank buffer lengths travel as u64 on the wire and are far below usize::MAX on
+// every supported target, so the u64 -> usize narrowing is exact.
+#[allow(clippy::cast_possible_truncation)]
+fn exchange_gather_plan<C: Communicator>(
+    comm: &C,
+    local_len: usize,
+    context: &str,
+) -> Result<(Vec<usize>, Vec<usize>), CliError> {
     let n_ranks = comm.size();
+    let send_len = [local_len as u64];
     let mut all_lens = vec![0u64; n_ranks];
     let len_counts: Vec<usize> = vec![1; n_ranks];
     let len_displs: Vec<usize> = (0..n_ranks).collect();
     comm.allgatherv(&send_len, &mut all_lens, &len_counts, &len_displs)
         .map_err(|e| CliError::Internal {
-            message: format!("partition path length exchange error: {e}"),
+            message: format!("{context} length exchange error: {e}"),
         })?;
 
     let recv_counts: Vec<usize> = all_lens.iter().map(|&l| l as usize).collect();
@@ -323,41 +338,7 @@ fn merge_simulation_metadata<C: Communicator>(
             Some(d)
         })
         .collect();
-    let total_bytes: usize = recv_counts.iter().sum();
-    let mut all_bytes = vec![0u8; total_bytes];
-    comm.allgatherv(
-        &local_paths_bytes,
-        &mut all_bytes,
-        &recv_counts,
-        &recv_displs,
-    )
-    .map_err(|e| CliError::Internal {
-        message: format!("partition path gather error: {e}"),
-    })?;
-
-    let mut all_partitions: Vec<String> = Vec::new();
-    for (i, &count) in recv_counts.iter().enumerate() {
-        if count == 0 {
-            continue;
-        }
-        let start = recv_displs[i];
-        let chunk = &all_bytes[start..start + count];
-        let text = std::str::from_utf8(chunk).map_err(|e| CliError::Internal {
-            message: format!("partition path UTF-8 decode error from rank {i}: {e}"),
-        })?;
-        all_partitions.extend(text.split('\n').filter(|s| !s.is_empty()).map(String::from));
-    }
-    all_partitions.sort();
-
-    Ok(SimulationOutput {
-        n_scenarios: merged_counts[0],
-        completed: merged_counts[1],
-        failed: merged_counts[2],
-        total_time_ms: merged_time[0],
-        partitions_written: all_partitions,
-        cost: None,
-        solve_stats: MetadataSimulationSolveStats::default(),
-    })
+    Ok((recv_counts, recv_displs))
 }
 
 /// Gather every rank's `(scenario_id, stage_id, node_id)` path rows for the
@@ -367,7 +348,6 @@ fn merge_simulation_metadata<C: Communicator>(
 /// then-payload pattern the other per-scenario gathers use. Order is irrelevant:
 /// `write_paths` fixes the canonical `(scenario_id, stage_id)` order, so the file
 /// is identical across rank shapes (the rank-invariance contract).
-#[allow(clippy::cast_possible_truncation)]
 fn aggregate_simulation_paths<C: Communicator>(
     comm: &C,
     local: &[SimulationPathRecord],
@@ -379,25 +359,8 @@ fn aggregate_simulation_paths<C: Communicator>(
         local_buf.push(r.node_id);
     }
 
-    let n_ranks = comm.size();
-    let send_len = [local_buf.len() as u64];
-    let mut all_lens = vec![0u64; n_ranks];
-    let len_counts: Vec<usize> = vec![1; n_ranks];
-    let len_displs: Vec<usize> = (0..n_ranks).collect();
-    comm.allgatherv(&send_len, &mut all_lens, &len_counts, &len_displs)
-        .map_err(|e| CliError::Internal {
-            message: format!("simulation path length exchange error: {e}"),
-        })?;
-
-    let recv_counts: Vec<usize> = all_lens.iter().map(|&l| l as usize).collect();
-    let recv_displs: Vec<usize> = recv_counts
-        .iter()
-        .scan(0usize, |acc, &c| {
-            let d = *acc;
-            *acc += c;
-            Some(d)
-        })
-        .collect();
+    let (recv_counts, recv_displs) =
+        exchange_gather_plan(comm, local_buf.len(), "simulation path")?;
     let total: usize = recv_counts.iter().sum();
     let mut all_buf = vec![0i32; total];
     comm.allgatherv(&local_buf, &mut all_buf, &recv_counts, &recv_displs)
@@ -420,7 +383,6 @@ fn aggregate_simulation_paths<C: Communicator>(
 /// Returns the global [`cobre_sddp::SolverStatsDelta`] (sum over all ranks, for
 /// the root summary) and a per-global-scenario `Vec`, sorted by scenario ID for
 /// deterministic Parquet output.
-#[allow(clippy::cast_possible_truncation)]
 fn aggregate_simulation_solver_stats<C: Communicator>(
     comm: &C,
     local_stats: &[(u32, i32, SolverStatsDelta)],
@@ -440,28 +402,10 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
         .iter()
         .map(|(id, _opening, delta)| (*id, delta.clone()))
         .collect();
-    let n_ranks = comm.size();
     let local_buf = pack_scenario_stats(&local_stats_stripped);
-    let local_count = local_buf.len();
 
-    let send_len = [local_count as u64];
-    let mut all_lens = vec![0u64; n_ranks];
-    let len_counts: Vec<usize> = vec![1; n_ranks];
-    let len_displs: Vec<usize> = (0..n_ranks).collect();
-    comm.allgatherv(&send_len, &mut all_lens, &len_counts, &len_displs)
-        .map_err(|e| CliError::Internal {
-            message: format!("simulation solver stats length exchange error: {e}"),
-        })?;
-
-    let recv_counts: Vec<usize> = all_lens.iter().map(|&l| l as usize).collect();
-    let recv_displs: Vec<usize> = recv_counts
-        .iter()
-        .scan(0usize, |acc, &c| {
-            let d = *acc;
-            *acc += c;
-            Some(d)
-        })
-        .collect();
+    let (recv_counts, recv_displs) =
+        exchange_gather_plan(comm, local_buf.len(), "simulation solver stats")?;
     let total_floats: usize = recv_counts.iter().sum();
     let mut all_buf = vec![0.0_f64; total_floats];
     comm.allgatherv(&local_buf, &mut all_buf, &recv_counts, &recv_displs)

@@ -106,14 +106,14 @@ pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext)
             && hydro.min_outflow_m3s > max_outflow
         {
             ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/hydros.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: min_outflow_m3s ({}) > max_outflow_m3s ({}); outflow bounds are inconsistent",
-                        hydro.min_outflow_m3s, max_outflow
-                    ),
-                );
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: min_outflow_m3s ({}) > max_outflow_m3s ({}); outflow bounds are inconsistent",
+                    hydro.min_outflow_m3s, max_outflow
+                ),
+            );
         }
 
         if hydro.min_generation_mw > hydro.max_generation_mw {
@@ -752,10 +752,10 @@ pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationCon
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use crate::FphaHyperplaneRow;
     use crate::constraints::HydroBoundsRow;
+    use crate::test_support::*;
     use crate::validation::{ErrorKind, ValidationContext};
     use chrono::NaiveDate;
     use cobre_core::DiversionChannel;

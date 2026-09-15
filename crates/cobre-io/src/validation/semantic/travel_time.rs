@@ -449,9 +449,9 @@ fn check_defluence_coverage(
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::*;
     use crate::stages::StagesData;
+    use crate::test_support::*;
     use cobre_core::entities::Hydro;
     use cobre_core::temporal::{Block, PolicyGraphType, Stage};
     use cobre_core::{EntityId, HorizonGraph, HydroPastDefluence};

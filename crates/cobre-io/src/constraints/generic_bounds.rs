@@ -39,13 +39,12 @@
 //! - At-least-one-endpoint-present and `bound_upper >= bound_lower` (referential).
 
 use arrow::array::Array;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
 use crate::parquet_helpers::{
     extract_optional_float64, extract_optional_int32, extract_required_int32,
+    open_record_batch_reader,
 };
 
 /// A single row from `constraints/generic_constraint_bounds.parquet`.
@@ -110,14 +109,7 @@ pub struct GenericConstraintBoundsRow {
 pub fn parse_generic_constraint_bounds(
     path: &Path,
 ) -> Result<Vec<GenericConstraintBoundsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<GenericConstraintBoundsRow> = Vec::new();
 
@@ -180,7 +172,6 @@ pub fn parse_generic_constraint_bounds(
         }
     }
 
-    // None block (= applies to all blocks) sorts before Some.
     rows.sort_by(|a, b| {
         a.constraint_id
             .cmp(&b.constraint_id)
@@ -208,12 +199,11 @@ pub fn parse_generic_constraint_bounds(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -232,15 +222,6 @@ mod tests {
             Field::new("constraint_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
         ]))
-    }
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
     }
 
     /// Build a full 5-column batch: `constraint_id`, `stage_id`, `block_id`,

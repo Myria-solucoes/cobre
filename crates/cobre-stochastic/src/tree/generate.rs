@@ -383,13 +383,11 @@ pub fn generate_opening_tree<'a>(
 mod tests {
     use std::collections::BTreeMap;
 
-    use chrono::NaiveDate;
     use cobre_core::{
         EntityId, Stage,
         scenario::{CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile},
-        temporal::{
-            BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
-        },
+        temporal::{NoiseMethod, ScenarioSourceConfig},
+        test_support::StageSpec,
     };
 
     use crate::{
@@ -409,24 +407,17 @@ mod tests {
         branching_factor: usize,
         noise_method: NoiseMethod,
     ) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            index: Some(index),
             season_id: Some(0),
-            blocks: vec![],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
+            blocks: Vec::new(),
             scenario_config: ScenarioSourceConfig {
                 branching_factor,
                 noise_method,
             },
-        }
+            ..Default::default()
+        })
     }
 
     fn identity_correlation(entity_ids: &[i32]) -> DecomposedCorrelation {

@@ -57,7 +57,7 @@ use crate::{
     sampling::historical::HistoricalScenarioLibrary,
     tree::{
         generate::{ClassDimensions, OpeningTreeGenerationInputs, generate_opening_tree},
-        opening_tree::{OpeningTreeView, SweepDirection},
+        opening_tree::OpeningTreeView,
     },
 };
 
@@ -305,7 +305,7 @@ impl StochasticContext {
     }
 
     /// Install a per-stage opening solve order, sorting each stage's openings by
-    /// `keys[s]` in `direction` (see [`OpeningTree::set_solve_order`]). Keys are
+    /// descending `keys[s]` (see [`OpeningTree::set_solve_order`]). Keys are
     /// caller-computed from setup-constant data, so the order is run-constant and
     /// identical across processes handed the same keys.
     ///
@@ -314,12 +314,8 @@ impl StochasticContext {
     /// Propagates [`StochasticError::InsufficientData`]
     /// when the key table's stage count or any stage's key count does not match
     /// the tree.
-    pub fn set_solve_order(
-        &mut self,
-        keys: &[Vec<f64>],
-        direction: SweepDirection,
-    ) -> Result<(), StochasticError> {
-        self.opening_tree.set_solve_order(keys, direction)
+    pub fn set_solve_order(&mut self, keys: &[Vec<f64>]) -> Result<(), StochasticError> {
+        self.opening_tree.set_solve_order(keys)
     }
 
     /// Returns the base seed used to generate the opening tree.
@@ -590,8 +586,6 @@ fn external_ar0_inflow_models(
 ///   with zero standard deviation.
 /// - [`StochasticError::InvalidCorrelation`]: the correlation model is empty,
 ///   ambiguous, or contains an invalid matrix.
-/// - [`StochasticError::SpectralDecompositionFailed`]: a correlation matrix
-///   is not positive-definite.
 ///
 /// [`LoadModel`]: cobre_core::scenario::LoadModel
 // Rationale: extracting sub-steps would thread the same partially-built context
@@ -613,7 +607,7 @@ pub fn build_stochastic_context(
         external_scenario_counts,
         noise_group_ids,
     } = opening_tree_inputs;
-    let _report = validate_par_parameters(system.inflow_models())?;
+    validate_par_parameters(system.inflow_models())?;
 
     let study_stages: Vec<_> = system
         .stages()
@@ -796,109 +790,54 @@ pub fn build_stochastic_context(
 mod tests {
     use std::collections::BTreeMap;
 
-    use chrono::NaiveDate;
     use cobre_core::{
-        Bus, DeficitSegment, EntityId, SystemBuilder,
-        entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+        Bus, DeficitSegment, EntityId, Hydro, SystemBuilder,
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
             ExternalLoadRow, ExternalScenarioRow, InflowModel, LoadModel, NcsModel, SamplingScheme,
         },
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-            StageStateConfig,
-        },
+        temporal::{NoiseMethod, ScenarioSourceConfig, Stage},
+        test_support::{BusSpec, HydroSpec, StageSpec, single_block},
     };
 
     use super::{ClassSchemes, OpeningTreeInputs, build_stochastic_context, noise_entity_order};
     use crate::StochasticError;
 
     fn make_stage(index: usize, id: i32, branching_factor: usize) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            index: Some(index),
             season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
+            blocks: single_block("SINGLE", 744.0),
             scenario_config: ScenarioSourceConfig {
                 branching_factor,
                 noise_method: NoiseMethod::Saa,
             },
-        }
+            ..Default::default()
+        })
     }
 
     fn make_bus(id: i32) -> Bus {
-        Bus {
-            id: EntityId(id),
+        cobre_core::test_support::make_bus(BusSpec {
+            id,
             name: format!("Bus{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
             }],
-            excess_cost: 0.0,
-        }
+            ..Default::default()
+        })
     }
 
     fn make_hydro(id: i32) -> Hydro {
-        let mut hydro = Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
+        cobre_core::test_support::make_hydro(HydroSpec {
+            id,
             name: format!("H{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
             max_storage_hm3: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 0.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-        };
-        hydro.declare_mirror_unit_group(EntityId(0));
-        hydro
+            ..Default::default()
+        })
     }
 
     fn make_inflow_model(hydro_id: i32, stage_id: i32, std: f64, coeffs: Vec<f64>) -> InflowModel {

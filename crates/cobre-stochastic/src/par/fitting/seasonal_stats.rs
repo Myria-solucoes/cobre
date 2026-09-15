@@ -167,26 +167,31 @@ pub fn classify_history(observations: &[f64]) -> HistoryClass {
 /// Only entities in `entity_ids` are processed; others are silently ignored.
 /// Stages with `season_id = None` are skipped.
 ///
+/// When `season_map` is `Some`, historical observation dates that fall outside
+/// the study horizon are resolved to a season using the calendar-based cycle
+/// definition. This allows PAR estimation from inflow history that predates
+/// the study period.
+///
 /// # Parameters
 ///
 /// - `observations` — `(entity_id, date, value)` triples, sorted by
 ///   `(entity_id, date)` (parser guarantee).
 /// - `stages` — all stages in canonical index order; `end_date` is exclusive.
 /// - `entity_ids` — canonical sorted list of entity IDs to estimate for.
+/// - `season_map` — optional [`SeasonMap`] fallback for dates outside the study horizon.
 ///
 /// # Errors
 ///
-/// [`StochasticError::InsufficientData`] when a `(entity, season)` group has
-/// fewer than 2 observations (a single-sample bucket would propagate zeros into
-/// every downstream correlation), or when an observation date falls outside
-/// every stage's date range.
+/// Returns [`StochasticError::InsufficientData`] when an observation date
+/// cannot be mapped to any season, or when fewer than 2 observations exist
+/// for any `(entity, season)` group.
 ///
 /// # Examples
 ///
 /// ```
 /// use chrono::NaiveDate;
 /// use cobre_core::{EntityId, temporal::{Stage, Block, BlockMode, StageStateConfig, StageRiskConfig, ScenarioSourceConfig, NoiseMethod}};
-/// use cobre_stochastic::par::fitting::estimate_seasonal_stats;
+/// use cobre_stochastic::par::fitting::estimate_seasonal_stats_with_season_map;
 ///
 /// fn stage(id: i32, y0: i32, m0: u32, y1: i32, m1: u32, season: usize) -> Stage {
 ///     Stage {
@@ -214,30 +219,10 @@ pub fn classify_history(observations: &[f64]) -> HistoryClass {
 ///     (EntityId::from(1), NaiveDate::from_ymd_opt(2020, 2, 20).unwrap(), 250.0),
 /// ];
 /// let entity_ids = vec![EntityId::from(1)];
-/// let stats = estimate_seasonal_stats(&obs, &stages, &entity_ids).unwrap();
+/// let stats = estimate_seasonal_stats_with_season_map(&obs, &stages, &entity_ids, None).unwrap();
 /// assert_eq!(stats.len(), 2);
 /// assert!((stats[0].mean - 150.0).abs() < 1e-10);
 /// ```
-pub fn estimate_seasonal_stats(
-    observations: &[(EntityId, NaiveDate, f64)],
-    stages: &[Stage],
-    entity_ids: &[EntityId],
-) -> Result<Vec<SeasonalStats>, StochasticError> {
-    estimate_seasonal_stats_with_season_map(observations, stages, entity_ids, None)
-}
-
-/// Estimate seasonal statistics with an optional [`SeasonMap`] fallback.
-///
-/// When `season_map` is `Some`, historical observation dates that fall outside
-/// the study horizon are resolved to a season using the calendar-based cycle
-/// definition. This allows PAR estimation from inflow history that predates
-/// the study period.
-///
-/// # Errors
-///
-/// Returns [`StochasticError::InsufficientData`] when an observation date
-/// cannot be mapped to any season, or when fewer than 2 observations exist
-/// for any `(entity, season)` group.
 pub fn estimate_seasonal_stats_with_season_map(
     observations: &[(EntityId, NaiveDate, f64)],
     stages: &[Stage],
@@ -312,8 +297,6 @@ pub fn estimate_seasonal_stats_with_season_map(
         let variance = values.iter().map(|&v| (v - mean) * (v - mean)).sum::<f64>() / n as f64;
         let std = variance.sqrt();
 
-        // Degenerate buckets get the forced (constant, 0) override (see
-        // HistoryClass); Default keeps the empirical (mean, std) above.
         let (final_mean, final_std) = classify_history(&values)
             .stats_override()
             .unwrap_or((mean, std));

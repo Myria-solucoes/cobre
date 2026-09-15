@@ -4,7 +4,7 @@
 //! temporary case directory, a synthetic `inflow_history.parquet`, and minimal
 //! supporting files. Stages span the full history period so every observation
 //! date falls within a stage's `[start_date, end_date)` range, which
-//! `estimate_seasonal_stats` requires.
+//! seasonal-statistics estimation requires.
 
 #![allow(
     clippy::unwrap_used,
@@ -444,15 +444,15 @@ const STAT_RELATIVE_TOLERANCE: f64 = 0.10;
 /// Generate an interleaved PAR(1) time series for two seasons, identical mean,
 /// std, and phi for both.
 ///
-/// The generative model is the cross-season form matching
-/// `estimate_ar_coefficients`, where `x_{t-1}` is the IMMEDIATELY preceding
+/// The generative model is the cross-season form the estimation path fits,
+/// where `x_{t-1}` is the IMMEDIATELY preceding
 /// observation (from the previous season):
 ///
 /// `(x_t,s - mu) / sigma = phi * (x_{t-1,s-1} - mu) / sigma + sqrt(1 - phi^2) * eps_t`
 ///
 /// Returns `2 * n_per_season` values alternating between the two seasons
-/// (`[s0_0, s1_0, s0_1, s1_1, ...]`) — the chronological ordering the lag-lookup
-/// in `estimate_ar_coefficients` requires.
+/// (`[s0_0, s1_0, s0_1, s1_1, ...]`) — the chronological ordering the lag
+/// lookup requires.
 fn generate_par1_interleaved(
     mean: f64,
     std: f64,
@@ -487,8 +487,8 @@ fn generate_par1_interleaved(
 /// season 0, February season 1, dated the 15th to fall within their stage windows).
 ///
 /// The Jan2000, Feb2000, Jan2001, ... chronological ordering ensures the lag-1
-/// lookup in `estimate_ar_coefficients` (which looks `lag` positions back in the
-/// sorted-by-date observations) finds the cross-season predecessor PAR(1) needs.
+/// lookup (which looks `lag` positions back in the sorted-by-date observations)
+/// finds the cross-season predecessor PAR(1) needs.
 fn write_par1_inflow_history(path: &Path, n_hydros: usize) {
     let schema = inflow_history_schema();
 

@@ -11,15 +11,10 @@
     clippy::cast_precision_loss
 )]
 
-use chrono::NaiveDate;
 use cobre_core::{
-    Bus, DeficitSegment, EntityId, SystemBuilder,
-    entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+    EntityId, Hydro, SystemBuilder,
     scenario::{InflowModel, SamplingScheme},
-    temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
-    },
+    temporal::{NoiseMethod, ScenarioSourceConfig, Stage},
 };
 use cobre_stochastic::tree::generate::OpeningTreeGenerationInputs;
 use cobre_stochastic::{
@@ -29,149 +24,43 @@ use cobre_stochastic::{
 };
 
 mod common;
-use common::{correlated_correlation, identity_correlation, identity_correlation_model};
+use common::{
+    StageSpec, correlated_correlation, default_inflow_model, deficit_bus, identity_correlation,
+    identity_correlation_model, make_stage, norm_cdf, single_block, sized_hydro,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers shared across tests
 // ---------------------------------------------------------------------------
 
-/// Approximate `erf(x)` using the Horner-form rational approximation
-/// (Abramowitz & Stegun 7.1.26, max error 1.5e-7).
-fn approx_erf(x: f64) -> f64 {
-    let sign = if x < 0.0 { -1.0_f64 } else { 1.0_f64 };
-    let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
-    let poly = t
-        * (0.254_829_592
-            + t * (-0.284_496_736
-                + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
-    sign * (1.0 - poly * (-x * x).exp())
-}
-
-fn norm_cdf(z: f64) -> f64 {
-    0.5 * (1.0 + approx_erf(z / std::f64::consts::SQRT_2))
-}
-
 /// No blocks — for direct use with `generate_opening_tree`.
 fn make_stage_halton(index: usize, id: i32, branching_factor: usize) -> Stage {
-    Stage {
-        index,
+    make_stage(StageSpec {
         id,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        index: Some(index),
         season_id: Some(0),
-        blocks: vec![],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
-        },
-        risk_config: StageRiskConfig::Expectation,
+        blocks: Vec::new(),
         scenario_config: ScenarioSourceConfig {
             branching_factor,
             noise_method: NoiseMethod::QmcHalton,
         },
-    }
+        ..Default::default()
+    })
 }
 
 /// One block — for use with `build_stochastic_context`.
 fn make_stage_halton_with_block(index: usize, id: i32, branching_factor: usize) -> Stage {
-    Stage {
-        index,
+    make_stage(StageSpec {
         id,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        index: Some(index),
         season_id: Some(0),
-        blocks: vec![Block {
-            index: 0,
-            name: "SINGLE".to_string(),
-            duration_hours: 744.0,
-        }],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
-        },
-        risk_config: StageRiskConfig::Expectation,
+        blocks: single_block("SINGLE", 744.0),
         scenario_config: ScenarioSourceConfig {
             branching_factor,
             noise_method: NoiseMethod::QmcHalton,
         },
-    }
-}
-
-fn make_bus(id: i32) -> Bus {
-    Bus {
-        id: EntityId(id),
-        name: format!("Bus{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1000.0,
-        }],
-        excess_cost: 0.0,
-    }
-}
-
-fn make_hydro(id: i32) -> Hydro {
-    let mut hydro = Hydro {
-        unit_groups: Vec::new(),
-        id: EntityId(id),
-        name: format!("H{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        downstream_id: None,
-        travel_time_hours: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        },
-    };
-    hydro.declare_mirror_unit_group(EntityId(0));
-    hydro
-}
-
-fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
-    InflowModel {
-        hydro_id: EntityId(hydro_id),
-        stage_id,
-        mean_m3s: 100.0,
-        std_m3s: 30.0,
-        ar_coefficients: vec![],
-        residual_std_ratio: 1.0,
-        annual: None,
-    }
+        ..Default::default()
+    })
 }
 
 fn build_halton_context(
@@ -194,12 +83,12 @@ fn build_halton_context(
     let mut inflow_models: Vec<InflowModel> = Vec::new();
     for &hid in &hydro_ids {
         for &sid in &[0_i32, 1, 2] {
-            inflow_models.push(make_inflow_model(hid, sid));
+            inflow_models.push(default_inflow_model(hid, sid));
         }
     }
 
     let system = SystemBuilder::new()
-        .buses(vec![make_bus(0)])
+        .buses(vec![deficit_bus(0)])
         .hydros(hydros)
         .stages(stages)
         .inflow_models(inflow_models)
@@ -386,8 +275,8 @@ fn halton_correlation_applied() {
 fn halton_declaration_order_invariant() {
     let n_openings = 30_usize;
 
-    let hydros_fwd = vec![make_hydro(1), make_hydro(2)];
-    let hydros_rev = vec![make_hydro(2), make_hydro(1)];
+    let hydros_fwd = vec![sized_hydro(1), sized_hydro(2)];
+    let hydros_rev = vec![sized_hydro(2), sized_hydro(1)];
 
     let ctx_fwd = build_halton_context(hydros_fwd, n_openings, 42);
     let ctx_rev = build_halton_context(hydros_rev, n_openings, 42);

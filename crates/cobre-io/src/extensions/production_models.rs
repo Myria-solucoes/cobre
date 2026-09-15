@@ -552,52 +552,14 @@ fn validate_production_models(
             }
             RawSelectionMode::Seasonal { seasons, .. } => {
                 for (season_idx, season) in seasons.iter().enumerate() {
-                    let field_base = format!(
-                        "production_models[{entry_idx}].seasons[{season_idx}].productivity_mw_per_m3s"
-                    );
-
-                    if season.model == "fpha" && season.productivity_mw_per_m3s.is_some() {
-                        return Err(LoadError::SchemaError {
-                            path: path.to_path_buf(),
-                            field: field_base,
-                            message: "productivity_mw_per_m3s must not be set when model is 'fpha'"
-                                .to_string(),
-                        });
-                    }
-
-                    // `0.0` is a planned-outage marker; reject only negative or non-finite.
-                    if season.model != "fpha"
-                        && let Some(val) = season.productivity_mw_per_m3s
-                        && (val < 0.0 || !val.is_finite())
-                    {
-                        return Err(LoadError::SchemaError {
-                            path: path.to_path_buf(),
-                            field: field_base,
-                            message: format!(
-                                "productivity_mw_per_m3s must be finite and non-negative, got {val}"
-                            ),
-                        });
-                    }
-
-                    if let Some(cfg) = &season.fpha_config {
-                        validate_fitting_window(
-                            cfg,
-                            &format!(
-                                "production_models[{entry_idx}].seasons[{season_idx}].fpha_config.fitting_window"
-                            ),
-                            path,
-                        )?;
-                    }
-
-                    if let Some(rv) = &season.reference_volume {
-                        validate_reference_volume(
-                            rv,
-                            &format!(
-                                "production_models[{entry_idx}].seasons[{season_idx}].reference_volume"
-                            ),
-                            path,
-                        )?;
-                    }
+                    validate_model_fields(
+                        &season.model,
+                        season.productivity_mw_per_m3s,
+                        season.fpha_config.as_ref(),
+                        season.reference_volume.as_ref(),
+                        &format!("production_models[{entry_idx}].seasons[{season_idx}]"),
+                        path,
+                    )?;
                 }
             }
         }
@@ -633,10 +595,29 @@ fn validate_stage_range(
         });
     }
 
-    let field_base =
-        format!("production_models[{entry_idx}].stage_ranges[{range_idx}].productivity_mw_per_m3s");
+    validate_model_fields(
+        &range.model,
+        range.productivity_mw_per_m3s,
+        range.fpha_config.as_ref(),
+        range.reference_volume.as_ref(),
+        &format!("production_models[{entry_idx}].stage_ranges[{range_idx}]"),
+        path,
+    )
+}
 
-    if range.model == "fpha" && range.productivity_mw_per_m3s.is_some() {
+/// Validate the model/productivity/`fpha_config`/`reference_volume` fields
+/// shared by a stage range and a season entry.
+fn validate_model_fields(
+    model: &str,
+    productivity_mw_per_m3s: Option<f64>,
+    fpha_config: Option<&RawFphaColumnLayout>,
+    reference_volume: Option<&RawReferenceVolume>,
+    field_prefix: &str,
+    path: &Path,
+) -> Result<(), LoadError> {
+    let field_base = format!("{field_prefix}.productivity_mw_per_m3s");
+
+    if model == "fpha" && productivity_mw_per_m3s.is_some() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: field_base,
@@ -645,8 +626,8 @@ fn validate_stage_range(
     }
 
     // `0.0` is a planned-outage marker; reject only negative or non-finite.
-    if range.model != "fpha"
-        && let Some(val) = range.productivity_mw_per_m3s
+    if model != "fpha"
+        && let Some(val) = productivity_mw_per_m3s
         && (val < 0.0 || !val.is_finite())
     {
         return Err(LoadError::SchemaError {
@@ -656,22 +637,16 @@ fn validate_stage_range(
         });
     }
 
-    if let Some(cfg) = &range.fpha_config {
+    if let Some(cfg) = fpha_config {
         validate_fitting_window(
             cfg,
-            &format!(
-                "production_models[{entry_idx}].stage_ranges[{range_idx}].fpha_config.fitting_window"
-            ),
+            &format!("{field_prefix}.fpha_config.fitting_window"),
             path,
         )?;
     }
 
-    if let Some(rv) = &range.reference_volume {
-        validate_reference_volume(
-            rv,
-            &format!("production_models[{entry_idx}].stage_ranges[{range_idx}].reference_volume"),
-            path,
-        )?;
+    if let Some(rv) = reference_volume {
+        validate_reference_volume(rv, &format!("{field_prefix}.reference_volume"), path)?;
     }
 
     Ok(())
@@ -909,16 +884,7 @@ fn convert_plane_reduction(raw: &RawPlaneReductionConfig) -> PlaneReductionConfi
 )]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    // ── helpers ───────────────────────────────────────────────────────────────
-
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
+    use crate::test_support::write_json;
 
     // ── AC: valid stage_ranges mode ───────────────────────────────────────────
 

@@ -12,10 +12,10 @@ use super::validate::{
 use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
-    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
-    NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal, ValidationError,
+    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NonControllableSource,
+    PostStudyStages, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
+    ValidationError,
 };
 
 /// Builder for constructing a validated, immutable [`System`].
@@ -452,16 +452,6 @@ impl SystemBuilder {
             return Err(errors);
         }
 
-        let network = NetworkTopology::build(
-            &self.buses,
-            &self.lines,
-            &self.hydros,
-            &self.thermals,
-            &self.non_controllable_sources,
-            &self.contracts,
-            &self.pumping_stations,
-        );
-
         let stage_index = build_stage_index(&self.stages);
 
         Ok(System {
@@ -480,7 +470,6 @@ impl SystemBuilder {
             contract_index,
             non_controllable_source_index,
             cascade,
-            network,
             stages: self.stages,
             policy_graph: self.policy_graph,
             stage_index,
@@ -535,81 +524,14 @@ pub(crate) fn check_canonical_order<T, K: Ord>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{BusSpec, HydroSpec, MirrorUnitGroup, make_bus, make_hydro};
     use crate::{
-        Block, BlockMode, DeficitSegment, HydroGenerationModel, HydroPenalties, NoiseMethod,
-        ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
+        Block, BlockMode, DeficitSegment, HydroPenalties, NoiseMethod, ScenarioSourceConfig,
+        StageRiskConfig, StageStateConfig,
     };
 
-    fn bus(id: i32) -> Bus {
-        Bus {
-            id: EntityId(id),
-            name: format!("bus-{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 5000.0,
-            }],
-            excess_cost: 0.0,
-        }
-    }
-
     pub(super) fn zero_penalties() -> HydroPenalties {
-        HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 0.0,
-        }
-    }
-
-    fn hydro_without_groups(
-        id: i32,
-        name: &str,
-        min_generation_mw: f64,
-        max_generation_mw: f64,
-        min_turbined_m3s: f64,
-        max_turbined_m3s: f64,
-    ) -> Hydro {
-        Hydro {
-            id: EntityId(id),
-            name: name.to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 1000.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s,
-            max_turbined_m3s,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw,
-            max_generation_mw,
-            unit_groups: Vec::new(),
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: zero_penalties(),
-        }
+        HydroPenalties::uniform(0.0)
     }
 
     /// Given two hydros with no declared `unit_groups`, `build()` returns `Err`
@@ -617,11 +539,52 @@ mod tests {
     /// proving errors are collected rather than short-circuited on the first.
     #[test]
     fn test_builder_rejects_hydro_with_no_unit_groups() {
-        let alpha = hydro_without_groups(1, "AlphaPlant", 10.0, 90.0, 5.0, 200.0);
-        let beta = hydro_without_groups(2, "BetaPlant", 25.0, 150.0, 15.0, 300.0);
+        let alpha = make_hydro(HydroSpec {
+            id: 1,
+            name: "AlphaPlant".to_string(),
+            max_storage_hm3: 1000.0,
+            min_generation_mw: 10.0,
+            max_generation_mw: 90.0,
+            min_turbined_m3s: 5.0,
+            max_turbined_m3s: 200.0,
+            penalties: zero_penalties(),
+            mirror_unit_group: MirrorUnitGroup::None,
+            ..Default::default()
+        });
+        let beta = make_hydro(HydroSpec {
+            id: 2,
+            name: "BetaPlant".to_string(),
+            max_storage_hm3: 1000.0,
+            min_generation_mw: 25.0,
+            max_generation_mw: 150.0,
+            min_turbined_m3s: 15.0,
+            max_turbined_m3s: 300.0,
+            penalties: zero_penalties(),
+            mirror_unit_group: MirrorUnitGroup::None,
+            ..Default::default()
+        });
 
         let result = SystemBuilder::new()
-            .buses(vec![bus(10), bus(20)])
+            .buses(vec![
+                make_bus(BusSpec {
+                    id: 10,
+                    name: format!("bus-{}", 10),
+                    deficit_segments: vec![DeficitSegment {
+                        depth_mw: None,
+                        cost_per_mwh: 5000.0,
+                    }],
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 20,
+                    name: format!("bus-{}", 20),
+                    deficit_segments: vec![DeficitSegment {
+                        depth_mw: None,
+                        cost_per_mwh: 5000.0,
+                    }],
+                    ..Default::default()
+                }),
+            ])
             .hydros(vec![alpha, beta])
             .build();
 
@@ -641,12 +604,53 @@ mod tests {
     /// filter discriminates rather than rejecting every hydro unconditionally.
     #[test]
     fn test_builder_reports_only_the_hydro_missing_unit_groups() {
-        let mut alpha = hydro_without_groups(1, "AlphaPlant", 10.0, 90.0, 5.0, 200.0);
+        let mut alpha = make_hydro(HydroSpec {
+            id: 1,
+            name: "AlphaPlant".to_string(),
+            max_storage_hm3: 1000.0,
+            min_generation_mw: 10.0,
+            max_generation_mw: 90.0,
+            min_turbined_m3s: 5.0,
+            max_turbined_m3s: 200.0,
+            penalties: zero_penalties(),
+            mirror_unit_group: MirrorUnitGroup::None,
+            ..Default::default()
+        });
         alpha.declare_mirror_unit_group(EntityId(10));
-        let beta = hydro_without_groups(2, "BetaPlant", 25.0, 150.0, 15.0, 300.0);
+        let beta = make_hydro(HydroSpec {
+            id: 2,
+            name: "BetaPlant".to_string(),
+            max_storage_hm3: 1000.0,
+            min_generation_mw: 25.0,
+            max_generation_mw: 150.0,
+            min_turbined_m3s: 15.0,
+            max_turbined_m3s: 300.0,
+            penalties: zero_penalties(),
+            mirror_unit_group: MirrorUnitGroup::None,
+            ..Default::default()
+        });
 
         let result = SystemBuilder::new()
-            .buses(vec![bus(10), bus(20)])
+            .buses(vec![
+                make_bus(BusSpec {
+                    id: 10,
+                    name: format!("bus-{}", 10),
+                    deficit_segments: vec![DeficitSegment {
+                        depth_mw: None,
+                        cost_per_mwh: 5000.0,
+                    }],
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 20,
+                    name: format!("bus-{}", 20),
+                    deficit_segments: vec![DeficitSegment {
+                        depth_mw: None,
+                        cost_per_mwh: 5000.0,
+                    }],
+                    ..Default::default()
+                }),
+            ])
             .hydros(vec![alpha, beta])
             .build();
 
@@ -822,10 +826,12 @@ mod tests {
 #[cfg(test)]
 mod proptests {
     use super::*;
-    use crate::{
-        Block, BlockMode, ConstraintExpression, ContractType, DeficitSegment, HydroGenerationModel,
-        NoiseMethod, ScenarioSourceConfig, SlackConfig, StageRiskConfig, StageStateConfig,
+    use crate::test_support::{
+        BusSpec, ContractSpec, HydroSpec, LineSpec, NcsSpec, PumpingSpec, StageSpec, ThermalSpec,
+        make_bus, make_contract, make_hydro, make_line, make_ncs, make_pumping_station, make_stage,
+        make_thermal,
     };
+    use crate::{ConstraintExpression, ContractType, DeficitSegment, SlackConfig};
     use proptest::prelude::*;
 
     fn date_early() -> NaiveDate {
@@ -834,166 +840,6 @@ mod proptests {
 
     fn date_late() -> NaiveDate {
         NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date")
-    }
-
-    fn bus(id: i32, name: &str, date: NaiveDate) -> Bus {
-        Bus {
-            id: EntityId(id),
-            name: name.to_string(),
-            operational_start_date: date,
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 5000.0,
-            }],
-            excess_cost: 0.0,
-        }
-    }
-
-    fn line(id: i32, name: &str, date: NaiveDate, source_bus: i32, target_bus: i32) -> Line {
-        Line {
-            id: EntityId(id),
-            name: name.to_string(),
-            operational_start_date: date,
-            source_bus_id: EntityId(source_bus),
-            target_bus_id: EntityId(target_bus),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            direct_capacity_mw: 100.0,
-            reverse_capacity_mw: 100.0,
-            losses_percent: 0.0,
-            exchange_cost: 0.0,
-        }
-    }
-
-    fn hydro(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> Hydro {
-        let mut hydro = Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
-            name: name.to_string(),
-            operational_start_date: date,
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 1000.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: super::tests::zero_penalties(),
-        };
-        hydro.declare_mirror_unit_group(EntityId(bus_id));
-        hydro
-    }
-
-    fn thermal(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> Thermal {
-        Thermal {
-            id: EntityId(id),
-            name: name.to_string(),
-            operational_start_date: date,
-            bus_id: EntityId(bus_id),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            cost_per_mwh: 10.0,
-            min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
-            anticipated_config: None,
-        }
-    }
-
-    fn pumping(
-        id: i32,
-        name: &str,
-        date: NaiveDate,
-        bus_id: i32,
-        source_hydro: i32,
-        destination_hydro: i32,
-    ) -> PumpingStation {
-        PumpingStation {
-            id: EntityId(id),
-            name: name.to_string(),
-            operational_start_date: date,
-            bus_id: EntityId(bus_id),
-            source_hydro_id: EntityId(source_hydro),
-            destination_hydro_id: EntityId(destination_hydro),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            consumption_mw_per_m3s: 0.5,
-            min_flow_m3s: 0.0,
-            max_flow_m3s: 100.0,
-        }
-    }
-
-    fn contract(
-        id: i32,
-        name: &str,
-        date: NaiveDate,
-        bus_id: i32,
-        contract_type: ContractType,
-    ) -> EnergyContract {
-        EnergyContract {
-            id: EntityId(id),
-            name: name.to_string(),
-            operational_start_date: date,
-            bus_id: EntityId(bus_id),
-            contract_type,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            price_per_mwh: 100.0,
-            min_mw: 0.0,
-            max_mw: 100.0,
-        }
-    }
-
-    fn ncs(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> NonControllableSource {
-        NonControllableSource {
-            id: EntityId(id),
-            name: name.to_string(),
-            operational_start_date: date,
-            bus_id: EntityId(bus_id),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            max_generation_mw: 100.0,
-            allow_curtailment: true,
-            curtailment_cost: 0.0,
-        }
-    }
-
-    fn stage(id: i32) -> Stage {
-        Stage {
-            index: 0,
-            id,
-            start_date: date_early(),
-            end_date: date_late(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "B0".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
     }
 
     fn generic_constraint(id: i32) -> GenericConstraint {
@@ -1018,53 +864,190 @@ mod proptests {
     // sees. Cross-references resolve: bus ids {1,2,3}, hydro ids {1,2}.
     fn reference_buses() -> Vec<Bus> {
         vec![
-            bus(1, "B", date_late()),
-            bus(2, "Z", date_early()),
-            bus(3, "A", date_early()),
+            make_bus(BusSpec {
+                id: 1,
+                name: "B".to_string(),
+                operational_start_date: date_late(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 5000.0,
+                }],
+                ..Default::default()
+            }),
+            make_bus(BusSpec {
+                id: 2,
+                name: "Z".to_string(),
+                operational_start_date: date_early(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 5000.0,
+                }],
+                ..Default::default()
+            }),
+            make_bus(BusSpec {
+                id: 3,
+                name: "A".to_string(),
+                operational_start_date: date_early(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 5000.0,
+                }],
+                ..Default::default()
+            }),
         ]
     }
 
     fn reference_lines() -> Vec<Line> {
         vec![
-            line(1, "LB", date_late(), 1, 2),
-            line(2, "LA", date_early(), 2, 3),
+            make_line(LineSpec {
+                id: 1,
+                name: "LB".to_string(),
+                operational_start_date: date_late(),
+                source_bus_id: 1,
+                target_bus_id: 2,
+                ..Default::default()
+            }),
+            make_line(LineSpec {
+                id: 2,
+                name: "LA".to_string(),
+                operational_start_date: date_early(),
+                source_bus_id: 2,
+                target_bus_id: 3,
+                ..Default::default()
+            }),
         ]
     }
 
     fn reference_hydros() -> Vec<Hydro> {
         vec![
-            hydro(1, "HB", date_late(), 1),
-            hydro(2, "HA", date_early(), 2),
+            make_hydro(HydroSpec {
+                id: 1,
+                name: "HB".to_string(),
+                operational_start_date: date_late(),
+                bus_id: 1,
+                max_storage_hm3: 1000.0,
+                max_turbined_m3s: 100.0,
+                max_generation_mw: 100.0,
+                penalties: super::tests::zero_penalties(),
+                ..Default::default()
+            }),
+            make_hydro(HydroSpec {
+                id: 2,
+                name: "HA".to_string(),
+                operational_start_date: date_early(),
+                bus_id: 2,
+                max_storage_hm3: 1000.0,
+                max_turbined_m3s: 100.0,
+                max_generation_mw: 100.0,
+                penalties: super::tests::zero_penalties(),
+                ..Default::default()
+            }),
         ]
     }
 
     fn reference_thermals() -> Vec<Thermal> {
         vec![
-            thermal(1, "TB", date_late(), 1),
-            thermal(2, "TA", date_early(), 3),
+            make_thermal(ThermalSpec {
+                id: 1,
+                name: "TB".to_string(),
+                operational_start_date: date_late(),
+                bus_id: 1,
+                cost_per_mwh: 10.0,
+                ..Default::default()
+            }),
+            make_thermal(ThermalSpec {
+                id: 2,
+                name: "TA".to_string(),
+                operational_start_date: date_early(),
+                bus_id: 3,
+                cost_per_mwh: 10.0,
+                ..Default::default()
+            }),
         ]
     }
 
     fn reference_pumping() -> Vec<PumpingStation> {
         vec![
-            pumping(1, "PB", date_late(), 1, 1, 2),
-            pumping(2, "PA", date_early(), 2, 2, 1),
+            make_pumping_station(PumpingSpec {
+                id: 1,
+                name: "PB".to_string(),
+                operational_start_date: date_late(),
+                bus_id: 1,
+                source_hydro_id: 1,
+                destination_hydro_id: 2,
+                max_flow_m3s: 100.0,
+            }),
+            make_pumping_station(PumpingSpec {
+                id: 2,
+                name: "PA".to_string(),
+                operational_start_date: date_early(),
+                bus_id: 2,
+                source_hydro_id: 2,
+                destination_hydro_id: 1,
+                max_flow_m3s: 100.0,
+            }),
         ]
     }
 
     fn reference_contracts() -> Vec<EnergyContract> {
         vec![
-            contract(1, "CB", date_late(), 1, ContractType::Import),
-            contract(2, "CA", date_early(), 2, ContractType::Export),
+            make_contract(ContractSpec {
+                id: 1,
+                name: "CB".to_string(),
+                operational_start_date: date_late(),
+                bus_id: 1,
+                contract_type: ContractType::Import,
+                price_per_mwh: 100.0,
+                ..Default::default()
+            }),
+            make_contract(ContractSpec {
+                id: 2,
+                name: "CA".to_string(),
+                operational_start_date: date_early(),
+                bus_id: 2,
+                contract_type: ContractType::Export,
+                price_per_mwh: 100.0,
+                ..Default::default()
+            }),
         ]
     }
 
     fn reference_ncs() -> Vec<NonControllableSource> {
-        vec![ncs(1, "NB", date_late(), 1), ncs(2, "NA", date_early(), 3)]
+        vec![
+            make_ncs(NcsSpec {
+                id: 1,
+                name: "NB".to_string(),
+                operational_start_date: date_late(),
+                bus_id: 1,
+                max_generation_mw: 100.0,
+                ..Default::default()
+            }),
+            make_ncs(NcsSpec {
+                id: 2,
+                name: "NA".to_string(),
+                operational_start_date: date_early(),
+                bus_id: 3,
+                max_generation_mw: 100.0,
+                ..Default::default()
+            }),
+        ]
     }
 
     fn reference_stages() -> Vec<Stage> {
-        vec![stage(3), stage(1), stage(2)]
+        vec![
+            make_stage(StageSpec {
+                id: 3,
+                ..Default::default()
+            }),
+            make_stage(StageSpec {
+                id: 1,
+                ..Default::default()
+            }),
+            make_stage(StageSpec {
+                id: 2,
+                ..Default::default()
+            }),
+        ]
     }
 
     fn reference_generic_constraints() -> Vec<GenericConstraint> {

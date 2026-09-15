@@ -1,11 +1,9 @@
-//! Topology representations for cascade and transmission network structures.
+//! Topology representations for the hydro cascade structure.
 //!
-//! The topology sub-modules define resolved, validated representations of the
-//! hydro cascade chain and the electrical transmission network. Both are built
-//! during case loading and stored on the [`crate::system`] struct.
+//! The topology sub-module defines a resolved, validated representation of
+//! the hydro cascade chain, built during case loading and stored on the
+//! [`crate::system`] struct.
 
 pub mod cascade;
-pub mod network;
 
 pub use cascade::CascadeTopology;
-pub use network::{BusGenerators, BusLineConnection, BusLoads, NetworkTopology};

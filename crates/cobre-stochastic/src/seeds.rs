@@ -150,12 +150,10 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         EntityId,
-        entities::hydro::{HydroGenerationModel, HydroPenalties},
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
-            StageRiskConfig, StageStateConfig,
-        },
+        test_support::{HydroSpec, MirrorUnitGroup, StageSpec, date, single_block},
     };
+
+    use crate::test_support::{MonthlyLabels, monthly_season_map, weekly_season_map};
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -168,116 +166,34 @@ mod tests {
         season_id: Option<usize>,
     ) -> Stage {
         let days = u32::try_from((end - start).num_days()).unwrap();
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id: i32::try_from(index).unwrap(),
+            index: Some(index),
             start_date: start,
             end_date: end,
             season_id,
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: f64::from(days) * 24.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
-    }
-
-    fn monthly_season_map() -> SeasonMap {
-        let seasons: Vec<SeasonDefinition> = (0..12u32)
-            .map(|i| SeasonDefinition {
-                id: i as usize,
-                label: format!("Month{}", i + 1),
-                month_start: i + 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        }
-    }
-
-    fn weekly_season_map() -> SeasonMap {
-        let seasons: Vec<SeasonDefinition> = (0..52u32)
-            .map(|i| SeasonDefinition {
-                id: i as usize,
-                label: format!("Week{}", i + 1),
-                month_start: 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        SeasonMap {
-            cycle_type: SeasonCycleType::Weekly,
-            seasons,
-        }
+            blocks: single_block("SINGLE", f64::from(days) * 24.0),
+            ..Default::default()
+        })
     }
 
     fn make_hydro(id: i32) -> Hydro {
-        Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
+        cobre_core::test_support::make_hydro(HydroSpec {
+            id,
             name: format!("H{id}"),
-            operational_start_date: d(2020, 1, 1),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
             max_storage_hm3: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 0.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-        }
+            operational_start_date: date(2020, 1, 1),
+            mirror_unit_group: MirrorUnitGroup::None,
+            ..Default::default()
+        })
     }
 
     #[test]
     #[allow(clippy::float_cmp)] // full-coverage windows make cast's weighted-value/overlap ratio bit-exact
     fn test_derive_inflow_seeds_full_coverage_matches_positional_lags() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let first_stage = make_stage(0, d(2026, 4, 1), d(2026, 5, 1), Some(3));
         let hydros = vec![make_hydro(1)];
         let record = vec![
@@ -311,7 +227,7 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)] // whole-day-hours coverage ratio and its product with rate are bit-exact
     fn test_derive_inflow_seeds_partial_inprogress_accumulator() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let first_stage = make_stage(0, d(2026, 4, 11), d(2026, 5, 2), Some(3));
         let hydros = vec![make_hydro(1)];
         let rate = 500.0;
@@ -335,7 +251,7 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)] // derivation and the hand-computed merge_layered_windows call share the same operand order, so the ratios are bit-identical
     fn test_derive_inflow_seeds_conditioning_shadows_record() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let first_stage = make_stage(0, d(2026, 4, 1), d(2026, 5, 1), Some(3));
         let hydros = vec![make_hydro(7)];
         let record = vec![InflowHistoryRow {
@@ -383,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_derive_inflow_seeds_guard_conditions_return_zero() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let first_stage = make_stage(0, d(2026, 4, 1), d(2026, 5, 1), Some(3));
         let hydros = vec![make_hydro(1)];
         let l_state = 2;
@@ -440,15 +356,13 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)] // full-coverage window whole-day-hours arithmetic keeps the value bit-exact
     fn test_seed_correct_under_staggered_commissioning_dates() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let first_stage = make_stage(0, d(2026, 4, 1), d(2026, 5, 1), Some(3));
 
         let mut hydro_1_earlier = make_hydro(1);
         hydro_1_earlier.operational_start_date = d(2024, 1, 1);
         let mut hydro_0_later = make_hydro(0);
         hydro_0_later.operational_start_date = d(2025, 6, 1);
-        // Canonical order: hydro id=1 (earlier date) at position 0, hydro
-        // id=0 (later date) at position 1 — id-descending, not id-ascending.
         let hydros = vec![hydro_1_earlier, hydro_0_later];
 
         let record = vec![

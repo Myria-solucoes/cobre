@@ -542,7 +542,6 @@ pub struct SimulationParquetWriter {
     /// non-contiguous.
     loss_factors: HashMap<i32, f64>,
     scenarios_written: u32,
-    partitions_written: Vec<String>,
     /// One row per `(scenario, stage)` visited, accumulated across every
     /// `write_scenario` call; drained by [`Self::path_rows`] into the run-level
     /// `paths.parquet` after the scenario stream closes.
@@ -583,44 +582,39 @@ impl SimulationParquetWriter {
             .map(|l| (l.id.0, 1.0 - l.losses_percent / 100.0))
             .collect();
 
+        let create_subdir = |name: &str| -> Result<(), OutputError> {
+            let dir = sim_dir.join(name);
+            std::fs::create_dir_all(&dir).map_err(|e| OutputError::io(&dir, e))
+        };
+
         // costs is unconditional (every system has stages); siblings gate on count > 0.
-        std::fs::create_dir_all(sim_dir.join("costs"))
-            .map_err(|e| OutputError::io(sim_dir.join("costs"), e))?;
+        create_subdir("costs")?;
 
         if system.n_hydros() > 0 {
-            std::fs::create_dir_all(sim_dir.join("hydros"))
-                .map_err(|e| OutputError::io(sim_dir.join("hydros"), e))?;
+            create_subdir("hydros")?;
             // inflow_lags is gated on hydro count, not its own.
-            std::fs::create_dir_all(sim_dir.join("inflow_lags"))
-                .map_err(|e| OutputError::io(sim_dir.join("inflow_lags"), e))?;
+            create_subdir("inflow_lags")?;
             // Gated on hydro count, not a multi-bus predicate: every hydro
             // study emits this file, single-bus systems included.
-            std::fs::create_dir_all(sim_dir.join("hydro_bus_generation"))
-                .map_err(|e| OutputError::io(sim_dir.join("hydro_bus_generation"), e))?;
+            create_subdir("hydro_bus_generation")?;
         }
         if system.n_thermals() > 0 {
-            std::fs::create_dir_all(sim_dir.join("thermals"))
-                .map_err(|e| OutputError::io(sim_dir.join("thermals"), e))?;
+            create_subdir("thermals")?;
         }
         if system.n_lines() > 0 {
-            std::fs::create_dir_all(sim_dir.join("exchanges"))
-                .map_err(|e| OutputError::io(sim_dir.join("exchanges"), e))?;
+            create_subdir("exchanges")?;
         }
         if system.n_buses() > 0 {
-            std::fs::create_dir_all(sim_dir.join("buses"))
-                .map_err(|e| OutputError::io(sim_dir.join("buses"), e))?;
+            create_subdir("buses")?;
         }
         if system.n_pumping_stations() > 0 {
-            std::fs::create_dir_all(sim_dir.join("pumping_stations"))
-                .map_err(|e| OutputError::io(sim_dir.join("pumping_stations"), e))?;
+            create_subdir("pumping_stations")?;
         }
         if system.n_contracts() > 0 {
-            std::fs::create_dir_all(sim_dir.join("contracts"))
-                .map_err(|e| OutputError::io(sim_dir.join("contracts"), e))?;
+            create_subdir("contracts")?;
         }
         if system.n_non_controllable_sources() > 0 {
-            std::fs::create_dir_all(sim_dir.join("non_controllables"))
-                .map_err(|e| OutputError::io(sim_dir.join("non_controllables"), e))?;
+            create_subdir("non_controllables")?;
         }
         // Gate on a declared travel-time arc, not on hydro count: a non-travel-time
         // study must emit no `in_transit` directory (byte-neutral). Mirrors
@@ -631,14 +625,11 @@ impl SimulationParquetWriter {
             .iter()
             .any(|h| h.travel_time_hours.is_some_and(|t| t > 0.0) && h.downstream_id.is_some());
         if declares_travel_time {
-            std::fs::create_dir_all(sim_dir.join("in_transit"))
-                .map_err(|e| OutputError::io(sim_dir.join("in_transit"), e))?;
-            std::fs::create_dir_all(sim_dir.join("transit_seed"))
-                .map_err(|e| OutputError::io(sim_dir.join("transit_seed"), e))?;
+            create_subdir("in_transit")?;
+            create_subdir("transit_seed")?;
         }
         if !system.generic_constraints().is_empty() {
-            std::fs::create_dir_all(sim_dir.join("violations/generic"))
-                .map_err(|e| OutputError::io(sim_dir.join("violations/generic"), e))?;
+            create_subdir("violations/generic")?;
         }
         // Gate on declared post-study stages, not on thermal count: a study with
         // no post-study stages must emit no `anticipated_lanes` directory
@@ -647,8 +638,7 @@ impl SimulationParquetWriter {
             .post_study_stages()
             .is_some_and(|ps| !ps.stages.is_empty());
         if declares_post_study {
-            std::fs::create_dir_all(sim_dir.join("anticipated_lanes"))
-                .map_err(|e| OutputError::io(sim_dir.join("anticipated_lanes"), e))?;
+            create_subdir("anticipated_lanes")?;
         }
 
         Ok(Self {
@@ -657,14 +647,12 @@ impl SimulationParquetWriter {
             block_durations,
             loss_factors,
             scenarios_written: 0,
-            partitions_written: Vec::new(),
             path_rows: Vec::new(),
         })
     }
 
-    /// Create the partition directory, write `batch` as `data.parquet`, and
-    /// record the partition in [`Self::partitions_written`] — the single
-    /// owner of the create-dir / write / push tail every entity type in
+    /// Create the partition directory and write `batch` as `data.parquet` —
+    /// the single owner of the create-dir / write tail every entity type in
     /// [`Self::write_scenario`] shares. `subpath` is the entity's directory
     /// under `simulation/` (`"costs"`, `"violations/generic"`, ...).
     ///
@@ -674,7 +662,7 @@ impl SimulationParquetWriter {
     ///   constructed (array length mismatch).
     /// - [`OutputError::IoError`] if any filesystem operation fails.
     fn write_partition(
-        &mut self,
+        &self,
         subpath: &str,
         suffix: &str,
         batch: &RecordBatch,
@@ -687,8 +675,6 @@ impl SimulationParquetWriter {
         std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
         let file_path = part_dir.join("data.parquet");
         write_parquet_atomic(&file_path, batch, &self.config)?;
-        self.partitions_written
-            .push(format!("simulation/{subpath}/{suffix}/data.parquet"));
         Ok(())
     }
 
@@ -938,7 +924,6 @@ impl SimulationParquetWriter {
             completed: self.scenarios_written,
             failed: 0,
             total_time_ms,
-            partitions_written: self.partitions_written,
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         }
@@ -2031,6 +2016,7 @@ fn build_anticipated_lanes_batch<'a>(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::output::read_first_batch;
     use chrono::NaiveDate;
     use cobre_core::{
         Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
@@ -2631,7 +2617,6 @@ mod tests {
     #[test]
     fn entity_rows_carry_node_id_and_scenario_id_columns() {
         use arrow::array::Array;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
@@ -2649,14 +2634,7 @@ mod tests {
         let path = tmp
             .path()
             .join("simulation/hydros/scenario_id=0003/data.parquet");
-        let file = std::fs::File::open(&path).expect("hydros parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         for col in &["scenario_id", "stage_id", "node_id"] {
             let field = batch
@@ -2712,8 +2690,6 @@ mod tests {
 
     #[test]
     fn write_paths_is_three_int32_columns_sorted_canonically() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
 
         // Deliberately out of (scenario_id, stage_id) order to pin the canonical sort.
@@ -2741,14 +2717,7 @@ mod tests {
             path.exists(),
             "simulation/paths.parquet must exist (unpartitioned)"
         );
-        let file = std::fs::File::open(&path).expect("paths parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         let schema = batch.schema();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -2789,21 +2758,12 @@ mod tests {
         arrow::array::Float64Array,
         arrow::array::Float64Array,
     ) {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let path = dir.join("simulation/scenario_summary.parquet");
         assert!(
             path.exists(),
             "simulation/scenario_summary.parquet must exist (unpartitioned)"
         );
-        let file = std::fs::File::open(&path).expect("scenario_summary parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         let schema = batch.schema();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -2954,8 +2914,6 @@ mod tests {
 
     #[test]
     fn write_scenario_writes_pumping_partition_for_populated_system() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3013,14 +2971,7 @@ mod tests {
         );
 
         // Read the written Parquet back with the crate's existing reader helper.
-        let file = std::fs::File::open(&path).expect("pumping parquet must exist");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         // Written schema is field-for-field equal to pumping_stations_schema().
         let expected = pumping_stations_schema();
@@ -3110,46 +3061,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_partitions_written_contains_all_paths() {
-        let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
-
-        let system = make_test_system();
-        let config = ParquetWriterConfig::default();
-
-        let mut writer =
-            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
-
-        writer
-            .write_scenario(make_scenario_payload(0, 1))
-            .expect("write scenario 0 must succeed");
-
-        let output = writer.finalize(0);
-        // The test system has hydros, so at minimum costs and hydros partitions.
-        assert!(
-            output.partitions_written.len() >= 2,
-            "partitions_written must include costs and hydros partitions"
-        );
-        assert!(
-            output
-                .partitions_written
-                .iter()
-                .any(|p| p.contains("simulation/costs/scenario_id=0000")),
-            "partitions_written must contain costs partition for scenario 0"
-        );
-        assert!(
-            output
-                .partitions_written
-                .iter()
-                .any(|p| p.contains("simulation/hydros/scenario_id=0000")),
-            "partitions_written must contain hydros partition for scenario 0"
-        );
-    }
-
-    #[test]
     fn write_scenario_parquet_roundtrip_costs_row_count() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3168,24 +3080,13 @@ mod tests {
         let path = tmp
             .path()
             .join("simulation/costs/scenario_id=0000/data.parquet");
-        let file = std::fs::File::open(&path).expect("parquet file must exist");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build");
-
-        let batch = reader
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
         assert_eq!(batch.num_rows(), 2, "costs parquet must have 2 rows");
         assert_eq!(batch.num_columns(), 29, "costs schema has 29 columns");
     }
 
     #[test]
     fn write_scenario_parquet_roundtrip_hydros_derived_mwh() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3204,16 +3105,7 @@ mod tests {
         let path = tmp
             .path()
             .join("simulation/hydros/scenario_id=0000/data.parquet");
-        let file = std::fs::File::open(&path).expect("hydros parquet must exist");
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build");
-
-        let batch = reader
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
         assert_eq!(
             batch.num_rows(),
             4,
@@ -3281,8 +3173,6 @@ mod tests {
     /// 3 stages and 2 entity types (costs + hydros) — no flat Vec materialisation.
     #[test]
     fn write_scenario_does_not_materialize_flat_vecs() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3310,28 +3200,14 @@ mod tests {
             .join("simulation/hydros/scenario_id=0000/data.parquet");
         assert!(hydros_path.exists(), "hydros parquet must be written");
 
-        let costs_file = std::fs::File::open(&costs_path).expect("costs file must exist");
-        let costs_batch = ParquetRecordBatchReaderBuilder::try_new(costs_file)
-            .expect("builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let costs_batch = read_first_batch(&costs_path);
         assert_eq!(
             costs_batch.num_rows(),
             3,
             "costs must have 3 rows (3 stages)"
         );
 
-        let hydros_file = std::fs::File::open(&hydros_path).expect("hydros file must exist");
-        let hydros_batch = ParquetRecordBatchReaderBuilder::try_new(hydros_file)
-            .expect("builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let hydros_batch = read_first_batch(&hydros_path);
         assert_eq!(
             hydros_batch.num_rows(),
             6,
@@ -3378,8 +3254,6 @@ mod tests {
 
     #[test]
     fn hydros_batch_round_trips_new_columns() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3403,14 +3277,7 @@ mod tests {
         let path = tmp
             .path()
             .join("simulation/hydros/scenario_id=0000/data.parquet");
-        let file = std::fs::File::open(&path).expect("hydros parquet must exist");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         let read_f64 = |col_name: &str| -> f64 {
             batch
@@ -3526,8 +3393,6 @@ mod tests {
 
     #[test]
     fn write_scenario_writes_in_transit_partition_round_trip() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3590,14 +3455,7 @@ mod tests {
             .join("simulation/in_transit/scenario_id=0000/data.parquet");
         assert!(path.exists(), "in_transit parquet must exist");
 
-        let file = std::fs::File::open(&path).expect("in_transit parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         assert_eq!(
             batch.schema().fields(),
@@ -3654,21 +3512,11 @@ mod tests {
             "no empty hydro_bus_generation per-scenario partition must ship when \
              a scenario's stages carry no cell records"
         );
-
-        let output = writer.finalize(0);
-        assert!(
-            !output
-                .partitions_written
-                .iter()
-                .any(|p| p.contains("hydro_bus_generation")),
-            "partitions_written must contain no hydro_bus_generation entry"
-        );
     }
 
     #[test]
     fn hydro_bus_generation_directory_created_for_a_hydro_system() {
         use arrow::array::Array;
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
@@ -3736,19 +3584,7 @@ mod tests {
             })
             .expect("write_scenario must succeed");
 
-        let read_batch = |path: &std::path::Path| {
-            let file =
-                std::fs::File::open(path).unwrap_or_else(|e| panic!("{path:?} must open: {e}"));
-            ParquetRecordBatchReaderBuilder::try_new(file)
-                .expect("reader builder must succeed")
-                .build()
-                .expect("reader must build")
-                .next()
-                .expect("must have rows")
-                .expect("batch must be Ok")
-        };
-
-        let hydros_batch = read_batch(
+        let hydros_batch = read_first_batch(
             &tmp.path()
                 .join("simulation/hydros/scenario_id=0000/data.parquet"),
         );
@@ -3756,7 +3592,7 @@ mod tests {
             .path()
             .join("simulation/hydro_bus_generation/scenario_id=0000/data.parquet");
         assert!(bus_path.exists(), "hydro_bus_generation parquet must exist");
-        let bus_batch = read_batch(&bus_path);
+        let bus_batch = read_first_batch(&bus_path);
 
         assert_eq!(
             bus_batch.num_rows(),
@@ -3777,8 +3613,6 @@ mod tests {
 
     #[test]
     fn write_scenario_writes_hydro_bus_generation_partition_round_trip() {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
         std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
 
@@ -3864,14 +3698,7 @@ mod tests {
             .join("simulation/hydro_bus_generation/scenario_id=0000/data.parquet");
         assert!(path.exists(), "hydro_bus_generation parquet must exist");
 
-        let file = std::fs::File::open(&path).expect("hydro_bus_generation parquet must open");
-        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
-            .expect("reader builder must succeed")
-            .build()
-            .expect("reader must build")
-            .next()
-            .expect("must have rows")
-            .expect("batch must be Ok");
+        let batch = read_first_batch(&path);
 
         assert_eq!(
             batch.schema().fields(),

@@ -3,7 +3,7 @@
 Shared data model for the [Cobre](https://github.com/cobre-rs/cobre) power systems ecosystem.
 
 This crate defines the fundamental types used across all Cobre tools: buses, branches,
-generators (hydro, thermal, renewable), loads, network topology, and the top-level
+generators (hydro, thermal, renewable), loads, and the top-level
 `System` struct. A power system described with `cobre-core` types can be used for
 stochastic optimization, steady-state analysis, and any other procedure in the
 ecosystem. The crate carries no solver or algorithm dependencies and enforces
@@ -41,9 +41,9 @@ you need.
 | `constraints::generic_constraint` | User-defined linear constraints (`GenericConstraint`, `VariableRef`) over LP variables                                                |
 | `constraints::initial_conditions` | Reservoir storage, AR inflow lags, and anticipated-commitment history at study start                                                  |
 | `constraints::training_event`     | `TrainingEvent` enum and `StoppingRuleResult`: the typed event stream consumed by loggers, the TUI, MCP progress, and Parquet writers |
-| `stats::welford`                  | `WelfordAccumulator` — running mean/variance for streaming statistics                                                                 |
+| `stats::welford`                  | `WelfordAccumulator` — running mean and sample standard deviation for streaming statistics                                            |
 | `system`                          | `System` container and `SystemBuilder`                                                                                                |
-| `topology`                        | `CascadeTopology` and `NetworkTopology` derived structures                                                                            |
+| `topology`                        | `CascadeTopology` derived structure                                                                                                   |
 
 ## `SystemBuilder` validation pipeline
 
@@ -69,10 +69,10 @@ the first individual error, only between phases:
    `ValidationError::CascadeCycle`. Each hydro `FillingConfig` is checked for
    a non-negative `filling_min_rate_m3s` and a non-`None` `entry_stage_id`.
 
-If all phases pass, `build()` constructs `NetworkTopology`, builds O(1) lookup
-indices for all seven entity collections, and returns the immutable `System`.
-This guarantees declaration-order invariance: two `System` values built from
-the same entities in different input orders are structurally identical.
+If all phases pass, `build()` builds O(1) lookup indices for all seven entity
+collections and returns the immutable `System`. This guarantees
+declaration-order invariance: two `System` values built from the same
+entities in different input orders are structurally identical.
 
 ## Feature flags
 

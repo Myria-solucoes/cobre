@@ -20,7 +20,7 @@ use crate::StochasticError;
 
 /// AR coefficient estimation result for a single (entity, season) pair.
 ///
-/// Produced by [`estimate_ar_coefficients`] and consumed by the assembly
+/// Produced by [`estimate_ar_coefficients_with_season_map`] and consumed by the assembly
 /// layer that writes AR coefficient rows to persistent storage.
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
@@ -34,72 +34,6 @@ pub struct ArCoefficientEstimate {
     /// PAR(p)-A annual-component triple; `None` for classical PAR(p). All three
     /// sub-fields are present together by construction, never split.
     pub annual: Option<AnnualComponent>,
-}
-
-/// Produce white-noise (order-0) AR estimates (empty coefficients) for every
-/// `(entity, season)` pair in `seasonal_stats` that belongs to `hydro_ids`.
-///
-/// # Errors
-///
-/// - [`StochasticError::InsufficientData`] when `max_order > 0` (use the
-///   periodic Yule-Walker path via
-///   [`estimate_periodic_ar_coefficients`](super::estimate_periodic_ar_coefficients) instead).
-///
-/// # Examples
-///
-/// ```
-/// use chrono::NaiveDate;
-/// use cobre_core::{EntityId, temporal::{Stage, Block, BlockMode, StageStateConfig, StageRiskConfig, ScenarioSourceConfig, NoiseMethod}};
-/// use cobre_stochastic::par::fitting::{estimate_seasonal_stats, estimate_ar_coefficients};
-///
-/// fn stage(id: i32, y0: i32, m0: u32, y1: i32, m1: u32, season: usize) -> Stage {
-///     Stage {
-///         index: 0,
-///         id,
-///         start_date: NaiveDate::from_ymd_opt(y0, m0, 1).unwrap(),
-///         end_date: NaiveDate::from_ymd_opt(y1, m1, 1).unwrap(),
-///         season_id: Some(season),
-///         blocks: vec![Block { index: 0, name: "S".to_string(), duration_hours: 744.0 }],
-///         block_mode: BlockMode::Parallel,
-///         state_config: StageStateConfig { storage: true, inflow_lags: false },
-///         risk_config: StageRiskConfig::Expectation,
-///         scenario_config: ScenarioSourceConfig { branching_factor: 1, noise_method: NoiseMethod::Saa },
-///     }
-/// }
-///
-/// // Build 2 seasons over 5 years (10 observations per season).
-/// let mut stages_vec: Vec<Stage> = Vec::new();
-/// for y in 2000..2005_i32 {
-///     stages_vec.push(stage(y * 2 - 3999, y, 1, y, 2, 0));
-///     stages_vec.push(stage(y * 2 - 3998, y, 2, y, 3, 1));
-/// }
-/// let entity_ids = vec![EntityId::from(1)];
-/// let mut obs: Vec<(EntityId, NaiveDate, f64)> = Vec::new();
-/// for y in 2000..2005_i32 {
-///     obs.push((EntityId::from(1), NaiveDate::from_ymd_opt(y, 1, 15).unwrap(), 100.0));
-///     obs.push((EntityId::from(1), NaiveDate::from_ymd_opt(y, 2, 15).unwrap(), 200.0));
-/// }
-/// let stats = estimate_seasonal_stats(&obs, &stages_vec, &entity_ids).unwrap();
-/// // order-0 produces white-noise estimates (empty coefficients, ratio = 1.0)
-/// let estimates = estimate_ar_coefficients(&obs, &stats, &stages_vec, &entity_ids, 0).unwrap();
-/// assert_eq!(estimates.len(), 2);
-/// assert!(estimates[0].coefficients.is_empty());
-/// ```
-pub fn estimate_ar_coefficients(
-    observations: &[(EntityId, NaiveDate, f64)],
-    seasonal_stats: &[SeasonalStats],
-    stages: &[Stage],
-    hydro_ids: &[EntityId],
-    max_order: usize,
-) -> Result<Vec<ArCoefficientEstimate>, StochasticError> {
-    estimate_ar_coefficients_with_season_map(
-        observations,
-        seasonal_stats,
-        stages,
-        hydro_ids,
-        max_order,
-        None,
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +132,47 @@ pub(super) fn build_season_lookups<'a>(
 /// requiring AR order selection must use
 /// [`estimate_periodic_ar_coefficients`](super::estimate_periodic_ar_coefficients)
 /// and the periodic Yule-Walker path instead.
+///
+/// # Examples
+///
+/// ```
+/// use chrono::NaiveDate;
+/// use cobre_core::{EntityId, temporal::{Stage, Block, BlockMode, StageStateConfig, StageRiskConfig, ScenarioSourceConfig, NoiseMethod}};
+/// use cobre_stochastic::par::fitting::{estimate_seasonal_stats_with_season_map, estimate_ar_coefficients_with_season_map};
+///
+/// fn stage(id: i32, y0: i32, m0: u32, y1: i32, m1: u32, season: usize) -> Stage {
+///     Stage {
+///         index: 0,
+///         id,
+///         start_date: NaiveDate::from_ymd_opt(y0, m0, 1).unwrap(),
+///         end_date: NaiveDate::from_ymd_opt(y1, m1, 1).unwrap(),
+///         season_id: Some(season),
+///         blocks: vec![Block { index: 0, name: "S".to_string(), duration_hours: 744.0 }],
+///         block_mode: BlockMode::Parallel,
+///         state_config: StageStateConfig { storage: true, inflow_lags: false },
+///         risk_config: StageRiskConfig::Expectation,
+///         scenario_config: ScenarioSourceConfig { branching_factor: 1, noise_method: NoiseMethod::Saa },
+///     }
+/// }
+///
+/// // Build 2 seasons over 5 years (10 observations per season).
+/// let mut stages_vec: Vec<Stage> = Vec::new();
+/// for y in 2000..2005_i32 {
+///     stages_vec.push(stage(y * 2 - 3999, y, 1, y, 2, 0));
+///     stages_vec.push(stage(y * 2 - 3998, y, 2, y, 3, 1));
+/// }
+/// let entity_ids = vec![EntityId::from(1)];
+/// let mut obs: Vec<(EntityId, NaiveDate, f64)> = Vec::new();
+/// for y in 2000..2005_i32 {
+///     obs.push((EntityId::from(1), NaiveDate::from_ymd_opt(y, 1, 15).unwrap(), 100.0));
+///     obs.push((EntityId::from(1), NaiveDate::from_ymd_opt(y, 2, 15).unwrap(), 200.0));
+/// }
+/// let stats = estimate_seasonal_stats_with_season_map(&obs, &stages_vec, &entity_ids, None).unwrap();
+/// // order-0 produces white-noise estimates (empty coefficients, ratio = 1.0)
+/// let estimates = estimate_ar_coefficients_with_season_map(&obs, &stats, &stages_vec, &entity_ids, 0, None).unwrap();
+/// assert_eq!(estimates.len(), 2);
+/// assert!(estimates[0].coefficients.is_empty());
+/// ```
 pub fn estimate_ar_coefficients_with_season_map(
     _observations: &[(EntityId, NaiveDate, f64)],
     seasonal_stats: &[SeasonalStats],

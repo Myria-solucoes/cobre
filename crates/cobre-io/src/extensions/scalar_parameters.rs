@@ -239,26 +239,6 @@ pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>,
     Ok(result)
 }
 
-/// Load `constraints/generic_parameters.json` relative to `case_dir`.
-///
-/// # Errors
-///
-/// Propagates [`LoadError`] from [`parse_scalar_parameters_json`].
-///
-/// # Examples
-///
-/// ```no_run
-/// use cobre_io::load_scalar_parameters_json;
-/// use std::path::Path;
-///
-/// let params = load_scalar_parameters_json(Path::new("/path/to/case"))
-///     .expect("valid parameters file");
-/// println!("loaded {} parameters", params.len());
-/// ```
-pub fn load_scalar_parameters_json(case_dir: &Path) -> Result<Vec<ScalarParameter>, LoadError> {
-    parse_scalar_parameters_json(&case_dir.join("constraints/generic_parameters.json"))
-}
-
 // ── Private conversion helpers ────────────────────────────────────────────────
 
 /// Convert a single `ScalarParameterJsonEntry` into a `ParameterKind`,
@@ -378,8 +358,9 @@ fn convert_per_stage(
         }
     }
 
-    let dense: Vec<f64> = sorted.into_iter().map(|(_, v)| v).collect();
-    Ok(ParameterKind::PerStage { values: dense })
+    Ok(ParameterKind::PerStage {
+        values: sorted.into_iter().map(|(_, v)| v).collect(),
+    })
 }
 
 /// Build a `ParameterKind::Seasonal`, rejecting non-finite values and duplicate
@@ -512,20 +493,9 @@ fn convert_per_stage_block(
     clippy::unwrap_used
 )]
 mod tests {
-    use std::io::Write;
-
     use super::*;
+    use crate::test_support::write_json;
     use cobre_core::EntityId;
-    use tempfile::NamedTempFile;
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /// Write a JSON string to a temporary file and return the file handle.
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut tmp = NamedTempFile::new().expect("tempfile");
-        tmp.write_all(content.as_bytes()).expect("write JSON");
-        tmp
-    }
 
     // ── Test 1: happy path — all four variants ─────────────────────────────────
 

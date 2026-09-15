@@ -40,7 +40,7 @@ pub fn write_training_results(
     std::fs::create_dir_all(output_dir.join("simulation"))
         .map_err(|e| OutputError::io(output_dir.join("simulation"), e))?;
 
-    write_dictionaries(&output_dir.join("training/dictionaries"), system, config)?;
+    write_dictionaries(&output_dir.join("training/dictionaries"), system)?;
 
     let parquet_config = ParquetWriterConfig::default();
     let writer = TrainingParquetWriter::new(output_dir, &parquet_config)?;
@@ -200,8 +200,9 @@ fn extract_max_iterations(config: &Config) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::output::{IterationRecord, RowPoolStatistics, TrainingOutput};
+    use crate::test_support::output::read_first_batch;
+    use crate::test_support::output::{make_config, make_output_context, make_system};
     use crate::{MetadataSimulationSolveStats, MetadataTrainingSolveStats};
-    use cobre_core::SystemBuilder;
 
     fn make_iteration_record(iteration: u32) -> IterationRecord {
         IterationRecord {
@@ -226,10 +227,8 @@ mod tests {
             time_lower_bound_ms: 0,
             time_state_exchange_ms: 0,
             time_cut_batch_build_ms: 0,
-            time_bwd_setup_ms: 0,
             time_bwd_load_imbalance_ms: 0,
             time_bwd_scheduling_overhead_ms: 0,
-            time_fwd_setup_ms: 0,
             time_fwd_load_imbalance_ms: 0,
             time_fwd_scheduling_overhead_ms: 0,
             time_overhead_ms: 0,
@@ -267,89 +266,14 @@ mod tests {
         }
     }
 
-    fn make_system() -> cobre_core::System {
-        SystemBuilder::new()
-            .build()
-            .expect("empty system must be valid")
-    }
-
-    fn make_config() -> crate::Config {
-        use crate::config::{
-            CheckpointingConfig, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-            ModelingConfig, ParallelismConfig, PolicyConfig, PolicyMode, RowSelectionConfig,
-            SimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
-            TrainingSolverConfig, UpperBoundEvaluationConfig,
-        };
-        crate::Config {
-            schema: None,
-            modeling: ModelingConfig {
-                inflow_non_negativity: InflowNonNegativityConfig::default(),
-                cost_scale_factor: None,
-            },
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: None,
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
-                stopping_mode: StoppingMode::Any,
-                cut_selection: RowSelectionConfig::default(),
-                solver: TrainingSolverConfig::default(),
-                parallelism: ParallelismConfig::default(),
-                scenario_source: None,
-                selection: Some(TrainingSelection::Sampled { forward_passes: 4 }),
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig {
-                path: "./policy".to_string(),
-                mode: PolicyMode::Fresh,
-                checkpointing: CheckpointingConfig::default(),
-                boundary: None,
-            },
-            simulation: SimulationConfig {
-                enabled: false,
-                io_channel_capacity: 64,
-                scenario_source: None,
-                solver: None,
-                selection: None,
-            },
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
-        }
-    }
-
     fn make_simulation_output() -> SimulationOutput {
         SimulationOutput {
             n_scenarios: 10,
             completed: 10,
             failed: 0,
             total_time_ms: 1_000,
-            partitions_written: vec!["simulation/costs/part-00.parquet".to_string()],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
-        }
-    }
-
-    fn make_output_context() -> OutputContext {
-        use super::super::manifest::DistributionInfo;
-        OutputContext {
-            hostname: "test-host".to_string(),
-            solver: "highs".to_string(),
-            solver_version: None,
-            started_at: "2026-01-17T08:00:00Z".to_string(),
-            completed_at: "2026-01-17T12:30:00Z".to_string(),
-            distribution: DistributionInfo {
-                backend: "local".to_string(),
-                world_size: 1,
-                ranks_participated: 1,
-                num_hosts: 1,
-                threads_per_rank: 1,
-                mpi_library: None,
-                mpi_standard: None,
-                thread_level: None,
-                slurm_job_id: None,
-                hosts: Vec::new(),
-            },
-            setup: None,
-            production_fit_deviation: None,
         }
     }
 
@@ -409,7 +333,6 @@ mod tests {
             completed: 10,
             failed: 0,
             total_time_ms: 1_500,
-            partitions_written: vec!["simulation/costs/part-00.parquet".to_string()],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };
@@ -605,7 +528,6 @@ mod tests {
             completed: 10,
             failed: 0,
             total_time_ms: 0,
-            partitions_written: vec![],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };
@@ -655,7 +577,6 @@ mod tests {
             completed: 10,
             failed: 0,
             total_time_ms: 0,
-            partitions_written: vec![],
             cost: None,
             solve_stats: MetadataSimulationSolveStats::default(),
         };
@@ -853,18 +774,10 @@ mod tests {
         );
     }
 
-    /// Read the sole `upper_bound_kind` value and the `upper_bound_std` null-count
-    /// from a written `training/convergence.parquet`.
     fn read_convergence_kind_and_std_nulls(dir: &std::path::Path) -> (String, usize) {
         use arrow::array::{Array, Float64Array, StringArray};
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         let path = dir.join("training/convergence.parquet");
-        let file = std::fs::File::open(&path).unwrap();
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .unwrap()
-            .build()
-            .unwrap();
-        let batch = reader.next().unwrap().unwrap();
+        let batch = read_first_batch(&path);
         let kind = batch
             .column_by_name("upper_bound_kind")
             .unwrap()
@@ -900,7 +813,6 @@ mod tests {
         )
         .expect("write must succeed");
 
-        // convergence.parquet: kind "exact", std all-NULL.
         let (kind, std_nulls) = read_convergence_kind_and_std_nulls(tmp.path());
         assert_eq!(kind, "exact", "convergence upper_bound_kind must be exact");
         assert_eq!(
@@ -908,7 +820,6 @@ mod tests {
             "every upper_bound_std must be NULL under exact"
         );
 
-        // metadata.json.bounds: same kind, std None.
         let metadata = read_training_metadata(&tmp.path().join("training/metadata.json")).unwrap();
         assert_eq!(metadata.bounds.final_upper_bound_kind, "exact");
         assert_eq!(metadata.bounds.final_upper_bound_std, None);
@@ -931,7 +842,6 @@ mod tests {
         )
         .expect("write must succeed");
 
-        // convergence.parquet: kind "statistical", std populated (no NULLs).
         let (kind, std_nulls) = read_convergence_kind_and_std_nulls(tmp.path());
         assert_eq!(kind, "statistical");
         assert_eq!(
@@ -939,7 +849,6 @@ mod tests {
             "upper_bound_std must be populated under statistical"
         );
 
-        // metadata.json.bounds: same kind, std Some.
         let metadata = read_training_metadata(&tmp.path().join("training/metadata.json")).unwrap();
         assert_eq!(metadata.bounds.final_upper_bound_kind, "statistical");
         assert_eq!(metadata.bounds.final_upper_bound_std, Some(0.5));

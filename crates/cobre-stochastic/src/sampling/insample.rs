@@ -51,15 +51,8 @@ where
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::sample_forward;
-    use crate::tree::opening_tree::{OpeningTree, OpeningTreeView};
-
-    fn uniform_tree(n_stages: usize, openings: usize, dim: usize) -> OpeningTree {
-        let total = n_stages * openings * dim;
-        let data: Vec<f64> = (0_u32..u32::try_from(total).unwrap())
-            .map(f64::from)
-            .collect();
-        OpeningTree::from_parts(data, vec![openings; n_stages], dim)
-    }
+    use crate::test_support::uniform_tree;
+    use crate::tree::opening_tree::OpeningTreeView;
 
     /// `sample_forward` over the FULL stage opening set (node Ω == the whole
     /// stage) — the chain-degenerate range.

@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, HorizonGraph, Hydro, InflowHistoryRow,
-    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NetworkTopology,
-    NonControllableSource, PostStudyStages, PumpingStation, ResolvedBounds,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, SamplingScheme, Stage, Thermal, ValidationError,
+    InflowModel, InitialConditions, Line, LoadModel, NcsModel, NonControllableSource,
+    PostStudyStages, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SamplingScheme,
+    Stage, Thermal, ValidationError,
 };
 
 mod builder;
@@ -63,10 +63,11 @@ pub struct System {
     non_controllable_sources: Vec<NonControllableSource>,
 
     // Not serialized: `HashMap` iteration order is unstable, so serializing an
-    // index would make the wire payload non-reproducible for identical content.
-    // `serde(from = "SystemRepr")` above is `Deserialize`'s sole entry point and
-    // rebuilds them unconditionally — without it every lookup on a deserialized
-    // `System` silently returns `None`.
+    // index or the cascade topology would make the wire payload
+    // non-reproducible for identical content. `serde(from = "SystemRepr")`
+    // above is `Deserialize`'s sole entry point and rebuilds them all
+    // unconditionally — without it every lookup on a deserialized `System`
+    // silently returns `None`, and the cascade is empty.
     #[cfg_attr(feature = "serde", serde(skip))]
     bus_index: HashMap<EntityId, usize>,
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -83,9 +84,8 @@ pub struct System {
     non_controllable_source_index: HashMap<EntityId, usize>,
 
     /// Resolved hydro cascade graph.
+    #[cfg_attr(feature = "serde", serde(skip))]
     cascade: CascadeTopology,
-    /// Resolved transmission network topology.
-    network: NetworkTopology,
 
     /// Ordered list of stages (study + pre-study), sorted by `id` (canonical order).
     stages: Vec<Stage>,
@@ -155,8 +155,6 @@ struct SystemRepr {
     pumping_stations: Vec<PumpingStation>,
     contracts: Vec<EnergyContract>,
     non_controllable_sources: Vec<NonControllableSource>,
-    cascade: CascadeTopology,
-    network: NetworkTopology,
     stages: Vec<Stage>,
     policy_graph: HorizonGraph,
     penalties: ResolvedPenalties,
@@ -196,8 +194,7 @@ impl From<SystemRepr> for System {
             pumping_station_index: HashMap::new(),
             contract_index: HashMap::new(),
             non_controllable_source_index: HashMap::new(),
-            cascade: repr.cascade,
-            network: repr.network,
+            cascade: CascadeTopology::default(),
             stages: repr.stages,
             policy_graph: repr.policy_graph,
             stage_index: HashMap::new(),
@@ -359,12 +356,6 @@ impl System {
     #[must_use]
     pub fn cascade(&self) -> &CascadeTopology {
         &self.cascade
-    }
-
-    /// Returns a reference to the transmission network topology.
-    #[must_use]
-    pub fn network(&self) -> &NetworkTopology {
-        &self.network
     }
 
     /// Returns all stages in canonical ID order (study and pre-study stages).
@@ -599,7 +590,7 @@ impl System {
         Ok(self)
     }
 
-    /// Rebuild all lookup indices from the entity collections.
+    /// Rebuild all lookup indices from the entity collections, and the cascade topology.
     ///
     /// Sole caller: `From<SystemRepr>` (`Deserialize`'s entry point).
     /// `SystemBuilder::build` needs the same maps earlier, for cross-reference
@@ -614,6 +605,7 @@ impl System {
         self.contract_index = build_index(&self.contracts);
         self.non_controllable_source_index = build_index(&self.non_controllable_sources);
         self.stage_index = build_stage_index(&self.stages);
+        self.cascade = CascadeTopology::build(&self.hydros);
     }
 }
 
@@ -621,174 +613,16 @@ impl System {
 mod tests {
     use super::*;
     use crate::ValidationError;
+    use crate::entities::FillingConfig;
     #[cfg(feature = "serde")]
     use crate::entities::HydroUnitGroup;
-    use crate::entities::{ContractType, FillingConfig, HydroGenerationModel, HydroPenalties};
+    use crate::temporal::{Block, NoiseMethod, ScenarioSourceConfig};
+    use crate::test_support::{
+        BusSpec, ContractSpec, HydroSpec, LineSpec, NcsSpec, PumpingSpec, StageSpec, ThermalSpec,
+        make_bus, make_contract, make_hydro, make_line, make_ncs, make_pumping_station, make_stage,
+        make_thermal,
+    };
     use chrono::NaiveDate;
-
-    fn make_bus(id: i32) -> Bus {
-        Bus {
-            id: EntityId(id),
-            name: format!("bus-{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![],
-            excess_cost: 0.0,
-        }
-    }
-
-    fn make_line(id: i32, source_bus_id: i32, target_bus_id: i32) -> Line {
-        Line {
-            id: EntityId(id),
-            name: format!("line-{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            source_bus_id: EntityId(source_bus_id),
-            target_bus_id: EntityId(target_bus_id),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            direct_capacity_mw: 100.0,
-            reverse_capacity_mw: 100.0,
-            losses_percent: 0.0,
-            exchange_cost: 0.0,
-        }
-    }
-
-    fn make_hydro_on_bus(id: i32, bus_id: i32) -> Hydro {
-        let zero_penalties = HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        };
-        let mut hydro = Hydro {
-            id: EntityId(id),
-            name: format!("hydro-{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 1.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 1.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 1.0,
-            unit_groups: Vec::new(),
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: zero_penalties,
-        };
-        hydro.declare_mirror_unit_group(EntityId(bus_id));
-        hydro
-    }
-
-    /// Creates a hydro on bus 0. Caller must supply `make_bus(0)`.
-    fn make_hydro(id: i32) -> Hydro {
-        make_hydro_on_bus(id, 0)
-    }
-
-    fn make_thermal_on_bus(id: i32, bus_id: i32) -> Thermal {
-        Thermal {
-            id: EntityId(id),
-            name: format!("thermal-{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            cost_per_mwh: 50.0,
-            min_generation_mw: 0.0,
-            max_generation_mw: 100.0,
-            anticipated_config: None,
-        }
-    }
-
-    /// Creates a thermal on bus 0. Caller must supply `make_bus(0)`.
-    fn make_thermal(id: i32) -> Thermal {
-        make_thermal_on_bus(id, 0)
-    }
-
-    fn make_pumping_station_full(
-        id: i32,
-        bus_id: i32,
-        source_hydro_id: i32,
-        destination_hydro_id: i32,
-    ) -> PumpingStation {
-        PumpingStation {
-            id: EntityId(id),
-            name: format!("ps-{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
-            source_hydro_id: EntityId(source_hydro_id),
-            destination_hydro_id: EntityId(destination_hydro_id),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            consumption_mw_per_m3s: 0.5,
-            min_flow_m3s: 0.0,
-            max_flow_m3s: 10.0,
-        }
-    }
-
-    fn make_pumping_station(id: i32) -> PumpingStation {
-        make_pumping_station_full(id, 0, 0, 1)
-    }
-
-    fn make_contract_on_bus(id: i32, bus_id: i32) -> EnergyContract {
-        EnergyContract {
-            id: EntityId(id),
-            name: format!("contract-{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
-            contract_type: ContractType::Import,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            price_per_mwh: 0.0,
-            min_mw: 0.0,
-            max_mw: 100.0,
-        }
-    }
-
-    fn make_contract(id: i32) -> EnergyContract {
-        make_contract_on_bus(id, 0)
-    }
-
-    fn make_ncs_on_bus(id: i32, bus_id: i32) -> NonControllableSource {
-        NonControllableSource {
-            id: EntityId(id),
-            name: format!("ncs-{id}"),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            max_generation_mw: 50.0,
-            allow_curtailment: true,
-            curtailment_cost: 0.0,
-        }
-    }
-
-    fn make_ncs(id: i32) -> NonControllableSource {
-        make_ncs_on_bus(id, 0)
-    }
 
     #[test]
     fn test_empty_system() {
@@ -807,7 +641,23 @@ mod tests {
     #[test]
     fn test_canonical_ordering() {
         let system = SystemBuilder::new()
-            .buses(vec![make_bus(2), make_bus(1), make_bus(0)])
+            .buses(vec![
+                make_bus(BusSpec {
+                    id: 2,
+                    name: format!("bus-{}", 2),
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 1,
+                    name: format!("bus-{}", 1),
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 0,
+                    name: format!("bus-{}", 0),
+                    ..Default::default()
+                }),
+            ])
             .build()
             .expect("valid system");
 
@@ -819,8 +669,28 @@ mod tests {
     #[test]
     fn test_lookup_by_id() {
         let system = SystemBuilder::new()
-            .buses(vec![make_bus(0)])
-            .hydros(vec![make_hydro(10), make_hydro(5), make_hydro(20)])
+            .buses(vec![make_bus(BusSpec {
+                id: 0,
+                name: format!("bus-{}", 0),
+                ..Default::default()
+            })])
+            .hydros(vec![
+                make_hydro(HydroSpec {
+                    id: 10,
+                    name: format!("hydro-{}", 10),
+                    ..Default::default()
+                }),
+                make_hydro(HydroSpec {
+                    id: 5,
+                    name: format!("hydro-{}", 5),
+                    ..Default::default()
+                }),
+                make_hydro(HydroSpec {
+                    id: 20,
+                    name: format!("hydro-{}", 20),
+                    ..Default::default()
+                }),
+            ])
             .build()
             .expect("valid system");
 
@@ -832,8 +702,23 @@ mod tests {
     #[test]
     fn test_lookup_missing_id() {
         let system = SystemBuilder::new()
-            .buses(vec![make_bus(0)])
-            .hydros(vec![make_hydro(1), make_hydro(2)])
+            .buses(vec![make_bus(BusSpec {
+                id: 0,
+                name: format!("bus-{}", 0),
+                ..Default::default()
+            })])
+            .hydros(vec![
+                make_hydro(HydroSpec {
+                    id: 1,
+                    name: format!("hydro-{}", 1),
+                    ..Default::default()
+                }),
+                make_hydro(HydroSpec {
+                    id: 2,
+                    name: format!("hydro-{}", 2),
+                    ..Default::default()
+                }),
+            ])
             .build()
             .expect("valid system");
 
@@ -843,13 +728,69 @@ mod tests {
     #[test]
     fn test_count_queries() {
         let system = SystemBuilder::new()
-            .buses(vec![make_bus(0), make_bus(1)])
-            .lines(vec![make_line(0, 0, 1)])
-            .hydros(vec![make_hydro(0), make_hydro(1), make_hydro(2)])
-            .thermals(vec![make_thermal(0)])
-            .pumping_stations(vec![make_pumping_station(0)])
-            .contracts(vec![make_contract(0), make_contract(1)])
-            .non_controllable_sources(vec![make_ncs(0)])
+            .buses(vec![
+                make_bus(BusSpec {
+                    id: 0,
+                    name: format!("bus-{}", 0),
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 1,
+                    name: format!("bus-{}", 1),
+                    ..Default::default()
+                }),
+            ])
+            .lines(vec![make_line(LineSpec {
+                id: 0,
+                name: format!("line-{}", 0),
+                source_bus_id: 0,
+                target_bus_id: 1,
+                ..Default::default()
+            })])
+            .hydros(vec![
+                make_hydro(HydroSpec {
+                    id: 0,
+                    name: format!("hydro-{}", 0),
+                    ..Default::default()
+                }),
+                make_hydro(HydroSpec {
+                    id: 1,
+                    name: format!("hydro-{}", 1),
+                    ..Default::default()
+                }),
+                make_hydro(HydroSpec {
+                    id: 2,
+                    name: format!("hydro-{}", 2),
+                    ..Default::default()
+                }),
+            ])
+            .thermals(vec![make_thermal(ThermalSpec {
+                id: 0,
+                name: format!("thermal-{}", 0),
+                ..Default::default()
+            })])
+            .pumping_stations(vec![make_pumping_station(PumpingSpec {
+                id: 0,
+                name: format!("ps-{}", 0),
+                ..Default::default()
+            })])
+            .contracts(vec![
+                make_contract(ContractSpec {
+                    id: 0,
+                    name: format!("contract-{}", 0),
+                    ..Default::default()
+                }),
+                make_contract(ContractSpec {
+                    id: 1,
+                    name: format!("contract-{}", 1),
+                    ..Default::default()
+                }),
+            ])
+            .non_controllable_sources(vec![make_ncs(NcsSpec {
+                id: 0,
+                name: format!("ncs-{}", 0),
+                ..Default::default()
+            })])
             .build()
             .expect("valid system");
 
@@ -865,7 +806,23 @@ mod tests {
     #[test]
     fn test_slice_accessors() {
         let system = SystemBuilder::new()
-            .buses(vec![make_bus(0), make_bus(1), make_bus(2)])
+            .buses(vec![
+                make_bus(BusSpec {
+                    id: 0,
+                    name: format!("bus-{}", 0),
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 1,
+                    name: format!("bus-{}", 1),
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 2,
+                    name: format!("bus-{}", 2),
+                    ..Default::default()
+                }),
+            ])
             .build()
             .expect("valid system");
 
@@ -879,7 +836,18 @@ mod tests {
     #[test]
     fn test_duplicate_id_error() {
         let result = SystemBuilder::new()
-            .buses(vec![make_bus(0), make_bus(0)])
+            .buses(vec![
+                make_bus(BusSpec {
+                    id: 0,
+                    name: format!("bus-{}", 0),
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 0,
+                    name: format!("bus-{}", 0),
+                    ..Default::default()
+                }),
+            ])
             .build();
 
         assert!(result.is_err());
@@ -898,7 +866,36 @@ mod tests {
     fn test_duplicate_stage_id_error() {
         // Without this check build_stage_index silently overwrites the colliding stage.
         let result = SystemBuilder::new()
-            .stages(vec![make_stage(0), make_stage(0)])
+            .stages(vec![
+                make_stage(StageSpec {
+                    id: 0,
+                    season_id: Some(0),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "SINGLE".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 50,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                }),
+                make_stage(StageSpec {
+                    id: 0,
+                    season_id: Some(0),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "SINGLE".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 50,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                }),
+            ])
             .build();
 
         assert!(result.is_err());
@@ -916,8 +913,30 @@ mod tests {
     fn test_multiple_duplicate_errors() {
         // Both duplicates must be reported (no short-circuiting on the first).
         let result = SystemBuilder::new()
-            .buses(vec![make_bus(0), make_bus(0)])
-            .thermals(vec![make_thermal(5), make_thermal(5)])
+            .buses(vec![
+                make_bus(BusSpec {
+                    id: 0,
+                    name: format!("bus-{}", 0),
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 0,
+                    name: format!("bus-{}", 0),
+                    ..Default::default()
+                }),
+            ])
+            .thermals(vec![
+                make_thermal(ThermalSpec {
+                    id: 5,
+                    name: format!("thermal-{}", 5),
+                    ..Default::default()
+                }),
+                make_thermal(ThermalSpec {
+                    id: 5,
+                    name: format!("thermal-{}", 5),
+                    ..Default::default()
+                }),
+            ])
             .build();
 
         assert!(result.is_err());
@@ -954,14 +973,33 @@ mod tests {
 
     #[test]
     fn test_cascade_accessible() {
-        let mut h0 = make_hydro_on_bus(0, 0);
+        let mut h0 = make_hydro(HydroSpec {
+            id: 0,
+            name: format!("hydro-{}", 0),
+            bus_id: 0,
+            ..Default::default()
+        });
         h0.downstream_id = Some(EntityId(1));
-        let mut h1 = make_hydro_on_bus(1, 0);
+        let mut h1 = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            bus_id: 0,
+            ..Default::default()
+        });
         h1.downstream_id = Some(EntityId(2));
-        let h2 = make_hydro_on_bus(2, 0);
+        let h2 = make_hydro(HydroSpec {
+            id: 2,
+            name: format!("hydro-{}", 2),
+            bus_id: 0,
+            ..Default::default()
+        });
 
         let system = SystemBuilder::new()
-            .buses(vec![make_bus(0)])
+            .buses(vec![make_bus(BusSpec {
+                id: 0,
+                name: format!("bus-{}", 0),
+                ..Default::default()
+            })])
             .hydros(vec![h0, h1, h2])
             .build()
             .expect("valid system");
@@ -980,34 +1018,69 @@ mod tests {
     }
 
     #[test]
-    fn test_network_accessible() {
-        let system = SystemBuilder::new()
-            .buses(vec![make_bus(0), make_bus(1)])
-            .lines(vec![make_line(0, 0, 1)])
-            .build()
-            .expect("valid system");
-
-        let connections = system.network().bus_lines(EntityId(0));
-        assert!(!connections.is_empty(), "bus 0 must have connections");
-        assert_eq!(connections[0].line_id, EntityId(0));
-    }
-
-    #[test]
     fn test_all_entity_lookups() {
         // Hydros 0 and 1 exist for the pumping station's source/destination refs;
         // hydro 3 is the lookup target.
         let system = SystemBuilder::new()
-            .buses(vec![make_bus(0), make_bus(1)])
-            .lines(vec![make_line(2, 0, 1)])
-            .hydros(vec![
-                make_hydro_on_bus(0, 0),
-                make_hydro_on_bus(1, 0),
-                make_hydro_on_bus(3, 0),
+            .buses(vec![
+                make_bus(BusSpec {
+                    id: 0,
+                    name: format!("bus-{}", 0),
+                    ..Default::default()
+                }),
+                make_bus(BusSpec {
+                    id: 1,
+                    name: format!("bus-{}", 1),
+                    ..Default::default()
+                }),
             ])
-            .thermals(vec![make_thermal(4)])
-            .pumping_stations(vec![make_pumping_station(5)])
-            .contracts(vec![make_contract(6)])
-            .non_controllable_sources(vec![make_ncs(7)])
+            .lines(vec![make_line(LineSpec {
+                id: 2,
+                name: format!("line-{}", 2),
+                source_bus_id: 0,
+                target_bus_id: 1,
+                ..Default::default()
+            })])
+            .hydros(vec![
+                make_hydro(HydroSpec {
+                    id: 0,
+                    name: format!("hydro-{}", 0),
+                    bus_id: 0,
+                    ..Default::default()
+                }),
+                make_hydro(HydroSpec {
+                    id: 1,
+                    name: format!("hydro-{}", 1),
+                    bus_id: 0,
+                    ..Default::default()
+                }),
+                make_hydro(HydroSpec {
+                    id: 3,
+                    name: format!("hydro-{}", 3),
+                    bus_id: 0,
+                    ..Default::default()
+                }),
+            ])
+            .thermals(vec![make_thermal(ThermalSpec {
+                id: 4,
+                name: format!("thermal-{}", 4),
+                ..Default::default()
+            })])
+            .pumping_stations(vec![make_pumping_station(PumpingSpec {
+                id: 5,
+                name: format!("ps-{}", 5),
+                ..Default::default()
+            })])
+            .contracts(vec![make_contract(ContractSpec {
+                id: 6,
+                name: format!("contract-{}", 6),
+                ..Default::default()
+            })])
+            .non_controllable_sources(vec![make_ncs(NcsSpec {
+                id: 7,
+                name: format!("ncs-{}", 7),
+                ..Default::default()
+            })])
             .build()
             .expect("valid system");
 
@@ -1040,8 +1113,16 @@ mod tests {
 
     #[test]
     fn test_invalid_downstream_reference() {
-        let bus = make_bus(0);
-        let mut hydro = make_hydro(1);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let mut hydro = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
         hydro.downstream_id = Some(EntityId(50));
 
         let result = SystemBuilder::new()
@@ -1071,9 +1152,24 @@ mod tests {
 
     #[test]
     fn test_invalid_pumping_station_hydro_refs() {
-        let bus = make_bus(0);
-        let dest_hydro = make_hydro(1);
-        let ps = make_pumping_station_full(10, 0, 77, 1);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let dest_hydro = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
+        let ps = make_pumping_station(PumpingSpec {
+            id: 10,
+            name: format!("ps-{}", 10),
+            bus_id: 0,
+            source_hydro_id: 77,
+            destination_hydro_id: 1,
+            ..Default::default()
+        });
 
         let result = SystemBuilder::new()
             .buses(vec![bus])
@@ -1104,11 +1200,26 @@ mod tests {
     #[test]
     fn test_multiple_invalid_references_collected() {
         // Both errors must be reported (no short-circuiting on the first).
-        let line = make_line(1, 99, 0);
-        let thermal = make_thermal_on_bus(2, 88);
+        let line = make_line(LineSpec {
+            id: 1,
+            name: format!("line-{}", 1),
+            source_bus_id: 99,
+            target_bus_id: 0,
+            ..Default::default()
+        });
+        let thermal = make_thermal(ThermalSpec {
+            id: 2,
+            name: format!("thermal-{}", 2),
+            bus_id: 88,
+            ..Default::default()
+        });
 
         let result = SystemBuilder::new()
-            .buses(vec![make_bus(0)])
+            .buses(vec![make_bus(BusSpec {
+                id: 0,
+                name: format!("bus-{}", 0),
+                ..Default::default()
+            })])
             .lines(vec![line])
             .thermals(vec![thermal])
             .build();
@@ -1159,17 +1270,68 @@ mod tests {
 
     #[test]
     fn test_valid_cross_references_pass() {
-        let bus_0 = make_bus(0);
-        let bus_1 = make_bus(1);
-        let h0 = make_hydro_on_bus(0, 0);
-        let h1 = make_hydro_on_bus(1, 1);
-        let mut h2 = make_hydro_on_bus(2, 0);
+        let bus_0 = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let bus_1 = make_bus(BusSpec {
+            id: 1,
+            name: format!("bus-{}", 1),
+            ..Default::default()
+        });
+        let h0 = make_hydro(HydroSpec {
+            id: 0,
+            name: format!("hydro-{}", 0),
+            bus_id: 0,
+            ..Default::default()
+        });
+        let h1 = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            bus_id: 1,
+            ..Default::default()
+        });
+        let mut h2 = make_hydro(HydroSpec {
+            id: 2,
+            name: format!("hydro-{}", 2),
+            bus_id: 0,
+            ..Default::default()
+        });
         h2.downstream_id = Some(EntityId(1));
-        let line = make_line(10, 0, 1);
-        let thermal = make_thermal_on_bus(20, 0);
-        let ps = make_pumping_station_full(30, 0, 0, 1);
-        let contract = make_contract_on_bus(40, 1);
-        let ncs = make_ncs_on_bus(50, 0);
+        let line = make_line(LineSpec {
+            id: 10,
+            name: format!("line-{}", 10),
+            source_bus_id: 0,
+            target_bus_id: 1,
+            ..Default::default()
+        });
+        let thermal = make_thermal(ThermalSpec {
+            id: 20,
+            name: format!("thermal-{}", 20),
+            bus_id: 0,
+            ..Default::default()
+        });
+        let ps = make_pumping_station(PumpingSpec {
+            id: 30,
+            name: format!("ps-{}", 30),
+            bus_id: 0,
+            source_hydro_id: 0,
+            destination_hydro_id: 1,
+            ..Default::default()
+        });
+        let contract = make_contract(ContractSpec {
+            id: 40,
+            name: format!("contract-{}", 40),
+            bus_id: 1,
+            ..Default::default()
+        });
+        let ncs = make_ncs(NcsSpec {
+            id: 50,
+            name: format!("ncs-{}", 50),
+            bus_id: 0,
+            ..Default::default()
+        });
 
         let result = SystemBuilder::new()
             .buses(vec![bus_0, bus_1])
@@ -1200,12 +1362,28 @@ mod tests {
 
     #[test]
     fn test_cascade_cycle_detected() {
-        let bus = make_bus(0);
-        let mut h0 = make_hydro(0);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let mut h0 = make_hydro(HydroSpec {
+            id: 0,
+            name: format!("hydro-{}", 0),
+            ..Default::default()
+        });
         h0.downstream_id = Some(EntityId(1));
-        let mut h1 = make_hydro(1);
+        let mut h1 = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
         h1.downstream_id = Some(EntityId(2));
-        let mut h2 = make_hydro(2);
+        let mut h2 = make_hydro(HydroSpec {
+            id: 2,
+            name: format!("hydro-{}", 2),
+            ..Default::default()
+        });
         h2.downstream_id = Some(EntityId(0));
 
         let result = SystemBuilder::new()
@@ -1234,8 +1412,16 @@ mod tests {
 
     #[test]
     fn test_cascade_self_loop_detected() {
-        let bus = make_bus(0);
-        let mut h0 = make_hydro(0);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let mut h0 = make_hydro(HydroSpec {
+            id: 0,
+            name: format!("hydro-{}", 0),
+            ..Default::default()
+        });
         h0.downstream_id = Some(EntityId(0));
 
         let result = SystemBuilder::new()
@@ -1256,12 +1442,28 @@ mod tests {
 
     #[test]
     fn test_valid_acyclic_cascade_passes() {
-        let bus = make_bus(0);
-        let mut h0 = make_hydro(0);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let mut h0 = make_hydro(HydroSpec {
+            id: 0,
+            name: format!("hydro-{}", 0),
+            ..Default::default()
+        });
         h0.downstream_id = Some(EntityId(1));
-        let mut h1 = make_hydro(1);
+        let mut h1 = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
         h1.downstream_id = Some(EntityId(2));
-        let h2 = make_hydro(2);
+        let h2 = make_hydro(HydroSpec {
+            id: 2,
+            name: format!("hydro-{}", 2),
+            ..Default::default()
+        });
 
         let result = SystemBuilder::new()
             .buses(vec![bus])
@@ -1285,8 +1487,16 @@ mod tests {
 
     #[test]
     fn test_filling_without_entry_stage() {
-        let bus = make_bus(0);
-        let mut hydro = make_hydro(1);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let mut hydro = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
         hydro.entry_stage_id = None;
         hydro.filling = Some(FillingConfig {
             start_stage_id: 10,
@@ -1318,8 +1528,16 @@ mod tests {
     #[test]
     fn test_filling_negative_rate() {
         // Only a negative rate is rejected; zero is valid (test_filling_zero_rate_accepted).
-        let bus = make_bus(0);
-        let mut hydro = make_hydro(1);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let mut hydro = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
         hydro.entry_stage_id = Some(10);
         hydro.filling = Some(FillingConfig {
             start_stage_id: 10,
@@ -1352,8 +1570,16 @@ mod tests {
     #[test]
     fn test_filling_zero_rate_accepted() {
         // A zero rate is valid: no minimum accumulation is required this stage.
-        let bus = make_bus(0);
-        let mut hydro = make_hydro(1);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let mut hydro = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
         hydro.entry_stage_id = Some(10);
         hydro.filling = Some(FillingConfig {
             start_stage_id: 9,
@@ -1374,8 +1600,16 @@ mod tests {
 
     #[test]
     fn test_valid_filling_config_passes() {
-        let bus = make_bus(0);
-        let mut hydro = make_hydro(1);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let mut hydro = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
         hydro.entry_stage_id = Some(10);
         hydro.filling = Some(FillingConfig {
             start_stage_id: 9,
@@ -1398,8 +1632,16 @@ mod tests {
     fn test_filling_start_not_before_entry_rejected() {
         // SystemBuilder rejects start_stage_id >= entry_stage_id even when cobre-io
         // is bypassed; an inverted ordering otherwise mis-phases the reservoir.
-        let bus = make_bus(0);
-        let mut hydro = make_hydro(1);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let mut hydro = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
         hydro.entry_stage_id = Some(5);
         hydro.filling = Some(FillingConfig {
             start_stage_id: 5,
@@ -1430,12 +1672,24 @@ mod tests {
 
     #[test]
     fn test_cascade_cycle_and_invalid_filling_both_reported() {
-        let bus = make_bus(0);
+        let bus = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
 
-        let mut h0 = make_hydro(0);
+        let mut h0 = make_hydro(HydroSpec {
+            id: 0,
+            name: format!("hydro-{}", 0),
+            ..Default::default()
+        });
         h0.downstream_id = Some(EntityId(0));
 
-        let mut h1 = make_hydro(1);
+        let mut h1 = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            ..Default::default()
+        });
         h1.entry_stage_id = None;
         h1.filling = Some(FillingConfig {
             start_stage_id: 5,
@@ -1465,11 +1719,35 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_system_serde_roundtrip() {
-        let bus_a = make_bus(1);
-        let bus_b = make_bus(2);
-        let hydro = make_hydro_on_bus(10, 1);
-        let thermal = make_thermal_on_bus(20, 2);
-        let line = make_line(1, 1, 2);
+        let bus_a = make_bus(BusSpec {
+            id: 1,
+            name: format!("bus-{}", 1),
+            ..Default::default()
+        });
+        let bus_b = make_bus(BusSpec {
+            id: 2,
+            name: format!("bus-{}", 2),
+            ..Default::default()
+        });
+        let hydro = make_hydro(HydroSpec {
+            id: 10,
+            name: format!("hydro-{}", 10),
+            bus_id: 1,
+            ..Default::default()
+        });
+        let thermal = make_thermal(ThermalSpec {
+            id: 20,
+            name: format!("thermal-{}", 20),
+            bus_id: 2,
+            ..Default::default()
+        });
+        let line = make_line(LineSpec {
+            id: 1,
+            name: format!("line-{}", 1),
+            source_bus_id: 1,
+            target_bus_id: 2,
+            ..Default::default()
+        });
 
         let system = SystemBuilder::new()
             .buses(vec![bus_a, bus_b])
@@ -1507,34 +1785,6 @@ mod tests {
     }
 
     // ---- Extended System tests ----------------------------------------------
-
-    fn make_stage(id: i32) -> Stage {
-        use crate::temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
-        };
-        Stage {
-            index: usize::try_from(id.max(0)).unwrap_or(0),
-            id,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 50,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
-    }
 
     #[test]
     fn test_system_backward_compat() {
@@ -1587,8 +1837,34 @@ mod tests {
 
     #[test]
     fn test_system_with_stages() {
-        let s0 = make_stage(0);
-        let s1 = make_stage(1);
+        let s0 = make_stage(StageSpec {
+            id: 0,
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 50,
+                noise_method: NoiseMethod::Saa,
+            },
+            ..Default::default()
+        });
+        let s1 = make_stage(StageSpec {
+            id: 1,
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 50,
+                noise_method: NoiseMethod::Saa,
+            },
+            ..Default::default()
+        });
 
         let system = SystemBuilder::new()
             .stages(vec![s1.clone(), s0.clone()])
@@ -1610,7 +1886,25 @@ mod tests {
 
     #[test]
     fn test_system_stage_lookup_by_id() {
-        let stages: Vec<Stage> = [0i32, 1, 2].iter().map(|&id| make_stage(id)).collect();
+        let stages: Vec<Stage> = [0i32, 1, 2]
+            .iter()
+            .map(|&id| {
+                make_stage(StageSpec {
+                    id,
+                    season_id: Some(0),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "SINGLE".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 50,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                })
+            })
+            .collect();
 
         let system = SystemBuilder::new()
             .stages(stages)
@@ -1649,7 +1943,36 @@ mod tests {
     fn test_system_serde_roundtrip_with_stages() {
         use crate::temporal::PolicyGraphType;
 
-        let stages = vec![make_stage(0), make_stage(1)];
+        let stages = vec![
+            make_stage(StageSpec {
+                id: 0,
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "SINGLE".to_string(),
+                    duration_hours: 744.0,
+                }],
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 50,
+                    noise_method: NoiseMethod::Saa,
+                },
+                ..Default::default()
+            }),
+            make_stage(StageSpec {
+                id: 1,
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "SINGLE".to_string(),
+                    duration_hours: 744.0,
+                }],
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 50,
+                    noise_method: NoiseMethod::Saa,
+                },
+                ..Default::default()
+            }),
+        ];
         let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
@@ -1685,9 +2008,23 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn deserialized_system_lookups_work_without_manual_rebuild() {
-        let bus = make_bus(1);
-        let hydro = make_hydro_on_bus(10, 1);
-        let thermal = make_thermal_on_bus(20, 1);
+        let bus = make_bus(BusSpec {
+            id: 1,
+            name: format!("bus-{}", 1),
+            ..Default::default()
+        });
+        let hydro = make_hydro(HydroSpec {
+            id: 10,
+            name: format!("hydro-{}", 10),
+            bus_id: 1,
+            ..Default::default()
+        });
+        let thermal = make_thermal(ThermalSpec {
+            id: 20,
+            name: format!("thermal-{}", 20),
+            bus_id: 1,
+            ..Default::default()
+        });
 
         let system = SystemBuilder::new()
             .buses(vec![bus])
@@ -1715,13 +2052,102 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
-    fn test_system_postcard_roundtrip_preserves_unit_groups() {
-        let bus0 = make_bus(0);
-        let bus4 = make_bus(4);
-        let bus9 = make_bus(9);
+    fn postcard_roundtrip_rebuilds_cascade_topology_bit_equal() {
+        let hydro_12 = make_hydro(HydroSpec {
+            id: 12,
+            name: format!("hydro-{}", 12),
+            bus_id: 0,
+            ..Default::default()
+        });
+        let hydro_11 = make_hydro(HydroSpec {
+            id: 11,
+            name: format!("hydro-{}", 11),
+            bus_id: 0,
+            downstream_id: Some(12),
+            ..Default::default()
+        });
+        let hydro_10 = make_hydro(HydroSpec {
+            id: 10,
+            name: format!("hydro-{}", 10),
+            bus_id: 0,
+            downstream_id: Some(12),
+            ..Default::default()
+        });
 
-        let no_groups_hydro = make_hydro_on_bus(1, 0);
-        let mut two_groups_hydro = make_hydro_on_bus(2, 0);
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(BusSpec {
+                id: 0,
+                name: format!("bus-{}", 0),
+                ..Default::default()
+            })])
+            .hydros(vec![hydro_12, hydro_11, hydro_10])
+            .build()
+            .expect("fork-merge cascade must be valid");
+
+        let expected_order = [EntityId(10), EntityId(11), EntityId(12)];
+        assert_eq!(system.cascade().topological_order(), &expected_order);
+
+        let bytes = postcard::to_allocvec(&system).unwrap();
+        let deserialized: System = postcard::from_bytes(&bytes).unwrap();
+
+        assert_eq!(deserialized.cascade(), system.cascade());
+        assert_eq!(
+            deserialized.cascade().topological_order(),
+            system.cascade().topological_order()
+        );
+        assert_eq!(deserialized.cascade().len(), system.cascade().len());
+
+        for id in expected_order {
+            assert_eq!(
+                deserialized.cascade().downstream(id),
+                system.cascade().downstream(id)
+            );
+            assert_eq!(
+                deserialized.cascade().upstream(id),
+                system.cascade().upstream(id)
+            );
+            assert_eq!(
+                deserialized.cascade().is_headwater(id),
+                system.cascade().is_headwater(id)
+            );
+            assert_eq!(
+                deserialized.cascade().is_terminal(id),
+                system.cascade().is_terminal(id)
+            );
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_system_postcard_roundtrip_preserves_unit_groups() {
+        let bus0 = make_bus(BusSpec {
+            id: 0,
+            name: format!("bus-{}", 0),
+            ..Default::default()
+        });
+        let bus4 = make_bus(BusSpec {
+            id: 4,
+            name: format!("bus-{}", 4),
+            ..Default::default()
+        });
+        let bus9 = make_bus(BusSpec {
+            id: 9,
+            name: format!("bus-{}", 9),
+            ..Default::default()
+        });
+
+        let no_groups_hydro = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            bus_id: 0,
+            ..Default::default()
+        });
+        let mut two_groups_hydro = make_hydro(HydroSpec {
+            id: 2,
+            name: format!("hydro-{}", 2),
+            bus_id: 0,
+            ..Default::default()
+        });
         two_groups_hydro.unit_groups = vec![
             HydroUnitGroup {
                 id: EntityId(3),
@@ -1779,7 +2205,11 @@ mod tests {
         };
 
         let bus1 = {
-            let mut b = make_bus(1);
+            let mut b = make_bus(BusSpec {
+                id: 1,
+                name: format!("bus-{}", 1),
+                ..Default::default()
+            });
             b.deficit_segments = vec![DeficitSegment {
                 depth_mw: Some(50.0),
                 cost_per_mwh: 3000.0,
@@ -1788,7 +2218,11 @@ mod tests {
             b
         };
         let bus2 = {
-            let mut b = make_bus(2);
+            let mut b = make_bus(BusSpec {
+                id: 2,
+                name: format!("bus-{}", 2),
+                ..Default::default()
+            });
             b.deficit_segments = vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 5000.0,
@@ -1797,7 +2231,12 @@ mod tests {
             b
         };
 
-        let mut hydro1 = make_hydro_on_bus(1, 1);
+        let mut hydro1 = make_hydro(HydroSpec {
+            id: 1,
+            name: format!("hydro-{}", 1),
+            bus_id: 1,
+            ..Default::default()
+        });
         hydro1.downstream_id = Some(EntityId(2));
         hydro1.travel_time_hours = Some(6.0);
         hydro1.entry_stage_id = Some(0);
@@ -1821,16 +2260,75 @@ mod tests {
                 max_turbined_m3s: 0.6,
             },
         ];
-        let hydro2 = make_hydro_on_bus(2, 2);
+        let hydro2 = make_hydro(HydroSpec {
+            id: 2,
+            name: format!("hydro-{}", 2),
+            bus_id: 2,
+            ..Default::default()
+        });
 
-        let thermal1 = make_thermal_on_bus(1, 1);
-        let line1 = make_line(1, 1, 2);
-        let pump1 = make_pumping_station_full(1, 1, 1, 2);
-        let contract1 = make_contract_on_bus(1, 2);
-        let ncs1 = make_ncs_on_bus(1, 2);
+        let thermal1 = make_thermal(ThermalSpec {
+            id: 1,
+            name: format!("thermal-{}", 1),
+            bus_id: 1,
+            ..Default::default()
+        });
+        let line1 = make_line(LineSpec {
+            id: 1,
+            name: format!("line-{}", 1),
+            source_bus_id: 1,
+            target_bus_id: 2,
+            ..Default::default()
+        });
+        let pump1 = make_pumping_station(PumpingSpec {
+            id: 1,
+            name: format!("ps-{}", 1),
+            bus_id: 1,
+            source_hydro_id: 1,
+            destination_hydro_id: 2,
+            ..Default::default()
+        });
+        let contract1 = make_contract(ContractSpec {
+            id: 1,
+            name: format!("contract-{}", 1),
+            bus_id: 2,
+            ..Default::default()
+        });
+        let ncs1 = make_ncs(NcsSpec {
+            id: 1,
+            name: format!("ncs-{}", 1),
+            bus_id: 2,
+            ..Default::default()
+        });
 
-        let stage0 = make_stage(0);
-        let stage1 = make_stage(1);
+        let stage0 = make_stage(StageSpec {
+            id: 0,
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 50,
+                noise_method: NoiseMethod::Saa,
+            },
+            ..Default::default()
+        });
+        let stage1 = make_stage(StageSpec {
+            id: 1,
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 50,
+                noise_method: NoiseMethod::Saa,
+            },
+            ..Default::default()
+        });
 
         let policy_graph = HorizonGraph {
             stage_discount_rate_overrides: std::collections::HashMap::new(),

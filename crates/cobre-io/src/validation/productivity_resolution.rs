@@ -167,9 +167,7 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         DeficitSegment, EntityId, HorizonGraph, Hydro,
-        entities::{Bus, HydroGenerationModel, HydroPenalties},
-        initial_conditions::InitialConditions,
-        penalty::GlobalPenaltyDefaults,
+        entities::{Bus, HydroGenerationModel},
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
@@ -178,17 +176,12 @@ mod tests {
 
     use super::{find_productivity_for_stage, validate_productivity_resolution};
     use crate::{
-        config::{
-            Config, EstimationConfig, ExportsConfig, ModelingConfig, ParallelismConfig,
-            PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingMode, StoppingRuleConfig,
-            TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
-        },
         extensions::{
             HydroEnergyProductivityRow, ProductionModelConfig, SeasonConfig, SelectionMode,
             StageRange,
         },
         stages::StagesData,
-        validation::{ErrorKind, ValidationContext, schema::ParsedData},
+        validation::{ErrorKind, ValidationContext},
     };
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -246,28 +239,7 @@ mod tests {
             evaporation_reference_volumes_hm3: None,
             diversion: None,
             filling: None,
-            penalties: penalties_default(),
-        }
-    }
-
-    fn penalties_default() -> HydroPenalties {
-        HydroPenalties {
-            spillage_cost: 1.0,
-            diversion_cost: 1.0,
-            turbined_cost: 1.0,
-            storage_violation_below_cost: 1.0,
-            filling_target_violation_cost: 1.0,
-            turbined_violation_below_cost: 1.0,
-            outflow_violation_below_cost: 1.0,
-            outflow_violation_above_cost: 1.0,
-            generation_violation_below_cost: 1.0,
-            evaporation_violation_cost: 1.0,
-            water_withdrawal_violation_cost: 1.0,
-            water_withdrawal_violation_pos_cost: 1.0,
-            water_withdrawal_violation_neg_cost: 1.0,
-            evaporation_violation_pos_cost: 1.0,
-            evaporation_violation_neg_cost: 1.0,
-            inflow_nonnegativity_cost: 1000.0,
+            penalties: crate::test_support::penalties_all(1.0),
         }
     }
 
@@ -301,110 +273,32 @@ mod tests {
         }
     }
 
-    fn base_parsed_data() -> ParsedData {
-        let config = Config {
-            schema: None,
-            modeling: ModelingConfig::default(),
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: None,
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 100 }]),
-                stopping_mode: StoppingMode::Any,
-                cut_selection: RowSelectionConfig::default(),
-                solver: TrainingSolverConfig::default(),
-                parallelism: ParallelismConfig::default(),
-                scenario_source: None,
-                selection: Some(TrainingSelection::Sampled { forward_passes: 10 }),
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            simulation: SimulationConfig::default(),
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
-            policy: PolicyConfig::default(),
-        };
-
-        let global_penalties = GlobalPenaltyDefaults {
-            bus_deficit_segments: vec![DeficitSegment {
-                depth_mw: None,
-                cost_per_mwh: 1.0,
-            }],
-            bus_excess_cost: 1.0,
-            line_exchange_cost: 1.0,
-            hydro: penalties_default(),
-            ncs_curtailment_cost: 1.0,
-        };
-
-        ParsedData {
-            config,
-            penalties: global_penalties,
-            stages: StagesData {
-                openings_declared: std::collections::HashSet::new(),
-                stages: vec![make_stage(0)],
-                policy_graph: HorizonGraph::default(),
-            },
-            initial_conditions: InitialConditions {
-                storage: vec![],
-                filling_storage: vec![],
-                past_anticipated_commitments: vec![],
-                recent_observations: vec![],
-                past_defluences: vec![],
-            },
-            post_study_stages: None,
-            buses: vec![Bus {
-                id: EntityId(1),
-                name: "BUS_1".to_string(),
-                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                deficit_segments: vec![DeficitSegment {
-                    depth_mw: None,
-                    cost_per_mwh: 1000.0,
-                }],
-                excess_cost: 100.0,
-            }],
-            thermals: vec![],
-            hydros: vec![],
-            lines: vec![],
-            non_controllable_sources: vec![],
-            pumping_stations: vec![],
-            energy_contracts: vec![],
-            hydro_geometry: vec![],
-            production_models: vec![],
-            plane_reduction: None,
-            hydro_energy_productivity_rows: vec![],
-            fpha_hyperplanes: vec![],
-            scalar_parameters: vec![],
-            inflow_history: vec![],
-            inflow_seasonal_stats: vec![],
-            inflow_ar_coefficients: vec![],
-            inflow_annual_components: vec![],
-            external_scenarios: vec![],
-            external_load_scenarios: vec![],
-            external_ncs_scenarios: vec![],
-            load_seasonal_stats: vec![],
-            load_factors: vec![],
-            correlation: None,
-            non_controllable_factors: vec![],
-            ncs_models: vec![],
-            thermal_bounds: vec![],
-            hydro_bounds: vec![],
-            line_bounds: vec![],
-            pumping_bounds: vec![],
-            contract_bounds: vec![],
-            generic_constraints: vec![],
-            generic_constraint_bounds: vec![],
-            penalty_overrides_bus: vec![],
-            penalty_overrides_line: vec![],
-            penalty_overrides_hydro: vec![],
-            penalty_overrides_ncs: vec![],
-            ncs_bounds: vec![],
-            hydro_unit_group_bounds: vec![],
+    fn stages() -> StagesData {
+        StagesData {
+            openings_declared: std::collections::HashSet::new(),
+            stages: vec![make_stage(0)],
+            policy_graph: HorizonGraph::default(),
         }
+    }
+
+    fn buses() -> Vec<Bus> {
+        vec![Bus {
+            id: EntityId(1),
+            name: "BUS_1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 100.0,
+        }]
     }
 
     // ── Unit tests ─────────────────────────────────────────────────────────────
 
     #[test]
     fn test_no_error_when_only_parquet_supplies_value() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), buses());
         data.hydros = vec![make_hydro(0, HydroGenerationModel::ConstantProductivity)];
         data.production_models = vec![];
         data.hydro_energy_productivity_rows = vec![parquet_row(0, Some(0), Some(0.9))];
@@ -420,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_no_error_when_only_json_supplies_value() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), buses());
         data.hydros = vec![make_hydro(0, HydroGenerationModel::ConstantProductivity)];
         data.production_models = vec![stage_range_config(0, Some(0.9))];
         data.hydro_energy_productivity_rows = vec![];
@@ -436,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_conflict_when_both_supply_value() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), buses());
         data.hydros = vec![make_hydro(0, HydroGenerationModel::ConstantProductivity)];
         data.production_models = vec![stage_range_config(0, Some(0.9))];
         data.hydro_energy_productivity_rows = vec![parquet_row(0, Some(0), Some(1.1))];
@@ -464,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_gap_when_neither_supplies_value() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), buses());
         data.hydros = vec![make_hydro(0, HydroGenerationModel::ConstantProductivity)];
         // JSON has an entry but productivity is None.
         data.production_models = vec![stage_range_config(0, None)];
@@ -485,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_per_hydro_default_covers_when_stage_specific_absent() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), buses());
         data.hydros = vec![make_hydro(0, HydroGenerationModel::ConstantProductivity)];
         data.production_models = vec![stage_range_config(0, None)];
         // Per-hydro default row (stage_id = None).
@@ -506,7 +400,7 @@ mod tests {
     /// No conflict between two parquet rows — no error expected.
     #[test]
     fn test_stage_specific_wins_over_per_hydro_default() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), buses());
         data.hydros = vec![make_hydro(0, HydroGenerationModel::ConstantProductivity)];
         data.production_models = vec![stage_range_config(0, None)];
         data.hydro_energy_productivity_rows = vec![
@@ -525,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_fpha_hydros_are_not_validated() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), buses());
         data.hydros = vec![make_hydro(0, HydroGenerationModel::Fpha)];
         // No production model config for hydro 0 (FPHA parser rejects productivity).
         data.production_models = vec![];
@@ -542,7 +436,7 @@ mod tests {
 
     #[test]
     fn test_multiple_issues_collected_in_one_pass() {
-        let mut data = base_parsed_data();
+        let mut data = crate::test_support::base_parsed_data(stages(), buses());
         data.hydros = vec![
             make_hydro(0, HydroGenerationModel::ConstantProductivity),
             make_hydro(1, HydroGenerationModel::LinearizedHead),

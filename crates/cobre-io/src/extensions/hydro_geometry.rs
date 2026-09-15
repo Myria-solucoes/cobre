@@ -30,13 +30,13 @@
 //! - Monotonicity (`volume_hm3` increasing within each hydro) — Layer 5.
 //! - `hydro_id` existence in the hydro registry — Layer 3.
 
-use arrow::array::{Array, Float64Array, Int32Array};
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
+use crate::parquet_helpers::{
+    extract_required_float64, extract_required_int32, open_record_batch_reader,
+};
 
 /// One point on the Volume-Height-Area (VHA) curve for a hydro plant; a complete
 /// curve is multiple same-`hydro_id` rows sorted by ascending `volume_hm3`. All
@@ -92,24 +92,17 @@ pub struct HydroGeometryRow {
 /// println!("loaded {} VHA curve points", rows.len());
 /// ```
 pub fn parse_hydro_geometry(path: &Path) -> Result<Vec<HydroGeometryRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
+    let reader = open_record_batch_reader(path)?;
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let mut rows: Vec<HydroGeometryRow> = Vec::new();
+    let mut rows = Vec::new();
 
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        let hydro_id_col = extract_int32_column(&batch, "hydro_id", path)?;
-        let volume_col = extract_float64_column(&batch, "volume_hm3", path)?;
-        let height_col = extract_float64_column(&batch, "height_m", path)?;
-        let area_col = extract_float64_column(&batch, "area_km2", path)?;
+        let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
+        let volume_col = extract_required_float64(&batch, "volume_hm3", path)?;
+        let height_col = extract_required_float64(&batch, "height_m", path)?;
+        let area_col = extract_required_float64(&batch, "area_km2", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -144,54 +137,6 @@ pub fn parse_hydro_geometry(path: &Path) -> Result<Vec<HydroGeometryRow>, LoadEr
     Ok(rows)
 }
 
-fn extract_int32_column<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a Int32Array, LoadError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing column \"{name}\""),
-        })?;
-    col.as_any()
-        .downcast_ref::<Int32Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Int32 is required",
-                col.data_type()
-            ),
-        })
-}
-
-fn extract_float64_column<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a Float64Array, LoadError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing column \"{name}\""),
-        })?;
-    col.as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Float64 is required",
-                col.data_type()
-            ),
-        })
-}
-
 fn validate_non_negative(
     value: f64,
     row_idx: usize,
@@ -220,12 +165,12 @@ fn validate_non_negative(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
+    use crate::test_support::write_parquet_batches;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -251,29 +196,6 @@ mod tests {
             ],
         )
         .expect("valid batch construction")
-    }
-
-    /// Returns the temp handle so the file stays alive until the caller drops it.
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
-
-    fn write_parquet_batches(batches: &[RecordBatch]) -> NamedTempFile {
-        assert!(!batches.is_empty(), "must provide at least one batch");
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer =
-            ArrowWriter::try_new(tmp.reopen().expect("reopen"), batches[0].schema(), None)
-                .expect("ArrowWriter");
-        for batch in batches {
-            writer.write(batch).expect("write batch");
-        }
-        writer.close().expect("close writer");
-        tmp
     }
 
     // ── AC: valid single-hydro file ───────────────────────────────────────────
@@ -328,10 +250,10 @@ mod tests {
         assert_eq!(rows[4].volume_hm3, 500.0);
     }
 
-    // ── AC: missing column ────────────────────────────────────────────────────
+    // ── AC: missing required column ────────────────────────────────────────────────────
 
     /// Parquet file missing `area_km2` column -> SchemaError with field "area_km2"
-    /// and message containing "missing column".
+    /// and message containing "missing required column".
     #[test]
     fn test_missing_area_km2_column() {
         let schema = Arc::new(Schema::new(vec![
@@ -359,8 +281,8 @@ mod tests {
                     "field should be 'area_km2', got: {field}"
                 );
                 assert!(
-                    message.contains("missing column"),
-                    "message should contain 'missing column', got: {message}"
+                    message.contains("missing required column"),
+                    "message should contain 'missing required column', got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -390,7 +312,7 @@ mod tests {
         match err {
             LoadError::SchemaError { field, message, .. } => {
                 assert_eq!(field, "hydro_id");
-                assert!(message.contains("missing column"));
+                assert!(message.contains("missing required column"));
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }

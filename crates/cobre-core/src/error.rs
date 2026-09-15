@@ -59,26 +59,6 @@ pub enum ValidationError {
         /// Hydro declaring no unit groups.
         hydro_id: EntityId,
     },
-    /// A bus has no connections (no lines, generators, or loads).
-    ///
-    /// Emitted by `cobre-io` validation.
-    DisconnectedBus {
-        /// The disconnected bus.
-        bus_id: EntityId,
-    },
-    /// Entity-level penalty value is invalid (e.g., negative cost).
-    ///
-    /// Emitted by `cobre-io` validation.
-    InvalidPenalty {
-        /// Entity type with the invalid penalty.
-        entity_type: &'static str,
-        /// ID of the entity with the invalid penalty.
-        entity_id: EntityId,
-        /// Penalty field that is invalid.
-        field_name: &'static str,
-        /// Why the penalty is invalid.
-        reason: String,
-    },
     /// A scenario model table is not in its documented canonical order.
     UnsortedModelTable {
         /// Table that is out of order.
@@ -119,19 +99,6 @@ impl fmt::Display for ValidationError {
             Self::MissingUnitGroups { hydro_id } => write!(
                 f,
                 "hydro {hydro_id} declares no unit groups: at least one unit group is required"
-            ),
-            Self::DisconnectedBus { bus_id } => write!(
-                f,
-                "bus {bus_id} is disconnected (no lines, generators, or loads)"
-            ),
-            Self::InvalidPenalty {
-                entity_type,
-                entity_id,
-                field_name,
-                reason,
-            } => write!(
-                f,
-                "{entity_type} with id {entity_id} has invalid penalty in field '{field_name}': {reason}"
             ),
             Self::UnsortedModelTable { table, position } => write!(
                 f,
@@ -197,8 +164,8 @@ mod tests {
 
     #[test]
     fn test_error_trait() {
-        let err = ValidationError::DisconnectedBus {
-            bus_id: EntityId(7),
+        let err = ValidationError::MissingUnitGroups {
+            hydro_id: EntityId(7),
         };
         let _: &dyn std::error::Error = &err;
     }

@@ -190,13 +190,7 @@ impl PrecomputedNormal {
     // Accessors
     // -----------------------------------------------------------------------
 
-    /// Stage-level mean for the given stage and entity indices.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `stage >= n_stages` or `entity >= n_entities`.
-    #[must_use]
-    pub fn mean(&self, stage: usize, entity: usize) -> f64 {
+    fn debug_assert_in_bounds(&self, stage: usize, entity: usize) {
         debug_assert!(
             stage < self.n_stages,
             "stage index {stage} is out of bounds (n_stages = {})",
@@ -207,6 +201,16 @@ impl PrecomputedNormal {
             "entity index {entity} is out of bounds (n_entities = {})",
             self.n_entities
         );
+    }
+
+    /// Stage-level mean for the given stage and entity indices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `stage >= n_stages` or `entity >= n_entities`.
+    #[must_use]
+    pub fn mean(&self, stage: usize, entity: usize) -> f64 {
+        self.debug_assert_in_bounds(stage, entity);
         self.mean[stage * self.n_entities + entity]
     }
 
@@ -217,16 +221,7 @@ impl PrecomputedNormal {
     /// Panics if `stage >= n_stages` or `entity >= n_entities`.
     #[must_use]
     pub fn std(&self, stage: usize, entity: usize) -> f64 {
-        debug_assert!(
-            stage < self.n_stages,
-            "stage index {stage} is out of bounds (n_stages = {})",
-            self.n_stages
-        );
-        debug_assert!(
-            entity < self.n_entities,
-            "entity index {entity} is out of bounds (n_entities = {})",
-            self.n_entities
-        );
+        self.debug_assert_in_bounds(stage, entity);
         self.std[stage * self.n_entities + entity]
     }
 
@@ -241,16 +236,7 @@ impl PrecomputedNormal {
     /// `block >= max_blocks`.
     #[must_use]
     pub fn block_factor(&self, stage: usize, entity: usize, block: usize) -> f64 {
-        debug_assert!(
-            stage < self.n_stages,
-            "stage index {stage} is out of bounds (n_stages = {})",
-            self.n_stages
-        );
-        debug_assert!(
-            entity < self.n_entities,
-            "entity index {entity} is out of bounds (n_entities = {})",
-            self.n_entities
-        );
+        self.debug_assert_in_bounds(stage, entity);
         debug_assert!(
             block < self.max_blocks,
             "block index {block} is out of bounds (max_blocks = {})",
@@ -298,45 +284,27 @@ impl Default for PrecomputedNormal {
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
     use cobre_core::{
         EntityId,
         scenario::LoadModel,
-        temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-            StageStateConfig,
-        },
+        temporal::{NoiseMethod, ScenarioSourceConfig, Stage},
+        test_support::{StageSpec, single_block},
     };
 
     use super::{BlockFactorPair, EntityFactorEntry, PrecomputedNormal};
 
-    fn dummy_date(year: i32, month: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(year, month, day).unwrap()
-    }
-
     fn make_stage(index: usize, id: i32) -> Stage {
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id,
-            start_date: dummy_date(2024, 1, 1),
-            end_date: dummy_date(2024, 2, 1),
+            index: Some(index),
             season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
+            blocks: single_block("SINGLE", 744.0),
             scenario_config: ScenarioSourceConfig {
                 branching_factor: 10,
                 noise_method: NoiseMethod::Saa,
             },
-        }
+            ..Default::default()
+        })
     }
 
     fn make_model(entity_id: i32, stage_id: i32, mean: f64, std: f64) -> LoadModel {

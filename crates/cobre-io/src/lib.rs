@@ -62,13 +62,12 @@ pub mod scenarios;
 pub mod stage_resolve;
 pub mod stages;
 pub mod system;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod validation;
 pub(crate) mod windowed_history;
 
-pub use broadcast::{
-    BroadcastComputedParameter, BroadcastParameterKind, BroadcastScalarParameter,
-    deserialize_parameters, deserialize_system, serialize_parameters, serialize_system,
-};
+pub use broadcast::{BroadcastComputedParameter, BroadcastParameterKind, BroadcastScalarParameter};
 pub use config::{
     BoundaryPolicy, Config, EstimationConfig, OrderSelectionMethod, PolicyMode, parse_config,
 };
@@ -91,9 +90,9 @@ pub use extensions::{
     PlaneReductionConfig, ProductionModelConfig, ProductionModelFile, SeasonConfig, SelectionMode,
     StageRange, build_hydro_reference_volumes_resolved, load_fpha_hyperplanes,
     load_hydro_energy_productivity, load_hydro_geometry, load_production_models,
-    load_scalar_parameters_json, parse_evaporation_models, parse_fpha_deviation_points,
-    parse_fpha_hyperplanes, parse_hydro_energy_productivity, parse_hydro_geometry,
-    parse_production_models, parse_scalar_parameters_json,
+    parse_evaporation_models, parse_fpha_deviation_points, parse_fpha_hyperplanes,
+    parse_hydro_energy_productivity, parse_hydro_geometry, parse_production_models,
+    parse_scalar_parameters_json,
 };
 pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::codec::{deserialize_checkpoint_manifest, serialize_checkpoint_manifest};
@@ -131,16 +130,16 @@ pub use resolution::{resolve_bounds, resolve_penalties};
 pub use scenarios::{
     BlockFactor, ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, InflowArCoefficientRow,
     InflowHistoryRow, InflowSeasonalStatsRow, LoadFactorEntry, LoadSeasonalStatsRow,
-    NoiseOpeningRow, ScenarioData, assemble_inflow_models, assemble_load_models, load_correlation,
+    NoiseOpeningRow, assemble_inflow_models, assemble_load_models, load_correlation,
     load_external_inflow_scenarios, load_external_load_scenarios, load_external_ncs_scenarios,
     load_inflow_ar_coefficients, load_inflow_history, load_inflow_seasonal_stats,
-    load_load_factors, load_load_seasonal_stats, load_noise_openings, load_scenarios,
-    parse_correlation, parse_external_inflow_scenarios, parse_external_load_scenarios,
-    parse_external_ncs_scenarios, parse_inflow_ar_coefficients, parse_inflow_history,
-    parse_inflow_seasonal_stats, parse_load_factors, parse_load_seasonal_stats,
+    load_load_factors, load_load_seasonal_stats, load_noise_openings, parse_correlation,
+    parse_external_inflow_scenarios, parse_external_load_scenarios, parse_external_ncs_scenarios,
+    parse_inflow_ar_coefficients, parse_inflow_history, parse_inflow_seasonal_stats,
+    parse_load_factors, parse_load_seasonal_stats,
 };
 pub use stage_resolve::StageIdResolver;
-pub use stages::{StagesData, build_season_stage_map, parse_stages};
+pub use stages::{StagesData, parse_stages};
 pub use system::{
     load_energy_contracts, load_non_controllable_sources, load_pumping_stations, parse_buses,
     parse_energy_contracts, parse_hydros, parse_lines, parse_non_controllable_sources,
@@ -233,7 +232,7 @@ pub struct LoadedCase {
 /// - [`LoadError::ConstraintError`] — one or more validation errors collected
 ///   across Layers 1-5, or `SystemBuilder` rejected the assembled data.
 pub fn load_case(path: &Path) -> Result<System, LoadError> {
-    pipeline::run_pipeline(path)
+    pipeline::run_pipeline_with_artifacts(path).map(|(loaded, _report)| loaded.system)
 }
 
 /// Load a case directory and return the validated [`System`] together with
@@ -264,7 +263,7 @@ pub fn load_case_with_artifacts(path: &Path) -> Result<LoadedCase, LoadError> {
 ///
 /// Same error conditions as [`load_case`].
 pub fn validate_case(path: &Path) -> Result<(System, ValidationReport), LoadError> {
-    pipeline::run_pipeline_with_report(path)
+    pipeline::run_pipeline_with_artifacts(path).map(|(loaded, report)| (loaded.system, report))
 }
 
 /// Load a case directory and return the validated [`LoadedCase`] together with a

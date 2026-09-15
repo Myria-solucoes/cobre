@@ -324,15 +324,7 @@ fn convert_thermals(raw: RawThermalFile, path: &Path) -> Result<Vec<Thermal>, Lo
 #[allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    /// Write a string to a temp file and return the file handle (keeps it alive).
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
+    use crate::test_support::write_json;
 
     /// Canonical valid `thermals.json` with 2 thermals: one with anticipated config
     /// (id=1), one without (id=0).

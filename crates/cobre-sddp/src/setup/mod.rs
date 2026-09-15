@@ -90,7 +90,6 @@ use cobre_io::build_hydro_reference_volumes_resolved;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
     ClassSchemes, ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext,
-    SweepDirection,
 };
 
 use crate::{
@@ -467,7 +466,7 @@ impl StudySetup {
         // thread/rank counts (canonical-ω aggregation is order-independent).
         let solve_order_keys = build_noise_key_table(system, &stochastic)?;
         stochastic
-            .set_solve_order(&solve_order_keys, SweepDirection::Descending)
+            .set_solve_order(&solve_order_keys)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
 
         // Computed here (not inside `build_energy_and_templates`) so the one
@@ -618,15 +617,13 @@ impl StudySetup {
         )?;
 
         reject_scenario_id_under_sampled_selection(&node_graph, training_enumerated)?;
-        {
-            let prov = stochastic.provenance();
-            reject_insample_class_under_external_nodes(
-                &node_graph,
-                (prov.inflow_scheme, stochastic.n_hydros()),
-                (prov.load_scheme, stochastic.n_load_buses()),
-                (prov.ncs_scheme, stochastic.n_stochastic_ncs()),
-            )?;
-        }
+        let prov = stochastic.provenance();
+        reject_insample_class_under_external_nodes(
+            &node_graph,
+            (prov.inflow_scheme, stochastic.n_hydros()),
+            (prov.load_scheme, stochastic.n_load_buses()),
+            (prov.ncs_scheme, stochastic.n_stochastic_ncs()),
+        )?;
 
         // Resolves any `enumerated`-declared phase's actual count now that the
         // graph exists — config load could only signal the request, never the
@@ -2549,6 +2546,16 @@ fn id_to_position<T>(entities: &[T], id_of: impl Fn(&T) -> i32) -> HashMap<i32, 
         .collect()
 }
 
+/// The contiguous study-stage slice (`Stage::id >= 0`), found by position since
+/// study stages are a contiguous suffix of `System::stages()`. Empty when the
+/// system declares no study stages.
+fn study_stages_slice(system: &System) -> &[Stage] {
+    match system.stages().iter().position(|s| s.id >= 0) {
+        Some(idx) => &system.stages()[idx..],
+        None => &[],
+    }
+}
+
 /// Build the initial state vector from the system's initial conditions.
 ///
 /// Layout `[storage(0..N), lags(N..N*(1+L))]` (N hydros, L = max PAR order),
@@ -2604,11 +2611,7 @@ fn build_initial_state(
         );
         let thermals = system.thermals();
         let thermal_positions = id_to_position(thermals, |t: &Thermal| t.id.0);
-        let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
-            Some(idx) => &system.stages()[idx..],
-            None => &[],
-        };
-        let calendar = StageCalendar::new(study_stages);
+        let calendar = StageCalendar::new(study_stages_slice(system));
         for history in &ic.past_anticipated_commitments {
             let Some(&global_idx) = thermal_positions.get(&history.thermal_id.0) else {
                 // Defense-in-depth — the cobre-io validator rejects an unknown ID in
@@ -2702,11 +2705,7 @@ fn build_initial_transit_bucket_state(
         );
         return seed;
     };
-    let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
-        Some(idx) => &system.stages()[idx..],
-        None => &[],
-    };
-    let calendar = StageCalendar::new(study_stages);
+    let calendar = StageCalendar::new(study_stages_slice(system));
     let ic = system.initial_conditions();
     let hydros = system.hydros();
 

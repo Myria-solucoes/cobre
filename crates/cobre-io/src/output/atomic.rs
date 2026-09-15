@@ -28,6 +28,18 @@ pub(crate) fn tmp_path(path: &Path) -> PathBuf {
     ))
 }
 
+/// Create `path`'s parent directory, if it has one and it does not already exist.
+///
+/// # Errors
+///
+/// Returns [`OutputError::IoError`] if directory creation fails.
+pub(crate) fn ensure_parent_dir(path: &Path) -> Result<(), OutputError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
+    }
+    Ok(())
+}
+
 /// Write `bytes` to `path` atomically (write to `{path}.tmp`, flush, rename).
 ///
 /// The parent directory must already exist. On any I/O error the target `path`
@@ -140,14 +152,32 @@ pub(crate) fn write_parquet_atomic(
     Ok(())
 }
 
+/// Create `path`'s parent directory, then write `batch` as Parquet with the
+/// crate-default writer configuration, atomically.
+///
+/// # Errors
+///
+/// See [`write_parquet_atomic`].
+pub(crate) fn write_batch_atomic(path: &Path, batch: &RecordBatch) -> Result<(), OutputError> {
+    ensure_parent_dir(path)?;
+    write_parquet_atomic(path, batch, &ParquetWriterConfig::default())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::super::error::OutputError;
-    use super::{serialize_json_then_flush, tmp_path, write_bytes_atomic, write_json_atomic};
+    use super::{
+        serialize_json_then_flush, tmp_path, write_batch_atomic, write_bytes_atomic,
+        write_json_atomic,
+    };
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use serde::Serialize;
     use std::io;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[derive(Serialize)]
@@ -238,5 +268,39 @@ mod tests {
             !tmp_path(&path).exists(),
             "tmp file must be removed after rename"
         );
+    }
+
+    #[test]
+    fn write_batch_atomic_creates_missing_parent_and_round_trips() {
+        let dir = TempDir::new().expect("temp dir");
+        let target = dir.path().join("a").join("b").join("batch.parquet");
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
+        let record_batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![7, 9]))])
+                .expect("batch");
+
+        write_batch_atomic(&target, &record_batch).expect("write should succeed");
+
+        assert!(target.exists(), "target file must exist");
+        assert!(
+            !tmp_path(&target).exists(),
+            "tmp file must be removed after rename"
+        );
+
+        let read_back = crate::test_support::output::read_first_batch(&target);
+        assert_eq!(read_back.num_rows(), 2, "must round-trip two rows");
+        let values = read_back
+            .column_by_name("value")
+            .expect("value column")
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("Int32Array");
+        assert_eq!(values.value(0), 7);
+        assert_eq!(values.value(1), 9);
     }
 }

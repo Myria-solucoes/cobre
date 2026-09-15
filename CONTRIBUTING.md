@@ -108,6 +108,11 @@ cargo test -p cobre-io --all-features
 cargo test -p cobre-io --all-features --test '*'
 ```
 
+cobre-io also declares a `test-support` feature (rolled into `--all-features` above),
+exposing its crate-internal fixture builders — entity, `ParsedData`, and `Config`
+construction helpers used by the semantic-validation unit tests — to `tests/`
+integration binaries and downstream crates' tests.
+
 Sample case directories are in `tests/data/`. Each follows the standard Cobre layout:
 `config.json` at the root, entity files under `buses/`, `hydros/`, `thermals/`, etc.
 When adding new parsers, add sample input files to `tests/data/` and reference them
@@ -160,6 +165,11 @@ cargo test -p cobre-stochastic
 No external dependencies or feature flags needed. Conformance tests verify PAR(p)
 preprocessing (tolerance 1e-10); reproducibility tests verify seed determinism and
 declaration-order invariance.
+
+cobre-stochastic also declares a `test-support` feature, exposing its crate-internal
+fixture builders — `OpeningTree`, `SeasonMap`, and `InflowModel` construction helpers
+used by its own unit tests — to `tests/` integration binaries and downstream crates'
+tests.
 
 ### Testing cobre-sddp
 

@@ -9,11 +9,10 @@
 //!
 //! Parquet parsers follow the canonical pattern:
 //!
-//! 1. Open the file with `std::fs::File::open`.
-//! 2. Build a `ParquetRecordBatchReaderBuilder` and consume all record batches.
-//! 3. Extract typed columns by name; return `SchemaError` for missing or wrong-type columns.
-//! 4. Validate per-row constraints; return `SchemaError` on violation.
-//! 5. Sort the output by the documented sort key and return.
+//! 1. Obtain the batch reader from `open_record_batch_reader` and consume all record batches.
+//! 2. Extract typed columns by name; return `SchemaError` for missing or wrong-type columns.
+//! 3. Validate per-row constraints; return `SchemaError` on violation.
+//! 4. Sort the output by the documented sort key and return.
 //!
 //! JSON parsers follow the 4-step pipeline:
 //! `fs::read_to_string` → `serde_json::from_str` → `validate_raw` → `convert`.
@@ -52,6 +51,16 @@ use std::path::Path;
 
 use crate::LoadError;
 
+fn load_optional<T>(
+    path: Option<&Path>,
+    parse: impl FnOnce(&Path) -> Result<Vec<T>, LoadError>,
+) -> Result<Vec<T>, LoadError> {
+    match path {
+        None => Ok(Vec::new()),
+        Some(p) => parse(p),
+    }
+}
+
 /// Load `constraints/thermal_bounds.parquet` (optional file; see the module doc).
 ///
 /// # Errors
@@ -67,10 +76,7 @@ use crate::LoadError;
 /// assert!(rows.is_empty());
 /// ```
 pub fn load_thermal_bounds(path: Option<&Path>) -> Result<Vec<ThermalBoundsRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_thermal_bounds(p),
-    }
+    load_optional(path, parse_thermal_bounds)
 }
 
 /// Load `constraints/hydro_bounds.parquet` (optional file; see the module doc).
@@ -88,10 +94,7 @@ pub fn load_thermal_bounds(path: Option<&Path>) -> Result<Vec<ThermalBoundsRow>,
 /// assert!(rows.is_empty());
 /// ```
 pub fn load_hydro_bounds(path: Option<&Path>) -> Result<Vec<HydroBoundsRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_hydro_bounds(p),
-    }
+    load_optional(path, parse_hydro_bounds)
 }
 
 /// Load `constraints/line_bounds.parquet` (optional file; see the module doc).
@@ -109,10 +112,7 @@ pub fn load_hydro_bounds(path: Option<&Path>) -> Result<Vec<HydroBoundsRow>, Loa
 /// assert!(rows.is_empty());
 /// ```
 pub fn load_line_bounds(path: Option<&Path>) -> Result<Vec<LineBoundsRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_line_bounds(p),
-    }
+    load_optional(path, parse_line_bounds)
 }
 
 /// Load `constraints/pumping_bounds.parquet` (optional file; see the module doc).
@@ -130,10 +130,7 @@ pub fn load_line_bounds(path: Option<&Path>) -> Result<Vec<LineBoundsRow>, LoadE
 /// assert!(rows.is_empty());
 /// ```
 pub fn load_pumping_bounds(path: Option<&Path>) -> Result<Vec<PumpingBoundsRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_pumping_bounds(p),
-    }
+    load_optional(path, parse_pumping_bounds)
 }
 
 /// Load `constraints/contract_bounds.parquet` (optional file; see the module doc).
@@ -151,10 +148,7 @@ pub fn load_pumping_bounds(path: Option<&Path>) -> Result<Vec<PumpingBoundsRow>,
 /// assert!(rows.is_empty());
 /// ```
 pub fn load_contract_bounds(path: Option<&Path>) -> Result<Vec<ContractBoundsRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_contract_bounds(p),
-    }
+    load_optional(path, parse_contract_bounds)
 }
 
 /// Load `constraints/penalty_overrides_bus.parquet` (optional file; see the module doc).
@@ -174,10 +168,7 @@ pub fn load_contract_bounds(path: Option<&Path>) -> Result<Vec<ContractBoundsRow
 pub fn load_penalty_overrides_bus(
     path: Option<&Path>,
 ) -> Result<Vec<BusPenaltyOverrideRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_penalty_overrides_bus(p),
-    }
+    load_optional(path, parse_penalty_overrides_bus)
 }
 
 /// Load `constraints/penalty_overrides_line.parquet` (optional file; see the module doc).
@@ -197,10 +188,7 @@ pub fn load_penalty_overrides_bus(
 pub fn load_penalty_overrides_line(
     path: Option<&Path>,
 ) -> Result<Vec<LinePenaltyOverrideRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_penalty_overrides_line(p),
-    }
+    load_optional(path, parse_penalty_overrides_line)
 }
 
 /// Load `constraints/penalty_overrides_hydro.parquet` (optional file; see the module doc).
@@ -220,10 +208,7 @@ pub fn load_penalty_overrides_line(
 pub fn load_penalty_overrides_hydro(
     path: Option<&Path>,
 ) -> Result<Vec<HydroPenaltyOverrideRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_penalty_overrides_hydro(p),
-    }
+    load_optional(path, parse_penalty_overrides_hydro)
 }
 
 /// Load `constraints/penalty_overrides_ncs.parquet` (optional file; see the module doc).
@@ -243,10 +228,7 @@ pub fn load_penalty_overrides_hydro(
 pub fn load_penalty_overrides_ncs(
     path: Option<&Path>,
 ) -> Result<Vec<NcsPenaltyOverrideRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_penalty_overrides_ncs(p),
-    }
+    load_optional(path, parse_penalty_overrides_ncs)
 }
 
 /// Load `constraints/generic_constraints.json` (optional file; see the module doc).
@@ -280,10 +262,9 @@ pub fn load_generic_constraints(
     name_to_id: &HashMap<String, EntityId>,
     line_index: &LineBusPairIndex,
 ) -> Result<Vec<GenericConstraint>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_generic_constraints(p, name_to_id, line_index),
-    }
+    load_optional(path, |p| {
+        parse_generic_constraints(p, name_to_id, line_index)
+    })
 }
 
 /// Load `constraints/generic_constraint_bounds.parquet` (optional file; see the module doc).
@@ -303,10 +284,7 @@ pub fn load_generic_constraints(
 pub fn load_generic_constraint_bounds(
     path: Option<&Path>,
 ) -> Result<Vec<GenericConstraintBoundsRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_generic_constraint_bounds(p),
-    }
+    load_optional(path, parse_generic_constraint_bounds)
 }
 
 /// Load `constraints/ncs_bounds.parquet` (optional file; see the module doc).
@@ -324,10 +302,7 @@ pub fn load_generic_constraint_bounds(
 /// assert!(rows.is_empty());
 /// ```
 pub fn load_ncs_bounds(path: Option<&Path>) -> Result<Vec<NcsBoundsRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_ncs_bounds(p),
-    }
+    load_optional(path, parse_ncs_bounds)
 }
 
 /// Load `constraints/hydro_unit_group_bounds.parquet` (optional file; see the module doc).
@@ -347,8 +322,5 @@ pub fn load_ncs_bounds(path: Option<&Path>) -> Result<Vec<NcsBoundsRow>, LoadErr
 pub fn load_hydro_unit_group_bounds(
     path: Option<&Path>,
 ) -> Result<Vec<HydroUnitGroupBoundsRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_hydro_unit_group_bounds(p),
-    }
+    load_optional(path, parse_hydro_unit_group_bounds)
 }

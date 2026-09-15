@@ -33,10 +33,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::extensions::{EvaporationModelRow, FphaDeviationPointRow, FphaHyperplaneRow};
-use crate::output::atomic::{write_json_atomic, write_parquet_atomic};
+use crate::output::atomic::{ensure_parent_dir, write_batch_atomic, write_json_atomic};
 use crate::output::error::OutputError;
-use crate::output::parquet_config::ParquetWriterConfig;
-use crate::output::stochastic::ensure_parent_dir;
 
 /// Write a slice of [`FphaHyperplaneRow`] to a Parquet file at `path`,
 /// re-readable as `system/fpha_hyperplanes.parquet` by
@@ -83,10 +81,8 @@ use crate::output::stochastic::ensure_parent_dir;
 /// # }
 /// ```
 pub fn write_fpha_hyperplanes(path: &Path, rows: &[FphaHyperplaneRow]) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_fpha_hyperplanes_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 // ── Schema builder ────────────────────────────────────────────────────────────
@@ -202,10 +198,8 @@ pub fn write_evaporation_models(
     path: &Path,
     rows: &[EvaporationModelRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_evaporation_models_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 fn evaporation_models_schema() -> Schema {
@@ -300,10 +294,8 @@ pub fn write_fpha_deviation_points(
     path: &Path,
     rows: &[FphaDeviationPointRow],
 ) -> Result<(), OutputError> {
-    ensure_parent_dir(path)?;
-    let config = ParquetWriterConfig::default();
     let batch = build_fpha_deviation_points_batch(rows)?;
-    write_parquet_atomic(path, &batch, &config)
+    write_batch_atomic(path, &batch)
 }
 
 fn fpha_deviation_points_schema() -> Schema {
@@ -684,14 +676,12 @@ mod tests {
         let parsed = parse_fpha_hyperplanes(&path).expect("parse must succeed");
         assert_eq!(parsed.len(), 5);
 
-        // First 3 rows: hydro_id=5, plane_id 0,1,2
         assert_eq!(parsed[0].hydro_id, EntityId::from(5));
         assert_eq!(parsed[0].plane_id, 0);
         assert_eq!(parsed[1].hydro_id, EntityId::from(5));
         assert_eq!(parsed[1].plane_id, 1);
         assert_eq!(parsed[2].hydro_id, EntityId::from(5));
         assert_eq!(parsed[2].plane_id, 2);
-        // Last 2 rows: hydro_id=10, plane_id 0,1
         assert_eq!(parsed[3].hydro_id, EntityId::from(10));
         assert_eq!(parsed[3].plane_id, 0);
         assert_eq!(parsed[4].hydro_id, EntityId::from(10));
@@ -710,7 +700,6 @@ mod tests {
             .join("hydro_models")
             .join("fpha_hyperplanes.parquet");
 
-        // Parent directories do not exist yet.
         assert!(
             !path.parent().unwrap().exists(),
             "parent dir must not exist before write"

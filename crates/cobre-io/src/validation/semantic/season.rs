@@ -101,6 +101,31 @@ pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut Validatio
     check_season_contiguity(data, season_map, ctx);
 }
 
+// ── Shared stage-index lookup (Rules 28, 31) ──────────────────────────────────
+
+/// Stages sorted by id, which matches date order — the season lookup below
+/// relies on it for `partition_point`.
+fn build_stage_index(data: &ParsedData) -> Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> {
+    data.stages
+        .stages
+        .iter()
+        .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
+        .collect()
+}
+
+/// Looks up the season whose stage window contains `date`.
+fn season_id_for_date(
+    stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, usize)],
+    date: chrono::NaiveDate,
+) -> Option<usize> {
+    let pos = stage_index.partition_point(|(start, _, _)| *start <= date);
+    if pos == 0 {
+        return None;
+    }
+    let (_, end_date, sid) = stage_index[pos - 1];
+    (date < end_date).then_some(sid)
+}
+
 // ── Rule 31: Observation-to-season alignment ──────────────────────────────────
 
 /// Rule 31: Observation-to-season alignment check.
@@ -137,28 +162,12 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
         return;
     };
 
-    // Stages are sorted by id, which matches date order — partition_point relies on it.
-    let stage_index: Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> = data
-        .stages
-        .stages
-        .iter()
-        .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
-        .collect();
+    let stage_index = build_stage_index(data);
 
     let mut counts: HashMap<(i32, usize, i32), usize> = HashMap::new();
     for row in &data.inflow_history {
-        let pos = stage_index.partition_point(|(start, _, _)| *start <= row.start_date);
-        let season_id = if pos > 0 {
-            let (_, end_date, sid) = stage_index[pos - 1];
-            if row.start_date < end_date {
-                Some(sid)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-        .or_else(|| season_map.season_for_date(row.start_date));
+        let season_id = season_id_for_date(&stage_index, row.start_date)
+            .or_else(|| season_map.season_for_date(row.start_date));
 
         if let Some(sid) = season_id {
             let year = row.start_date.year();
@@ -260,28 +269,11 @@ pub(super) fn check_season_observation_coverage(
         return;
     }
 
-    // Stages are sorted by id, which matches date order — partition_point relies on it.
-    let stage_index: Vec<(chrono::NaiveDate, chrono::NaiveDate, usize)> = data
-        .stages
-        .stages
-        .iter()
-        .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
-        .collect();
+    let stage_index = build_stage_index(data);
 
     let mut season_obs_count: HashMap<usize, usize> = HashMap::new();
     for row in &data.inflow_history {
-        let pos = stage_index.partition_point(|(start, _, _)| *start <= row.start_date);
-        let season_id = if pos > 0 {
-            let (_, end_date, sid) = stage_index[pos - 1];
-            if row.start_date < end_date {
-                Some(sid)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if let Some(sid) = season_id {
+        if let Some(sid) = season_id_for_date(&stage_index, row.start_date) {
             *season_obs_count.entry(sid).or_insert(0) += 1;
         }
     }
@@ -347,9 +339,9 @@ pub(super) fn check_season_contiguity(
     clippy::cast_sign_loss
 )]
 mod tests {
-    use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
     use super::*;
+    use crate::test_support::*;
     use crate::{
         scenarios::{InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow},
         stages::StagesData,

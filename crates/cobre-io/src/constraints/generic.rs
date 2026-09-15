@@ -760,27 +760,13 @@ fn parse_terms(
     let mut pos = 0;
 
     let mut sign: f64 = 1.0;
-    if pos < tokens.len() {
-        match &tokens[pos] {
-            Token::Plus => {
-                pos += 1;
-            }
-            Token::Minus => {
-                sign = -1.0;
-                pos += 1;
-            }
-            Token::Number(_)
-            | Token::Ident(_)
-            | Token::ParamRef(_)
-            | Token::Star
-            | Token::LParen
-            | Token::RParen
-            | Token::Comma
-            | Token::Equals
-            | Token::Le
-            | Token::Ge
-            | Token::EqEq => {}
+    match tokens.first() {
+        Some(Token::Plus) => pos += 1,
+        Some(Token::Minus) => {
+            sign = -1.0;
+            pos += 1;
         }
+        _ => {}
     }
 
     let (mut group, next_pos) = parse_single_term(tokens, pos, sign, name_to_id, line_index)?;
@@ -1747,18 +1733,9 @@ fn build_variable_ref(
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_json;
     use cobre_core::CoefficientRef;
     use std::fmt::Write as _;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().expect("tempfile");
-        f.write_all(content.as_bytes()).expect("write");
-        f
-    }
 
     fn lit(term: &LinearTerm) -> f64 {
         match term.coefficient {

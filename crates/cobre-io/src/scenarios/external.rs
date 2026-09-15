@@ -54,12 +54,12 @@
 //! - Scenario count matching `stage.num_scenarios` — Layer 3/5.
 
 use cobre_core::EntityId;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
+use crate::parquet_helpers::{
+    extract_required_float64, extract_required_int32, open_record_batch_reader,
+};
 
 pub use cobre_core::scenario::{ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow};
 
@@ -88,14 +88,7 @@ pub use cobre_core::scenario::{ExternalLoadRow, ExternalNcsRow, ExternalScenario
 /// println!("loaded {} external inflow scenario rows", rows.len());
 /// ```
 pub fn parse_external_inflow_scenarios(path: &Path) -> Result<Vec<ExternalScenarioRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<ExternalScenarioRow> = Vec::new();
 
@@ -202,14 +195,7 @@ pub fn parse_external_inflow_scenarios(path: &Path) -> Result<Vec<ExternalScenar
 /// println!("loaded {} external load scenario rows", rows.len());
 /// ```
 pub fn parse_external_load_scenarios(path: &Path) -> Result<Vec<ExternalLoadRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<ExternalLoadRow> = Vec::new();
 
@@ -316,14 +302,7 @@ pub fn parse_external_load_scenarios(path: &Path) -> Result<Vec<ExternalLoadRow>
 /// println!("loaded {} external NCS scenario rows", rows.len());
 /// ```
 pub fn parse_external_ncs_scenarios(path: &Path) -> Result<Vec<ExternalNcsRow>, LoadError> {
-    let file = File::open(path).map_err(|e| LoadError::io(path, e))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
-
-    let reader = builder
-        .build()
-        .map_err(|e| LoadError::parse(path, e.to_string()))?;
+    let reader = open_record_batch_reader(path)?;
 
     let mut rows: Vec<ExternalNcsRow> = Vec::new();
 
@@ -415,21 +394,11 @@ pub fn parse_external_ncs_scenarios(path: &Path) -> Result<Vec<ExternalNcsRow>, 
 )]
 mod tests {
     use super::*;
+    use crate::test_support::write_parquet;
     use arrow::array::{Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
-
-    fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-        let tmp = NamedTempFile::new().expect("tempfile");
-        let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-            .expect("ArrowWriter");
-        writer.write(batch).expect("write batch");
-        writer.close().expect("close writer");
-        tmp
-    }
 
     fn inflow_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![

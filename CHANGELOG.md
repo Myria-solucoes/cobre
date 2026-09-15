@@ -11,27 +11,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING — the per-(hydro, stage) penalty type that duplicated
-  `cobre_core::HydroPenalties`' sixteen fields is removed from
-  `cobre_core::resolved`.** The resolved penalty table's `hydro` field, and
-  `ResolvedPenalties::hydro_penalties`/`hydro_penalties_mut`, now read and
-  write `cobre_core::HydroPenalties` directly — the same type already used
-  for entity-level hydro penalties — instead of copying into a separate
-  per-stage twin. Code importing the removed type from `cobre_core::resolved`
-  should import `HydroPenalties` from the crate root instead; field names and
-  resolved values are unchanged.
+- **BREAKING — a bound-override row whose `stage_id` is not a declared study
+  stage is now rejected at validation, for every bound family.** Such rows
+  were previously dropped without a warning or an error. A deck that relied on
+  that — for example one carrying stale override rows for a stage no longer in
+  the study — now fails validation; remove the rows or correct their
+  `stage_id`.
 
-- **BREAKING — a bound-override row naming a `stage_id` that is not a
-  declared study stage is now rejected at validation, for every bound
-  family.** The hydro, line, pumping, contract and hydro-unit-group families
-  previously resolved such a row by silently dropping it, with no warning and
-  no error. The thermal family checked the id against the position range
-  `[0, n_stages)` rather than the declared ids, so in a deck whose stage ids
-  are gapped or start at 1 an undeclared id inside that range was dropped
-  silently too. A deck that relied on that leniency — for example carrying
-  stale override rows for a stage no longer in the study — now fails
-  validation instead of loading with the row discarded; remove or correct the
-  offending rows' `stage_id`.
+- **A required column missing from `hydro_geometry.parquet`,
+  `hydro_energy_productivity.parquet` or `tailrace_curves.parquet` is now
+  reported as `missing required column "<name>"`**, the wording every other
+  tabular input already uses. The error class, file path and column name are
+  unchanged.
+
+- **Rust crate API: `cobre-core`, `cobre-io` and `cobre-stochastic` drop
+  unused or duplicated public items and tighten two constructor checks.** The
+  `cobre` CLI, its output files, the Python package and every loadable deck
+  are unaffected; only code that depends on these crates directly needs to
+  adapt:
+  - `cobre-core`: `ValidationError::DisconnectedBus` and
+    `ValidationError::InvalidPenalty` are removed. The `count`, `variance`,
+    `std_dev`, `sample_variance` and `ci_95_half_width` accessors of
+    `WelfordAccumulator` are removed; the sample-statistics accessors stay.
+    `NetworkTopology`, `BusGenerators`, `BusLineConnection`, `BusLoads` and
+    `System::network()` are removed — derive adjacency from the entity
+    accessors; `System::cascade()` is unchanged. The per-(hydro, stage)
+    penalty type that duplicated `HydroPenalties` is removed from
+    `cobre_core::resolved`; `ResolvedPenalties::hydro_penalties` and
+    `hydro_penalties_mut` now read and write `cobre_core::HydroPenalties`
+    directly, with the same field names and values. `SystemBuilder::build`
+    rejects a scenario model table (`inflow_models`, `load_models`,
+    `ncs_models`) whose `(entity_id, stage_id)` keys are not in canonical
+    order, `System::with_scenario_models` returns
+    `Result<Self, ValidationError>` to apply the same check, and
+    `EstimationError` gains a `Validation` variant; `cobre-io` already emits
+    the tables sorted, so no deck is affected.
+  - `cobre-io`: the free `serialize_system`, `deserialize_system`,
+    `serialize_parameters` and `deserialize_parameters` postcard helpers;
+    `load_scalar_parameters_json` and `build_season_stage_map`;
+    `load_scenarios` and its result type; `default_severity` on the
+    validation error kind; the study-configuration argument of
+    `write_dictionaries`; the public `default_bounds` and
+    `default_upper_bound_kind` helpers; the two thread-pool setup fields of
+    `IterationRecord`; `SimulationOutput::partitions_written`;
+    `LoadError::CrossReferenceError`; and the `resolution::load_factors` and
+    `resolution::ncs_factors` module paths (`resolve_load_factors` and
+    `resolve_ncs_factors` stay at `cobre_io::resolution`) are removed.
+  - `cobre-stochastic`: `ParValidationReport` and `ParWarning` are removed
+    (`validate_par_parameters` returns only the fatal result); the three
+    PAR-fitting entry points that took no season map are removed (call the
+    season-map variants); `SweepDirection` and the direction argument of
+    `set_solve_order` are removed (openings are always ordered by descending
+    key, as every run already did); and
+    `StochasticError::SpectralDecompositionFailed`,
+    `StochasticError::SeedDerivationError` and
+    `StochasticError::UnsupportedSamplingScheme` are removed.
 
 - **The out-of-sample forward draw no longer rebuilds per-draw sampling state for
   the Sobol, Halton and Latin-hypercube noise methods, and no longer allocates
@@ -42,17 +76,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single applier that handles every group width from caller-owned scratch.
   Results are unchanged.
 
-- **BREAKING — the three scenario model tables (`inflow_models`, `load_models`,
-  `ncs_models`) now have their documented canonical order checked at
-  construction instead of merely asserted.** `SystemBuilder::build` rejects a
-  table whose `(entity_id, stage_id)` key sequence decreases anywhere, and
-  `System::with_scenario_models` now returns `Result<Self, ValidationError>`
-  instead of `Self`, applying the same check to its replacement
-  `inflow_models` table. `EstimationError` gains a `Validation` variant for
-  callers that match it exhaustively. No deck `cobre-io` can load is affected:
-  `cobre-io` already emits all three tables pre-sorted.
-
 ### Fixed
+
+- **A multi-rank `cobre run` now applies the terminal boundary policy on every
+  rank.** The cuts loaded from `policy.boundary` were injected only on rank 0
+  and never broadcast, so every other rank trained and simulated its share of
+  the terminal stage against an empty terminal pool with the post-horizon
+  value-to-go dropped. Under enumerated traversal, where forward paths and
+  backward outcomes are partitioned across ranks, this corrupted the upper
+  bound, the backward cut aggregation and every non-root rank's simulation
+  costs, by an amount that grew with the share of work on non-root ranks.
+  Rank 0 still reads and reconciles the boundary cuts once; the reconciled
+  records are now broadcast, so every rank injects the identical terminal
+  pool. Single-rank runs and runs without a boundary policy are unchanged;
+  multi-rank results with a boundary policy change, and are now bit-identical
+  across rank counts.
 
 - **Entity classes sampled out of sample no longer share a noise stream.**
   Every class sampler was seeded from the same forward seed with no class tag,

@@ -150,9 +150,6 @@ mod travel_time;
 
 pub use inflow_seeding::seed_lag_state_depth;
 
-#[cfg(test)]
-mod test_support;
-
 pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut ValidationContext) {
     hydro::check_cascade_acyclic(data, ctx);
     hydro::check_hydro_bounds(data, ctx);

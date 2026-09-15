@@ -241,8 +241,8 @@ mod tests {
 
     #[test]
     fn from_stochastic_error() {
-        let inner = StochasticError::SeedDerivationError {
-            reason: "hash overflow".to_string(),
+        let inner = StochasticError::InsufficientData {
+            context: "hydro 7 has only 2 observations".to_string(),
         };
         let err: SddpError = inner.into();
         assert!(matches!(err, SddpError::Stochastic(_)));

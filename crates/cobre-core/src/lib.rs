@@ -3,8 +3,8 @@
 //! Shared data model for the [Cobre](https://github.com/cobre-rs/cobre) power systems ecosystem.
 //!
 //! This crate defines the fundamental types used across all Cobre tools:
-//! buses, branches, generators (hydro, thermal, renewable), loads, network
-//! topology, and the top-level [`system`] struct. A power system defined with
+//! buses, branches, generators (hydro, thermal, renewable), loads, and the
+//! top-level [`system`] struct. A power system defined with
 //! `cobre-core` types can be used for power flow analysis, optimization, dynamic
 //! simulation, and any other analysis procedure in the ecosystem.
 //!
@@ -47,6 +47,8 @@ pub mod error;
 pub mod model;
 pub mod stats;
 pub mod system;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod topology;
 
 // Crate-root module aliases so `cobre_core::<module>::Symbol` paths resolve for
@@ -106,4 +108,4 @@ pub use model::temporal::{
 };
 pub use stats::welford::WelfordAccumulator;
 pub use system::{System, SystemBuilder};
-pub use topology::{BusGenerators, BusLineConnection, BusLoads, CascadeTopology, NetworkTopology};
+pub use topology::CascadeTopology;

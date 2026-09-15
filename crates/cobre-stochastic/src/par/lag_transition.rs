@@ -335,36 +335,17 @@ pub fn precompute_noise_groups(stages: &[Stage]) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
-        SeasonMap, Stage, StageRiskConfig, StageStateConfig,
-    };
+    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap, Stage};
     use cobre_core::{
         EntityId, Hydro, InflowHistoryRow, RecentObservation,
-        entities::hydro::{HydroGenerationModel, HydroPenalties},
+        test_support::{HydroSpec, MirrorUnitGroup, StageSpec, date, single_block},
     };
 
     use crate::par::lag_kernel::{
         DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain,
     };
     use crate::seeds::{DerivedInflowSeeds, derive_inflow_seeds};
-
-    fn monthly_season_map() -> SeasonMap {
-        let seasons: Vec<SeasonDefinition> = (0..12u32)
-            .map(|i| SeasonDefinition {
-                id: i as usize,
-                label: format!("Month{}", i + 1),
-                month_start: i + 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        SeasonMap {
-            cycle_type: SeasonCycleType::Monthly,
-            seasons,
-        }
-    }
+    use crate::test_support::{MonthlyLabels, monthly_season_map, weekly_season_map};
 
     fn make_stage(
         index: usize,
@@ -373,28 +354,15 @@ mod tests {
         season_id: Option<usize>,
     ) -> Stage {
         let days = u32::try_from((end - start).num_days()).unwrap();
-        Stage {
-            index,
+        cobre_core::test_support::make_stage(StageSpec {
             id: i32::try_from(index).unwrap(),
+            index: Some(index),
             start_date: start,
             end_date: end,
             season_id,
-            blocks: vec![Block {
-                index: 0,
-                name: "SINGLE".to_string(),
-                duration_hours: f64::from(days) * 24.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
+            blocks: single_block("SINGLE", f64::from(days) * 24.0),
+            ..Default::default()
+        })
     }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -431,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_derive_downstream_par_order_monthly_quarterly_unchanged() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let stages = vec![
             make_stage(0, d(2026, 1, 1), d(2026, 2, 1), Some(0)),
             make_stage(1, d(2026, 2, 1), d(2026, 3, 1), Some(1)),
@@ -477,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_uniform_monthly_identity() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let stages: Vec<Stage> = (0..12usize)
             .map(|i| {
                 let month = u32::try_from(i + 1).unwrap();
@@ -526,7 +494,7 @@ mod tests {
     /// April = 720 h; May = 744 h.
     #[test]
     fn test_pmo_apr_2026_rv0_trace() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
 
         let stages = vec![
             make_stage(0, d(2026, 3, 28), d(2026, 4, 4), Some(3)),
@@ -639,7 +607,7 @@ mod tests {
     /// February 2026: 28 days = 672 h (not a leap year).
     #[test]
     fn test_boundary_straddling_week() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let stage = make_stage(0, d(2026, 1, 28), d(2026, 2, 4), Some(0));
         let stages = vec![stage];
 
@@ -672,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_no_season_id_produces_noop() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let stage = make_stage(0, d(2026, 1, 1), d(2026, 2, 1), None);
         let stages = vec![stage];
 
@@ -691,7 +659,7 @@ mod tests {
 
     #[test]
     fn test_single_stage_per_month_finalizes() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let stages = vec![
             make_stage(0, d(2026, 1, 1), d(2026, 2, 1), Some(0)),
             make_stage(1, d(2026, 2, 1), d(2026, 3, 1), Some(1)),
@@ -715,7 +683,7 @@ mod tests {
 
     #[test]
     fn test_multiple_weekly_stages_only_last_finalizes() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let stages = vec![
             make_stage(0, d(2026, 1, 1), d(2026, 1, 8), Some(0)),
             make_stage(1, d(2026, 1, 8), d(2026, 1, 15), Some(0)),
@@ -757,23 +725,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // Weekly / Custom period-window generalization (compute_period_transition)
     // -----------------------------------------------------------------------
-
-    fn weekly_season_map() -> SeasonMap {
-        let seasons: Vec<SeasonDefinition> = (0..52u32)
-            .map(|i| SeasonDefinition {
-                id: i as usize,
-                label: format!("Week{}", i + 1),
-                month_start: 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            })
-            .collect();
-        SeasonMap {
-            cycle_type: SeasonCycleType::Weekly,
-            seasons,
-        }
-    }
 
     /// Four consecutive real ISO weeks of January 2024 (2024-01-01 is a Monday,
     /// ISO week 1), each stage exactly spanning its own week.
@@ -1186,51 +1137,16 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_hydro(id: i32) -> Hydro {
-        Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
+        cobre_core::test_support::make_hydro(HydroSpec {
+            id,
             name: format!("H{id}"),
-            operational_start_date: d(2020, 1, 1),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
             max_storage_hm3: 100.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 0.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
-        }
+            operational_start_date: date(2020, 1, 1),
+            mirror_unit_group: MirrorUnitGroup::None,
+            ..Default::default()
+        })
     }
 
     /// Finalizes `derived`'s `accum`/`weight` seed through `stage_lag_transitions`
@@ -1283,7 +1199,7 @@ mod tests {
     /// April 4 (a 3-day pre-study record seeds the in-progress accumulator).
     #[test]
     fn test_seeded_weekly_to_monthly_finalize_values_exact() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let hydro_id = EntityId(1);
         let hydros = vec![make_hydro(1)];
 
@@ -1341,7 +1257,7 @@ mod tests {
     /// April-overlapping days seed the accumulator) through seed derivation.
     #[test]
     fn test_rv1_elapsed_week_conditioning_with_straddle() {
-        let season_map = monthly_season_map();
+        let season_map = monthly_season_map(MonthlyLabels::OneBased);
         let hydro_id = EntityId(1);
         let hydros = vec![make_hydro(1)];
 

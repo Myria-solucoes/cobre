@@ -6,14 +6,7 @@ use cobre_io::config::{
     ForwardPassesResolution, InflowNonNegativityMethod, NumScenariosResolution, StoppingMode,
     parse_config,
 };
-use std::io::Write;
-use tempfile::NamedTempFile;
-
-fn write_json(content: &str) -> NamedTempFile {
-    let mut f = NamedTempFile::new().unwrap();
-    f.write_all(content.as_bytes()).unwrap();
-    f
-}
+use cobre_io::test_support::write_json;
 
 #[test]
 fn test_minimal_config_all_defaults() {
