@@ -37,25 +37,32 @@ use crate::setup::{
 };
 use crate::training::TrainingResult;
 
-/// The ring slot's RING-AXIS delivery target `r` at study-stage index
-/// `current_stage_idx`: the next `r >= current_stage_idx` whose residue
+/// The ring slot's RING-AXIS delivery target `r` at anchor stage index
+/// `anchor_stage_idx`: the next `r >= anchor_stage_idx` whose residue
 /// `r mod k_max` equals `slot_idx`
-/// (`delta = (slot_idx + k_max − current_stage_idx mod k_max) mod k_max`,
-/// `r = current_stage_idx + delta`). The residue search runs on the ring axis;
+/// (`delta = (slot_idx + k_max − anchor_stage_idx mod k_max) mod k_max`,
+/// `r = anchor_stage_idx + delta`). The residue search runs on the ring axis;
 /// [`reachable_delivery_target`] maps `r` to the physical delivery target
-/// through [`PointResolution::physical_target`]. Sole owner of the residue
+/// through [`PointResolution::physical_target`]. This primitive takes the
+/// residue at whichever `anchor_stage_idx` its caller passes — every
+/// production call site passes the OUTGOING anchor (`current_stage_idx + 1`,
+/// via [`resolve_delivery_stage`]'s `outgoing_anchor`), never the entering
+/// `current_stage_idx` itself. Sole owner of the residue
 /// arithmetic that a ring slot's `delivery_date`
 /// ([`build_stage_entity_manifest`]) and its target interval
 /// ([`build_stage_entity_delivery_intervals`]) both derive from — a second copy
 /// of the formula is how the date and the interval start to disagree, fanning
 /// out an undated slot or zeroing a dated one.
-fn modular_delivery_target(slot_idx: usize, current_stage_idx: usize, k_max: usize) -> usize {
-    let delta = (slot_idx + k_max - current_stage_idx % k_max) % k_max;
-    current_stage_idx + delta
+fn modular_delivery_target(slot_idx: usize, anchor_stage_idx: usize, k_max: usize) -> usize {
+    let delta = (slot_idx + k_max - anchor_stage_idx % k_max) % k_max;
+    anchor_stage_idx + delta
 }
 
 /// The reachable ring slot's PHYSICAL delivery target: [`modular_delivery_target`]'s
-/// ring-axis index mapped through [`PointResolution::physical_target`], or `None`
+/// ring-axis index — the residue taken at whichever `anchor_stage_idx` the
+/// caller passes (every production call site passes the OUTGOING anchor; see
+/// [`modular_delivery_target`]) — mapped through
+/// [`PointResolution::physical_target`], or `None`
 /// when the slot is structural padding beyond the plant's own lead
 /// (`slot_idx >= k_i`, frozen `[0, 0]`, not a real commitment even when its
 /// target still lands in-horizon). The manifest date
@@ -70,12 +77,12 @@ fn modular_delivery_target(slot_idx: usize, current_stage_idx: usize, k_max: usi
 fn reachable_delivery_target(
     slot_idx: usize,
     k_i: usize,
-    current_stage_idx: usize,
+    anchor_stage_idx: usize,
     k_max: usize,
     resolution: &PointResolution,
 ) -> Option<usize> {
     (slot_idx < k_i).then(|| {
-        resolution.physical_target(modular_delivery_target(slot_idx, current_stage_idx, k_max))
+        resolution.physical_target(modular_delivery_target(slot_idx, anchor_stage_idx, k_max))
     })
 }
 

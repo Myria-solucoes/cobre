@@ -22,7 +22,7 @@ use cobre_io::output::{
 };
 use cobre_io::scenarios::LoadSeasonalStatsRow;
 use cobre_io::scenarios::estimation::EstimationReport;
-use cobre_io::scenarios::resolve_stage_seasons;
+use cobre_io::scenarios::resolve_model_stage_seasons;
 use cobre_stochastic::StochasticContext;
 
 use crate::TrainingResult;
@@ -67,9 +67,12 @@ fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
 /// Builds the study's season-cycle and per-hydro PAR-order descriptor for
 /// [`CheckpointManifest::season_manifest`].
 ///
-/// Sources `n_seasons` from [`resolve_stage_seasons`]'s dense ordinals, not raw
-/// `season_id`s — a sparse cycle (e.g. `Weekly` ids 21/26) would index `orders`
-/// out of bounds otherwise.
+/// Sources `n_seasons` from [`resolve_model_stage_seasons`]'s dense ordinals,
+/// not raw `season_id`s — a sparse cycle (e.g. `Weekly` ids 21/26) would index
+/// `orders` out of bounds otherwise. Resolving through the inflow models'
+/// stage ids (not just `system.stages()`) keeps fitted models at synthesized
+/// pre-study stage ids — partial-year studies whose AR lags reach past the
+/// horizon — from silently dropping out of the descriptor.
 #[allow(clippy::cast_possible_truncation)] // season/AR-order counts are small
 fn season_manifest(system: &System) -> SeasonManifest {
     let Some(season_map) = system.policy_graph().season_map.as_ref() else {
@@ -82,7 +85,11 @@ fn season_manifest(system: &System) -> SeasonManifest {
         SeasonCycleType::Custom => SEASON_CYCLE_CODE_CUSTOM,
     };
 
-    let (stage_to_season, n_seasons) = resolve_stage_seasons(system.stages(), Some(season_map));
+    let (stage_to_season, n_seasons) = resolve_model_stage_seasons(
+        system.stages(),
+        system.inflow_models().iter().map(|m| m.stage_id),
+        season_map,
+    );
     let hydro_orders = hydro_season_orders(system.inflow_models(), &stage_to_season, n_seasons);
 
     SeasonManifest {
@@ -631,5 +638,55 @@ mod tests {
         assert_eq!(manifest.hydro_orders.len(), 1);
         assert_eq!(manifest.hydro_orders[0].hydro_id, 7);
         assert_eq!(manifest.hydro_orders[0].orders, vec![1, 0, 2]);
+    }
+
+    /// Regression for a reviewer-flagged bug: `season_manifest` used to
+    /// resolve every `InflowModel.stage_id` through `system.stages()` alone,
+    /// so a fitted model at a synthesized pre-study stage id (never merged
+    /// into `system.stages()`) silently dropped out of `hydro_season_orders`
+    /// and its gap season stayed at order 0.
+    #[test]
+    fn season_descriptor_keeps_gap_season_orders_from_synthesized_prestudy_stages() {
+        // Declared study stages: ids 0..3, seasons 8..11 (Sep-Dec).
+        let stages = vec![
+            stage_with_season(0, Some(8)),
+            stage_with_season(1, Some(9)),
+            stage_with_season(2, Some(10)),
+            stage_with_season(3, Some(11)),
+        ];
+        let system = system_with(
+            stages,
+            Some(season_map(SeasonCycleType::Monthly, 12)),
+            vec![
+                // Synthesized pre-study ids: -1 -> season 7 (Aug), -2 -> season 6 (Jul).
+                inflow_model(1, -2, vec![0.1, 0.05, 0.02]),
+                inflow_model(1, -1, vec![0.2, 0.1]),
+                inflow_model(1, 0, vec![0.3]),
+                inflow_model(1, 1, vec![0.3]),
+                inflow_model(1, 2, vec![0.3]),
+                inflow_model(1, 3, vec![0.3]),
+            ],
+        );
+
+        let manifest = season_manifest(&system);
+
+        assert_eq!(manifest.n_seasons, 12);
+        assert_eq!(manifest.hydro_orders.len(), 1);
+        let orders = &manifest.hydro_orders[0].orders;
+        assert_eq!(orders.len(), 12);
+        assert_eq!(
+            orders[7], 2,
+            "gap season 7 (Aug) must keep the synthesized stage -1's order"
+        );
+        assert_eq!(
+            orders[6], 3,
+            "gap season 6 (Jul) must keep the synthesized stage -2's order"
+        );
+        for &season in &[0_usize, 1, 2, 3, 4, 5] {
+            assert_eq!(
+                orders[season], 0,
+                "untouched gap season {season} must stay zero"
+            );
+        }
     }
 }

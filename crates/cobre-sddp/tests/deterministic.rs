@@ -6935,7 +6935,7 @@ mod season_descriptor_checkpoint_round_trip {
         }
     }
 
-    /// AC1: a study with a monthly `SeasonMap` and hydros fitted at per-season
+    /// A study with a monthly `SeasonMap` and hydros fitted at per-season
     /// orders, checkpointed through the real producer path and read back,
     /// carries `n_seasons == 12` and each hydro's `orders` vector at the
     /// study's dense season ordinals.

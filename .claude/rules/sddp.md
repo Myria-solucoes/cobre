@@ -901,28 +901,48 @@ density replicates across the uncovered span instead of deflating the boundary F
 with an implicit `0.0` term. No covered month yields `Zero`.
 
 Only a post-study-targeted ring slot fans out. A dated target slot with NO
-resolved delivery interval is an IN-STUDY ring slot — a commitment delivered
-WITHIN the current horizon (a matured commitment fished at the terminal stage, or
-a `K = 0` sub-stage-lead delivery self-delivered there) — and resolves to `Zero`:
-the terminal boundary FCF prices only post-study obligations, so a within-horizon
-delivery, already discharged inside the study, contributes nothing. This is sound
-BECAUSE a ring slot's `delivery_date` and its target interval are BOTH derived
-from the SAME modular delivery target at the same stage — the manifest recovers
-`(slot, plant)` from a ring column via `slot_lane_at` (the exact inverse of
-`out_col`/`in_col`) and dates the slot at its modular delivery stage
-(`build_stage_entity_manifest`), while the companion
-`build_terminal_anticipated_delivery_intervals` derives the interval from that
-same target — so a slot dated onto a post-study stage always carries
-`Some(interval)` and a slot dated onto an in-study stage always carries `None`:
-`dated ⟺ Some(interval)` holds by construction, and a `None` interval on a dated
-slot marks the in-study ring uniquely, never a failed post-study resolution. Two
-wrong-but-compiling alternatives: `RebindOp::Reject` here (the
-retired behavior) aborts a legitimate boundary load the moment any anticipated
-thermal delivers in-horizon (the K=0-at-terminal case — the manifest DELIBERATELY
-dates a matures-this-stage slot, pinned by
-`anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`); resolving
-the in-study slot an in-horizon interval and fanning it out would wrongly `Blend`
-a within-horizon delivery against the source's months.
+resolved delivery interval is an IN-STUDY ring slot — its resolved physical
+delivery target still lands within the current horizon (chiefly a `K = 0`
+sub-stage-lead delivery, self-delivered at its own stage) — and resolves to
+`Zero`: the terminal boundary FCF prices only post-study obligations, so a
+within-horizon delivery, already discharged inside the study, contributes
+nothing. This is sound BECAUSE a ring slot's `delivery_date` and its target
+interval are BOTH derived from the SAME modular delivery target, resolved at
+the SAME OUTGOING anchor (`current_stage_idx + 1`, the state leaving the
+pool's own stage — see the manifest's own contract above) — the manifest
+recovers `(slot, plant)` from a ring column via `slot_lane_at` (the exact
+inverse of `out_col`/`in_col`) and dates the slot at its modular delivery
+stage (`build_stage_entity_manifest`), while the companion
+`build_terminal_anticipated_delivery_intervals` derives the interval from
+that same target — so a slot dated onto a post-study stage always carries
+`Some(interval)` and a slot dated onto an in-study stage always carries
+`None`: `dated ⟺ Some(interval)` holds by construction, and a `None` interval
+on a dated slot marks the in-study ring uniquely, never a failed post-study
+resolution.
+
+The terminal pool's OWN maturing residue — the slot whose subindex matches
+the terminal stage's own delivery class, the same slot the always-fish arm
+reads via `in_col` that stage — is NOT this in-study case. Resolved at the
+outgoing anchor (one stage past the terminal stage), its next same-residue
+ring-axis target is always a full `k_max` stages past the terminal stage:
+the slot now dates onto its REAL post-study delivery and fans out
+(`Some(interval)`, `Blend`/`Renormalize`) whenever a declared post-study
+calendar reaches that far, or reads the sentinel — still `None`, still
+`Zero`, but because no calendar exists to date it against, never because the
+delivery is discharged in-study — when none does. Anchoring this slot on the
+entering `current_stage_idx` instead of the outgoing anchor — the RETIRED
+behavior — is now the wrong-but-compiling alternative: it dates the terminal
+maturing residue onto the terminal stage's own in-study month, silently
+zeroing a real post-study delivery a declared post-study calendar should
+have priced. Pinned by
+`terminal_maturing_residue_dates_onto_its_post_study_delivery` and
+`terminal_maturing_residue_stays_sentinel_without_a_post_study_calendar`
+(`policy/policy_export.rs`). Two further wrong-but-compiling alternatives,
+retired earlier and still forbidden: `RebindOp::Reject` here aborts a
+legitimate boundary load the moment any anticipated thermal targets an
+in-study delivery (the `K = 0` case); resolving an in-study slot an
+in-horizon interval and fanning it out would wrongly `Blend` a within-horizon
+delivery against the source's months.
 
 `Blend` and `Renormalize` are semantically distinct and MUST NOT be collapsed:
 `rebind_cut` applies both through the identical weighted-sum, so unifying them
@@ -1593,21 +1613,29 @@ out-of-nowhere commitment value.
 The policy manifest resolves a ring column back to `(slot, plant)` via
 `DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col`, never a
 hand-rolled `offset / n_anticipated`/`offset % n_anticipated` pair — and dates it
-at its MODULAR delivery stage, reached through the RING-AXIS residue: the next
-ring-axis target `r >= t` in the slot's residue class (`delta = (slot_idx +
-k_max − t mod k_max) mod k_max`, `r = t + delta`), mapped to the physical
+at its MODULAR delivery stage, reached through the RING-AXIS residue evaluated
+at the OUTGOING anchor `t_out = current_stage_idx + 1` (the state leaving the
+pool's own stage, never the entering `current_stage_idx`): the next ring-axis
+target `r >= t_out` in the slot's residue class (`delta = (slot_idx + k_max −
+t_out mod k_max) mod k_max`, `r = t_out + delta`), mapped to the physical
 delivery stage `m = physical_target(r)` (The ring axis subsection above)
-before dating. Two wrong-but-compiling alternatives: `t + slot_idx` (the
-retired shift-ring form, wrong whenever `t mod k_max != 0`), and dating the
-raw ring-axis `r` directly instead of `physical_target(r)` — it lands on the
-excised fixed post-horizon window's stub stage whenever a plant declares one.
-Reachability uses the plant's OWN `StateSpace::anticipated_lead_stages[plant]`
-bound (`slot_idx < k_i`), not a depth- or decider-only check
+before dating. Three wrong-but-compiling alternatives: anchoring on the
+entering `current_stage_idx` instead of `t_out` — the RETIRED form this
+section itself described before the re-anchoring — dates the terminal pool's
+own maturing-residue slot onto the terminal stage's own in-study month
+instead of a full `k_max` stages past it, silently zeroing a real post-study
+delivery; `t_out + slot_idx` (the older retired shift-ring form, wrong
+whenever `t_out mod k_max != 0`); and dating the raw ring-axis `r` directly
+instead of `physical_target(r)` — it lands on the excised fixed post-horizon
+window's stub stage whenever a plant declares one. Reachability uses the
+plant's OWN `StateSpace::anticipated_lead_stages[plant]` bound (`slot_idx <
+k_i`), not a depth- or decider-only check
 (`AnticipatedResolution::decision_sets`/`depth` count only within-study-decided
 commitments and silently exclude a still-draining pre-study seed): a slot beyond
 that bound is structural padding dated at the sentinel even when its delivery
 target `m` still lands inside the horizon — the multi-plant heterogeneous-lead
-case, where plants sharing one `k_max`-wide ring have different reachable widths.
+case, where plants sharing one `k_max`-wide ring have different reachable widths,
+unaffected by which anchor `reachable_delivery_target` resolves against.
 `build_stage_entity_manifest` applies this before populating
 `EntitySlot::delivery_date`.
 
@@ -1644,7 +1672,12 @@ the backward-cut coefficient-propagation regressions
 manifest delivery-anchor regressions
 (`anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`,
 `anticipated_slot_delivery_anchor_past_horizon_is_sentinel`,
-`anticipated_slot_padding_beyond_own_lead_is_sentinel`). The ring-axis
+`anticipated_slot_padding_beyond_own_lead_is_sentinel`), and the
+outgoing-anchor re-anchoring regressions
+(`terminal_maturing_residue_dates_onto_its_post_study_delivery`,
+`terminal_maturing_residue_stays_sentinel_without_a_post_study_calendar`,
+`anticipated_slot_date_matches_the_resolved_physical_delivery_stage`,
+`anticipated_padding_slots_beyond_plant_lead_stay_sentinel`). The ring-axis
 excision itself is additionally pinned by the collision/identity regressions
 `excision_keeps_each_study_stage_fishing_its_own_seed`,
 `zero_gap_with_post_study_resolves_an_identity_ring_and_occupancy_depth`, and
