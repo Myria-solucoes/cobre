@@ -1122,26 +1122,81 @@ three QMC/LHS integration suites and the reproducibility suite pin the bits any 
   sampling gate (a typo fails loudly, so not user-visible). *Owner:* `cobre-stochastic` sampling
   owner. *Trigger:* the hot-path change above touches the same files.
 
-### Structural lever — a shared test-fixture surface in `cobre-core`
+### Fixed — a shared test-fixture surface per type owner (2026-09-15)
 
-**What it is.** `cobre-core` declares a `test-support` feature that gates a single method, while
-every consumer crate hand-copies entity literals (one hydro literal is byte-identical at nine
-sites; the stochastic integration binaries carry hundreds of duplicated helper lines). A
-parameterized builder surface behind that feature resolves most of the test-corpus findings at
-once. The order-invariance and reproducibility tests are load-bearing and are relocated, never
-deleted.
+- **Every crate that owns shareable fixtures exposes them behind its own `test-support`
+  feature.** The gate is `#[cfg(any(test, feature = "test-support"))]`, enabled by consumers as a
+  dev-dependency feature, so a fixture has one definition where its type lives: the entity, stage
+  and penalty builders (a spec struct with `Default` plus a `make_*` constructor, parameterised on
+  the axes the former copies varied), the bit-exact scalar comparators and the numeric helpers in
+  `cobre-core`; the Parquet and JSON writers, the minimal-case corpus, the validation-phase
+  fixtures, the stats-parser template and the output-context fixtures in `cobre-io`; the
+  opening-tree, season-map and inflow-model builders in `cobre-stochastic`. The `cobre-stochastic`
+  integration binaries share one `tests/common` prelude that re-exports from those surfaces.
+- **The struct-specific bit comparators are exhaustive by construction.** Each destructures both
+  sides with a full field pattern and no rest, so a field added to a bounds struct fails to compile
+  until the comparator names it; the scalar and `Option<f64>` comparison is one shared helper.
+- **The shared Parquet extractors carry their own contract tests.** The happy path, the
+  missing-column message and the wrong-type message are pinned once at the owner rather than
+  incidentally in consumer test modules.
+- **The order-invariance, reproducibility and golden-value pins relocated and none changed.** The
+  declaration-order-invariance parser tests, the reproducibility suite, the sample-average golden
+  value and the forward-sampler golden arrays pass with their constants unedited. The one declared
+  coverage addition on the stats parsers is a zero-standard-deviation acceptance case for inflows;
+  the out-of-range case is specific to availability factors and was recorded as not applying to the
+  inflow and load parsers rather than copied to them.
+- **Consolidation was a refactor, not a coverage change.** Every duplicated fixture that folded
+  kept its callers' assertions; the test listing moves only by the declared additions and by the
+  permutation-helper tests that the solver-linking test aggregator no longer inherits into every
+  binary.
 
-**Owner.** The testing-architecture owner. **Trigger.** Ratification of the homing threshold and
-`test-support` convention proposed in `docs/design/testing-architecture.md` §5; the extractor
-contract tests land first as the safety net.
+**What the convention has not reached.** `crates/cobre-sddp/tests/common/` still holds its own
+fixture directory rather than collapsing into that crate's `test-support` surface, and
+`crates/cobre-python` does not yet dev-depend on it; both remain the open half of the convention in
+`docs/design/testing-architecture.md`. The `cobre-stochastic` in-`src` unit-test modules still keep
+local identity-correlation builders where the integration binaries share one.
 
-### Dead-surface sweep
+**Owner.** The `cobre-core`, `cobre-io` and `cobre-stochastic` owners (as executed).
+**Trigger.** None — done.
 
-Unwired public items in `cobre-io`, `cobre-core` and `cobre-stochastic` (dead error variants,
-never-read output fields, a serde-skipped payload rebuilt on receipt, a reader-prologue pattern
-repeated across the input modules) are batched with adjacent feature work; several are public-API
-removals and go through the API-break gate. **Owner.** The respective crate owners.
-**Trigger.** Batch with the next touch of each area.
+### Fixed — the dead-surface sweep (2026-09-15)
+
+- **Every public item the workspace ships has a production reader, or a recorded owner and
+  milestone.** The unwired public error variants are gone: the validation variants no builder path
+  produced, the cross-reference load-error variant no loading path produced, the stochastic-error
+  variants no code path constructed, and the single-inhabitant PAR warning taxonomy whose one
+  caller discarded it. The never-read output columns are gone: the per-iteration setup timings
+  that reached no file, and the written-partition inventory together with the rank exchange that
+  merged it. The unread projections are gone: the dictionary writer's configuration argument, the
+  severity-defaulting method, the aggregate scenario-loading entry point, the case-relative
+  scalar-parameter loader and raw season-map builder, the free postcard serializers, the dead
+  penalties bundle field, the f32 vector decoder, the pipeline projection wrappers, the
+  population-statistics arm of the Welford accumulator, the bare season-map forwarders and the
+  sort-direction knob with one reachable setting. The reader-less bus adjacency topology is deleted
+  with its constructor's unread bus argument.
+- **The broadcast payload no longer carries content-determined derivations.** The cascade
+  adjacency is rebuilt on receipt from the entity slices already in the payload, and a bit-equality
+  round-trip guard pins that the rebuild is exact.
+- **The read-side reader prologue has one owner.** Every Parquet input parser that maps open and
+  build failures to the loading error opens through one crate-internal helper; the
+  convergence-output readers, which map to the output error type or to an option, are named
+  exclusions rather than absorbed into a wider helper.
+- **The write-side ensure-parent-then-write sequence has one owner.** The parent-directory helper
+  lives beside the atomic writers, its inline copies fold onto it, and an atomic batch writer
+  performs the sequence for the writers whose shape matches; the writers that thread their own
+  configuration or create the output directory themselves are named exclusions.
+- **The copied extension extractors fold onto the shared pair**, so a required column missing from
+  the hydro-geometry, energy-productivity or tailrace inputs reports the same wording every other
+  tabular input already produced.
+- **The load- and non-controllable-source factor resolvers are one generic routine** over a private
+  kind marker, with the public entry points unchanged.
+- **PAR parameter validation returns the fatal check directly**; the zero-standard-deviation rule,
+  its message and its fields are unchanged.
+- **The opening solve order is always descending by key**, ties broken by ascending canonical
+  order — the same permutation every run produced before.
+
+**Owner.** The `cobre-core`, `cobre-io` and `cobre-stochastic` owners (as executed).
+**Trigger.** None — done.
 
 ### Deprioritized (recorded, not scheduled)
 
