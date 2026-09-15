@@ -79,6 +79,34 @@ fn reachable_delivery_target(
     })
 }
 
+/// Day-accurate `YYYYMMDD` anchor of `date` — contrast with
+/// [`year_month_day_anchor`]'s day-01 pin, kept for `delivery_date`
+/// (load-bearing for the boundary reconciliation's month-equality join).
+fn full_date_anchor(date: NaiveDate) -> i32 {
+    use chrono::Datelike;
+    date.year() * 10_000
+        + i32::try_from(date.month()).unwrap_or(1) * 100
+        + i32::try_from(date.day()).unwrap_or(1)
+}
+
+/// Resolves ring slot `slot_idx`'s reachable physical delivery target through
+/// [`reachable_delivery_target`] against `outgoing_anchor`, then reads that
+/// target's own delivery stage out of `delivery_stages` — the single step
+/// [`build_stage_entity_manifest`]'s anticipated slot and
+/// [`build_stage_entity_delivery_intervals`] both derive their date and
+/// interval from, so the two builders cannot resolve different targets.
+fn resolve_delivery_stage<'a>(
+    slot_idx: usize,
+    k_i: usize,
+    outgoing_anchor: usize,
+    k_max: usize,
+    resolution: &PointResolution,
+    delivery_stages: &[&'a Stage],
+) -> Option<(usize, &'a Stage)> {
+    let m = reachable_delivery_target(slot_idx, k_i, outgoing_anchor, k_max, resolution)?;
+    delivery_stages.get(m).map(|&stage| (m, stage))
+}
+
 /// Day-01 delivery anchor of the stage `current_stage_idx + offset` against
 /// `stages`: the `YYYYMMDD` anchor of that stage's `start_date`, or the sentinel
 /// when the current stage is unknown or the target lands past `stages`. Callers
@@ -89,6 +117,23 @@ fn calendar_anchor_at(current_stage_idx: Option<usize>, stages: &[&Stage], offse
         .and_then(|t| stages.get(t + offset))
         .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |s| {
             year_month_day_anchor(s.start_date)
+        })
+}
+
+/// The inflow-lag slot's reference stage: pool `p` prices the state leaving
+/// stage `p` (`training::backward`'s stage convention, the same outgoing state
+/// `cut::row` prices into each cut row), so 1-based lag `1` (`lag == 0` here) is
+/// `p`'s own stage and each deeper lag steps one further stage back, walked over
+/// the FULL `system.stages()` ordering (pre-study stages included); the sentinel
+/// when `pool_pos_in_all` is `None` or the walk reaches before the earliest
+/// declared stage. The returned anchor is [`full_date_anchor`] of the referenced
+/// stage's own `start_date` — its full date, not the enclosing calendar month.
+fn lag_reference_anchor(all_stages: &[&Stage], pool_pos_in_all: Option<usize>, lag: usize) -> i32 {
+    pool_pos_in_all
+        .and_then(|t| t.checked_sub(lag))
+        .and_then(|idx| all_stages.get(idx))
+        .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |s| {
+            full_date_anchor(s.start_date)
         })
 }
 
@@ -124,12 +169,32 @@ fn anticipated_ring_for(global_layout: &StateSpace) -> DeliveryRing {
 /// post-horizon lane.
 ///
 /// An in-study ring slot's `delivery_date` is the `YYYYMM01` anchor of its
-/// modular delivery stage against the delivery calendar `study_stages` extended
-/// by [`post_study_delivery_calendar`] when the study declares one: a slot whose
-/// modular target lands on a post-study stage carries that stage's real anchor,
-/// a target past the extended calendar or a padding slot beyond the plant's own
-/// lead carries the sentinel. With no post-study stages the calendar is
-/// study-only, so every date is byte-identical to a study-stages-only walk.
+/// modular delivery stage, resolved against the OUTGOING anchor
+/// (`current_stage_idx + 1`, the state leaving this pool's own stage — the
+/// same state a cut couples to) rather than the entering `current_stage_idx`,
+/// against the delivery calendar `study_stages` extended by
+/// [`post_study_delivery_calendar`] when the study declares one: a slot whose
+/// modular target lands on a post-study stage carries that stage's real
+/// anchor, a target past the extended calendar or a padding slot beyond the
+/// plant's own lead carries the sentinel. With no post-study stages the
+/// calendar is study-only, so every date is byte-identical to a
+/// study-stages-only walk.
+///
+/// The SAME live slot's `interval_start`/`interval_end` are the day-accurate
+/// `YYYYMMDD` anchors of that resolved delivery stage's own `start_date` and
+/// exclusive `end_date` — every live slot, in-study targets included, not
+/// only post-study ones. Both fields derive from the SAME resolved stage as
+/// `delivery_date`, so a live `delivery_date` implies a live interval and
+/// vice versa; `build_stage_entity_delivery_intervals` is the transitional
+/// bridge carrying the equivalent (post-study-only) interval for the
+/// not-yet-migrated `load_boundary_cuts` consumer.
+///
+/// An inflow-lag slot's `reference_date` is the referenced past stage's own
+/// full `start_date`, [`full_date_anchor`]-encoded, via
+/// [`lag_reference_anchor`]: 1-based lag `1` is the pool's own stage and each
+/// deeper lag steps one further stage back over the full `system.stages()`
+/// ordering (pre-study stages included), or the sentinel when the pool's own
+/// stage or the referenced stage is unresolvable.
 ///
 /// # Panics (debug builds only)
 ///
@@ -156,17 +221,23 @@ pub fn build_stage_entity_manifest(
     // decider/depth and the bucket topology both index.
     let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let current_stage_idx = study_stages.iter().position(|s| s.id == stage_id);
+    // Pool `p` prices the state leaving stage `p` — the state entering `p + 1`.
+    let outgoing_anchor = current_stage_idx.map(|t| t + 1);
+    // Full stage ordering (pre-study stages included) — the basis
+    // `lag_reference_anchor` walks, since a deep lag can reach into the
+    // pre-study window `study_stages` excludes.
+    let all_stages: Vec<&Stage> = system.stages().iter().collect();
+    let pool_pos_in_all = all_stages.iter().position(|s| s.id == stage_id);
     // Delivery calendar: study stages, then the post-study calendar (empty when
     // none is declared, so the walk is byte-identical to a study-only one). A
     // ring slot maturing past the horizon then dates onto its real post-study
     // stage instead of the sentinel.
     let post_study_calendar = post_study_delivery_calendar(system);
     let delivery_stages = extended_delivery_stages(&study_stages, &post_study_calendar);
-    // `delivery_anchor_at` walks the EXTENDED calendar (study stages then the
-    // post-study continuation); `bucket_anchor_at` walks STUDY STAGES ONLY. The
-    // two are kept distinct on purpose — see the `Buckets` arm.
-    let delivery_anchor_at =
-        |offset: usize| calendar_anchor_at(current_stage_idx, &delivery_stages, offset);
+    // The anticipated ring dates against the EXTENDED calendar (study stages
+    // then the post-study continuation, `delivery_stages`, via
+    // `resolve_delivery_stage`); `bucket_anchor_at` walks STUDY STAGES ONLY.
+    // The two are kept distinct on purpose — see the `Buckets` arm.
     let bucket_anchor_at =
         |offset: usize| calendar_anchor_at(current_stage_idx, &study_stages, offset);
 
@@ -185,18 +256,24 @@ pub fn build_stage_entity_manifest(
         // padding (frozen `[0, 0]`), not a real commitment, even when `m` itself
         // still lands inside the horizon — the multi-plant heterogeneous-lead case.
         let k_i = global_layout.anticipated_lead_stages[plant_pos];
-        let delivery_date = current_stage_idx
-            .and_then(|t| {
-                reachable_delivery_target(
-                    slot_idx,
-                    k_i,
-                    t,
-                    global_layout.k_max,
-                    &global_layout.anticipated_resolution.per_plant[plant_pos],
-                )
-                .map(|m| (t, m))
-            })
-            .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |(t, m)| {
+        let resolved = outgoing_anchor.and_then(|t| {
+            resolve_delivery_stage(
+                slot_idx,
+                k_i,
+                t,
+                global_layout.k_max,
+                &global_layout.anticipated_resolution.per_plant[plant_pos],
+                &delivery_stages,
+            )
+            .map(|(m, stage)| (t, m, stage))
+        });
+        let (delivery_date, interval_start, interval_end) = resolved.map_or(
+            (
+                ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            ),
+            |(t, m, stage)| {
                 // Defensive cross-check against the resolver (the single owner
                 // of c(m), from `resolve_point`): a within-study decider must
                 // have already fired by `t`; a pre-study (IC-seeded) delivery
@@ -212,14 +289,20 @@ pub fn build_stage_entity_manifest(
                         .is_none_or(|decided_at| decided_at <= t),
                     "anticipated delivery {m} observed at stage {t} was not yet decided"
                 );
-                delivery_anchor_at(m - t)
-            });
+                (
+                    year_month_day_anchor(stage.start_date),
+                    full_date_anchor(stage.start_date),
+                    full_date_anchor(stage.end_date),
+                )
+            },
+        );
         EntitySlot::anticipated(
             plant.id.0,
             slot_idx as u32,
             commissioning_active(plant.entry_stage_id, plant.exit_stage_id, stage_id),
         )
         .with_delivery_date(delivery_date)
+        .with_interval(interval_start, interval_end)
     };
 
     let mut manifest = Vec::with_capacity(projection.n_slots());
@@ -253,6 +336,11 @@ pub fn build_stage_entity_manifest(
                         stage_id,
                     ),
                 )
+                .with_reference_date(lag_reference_anchor(
+                    &all_stages,
+                    pool_pos_in_all,
+                    lag,
+                ))
             }
             StateRegion::Buckets => {
                 let (plant_idx, lag) = global_layout.transit_bucket_column_order[offset];
@@ -267,10 +355,11 @@ pub fn build_stage_entity_manifest(
                         stage_id,
                     ),
                 )
-                // Study-only dating (`bucket_anchor_at`, never the extended
-                // `delivery_anchor_at`): a bucket lag landing past the study
-                // horizon stays sentinel — §W1, the water ring's dating is
-                // unchanged by post-study stages (Terminal credit deferred).
+                // Study-only dating (`bucket_anchor_at`, never the
+                // anticipated ring's extended delivery calendar): a bucket lag
+                // landing past the study horizon stays sentinel — §W1, the
+                // water ring's dating is unchanged by post-study stages
+                // (Terminal credit deferred).
                 .with_delivery_date(bucket_anchor_at(lag))
             }
             StateRegion::CommitmentHold => anticipated_slot(offset),
@@ -492,25 +581,22 @@ fn splice_reserved_state_block(
     Ok((new_manifest, new_coefficients))
 }
 
-/// Build the per-slot delivery INTERVAL, in LOCKSTEP with
-/// [`build_stage_entity_manifest`]'s `0..projection.n_slots()` classification
-/// walk: `Some((start, end))` for an in-study ring slot whose modular delivery
-/// target `m` at `stage_id` lands on a post-study stage, `None` for every
-/// other slot.
+/// The transitional bridge carrier for `load_boundary_cuts`'s
+/// `target_delivery_intervals` parameter, until that consumer reads intervals
+/// from [`build_stage_entity_manifest`]'s own `interval_start`/`interval_end`
+/// fields directly — the manifest is now the PRIMARY carrier: every live
+/// anticipated slot there already carries the same interval. This builder
+/// still walks `0..projection.n_slots()` in LOCKSTEP with the manifest and
+/// returns `Some((start, end))` only for an in-study ring slot whose delivery
+/// target lands on a post-study stage, `None` for every other slot — the
+/// reconciliation still reads `None` as "in-study" (a delivery matured and
+/// discharged within the horizon, resolving `Zero`) and `Some` as "post-study"
+/// (a target that fans out).
 ///
-/// The reconciliation reads `None` as "in-study": a dated ring slot with **no**
-/// interval is a delivery matured and discharged within the horizon and resolves
-/// `Zero`; a dated ring slot **with** an interval is a post-study target and fans
-/// out. That is sound because a ring slot's `delivery_date` (in
-/// [`build_stage_entity_manifest`]) and its interval here both derive from the
-/// SAME modular delivery target `m` at the SAME stage (`modular_delivery_target`,
-/// resolved against `stage_id` identically in both), so
-/// `dated-post-study ⟺ Some(interval)` holds by construction: `m` in study dates
-/// a real study anchor with a `None` interval, `m` on a post-study stage dates a
-/// real post-study anchor with a `Some` interval, and a padding or past-extended
-/// slot is sentinel-dated with a `None` interval. Alignment with
-/// [`build_stage_entity_manifest`]'s output is otherwise by construction — both
-/// classify the same slot the same way — never a re-derived subindex convention.
+/// Both builders resolve the SAME modular delivery target through the SAME
+/// [`resolve_delivery_stage`] call at the SAME OUTGOING anchor
+/// (`current_stage_idx + 1`), so `dated-post-study ⟺ Some(interval)` holds by
+/// construction — never a re-derived subindex convention.
 #[must_use]
 pub fn build_stage_entity_delivery_intervals(
     system: &System,
@@ -520,7 +606,9 @@ pub fn build_stage_entity_delivery_intervals(
 ) -> Vec<Option<(NaiveDate, NaiveDate)>> {
     let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let current_stage_idx = study_stages.iter().position(|s| s.id == stage_id);
+    let outgoing_anchor = current_stage_idx.map(|t| t + 1);
     let post_study_calendar = post_study_delivery_calendar(system);
+    let delivery_stages = extended_delivery_stages(&study_stages, &post_study_calendar);
     let n_study = study_stages.len();
     let anticipated_ring = anticipated_ring_for(global_layout);
 
@@ -530,22 +618,17 @@ pub fn build_stage_entity_delivery_intervals(
                 global_layout.classify_incoming_column(projection.incoming_column(CutSlot::new(j)));
             match region {
                 StateRegion::CommitmentHold => {
-                    // Resolve the interval the SAME way `anticipated_slot`
-                    // resolves the date — through `reachable_delivery_target` —
-                    // so `m` is `Some` only when it lands on a post-study stage,
-                    // making a ring slot dated-post-study ⟺ `Some(interval)`.
                     let (slot, plant) = anticipated_ring.slot_lane_at(offset);
                     let k_i = global_layout.anticipated_lead_stages[plant];
-                    let m = reachable_delivery_target(
+                    let (m, stage) = resolve_delivery_stage(
                         slot,
                         k_i,
-                        current_stage_idx?,
+                        outgoing_anchor?,
                         global_layout.k_max,
                         &global_layout.anticipated_resolution.per_plant[plant],
+                        &delivery_stages,
                     )?;
-                    m.checked_sub(n_study)
-                        .and_then(|post_idx| post_study_calendar.get(post_idx))
-                        .map(|stage| (stage.start_date, stage.end_date))
+                    (m >= n_study).then_some((stage.start_date, stage.end_date))
                 }
                 _ => None,
             }
@@ -686,36 +769,55 @@ fn sole_pool_owner_node_id(node_graph: &NodeGraph, pool: usize) -> i32 {
 /// study's single resolved factor, `graph_stage_id` is
 /// `study_stage_ids[node_graph.pool_stage[pool]]`, `node_id` is the pool's
 /// sole owning node id (see [`sole_pool_owner_node_id`]), and
-/// `priced_state_date` is always [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`].
+/// `priced_state_date` is [`full_date_anchor`] of
+/// `study_stage_end_dates[node_graph.pool_stage[pool]]` — the pool's owning
+/// stage's exclusive `end_date`, day-accurate: the instant the pool's priced
+/// state leaves that stage, not the enclosing calendar month.
+/// `study_stage_ids` and `study_stage_end_dates` share the same
+/// `pool_stage` indirection and the same out-of-range sentinel fallback, so a
+/// pool with a sentinel `graph_stage_id` also carries a sentinel
+/// `priced_state_date`.
 #[must_use]
 pub fn build_stage_cuts_payloads<'a>(
     fcf: &FutureCostFunction,
     node_graph: &NodeGraph,
     study_stage_ids: &[i32],
+    study_stage_end_dates: &[NaiveDate],
     cost_scale_factor: f64,
     stage_records: &'a [Vec<PolicyCutRecord<'a>>],
     stage_active_indices: &'a [Vec<u32>],
     stage_manifests: &'a [Vec<EntitySlot>],
 ) -> Vec<StageCutsPayload<'a>> {
+    debug_assert_eq!(
+        study_stage_ids.len(),
+        study_stage_end_dates.len(),
+        "study_stage_ids and study_stage_end_dates must be threaded 1:1"
+    );
     fcf.pools
         .iter()
         .enumerate()
-        .map(|(pool, pool_data)| StageCutsPayload {
-            stage_id: pool as u32,
-            state_dimension: fcf.state_dimension as u32,
-            capacity: pool_data.capacity as u32,
-            warm_start_count: pool_data.warm_start_count,
-            cuts: &stage_records[pool],
-            active_cut_indices: &stage_active_indices[pool],
-            populated_count: pool_data.populated() as u32,
-            entity_manifest: &stage_manifests[pool],
-            cost_scale_factor,
-            node_id: sole_pool_owner_node_id(node_graph, pool),
-            graph_stage_id: study_stage_ids
-                .get(node_graph.pool_stage[pool].0)
-                .copied()
-                .unwrap_or(STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL),
-            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+        .map(|(pool, pool_data)| {
+            let pool_stage = node_graph.pool_stage[pool].0;
+            StageCutsPayload {
+                stage_id: pool as u32,
+                state_dimension: fcf.state_dimension as u32,
+                capacity: pool_data.capacity as u32,
+                warm_start_count: pool_data.warm_start_count,
+                cuts: &stage_records[pool],
+                active_cut_indices: &stage_active_indices[pool],
+                populated_count: pool_data.populated() as u32,
+                entity_manifest: &stage_manifests[pool],
+                cost_scale_factor,
+                node_id: sole_pool_owner_node_id(node_graph, pool),
+                graph_stage_id: study_stage_ids
+                    .get(pool_stage)
+                    .copied()
+                    .unwrap_or(STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL),
+                priced_state_date: study_stage_end_dates
+                    .get(pool_stage)
+                    .copied()
+                    .map_or(STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, full_date_anchor),
+            }
         })
         .collect()
 }
@@ -895,14 +997,15 @@ pub fn build_stage_states_payloads<'a>(
 mod tests {
     use super::{
         EntitySlot, HashMap, StateFamily, build_stage_entity_delivery_intervals,
-        build_stage_entity_manifest, build_stage_states_payloads, modular_delivery_target,
-        reachable_delivery_target, reserve_boundary_inflow_lag_slots, year_month_day_anchor,
+        build_stage_entity_manifest, build_stage_states_payloads, full_date_anchor,
+        modular_delivery_target, reachable_delivery_target, reserve_boundary_inflow_lag_slots,
+        year_month_day_anchor,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, DeliveryAxis, LeadTime};
     use crate::setup::{
         NodeGraph, NodeId, NodeOpenings, NodePos, NodeRuntime, NodeSuccessor, OpeningSource,
-        StageIdx,
+        StageIdx, extended_delivery_stages, post_study_delivery_calendar,
     };
     use crate::test_support;
     use crate::visited_states::VisitedStatesArchive;
@@ -1363,6 +1466,225 @@ mod tests {
         }
     }
 
+    // -- inflow-lag `reference_date` dating --
+
+    /// A stage covering `[start, end)` at domain id `id`; `index`/`season_id`
+    /// are overwritten by `SystemBuilder::build`'s canonical-order sort, so a
+    /// placeholder value is fine. `id` may be negative (a pre-study stage).
+    fn make_stage_dated(id: i32, start: chrono::NaiveDate, end: chrono::NaiveDate) -> Stage {
+        Stage {
+            index: 0,
+            id,
+            start_date: start,
+            end_date: end,
+            season_id: None,
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 720.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: ALL_ENABLED,
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// A storage+lag-only `System` (no anticipated thermals): `n_hydro` hydros
+    /// (ids `1..=n_hydro`) over `stages`, already carrying their own ids/dates
+    /// (negative ids for pre-study stages included).
+    fn system_lag_only(n_hydro: usize, stages: Vec<Stage>) -> System {
+        let n_stages = stages.len();
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: n_hydro,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &bounds_defaults(),
+        );
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(
+                (1..=n_hydro as i32)
+                    .map(|id| make_hydro(id, None, None))
+                    .collect(),
+            )
+            .stages(stages)
+            .bounds(bounds)
+            .build()
+            .expect("valid lag-only system")
+    }
+
+    /// Three consecutive monthly study stages (ids 0, 1, 2) ending on the pool's
+    /// own stage, 2031-11-01.
+    fn three_monthly_stages_ending_nov_2031() -> Vec<Stage> {
+        let d = |y, m| chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+        vec![
+            make_stage_dated(0, d(2031, 9), d(2031, 10)),
+            make_stage_dated(1, d(2031, 10), d(2031, 11)),
+            make_stage_dated(2, d(2031, 11), d(2031, 12)),
+        ]
+    }
+
+    #[test]
+    fn inflow_lag_slot_lag_one_references_the_pools_own_stage() {
+        let system = system_lag_only(1, three_monthly_stages_ending_nov_2031());
+        let global = test_support::state_layout(1, 3);
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 2);
+
+        let lag1 = manifest
+            .iter()
+            .find(|s| s.entity_type == StateFamily::HydroInflowLag.code() && s.subindex == 1)
+            .expect("a subindex-1 inflow-lag slot must exist");
+        assert_eq!(lag1.reference_date, 20_311_101);
+    }
+
+    #[test]
+    fn inflow_lag_slot_deeper_lags_step_back_one_stage_each() {
+        let system = system_lag_only(1, three_monthly_stages_ending_nov_2031());
+        let global = test_support::state_layout(1, 3);
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 2);
+
+        let lag1 = manifest
+            .iter()
+            .find(|s| s.entity_type == StateFamily::HydroInflowLag.code() && s.subindex == 1)
+            .expect("a subindex-1 inflow-lag slot must exist");
+        let lag3 = manifest
+            .iter()
+            .find(|s| s.entity_type == StateFamily::HydroInflowLag.code() && s.subindex == 3)
+            .expect("a subindex-3 inflow-lag slot must exist");
+        assert_eq!(lag1.reference_date, 20_311_101);
+        assert_eq!(
+            lag3.reference_date, 20_310_901,
+            "subindex 3 is two stages earlier than the subindex-1 slot's stage"
+        );
+    }
+
+    #[test]
+    fn inflow_lag_slot_reaching_pre_study_window_dates_onto_a_negative_id_stage() {
+        let d = |y, m| chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+        let stages = vec![
+            make_stage_dated(-3, d(2031, 8), d(2031, 9)),
+            make_stage_dated(-2, d(2031, 9), d(2031, 10)),
+            make_stage_dated(-1, d(2031, 10), d(2031, 11)),
+            make_stage_dated(0, d(2031, 11), d(2031, 12)),
+        ];
+        let system = system_lag_only(1, stages);
+        let global = test_support::state_layout(1, 2);
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        let lag2 = manifest
+            .iter()
+            .find(|s| s.entity_type == StateFamily::HydroInflowLag.code() && s.subindex == 2)
+            .expect("a subindex-2 inflow-lag slot must exist");
+        assert_eq!(
+            lag2.reference_date, 20_311_001,
+            "must date onto the pre-study stage id -1, not the sentinel"
+        );
+    }
+
+    #[test]
+    fn inflow_lag_slot_beyond_the_earliest_stage_stays_sentinel() {
+        let d = |y, m| chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+        let stages = vec![make_stage_dated(0, d(2031, 11), d(2031, 12))];
+        let system = system_lag_only(1, stages);
+        let global = test_support::state_layout(1, 3);
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        let lag1 = manifest
+            .iter()
+            .find(|s| s.entity_type == StateFamily::HydroInflowLag.code() && s.subindex == 1)
+            .expect("a subindex-1 inflow-lag slot must exist");
+        assert_eq!(
+            lag1.reference_date, 20_311_101,
+            "the pool's own stage stays dated"
+        );
+
+        for subindex in [2, 3] {
+            let slot = manifest
+                .iter()
+                .find(|s| {
+                    s.entity_type == StateFamily::HydroInflowLag.code() && s.subindex == subindex
+                })
+                .unwrap_or_else(|| panic!("a subindex-{subindex} inflow-lag slot must exist"));
+            assert_eq!(
+                slot.reference_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                "subindex {subindex} reaches before the earliest declared stage"
+            );
+        }
+    }
+
+    #[test]
+    fn inflow_lag_reference_date_is_independent_of_hydro_declaration_order() {
+        let system = system_lag_only(2, three_monthly_stages_ending_nov_2031());
+        let global = test_support::state_layout(2, 2);
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 2);
+
+        for subindex in [1, 2] {
+            let dates: Vec<i32> = manifest
+                .iter()
+                .filter(|s| {
+                    s.entity_type == StateFamily::HydroInflowLag.code() && s.subindex == subindex
+                })
+                .map(|s| s.reference_date)
+                .collect();
+            assert_eq!(
+                dates.len(),
+                2,
+                "both hydros must own a slot at subindex {subindex}"
+            );
+            assert_eq!(
+                dates[0], dates[1],
+                "subindex {subindex}'s reference_date must not depend on which hydro owns the slot"
+            );
+        }
+    }
+
+    /// A stage starting mid-week (2031-11-03, not day-01) must stamp
+    /// `reference_date` at its own day — `year_month_day_anchor` would
+    /// truncate it to `20311101`, colliding it with any sibling stage
+    /// starting earlier in the same month.
+    #[test]
+    fn inflow_lag_reference_date_keeps_the_stage_start_day() {
+        let stages = vec![make_stage_dated(
+            0,
+            chrono::NaiveDate::from_ymd_opt(2031, 11, 3).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2031, 11, 10).unwrap(),
+        )];
+        let system = system_lag_only(1, stages);
+        let global = test_support::state_layout(1, 1);
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        let lag1 = manifest
+            .iter()
+            .find(|s| s.entity_type == StateFamily::HydroInflowLag.code() && s.subindex == 1)
+            .expect("a subindex-1 inflow-lag slot must exist");
+        assert_eq!(
+            lag1.reference_date, 20_311_103,
+            "the reference date must keep the stage's own start day, not truncate to day 01"
+        );
+    }
+
     /// A monthly stage (`index`/`id` shared) starting on the first of `year`/`month`.
     fn make_stage_ym(index: usize, id: i32, year: i32, month: u32) -> Stage {
         let start = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap();
@@ -1535,14 +1857,111 @@ mod tests {
         }
     }
 
+    /// `System` with 1 hydro and 1 anticipated thermal (`LeadStages(1)`, so
+    /// `k_max = 1`) over two study stages: a 14-day first stage, then a
+    /// non-month-aligned 35-day (five-week) terminal stage starting
+    /// 2026-01-15 — a real, day-accurate delivery span for a slot targeting
+    /// it, not the enclosing calendar month.
+    fn system_1h_1ant_short_then_five_week_terminal() -> System {
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 2,
+                k_max: 1,
+            },
+            &bounds_defaults(),
+        );
+        let stage0_start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let stage0_end = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let stage1_end = chrono::NaiveDate::from_ymd_opt(2026, 2, 19).unwrap();
+        let stage = |index, id, start, end, season_id, duration_hours| Stage {
+            index,
+            id,
+            start_date: start,
+            end_date: end,
+            season_id: Some(season_id),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: ALL_ENABLED,
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        };
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![make_hydro(1, None, None)])
+            .thermals(vec![anticipated_thermal(1, 1)])
+            .stages(vec![
+                stage(0, 0, stage0_start, stage0_end, 0, 336.0),
+                stage(1, 1, stage0_end, stage1_end, 1, 840.0),
+            ])
+            .bounds(bounds)
+            .build()
+            .expect("valid 2-stage system with a non-month-aligned five-week terminal stage")
+    }
+
+    /// `n` consecutive monthly study stages (ids `0..n`), the last one ending
+    /// `end_year`/`end_month` — the many-stage generalization of
+    /// [`three_monthly_stages_ending_nov_2031`].
+    fn monthly_stages_ending(n: usize, end_year: i32, end_month: u32) -> Vec<Stage> {
+        let end_abs = end_year * 12 + (end_month as i32 - 1);
+        (0..n)
+            .map(|i| {
+                let abs = end_abs - (n - 1 - i) as i32;
+                let year = abs.div_euclid(12);
+                let month = (abs.rem_euclid(12) + 1) as u32;
+                make_stage_ym(i, i as i32, year, month)
+            })
+            .collect()
+    }
+
+    /// 64 consecutive monthly study stages ending 2031-11-01 (ids 0..63), 1
+    /// hydro, and 1 anticipated thermal with `lead_stages = 2` (so
+    /// `k_max = 2`), carrying `post_study` — the terminal-maturing-residue
+    /// fixture.
+    fn system_1h_1ant_64monthly_lead2(post_study: Option<PostStudyStages>) -> System {
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 64,
+                k_max: 2,
+            },
+            &bounds_defaults(),
+        );
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![make_hydro(1, None, None)])
+            .thermals(vec![anticipated_thermal(1, 2)])
+            .stages(monthly_stages_ending(64, 2031, 11))
+            .bounds(bounds)
+            .post_study_stages(post_study)
+            .build()
+            .expect("valid 64-stage lead-2 system")
+    }
+
     /// An `AnticipatedThermalState` ring slot's `delivery_date` is the `YYYYMMDD`
-    /// of its delivery stage — the next stage `m >= t` whose residue `m mod k_max`
-    /// equals the slot — resolved through the attached `AnticipatedResolution`;
-    /// storage/lag slots stay at the sentinel. At stage index 1 with `k_max = 2`
-    /// (residue 1), ring slot 1 matures now at index 1 (2024-05) and ring slot 0
-    /// delivers next at index 2 (2024-06). Stage index 1 is chosen because
-    /// `t mod k_max != 0`, where the residue mapping differs from the retired
-    /// shift form `t + slot`.
+    /// of its delivery stage — the next stage `m >= t_out` whose residue `m mod
+    /// k_max` equals the slot, where `t_out` is the OUTGOING anchor
+    /// (`current_stage_idx + 1`) — resolved through the attached
+    /// `AnticipatedResolution`; storage/lag slots stay at the sentinel. At stage
+    /// index 1 (`t_out = 2`) with `k_max = 2`, ring slot 0 (residue 0) matures at
+    /// the outgoing instant itself (index 2, 2024-06); ring slot 1 (residue 1,
+    /// the class matching `t_out`'s own predecessor) next recurs a full `k_max`
+    /// stages out, at index 3 — past the 3-stage horizon, so it stays sentinel.
     #[test]
     fn anticipated_slot_delivery_anchor_matches_delivery_stage_year_month() {
         let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadStages(2));
@@ -1580,7 +1999,7 @@ mod tests {
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
             manifest[2].delivery_date, 20240601,
-            "ring slot 0 (residue 0) at stage index 1 delivers next at index 2 (2024-06)"
+            "ring slot 0 (residue 0) matures at the outgoing anchor itself (index 2, 2024-06)"
         );
 
         assert_eq!(
@@ -1589,14 +2008,19 @@ mod tests {
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].delivery_date, 20240501,
-            "ring slot 1 (residue 1) at stage index 1 matures now at index 1 (2024-05)"
+            manifest[3].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "ring slot 1 (residue 1) next recurs at index 3, past the 3-stage horizon"
         );
     }
 
     /// A ring slot whose delivery stage lands past the horizon reads the
-    /// sentinel: at the last stage (index 2), ring slot 1 would deliver at index
-    /// 3, which does not exist, so its date is the sentinel.
+    /// sentinel: at the terminal stage (index 2, outgoing anchor `t_out = 3`),
+    /// ring slot 0 (residue 0, the class matching `t_out`'s own predecessor)
+    /// next recurs at index 4 and ring slot 1 (residue 1) at index 3 — both
+    /// past the 3-stage horizon, so both read the sentinel. Anchoring on the
+    /// entering `current_stage_idx = 2` instead would wrongly mature ring
+    /// slot 0 in-study at index 2 (2024-06), the terminal maturing-residue
+    /// pitfall [`build_stage_entity_manifest`]'s rustdoc names.
     #[test]
     fn anticipated_slot_delivery_anchor_past_horizon_is_sentinel() {
         let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadStages(2));
@@ -1614,21 +2038,25 @@ mod tests {
         // stage_id 2 is the terminal stage (2024-06), study index 2.
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 2);
 
-        // Ring slot 0 delivers at index 2 (2024-06); ring slot 1 at index 3 (gone).
+        // Both ring slots' next occurrence (index 4 and index 3) lands past
+        // the 3-stage horizon.
         assert_eq!(manifest[2].subindex, 0);
-        assert_eq!(manifest[2].delivery_date, 20240601);
+        assert_eq!(
+            manifest[2].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "ring slot 0 next recurs at index 4, past the horizon"
+        );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
             manifest[3].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            "delivery past the horizon reads the sentinel"
+            "ring slot 1 next recurs at index 3, past the horizon"
         );
     }
 
-    /// A `LeadTime`-mode anticipated plant yields a real anchor on every
-    /// reachable ring slot, exactly like `LeadStages` (compare
+    /// A `LeadTime`-mode anticipated plant resolves its ring slots exactly
+    /// like `LeadStages` (compare
     /// `anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`):
-    /// lead mode no longer gates the anchor, only reachability
-    /// (`anticipated_lead_stages`) and horizon truncation do.
+    /// lead mode does not change which anchor gates the ring, only
+    /// reachability (`anticipated_lead_stages`) and horizon truncation do.
     #[test]
     fn anticipated_slot_leadtime_mode_yields_real_anchor() {
         let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadTime(720.0));
@@ -1648,20 +2076,20 @@ mod tests {
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
             manifest[2].delivery_date, 20240601,
-            "ring slot 0 (residue 0) at stage index 1 delivers next at index 2 (2024-06)"
+            "ring slot 0 (residue 0) matures at the outgoing anchor itself (index 2, 2024-06)"
         );
         assert_eq!(manifest[3].subindex, 1);
         assert_eq!(
-            manifest[3].delivery_date, 20240501,
-            "ring slot 1 (residue 1) at stage index 1 matures now at index 1 (2024-05)"
+            manifest[3].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "ring slot 1 (residue 1) next recurs at index 3, past the 3-stage horizon"
         );
     }
 
     /// A slot beyond a plant's OWN `anticipated_lead_stages` is structural
-    /// padding (frozen `[0, 0]`), so it reads the sentinel even when
-    /// `t + slot_idx` itself still lands inside the horizon: with plants
-    /// ℓ=1 and ℓ=2 sharing one `k_max=2` ring, the ℓ=1 plant's slot 1 is
-    /// padding at every stage, while the ℓ=2 plant's slot 1 is reachable.
+    /// padding (frozen `[0, 0]`), so it reads the sentinel regardless of
+    /// where its ring-axis target would otherwise land: with plants ℓ=1 and
+    /// ℓ=2 sharing one `k_max=2` ring, the ℓ=1 plant's slot 1 is padding at
+    /// every stage, while the ℓ=2 plant's slot 1 is reachable.
     #[test]
     fn anticipated_slot_padding_beyond_own_lead_is_sentinel() {
         let system = system_1h_2ant_3monthly();
@@ -1676,7 +2104,10 @@ mod tests {
         ));
         let projection = CutStateProjection::new(&global, ALL_ENABLED);
 
-        // Stage index 0 (2024-04): plenty of horizon left for both plants.
+        // Stage index 0, outgoing anchor t_out = 1: slot 0 (residue 0, the
+        // class matching stage index 0's own residue) next recurs at index 2
+        // for both plants; slot 1 (residue 1) matures at the outgoing instant
+        // itself (index 1).
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
 
         // Layout N=1, L=1, A=2, k_max=2: storage j=0, lag j=1, anticipated j=2..6
@@ -1684,15 +2115,15 @@ mod tests {
         assert_eq!(manifest[2].entity_id, 1, "slot0/plant0 = ℓ=1 plant");
         assert_eq!(manifest[2].subindex, 0);
         assert_eq!(
-            manifest[2].delivery_date, 20240401,
-            "ℓ=1 plant slot 0 delivers at index 0 (2024-04)"
+            manifest[2].delivery_date, 20240601,
+            "ℓ=1 plant slot 0 next recurs at index 2 (2024-06)"
         );
 
         assert_eq!(manifest[3].entity_id, 2, "slot0/plant1 = ℓ=2 plant");
         assert_eq!(manifest[3].subindex, 0);
         assert_eq!(
-            manifest[3].delivery_date, 20240401,
-            "ℓ=2 plant slot 0 delivers at index 0 (2024-04)"
+            manifest[3].delivery_date, 20240601,
+            "ℓ=2 plant slot 0 next recurs at index 2 (2024-06)"
         );
 
         assert_eq!(manifest[4].entity_id, 1, "slot1/plant0 = ℓ=1 plant");
@@ -1706,7 +2137,7 @@ mod tests {
         assert_eq!(manifest[5].subindex, 1);
         assert_eq!(
             manifest[5].delivery_date, 20240501,
-            "ℓ=2 plant slot 1 delivers at index 1 (2024-05)"
+            "ℓ=2 plant slot 1 matures at the outgoing instant itself (index 1, 2024-05)"
         );
     }
 
@@ -1715,10 +2146,14 @@ mod tests {
     /// With a post-study calendar declared, an in-study ring slot whose modular
     /// delivery target lands on a post-study stage carries that stage's real
     /// `YYYYMM01` anchor — not the sentinel — while a target past the extended
-    /// calendar stays sentinel and an in-study target keeps its study anchor.
-    /// Layout `N=1, L=1, A=1, k_max=3` at the terminal stage index 2: ring slot 0
-    /// delivers at `m=3` (the post-study stage 2024-07), slot 1 at `m=4` (past the
-    /// extended calendar), slot 2 at `m=2` (in-study 2024-06).
+    /// calendar stays sentinel. Layout `N=1, L=1, A=1, k_max=3` at the
+    /// terminal stage index 2 (outgoing anchor `t_out = 3`): ring slot 0
+    /// delivers at `m=3` (the post-study stage 2024-07), slot 1 at `m=4`
+    /// (past the extended calendar), and slot 2 — the residue matching the
+    /// terminal stage's own class, the "maturing residue" — recurs at `m=5`,
+    /// also past the 1-stage-deep extended calendar: at the terminal stage
+    /// the outgoing anchor is itself already one past the horizon, so no
+    /// residue can resolve in-study any more.
     #[test]
     fn ring_slot_targeting_post_study_carries_a_real_anchor() {
         let start = chrono::NaiveDate::from_ymd_opt(2024, 7, 1).unwrap();
@@ -1751,8 +2186,8 @@ mod tests {
         );
         assert_eq!(manifest[4].subindex, 2);
         assert_eq!(
-            manifest[4].delivery_date, 20240601,
-            "ring slot 2 (m=2) matures in-study at 2024-06"
+            manifest[4].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "ring slot 2 (m=5), the terminal maturing residue, lands past the extended calendar"
         );
     }
 
@@ -1795,9 +2230,361 @@ mod tests {
             intervals[3], None,
             "ring slot 1 (m=4) is past the extended calendar"
         );
-        assert_eq!(intervals[4], None, "ring slot 2 (m=2) matures in-study");
+        assert_eq!(
+            intervals[4], None,
+            "ring slot 2 (m=5, the terminal maturing residue) lands past the extended calendar"
+        );
         assert_eq!(intervals[0], None, "storage carries no interval");
         assert_eq!(intervals[1], None, "lag carries no interval");
+    }
+
+    // -- Manifest-carried intervals (ticket-012) --
+
+    /// A live anticipated slot's `interval_start`/`interval_end` are the
+    /// resolved delivery stage's own `start_date`/`end_date` anchors — the
+    /// same stage `delivery_date` (day-01-truncated) resolves against, over
+    /// the same fixture as
+    /// [`anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`].
+    #[test]
+    fn anticipated_slot_interval_matches_its_delivery_stage_span() {
+        let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadStages(2));
+        let mut global = test_support::state_layout_full(1, 1, 1, 2, vec![2]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        // stage_id 1 is the middle stage (2024-05), study index 1; ring slot 0
+        // (residue 0) matures at the outgoing anchor itself (index 2, 2024-06).
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 1);
+
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(manifest[2].delivery_date, 20240601);
+        assert_eq!(
+            manifest[2].interval_start, 20240601,
+            "interval_start is the delivery stage's own start_date anchor"
+        );
+        assert_eq!(
+            manifest[2].interval_end, 20240701,
+            "interval_end is the delivery stage's own exclusive end_date anchor"
+        );
+    }
+
+    /// A non-month-aligned five-week (35-day) delivery stage's interval spans
+    /// its own real 35 days, not the enclosing calendar month —
+    /// `year_month_day_anchor`'s day-01 pin would collapse both endpoints to
+    /// the first of their months instead.
+    #[test]
+    fn anticipated_slot_interval_on_a_five_week_stage_spans_thirty_five_days() {
+        let system = system_1h_1ant_short_then_five_week_terminal();
+        let mut global = test_support::state_layout_full(1, 1, 1, 1, vec![1]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(1)],
+            DeliveryAxis {
+                stage_lengths_hours: &[336.0, 840.0],
+                n_decision: 2,
+                n_delivery: 2,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        // stage_id 0's single ring slot matures at the outgoing anchor
+        // (index 1), the five-week terminal stage.
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        // Layout N=1, L=1, A=1, k_max=1: storage j=0, lag j=1, anticipated j=2.
+        assert_eq!(manifest.len(), 3);
+        assert_eq!(
+            manifest[2].interval_start, 20260115,
+            "interval_start is the terminal stage's real start day, not day-01"
+        );
+        assert_eq!(
+            manifest[2].interval_end, 20260219,
+            "interval_end is the terminal stage's real exclusive end day"
+        );
+
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 2, 19).unwrap();
+        assert_eq!(
+            (end - start).num_days(),
+            35,
+            "a non-month-aligned five-week stage's interval must span its real 35 days, not the \
+             enclosing calendar month"
+        );
+    }
+
+    /// Over a fixture whose ring reaches both in-study and post-study
+    /// targets, every slot's `delivery_date != SENTINEL` holds if and only if
+    /// `interval_start`/`interval_end != SENTINEL` — in-study deliveries
+    /// carry a live interval too, not only post-study ones.
+    #[test]
+    fn anticipated_slot_dated_iff_intervalled() {
+        let start = chrono::NaiveDate::from_ymd_opt(2024, 7, 1).unwrap();
+        let system = system_1h_1ant_3monthly_lead3(post_study_stages_from(start));
+        let mut global = test_support::state_layout_full(1, 1, 1, 3, vec![3]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(3)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let mut saw_in_study_live = false;
+        let mut saw_post_study_live = false;
+        for stage_id in 0..3i32 {
+            let manifest = build_stage_entity_manifest(&system, &global, &projection, stage_id);
+            for slot in &manifest {
+                let dated = slot.delivery_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+                let intervalled = slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+                    && slot.interval_end != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+                assert_eq!(
+                    dated, intervalled,
+                    "stage {stage_id} subindex {}: delivery_date != SENTINEL must hold iff \
+                     interval_start/interval_end != SENTINEL",
+                    slot.subindex
+                );
+                if dated && slot.entity_type == StateFamily::AnticipatedThermalState.code() {
+                    if slot.delivery_date < 20_240_700 {
+                        saw_in_study_live = true;
+                    } else {
+                        saw_post_study_live = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_in_study_live,
+            "fixture must exercise a live in-study delivery"
+        );
+        assert!(
+            saw_post_study_live,
+            "fixture must exercise a live post-study delivery"
+        );
+    }
+
+    /// The realigned bridge builder is the manifest's lockstep pin: wherever
+    /// it returns `Some((start, end))`, the manifest's same slot carries that
+    /// same span as its `interval_start`/`interval_end` anchors — both derive
+    /// from the SAME [`resolve_delivery_stage`] call at the SAME outgoing
+    /// anchor, so the two cannot resolve different targets.
+    #[test]
+    fn delivery_interval_builder_agrees_with_the_manifest_slot_by_slot() {
+        let start = chrono::NaiveDate::from_ymd_opt(2024, 7, 1).unwrap();
+        let system = system_1h_1ant_3monthly_lead3(post_study_stages_from(start));
+        let mut global = test_support::state_layout_full(1, 1, 1, 3, vec![3]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(3)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        for stage_id in 0..3i32 {
+            let manifest = build_stage_entity_manifest(&system, &global, &projection, stage_id);
+            let intervals =
+                build_stage_entity_delivery_intervals(&system, &global, &projection, stage_id);
+            assert_eq!(intervals.len(), manifest.len());
+
+            for (slot, interval) in manifest.iter().zip(intervals.iter()) {
+                let Some((start, end)) = interval else {
+                    continue;
+                };
+                assert_eq!(
+                    slot.interval_start,
+                    full_date_anchor(*start),
+                    "stage {stage_id} subindex {}: the bridge builder's Some must match the \
+                     manifest's own interval_start",
+                    slot.subindex
+                );
+                assert_eq!(
+                    slot.interval_end,
+                    full_date_anchor(*end),
+                    "stage {stage_id} subindex {}: the bridge builder's Some must match the \
+                     manifest's own interval_end",
+                    slot.subindex
+                );
+            }
+        }
+    }
+
+    // -- Re-anchoring onto the outgoing state: terminal maturing residue --
+
+    /// The terminal pool's maturing residue — the ring slot whose subindex
+    /// matches the terminal stage's own class — re-anchors onto its real
+    /// post-study delivery instead of the in-study terminal month: over 64
+    /// monthly stages ending 2031-11-01 with `lead_stages = 2` and a 2-stage
+    /// post-study calendar, the terminal pool's subindex-1 slot dates onto
+    /// 2032-01-01, not `20311101`.
+    #[test]
+    fn terminal_maturing_residue_dates_onto_its_post_study_delivery() {
+        let post_study = post_study_stages_from_months(&[(2031, 12), (2032, 1)]);
+        let system = system_1h_1ant_64monthly_lead2(Some(post_study));
+        let mut global = test_support::state_layout_full(1, 1, 1, 2, vec![2]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 64],
+                n_decision: 64,
+                n_delivery: 64,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        // Terminal stage id 63 (2031-11), study index 63.
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 63);
+
+        // storage j=0, lag j=1, anticipated ring slots j=2 (subindex 0), j=3 (subindex 1).
+        assert_eq!(manifest.len(), 4);
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(
+            manifest[2].delivery_date, 20311201,
+            "ring slot 0 matures at the outgoing anchor itself (2031-12)"
+        );
+
+        assert_eq!(manifest[3].subindex, 1);
+        assert_ne!(
+            manifest[3].delivery_date, 20311101,
+            "the maturing residue must not date onto the in-study terminal month"
+        );
+        assert_eq!(
+            manifest[3].delivery_date, 20320101,
+            "the maturing residue re-anchors a full k_max stages past the horizon (2032-01)"
+        );
+    }
+
+    /// Without a declared post-study calendar, the terminal pool's maturing
+    /// residue reads the sentinel rather than the in-study terminal month:
+    /// its re-anchored target has no stage in the un-extended calendar.
+    #[test]
+    fn terminal_maturing_residue_stays_sentinel_without_a_post_study_calendar() {
+        let system = system_1h_1ant_64monthly_lead2(None);
+        let mut global = test_support::state_layout_full(1, 1, 1, 2, vec![2]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 64],
+                n_decision: 64,
+                n_delivery: 64,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 63);
+
+        assert_eq!(manifest[3].subindex, 1);
+        assert_eq!(
+            manifest[3].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "the maturing residue's re-anchored target has no stage in the un-extended calendar"
+        );
+    }
+
+    // -- General correspondence and reachability invariance --
+
+    /// For every `(stage_id, slot_idx)` combination over a fixture whose ring
+    /// reaches both in-study and post-study targets, a live anticipated
+    /// slot's `delivery_date` equals `year_month_day_anchor` of the
+    /// `start_date` of the stage `reachable_delivery_target` resolves for
+    /// that slot at the OUTGOING anchor — the correspondence
+    /// [`build_stage_entity_manifest`]'s rustdoc promises, checked directly
+    /// against the resolver rather than against a fixed date.
+    #[test]
+    fn anticipated_slot_date_matches_the_resolved_physical_delivery_stage() {
+        let start = chrono::NaiveDate::from_ymd_opt(2024, 7, 1).unwrap();
+        let system = system_1h_1ant_3monthly_lead3(post_study_stages_from(start));
+        let mut global = test_support::state_layout_full(1, 1, 1, 3, vec![3]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(3)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+        let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
+        let post_study_calendar = post_study_delivery_calendar(&system);
+        let delivery_stages = extended_delivery_stages(&study_stages, &post_study_calendar);
+        let k_i = global.anticipated_lead_stages[0];
+
+        for stage_id in 0..3i32 {
+            let manifest = build_stage_entity_manifest(&system, &global, &projection, stage_id);
+            let current_stage_idx = study_stages
+                .iter()
+                .position(|s| s.id == stage_id)
+                .expect("stage_id must resolve to a study stage");
+            let outgoing_anchor = current_stage_idx + 1;
+
+            for slot_idx in 0..global.k_max {
+                let slot = manifest
+                    .iter()
+                    .find(|s| {
+                        s.entity_type == StateFamily::AnticipatedThermalState.code()
+                            && s.subindex == slot_idx as u32
+                    })
+                    .expect("every ring slot_idx must own a manifest entry");
+                let expected = reachable_delivery_target(
+                    slot_idx,
+                    k_i,
+                    outgoing_anchor,
+                    global.k_max,
+                    &global.anticipated_resolution.per_plant[0],
+                )
+                .and_then(|m| delivery_stages.get(m))
+                .map_or(ENTITY_SLOT_DELIVERY_DATE_SENTINEL, |s| {
+                    year_month_day_anchor(s.start_date)
+                });
+                assert_eq!(
+                    slot.delivery_date, expected,
+                    "stage {stage_id} slot {slot_idx} must match the resolver's own physical target"
+                );
+            }
+        }
+    }
+
+    /// A slot beyond a plant's own `anticipated_lead_stages` (`slot_idx >=
+    /// k_i`) stays sentinel-dated at every stage: the reachability gate does
+    /// not depend on which anchor `reachable_delivery_target` resolves
+    /// against, so it is unaffected by the outgoing re-anchoring above.
+    #[test]
+    fn anticipated_padding_slots_beyond_plant_lead_stay_sentinel() {
+        let system = system_1h_2ant_3monthly();
+        let mut global = test_support::state_layout_full(1, 1, 2, 2, vec![1, 2]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(1), LeadTime::Stages(2)],
+            DeliveryAxis {
+                stage_lengths_hours: &[720.0; 3],
+                n_decision: 3,
+                n_delivery: 3,
+            },
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        for stage_id in 0..3i32 {
+            let manifest = build_stage_entity_manifest(&system, &global, &projection, stage_id);
+            let padding = manifest
+                .iter()
+                .find(|s| {
+                    s.entity_type == StateFamily::AnticipatedThermalState.code()
+                        && s.entity_id == 1
+                        && s.subindex == 1
+                })
+                .expect("the ℓ=1 plant must own a subindex-1 slot");
+            assert_eq!(
+                padding.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                "stage {stage_id}: slot_idx 1 exceeds the ℓ=1 plant's own lead"
+            );
+        }
     }
 
     // -- Ring-axis excision: dating maps through `physical_target` --
@@ -1903,18 +2690,21 @@ mod tests {
             Some((calendar[5].start_date, calendar[5].end_date))
         );
 
-        // Ring slot 3 (residue 3 == t mod k_max) matures NOW, in-study: its
-        // ring-axis target `r = 3` sits below `n_decision`, so `physical_target`
-        // is the identity and it keeps its own terminal-stage anchor with no
-        // fanned interval — `dated ⟺ Some(interval)` still pins it in-study.
+        // Ring slot 3 (residue 3 == the terminal stage's own class) is the
+        // maturing residue: it re-anchors a full `k_max` stages out, to
+        // ring-axis target `r = 7`, which `physical_target` maps to `m = 10`
+        // — past the 10-entry extended calendar (4 study + 6 post-study
+        // stages), so it reads the sentinel rather than the in-study
+        // `20240401` an entering-anchor resolution would wrongly emit.
         assert_eq!(manifest[5].subindex, 3);
         assert_eq!(
-            manifest[5].delivery_date, 20240401,
-            "ring slot 3 (ring index 3, below n_decision) matures now at the terminal stage"
+            manifest[5].delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            "ring slot 3 (ring index 7, physical target m=10) lands past the extended calendar"
         );
         assert_eq!(
             intervals[5], None,
-            "an in-study-maturing slot carries no post-study interval"
+            "ring slot 3 (ring index 7, physical target m=10) lands past the extended calendar, \
+             same as the manifest's own delivery_date"
         );
     }
 
@@ -2003,6 +2793,40 @@ mod tests {
             .into(),
             n_pools: 4,
             pool_stage: vec![StageIdx(0), StageIdx(1), StageIdx(1), StageIdx(2)],
+        }
+    }
+
+    /// A degenerate one-node-per-stage chain: `pool_stage[t] == StageIdx(t)`.
+    fn chain_node_graph(n_stages: usize) -> NodeGraph {
+        let opening = NodeOpenings {
+            source: OpeningSource::Generated,
+            offset: 0,
+            len: 1,
+            q: 1.0,
+        };
+        NodeGraph {
+            node_ids: (0..n_stages as i32).map(NodeId).collect(),
+            nodes: (0..n_stages)
+                .map(|t| NodeRuntime {
+                    stage: StageIdx(t),
+                    pool_id: t,
+                    openings: opening,
+                })
+                .collect(),
+            successors: (0..n_stages)
+                .map(|t| {
+                    if t + 1 < n_stages {
+                        vec![NodeSuccessor {
+                            child: NodePos(t + 1),
+                            probability: 1.0,
+                        }]
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect(),
+            n_pools: n_stages,
+            pool_stage: (0..n_stages).map(StageIdx).collect(),
         }
     }
 
@@ -2139,6 +2963,192 @@ mod tests {
                 "node {node} num_cut_rows must reflect its own pool {pool}, not fcf.pools[{node}]"
             );
         }
+    }
+
+    // -- build_stage_cuts_payloads: priced_state_date stamping --
+
+    #[test]
+    fn stage_cuts_payload_stamps_owning_stage_end_date() {
+        use super::{build_active_indices, build_stage_cut_records, build_stage_cuts_payloads};
+        use crate::cut::FutureCostFunction;
+
+        let node_graph = chain_node_graph(3);
+        let fcf = FutureCostFunction::new(3, 1, 1, 10, &[0; 3]);
+        let stage_records = build_stage_cut_records(&fcf);
+        let stage_active_indices = build_active_indices(&stage_records);
+        let stage_manifests: Vec<Vec<EntitySlot>> = vec![Vec::new(); 3];
+        let study_stage_ids = vec![0, 1, 2];
+        let study_stage_end_dates = vec![
+            chrono::NaiveDate::from_ymd_opt(2031, 10, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2031, 12, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2032, 1, 1).unwrap(),
+        ];
+
+        let payloads = build_stage_cuts_payloads(
+            &fcf,
+            &node_graph,
+            &study_stage_ids,
+            &study_stage_end_dates,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
+
+        assert_eq!(payloads[0].priced_state_date, 20_311_001);
+        assert_eq!(
+            payloads[1].priced_state_date, 20_311_201,
+            "pool 1's priced_state_date must be its owning stage's exclusive end_date, \
+             YYYYMMDD-encoded"
+        );
+        assert_eq!(payloads[2].priced_state_date, 20_320_101);
+    }
+
+    /// On a branching graph, pool 2's own ordinal is stage-shaped `2`, but its
+    /// OWNING stage is 1 (`pool_stage[2] == StageIdx(1)`, shared with pool 1's
+    /// owner). Reading `study_stage_end_dates[2]` instead of
+    /// `study_stage_end_dates[pool_stage[2]]` is the forbidden pool-ordinal path
+    /// this test distinguishes.
+    #[test]
+    fn stage_cuts_payload_priced_date_resolves_through_pool_stage_on_branching_graph() {
+        use super::{build_active_indices, build_stage_cut_records, build_stage_cuts_payloads};
+        use crate::cut::FutureCostFunction;
+
+        let node_graph = binary_tree_node_graph(); // 4 pools; pool_stage = [0, 1, 1, 2]
+        let fcf = FutureCostFunction::new(4, 1, 1, 10, &[0; 4]);
+        let stage_records = build_stage_cut_records(&fcf);
+        let stage_active_indices = build_active_indices(&stage_records);
+        let stage_manifests: Vec<Vec<EntitySlot>> = vec![Vec::new(); 4];
+        let study_stage_ids = vec![0, 1, 2];
+        let study_stage_end_dates = vec![
+            chrono::NaiveDate::from_ymd_opt(2030, 1, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2030, 2, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2030, 3, 1).unwrap(),
+        ];
+
+        let payloads = build_stage_cuts_payloads(
+            &fcf,
+            &node_graph,
+            &study_stage_ids,
+            &study_stage_end_dates,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
+
+        assert_eq!(
+            payloads.len(),
+            4,
+            "one payload per pool; n_pools (4) > n_stages (3)"
+        );
+        assert_eq!(
+            payloads[0].priced_state_date, 20_300_101,
+            "pool 0 owns stage 0"
+        );
+        assert_eq!(
+            payloads[1].priced_state_date, 20_300_201,
+            "pool 1 owns stage 1"
+        );
+        assert_eq!(
+            payloads[2].priced_state_date, 20_300_201,
+            "pool 2 owns stage 1, not stage 2 — its own pool ordinal must not be read"
+        );
+        assert_eq!(
+            payloads[3].priced_state_date, 20_300_301,
+            "the shared leaf pool 3 owns the terminal stage 2"
+        );
+    }
+
+    #[test]
+    fn stage_cuts_payload_unresolvable_pool_stage_keeps_both_sentinels() {
+        use super::{
+            STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+            build_active_indices, build_stage_cut_records, build_stage_cuts_payloads,
+        };
+        use crate::cut::FutureCostFunction;
+
+        let node_graph = NodeGraph {
+            node_ids: vec![NodeId(0)].into(),
+            nodes: vec![NodeRuntime {
+                stage: StageIdx(5),
+                pool_id: 0,
+                openings: NodeOpenings {
+                    source: OpeningSource::Generated,
+                    offset: 0,
+                    len: 1,
+                    q: 1.0,
+                },
+            }]
+            .into(),
+            successors: vec![Vec::new()].into(),
+            n_pools: 1,
+            pool_stage: vec![StageIdx(5)],
+        };
+        let fcf = FutureCostFunction::new(1, 1, 1, 10, &[0]);
+        let stage_records = build_stage_cut_records(&fcf);
+        let stage_active_indices = build_active_indices(&stage_records);
+        let stage_manifests: Vec<Vec<EntitySlot>> = vec![Vec::new(); 1];
+        let study_stage_ids = vec![0, 1]; // len 2; pool_stage[0] == 5 is out of range
+        let study_stage_end_dates = vec![
+            chrono::NaiveDate::from_ymd_opt(2030, 1, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2030, 2, 1).unwrap(),
+        ];
+
+        let payloads = build_stage_cuts_payloads(
+            &fcf,
+            &node_graph,
+            &study_stage_ids,
+            &study_stage_end_dates,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
+
+        assert_eq!(
+            payloads[0].graph_stage_id, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
+            "an out-of-range pool_stage must fall back to the graph_stage_id sentinel"
+        );
+        assert_eq!(
+            payloads[0].priced_state_date, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
+            "the two sentinel fallbacks must agree: an out-of-range pool_stage keeps \
+             priced_state_date at its sentinel too"
+        );
+    }
+
+    /// A weekly stage's exclusive `end_date` (2031-11-10, not month-aligned)
+    /// must stamp `priced_state_date` at its own day — `year_month_day_anchor`
+    /// would truncate it to `20311101`, colliding it with a sibling weekly
+    /// pool ending earlier in the same month.
+    #[test]
+    fn stage_cuts_payload_priced_state_date_keeps_the_stage_end_day() {
+        use super::{build_active_indices, build_stage_cut_records, build_stage_cuts_payloads};
+        use crate::cut::FutureCostFunction;
+
+        let node_graph = chain_node_graph(1);
+        let fcf = FutureCostFunction::new(1, 1, 1, 10, &[0; 1]);
+        let stage_records = build_stage_cut_records(&fcf);
+        let stage_active_indices = build_active_indices(&stage_records);
+        let stage_manifests: Vec<Vec<EntitySlot>> = vec![Vec::new(); 1];
+        let study_stage_ids = vec![0];
+        let study_stage_end_dates = vec![chrono::NaiveDate::from_ymd_opt(2031, 11, 10).unwrap()];
+
+        let payloads = build_stage_cuts_payloads(
+            &fcf,
+            &node_graph,
+            &study_stage_ids,
+            &study_stage_end_dates,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
+
+        assert_eq!(
+            payloads[0].priced_state_date, 20_311_110,
+            "a weekly stage's exclusive end_date must keep its own day, not truncate to day 01"
+        );
     }
 
     #[test]

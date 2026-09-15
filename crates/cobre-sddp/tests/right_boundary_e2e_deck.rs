@@ -87,6 +87,9 @@ mod deck_smoke {
 
     use cobre_io::StateFamily;
     use cobre_sddp::indexer::StateDim;
+    use cobre_sddp::policy_export::{
+        build_active_indices, build_stage_cut_records, build_stage_cuts_payloads,
+    };
 
     use crate::common::fresh_setup_with;
 
@@ -114,6 +117,8 @@ mod deck_smoke {
     /// relies on — never a hand-rolled `commit_out`-relative offset.
     #[test]
     fn real_deck_terminal_manifest_lists_live_dated_post_horizon_lane() {
+        use chrono::Datelike;
+
         let deck = deck_dir();
         if !deck.exists() {
             eprintln!("skipping deck smoke: {deck:?} absent");
@@ -126,6 +131,48 @@ mod deck_smoke {
         let state = setup.stage_state();
 
         let manifest = setup.build_terminal_entity_manifest(&system);
+
+        let study_stage_ids: Vec<i32> = system
+            .stages()
+            .iter()
+            .filter(|s| s.id >= 0)
+            .map(|s| s.id)
+            .collect();
+        let study_stage_end_dates: Vec<chrono::NaiveDate> = system
+            .stages()
+            .iter()
+            .filter(|s| s.id >= 0)
+            .map(|s| s.end_date)
+            .collect();
+        let stage_records = build_stage_cut_records(&setup.fcf);
+        let stage_active_indices = build_active_indices(&stage_records);
+        let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> =
+            vec![Vec::new(); setup.fcf.pools.len()];
+        let stage_cuts = build_stage_cuts_payloads(
+            &setup.fcf,
+            &setup.node_graph,
+            &study_stage_ids,
+            &study_stage_end_dates,
+            1_000_000.0,
+            &stage_records,
+            &stage_active_indices,
+            &stage_manifests,
+        );
+        let last_end_date = *study_stage_end_dates
+            .last()
+            .expect("a converted deck has at least one study stage");
+        let expected_priced_state_date = last_end_date.year() * 10_000
+            + i32::try_from(last_end_date.month()).unwrap_or(1) * 100
+            + i32::try_from(last_end_date.day()).unwrap_or(1);
+        assert_eq!(
+            stage_cuts
+                .last()
+                .expect("at least one pool")
+                .priced_state_date,
+            expected_priced_state_date,
+            "the terminal pool must be stamped with the study's last-stage end date"
+        );
+
         let ring_slot = manifest.iter().enumerate().find(|(_, slot)| {
             slot.entity_type == StateFamily::AnticipatedThermalState.code()
                 && slot.entity_id == DECK_THERMAL_ID
@@ -222,7 +269,22 @@ mod anticipated_fanout_readback {
     }
 
     fn anticipated_source_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-        EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
+        EntitySlot::anticipated(thermal_id, ring_slot, true)
+            .with_delivery_date(delivery_date)
+            .with_interval(delivery_date, next_month_anchor(delivery_date))
+    }
+
+    /// The following month's day-01 `YYYYMMDD` anchor of `month_anchor`
+    /// (itself a day-01 anchor) — mirrors
+    /// `boundary_reconcile_defaults.rs`'s same-named helper.
+    fn next_month_anchor(month_anchor: i32) -> i32 {
+        let year = month_anchor / 10_000;
+        let month = (month_anchor / 100) % 100;
+        if month == 12 {
+            (year + 1) * 10_000 + 101
+        } else {
+            year * 10_000 + (month + 1) * 100 + 1
+        }
     }
 
     /// Mirrors `boundary_reconcile_defaults.rs`'s same-named helper: a single-stage,

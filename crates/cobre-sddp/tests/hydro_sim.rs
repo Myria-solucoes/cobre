@@ -100,10 +100,13 @@ mod simulation_only {
         let stage_active_indices = build_active_indices(&stage_records);
         let stage_manifests: Vec<Vec<cobre_io::EntitySlot>> = vec![Vec::new(); fcf.pools.len()];
         let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let study_stage_end_dates =
+            vec![chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(); fcf.pools.len()];
         let stage_cuts = build_stage_cuts_payloads(
             fcf,
             &setup.node_graph,
             &study_stage_ids,
+            &study_stage_end_dates,
             1_000_000.0,
             &stage_records,
             &stage_active_indices,
@@ -991,10 +994,13 @@ mod decomp_integration {
         let stage_records = build_stage_cut_records(fcf);
         let stage_active_indices = build_active_indices(&stage_records);
         let study_stage_ids: Vec<i32> = (0..fcf.pools.len() as i32).collect();
+        let study_stage_end_dates =
+            vec![chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(); fcf.pools.len()];
         let stage_cuts = build_stage_cuts_payloads(
             fcf,
             &setup.node_graph,
             &study_stage_ids,
+            &study_stage_end_dates,
             1_000_000.0,
             &stage_records,
             &stage_active_indices,

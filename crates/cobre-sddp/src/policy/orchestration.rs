@@ -6,11 +6,14 @@
 //! parity is a hard rule). Callers thread their own diagnostics via the
 //! `on_warning` callback on [`export_stochastic_artifacts`].
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+use chrono::NaiveDate;
 use cobre_io::EntitySlot;
 use cobre_io::output::policy::{
-    CheckpointManifest, FORMAT_VERSION, ProducerBlock, SeasonManifest, write_policy_checkpoint,
+    CheckpointManifest, FORMAT_VERSION, HydroSeasonOrders, ProducerBlock, SEASON_CYCLE_CODE_CUSTOM,
+    SEASON_CYCLE_CODE_MONTHLY, SEASON_CYCLE_CODE_WEEKLY, SeasonManifest, write_policy_checkpoint,
 };
 use cobre_io::output::{
     OutputError, write_correlation_json, write_fitting_report, write_inflow_annual_component,
@@ -19,6 +22,7 @@ use cobre_io::output::{
 };
 use cobre_io::scenarios::LoadSeasonalStatsRow;
 use cobre_io::scenarios::estimation::EstimationReport;
+use cobre_io::scenarios::resolve_stage_seasons;
 use cobre_stochastic::StochasticContext;
 
 use crate::TrainingResult;
@@ -33,7 +37,7 @@ use crate::stochastic_summary::{
     inflow_models_to_ar_rows, inflow_models_to_stats_rows,
 };
 
-use cobre_core::{BlockMode, System};
+use cobre_core::{BlockMode, InflowModel, SeasonCycleType, System};
 
 // ── Policy checkpoint ─────────────────────────────────────────────────────────
 
@@ -58,6 +62,62 @@ fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
                 .collect(),
         ),
     }
+}
+
+/// Builds the study's season-cycle and per-hydro PAR-order descriptor for
+/// [`CheckpointManifest::season_manifest`].
+///
+/// Sources `n_seasons` from [`resolve_stage_seasons`]'s dense ordinals, not raw
+/// `season_id`s — a sparse cycle (e.g. `Weekly` ids 21/26) would index `orders`
+/// out of bounds otherwise.
+#[allow(clippy::cast_possible_truncation)] // season/AR-order counts are small
+fn season_manifest(system: &System) -> SeasonManifest {
+    let Some(season_map) = system.policy_graph().season_map.as_ref() else {
+        return SeasonManifest::default();
+    };
+
+    let cycle_code = match season_map.cycle_type {
+        SeasonCycleType::Monthly => SEASON_CYCLE_CODE_MONTHLY,
+        SeasonCycleType::Weekly => SEASON_CYCLE_CODE_WEEKLY,
+        SeasonCycleType::Custom => SEASON_CYCLE_CODE_CUSTOM,
+    };
+
+    let (stage_to_season, n_seasons) = resolve_stage_seasons(system.stages(), Some(season_map));
+    let hydro_orders = hydro_season_orders(system.inflow_models(), &stage_to_season, n_seasons);
+
+    SeasonManifest {
+        cycle_code,
+        n_seasons: n_seasons as u32,
+        hydro_orders,
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)] // season/AR-order counts are small
+fn hydro_season_orders(
+    inflow_models: &[InflowModel],
+    stage_to_season: &HashMap<i32, usize>,
+    n_seasons: usize,
+) -> Vec<HydroSeasonOrders> {
+    // BTreeMap, not HashMap: ascending hydro_id order must not depend on
+    // insertion order or hash-seed randomization.
+    let mut orders_by_hydro: BTreeMap<i32, Vec<u32>> = BTreeMap::new();
+    for model in inflow_models {
+        let Some(&season) = stage_to_season.get(&model.stage_id) else {
+            continue;
+        };
+        let orders = orders_by_hydro
+            .entry(model.hydro_id.0)
+            .or_insert_with(|| vec![0_u32; n_seasons]);
+        orders[season] = model.ar_order() as u32;
+    }
+
+    orders_by_hydro
+        .into_iter()
+        .map(|(hydro_id, orders)| {
+            debug_assert_eq!(orders.len(), n_seasons, "orders must span every season");
+            HydroSeasonOrders { hydro_id, orders }
+        })
+        .collect()
 }
 
 /// Run-derived inputs to [`write_checkpoint`] (independent of the training
@@ -130,10 +190,17 @@ pub fn write_checkpoint(
         scale_cut_records_for_export(&stage_records_internal, cost_scale_factor);
     let stage_records = borrow_cut_records(&stage_records_owned);
     let stage_active_indices = build_active_indices(&stage_records);
+    let study_stage_end_dates: Vec<NaiveDate> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.end_date)
+        .collect();
     let stage_cuts = build_stage_cuts_payloads(
         fcf,
         &setup.node_graph,
         &setup.study_stage_ids,
+        &study_stage_end_dates,
         cost_scale_factor,
         &stage_records,
         &stage_active_indices,
@@ -188,7 +255,7 @@ pub fn write_checkpoint(
             training_block_mode_per_stage,
             cost_scale_factor: Some(setup.stage_data.stage_templates.cost_scale_factor),
         },
-        season_manifest: SeasonManifest::default(),
+        season_manifest: season_manifest(system),
     };
 
     let stage_states = if params.export_states {
@@ -306,7 +373,19 @@ pub fn export_stochastic_artifacts(
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockMode, training_block_provenance};
+    use std::collections::HashMap;
+
+    use chrono::NaiveDate;
+    use cobre_core::temporal::{
+        Block, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
+    };
+    use cobre_core::{EntityId, HorizonGraph, SeasonDefinition, SeasonMap, Stage, SystemBuilder};
+    use cobre_io::output::policy::SEASON_CYCLE_CODE_ABSENT;
+
+    use super::{
+        BlockMode, InflowModel, SEASON_CYCLE_CODE_WEEKLY, SeasonCycleType, System,
+        hydro_season_orders, season_manifest, training_block_provenance,
+    };
 
     #[test]
     fn uniform_parallel_study_summarizes_without_per_stage_list() {
@@ -333,5 +412,224 @@ mod tests {
         ]);
         assert_eq!(summary, "mixed");
         assert_eq!(per_stage, vec!["parallel", "chronological", "parallel"]);
+    }
+
+    fn stage_with_season(id: i32, season_id: Option<usize>) -> Stage {
+        Stage {
+            index: 0,
+            id,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date"),
+            season_id,
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    fn season_map(cycle_type: SeasonCycleType, n_seasons: usize) -> SeasonMap {
+        SeasonMap {
+            cycle_type,
+            seasons: (0..n_seasons)
+                .map(|id| SeasonDefinition {
+                    id,
+                    label: format!("S{id}"),
+                    month_start: 1,
+                    day_start: None,
+                    month_end: None,
+                    day_end: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// A 2-season `Weekly` cycle with sparse, non-contiguous ids `21`/`26` —
+    /// mirrors the fixture that pinned `resolve_stage_seasons`'s densification.
+    fn sparse_two_season_map() -> SeasonMap {
+        SeasonMap {
+            cycle_type: SeasonCycleType::Weekly,
+            seasons: vec![
+                SeasonDefinition {
+                    id: 21,
+                    label: "W22".to_string(),
+                    month_start: 1,
+                    day_start: None,
+                    month_end: None,
+                    day_end: None,
+                },
+                SeasonDefinition {
+                    id: 26,
+                    label: "W27".to_string(),
+                    month_start: 1,
+                    day_start: None,
+                    month_end: None,
+                    day_end: None,
+                },
+            ],
+        }
+    }
+
+    fn inflow_model(hydro_id: i32, stage_id: i32, ar_coefficients: Vec<f64>) -> InflowModel {
+        InflowModel {
+            hydro_id: EntityId(hydro_id),
+            stage_id,
+            mean_m3s: 100.0,
+            std_m3s: 20.0,
+            ar_coefficients,
+            residual_std_ratio: 1.0,
+            annual: None,
+        }
+    }
+
+    fn system_with(
+        stages: Vec<Stage>,
+        season_map: Option<SeasonMap>,
+        inflow_models: Vec<InflowModel>,
+    ) -> System {
+        SystemBuilder::new()
+            .stages(stages)
+            .policy_graph(HorizonGraph {
+                season_map,
+                ..HorizonGraph::default()
+            })
+            .inflow_models(inflow_models)
+            .build()
+            .expect("test system must be valid")
+    }
+
+    #[test]
+    fn season_descriptor_reports_dense_ordinals_for_a_sparse_weekly_cycle() {
+        let stages = vec![
+            stage_with_season(0, Some(21)),
+            stage_with_season(1, Some(26)),
+        ];
+        let system = system_with(
+            stages,
+            Some(sparse_two_season_map()),
+            vec![
+                inflow_model(1, 0, vec![0.4]),
+                inflow_model(1, 1, vec![0.25, 0.1]),
+            ],
+        );
+
+        let manifest = season_manifest(&system);
+
+        assert_eq!(manifest.cycle_code, SEASON_CYCLE_CODE_WEEKLY);
+        assert_eq!(manifest.n_seasons, 2);
+        assert_eq!(manifest.hydro_orders.len(), 1);
+        assert_eq!(manifest.hydro_orders[0].hydro_id, 1);
+        assert_eq!(manifest.hydro_orders[0].orders, vec![1, 2]);
+    }
+
+    #[test]
+    fn season_descriptor_absent_when_no_season_map_is_declared() {
+        let system = SystemBuilder::new()
+            .build()
+            .expect("empty system must be valid");
+
+        let manifest = season_manifest(&system);
+
+        assert_eq!(manifest.cycle_code, SEASON_CYCLE_CODE_ABSENT);
+        assert_eq!(manifest.n_seasons, 0);
+        assert!(manifest.hydro_orders.is_empty());
+    }
+
+    #[test]
+    fn season_descriptor_orders_vector_length_equals_n_seasons() {
+        let stages = vec![
+            stage_with_season(0, Some(0)),
+            stage_with_season(1, Some(1)),
+            stage_with_season(2, Some(2)),
+            stage_with_season(3, Some(3)),
+        ];
+        let system = system_with(
+            stages,
+            Some(season_map(SeasonCycleType::Monthly, 4)),
+            vec![inflow_model(1, 0, vec![0.3])],
+        );
+
+        let manifest = season_manifest(&system);
+
+        assert_eq!(manifest.n_seasons, 4);
+        assert_eq!(manifest.hydro_orders.len(), 1);
+        assert_eq!(manifest.hydro_orders[0].orders, vec![1, 0, 0, 0]);
+    }
+
+    /// [`hydro_season_orders`] is fed the same multiset of models in two
+    /// different orders (bypassing `SystemBuilder`, which requires
+    /// `inflow_models` pre-sorted) — the `BTreeMap` grouping must not leak
+    /// input order into the output.
+    #[test]
+    fn season_descriptor_is_invariant_to_hydro_declaration_order() {
+        let stage_to_season: HashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
+
+        let hydro_2_stage_0 = inflow_model(2, 0, vec![0.4]);
+        let hydro_2_stage_1 = inflow_model(2, 1, vec![0.1]);
+        let hydro_5_stage_0 = inflow_model(5, 0, vec![0.2, 0.05]);
+        let hydro_5_stage_1 = inflow_model(5, 1, vec![0.3]);
+
+        let declared_5_first = vec![
+            hydro_5_stage_0.clone(),
+            hydro_5_stage_1.clone(),
+            hydro_2_stage_0.clone(),
+            hydro_2_stage_1.clone(),
+        ];
+        let declared_2_first = vec![
+            hydro_2_stage_0,
+            hydro_2_stage_1,
+            hydro_5_stage_0,
+            hydro_5_stage_1,
+        ];
+
+        let from_5_first = hydro_season_orders(&declared_5_first, &stage_to_season, 2);
+        let from_2_first = hydro_season_orders(&declared_2_first, &stage_to_season, 2);
+
+        assert_eq!(from_5_first.len(), 2);
+        assert_eq!(from_5_first[0].hydro_id, 2);
+        assert_eq!(from_5_first[0].orders, vec![1, 1]);
+        assert_eq!(from_5_first[1].hydro_id, 5);
+        assert_eq!(from_5_first[1].orders, vec![2, 1]);
+        assert_eq!(
+            format!("{from_5_first:?}"),
+            format!("{from_2_first:?}"),
+            "hydro declaration order must not affect the descriptor"
+        );
+    }
+
+    #[test]
+    fn season_descriptor_records_zero_for_a_missing_hydro_season_pair() {
+        let stages = vec![
+            stage_with_season(0, Some(0)),
+            stage_with_season(1, Some(1)),
+            stage_with_season(2, Some(2)),
+        ];
+        // Hydro 7 has no inflow model for season 1.
+        let system = system_with(
+            stages,
+            Some(season_map(SeasonCycleType::Monthly, 3)),
+            vec![
+                inflow_model(7, 0, vec![0.4]),
+                inflow_model(7, 2, vec![0.2, 0.1]),
+            ],
+        );
+
+        let manifest = season_manifest(&system);
+
+        assert_eq!(manifest.n_seasons, 3);
+        assert_eq!(manifest.hydro_orders.len(), 1);
+        assert_eq!(manifest.hydro_orders[0].hydro_id, 7);
+        assert_eq!(manifest.hydro_orders[0].orders, vec![1, 0, 2]);
     }
 }

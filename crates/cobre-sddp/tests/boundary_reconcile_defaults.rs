@@ -38,7 +38,7 @@ fn storage_slot(id: i32) -> EntitySlot {
 }
 
 fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-    EntitySlot::inflow_lag(id, lag_depth, true)
+    EntitySlot::inflow_lag(id, lag_depth, true).with_reference_date(20_310_101)
 }
 
 fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
@@ -50,7 +50,22 @@ fn sentinel_anticipated_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
 }
 
 fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-    EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
+    EntitySlot::anticipated(thermal_id, ring_slot, true)
+        .with_delivery_date(delivery_date)
+        .with_interval(delivery_date, next_month_anchor(delivery_date))
+}
+
+/// The following month's day-01 `YYYYMMDD` anchor of `month_anchor` (itself a
+/// day-01 anchor) — the exclusive end of the one-month interval every dated
+/// fixture in this suite prices (`π_M`, one calendar month).
+fn next_month_anchor(month_anchor: i32) -> i32 {
+    let year = month_anchor / 10_000;
+    let month = (month_anchor / 100) % 100;
+    if month == 12 {
+        (year + 1) * 10_000 + 101
+    } else {
+        year * 10_000 + (month + 1) * 100 + 1
+    }
 }
 
 /// All-`None` delivery intervals aligned to `len` — for tests whose
