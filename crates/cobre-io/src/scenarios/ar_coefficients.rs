@@ -337,8 +337,6 @@ mod tests {
         assert!((row.coefficient - 0.12345).abs() < 1e-10);
     }
 
-    /// Columns beyond the four-column schema are ignored: the file parses and
-    /// the extra values never reach the row table.
     #[test]
     fn extra_columns_are_ignored() {
         let batch = make_batch_with_extra(

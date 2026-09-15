@@ -277,8 +277,6 @@ mod tests {
 
     // ── AC: valid file with all columns present (Itaipu example) ─────────────
 
-    /// 5 planes for hydro 66, all with kappa = 0.985 (Itaipu from spec example).
-    /// Result: Ok with 5 rows, all hydro_id = EntityId(66), sorted by plane_id.
     #[test]
     fn test_valid_itaipu_5_planes_all_columns() {
         let schema = full_schema();
@@ -319,11 +317,9 @@ mod tests {
                 row.kappa
             );
         }
-        // Verify sort by plane_id.
         let plane_ids: Vec<i32> = rows.iter().map(|r| r.plane_id).collect();
         assert_eq!(plane_ids, vec![0, 1, 2, 3, 4]);
 
-        // Spot-check specific values from the spec example.
         assert!((rows[0].gamma_0 - 1250.5).abs() < 1e-10);
         assert!((rows[0].gamma_v - 0.0023).abs() < 1e-12);
         assert!((rows[0].gamma_q - 0.892).abs() < 1e-10);
@@ -332,7 +328,6 @@ mod tests {
 
     // ── AC: optional columns absent — kappa defaults to 1.0 ──────────────────
 
-    /// File with only required columns — kappa defaults to 1.0 per row.
     #[test]
     fn test_optional_columns_absent_kappa_defaults_to_1() {
         let batch = make_required_batch(
@@ -362,7 +357,6 @@ mod tests {
 
     // ── AC: kappa null in column still defaults to 1.0 ───────────────────────
 
-    /// File has a kappa column but all values are null — defaults to 1.0.
     #[test]
     fn test_kappa_column_present_but_null_defaults_to_1() {
         let schema = Arc::new(Schema::new(vec![
@@ -400,7 +394,6 @@ mod tests {
 
     // ── AC: missing required column -> SchemaError ────────────────────────────
 
-    /// File missing `gamma_0` column -> SchemaError with field "gamma_0".
     #[test]
     fn test_missing_gamma_0_column() {
         let schema = Arc::new(Schema::new(vec![
@@ -436,7 +429,6 @@ mod tests {
         }
     }
 
-    /// File missing `hydro_id` column -> SchemaError with field "hydro_id".
     #[test]
     fn test_missing_hydro_id_column() {
         let schema = Arc::new(Schema::new(vec![
@@ -470,7 +462,6 @@ mod tests {
 
     // ── AC: wrong column type -> SchemaError ──────────────────────────────────
 
-    /// `gamma_0` provided as Int32 instead of Float64 -> SchemaError.
     #[test]
     fn test_wrong_type_gamma_0_as_int32() {
         let schema = Arc::new(Schema::new(vec![
@@ -506,7 +497,6 @@ mod tests {
 
     // ── AC: sorted output (hydro_id, stage_id, plane_id) ─────────────────────
 
-    /// Rows for two hydros in reverse order -> sorted by (hydro_id, stage_id, plane_id).
     #[test]
     fn test_sorted_output() {
         let batch = make_required_batch(
@@ -537,7 +527,6 @@ mod tests {
 
     // ── AC: null stage_id sorts before non-null ───────────────────────────────
 
-    /// Rows for same hydro with null and non-null stage_id — null sorts first.
     #[test]
     fn test_null_stage_id_sorts_before_non_null() {
         let schema = full_schema();
@@ -563,7 +552,6 @@ mod tests {
         let rows = parse_fpha_hyperplanes(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 3);
-        // null stage_id should sort first
         assert!(
             rows[0].stage_id.is_none(),
             "null stage_id should sort first"
@@ -574,7 +562,6 @@ mod tests {
 
     // ── AC: file not found -> IoError ─────────────────────────────────────────
 
-    /// Non-existent path -> IoError with the matching path.
     #[test]
     fn test_file_not_found() {
         let path = Path::new("/nonexistent/path/fpha_hyperplanes.parquet");
@@ -590,7 +577,6 @@ mod tests {
 
     // ── AC: empty file -> Ok(Vec::new()) ──────────────────────────────────────
 
-    /// Empty Parquet (zero rows) -> Ok(Vec::new()).
     #[test]
     fn test_empty_parquet_returns_empty_vec() {
         let batch = make_required_batch(&[], &[], &[], &[], &[], &[]);
@@ -601,7 +587,6 @@ mod tests {
 
     // ── AC: optional validity range columns preserved ─────────────────────────
 
-    /// Rows with valid_v_min_hm3, valid_v_max_hm3, valid_q_max_m3s — values preserved.
     #[test]
     fn test_optional_validity_ranges_preserved() {
         let schema = full_schema();
@@ -635,7 +620,6 @@ mod tests {
 
     // ── AC: declaration-order invariance ─────────────────────────────────────
 
-    /// Reordering the Parquet rows does not change the output ordering.
     #[test]
     fn test_declaration_order_invariance() {
         let batch_asc = make_required_batch(
@@ -677,7 +661,6 @@ mod tests {
 
     // ── AC: field values round-tripped correctly ──────────────────────────────
 
-    /// All required field values are correctly preserved through the Parquet read path.
     #[test]
     fn test_field_values_preserved() {
         let batch = make_required_batch(&[42], &[3], &[987.654], &[0.00321], &[0.777], &[-0.00123]);

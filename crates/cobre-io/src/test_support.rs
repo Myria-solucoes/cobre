@@ -77,16 +77,8 @@ pub fn date(year: i32, month: u32, day: u32) -> NaiveDate {
 ///
 /// If the test host cannot create, reopen, or write to a temporary file.
 #[must_use]
-#[allow(clippy::expect_used)]
-// Rationale: a failure here means the test host cannot create a temporary
-// file — an environment fault, not a fixture condition.
 pub fn write_parquet(batch: &RecordBatch) -> NamedTempFile {
-    let tmp = NamedTempFile::new().expect("tempfile");
-    let mut writer = ArrowWriter::try_new(tmp.reopen().expect("reopen"), batch.schema(), None)
-        .expect("ArrowWriter");
-    writer.write(batch).expect("write batch");
-    writer.close().expect("close writer");
-    tmp
+    write_parquet_batches(std::slice::from_ref(batch))
 }
 
 /// A temporary parquet file holding `batches` as consecutive row groups.

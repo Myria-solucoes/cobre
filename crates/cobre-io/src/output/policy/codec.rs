@@ -162,7 +162,6 @@ fn build_manifest_node_table(
     builder.end_table(tab)
 }
 
-/// Build one `ManifestEdge` nested table.
 fn build_manifest_edge_table(
     builder: &mut FlatBufferBuilder<'_>,
     edge: &ManifestEdge,
@@ -715,7 +714,6 @@ fn deserialize_entity_slot_table(buf: &[u8], slot_table_pos: usize) -> Option<En
 // share one absence contract: a field missing from the vtable yields an empty
 // `String`/`Vec`, never an error (graceful absence).
 
-/// Read a string field at vtable `slot`.
 fn read_string_field(
     buf: &[u8],
     table_pos: usize,
@@ -732,7 +730,6 @@ fn read_string_field(
         .ok_or_else(|| OutputError::serialization(ctx, "string field truncated or not UTF-8"))
 }
 
-/// Read a `[uint32]` field at vtable `slot`.
 fn read_u32_vector_field(
     buf: &[u8],
     table_pos: usize,
@@ -749,7 +746,6 @@ fn read_u32_vector_field(
         .ok_or_else(|| OutputError::serialization(ctx, "uint32 vector truncated or corrupt"))
 }
 
-/// Read a `[string]` field at vtable `slot`.
 fn read_string_vector_field(
     buf: &[u8],
     table_pos: usize,
@@ -774,7 +770,6 @@ fn read_string_vector_field(
     Ok(out)
 }
 
-/// Read a `[ManifestNode]` field at vtable `slot`.
 fn read_manifest_nodes(
     buf: &[u8],
     table_pos: usize,
@@ -799,7 +794,6 @@ fn read_manifest_nodes(
     Ok(out)
 }
 
-/// Read a `[ManifestEdge]` field at vtable `slot`.
 fn read_manifest_edges(
     buf: &[u8],
     table_pos: usize,

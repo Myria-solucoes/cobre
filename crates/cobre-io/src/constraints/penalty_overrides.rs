@@ -822,8 +822,6 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    // ── Shared test helpers ───────────────────────────────────────────────────
-
     // ── BusPenaltyOverrideRow tests ───────────────────────────────────────────
 
     fn bus_schema() -> Arc<Schema> {

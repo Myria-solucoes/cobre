@@ -798,7 +798,6 @@ mod tests {
     fn write_creates_parent_directory() {
         let tree = make_tree_2s_2d();
         let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        // Nested path — neither intermediate directory exists yet.
         let path = tmp.path().join("output/stochastic/noise_openings.parquet");
 
         assert!(

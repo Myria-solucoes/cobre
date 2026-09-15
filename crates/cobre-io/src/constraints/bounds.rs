@@ -450,6 +450,26 @@ pub(super) fn validate_optional_finite(
     Ok(())
 }
 
+/// Validate that a present (non-null) optional value is non-negative.
+pub(super) fn validate_optional_nonneg(
+    value: Option<f64>,
+    file_label: &str,
+    row_idx: usize,
+    column: &str,
+    path: &Path,
+) -> Result<(), LoadError> {
+    if let Some(v) = value
+        && v < 0.0
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("{file_label}[{row_idx}].{column}"),
+            message: format!("value must be >= 0.0, got {v}"),
+        });
+    }
+    Ok(())
+}
+
 /// Parse `constraints/thermal_bounds.parquet`, returning rows sorted by
 /// `(thermal_id, stage_id, block_id)` ascending (`None` before `Some(i)`).
 ///
@@ -510,15 +530,13 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
             ] {
                 validate_optional_finite(value, "thermal_bounds", row_idx, column, path)?;
             }
-            if let Some(v) = cost_per_mwh
-                && v < 0.0
-            {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("thermal_bounds[{row_idx}].cost_per_mwh"),
-                    message: format!("value must be >= 0.0, got {v}"),
-                });
-            }
+            validate_optional_nonneg(
+                cost_per_mwh,
+                "thermal_bounds",
+                row_idx,
+                "cost_per_mwh",
+                path,
+            )?;
 
             rows.push(ThermalBoundsRow {
                 thermal_id,
@@ -640,47 +658,39 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
             // build_filling_v_target and check_filling_sufficiency assume rate ≥ 0;
             // a negative override silently inverts the V_target floor (validate_filling_configs
             // enforces this for the entity; the finiteness gate above does not).
-            if let Some(v) = filling_min_rate_m3s
-                && v < 0.0
-            {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("hydro_bounds[{row_idx}].filling_min_rate_m3s"),
-                    message: format!("value must be >= 0.0, got {v}"),
-                });
-            }
+            validate_optional_nonneg(
+                filling_min_rate_m3s,
+                "hydro_bounds",
+                row_idx,
+                "filling_min_rate_m3s",
+                path,
+            )?;
 
             // A diversion/spillage override is non-negative and, for spillage,
             // `min <= max`; a negative or inverted row otherwise yields an
             // infeasible per-stage bound (the finiteness gate above catches
             // neither sign nor ordering).
-            if let Some(v) = min_diversion_m3s
-                && v < 0.0
-            {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("hydro_bounds[{row_idx}].min_diversion_m3s"),
-                    message: format!("value must be >= 0.0, got {v}"),
-                });
-            }
-            if let Some(v) = min_spillage_m3s
-                && v < 0.0
-            {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("hydro_bounds[{row_idx}].min_spillage_m3s"),
-                    message: format!("value must be >= 0.0, got {v}"),
-                });
-            }
-            if let Some(v) = max_spillage_m3s
-                && v < 0.0
-            {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("hydro_bounds[{row_idx}].max_spillage_m3s"),
-                    message: format!("value must be >= 0.0, got {v}"),
-                });
-            }
+            validate_optional_nonneg(
+                min_diversion_m3s,
+                "hydro_bounds",
+                row_idx,
+                "min_diversion_m3s",
+                path,
+            )?;
+            validate_optional_nonneg(
+                min_spillage_m3s,
+                "hydro_bounds",
+                row_idx,
+                "min_spillage_m3s",
+                path,
+            )?;
+            validate_optional_nonneg(
+                max_spillage_m3s,
+                "hydro_bounds",
+                row_idx,
+                "max_spillage_m3s",
+                path,
+            )?;
             if let (Some(min), Some(max)) = (min_spillage_m3s, max_spillage_m3s)
                 && min > max
             {
@@ -847,24 +857,8 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
             // inverted row otherwise yields an infeasible per-stage bound (the
             // `pumping_stations.json` entity-reader enforces this; the finiteness gate
             // above does not).
-            if let Some(v) = min_m3s
-                && v < 0.0
-            {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("pumping_bounds[{row_idx}].min_m3s"),
-                    message: format!("value must be >= 0.0, got {v}"),
-                });
-            }
-            if let Some(v) = max_m3s
-                && v < 0.0
-            {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("pumping_bounds[{row_idx}].max_m3s"),
-                    message: format!("value must be >= 0.0, got {v}"),
-                });
-            }
+            validate_optional_nonneg(min_m3s, "pumping_bounds", row_idx, "min_m3s", path)?;
+            validate_optional_nonneg(max_m3s, "pumping_bounds", row_idx, "max_m3s", path)?;
             if let (Some(min), Some(max)) = (min_m3s, max_m3s)
                 && min > max
             {

@@ -44,7 +44,7 @@
 
 use std::path::Path;
 
-use arrow::array::Array;
+use arrow::array::{Array, Float64Array};
 use cobre_core::EntityId;
 
 use crate::LoadError;
@@ -120,38 +120,24 @@ pub fn parse_hydro_energy_productivity(
                 Some(stage_id_col.value(i))
             };
 
-            let equivalent_productivity_mw_per_m3s = if rho_eq_col.is_null(i) {
-                None
-            } else {
-                Some(validate_nonnegative(
-                    rho_eq_col.value(i),
-                    row_idx,
-                    "equivalent_productivity_mw_per_m3s",
-                    path,
-                )?)
-            };
+            let equivalent_productivity_mw_per_m3s = extract_nonnegative_override(
+                rho_eq_col,
+                i,
+                row_idx,
+                "equivalent_productivity_mw_per_m3s",
+                path,
+            )?;
 
-            let reference_outflow_m3s = if q_ref_col.is_null(i) {
-                None
-            } else {
-                Some(validate_nonnegative(
-                    q_ref_col.value(i),
-                    row_idx,
-                    "reference_outflow_m3s",
-                    path,
-                )?)
-            };
+            let reference_outflow_m3s =
+                extract_nonnegative_override(q_ref_col, i, row_idx, "reference_outflow_m3s", path)?;
 
-            let specific_productivity_mw_per_m3s_per_m = if rho_esp_col.is_null(i) {
-                None
-            } else {
-                Some(validate_nonnegative(
-                    rho_esp_col.value(i),
-                    row_idx,
-                    "specific_productivity_mw_per_m3s_per_m",
-                    path,
-                )?)
-            };
+            let specific_productivity_mw_per_m3s_per_m = extract_nonnegative_override(
+                rho_esp_col,
+                i,
+                row_idx,
+                "specific_productivity_mw_per_m3s_per_m",
+                path,
+            )?;
 
             rows.push(HydroEnergyProductivityRow {
                 hydro_id,
@@ -196,7 +182,25 @@ fn warn_on_stale_reference_volume_column(batch: &arrow::record_batch::RecordBatc
 
 // ── per-value validation helpers ───────────────────────────────────────────────
 
-/// Validates that `value` is finite and non-negative (`>= 0.0`).
+fn extract_nonnegative_override(
+    col: &Float64Array,
+    i: usize,
+    row_idx: usize,
+    column: &str,
+    path: &Path,
+) -> Result<Option<f64>, LoadError> {
+    if col.is_null(i) {
+        Ok(None)
+    } else {
+        Ok(Some(validate_nonnegative(
+            col.value(i),
+            row_idx,
+            column,
+            path,
+        )?))
+    }
+}
+
 fn validate_nonnegative(
     value: f64,
     row_idx: usize,

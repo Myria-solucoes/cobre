@@ -172,7 +172,6 @@ pub fn parse_generic_constraint_bounds(
         }
     }
 
-    // None block (= applies to all blocks) sorts before Some.
     rows.sort_by(|a, b| {
         a.constraint_id
             .cmp(&b.constraint_id)

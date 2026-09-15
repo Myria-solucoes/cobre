@@ -145,7 +145,7 @@ pub fn parse_hydro_unit_group_bounds(
 ) -> Result<Vec<HydroUnitGroupBoundsRow>, LoadError> {
     let reader = open_record_batch_reader(path)?;
 
-    let mut rows: Vec<HydroUnitGroupBoundsRow> = Vec::new();
+    let mut rows = Vec::new();
 
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;

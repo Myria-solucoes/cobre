@@ -146,7 +146,6 @@ mod tests {
     use std::sync::Arc;
     use tempfile::NamedTempFile;
 
-    /// Write a Parquet file with the given NCS bounds data.
     fn write_ncs_bounds_parquet(
         ncs_ids: &[i32],
         stage_ids: &[i32],
