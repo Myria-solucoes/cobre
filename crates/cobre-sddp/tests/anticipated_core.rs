@@ -1601,7 +1601,7 @@ mod anticipated_pre_horizon_seed_delivery {
         };
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
@@ -4673,7 +4673,7 @@ mod anticipated_numerical_reconciliation_k2 {
         // default change cannot silently introduce NPV scaling into the analytical
         // derivation.
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
@@ -5236,7 +5236,7 @@ mod anticipated_bridge_st_cruz_nova_k1 {
         };
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
@@ -6211,7 +6211,7 @@ mod a1b_value_cut_identity_anchor {
         };
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],

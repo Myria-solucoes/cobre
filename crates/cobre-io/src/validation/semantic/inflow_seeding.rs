@@ -25,6 +25,7 @@ use cobre_stochastic::season_cast::{
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
+/// Rules 29-34 (see the module table above for the row-to-check mapping).
 pub(super) fn validate_inflow_seeding(data: &ParsedData, ctx: &mut ValidationContext) {
     warn_unresolvable_first_stage_season(data, ctx);
     check_conditioning_window_bound(data, ctx);
@@ -585,7 +586,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],

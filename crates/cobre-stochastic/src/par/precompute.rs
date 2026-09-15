@@ -8,7 +8,7 @@
 //! Two-dimensional arrays are **stage-major** `array[stage * n_series + series_element]`;
 //! the three-dimensional `psi` is **stage-major, series-minor, lag-innermost**
 //! `psi[stage * n_series * max_order + series_element * max_order + lag]`. This keeps
-//! a scenario trajectory's per-stage data contiguous for the forward/backward passes.
+//! a scenario trajectory's per-stage data contiguous for sequential per-stage traversal.
 //!
 //! ## Coefficient conversion
 //!

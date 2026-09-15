@@ -661,7 +661,7 @@ pub fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
 /// a finite-horizon graph with no discount-rate overrides or transitions.
 fn make_horizon_graph(season_map: Option<SeasonMap>) -> HorizonGraph {
     HorizonGraph {
-        stage_discount_rate_overrides: std::collections::HashMap::new(),
+        stage_discount_rate_overrides: std::collections::BTreeMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.06,
         transitions: vec![],

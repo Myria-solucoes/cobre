@@ -6,7 +6,7 @@
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
-/// Rejects pumping stations whose source and destination hydros are identical.
+/// Rule 19: rejects pumping stations whose source and destination hydros are identical.
 ///
 /// A `source_hydro_id == destination_hydro_id` station passes referential
 /// validation (the ID resolves) yet models a degenerate self-transfer: a

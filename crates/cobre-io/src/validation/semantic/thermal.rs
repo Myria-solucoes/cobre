@@ -19,6 +19,7 @@ use cobre_stochastic::season_cast::{DatedWindow, StageCalendar};
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::envelope_tolerance;
 
+/// Rule 13: `min_generation_mw <= max_generation_mw` for a thermal.
 pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut ValidationContext) {
     for thermal in &data.thermals {
         if thermal.min_generation_mw > thermal.max_generation_mw {
@@ -36,7 +37,7 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
     }
 }
 
-/// Checks cross-field invariants for anticipated thermal plants.
+/// Rules 14-15: cross-field invariants for anticipated thermal plants.
 ///
 /// 1. **Per-plant lead horizon** — `LeadStages` rejects `K == 0` (defence in
 ///    depth; parse-time also rejects it). Both `LeadStages`'s `K > n_stages`
@@ -242,7 +243,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     }
 }
 
-/// Advisory (`ModelQuality`): a `lead_stages`-configured thermal whose active
+/// Rule 28. Advisory (`ModelQuality`): a `lead_stages`-configured thermal whose active
 /// window — decision stage `t` through delivery `t + lead_stages`, `t` ranging
 /// over the plant's commissioning window and the delivery side clamped to the
 /// study horizon — spans a pair of adjacent study stages with differing
@@ -880,7 +881,7 @@ fn check_fixed_commitment_within_window(
     }
 }
 
-/// Layer 5a — rejects use of `anticipated_decision(N)` in a generic constraint
+/// Rule 17. Layer 5a — rejects use of `anticipated_decision(N)` in a generic constraint
 /// when thermal `N` does not have `anticipated_config: Some(_)`.
 ///
 /// `anticipated_decision` is an LP column that only exists for plants committed
@@ -917,7 +918,7 @@ pub(super) fn check_anticipated_decision_target_is_anticipated(
     }
 }
 
-/// Layer 5a — warns when `thermal_generation(N)` is used in a generic
+/// Rule 18. Layer 5a — warns when `thermal_generation(N)` is used in a generic
 /// constraint and thermal `N` is anticipated.
 ///
 /// `thermal_generation` for an anticipated thermal references the per-block
@@ -959,7 +960,7 @@ pub(super) fn warn_thermal_generation_on_anticipated_thermal(
     }
 }
 
-/// Layer 5a — validates the standalone `post_study_stages.json` boundary input,
+/// Rule 47. Layer 5a — validates the standalone `post_study_stages.json` boundary input,
 /// the sole post-horizon surface, against the study calendar.
 ///
 /// Rejects unless:
@@ -1488,7 +1489,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages: contiguous_stages(durations_hours),
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],

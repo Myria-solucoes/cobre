@@ -7,6 +7,7 @@ use cobre_core::{EntityId, Hydro};
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::envelope_tolerance;
 
+/// Rule 1: the hydro cascade graph must be acyclic.
 pub(super) fn check_cascade_acyclic(data: &ParsedData, ctx: &mut ValidationContext) {
     if data.hydros.is_empty() {
         return;
@@ -74,6 +75,8 @@ pub(super) fn check_cascade_acyclic(data: &ParsedData, ctx: &mut ValidationConte
     }
 }
 
+/// Rules 2-5: `min <= max` for a hydro's storage, turbined, outflow (when
+/// `Some`), and generation bounds.
 pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext) {
     for hydro in &data.hydros {
         let entity_str = format!("Hydro {}", hydro.id.0);
@@ -130,7 +133,7 @@ pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext)
     }
 }
 
-/// Rejects a `min_diversion_m3s` override on a hydro that declares no `diversion`
+/// Rule 46: rejects a `min_diversion_m3s` override on a hydro that declares no `diversion`
 /// channel: with no channel, [`resolve_bounds`](crate::resolution::resolve_bounds)
 /// pins the diversion column to `[0, 0]`, so a positive floor is the infeasible
 /// `[min > 0, 0]`.
@@ -196,6 +199,8 @@ fn check_entry_precedes_exit(
     }
 }
 
+/// Rule 6: `entry_stage_id < exit_stage_id` (when both `Some`), for hydros,
+/// lines, and thermals.
 pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut ValidationContext) {
     for hydro in &data.hydros {
         check_entry_precedes_exit(
@@ -231,10 +236,11 @@ pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut Validatio
     }
 }
 
-/// Extends the `entry < exit` ordering check in [`check_lifecycle_consistency`]
-/// to the entity types it does not cover: pumping stations, non-controllable
-/// sources, and energy contracts. An unchecked window-bearing entity would pass
-/// validation while the others reject `entry >= exit` — the parity this closes.
+/// Rule 6 (remaining entity types): extends the `entry < exit` ordering check
+/// in [`check_lifecycle_consistency`] to the entity types it does not cover:
+/// pumping stations, non-controllable sources, and energy contracts. An
+/// unchecked window-bearing entity would pass validation while the others
+/// reject `entry >= exit` — the parity this closes.
 pub(super) fn check_lifecycle_consistency_remaining(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -273,6 +279,8 @@ pub(super) fn check_lifecycle_consistency_remaining(
     }
 }
 
+/// Rule 7: a filling hydro's `filling.start_stage_id` must be a declared
+/// study stage.
 pub(super) fn check_filling_config(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_stage_ids: HashSet<i32> = data
         .stages
@@ -300,7 +308,7 @@ pub(super) fn check_filling_config(data: &ParsedData, ctx: &mut ValidationContex
     }
 }
 
-/// Enforces the structural guards a filling hydro must satisfy beyond the
+/// Rules 7a-7b: enforces the structural guards a filling hydro must satisfy beyond the
 /// start-stage-validity check in [`check_filling_config`]. Each rejects an
 /// ill-formed combination that would otherwise yield a meaningless or infeasible
 /// `PreFilling`/`Filling`/`Operating` lifecycle, except guard 3, which warns:
@@ -431,6 +439,9 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
     }
 }
 
+/// Rules 8-10: `hydro_geometry.parquet`'s `volume_hm3` is strictly increasing,
+/// and `height_m`/`area_km2` are non-decreasing (within a relative tolerance),
+/// per hydro.
 pub(super) fn check_geometry_monotonicity(data: &ParsedData, ctx: &mut ValidationContext) {
     if data.hydro_geometry.is_empty() {
         return;
@@ -502,7 +513,7 @@ pub(super) fn check_geometry_monotonicity(data: &ParsedData, ctx: &mut Validatio
     }
 }
 
-/// Hydros with `evaporation_coefficients_mm` require geometry rows in
+/// Rule 50: hydros with `evaporation_coefficients_mm` require geometry rows in
 /// `hydro_geometry.parquet` (area-volume curve for linearization).
 pub(super) fn check_evaporation_geometry_coverage(data: &ParsedData, ctx: &mut ValidationContext) {
     let geometry_hydro_ids: HashSet<i32> =
@@ -526,6 +537,8 @@ pub(super) fn check_evaporation_geometry_coverage(data: &ParsedData, ctx: &mut V
     }
 }
 
+/// Rules 11-12: every (hydro, stage) has at least 1 FPHA plane, and each
+/// plane's `gamma_v >= 0` / `gamma_s <= 0`.
 pub(super) fn check_fpha_constraints(data: &ParsedData, ctx: &mut ValidationContext) {
     if data.fpha_hyperplanes.is_empty() {
         return;

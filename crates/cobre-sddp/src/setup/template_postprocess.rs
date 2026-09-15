@@ -175,7 +175,7 @@ mod tests {
         BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn one_year_stage(id: i32) -> Stage {
         Stage {
@@ -205,7 +205,7 @@ mod tests {
     fn stage_discount_override_is_read_off_the_stage() {
         let stage = one_year_stage(0);
         let days = f64::from((stage.end_date - stage.start_date).num_days() as i32);
-        let mut overrides = HashMap::new();
+        let mut overrides = BTreeMap::new();
         overrides.insert(0, 0.10);
         let pg = HorizonGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
@@ -240,7 +240,7 @@ mod tests {
             annual_discount_rate: 0.06,
             transitions: vec![],
             nodes: vec![],
-            stage_discount_rate_overrides: HashMap::new(),
+            stage_discount_rate_overrides: BTreeMap::new(),
             season_map: None,
         };
 

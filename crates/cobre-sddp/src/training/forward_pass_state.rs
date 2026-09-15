@@ -2424,7 +2424,7 @@ mod tests {
                 transition(0, 3, 0.25),
                 transition(0, 4, 0.25),
             ],
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         };
         let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)
@@ -2530,7 +2530,7 @@ mod tests {
                 transition(0, 3, 0.25),
                 transition(0, 4, 0.25),
             ],
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         };
         let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)

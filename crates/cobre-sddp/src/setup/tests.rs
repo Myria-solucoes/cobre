@@ -1045,7 +1045,7 @@ fn train_generates_cuts_in_fcf() {
 #[test]
 fn node_native_binary_tree_loads_and_constructs_node_graph() {
     use cobre_core::temporal::{Node, Transition};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     let policy_graph = HorizonGraph {
         graph_type: PolicyGraphType::FiniteHorizon,
@@ -1132,7 +1132,7 @@ fn node_native_binary_tree_loads_and_constructs_node_graph() {
                 annual_discount_rate_override: None,
             },
         ],
-        stage_discount_rate_overrides: HashMap::new(),
+        stage_discount_rate_overrides: BTreeMap::new(),
         season_map: None,
     };
 
@@ -2410,7 +2410,7 @@ fn minimal_system_2_hydros_with_history(
         .bounds(bounds)
         .penalties(penalties)
         .policy_graph(HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],

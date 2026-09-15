@@ -51,7 +51,7 @@ use cobre_core::temporal::{
     SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig, Transition,
 };
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use crate::LoadError;
@@ -681,7 +681,7 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
     // Chain dialect: the departing-edge override folds onto its source stage (exactly
     // one edge per stage); under nodes[] the per-edge spelling is rejected by the
     // semantic layer, never folded — the stage field is the only source.
-    let stage_discount_rate_overrides: HashMap<i32, f64> = raw
+    let stage_discount_rate_overrides: BTreeMap<i32, f64> = raw
         .stages
         .iter()
         .filter_map(|s| {
@@ -822,7 +822,7 @@ fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<HorizonGraph
         nodes,
         // season_map and stage_discount_rate_overrides are set by the caller, which
         // has the study stages and season definitions.
-        stage_discount_rate_overrides: HashMap::new(),
+        stage_discount_rate_overrides: BTreeMap::new(),
         season_map: None,
     })
 }
@@ -2529,7 +2529,7 @@ mod tests {
             annual_discount_rate: 0.0,
             transitions,
             nodes: Vec::new(),
-            stage_discount_rate_overrides: HashMap::new(),
+            stage_discount_rate_overrides: BTreeMap::new(),
             season_map: None,
         }
     }

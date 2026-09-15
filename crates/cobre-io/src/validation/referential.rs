@@ -17,13 +17,10 @@ use super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 /// Performs Layer 3 referential integrity validation on the parsed data.
 ///
-/// Checks that every referenced entity ID exists in its target registry. Any
-/// dangling reference adds one [`ErrorKind::InvalidReference`] entry to `ctx`
-/// with the message:
-///
-/// ```text
-/// "<source_type> <source_id> references non-existent <target_type> <target_id> via field '<field_name>'"
-/// ```
+/// Checks that every referenced entity ID exists in its target registry. Most
+/// dangling-reference findings share one message shape, owned by
+/// [`emit_dangling_ref`] / [`emit_dangling_ref_at`] — see either for the
+/// exact wording.
 ///
 /// Infallible — all errors are collected in `ctx`; optional data collections
 /// (empty `Vec` or `None`) are silently skipped.
@@ -89,6 +86,248 @@ struct LookupSets {
     hydro_group_bus: HashMap<i32, HashSet<i32>>,
 }
 
+// ── Dangling-reference descriptor and emit helper ────────────────────────────
+//
+// The single owner of the "<location> references non-existent <target entity>
+// <id> via field '<field>'" message shape (see the module doc). A row-type
+// descriptor names the source file, the referenced entity type, and the
+// field; `emit_dangling_ref` (indexed rows) and `emit_dangling_ref_at` (a
+// caller-supplied location, e.g. an already-built `entity_str`) are the only
+// two call sites that format the message. A block whose location or message
+// does not fit this shape (a nested per-plant lookup, an extra clause, a
+// runtime-dispatched field) stays open-coded.
+
+/// One dangling-reference row-type: the source file, the referenced entity
+/// type, and the field name that failed to resolve.
+struct DanglingRefDescriptor {
+    file: &'static str,
+    target_entity: &'static str,
+    field: &'static str,
+}
+
+/// Emits one `InvalidReference` finding for an indexed row: location
+/// `"<row_label>[<row_index>]"`.
+fn emit_dangling_ref(
+    descriptor: &DanglingRefDescriptor,
+    row_label: &str,
+    row_index: usize,
+    id: i32,
+    ctx: &mut ValidationContext,
+) {
+    emit_dangling_ref_at(descriptor, &format!("{row_label}[{row_index}]"), id, ctx);
+}
+
+/// Emits one `InvalidReference` finding at a caller-supplied `location`
+/// (an indexed row label, or an entity-named location such as `"Line 5"`).
+fn emit_dangling_ref_at(
+    descriptor: &DanglingRefDescriptor,
+    location: &str,
+    id: i32,
+    ctx: &mut ValidationContext,
+) {
+    ctx.add_error(
+        ErrorKind::InvalidReference,
+        descriptor.file,
+        Some(location),
+        format!(
+            "{location} references non-existent {} {id} via field '{}'",
+            descriptor.target_entity, descriptor.field
+        ),
+    );
+}
+
+const HYDRO_GEOMETRY_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/hydro_geometry.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const PRODUCTION_MODEL_CONFIG_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/hydro_production_models.json",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const FPHA_HYPERPLANE_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/fpha_hyperplanes.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const INFLOW_SEASONAL_STATS_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/inflow_seasonal_stats.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const INFLOW_AR_COEFFICIENT_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/inflow_ar_coefficients.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const INFLOW_ANNUAL_COMPONENT_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/inflow_annual_component.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const INFLOW_HISTORY_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/inflow_history.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const LOAD_SEASONAL_STATS_ROW_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/load_seasonal_stats.parquet",
+    target_entity: "Bus",
+    field: "bus_id",
+};
+const EXTERNAL_SCENARIO_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/external_inflow_scenarios.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const EXTERNAL_LOAD_ROW_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/external_load_scenarios.parquet",
+    target_entity: "Bus",
+    field: "bus_id",
+};
+const EXTERNAL_NCS_ROW_NCS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/external_ncs_scenarios.parquet",
+    target_entity: "NonControllableSource",
+    field: "ncs_id",
+};
+const NCS_MODEL_NCS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/non_controllable_stats.parquet",
+    target_entity: "NonControllableSource",
+    field: "ncs_id",
+};
+const THERMAL_BOUNDS_ROW_THERMAL: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/thermal_bounds.parquet",
+    target_entity: "Thermal",
+    field: "thermal_id",
+};
+const HYDRO_BOUNDS_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/hydro_bounds.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const HYDRO_UNIT_GROUP_BOUNDS_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/hydro_unit_group_bounds.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const LINE_BOUNDS_ROW_LINE: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/line_bounds.parquet",
+    target_entity: "Line",
+    field: "line_id",
+};
+const PUMPING_BOUNDS_ROW_PUMPING: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/pumping_bounds.parquet",
+    target_entity: "PumpingStation",
+    field: "station_id",
+};
+const CONTRACT_BOUNDS_ROW_CONTRACT: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/contract_bounds.parquet",
+    target_entity: "EnergyContract",
+    field: "contract_id",
+};
+const GENERIC_CONSTRAINT_BOUNDS_ROW_CONSTRAINT: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/generic_constraint_bounds.parquet",
+    target_entity: "GenericConstraint",
+    field: "constraint_id",
+};
+const BUS_PENALTY_OVERRIDE_ROW_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/penalty_overrides_bus.parquet",
+    target_entity: "Bus",
+    field: "bus_id",
+};
+const LINE_PENALTY_OVERRIDE_ROW_LINE: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/penalty_overrides_line.parquet",
+    target_entity: "Line",
+    field: "line_id",
+};
+const HYDRO_PENALTY_OVERRIDE_ROW_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/penalty_overrides_hydro.parquet",
+    target_entity: "Hydro",
+    field: "hydro_id",
+};
+const NCS_PENALTY_OVERRIDE_ROW_NCS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/penalty_overrides_ncs.parquet",
+    target_entity: "NonControllableSource",
+    field: "source_id",
+};
+const LOAD_FACTOR_ENTRY_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/load_factors.json",
+    target_entity: "Bus",
+    field: "bus_id",
+};
+const LOAD_FACTOR_ENTRY_STAGE: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/load_factors.json",
+    target_entity: "Stage",
+    field: "stage_id",
+};
+const NCS_BOUNDS_ROW_NCS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "constraints/ncs_bounds.parquet",
+    target_entity: "NonControllableSource",
+    field: "ncs_id",
+};
+const NCS_FACTOR_ENTRY_NCS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "scenarios/non_controllable_factors.json",
+    target_entity: "NonControllableSource",
+    field: "ncs_id",
+};
+
+const LINE_SOURCE_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/lines.json",
+    target_entity: "Bus",
+    field: "source_bus_id",
+};
+const LINE_TARGET_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/lines.json",
+    target_entity: "Bus",
+    field: "target_bus_id",
+};
+const HYDRO_DOWNSTREAM_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/hydros.json",
+    target_entity: "Hydro",
+    field: "downstream_id",
+};
+const HYDRO_DIVERSION_DOWNSTREAM_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/hydros.json",
+    target_entity: "Hydro",
+    field: "diversion.downstream_id",
+};
+const HYDRO_UNIT_GROUP_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/hydros.json",
+    target_entity: "Bus",
+    field: "bus_id",
+};
+const THERMAL_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/thermals.json",
+    target_entity: "Bus",
+    field: "bus_id",
+};
+const NCS_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/non_controllable_sources.json",
+    target_entity: "Bus",
+    field: "bus_id",
+};
+const PUMPING_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/pumping_stations.json",
+    target_entity: "Bus",
+    field: "bus_id",
+};
+const PUMPING_SOURCE_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/pumping_stations.json",
+    target_entity: "Hydro",
+    field: "source_hydro_id",
+};
+const PUMPING_DESTINATION_HYDRO: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/pumping_stations.json",
+    target_entity: "Hydro",
+    field: "destination_hydro_id",
+};
+const CONTRACT_BUS: DanglingRefDescriptor = DanglingRefDescriptor {
+    file: "system/energy_contracts.json",
+    target_entity: "Bus",
+    field: "bus_id",
+};
+
 // ── Per-entity-group helper functions ─────────────────────────────────────────
 
 /// Line -> bus references (`source_bus_id`, `target_bus_id`).
@@ -97,27 +336,11 @@ fn check_line_references(data: &ParsedData, ctx: &mut ValidationContext, bus_ids
         let entity_str = format!("Line {}", line.id.0);
 
         if !bus_ids.contains(&line.source_bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/lines.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Bus {} via field 'source_bus_id'",
-                    line.source_bus_id.0
-                ),
-            );
+            emit_dangling_ref_at(&LINE_SOURCE_BUS, &entity_str, line.source_bus_id.0, ctx);
         }
 
         if !bus_ids.contains(&line.target_bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/lines.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Bus {} via field 'target_bus_id'",
-                    line.target_bus_id.0
-                ),
-            );
+            emit_dangling_ref_at(&LINE_TARGET_BUS, &entity_str, line.target_bus_id.0, ctx);
         }
     }
 }
@@ -135,43 +358,24 @@ fn check_hydro_references(
         if let Some(downstream_id) = hydro.downstream_id
             && !hydro_ids.contains(&downstream_id.0)
         {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/hydros.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Hydro {} via field 'downstream_id'",
-                    downstream_id.0
-                ),
-            );
+            emit_dangling_ref_at(&HYDRO_DOWNSTREAM_HYDRO, &entity_str, downstream_id.0, ctx);
         }
 
         if let Some(ref diversion) = hydro.diversion
             && !hydro_ids.contains(&diversion.downstream_id.0)
         {
-            ctx.add_error(
-                    ErrorKind::InvalidReference,
-                    "system/hydros.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str} references non-existent Hydro {} via field 'diversion.downstream_id'",
-                        diversion.downstream_id.0
-                    ),
-                );
+            emit_dangling_ref_at(
+                &HYDRO_DIVERSION_DOWNSTREAM_HYDRO,
+                &entity_str,
+                diversion.downstream_id.0,
+                ctx,
+            );
         }
 
         for group in &hydro.unit_groups {
             if !bus_ids.contains(&group.bus_id.0) {
                 let group_str = format!("{entity_str} unit group {}", group.id.0);
-                ctx.add_error(
-                    ErrorKind::InvalidReference,
-                    "system/hydros.json",
-                    Some(&group_str),
-                    format!(
-                        "{group_str} references non-existent Bus {} via field 'bus_id'",
-                        group.bus_id.0
-                    ),
-                );
+                emit_dangling_ref_at(&HYDRO_UNIT_GROUP_BUS, &group_str, group.bus_id.0, ctx);
             }
         }
     }
@@ -187,15 +391,7 @@ fn check_thermal_references(
         let entity_str = format!("Thermal {}", thermal.id.0);
 
         if !bus_ids.contains(&thermal.bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/thermals.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Bus {} via field 'bus_id'",
-                    thermal.bus_id.0
-                ),
-            );
+            emit_dangling_ref_at(&THERMAL_BUS, &entity_str, thermal.bus_id.0, ctx);
         }
     }
 }
@@ -211,29 +407,13 @@ fn check_ncs_references(
         let entity_str = format!("NonControllableSource {}", ncs.id.0);
 
         if !bus_ids.contains(&ncs.bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/non_controllable_sources.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Bus {} via field 'bus_id'",
-                    ncs.bus_id.0
-                ),
-            );
+            emit_dangling_ref_at(&NCS_BUS, &entity_str, ncs.bus_id.0, ctx);
         }
     }
 
     for (i, model) in data.ncs_models.iter().enumerate() {
         if !ncs_ids.contains(&model.ncs_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/non_controllable_stats.parquet",
-                Some(format!("NcsModel[{i}]")),
-                format!(
-                    "NcsModel[{i}] references non-existent NonControllableSource {} via field 'ncs_id'",
-                    model.ncs_id.0
-                ),
-            );
+            emit_dangling_ref(&NCS_MODEL_NCS, "NcsModel", i, model.ncs_id.0, ctx);
         }
     }
 }
@@ -249,38 +429,24 @@ fn check_pumping_references(
         let entity_str = format!("PumpingStation {}", station.id.0);
 
         if !bus_ids.contains(&station.bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/pumping_stations.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Bus {} via field 'bus_id'",
-                    station.bus_id.0
-                ),
-            );
+            emit_dangling_ref_at(&PUMPING_BUS, &entity_str, station.bus_id.0, ctx);
         }
 
         if !hydro_ids.contains(&station.source_hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/pumping_stations.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Hydro {} via field 'source_hydro_id'",
-                    station.source_hydro_id.0
-                ),
+            emit_dangling_ref_at(
+                &PUMPING_SOURCE_HYDRO,
+                &entity_str,
+                station.source_hydro_id.0,
+                ctx,
             );
         }
 
         if !hydro_ids.contains(&station.destination_hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/pumping_stations.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Hydro {} via field 'destination_hydro_id'",
-                    station.destination_hydro_id.0
-                ),
+            emit_dangling_ref_at(
+                &PUMPING_DESTINATION_HYDRO,
+                &entity_str,
+                station.destination_hydro_id.0,
+                ctx,
             );
         }
     }
@@ -296,15 +462,7 @@ fn check_contract_references(
         let entity_str = format!("EnergyContract {}", contract.id.0);
 
         if !bus_ids.contains(&contract.bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/energy_contracts.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Bus {} via field 'bus_id'",
-                    contract.bus_id.0
-                ),
-            );
+            emit_dangling_ref_at(&CONTRACT_BUS, &entity_str, contract.bus_id.0, ctx);
         }
     }
 }
@@ -317,42 +475,36 @@ fn check_extension_references(
 ) {
     for (i, row) in data.hydro_geometry.iter().enumerate() {
         if !hydro_ids.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/hydro_geometry.parquet",
-                Some(format!("HydroGeometryRow[{i}]")),
-                format!(
-                    "HydroGeometryRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &HYDRO_GEOMETRY_ROW_HYDRO,
+                "HydroGeometryRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         }
     }
 
     for (i, model) in data.production_models.iter().enumerate() {
         if !hydro_ids.contains(&model.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/hydro_production_models.json",
-                Some(format!("ProductionModelConfig[{i}]")),
-                format!(
-                    "ProductionModelConfig[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    model.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &PRODUCTION_MODEL_CONFIG_HYDRO,
+                "ProductionModelConfig",
+                i,
+                model.hydro_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.fpha_hyperplanes.iter().enumerate() {
         if !hydro_ids.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/fpha_hyperplanes.parquet",
-                Some(format!("FphaHyperplaneRow[{i}]")),
-                format!(
-                    "FphaHyperplaneRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &FPHA_HYPERPLANE_ROW_HYDRO,
+                "FphaHyperplaneRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         }
     }
@@ -372,70 +524,60 @@ fn check_scenario_references(
 ) {
     for (i, row) in data.inflow_seasonal_stats.iter().enumerate() {
         if !hydro_ids.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/inflow_seasonal_stats.parquet",
-                Some(format!("InflowSeasonalStatsRow[{i}]")),
-                format!(
-                    "InflowSeasonalStatsRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &INFLOW_SEASONAL_STATS_ROW_HYDRO,
+                "InflowSeasonalStatsRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.inflow_ar_coefficients.iter().enumerate() {
         if !hydro_ids.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/inflow_ar_coefficients.parquet",
-                Some(format!("InflowArCoefficientRow[{i}]")),
-                format!(
-                    "InflowArCoefficientRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &INFLOW_AR_COEFFICIENT_ROW_HYDRO,
+                "InflowArCoefficientRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.inflow_annual_components.iter().enumerate() {
         if !hydro_ids.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/inflow_annual_component.parquet",
-                Some(format!("InflowAnnualComponentRow[{i}]")),
-                format!(
-                    "InflowAnnualComponentRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &INFLOW_ANNUAL_COMPONENT_ROW_HYDRO,
+                "InflowAnnualComponentRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.inflow_history.iter().enumerate() {
         if !hydro_ids.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/inflow_history.parquet",
-                Some(format!("InflowHistoryRow[{i}]")),
-                format!(
-                    "InflowHistoryRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &INFLOW_HISTORY_ROW_HYDRO,
+                "InflowHistoryRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.load_seasonal_stats.iter().enumerate() {
         if !bus_ids.contains(&row.bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/load_seasonal_stats.parquet",
-                Some(format!("LoadSeasonalStatsRow[{i}]")),
-                format!(
-                    "LoadSeasonalStatsRow[{i}] references non-existent Bus {} via field 'bus_id'",
-                    row.bus_id.0
-                ),
+            emit_dangling_ref(
+                &LOAD_SEASONAL_STATS_ROW_BUS,
+                "LoadSeasonalStatsRow",
+                i,
+                row.bus_id.0,
+                ctx,
             );
         }
     }
@@ -467,15 +609,12 @@ fn check_scenario_references(
                     if !valid {
                         let entity_str =
                             format!("CorrelationEntity({type_label}, {})", entity.id.0);
-                        ctx.add_error(
-                            ErrorKind::InvalidReference,
-                            "scenarios/correlation.json",
-                            Some(&entity_str),
-                            format!(
-                                "{entity_str} references non-existent {registry_label} {} via field 'id'",
-                                entity.id.0
-                            ),
-                        );
+                        let descriptor = DanglingRefDescriptor {
+                            file: "scenarios/correlation.json",
+                            target_entity: registry_label,
+                            field: "id",
+                        };
+                        emit_dangling_ref_at(&descriptor, &entity_str, entity.id.0, ctx);
                     }
                 }
             }
@@ -484,42 +623,36 @@ fn check_scenario_references(
 
     for (i, row) in data.external_scenarios.iter().enumerate() {
         if !hydro_ids.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/external_inflow_scenarios.parquet",
-                Some(format!("ExternalScenarioRow[{i}]")),
-                format!(
-                    "ExternalScenarioRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &EXTERNAL_SCENARIO_ROW_HYDRO,
+                "ExternalScenarioRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.external_load_scenarios.iter().enumerate() {
         if !bus_ids.contains(&row.bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/external_load_scenarios.parquet",
-                Some(format!("ExternalLoadRow[{i}]")),
-                format!(
-                    "ExternalLoadRow[{i}] references non-existent Bus {} via field 'bus_id'",
-                    row.bus_id.0
-                ),
+            emit_dangling_ref(
+                &EXTERNAL_LOAD_ROW_BUS,
+                "ExternalLoadRow",
+                i,
+                row.bus_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.external_ncs_scenarios.iter().enumerate() {
         if !ncs_ids.contains(&row.ncs_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/external_ncs_scenarios.parquet",
-                Some(format!("ExternalNcsRow[{i}]")),
-                format!(
-                    "ExternalNcsRow[{i}] references non-existent NonControllableSource {} via field 'ncs_id'",
-                    row.ncs_id.0
-                ),
+            emit_dangling_ref(
+                &EXTERNAL_NCS_ROW_NCS,
+                "ExternalNcsRow",
+                i,
+                row.ncs_id.0,
+                ctx,
             );
         }
     }
@@ -529,28 +662,24 @@ fn check_scenario_references(
 fn check_bounds_references(data: &ParsedData, ctx: &mut ValidationContext, ids: &LookupSets) {
     for (i, row) in data.thermal_bounds.iter().enumerate() {
         if !ids.thermal.contains(&row.thermal_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/thermal_bounds.parquet",
-                Some(format!("ThermalBoundsRow[{i}]")),
-                format!(
-                    "ThermalBoundsRow[{i}] references non-existent Thermal {} via field 'thermal_id'",
-                    row.thermal_id.0
-                ),
+            emit_dangling_ref(
+                &THERMAL_BOUNDS_ROW_THERMAL,
+                "ThermalBoundsRow",
+                i,
+                row.thermal_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.hydro_bounds.iter().enumerate() {
         if !ids.hydro.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/hydro_bounds.parquet",
-                Some(format!("HydroBoundsRow[{i}]")),
-                format!(
-                    "HydroBoundsRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &HYDRO_BOUNDS_ROW_HYDRO,
+                "HydroBoundsRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         }
     }
@@ -559,14 +688,12 @@ fn check_bounds_references(data: &ParsedData, ctx: &mut ValidationContext, ids: 
         // An unknown hydro_id makes the group check unanswerable, so it is an
         // else-if, not two independent ifs — one finding per row, never both.
         if !ids.hydro.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/hydro_unit_group_bounds.parquet",
-                Some(format!("HydroUnitGroupBoundsRow[{i}]")),
-                format!(
-                    "HydroUnitGroupBoundsRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &HYDRO_UNIT_GROUP_BOUNDS_ROW_HYDRO,
+                "HydroUnitGroupBoundsRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         } else if !ids
             .hydro_unit_group
@@ -587,56 +714,48 @@ fn check_bounds_references(data: &ParsedData, ctx: &mut ValidationContext, ids: 
 
     for (i, row) in data.line_bounds.iter().enumerate() {
         if !ids.line.contains(&row.line_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/line_bounds.parquet",
-                Some(format!("LineBoundsRow[{i}]")),
-                format!(
-                    "LineBoundsRow[{i}] references non-existent Line {} via field 'line_id'",
-                    row.line_id.0
-                ),
+            emit_dangling_ref(
+                &LINE_BOUNDS_ROW_LINE,
+                "LineBoundsRow",
+                i,
+                row.line_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.pumping_bounds.iter().enumerate() {
         if !ids.pumping.contains(&row.station_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/pumping_bounds.parquet",
-                Some(format!("PumpingBoundsRow[{i}]")),
-                format!(
-                    "PumpingBoundsRow[{i}] references non-existent PumpingStation {} via field 'station_id'",
-                    row.station_id.0
-                ),
+            emit_dangling_ref(
+                &PUMPING_BOUNDS_ROW_PUMPING,
+                "PumpingBoundsRow",
+                i,
+                row.station_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.contract_bounds.iter().enumerate() {
         if !ids.contract.contains(&row.contract_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/contract_bounds.parquet",
-                Some(format!("ContractBoundsRow[{i}]")),
-                format!(
-                    "ContractBoundsRow[{i}] references non-existent EnergyContract {} via field 'contract_id'",
-                    row.contract_id.0
-                ),
+            emit_dangling_ref(
+                &CONTRACT_BOUNDS_ROW_CONTRACT,
+                "ContractBoundsRow",
+                i,
+                row.contract_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
         if !ids.generic_constraint.contains(&row.constraint_id) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/generic_constraint_bounds.parquet",
-                Some(format!("GenericConstraintBoundsRow[{i}]")),
-                format!(
-                    "GenericConstraintBoundsRow[{i}] references non-existent GenericConstraint {} via field 'constraint_id'",
-                    row.constraint_id
-                ),
+            emit_dangling_ref(
+                &GENERIC_CONSTRAINT_BOUNDS_ROW_CONSTRAINT,
+                "GenericConstraintBoundsRow",
+                i,
+                row.constraint_id,
+                ctx,
             );
         }
     }
@@ -653,56 +772,48 @@ fn check_penalty_override_references(
 ) {
     for (i, row) in data.penalty_overrides_bus.iter().enumerate() {
         if !bus_ids.contains(&row.bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/penalty_overrides_bus.parquet",
-                Some(format!("BusPenaltyOverrideRow[{i}]")),
-                format!(
-                    "BusPenaltyOverrideRow[{i}] references non-existent Bus {} via field 'bus_id'",
-                    row.bus_id.0
-                ),
+            emit_dangling_ref(
+                &BUS_PENALTY_OVERRIDE_ROW_BUS,
+                "BusPenaltyOverrideRow",
+                i,
+                row.bus_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.penalty_overrides_line.iter().enumerate() {
         if !line_ids.contains(&row.line_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/penalty_overrides_line.parquet",
-                Some(format!("LinePenaltyOverrideRow[{i}]")),
-                format!(
-                    "LinePenaltyOverrideRow[{i}] references non-existent Line {} via field 'line_id'",
-                    row.line_id.0
-                ),
+            emit_dangling_ref(
+                &LINE_PENALTY_OVERRIDE_ROW_LINE,
+                "LinePenaltyOverrideRow",
+                i,
+                row.line_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.penalty_overrides_hydro.iter().enumerate() {
         if !hydro_ids.contains(&row.hydro_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/penalty_overrides_hydro.parquet",
-                Some(format!("HydroPenaltyOverrideRow[{i}]")),
-                format!(
-                    "HydroPenaltyOverrideRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
-                    row.hydro_id.0
-                ),
+            emit_dangling_ref(
+                &HYDRO_PENALTY_OVERRIDE_ROW_HYDRO,
+                "HydroPenaltyOverrideRow",
+                i,
+                row.hydro_id.0,
+                ctx,
             );
         }
     }
 
     for (i, row) in data.penalty_overrides_ncs.iter().enumerate() {
         if !ncs_ids.contains(&row.source_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/penalty_overrides_ncs.parquet",
-                Some(format!("NcsPenaltyOverrideRow[{i}]")),
-                format!(
-                    "NcsPenaltyOverrideRow[{i}] references non-existent NonControllableSource {} via field 'source_id'",
-                    row.source_id.0
-                ),
+            emit_dangling_ref(
+                &NCS_PENALTY_OVERRIDE_ROW_NCS,
+                "NcsPenaltyOverrideRow",
+                i,
+                row.source_id.0,
+                ctx,
             );
         }
     }
@@ -728,26 +839,22 @@ fn check_load_factor_references(
 
     for (i, entry) in data.load_factors.iter().enumerate() {
         if !bus_ids.contains(&entry.bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/load_factors.json",
-                Some(format!("LoadFactorEntry[{i}]")),
-                format!(
-                    "LoadFactorEntry[{i}] references non-existent Bus {} via field 'bus_id'",
-                    entry.bus_id.0
-                ),
+            emit_dangling_ref(
+                &LOAD_FACTOR_ENTRY_BUS,
+                "LoadFactorEntry",
+                i,
+                entry.bus_id.0,
+                ctx,
             );
         }
 
         if !study_stage_ids.contains(&entry.stage_id) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/load_factors.json",
-                Some(format!("LoadFactorEntry[{i}]")),
-                format!(
-                    "LoadFactorEntry[{i}] references non-existent Stage {} via field 'stage_id'",
-                    entry.stage_id
-                ),
+            emit_dangling_ref(
+                &LOAD_FACTOR_ENTRY_STAGE,
+                "LoadFactorEntry",
+                i,
+                entry.stage_id,
+                ctx,
             );
         }
     }
@@ -782,37 +889,11 @@ fn static_fold(literal: Option<f64>, affine: Option<&AffineBound>) -> Option<f64
     }
 }
 
-/// `GenericConstraintBoundsRow` `block_id` validity, per-row endpoint-interval
-/// checks, and duplicate key detection.
+/// `GenericConstraintBoundsRow` per-row endpoint-interval checks: at least one
+/// endpoint present, and same-row static-fold inversion. `block_id` range and
+/// duplicate-key detection are owned by the Layer 5a bound-override family
+/// (`validation::semantic::block_bounds`), alongside the other six families.
 fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut ValidationContext) {
-    let stage_block_counts: HashMap<i32, usize> = data
-        .stages
-        .stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| (s.id, s.blocks.len()))
-        .collect();
-
-    for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
-        if let Some(blk) = row.block_id
-            && let Some(&n_blocks) = stage_block_counts.get(&row.stage_id)
-        {
-            #[allow(clippy::cast_sign_loss)]
-            let blk_usize = blk as usize;
-            if blk < 0 || blk_usize >= n_blocks {
-                ctx.add_error(
-                        ErrorKind::InvalidValue,
-                        "constraints/generic_constraint_bounds.parquet",
-                        Some(format!("GenericConstraintBoundsRow[{i}]")),
-                        format!(
-                            "GenericConstraintBoundsRow[{i}] has block_id={blk} but Stage {} has only {n_blocks} block(s) (valid range: 0..{n_blocks})",
-                            row.stage_id
-                        ),
-                    );
-            }
-        }
-    }
-
     // Which affine remainder (if any) each constraint assigns to each endpoint,
     // keyed by constraint id. A parquet numeric endpoint and an affine remainder
     // on the same endpoint compose (`base + R`, `fold_endpoint` in the LP
@@ -880,22 +961,6 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
         }
     }
 
-    let mut seen_keys: HashSet<(i32, i32, Option<i32>)> = HashSet::new();
-    for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
-        let key = (row.constraint_id, row.stage_id, row.block_id);
-        if !seen_keys.insert(key) {
-            ctx.add_error(
-                ErrorKind::DuplicateId,
-                "constraints/generic_constraint_bounds.parquet",
-                Some(format!("GenericConstraintBoundsRow[{i}]")),
-                format!(
-                    "Duplicate key (constraint_id={}, stage_id={}, block_id={:?}) in generic constraint bounds",
-                    row.constraint_id, row.stage_id, row.block_id
-                ),
-            );
-        }
-    }
-
     // The parquet is the activation grid: a symbolic bound supplies a value, but the
     // constraint's applicable (stage, block) cells still come from its parquet rows.
     // A reference with no rows would apply to nothing and be silently inert.
@@ -921,7 +986,11 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
     }
 }
 
-/// NCS bounds and NCS factor entry checks.
+/// NCS bounds and NCS factor entry checks: dangling `ncs_id`/`stage_id`
+/// references only. `available_generation_mw`/`factor` sign is a parse-layer
+/// contract (`constraints/ncs_bounds.rs`'s and
+/// `scenarios/non_controllable_factors.rs`'s parsers reject a negative value
+/// with `LoadError::SchemaError` before this layer runs), not re-checked here.
 fn check_ncs_bounds_and_factors(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -931,15 +1000,7 @@ fn check_ncs_bounds_and_factors(
 
     for (i, row) in data.ncs_bounds.iter().enumerate() {
         if !ncs_ids.contains(&row.ncs_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "constraints/ncs_bounds.parquet",
-                Some(format!("NcsBoundsRow[{i}]")),
-                format!(
-                    "NcsBoundsRow[{i}] references non-existent NonControllableSource {} via field 'ncs_id'",
-                    row.ncs_id.0
-                ),
-            );
+            emit_dangling_ref(&NCS_BOUNDS_ROW_NCS, "NcsBoundsRow", i, row.ncs_id.0, ctx);
         }
         if !study_stage_ids.contains(&row.stage_id) {
             ctx.add_error(
@@ -952,29 +1013,16 @@ fn check_ncs_bounds_and_factors(
                 ),
             );
         }
-        if row.available_generation_mw < 0.0 {
-            ctx.add_error(
-                ErrorKind::InvalidValue,
-                "constraints/ncs_bounds.parquet",
-                Some(format!("NcsBoundsRow[{i}]")),
-                format!(
-                    "NcsBoundsRow[{i}] has negative available_generation_mw: {}",
-                    row.available_generation_mw
-                ),
-            );
-        }
     }
 
     for (i, entry) in data.non_controllable_factors.iter().enumerate() {
         if !ncs_ids.contains(&entry.ncs_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "scenarios/non_controllable_factors.json",
-                Some(format!("NcsFactorEntry[{i}]")),
-                format!(
-                    "NcsFactorEntry[{i}] references non-existent NonControllableSource {} via field 'ncs_id'",
-                    entry.ncs_id.0
-                ),
+            emit_dangling_ref(
+                &NCS_FACTOR_ENTRY_NCS,
+                "NcsFactorEntry",
+                i,
+                entry.ncs_id.0,
+                ctx,
             );
         }
         if !study_stage_ids.contains(&entry.stage_id) {
@@ -987,19 +1035,6 @@ fn check_ncs_bounds_and_factors(
                     entry.stage_id
                 ),
             );
-        }
-        for (j, bf) in entry.block_factors.iter().enumerate() {
-            if bf.factor < 0.0 {
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "scenarios/non_controllable_factors.json",
-                    Some(format!("NcsFactorEntry[{i}].block_factors[{j}]")),
-                    format!(
-                        "NcsFactorEntry[{i}] block_factors[{j}] has negative factor: {}",
-                        bf.factor
-                    ),
-                );
-            }
         }
     }
 }
@@ -2669,30 +2704,6 @@ mod tests {
         assert!(inv[0].message.contains("999"));
     }
 
-    /// `NcsBoundsRow` with negative `available_generation_mw` produces `InvalidValue`.
-    #[test]
-    fn test_ncs_bounds_negative_available_generation() {
-        let dir = TempDir::new().unwrap();
-        make_minimal_case(&dir);
-        let mut data = parse_case(&dir);
-        data.non_controllable_sources = vec![make_ncs(1, 1)];
-        data.ncs_bounds = vec![NcsBoundsRow {
-            ncs_id: EntityId::from(1),
-            stage_id: 0,
-            available_generation_mw: -10.0,
-        }];
-        let mut ctx = ValidationContext::new();
-        validate_referential_integrity(&data, &mut ctx);
-        assert!(ctx.has_errors());
-        let inv: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| e.kind == ErrorKind::InvalidValue)
-            .collect();
-        assert_eq!(inv.len(), 1);
-        assert!(inv[0].message.contains("negative"));
-    }
-
     /// Valid `NcsFactorEntry` with an existing NCS ID and valid stage produces no errors.
     #[test]
     fn test_ncs_factors_valid_refs_no_error() {
@@ -2779,33 +2790,6 @@ mod tests {
             .collect();
         assert_eq!(inv.len(), 1);
         assert!(inv[0].message.contains("999"));
-    }
-
-    /// `NcsFactorEntry` with a negative block factor produces `InvalidValue`.
-    #[test]
-    fn test_ncs_factors_negative_factor() {
-        let dir = TempDir::new().unwrap();
-        make_minimal_case(&dir);
-        let mut data = parse_case(&dir);
-        data.non_controllable_sources = vec![make_ncs(1, 1)];
-        data.non_controllable_factors = vec![NcsFactorEntry {
-            ncs_id: EntityId::from(1),
-            stage_id: 0,
-            block_factors: vec![BlockFactor {
-                block_id: 0,
-                factor: -0.5,
-            }],
-        }];
-        let mut ctx = ValidationContext::new();
-        validate_referential_integrity(&data, &mut ctx);
-        assert!(ctx.has_errors());
-        let inv: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| e.kind == ErrorKind::InvalidValue)
-            .collect();
-        assert_eq!(inv.len(), 1);
-        assert!(inv[0].message.contains("negative"));
     }
 
     // ── AnticipatedDecision referential validation ─────────────────────

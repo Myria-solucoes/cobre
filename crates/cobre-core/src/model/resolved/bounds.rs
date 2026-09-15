@@ -19,8 +19,8 @@
 //!   (`fill_anticipated_columns`, thermal only). Any other caller is a design
 //!   question, not an implementation detail.
 //!
-//! Most entity tables use the flat layout `data[entity_idx * n_stages + stage_idx]`;
-//! the thermal table's extended stride is documented on [`ResolvedBounds`].
+//! Most entity tables share a uniform flat entity/stage layout; [`ResolvedBounds`]
+//! documents the exact stride for each family, including thermal's extended one.
 //! Populated by `cobre-io` after base bounds are overlaid with stage-specific
 //! overrides; never modified after construction.
 
@@ -281,8 +281,9 @@ pub struct ContractBlockBounds {
 
 /// Pre-resolved bound table for all entities across all stages.
 ///
-/// Most tables index `data[entity_idx * n_stages + stage_idx]`; the `thermal`
-/// table uses an extended `n_stages + k_max` stride — see
+/// Most tables index `data[entity_idx * n_stages + stage_idx]`, computed by the
+/// private `cell_index` helper; the `thermal` table uses an extended
+/// `n_stages + k_max` stride computed by `thermal_cell_index` — see
 /// [`thermal_stage_axis_len`](Self::thermal_stage_axis_len).
 ///
 /// # Examples
@@ -327,7 +328,7 @@ pub struct ContractBlockBounds {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "ResolvedBoundsWire"))]
 pub struct ResolvedBounds {
-    /// Stride for every entity table except `thermal`: `data[entity_idx * n_stages + stage_idx]`.
+    /// Stride for every entity table except `thermal` — see the layout note above.
     n_stages: usize,
     /// Stride for the `thermal` Vec; equals `n_stages + k_max`. Required on the
     /// wire and never defaulted: a missing or zero stride (with `thermal`
@@ -493,6 +494,20 @@ impl ResolvedBounds {
         }
     }
 
+    /// Return the flat index for `(entity_index, stage_index)` in the uniform
+    /// `n_stages`-strided tables (`hydro`, `line`, `pumping`, `contract`);
+    /// `thermal` uses its own extended stride — see
+    /// [`thermal_cell_index`](Self::thermal_cell_index).
+    #[inline]
+    fn cell_index(&self, entity_index: usize, stage_index: usize) -> usize {
+        debug_assert!(
+            stage_index < self.n_stages,
+            "stage_index out of bounds: {stage_index} >= n_stages {}",
+            self.n_stages
+        );
+        entity_index * self.n_stages + stage_index
+    }
+
     /// Return the resolved stage-level bounds for a hydro plant at a specific stage.
     ///
     /// Returns a reference rather than a copy to avoid copying the struct on hot paths.
@@ -551,7 +566,7 @@ impl ResolvedBounds {
     #[inline]
     #[must_use]
     pub fn hydro_bounds(&self, hydro_index: usize, stage_index: usize) -> &HydroStageBounds {
-        &self.hydro[hydro_index * self.n_stages + stage_index].stage
+        &self.hydro[self.cell_index(hydro_index, stage_index)].stage
     }
 
     /// Return the flat `self.thermal` index for `(thermal_index, stage_index)`,
@@ -638,7 +653,8 @@ impl ResolvedBounds {
         hydro_index: usize,
         stage_index: usize,
     ) -> &mut HydroStageBounds {
-        &mut self.hydro[hydro_index * self.n_stages + stage_index].stage
+        let idx = self.cell_index(hydro_index, stage_index);
+        &mut self.hydro[idx].stage
     }
 
     /// Return a mutable reference to the hydro block-base cell for in-place
@@ -650,7 +666,8 @@ impl ResolvedBounds {
         hydro_index: usize,
         stage_index: usize,
     ) -> &mut HydroBlockBounds {
-        &mut self.hydro[hydro_index * self.n_stages + stage_index].block
+        let idx = self.cell_index(hydro_index, stage_index);
+        &mut self.hydro[idx].block
     }
 
     /// Return a mutable reference to the thermal cost cell for in-place update.
@@ -690,7 +707,8 @@ impl ResolvedBounds {
         line_index: usize,
         stage_index: usize,
     ) -> &mut LineBlockBounds {
-        &mut self.line[line_index * self.n_stages + stage_index]
+        let idx = self.cell_index(line_index, stage_index);
+        &mut self.line[idx]
     }
 
     /// Return a mutable reference to the pumping bounds cell for in-place update.
@@ -700,7 +718,8 @@ impl ResolvedBounds {
         pumping_index: usize,
         stage_index: usize,
     ) -> &mut PumpingBlockBounds {
-        &mut self.pumping[pumping_index * self.n_stages + stage_index]
+        let idx = self.cell_index(pumping_index, stage_index);
+        &mut self.pumping[idx]
     }
 
     /// Return a mutable reference to the contract bounds cell for in-place update.
@@ -710,7 +729,8 @@ impl ResolvedBounds {
         contract_index: usize,
         stage_index: usize,
     ) -> &mut ContractBlockBounds {
-        &mut self.contract[contract_index * self.n_stages + stage_index]
+        let idx = self.cell_index(contract_index, stage_index);
+        &mut self.contract[idx]
     }
 
     /// Install the per-block override overlay (bound-precedence layer 1).
@@ -772,7 +792,7 @@ impl ResolvedBounds {
         stage_index: usize,
         block_index: usize,
     ) -> HydroBlockBounds {
-        let cell = self.hydro[hydro_index * self.n_stages + stage_index].block;
+        let cell = self.hydro[self.cell_index(hydro_index, stage_index)].block;
         let over = self
             .block
             .hydro_override(hydro_index, stage_index, block_index);
@@ -875,7 +895,7 @@ impl ResolvedBounds {
         stage_index: usize,
         block_index: usize,
     ) -> LineBlockBounds {
-        let cell = self.line[line_index * self.n_stages + stage_index];
+        let cell = self.line[self.cell_index(line_index, stage_index)];
         let over = self
             .block
             .line_override(line_index, stage_index, block_index);
@@ -948,7 +968,7 @@ impl ResolvedBounds {
         stage_index: usize,
         block_index: usize,
     ) -> PumpingBlockBounds {
-        let cell = self.pumping[pumping_index * self.n_stages + stage_index];
+        let cell = self.pumping[self.cell_index(pumping_index, stage_index)];
         let over = self
             .block
             .pumping_override(pumping_index, stage_index, block_index);
@@ -1024,7 +1044,7 @@ impl ResolvedBounds {
         stage_index: usize,
         block_index: usize,
     ) -> ContractBlockBounds {
-        let cell = self.contract[contract_index * self.n_stages + stage_index];
+        let cell = self.contract[self.cell_index(contract_index, stage_index)];
         let over = self
             .block
             .contract_override(contract_index, stage_index, block_index);
@@ -1044,7 +1064,7 @@ impl ResolvedBounds {
     #[inline]
     #[must_use]
     pub fn hydro_block_base(&self, hydro_index: usize, stage_index: usize) -> HydroBlockBounds {
-        self.hydro[hydro_index * self.n_stages + stage_index].block
+        self.hydro[self.cell_index(hydro_index, stage_index)].block
     }
 
     /// Return the block-eligible thermal columns at `(thermal_index,
@@ -1077,7 +1097,7 @@ impl ResolvedBounds {
     #[inline]
     #[must_use]
     pub fn line_block_base(&self, line_index: usize, stage_index: usize) -> LineBlockBounds {
-        self.line[line_index * self.n_stages + stage_index]
+        self.line[self.cell_index(line_index, stage_index)]
     }
 
     /// Return the block-eligible pumping columns at `(pumping_index,
@@ -1094,7 +1114,7 @@ impl ResolvedBounds {
         pumping_index: usize,
         stage_index: usize,
     ) -> PumpingBlockBounds {
-        self.pumping[pumping_index * self.n_stages + stage_index]
+        self.pumping[self.cell_index(pumping_index, stage_index)]
     }
 
     /// Return the block-eligible contract columns at `(contract_index,
@@ -1111,7 +1131,7 @@ impl ResolvedBounds {
         contract_index: usize,
         stage_index: usize,
     ) -> ContractBlockBounds {
-        self.contract[contract_index * self.n_stages + stage_index]
+        self.contract[self.cell_index(contract_index, stage_index)]
     }
 
     /// Return the number of stages in this table.

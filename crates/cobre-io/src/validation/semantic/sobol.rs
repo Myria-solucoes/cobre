@@ -5,7 +5,7 @@
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
-/// Warns when a stage uses `QmcSobol` with a non-power-of-2 `branching_factor`.
+/// Rule 25: warns when a stage uses `QmcSobol` with a non-power-of-2 `branching_factor`.
 ///
 /// Sobol sequences achieve optimal low-discrepancy uniformity only when the
 /// number of sample points is a power of 2. A non-power-of-2 value produces

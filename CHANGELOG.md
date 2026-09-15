@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the study — now fails validation; remove the rows or correct their
   `stage_id`.
 
+- **Generic-constraint bound-override rows now follow the same rules as the
+  other six bound families.** An out-of-range `block_id` in
+  `constraints/generic_constraint_bounds.parquet` is reported as a
+  `BusinessRuleViolation` instead of an `InvalidValue`, and two rows that set
+  disjoint columns (`bound_lower` in one, `bound_upper` in the other) for the
+  same constraint, stage and block are no longer rejected as duplicates. Every
+  other bound family already behaved this way; decks without such rows are
+  unaffected.
+
 - **A required column missing from `hydro_geometry.parquet`,
   `hydro_energy_productivity.parquet` or `tailrace_curves.parquet` is now
   reported as `missing required column "<name>"`**, the wording every other
@@ -46,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Result<Self, ValidationError>` to apply the same check, and
     `EstimationError` gains a `Validation` variant; `cobre-io` already emits
     the tables sorted, so no deck is affected.
+    `HorizonGraph::stage_discount_rate_overrides` is a `BTreeMap<i32, f64>`
+    instead of a `HashMap`, so a `System` payload serializes to the same
+    bytes regardless of the order the overrides were inserted.
   - `cobre-io`: the free `serialize_system`, `deserialize_system`,
     `serialize_parameters` and `deserialize_parameters` postcard helpers;
     `load_scalar_parameters_json` and `build_season_stage_map`;

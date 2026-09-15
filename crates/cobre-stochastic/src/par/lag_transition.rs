@@ -57,8 +57,8 @@ fn noop_transition() -> StageLagTransition {
 
 /// The full-weight, finalizing [`StageLagTransition`] — one stage folded
 /// entirely into one lag bucket. The out-of-bounds fallback for
-/// [`resolve_stage_lag_transition`], shared with the forward pass's own
-/// `unwrap_or` default.
+/// [`resolve_stage_lag_transition`], shared with the per-stage evaluation
+/// path's own `unwrap_or` default.
 const UNIFORM_MONTHLY_TRANSITION: StageLagTransition = StageLagTransition {
     accumulate_weight: 1.0,
     spillover_weight: 0.0,
@@ -73,7 +73,7 @@ const UNIFORM_MONTHLY_TRANSITION: StageLagTransition = StageLagTransition {
 /// Resolve stage `t`'s transition from `transitions`: a present entry —
 /// including a `noop_transition` one — is consumed as-is; the full-weight,
 /// finalizing identity transition is the fallback ONLY when `t` is out of
-/// bounds. Every η-inversion and forward-accumulation call site shares this
+/// bounds. Every η-inversion and lag-accumulation call site shares this
 /// one convention; swapping a present noop entry for the fallback would
 /// desync that site's lag chain from every other reader of the same
 /// `transitions` slice.
@@ -135,10 +135,10 @@ pub(crate) fn compute_period_transition(
 /// — an ISO week number reaching 12 has nothing to do with quarters, while a
 /// `Monthly` or `Custom` cycle's `season_id >= 12` is a deliberate quarterly
 /// convention; a `None` `season_map` also leaves the ring inert (`0`). Every
-/// call site that needs this gate — training/simulation lag transitions and
-/// both the rank-0 and non-root opening-tree builds — routes through this one
-/// function; an independent re-derivation risks the two opening-tree sides
-/// diverging across MPI ranks.
+/// call site that needs this gate — the two evaluation-phase lag-transition
+/// call sites, and both the rank-0 and non-root opening-tree builds — routes
+/// through this one function; an independent re-derivation risks the two
+/// opening-tree sides diverging across MPI ranks.
 #[must_use]
 pub fn derive_downstream_par_order(
     stages: &[Stage],
@@ -158,7 +158,7 @@ pub fn derive_downstream_par_order(
 }
 
 /// Precompute one [`StageLagTransition`] per stage from stage date boundaries
-/// and season definitions; consumed read-only on the forward-pass hot path.
+/// and season definitions; consumed read-only on the per-stage evaluation hot path.
 ///
 /// A `season_id = None` stage, or any input outside a season, produces a
 /// fully zeroed no-op transition.
@@ -298,9 +298,11 @@ fn compute_downstream_transitions(
     }
 }
 
-/// Precompute a noise group ID for each study stage, so the forward sampler can
+/// Precompute a noise group ID for each study stage, so [`ForwardSampler`] can
 /// draw one noise sample per group and broadcast it (weekly stages sharing
 /// monthly PAR noise).
+///
+/// [`ForwardSampler`]: crate::ForwardSampler
 ///
 /// Stages with `season_id = Some(id)` group by `(id, start_date.year())`,
 /// consecutive IDs from 0 in slice order of first occurrence; a

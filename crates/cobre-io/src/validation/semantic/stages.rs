@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use cobre_core::scenario::{SamplingScheme, ScenarioSource};
-use cobre_core::temporal::{Node, PolicyGraphType, StageRiskConfig, Transition};
+use cobre_core::temporal::{Node, PolicyGraphType, Transition};
 
 use crate::StageIdResolver;
 use crate::config::{ForwardPassesResolution, Openings};
@@ -13,7 +13,8 @@ use crate::config::{ForwardPassesResolution, Openings};
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::PROB_TOLERANCE;
 
-/// Validates policy graph transitions, block durations, and `CVaR` parameters.
+/// Rules 1-3: validates policy graph transitions, outgoing transition
+/// probabilities, and the cyclic-graph discount rate.
 pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationContext) {
     let graph = &data.stages.policy_graph;
     let stages = &data.stages.stages;
@@ -84,55 +85,9 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
             ),
         );
     }
-
-    for stage in stages {
-        for block in &stage.blocks {
-            if block.duration_hours <= 0.0 {
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "stages.json",
-                    Some(format!("Stage {}", stage.id)),
-                    format!(
-                        "Stage {}: block has duration_hours {} which is not > 0.0; \
-                         block duration must be positive",
-                        stage.id, block.duration_hours
-                    ),
-                );
-            }
-        }
-    }
-
-    for stage in stages {
-        if let StageRiskConfig::CVaR { alpha, lambda } = stage.risk_config {
-            if alpha <= 0.0 || alpha > 1.0 {
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "stages.json",
-                    Some(format!("Stage {}", stage.id)),
-                    format!(
-                        "Stage {}: CVaR alpha ({alpha}) must be in (0, 1]; \
-                         alpha must be a valid tail probability",
-                        stage.id
-                    ),
-                );
-            }
-            if !(0.0..=1.0).contains(&lambda) {
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "stages.json",
-                    Some(format!("Stage {}", stage.id)),
-                    format!(
-                        "Stage {}: CVaR lambda ({lambda}) must be in [0, 1]; \
-                         lambda is the CVaR mixing weight",
-                        stage.id
-                    ),
-                );
-            }
-        }
-    }
 }
 
-/// Warns once when an autoregressive inflow model (PAR order `p > 0`) coexists
+/// Rule 34. Warns once when an autoregressive inflow model (PAR order `p > 0`) coexists
 /// with every study stage having `state_config.inflow_lags == false`.
 ///
 /// AR order is read as the maximum 1-based `lag` over `inflow_ar_coefficients`;
@@ -827,8 +782,7 @@ mod tests {
     use cobre_core::EntityId;
     use cobre_core::scenario::ExternalScenarioRow;
     use cobre_core::temporal::{
-        Block, Node, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap,
-        StageRiskConfig, Transition,
+        Node, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap, Transition,
     };
 
     use crate::scenarios::{InflowArCoefficientRow, InflowSeasonalStatsRow};
@@ -1035,122 +989,6 @@ mod tests {
         assert!(
             discount_errors.is_empty(),
             "cyclic with positive discount rate should produce no error, got: {discount_errors:?}"
-        );
-    }
-
-    // ── Rule 4: Block duration positivity ─────────────────────────────────────
-
-    /// A block with duration_hours = 0.0 produces an InvalidValue error.
-    #[test]
-    fn test_5b_block_zero_duration() {
-        let mut stages = make_stages_5b(vec![0]);
-        stages.stages[0].blocks = vec![Block {
-            index: 0,
-            name: "Peak".to_string(),
-            duration_hours: 0.0, // invalid
-        }];
-        let data = make_data_5b(
-            vec![make_hydro_ordered_penalties(1)],
-            stages,
-            vec![make_bus_with_deficit(1, 10.0)],
-            vec![],
-            vec![],
-            None,
-        );
-        let mut ctx = ValidationContext::new();
-        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
-        assert!(ctx.has_errors());
-        assert!(
-            ctx.errors()
-                .iter()
-                .any(|e| e.kind == ErrorKind::InvalidValue),
-            "zero duration block should produce InvalidValue"
-        );
-    }
-
-    /// A block with positive duration_hours produces no block duration error.
-    #[test]
-    fn test_5b_block_positive_duration_valid() {
-        let mut stages = make_stages_5b(vec![0]);
-        stages.stages[0].blocks = vec![Block {
-            index: 0,
-            name: "Peak".to_string(),
-            duration_hours: 168.0,
-        }];
-        let data = make_data_5b(
-            vec![make_hydro_ordered_penalties(1)],
-            stages,
-            vec![make_bus_with_deficit(1, 10.0)],
-            vec![],
-            vec![],
-            None,
-        );
-        let mut ctx = ValidationContext::new();
-        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
-        let errors: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| e.kind == ErrorKind::InvalidValue)
-            .collect();
-        assert!(
-            errors.is_empty(),
-            "positive block duration should produce no error, got: {errors:?}"
-        );
-    }
-
-    // ── Rule 5: CVaR parameter validity ───────────────────────────────────────
-
-    /// CVaR alpha = 0.0 (invalid, must be in (0, 1]) produces InvalidValue.
-    #[test]
-    fn test_5b_cvar_alpha_zero_invalid() {
-        let mut stages = make_stages_5b(vec![0]);
-        stages.stages[0].risk_config = StageRiskConfig::CVaR {
-            alpha: 0.0, // invalid: must be in (0, 1]
-            lambda: 0.5,
-        };
-        let data = make_data_5b(
-            vec![make_hydro_ordered_penalties(1)],
-            stages,
-            vec![make_bus_with_deficit(1, 10.0)],
-            vec![],
-            vec![],
-            None,
-        );
-        let mut ctx = ValidationContext::new();
-        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
-        assert!(ctx.has_errors());
-        assert!(
-            ctx.errors()
-                .iter()
-                .any(|e| e.kind == ErrorKind::InvalidValue),
-            "CVaR alpha=0.0 should produce InvalidValue"
-        );
-    }
-
-    /// CVaR lambda = -0.1 (invalid, must be in [0, 1]) produces InvalidValue.
-    #[test]
-    fn test_5b_cvar_lambda_out_of_range() {
-        let mut stages = make_stages_5b(vec![0]);
-        stages.stages[0].risk_config = StageRiskConfig::CVaR {
-            alpha: 0.95,
-            lambda: -0.1, // invalid: must be in [0, 1]
-        };
-        let data = make_data_5b(
-            vec![make_hydro_ordered_penalties(1)],
-            stages,
-            vec![make_bus_with_deficit(1, 10.0)],
-            vec![],
-            vec![],
-            None,
-        );
-        let mut ctx = ValidationContext::new();
-        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
-        assert!(ctx.has_errors());
-        assert!(
-            ctx.errors()
-                .iter()
-                .any(|e| e.kind == ErrorKind::InvalidValue),
-            "CVaR lambda=-0.1 should produce InvalidValue"
         );
     }
 

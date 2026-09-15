@@ -971,7 +971,7 @@ fn k_fan_policy_graph(k: usize, reversed: bool) -> HorizonGraph {
         annual_discount_rate: 0.0,
         transitions,
         nodes,
-        stage_discount_rate_overrides: HashMap::new(),
+        stage_discount_rate_overrides: BTreeMap::new(),
         season_map: None,
     }
 }
@@ -1869,7 +1869,7 @@ fn terminal_generated_fan_policy_graph(k: usize) -> HorizonGraph {
         annual_discount_rate: 0.0,
         transitions,
         nodes,
-        stage_discount_rate_overrides: HashMap::new(),
+        stage_discount_rate_overrides: BTreeMap::new(),
         season_map: None,
     }
 }
@@ -2055,7 +2055,7 @@ fn build_external_distinct_fan_setup(
             annual_discount_rate: 0.0,
             transitions,
             nodes,
-            stage_discount_rate_overrides: HashMap::new(),
+            stage_discount_rate_overrides: BTreeMap::new(),
             season_map: None,
         }
     };
@@ -2198,7 +2198,7 @@ pub fn external_root_fan_setup(k: usize, max_iterations: u32) -> StudySetup {
             annual_discount_rate: 0.0,
             transitions,
             nodes,
-            stage_discount_rate_overrides: HashMap::new(),
+            stage_discount_rate_overrides: BTreeMap::new(),
             season_map: None,
         }
     };
@@ -2382,7 +2382,7 @@ fn build_water_binding_external_fan(k: usize, max_iterations: u32, reversed: boo
             annual_discount_rate: 0.0,
             transitions,
             nodes,
-            stage_discount_rate_overrides: HashMap::new(),
+            stage_discount_rate_overrides: BTreeMap::new(),
             season_map: None,
         }
     };
@@ -2519,7 +2519,7 @@ fn branching_tree_policy_graph(reversed: bool) -> HorizonGraph {
         annual_discount_rate: 0.0,
         transitions,
         nodes,
-        stage_discount_rate_overrides: HashMap::new(),
+        stage_discount_rate_overrides: BTreeMap::new(),
         season_map: None,
     }
 }
@@ -3011,7 +3011,7 @@ fn dual_folding_policy_graph(k: usize) -> HorizonGraph {
         annual_discount_rate: 0.0,
         transitions,
         nodes,
-        stage_discount_rate_overrides: HashMap::new(),
+        stage_discount_rate_overrides: BTreeMap::new(),
         season_map: None,
     }
 }
@@ -3172,7 +3172,7 @@ fn trunk_fan_policy_graph(t_trunk: usize, k: usize) -> HorizonGraph {
         annual_discount_rate: 0.0,
         transitions,
         nodes,
-        stage_discount_rate_overrides: HashMap::new(),
+        stage_discount_rate_overrides: BTreeMap::new(),
         season_map: None,
     }
 }

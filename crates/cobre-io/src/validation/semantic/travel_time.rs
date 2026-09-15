@@ -26,6 +26,7 @@ use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 /// mass-fraction small enough to treat as negligible.
 const NEGLIGIBLE_RATIO_THRESHOLD: f64 = 0.01;
 
+/// Rules 21-26 (see the module table above for the row-to-check mapping).
 pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_durations = study_stage_durations(data);
     let start_0 = study_start_date(data);
@@ -315,7 +316,7 @@ fn check_negligible_ratio(
     );
 }
 
-/// Row 3b: `t_v` exceeding the remaining study horizon at some stage — the
+/// Row 4: `t_v` exceeding the remaining study horizon at some stage — the
 /// arc's release never arrives before the horizon ends from that stage
 /// onward. Routed through [`window_period_overlaps`] (the one shared overlap
 /// engine every travel-time/lag computation in this feature reuses) rather
@@ -497,7 +498,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -674,7 +675,7 @@ mod tests {
         );
     }
 
-    // ── Row 3b: horizon-inertness advisory ────────────────────────────────────
+    // ── Row 4: horizon-inertness advisory ─────────────────────────────────────
 
     #[test]
     fn test_travel_time_exceeds_tail_horizon_emits_advisory() {

@@ -18,7 +18,7 @@ use super::envelope_tolerance;
 
 // ── Rules 6-10: Penalty ordering ──────────────────────────────────────────────
 
-/// Checks the penalty hierarchy ordering across all hydros and buses.
+/// Rules 6-10: checks the penalty hierarchy ordering across all hydros and buses.
 ///
 /// Emits one `ModelQuality` warning per violated ordering check, aggregating
 /// all violating entities into a single warning with the count and worst-case ID.
@@ -202,7 +202,7 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
 
 // ── Rule 11: FPHA penalty rule ─────────────────────────────────────────────────
 
-/// Checks that FPHA hydros have `turbined_cost >= 0`.
+/// Rule 11: checks that FPHA hydros have `turbined_cost >= 0`.
 ///
 /// A zero cost is valid for constant-head plants (e.g., `gamma_v = 0`) where the
 /// LP has no incentive to spill rather than turbine. Negative values are rejected
@@ -235,7 +235,7 @@ pub(super) fn check_fpha_penalty_rule(data: &ParsedData, ctx: &mut ValidationCon
 // by number elsewhere in this module and in the crate-level rule catalogue
 // (`validation/semantic/mod.rs`).
 
-/// Validates inflow model standard deviation.
+/// Rule 12: validates inflow model standard deviation.
 pub(super) fn check_scenario_models(data: &ParsedData, ctx: &mut ValidationContext) {
     // Rule 12: the parser rejects std_m3s < 0; this layer only warns on == 0.0
     // (valid but unusual deterministic inflow) -- suppressed when every applicable
@@ -292,7 +292,7 @@ fn inflow_scheme_is_external_everywhere(data: &ParsedData) -> bool {
 
 // ── Rule 35: Hard stationarity gate on user-supplied AR coefficients ─────────
 
-/// Gates user-supplied `inflow_ar_coefficients.parquet` rows for stationarity
+/// Rule 35: gates user-supplied `inflow_ar_coefficients.parquet` rows for stationarity
 /// via the periodic-ACF closure (`cobre_stochastic::par::closure`).
 ///
 /// Runs only when `data.inflow_ar_coefficients` is non-empty -- the
@@ -451,7 +451,7 @@ fn describe_par_rejection(hydro_id: i32, rejection: &ClosureRejection) -> String
 
 // ── External scheme requires external scenario files ─────────────────────────
 
-/// Validates that when a class uses the `External` sampling scheme, the
+/// Rule 44a: validates that when a class uses the `External` sampling scheme, the
 /// corresponding external scenario file data is non-empty.
 pub(super) fn check_external_scheme_has_files(data: &ParsedData, ctx: &mut ValidationContext) {
     // validate_config resolves both sources at load, so these reads cannot fail here.
@@ -534,14 +534,15 @@ struct ClassExternal {
     raw_c: Vec<usize>,
 }
 
-/// Rules 45-48: external-library coherence across the slot-occupying external
+/// Rules 45-48, 50: external-library coherence across the slot-occupying external
 /// classes of the training scenario source — the shared per-stage raw
 /// column-count vector `raw_c(t)` (rule 45), the exact `scenario_id` set
 /// per (class, stage) (rule 46), out-of-range `stage_id` rejection (rule
-/// 47), and the prefix-coherence warning (rule 48). Rules 45-47 fire for every
-/// study; the prefix-coherence warning only when `nodes[]` is declared. Reads
-/// raw parsed values only — the standardized-library width assertion runs
-/// at study setup, where the standardized libraries exist.
+/// 47), the prefix-coherence warning (rule 48), and the External-scheme
+/// deterministic-inflow σ check (rule 50, in [`extract_class`]). Rules 45-47
+/// fire for every study; the prefix-coherence warning only when `nodes[]` is
+/// declared. Reads raw parsed values only — the standardized-library width
+/// assertion runs at study setup, where the standardized libraries exist.
 pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut ValidationContext) {
     let Ok(source) = data
         .config
@@ -1082,7 +1083,7 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
 /// infrastructure-genericity rule; this is redundancy-with-purpose, not drift.
 const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
 
-/// Checks that each filling hydro's minimum accumulation schedule can reach its
+/// Rule 33: checks that each filling hydro's minimum accumulation schedule can reach its
 /// dead volume before the entry stage:
 ///
 /// ```text
@@ -1215,7 +1216,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages: vec![stage],
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -1556,7 +1557,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -2275,7 +2276,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],

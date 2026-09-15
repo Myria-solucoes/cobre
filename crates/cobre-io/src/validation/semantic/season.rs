@@ -423,7 +423,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -474,7 +474,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -1071,7 +1071,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -1310,7 +1310,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages: stages_vec,
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],

@@ -28,6 +28,11 @@ use validate::{build_index, build_stage_index};
 ///
 /// Entity collections are in canonical order (sorted by [`EntityId`]'s inner `i32`).
 ///
+/// Everything reachable from the `System` payload serializes in content-determined
+/// order, never in a transient hash-map or thread order: a derived map marked
+/// `serde(skip)` is rebuilt unconditionally on deserialize, and any map that stays
+/// on the wire is key-ordered (a `BTreeMap`, never a `HashMap`).
+///
 /// # Examples
 ///
 /// ```
@@ -62,12 +67,10 @@ pub struct System {
     contracts: Vec<EnergyContract>,
     non_controllable_sources: Vec<NonControllableSource>,
 
-    // Not serialized: `HashMap` iteration order is unstable, so serializing an
-    // index or the cascade topology would make the wire payload
-    // non-reproducible for identical content. `serde(from = "SystemRepr")`
-    // above is `Deserialize`'s sole entry point and rebuilds them all
-    // unconditionally — without it every lookup on a deserialized `System`
-    // silently returns `None`, and the cascade is empty.
+    // Not serialized — see the content-determined wire-order note on `System`'s
+    // struct doc. `serde(from = "SystemRepr")` above is `Deserialize`'s sole entry
+    // point and rebuilds them all unconditionally — without it every lookup on a
+    // deserialized `System` silently returns `None`, and the cascade is empty.
     #[cfg_attr(feature = "serde", serde(skip))]
     bus_index: HashMap<EntityId, usize>,
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -1974,7 +1977,7 @@ mod tests {
             }),
         ];
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
@@ -2002,6 +2005,48 @@ mod tests {
         assert_eq!(
             deserialized.policy_graph().graph_type,
             system.policy_graph().graph_type
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn postcard_wire_bytes_are_identical_regardless_of_discount_override_insertion_order() {
+        use crate::temporal::PolicyGraphType;
+
+        let mut overrides_a = std::collections::BTreeMap::new();
+        overrides_a.insert(2, 0.09);
+        overrides_a.insert(0, 0.07);
+        overrides_a.insert(1, 0.08);
+
+        let mut overrides_b = std::collections::BTreeMap::new();
+        overrides_b.insert(1, 0.08);
+        overrides_b.insert(2, 0.09);
+        overrides_b.insert(0, 0.07);
+
+        let make_system = |overrides| {
+            let policy_graph = HorizonGraph {
+                stage_discount_rate_overrides: overrides,
+                graph_type: PolicyGraphType::FiniteHorizon,
+                annual_discount_rate: 0.06,
+                transitions: vec![],
+                nodes: Vec::new(),
+                season_map: None,
+            };
+            SystemBuilder::new()
+                .policy_graph(policy_graph)
+                .build()
+                .expect("valid system")
+        };
+
+        let system_a = make_system(overrides_a);
+        let system_b = make_system(overrides_b);
+
+        let bytes_a = postcard::to_allocvec(&system_a).unwrap();
+        let bytes_b = postcard::to_allocvec(&system_b).unwrap();
+
+        assert_eq!(
+            bytes_a, bytes_b,
+            "wire bytes must not depend on override insertion order"
         );
     }
 
@@ -2331,7 +2376,7 @@ mod tests {
         });
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::Cyclic,
             annual_discount_rate: 0.08,
             transitions: vec![

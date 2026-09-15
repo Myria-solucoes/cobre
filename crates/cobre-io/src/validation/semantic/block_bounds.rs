@@ -1,4 +1,4 @@
-//! Layer 5a — bound-override-family validation: block-axis rules for the six
+//! Layer 5a — bound-override-family validation: block-axis rules for the seven
 //! Parquet families, plus block_id-agnostic stage-wide envelope rules (e.g.
 //! `check_bound_raises_declared_capacity`, rule 43, and its group-axis mirror
 //! `check_group_bound_raises_declared_capacity`, rule 45).
@@ -71,6 +71,13 @@ const HYDRO_UNIT_GROUP: FamilyMeta = FamilyMeta {
     file: "constraints/hydro_unit_group_bounds.parquet",
 };
 
+const GENERIC_CONSTRAINT: FamilyMeta = FamilyMeta {
+    family: "GenericConstraint",
+    entity_label: "constraint_id",
+    row_label: "generic_constraint_bounds",
+    file: "constraints/generic_constraint_bounds.parquet",
+};
+
 /// `", hydro_unit_group_id={g}"` for `Some(g)`, else empty — the extra key
 /// axis a group row's `entity` field carries that the five plant-level
 /// families never set.
@@ -99,10 +106,10 @@ fn block_id_clause(block_id: Option<i32>) -> String {
     }
 }
 
-/// Rejects a bound-override row whose `block_id` is negative or outside
-/// `[0, n_blocks)` for the stage it names, across all six block-eligible
+/// Rule 35: rejects a bound-override row whose `block_id` is negative or outside
+/// `[0, n_blocks)` for the stage it names, across all seven block-eligible
 /// bound families in the fixed order thermal, hydro, line, pumping, contract,
-/// hydro unit group.
+/// hydro unit group, generic constraint.
 ///
 /// A row whose `stage_id` is not a study stage is skipped without a finding —
 /// that is a stage-axis defect this rule does not own.
@@ -181,6 +188,17 @@ pub(super) fn check_bound_block_id_range(data: &ParsedData, ctx: &mut Validation
             ctx,
         );
     }
+    for row in &data.generic_constraint_bounds {
+        check_row(
+            &GENERIC_CONSTRAINT,
+            row.constraint_id,
+            None,
+            row.stage_id,
+            row.block_id,
+            &stage_block_counts,
+            ctx,
+        );
+    }
 }
 
 fn check_row(
@@ -219,7 +237,7 @@ fn check_row(
     }
 }
 
-/// Rejects a bound-override row whose `stage_id` names no declared study
+/// Rule 49: rejects a bound-override row whose `stage_id` names no declared study
 /// stage, across the six bound families. Admission is membership in the
 /// declared id set — the same map [`resolve_bounds`] keys on — never a
 /// `[0, n)` position test: study ids may be gapped or start at 1. NCS is
@@ -324,7 +342,7 @@ fn check_row_stage_range(
     );
 }
 
-/// Rejects two bound rows in the same family that set the same column for
+/// Rule 36: rejects two bound rows in the same family that set the same column for
 /// the same `(entity_id, stage_id, block_id)` — [`resolve_bounds`] resolves
 /// the second such row over the first (last write wins) with no diagnostic,
 /// so this rule is what makes that collision loud. The key's `block_id` is
@@ -447,6 +465,23 @@ pub(super) fn check_duplicate_bound_rows(data: &ParsedData, ctx: &mut Validation
             ctx,
         );
     }
+
+    let mut generic_constraint_seen = HashSet::new();
+    for row in &data.generic_constraint_bounds {
+        check_row_columns(
+            &GENERIC_CONSTRAINT,
+            row.constraint_id,
+            None,
+            row.stage_id,
+            row.block_id,
+            &[
+                ("bound_lower", row.bound_lower),
+                ("bound_upper", row.bound_upper),
+            ],
+            &mut generic_constraint_seen,
+            ctx,
+        );
+    }
 }
 
 /// `(entity_id, group_id, stage_id, block_id, column)` — `group_id` is `None`
@@ -534,7 +569,7 @@ const INELIGIBLE_THERMAL_COLUMNS: [IneligibleColumn; 1] = [IneligibleColumn {
              unlike contract price, which is block-eligible",
 }];
 
-/// Rejects a `block_id` on a hydro or thermal bound column with no per-block
+/// Rule 37: rejects a `block_id` on a hydro or thermal bound column with no per-block
 /// LP variable: [`resolve_bounds`] never reads the column for a block row at
 /// all (`HydroBlockOverride`/`ThermalBlockOverride` carry no field for it), so
 /// today the value is dropped without a diagnostic; this rule turns that into
@@ -603,7 +638,7 @@ fn emit_ineligible_column_error(
     );
 }
 
-/// Rejects any non-null `block_id` on a `thermal_bounds` row targeting a
+/// Rule 38: rejects any non-null `block_id` on a `thermal_bounds` row targeting a
 /// thermal with `anticipated_config` set, whatever columns the row carries.
 ///
 /// The anticipated commitment decision is a stage-level column, but
@@ -653,7 +688,7 @@ pub(super) fn check_block_id_on_anticipated_thermal(
     }
 }
 
-/// Rejects a `hydro_bounds` row that raises `max_turbined_m3s` or
+/// Rule 43: rejects a `hydro_bounds` row that raises `max_turbined_m3s` or
 /// `max_generation_mw` above the hydro's own declared value, each column
 /// checked independently. A row on an unknown `hydro_id` is skipped — Layer 3
 /// referential validation already owns that rejection. The comparison is
@@ -731,7 +766,7 @@ fn emit_raises_declared_capacity_error(
     );
 }
 
-/// Rejects a `hydro_unit_group_bounds` row that raises `max_turbined_m3s` or
+/// Rule 45: rejects a `hydro_unit_group_bounds` row that raises `max_turbined_m3s` or
 /// `max_generation_mw` above that GROUP's own declared value — not the
 /// plant's — each column checked independently; the group-axis mirror of
 /// [`check_bound_raises_declared_capacity`] (rule 43). A row on an unknown
@@ -838,20 +873,21 @@ mod tests {
     use super::super::validate_semantic_hydro_thermal;
     use crate::ValidationEntry;
     use crate::constraints::{
-        ContractBoundsRow, HydroBoundsRow, HydroUnitGroupBoundsRow, LineBoundsRow,
-        PumpingBoundsRow, ThermalBoundsRow,
+        ContractBoundsRow, GenericConstraintBoundsRow, HydroBoundsRow, HydroUnitGroupBoundsRow,
+        LineBoundsRow, PumpingBoundsRow, ThermalBoundsRow,
     };
     use crate::stages::StagesData;
     use crate::test_support::*;
     use crate::validation::schema::ParsedData;
     use crate::validation::{ErrorKind, ValidationContext};
 
-    const BOUND_FILES: [&str; 5] = [
+    const BOUND_FILES: [&str; 6] = [
         "constraints/thermal_bounds.parquet",
         "constraints/hydro_bounds.parquet",
         "constraints/line_bounds.parquet",
         "constraints/pumping_bounds.parquet",
         "constraints/contract_bounds.parquet",
+        "constraints/generic_constraint_bounds.parquet",
     ];
 
     /// Stage 0 declares 3 blocks, stage 1 declares 2 — the two counts must
@@ -869,7 +905,7 @@ mod tests {
             openings_declared: std::collections::HashSet::new(),
             stages: vec![stage_0, stage_1],
             policy_graph: HorizonGraph {
-                stage_discount_rate_overrides: std::collections::HashMap::new(),
+                stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
@@ -951,6 +987,20 @@ mod tests {
         }
     }
 
+    fn generic_constraint_row(
+        id: i32,
+        stage_id: i32,
+        block_id: Option<i32>,
+    ) -> GenericConstraintBoundsRow {
+        GenericConstraintBoundsRow {
+            constraint_id: id,
+            stage_id,
+            block_id,
+            bound_lower: None,
+            bound_upper: Some(1.0),
+        }
+    }
+
     fn group_bounds_row(
         hydro_id: i32,
         group_id: i32,
@@ -987,7 +1037,7 @@ mod tests {
     }
 
     /// Runs the full Layer 5a dispatch and returns only the findings of `kind`
-    /// raised against one of the five bound parquets.
+    /// raised against one of the six flat-family bound parquets ([`BOUND_FILES`]).
     fn bound_errors_of_kind(data: &ParsedData, kind: ErrorKind) -> Vec<ValidationEntry> {
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(data, &mut ctx);
@@ -1006,7 +1056,7 @@ mod tests {
         bound_errors_of_kind(data, ErrorKind::DuplicateId)
     }
 
-    /// No other Layer 5a rule emits `InvalidValue` against one of the five
+    /// No other Layer 5a rule emits `InvalidValue` against one of the six
     /// bound parquets, so this isolates `check_bound_raises_declared_capacity`
     /// from the plant-level `InvalidValue` rules that target
     /// `system/hydros.json` instead (e.g. rule 3's turbine-bound ordering).
@@ -1085,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_five_bound_families_are_checked() {
+    fn test_all_six_bound_families_are_checked() {
         let mut data = make_data(
             vec![],
             vec![],
@@ -1094,7 +1144,7 @@ mod tests {
                 openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage_with_blocks(0, 1), make_stage_with_blocks(1, 3)],
                 policy_graph: HorizonGraph {
-                    stage_discount_rate_overrides: std::collections::HashMap::new(),
+                    stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                     graph_type: PolicyGraphType::FiniteHorizon,
                     annual_discount_rate: 0.06,
                     transitions: vec![],
@@ -1113,11 +1163,12 @@ mod tests {
         data.line_bounds = vec![line_row(1, 0, Some(1))];
         data.pumping_bounds = vec![pumping_row(1, 0, Some(1))];
         data.contract_bounds = vec![contract_row(1, 0, Some(1))];
+        data.generic_constraint_bounds = vec![generic_constraint_row(1, 0, Some(1))];
 
         let errors = bound_range_errors(&data);
         assert_eq!(
             errors.len(),
-            5,
+            6,
             "expected one error per family, got: {errors:?}"
         );
         let files: HashSet<String> = errors
@@ -1127,7 +1178,7 @@ mod tests {
         let expected: HashSet<String> = BOUND_FILES.iter().map(|s| (*s).to_string()).collect();
         assert_eq!(
             files, expected,
-            "expected all five family files to be present"
+            "expected all six family files to be present"
         );
     }
 
@@ -1173,6 +1224,41 @@ mod tests {
             stage_error.message.contains("not a declared study stage"),
             "message: {}",
             stage_error.message
+        );
+    }
+
+    /// Deliberate behavior change: a generic-constraint bounds row's `block_id`
+    /// range used to be checked in Layer 3 (`referential.rs`) as
+    /// `ErrorKind::InvalidValue`; owning it through Layer 5a's shared
+    /// `check_row` now reports `BusinessRuleViolation`, exactly like the other
+    /// six families ([`test_negative_block_id_and_out_of_horizon_stage_both_rejected`]).
+    #[test]
+    fn test_generic_constraint_bounds_block_id_range_is_business_rule_violation() {
+        let mut data = make_data(
+            vec![],
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.generic_constraint_bounds = vec![generic_constraint_row(1, 0, Some(-1))];
+
+        let business_rule_errors = bound_range_errors(&data);
+        assert_eq!(
+            business_rule_errors.len(),
+            1,
+            "expected exactly one BusinessRuleViolation, got: {business_rule_errors:?}"
+        );
+        assert!(business_rule_errors[0].message.contains("block_id=-1"));
+
+        let invalid_value_errors: Vec<_> = bound_errors_of_kind(&data, ErrorKind::InvalidValue)
+            .into_iter()
+            .filter(|e| e.message.contains("block_id"))
+            .collect();
+        assert!(
+            invalid_value_errors.is_empty(),
+            "block_id range must not also be reported as InvalidValue: {invalid_value_errors:?}"
         );
     }
 
@@ -1477,6 +1563,41 @@ mod tests {
         );
     }
 
+    /// Deliberate behavior change: `check_generic_constraint_bounds_validity`
+    /// (Layer 3) used to key duplicates per ROW `(constraint_id, stage_id,
+    /// block_id)`, rejecting this pair; owning the family through Layer 5a's
+    /// per-COLUMN key — the same rule the other six families already have —
+    /// now accepts it, exactly like [`test_disjoint_columns_on_same_entity_stage_block_accepted`].
+    #[test]
+    fn test_generic_constraint_bounds_disjoint_column_duplicate_now_accepted() {
+        let mut data = make_data(
+            vec![],
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.generic_constraint_bounds = vec![
+            GenericConstraintBoundsRow {
+                bound_lower: Some(0.0),
+                bound_upper: None,
+                ..generic_constraint_row(1, 0, Some(1))
+            },
+            GenericConstraintBoundsRow {
+                bound_lower: None,
+                bound_upper: Some(20.0),
+                ..generic_constraint_row(1, 0, Some(1))
+            },
+        ];
+
+        assert!(
+            duplicate_errors(&data).is_empty(),
+            "disjoint bound_lower/bound_upper columns on the same \
+             (constraint, stage, block) must not collide"
+        );
+    }
+
     #[test]
     fn test_stage_wide_and_block_row_on_same_column_accepted() {
         let mut data = make_data(
@@ -1651,7 +1772,7 @@ mod tests {
                 openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage_with_blocks(0, 2)],
                 policy_graph: HorizonGraph {
-                    stage_discount_rate_overrides: std::collections::HashMap::new(),
+                    stage_discount_rate_overrides: std::collections::BTreeMap::new(),
                     graph_type: PolicyGraphType::FiniteHorizon,
                     annual_discount_rate: 0.06,
                     transitions: vec![],

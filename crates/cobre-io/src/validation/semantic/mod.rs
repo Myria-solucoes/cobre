@@ -29,7 +29,7 @@
 //! |11 | FPHA: at least 1 plane per (hydro, stage)         | `system/fpha_hyperplanes.parquet`     | `BusinessRuleViolation`|
 //! |12 | FPHA: `gamma_v >= 0`, `gamma_s <= 0`              | `system/fpha_hyperplanes.parquet`     | `BusinessRuleViolation`|
 //! |13 | `min_generation_mw <= max_generation_mw` (thermal)| `system/thermals.json`                | `InvalidValue`         |
-//! |14 | Anticipated thermal `lead_stages` within study horizon and lifecycle bounds | `system/thermals.json` | `BusinessRuleViolation` |
+//! |14 | Anticipated thermal `lead_stages`/`lead_time` reaches a deliverable stage within the study horizon or a declared post-study stage (`lead_stages` must be `>= 1`) | `system/thermals.json` | `BusinessRuleViolation` |
 //! |15 | Anticipated thermals bijection with `past_anticipated_commitments` entries  | `initial_conditions.json` | `BusinessRuleViolation` |
 //! |16 | *(retired — the thermal stage axis is covered by rule 49 with the other bound families; number never reused)* | — | — |
 //! |17 | `anticipated_decision(N)` in generic constraint targets an anticipated thermal | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
@@ -40,8 +40,11 @@
 //! |22 | `travel_time_hours == 0.0` — treated as undeclared, no arc created     | `system/hydros.json`                  | `ModelQuality` (warning) |
 //! |23 | Declared arc: `max_t(t_v/h_t)` below a smallness threshold             | `system/hydros.json`                  | `ModelQuality` (warning) |
 //! |24 | Declared arc: `t_v` exceeds the remaining study horizon at some stage  | `system/hydros.json`                  | `ModelQuality` (warning) |
-//! |25 | Declared arc: `past_defluences` windows do not cover the arc's required pre-study depth | `initial_conditions.json` | `BusinessRuleViolation` (or `ModelQuality` warning) |
+//! |25 | Declared arc: `past_defluences` windows do not cover the arc's required pre-study depth | `initial_conditions.json` | `BusinessRuleViolation` |
+//! |25b| A `past_defluences` window ends after the study start (future-dated)       | `initial_conditions.json` | `InvalidValue` |
 //! |26 | 2+ declared arcs into one downstream plant with differing `travel_time_hours`, while any study stage is `Chronological` | `system/hydros.json` | `NotImplemented` |
+//! |26a| A declared arc's downstream `exit_stage_id` falls inside the arrival window of a release whose own stage is still Operating | `system/hydros.json` | `ModelQuality` (warning) |
+//! |26b| A declared arc releases at a stage where its downstream has not yet reached Operating status (`PreFilling`/`Filling`, or before `entry_stage_id`) | `system/hydros.json` | `BusinessRuleViolation` |
 //! |27 | *(retired — number never reused)* | — | — |
 //! |28 | `lead_stages` anticipated active window spans a stage-cadence transition (adjacent unequal stage durations); `lead_time` is the physically-anchored alternative | `system/thermals.json` | `ModelQuality` (warning) |
 //! |29 | Study supplies an inflow annual component (`inflow_annual_components` non-empty) while `season_map.cycle_type` is not `Monthly` — PAR(p)-A is monthly-exclusive by design | `scenarios/inflow_annual_component.parquet` | `BusinessRuleViolation` |
@@ -50,8 +53,9 @@
 //! |32 | A `recent_observations` conditioning window extends past the study start, into the solved study itself | `initial_conditions.json` | `InvalidValue` |
 //! |33 | The in-progress period `[period_start, study_start)` is covered strictly between 0 and 1 | `scenarios/inflow_history.parquet` | `ModelQuality` (warning) |
 //! |34 | The first study stage's season is unresolvable (no `season_map`, no `season_id`, or an unmatched id) while PAR seeding is active | `initial_conditions.json` | `ModelQuality` (warning) |
-//! |35 | Bound-override row `block_id` within `[0, n_blocks)` for its stage, across all six bound families (thermal, hydro, line, pumping, contract, hydro unit group) | `constraints/*_bounds.parquet` | `BusinessRuleViolation` |
-//! |36 | Bound-override row uniqueness per `(entity_id, stage_id, block_id, column)` — widened to `(hydro_id, hydro_unit_group_id, stage_id, block_id, column)` for the hydro unit group family — across all six bound families (thermal, hydro, line, pumping, contract, hydro unit group); a `None` `block_id` is a distinct key from `Some(b)` | `constraints/*_bounds.parquet` | `DuplicateId` |
+//! |34a| A realized inflow record (`inflow_history` or `recent_observations`) is negative — accepted, since incremental inflow is a difference | `scenarios/inflow_history.parquet` / `initial_conditions.json` | `ModelQuality` (warning) |
+//! |35 | Bound-override row `block_id` within `[0, n_blocks)` for its stage, across all seven bound families (thermal, hydro, line, pumping, contract, hydro unit group, generic constraint) | `constraints/*_bounds.parquet` | `BusinessRuleViolation` |
+//! |36 | Bound-override row uniqueness per `(entity_id, stage_id, block_id, column)` — widened to `(hydro_id, hydro_unit_group_id, stage_id, block_id, column)` for the hydro unit group family — across all seven bound families (thermal, hydro, line, pumping, contract, hydro unit group, generic constraint); a `None` `block_id` is a distinct key from `Some(b)`, and a disjoint-column duplicate is legal (the key is scoped per column, not per row) | `constraints/*_bounds.parquet` | `DuplicateId` |
 //! |37 | `block_id` on a hydro/thermal bound column with no per-block LP variable (hydro storage/filling-rate/withdrawal, thermal cost) | `constraints/{hydro,thermal}_bounds.parquet` | `BusinessRuleViolation` |
 //! |38 | `block_id` on a `thermal_bounds` row targeting an anticipated thermal (commitment decision is stage-level; delivery-stage reconciliation compares per-block bounds) | `constraints/thermal_bounds.parquet` | `BusinessRuleViolation` |
 //! |39 | Hydro unit group `id` unique within its own plant (ids are plant-scoped, not global) | `system/hydros.json` | `DuplicateId` |
@@ -65,6 +69,7 @@
 //! |47 | Post-study boundary (`post_study_stages.json`), the sole post-horizon surface: stages date-contiguous with first `start_date` at the study horizon end (a); a `PostStudyThermalBound` for every post-study stage an anticipated thermal's extended lead reaches from an in-study, commissioning-active decision (Rule 1); the plant's pre-study-decided post-study stages tiled by `past_anticipated_commitments` at coverage `1.0`, an explicit `0 MW` window included where required (V2); no commitment window covering a study-decided or beyond-reach post-study stage (V3); a non-zero fixed value only inside the plant's commissioning window at its delivery stage (V5) | `post_study_stages.json` | `BusinessRuleViolation` |
 //! |48 | *(retired — number never reused)* | — | — |
 //! |49 | Bound-override row `stage_id` a member of the declared study stage id set (never a `[0, n)` position test), across all six bound families (thermal, hydro, line, pumping, contract, hydro unit group); NCS keeps its Layer-3 referential stage check | `constraints/*_bounds.parquet` | `BusinessRuleViolation` |
+//! |50 | A hydro declaring `evaporation_coefficients_mm` has geometry rows in `hydro_geometry.parquet` (area-volume curve, required for evaporation linearization) | `system/hydros.json` | `BusinessRuleViolation` |
 //!
 //! A hydro unit group bounds row's `block_id` range and duplicate-row keying
 //! are covered by rules 35 and 36 above; a row referencing a non-existent
@@ -81,8 +86,8 @@
 //! | 1  | Every transition `source_id`/`target_id` must refer to an existing stage| `stages.json`                                  | `InvalidValue`           |
 //! | 2  | Outgoing transition probabilities sum to 1.0 (±1e-6) per source stage  | `stages.json`                                  | `InvalidValue`           |
 //! | 3  | Cyclic graph: `annual_discount_rate > 0.0`                              | `stages.json`                                  | `InvalidValue`           |
-//! | 4  | Every `Block.duration_hours > 0.0`                                      | `stages.json`                                  | `InvalidValue`           |
-//! | 5  | `CVaR`: `alpha` in (0, 1], `lambda` in [0, 1]                             | `stages.json`                                  | `InvalidValue`           |
+//! | 4  | *(retired — enforced at the parse layer by `stages.rs`'s `validate_block_hours` / `validate_risk_measure`; number never reused)* | — | — |
+//! | 5  | *(retired — enforced at the parse layer by `stages.rs`'s `validate_block_hours` / `validate_risk_measure`; number never reused)* | — | — |
 //! | 6  | `max(deficit_segment_costs) > filling_target_violation_cost`            | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 7  | `storage_violation_below_cost > max(deficit_segment_costs)`             | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 8  | `max(deficit_segment_costs) > max(constraint_violation_costs)`          | `penalties.json`                               | `ModelQuality` (warning) |
@@ -94,6 +99,7 @@
 //! |14  | Correlation matrix symmetry (`matrix[i][j] == matrix[j][i]` ±1e-9)     | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |15  | Correlation matrix diagonal entries equal 1.0 (±1e-9)                  | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |16  | Correlation off-diagonal entries in [-1.0, 1.0]                        | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
+//! |16a | All entities within a correlation group share the same `entity_type`  | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |17  | Each `block_factors[j].block_id` matches a `Block.index` in its stage  | `scenarios/load_factors.json`                  | `BusinessRuleViolation`  |
 //! |18  | *(retired — number never reused)* | — | — |
 //! |19  | `season_definitions` required in `stages.json` when estimating          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
@@ -103,12 +109,12 @@
 //! |23  | *(retired — number never reused)* | — | — |
 //! |24  | *(retired — number never reused)* | — | — |
 //! |25  | Sobol stages: `branching_factor` should be a power of 2                 | `stages.json`                                  | `ModelQuality` (warning) |
-//! |26  | `simulation.sampling_scheme.type` must be a known scheme string          | `config.json`                                  | `InvalidValue`           |
+//! |26  | *(retired — `simulation.selection.method` is parse-layer enforced by a `#[serde(deny_unknown_fields)]`-tagged enum, not the semantic layer; number never reused)* | — | — |
 //! |27  | Every stage `season_id` must reference a season defined in `season_definitions` | `stages.json`                        | `BusinessRuleViolation`  |
 //! |28  | Season with zero observations when inflow scheme is not External         | `stages.json`                                  | `ModelQuality` (warning) |
 //! |29  | All stages sharing a `season_id` must have compatible durations (within 7d) | `stages.json`                        | `BusinessRuleViolation`  |
 //! |30  | Season defined in `season_definitions` but not referenced by any stage   | `stages.json`                                  | `ModelQuality` (warning) |
-//! |31  | Observation resolution must not be finer than season resolution          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
+//! |31  | Observation-to-season alignment: finer-than-season observations are aggregated during PAR estimation (warning); an interior hydro-year missing a season under coarser-than-season observations cannot be disaggregated (error) | `scenarios/inflow_history.parquet` | `BusinessRuleViolation` |
 //! |32  | *(retired — number never reused)* | — | — |
 //! |33  | Filling schedule reaches the dead volume, within a relative tolerance: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json` | `BusinessRuleViolation`  |
 //! |34  | PAR order > 0 but every study stage has `inflow_lags == false` (inflow-lag state omitted) | `stages.json`        | `ModelQuality` (warning) |
@@ -122,6 +128,7 @@
 //! |42  | Per-edge `annual_discount_rate_override` rejected under `nodes[]` — the override is a per-stage quantity on `stages[]` (legal in the chain dialect) | `stages.json` | `InvalidValue` |
 //! |43  | `scenarios/noise_openings.parquet` present under enumerated forward selection — the generated backward opening tree is not consumed there | `stages.json` | `InvalidValue` |
 //! |44  | `sampling_method` inert under external openings / ill-defined at a multi-node stage (declared `nodes[]` only) | `stages.json` | `ModelQuality` (warning) |
+//! |44a | A class resolved to the `External` scheme has non-empty `external_*_scenarios.parquet` data | `config.json` | `BusinessRuleViolation` |
 //! |45  | All slot-occupying external classes agree on the per-stage raw column-count vector `raw_c(t)` — no element-wise-minimum reconciliation, fires with or without `nodes[]` (P-B1) | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
 //! |46  | Every (slot-occupying external class, stage) carries the exact `scenario_id` set `{0..raw_c(t)-1}` per entity — a set check (rejects 1-based deck, gap, duplicate, out-of-range), not a bound check (A1) | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
 //! |47  | Every external scenario row's `stage_id` resolves to a declared study stage via the [`crate::StageIdResolver`], never silently dropped (A2) | `scenarios/external_*_scenarios.parquet` | `InvalidValue` |

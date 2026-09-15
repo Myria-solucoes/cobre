@@ -1561,7 +1561,6 @@ mod tests {
     use crate::cut::FutureCostFunction;
     use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, Transition};
     use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
-    use std::collections::HashMap as StdHashMap;
 
     fn cb(node_id: i32, marker: u32) -> CapturedBasis {
         let mut c = CapturedBasis::new(0, 0, 0, 1, 0, NodeId(node_id));
@@ -1723,7 +1722,7 @@ mod tests {
             annual_discount_rate: 0.0,
             transitions: Vec::new(),
             nodes: Vec::new(),
-            stage_discount_rate_overrides: StdHashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             season_map: None,
         }
     }

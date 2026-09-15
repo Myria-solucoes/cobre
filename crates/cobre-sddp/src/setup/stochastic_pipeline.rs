@@ -816,7 +816,7 @@ mod tests {
         );
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
@@ -1231,7 +1231,7 @@ mod tests {
         );
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
@@ -1631,7 +1631,7 @@ mod tests {
         );
 
         let policy_graph = HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            stage_discount_rate_overrides: std::collections::BTreeMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],

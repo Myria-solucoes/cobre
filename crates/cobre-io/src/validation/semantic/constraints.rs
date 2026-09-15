@@ -8,7 +8,7 @@ use cobre_core::{GenericConstraint, VariableRef, temporal::BlockMode};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
-/// Layer 5a — rejects per-block variable references that address a column a stage
+/// Rule 20. Layer 5a — rejects per-block variable references that address a column a stage
 /// cannot expose, honoring per-`(constraint, stage)` activation.
 ///
 /// `HydroStorageInitial{Some(b)}` references boundary `b` (start of block `b`);

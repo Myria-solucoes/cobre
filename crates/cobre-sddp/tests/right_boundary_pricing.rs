@@ -275,7 +275,7 @@ fn two_leaf_fan_graph() -> HorizonGraph {
                 label: None,
             },
         ],
-        stage_discount_rate_overrides: std::collections::HashMap::new(),
+        stage_discount_rate_overrides: std::collections::BTreeMap::new(),
         season_map: None,
     }
 }

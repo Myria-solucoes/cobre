@@ -167,8 +167,9 @@ pub struct StageStateConfig {
 /// the precomputation algorithm, not here. The `downstream_*` fields are inert
 /// (`0.0` / `false`) unless `accumulate_downstream` is set, so uniform-resolution
 /// studies carry zero hot-path overhead.
-// Rationale: the bools encode orthogonal hot-path conditions independently
-// tested in `accumulate_and_shift_lag_state`; an enum would need 2^N variants.
+// Rationale: the bools encode orthogonal hot-path conditions, each
+// independently tested by the lag-state accumulation kernel; an enum would
+// need 2^N variants.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -198,8 +199,8 @@ pub struct StageLagTransition {
     /// downstream ring buffer.
     pub downstream_finalize: bool,
 
-    /// When `true` (first coarse stage with a downstream PAR order),
-    /// `accumulate_and_shift_lag_state` overwrites `state[lag_start..]` with the
+    /// When `true` (first coarse stage with a downstream PAR order), the
+    /// lag-state accumulation kernel overwrites `state[lag_start..]` with the
     /// completed downstream lags before resuming primary accumulation.
     pub rebuild_from_downstream: bool,
 }

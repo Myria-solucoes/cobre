@@ -8327,7 +8327,7 @@ mod heterogeneous_visit_bound_resume {
 mod enumerated_external {
     #![allow(clippy::cast_possible_wrap)]
 
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::sync::mpsc;
 
     use chrono::NaiveDate;
@@ -8503,7 +8503,7 @@ mod enumerated_external {
             annual_discount_rate: 0.0,
             transitions,
             nodes,
-            stage_discount_rate_overrides: HashMap::new(),
+            stage_discount_rate_overrides: BTreeMap::new(),
             season_map: None,
         };
 
