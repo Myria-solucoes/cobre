@@ -22,11 +22,16 @@ use crate::StochasticError;
 // Correlation estimation
 // ---------------------------------------------------------------------------
 
+/// Minimum number of paired observations required per season for a per-season
+/// correlation matrix. Seasons below this threshold fall back to the pooled
+/// (all-season) matrix via the "default" profile.
+const MIN_CORRELATION_PAIRS: usize = 30;
+
 /// Estimate the cross-entity residual correlation matrix from historical observations.
 ///
 /// After a PAR(p) model is fitted (via
-/// [`estimate_seasonal_stats`](super::estimate_seasonal_stats) and
-/// [`estimate_ar_coefficients`](super::estimate_ar_coefficients)), this function computes the standardized
+/// [`estimate_seasonal_stats_with_season_map`](super::estimate_seasonal_stats_with_season_map) and
+/// [`estimate_ar_coefficients_with_season_map`](super::estimate_ar_coefficients_with_season_map)), this function computes the standardized
 /// innovation residuals for each entity at each time step and derives
 /// the Pearson correlation between each pair of entities. The result is
 /// a [`CorrelationModel`] with a single `"default"` profile containing
@@ -68,11 +73,12 @@ use crate::StochasticError;
 ///
 /// - `observations` — `(entity_id, date, value)` triples sorted by `(entity_id, date)`.
 /// - `hydro_ids` — canonical sorted entity IDs; determines matrix row/column order.
+/// - `season_map` — optional [`SeasonMap`] fallback.
 ///
 /// # Errors
 ///
-/// - [`StochasticError::InsufficientData`] when `seasonal_stats` is empty but
-///   `hydro_ids` is non-empty (inconsistent inputs).
+/// Returns [`StochasticError::InsufficientData`] when seasonal stats are
+/// empty but hydros are present, or when residual computation fails.
 ///
 /// # Examples
 ///
@@ -80,7 +86,8 @@ use crate::StochasticError;
 /// use chrono::NaiveDate;
 /// use cobre_core::{EntityId, temporal::{Stage, Block, BlockMode, StageStateConfig, StageRiskConfig, ScenarioSourceConfig, NoiseMethod}};
 /// use cobre_stochastic::par::fitting::{
-///     estimate_seasonal_stats, estimate_ar_coefficients, estimate_correlation,
+///     estimate_seasonal_stats_with_season_map, estimate_ar_coefficients_with_season_map,
+///     estimate_correlation_with_season_map,
 /// };
 ///
 /// fn stage(id: i32, y0: i32, m0: u32, y1: i32, m1: u32, season: usize) -> Stage {
@@ -106,40 +113,12 @@ use crate::StochasticError;
 /// let obs: Vec<(EntityId, NaiveDate, f64)> = (2000..2005_i32)
 ///     .map(|y| (EntityId::from(1), NaiveDate::from_ymd_opt(y, 1, 15).unwrap(), 100.0 + y as f64))
 ///     .collect();
-/// let stats = estimate_seasonal_stats(&obs, &stages_vec, &hydro_ids).unwrap();
-/// let estimates = estimate_ar_coefficients(&obs, &stats, &stages_vec, &hydro_ids, 0).unwrap();
-/// let corr = estimate_correlation(&obs, &estimates, &stats, &stages_vec, &hydro_ids).unwrap();
+/// let stats = estimate_seasonal_stats_with_season_map(&obs, &stages_vec, &hydro_ids, None).unwrap();
+/// let estimates = estimate_ar_coefficients_with_season_map(&obs, &stats, &stages_vec, &hydro_ids, 0, None).unwrap();
+/// let corr = estimate_correlation_with_season_map(&obs, &estimates, &stats, &stages_vec, &hydro_ids, None).unwrap();
 /// assert!(corr.profiles.contains_key("default"));
 /// assert_eq!(corr.profiles["default"].groups[0].matrix.len(), 1);
 /// ```
-pub fn estimate_correlation(
-    observations: &[(EntityId, NaiveDate, f64)],
-    ar_estimates: &[ArCoefficientEstimate],
-    seasonal_stats: &[SeasonalStats],
-    stages: &[Stage],
-    hydro_ids: &[EntityId],
-) -> Result<CorrelationModel, StochasticError> {
-    estimate_correlation_with_season_map(
-        observations,
-        ar_estimates,
-        seasonal_stats,
-        stages,
-        hydro_ids,
-        None,
-    )
-}
-
-/// Minimum number of paired observations required per season for a per-season
-/// correlation matrix. Seasons below this threshold fall back to the pooled
-/// (all-season) matrix via the "default" profile.
-const MIN_CORRELATION_PAIRS: usize = 30;
-
-/// Estimate correlation with an optional [`SeasonMap`] fallback.
-///
-/// # Errors
-///
-/// Returns [`StochasticError::InsufficientData`] when seasonal stats are
-/// empty but hydros are present, or when residual computation fails.
 pub fn estimate_correlation_with_season_map(
     observations: &[(EntityId, NaiveDate, f64)],
     ar_estimates: &[ArCoefficientEstimate],
@@ -193,8 +172,9 @@ pub fn estimate_correlation_with_season_map(
     ))
 }
 
-/// Compute standardized AR innovation residuals (see `estimate_correlation`'s
-/// residual formula) for each hydro, keyed by `season_id` rather than pooled
+/// Compute standardized AR innovation residuals (see
+/// `estimate_correlation_with_season_map`'s residual formula) for each hydro, keyed by
+/// `season_id` rather than pooled
 /// into a flat date map; one entry per position in `hydro_ids`.
 fn compute_hydro_residuals(
     lookups: &SeasonLookups<'_>,

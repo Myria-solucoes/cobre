@@ -35,11 +35,10 @@ pub use fitting::{
     PacfSelectionResult, PeriodicYwAnnualResult, PeriodicYwResult, ReductionReason, SeasonalStats,
     StdRatioDivergence, build_estimation_report, build_extended_periodic_yw_matrix,
     build_periodic_yw_matrix, conditional_facp_partitioned, cross_correlation_a_z_neg1,
-    cross_correlation_z_a, estimate_annual_seasonal_stats, estimate_ar_coefficients,
-    estimate_ar_coefficients_with_selection, estimate_correlation,
+    cross_correlation_z_a, estimate_annual_seasonal_stats, estimate_ar_coefficients_with_selection,
     estimate_periodic_ar_annual_coefficients, estimate_periodic_ar_coefficients,
-    estimate_seasonal_stats, find_season_for_date, periodic_autocorrelation, periodic_pacf,
-    select_order_aic, select_order_pacf, select_order_pacf_annual, solve_linear_system,
+    find_season_for_date, periodic_autocorrelation, periodic_pacf, select_order_aic,
+    select_order_pacf, select_order_pacf_annual, solve_linear_system,
 };
 pub use lag_kernel::{
     DownstreamLagAccum, EntityMajor, LagIndex, LagMajor, PrimaryLagAccum, advance_lag_chain,
@@ -49,4 +48,4 @@ pub use lag_transition::{
     resolve_stage_lag_transition,
 };
 pub use precompute::PrecomputedPar;
-pub use validation::{ParValidationReport, ParWarning, validate_par_parameters};
+pub use validation::validate_par_parameters;

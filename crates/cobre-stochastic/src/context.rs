@@ -57,7 +57,7 @@ use crate::{
     sampling::historical::HistoricalScenarioLibrary,
     tree::{
         generate::{ClassDimensions, OpeningTreeGenerationInputs, generate_opening_tree},
-        opening_tree::{OpeningTreeView, SweepDirection},
+        opening_tree::OpeningTreeView,
     },
 };
 
@@ -305,7 +305,7 @@ impl StochasticContext {
     }
 
     /// Install a per-stage opening solve order, sorting each stage's openings by
-    /// `keys[s]` in `direction` (see [`OpeningTree::set_solve_order`]). Keys are
+    /// descending `keys[s]` (see [`OpeningTree::set_solve_order`]). Keys are
     /// caller-computed from setup-constant data, so the order is run-constant and
     /// identical across processes handed the same keys.
     ///
@@ -314,12 +314,8 @@ impl StochasticContext {
     /// Propagates [`StochasticError::InsufficientData`]
     /// when the key table's stage count or any stage's key count does not match
     /// the tree.
-    pub fn set_solve_order(
-        &mut self,
-        keys: &[Vec<f64>],
-        direction: SweepDirection,
-    ) -> Result<(), StochasticError> {
-        self.opening_tree.set_solve_order(keys, direction)
+    pub fn set_solve_order(&mut self, keys: &[Vec<f64>]) -> Result<(), StochasticError> {
+        self.opening_tree.set_solve_order(keys)
     }
 
     /// Returns the base seed used to generate the opening tree.
@@ -590,8 +586,6 @@ fn external_ar0_inflow_models(
 ///   with zero standard deviation.
 /// - [`StochasticError::InvalidCorrelation`]: the correlation model is empty,
 ///   ambiguous, or contains an invalid matrix.
-/// - [`StochasticError::SpectralDecompositionFailed`]: a correlation matrix
-///   is not positive-definite.
 ///
 /// [`LoadModel`]: cobre_core::scenario::LoadModel
 // Rationale: extracting sub-steps would thread the same partially-built context
@@ -613,7 +607,7 @@ pub fn build_stochastic_context(
         external_scenario_counts,
         noise_group_ids,
     } = opening_tree_inputs;
-    let _report = validate_par_parameters(system.inflow_models())?;
+    validate_par_parameters(system.inflow_models())?;
 
     let study_stages: Vec<_> = system
         .stages()

@@ -7,17 +7,6 @@
 
 use crate::error::StochasticError;
 
-/// Direction in which [`OpeningTree::set_solve_order`] sorts each stage's
-/// openings by their caller-supplied key. Purely an ordering policy, with no
-/// algorithm-specific meaning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SweepDirection {
-    /// Smallest key first.
-    Ascending,
-    /// Largest key first.
-    Descending,
-}
-
 /// Fixed opening tree of pre-generated noise realisations, read-only after
 /// construction.
 ///
@@ -103,11 +92,11 @@ impl OpeningTree {
     }
 
     /// Replace the per-stage solve order by sorting each stage's openings by a
-    /// caller-supplied scalar key, in the given [`SweepDirection`].
+    /// caller-supplied scalar key, **descending**.
     ///
     /// `keys[s]` holds one key per canonical opening ω (`keys.len() == n_stages()`,
     /// `keys[s].len() == n_openings(s)`). Ties are broken by **ascending canonical
-    /// ω**, so the permutation is a deterministic function of `(keys, direction)`
+    /// ω**, so the permutation is a deterministic function of `keys`
     /// alone — independent of input ordering and identical on every process given
     /// the same keys. Only the permutation is stored, not the keys.
     ///
@@ -117,11 +106,7 @@ impl OpeningTree {
     /// [`Self::n_stages`], or if any `keys[s].len()` does not equal
     /// `n_openings(s)` — naming the offending stage and both lengths. The solve
     /// order is left unchanged on error.
-    pub fn set_solve_order(
-        &mut self,
-        keys: &[Vec<f64>],
-        direction: SweepDirection,
-    ) -> Result<(), StochasticError> {
+    pub fn set_solve_order(&mut self, keys: &[Vec<f64>]) -> Result<(), StochasticError> {
         if keys.len() != self.n_stages {
             return Err(StochasticError::InsufficientData {
                 context: format!(
@@ -164,10 +149,7 @@ impl OpeningTree {
                 let kb = stage_keys[b as usize];
                 // total_cmp totally orders all f64 bit patterns (NaN/±0), so the
                 // permutation is rank-invariant.
-                match direction {
-                    SweepDirection::Ascending => ka.total_cmp(&kb),
-                    SweepDirection::Descending => kb.total_cmp(&ka),
-                }
+                kb.total_cmp(&ka)
             });
             debug_assert!(
                 is_permutation(order, n_openings),
@@ -638,8 +620,7 @@ mod tests {
         // Stage 0 keys: ω0=1.0, ω1=3.0, ω2=2.0 → descending order [1, 2, 0].
         // Stage 1 keys: ω0=-1.0, ω1=0.5, ω2=10.0, ω3=4.0 → descending [2, 3, 1, 0].
         let keys = vec![vec![1.0, 3.0, 2.0], vec![-1.0, 0.5, 10.0, 4.0]];
-        tree.set_solve_order(&keys, SweepDirection::Descending)
-            .expect("dims aligned");
+        tree.set_solve_order(&keys).expect("dims aligned");
 
         assert!(is_permutation(tree.solve_order(0), 3));
         assert!(is_permutation(tree.solve_order(1), 4));
@@ -648,25 +629,11 @@ mod tests {
     }
 
     #[test]
-    fn solve_order_ascending_first_is_smallest_key() {
-        let mut tree = OpeningTree::from_parts((0_i32..6).map(f64::from).collect(), vec![3], 2);
-        let keys = vec![vec![1.0, 3.0, 2.0]];
-        tree.set_solve_order(&keys, SweepDirection::Ascending)
-            .expect("dims aligned");
-        // Ascending: smallest key first → [0 (1.0), 2 (2.0), 1 (3.0)].
-        assert_eq!(tree.solve_order(0), &[0, 2, 1]);
-    }
-
-    #[test]
     fn solve_order_ties_broken_by_canonical_omega() {
-        // All keys equal: every direction must fall back to ascending ω.
+        // All keys equal: falls back to ascending ω.
         let mut tree = OpeningTree::from_parts((0_i32..8).map(f64::from).collect(), vec![4], 2);
         let keys = vec![vec![7.0, 7.0, 7.0, 7.0]];
-        tree.set_solve_order(&keys, SweepDirection::Descending)
-            .expect("dims aligned");
-        assert_eq!(tree.solve_order(0), &[0, 1, 2, 3]);
-        tree.set_solve_order(&keys, SweepDirection::Ascending)
-            .expect("dims aligned");
+        tree.set_solve_order(&keys).expect("dims aligned");
         assert_eq!(tree.solve_order(0), &[0, 1, 2, 3]);
     }
 
@@ -677,16 +644,13 @@ mod tests {
         let mut tree = OpeningTree::from_parts((0_i32..6).map(f64::from).collect(), vec![3], 2);
         let keys_a = vec![vec![5.0, 1.0, 3.0]];
         let keys_b = vec![vec![1.0, 5.0, 3.0]];
-        tree.set_solve_order(&keys_a, SweepDirection::Descending)
-            .expect("dims aligned");
+        tree.set_solve_order(&keys_a).expect("dims aligned");
         assert_eq!(tree.solve_order(0), &[0, 2, 1]);
         // Install a different key set, then re-install the first: result matches
         // a fresh install (the reset-to-identity-before-sort guarantee).
-        tree.set_solve_order(&keys_b, SweepDirection::Descending)
-            .expect("dims aligned");
+        tree.set_solve_order(&keys_b).expect("dims aligned");
         assert_eq!(tree.solve_order(0), &[1, 2, 0]);
-        tree.set_solve_order(&keys_a, SweepDirection::Descending)
-            .expect("dims aligned");
+        tree.set_solve_order(&keys_a).expect("dims aligned");
         assert_eq!(tree.solve_order(0), &[0, 2, 1]);
     }
 
@@ -696,7 +660,7 @@ mod tests {
         // Two stages in the tree, but only one stage of keys.
         let keys = vec![vec![1.0]];
         let err = tree
-            .set_solve_order(&keys, SweepDirection::Descending)
+            .set_solve_order(&keys)
             .expect_err("stage count mismatch must error");
         let msg = err.to_string();
         assert!(msg.contains('1'), "must name keys stage count 1: {msg}");
@@ -709,7 +673,7 @@ mod tests {
         // Stage 1 has 2 openings but only 1 key is supplied.
         let keys = vec![vec![1.0], vec![3.0]];
         let err = tree
-            .set_solve_order(&keys, SweepDirection::Descending)
+            .set_solve_order(&keys)
             .expect_err("opening count mismatch must error");
         let msg = err.to_string();
         assert!(

@@ -1182,7 +1182,7 @@ fn roundtrip_estimation_two_season_par2_recovers_coefficients() {
         make_two_season_stage(1, 1, 1, ref_year, false),
     ];
 
-    // Build seasonal stats (Bessel-corrected std to match estimate_seasonal_stats).
+    // Build seasonal stats (Bessel-corrected std to match estimate_seasonal_stats_with_season_map).
     let n_f = n_years as f64;
     let mu0 = obs_s0.iter().sum::<f64>() / n_f;
     let mu1 = obs_s1.iter().sum::<f64>() / n_f;

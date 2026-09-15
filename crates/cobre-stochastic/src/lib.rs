@@ -45,8 +45,7 @@ pub use noise::seed::{derive_forward_seed, derive_opening_seed, derive_stage_see
 pub use normal::precompute::{BlockFactorPair, EntityFactorEntry, PrecomputedNormal};
 #[allow(deprecated)]
 pub use par::{
-    ArCoefficientEstimate, ParValidationReport, ParWarning, PrecomputedPar, SeasonalStats,
-    estimate_ar_coefficients, estimate_seasonal_stats, evaluate_par, evaluate_par_batch,
+    ArCoefficientEstimate, PrecomputedPar, SeasonalStats, evaluate_par, evaluate_par_batch,
     evaluate_par_inflow, evaluate_par_inflows, solve_par_noise, solve_par_noise_batch,
     solve_par_noises, validate_par_parameters,
 };
@@ -62,8 +61,7 @@ pub use sampling::{
 };
 pub use seeds::{DerivedInflowSeeds, DerivedSeed, derive_inflow_seeds};
 pub use tree::{
-    ClassDimensions, NoisePointSpec, OpeningTree, OpeningTreeView, SweepDirection,
-    generate_opening_tree,
+    ClassDimensions, NoisePointSpec, OpeningTree, OpeningTreeView, generate_opening_tree,
 };
 
 #[cfg(test)]

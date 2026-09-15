@@ -90,7 +90,6 @@ use cobre_io::build_hydro_reference_volumes_resolved;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
     ClassSchemes, ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext,
-    SweepDirection,
 };
 
 use crate::{
@@ -467,7 +466,7 @@ impl StudySetup {
         // thread/rank counts (canonical-ω aggregation is order-independent).
         let solve_order_keys = build_noise_key_table(system, &stochastic)?;
         stochastic
-            .set_solve_order(&solve_order_keys, SweepDirection::Descending)
+            .set_solve_order(&solve_order_keys)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
 
         // Computed here (not inside `build_energy_and_templates`) so the one

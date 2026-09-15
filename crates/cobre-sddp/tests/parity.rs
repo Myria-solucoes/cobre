@@ -803,8 +803,7 @@ mod determinism {
         Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
     use cobre_stochastic::{
-        ClassSchemes, OpeningTreeInputs, StochasticContext, SweepDirection,
-        build_stochastic_context,
+        ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
     };
 
     // ===========================================================================
@@ -1571,7 +1570,7 @@ mod determinism {
             })
             .collect();
         fx.stochastic
-            .set_solve_order(&keys, SweepDirection::Descending)
+            .set_solve_order(&keys)
             .expect("solve-order key dims match the tree");
         assert_eq!(
             fx.stochastic.tree_view().solve_order(0),
@@ -1867,7 +1866,7 @@ mod determinism {
         let mut fx = Fixture3H::with_branching(BRANCHING);
         let keys: Vec<Vec<f64>> = (0..fx.n_stages).map(|_| vec![3.0, 1.0, 4.0, 2.0]).collect();
         fx.stochastic
-            .set_solve_order(&keys, SweepDirection::Descending)
+            .set_solve_order(&keys)
             .expect("solve-order key dims match the tree");
 
         let (_training_result, fcf) = run_training(1, &fx, N_ITERATIONS);

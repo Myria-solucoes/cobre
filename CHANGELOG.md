@@ -11,6 +11,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING — the `cobre-stochastic` public surface drops a set of unused
+  validation, fitting, ordering and error-reporting items.** PAR parameter
+  validation no longer returns a report of non-fatal warnings; the
+  low-residual-variance warning it accumulated reached no log line, output file
+  or Python binding, and the function now returns only the fatal
+  zero-standard-deviation result, whose check, message and fields are unchanged.
+  The three PAR-fitting entry points that existed only to pass an absent season
+  map through to their season-map-aware counterparts are removed; every caller
+  now passes the season map explicitly, the fitted seasonal statistics, AR
+  coefficients and correlation matrices are unchanged, and the season-map-aware
+  functions keep their names, signatures and documentation. Installing a
+  per-stage opening solve order no longer takes a sort-direction argument: the
+  enum that selected it had one reachable setting, every caller passed it, and
+  the openings are now always ordered by descending key with equal keys broken
+  by ascending canonical order — the same permutation, cut for cut, that every
+  run produced before. `StochasticError` no longer carries the three variants no
+  code path ever produced — a spectral-decomposition failure, a seed-derivation
+  failure and an unsupported-sampling-scheme report. Correlation matrix problems
+  are reported, as they always were, through the invalid-correlation variant; a
+  matrix that is not positive-definite is still clipped rather than rejected;
+  seed derivation is infallible; and an absent scenario source is still reported
+  through the missing-scenario-source variant.
+
 - **BREAKING — the `cobre-io` public surface drops a set of unused,
   narrowly-reached, or duplicated items.** Four unused postcard serialization
   helpers are removed: the free `System` and scalar-parameter
