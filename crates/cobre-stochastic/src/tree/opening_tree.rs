@@ -469,13 +469,9 @@ mod tests {
         assert_eq!(tree.dim(), 2);
         assert_eq!(tree.len(), 30);
 
-        // Stage 0, opening 0: elements 0,1
         assert_eq!(tree.opening(0, 0), &[0.0_f64, 1.0]);
-        // Stage 0, opening 4: elements 8,9
         assert_eq!(tree.opening(0, 4), &[8.0_f64, 9.0]);
-        // Stage 1, opening 0: elements 10,11
         assert_eq!(tree.opening(1, 0), &[10.0_f64, 11.0]);
-        // Stage 2, opening 4: elements 28,29
         assert_eq!(tree.opening(2, 4), &[28.0_f64, 29.0]);
     }
 

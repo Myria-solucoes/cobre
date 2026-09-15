@@ -617,15 +617,13 @@ impl StudySetup {
         )?;
 
         reject_scenario_id_under_sampled_selection(&node_graph, training_enumerated)?;
-        {
-            let prov = stochastic.provenance();
-            reject_insample_class_under_external_nodes(
-                &node_graph,
-                (prov.inflow_scheme, stochastic.n_hydros()),
-                (prov.load_scheme, stochastic.n_load_buses()),
-                (prov.ncs_scheme, stochastic.n_stochastic_ncs()),
-            )?;
-        }
+        let prov = stochastic.provenance();
+        reject_insample_class_under_external_nodes(
+            &node_graph,
+            (prov.inflow_scheme, stochastic.n_hydros()),
+            (prov.load_scheme, stochastic.n_load_buses()),
+            (prov.ncs_scheme, stochastic.n_stochastic_ncs()),
+        )?;
 
         // Resolves any `enumerated`-declared phase's actual count now that the
         // graph exists — config load could only signal the request, never the
