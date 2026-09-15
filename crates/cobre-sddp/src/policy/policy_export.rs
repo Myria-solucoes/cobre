@@ -22,7 +22,8 @@ use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
     OwnedPolicyCutRecord, PolicyBasisRecord, PolicyCutRecord, STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL,
-    STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload, StageStatesPayload, StateFamily,
+    STAGE_CUTS_NODE_ID_SENTINEL, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
+    StageStatesPayload, StateFamily,
 };
 
 use crate::SddpError;
@@ -213,13 +214,12 @@ pub fn build_stage_entity_manifest(
                 );
                 delivery_anchor_at(m - t)
             });
-        EntitySlot {
-            entity_type: StateFamily::AnticipatedThermalState.code(),
-            entity_id: plant.id.0,
-            subindex: slot_idx as u32,
-            was_active: commissioning_active(plant.entry_stage_id, plant.exit_stage_id, stage_id),
-            delivery_date,
-        }
+        EntitySlot::anticipated(
+            plant.id.0,
+            slot_idx as u32,
+            commissioning_active(plant.entry_stage_id, plant.exit_stage_id, stage_id),
+        )
+        .with_delivery_date(delivery_date)
     };
 
     let mut manifest = Vec::with_capacity(projection.n_slots());
@@ -229,55 +229,49 @@ pub fn build_stage_entity_manifest(
         let slot = match region {
             StateRegion::Storage => {
                 let hydro = &hydros[offset];
-                EntitySlot {
-                    entity_type: StateFamily::HydroStorage.code(),
-                    entity_id: hydro.id.0,
-                    subindex: 0,
-                    was_active: hydro_operating_active(
+                EntitySlot::storage(
+                    hydro.id.0,
+                    hydro_operating_active(
                         hydro.filling.as_ref(),
                         hydro.entry_stage_id,
                         hydro.exit_stage_id,
                         stage_id,
                     ),
-                    delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                }
+                )
             }
             StateRegion::Lag => {
                 let lag = offset / n;
                 let h = offset % n;
                 let hydro = &hydros[h];
-                EntitySlot {
-                    entity_type: StateFamily::HydroInflowLag.code(),
-                    entity_id: hydro.id.0,
-                    subindex: (lag + 1) as u32,
-                    was_active: hydro_operating_active(
+                EntitySlot::inflow_lag(
+                    hydro.id.0,
+                    (lag + 1) as u32,
+                    hydro_operating_active(
                         hydro.filling.as_ref(),
                         hydro.entry_stage_id,
                         hydro.exit_stage_id,
                         stage_id,
                     ),
-                    delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-                }
+                )
             }
             StateRegion::Buckets => {
                 let (plant_idx, lag) = global_layout.transit_bucket_column_order[offset];
                 let hydro = &hydros[plant_idx];
-                EntitySlot {
-                    entity_type: StateFamily::HydroTransitBucket.code(),
-                    entity_id: hydro.id.0,
-                    subindex: lag as u32,
-                    was_active: hydro_operating_active(
+                EntitySlot::transit_bucket(
+                    hydro.id.0,
+                    lag as u32,
+                    hydro_operating_active(
                         hydro.filling.as_ref(),
                         hydro.entry_stage_id,
                         hydro.exit_stage_id,
                         stage_id,
                     ),
-                    // Study-only dating (`bucket_anchor_at`, never the extended
-                    // `delivery_anchor_at`): a bucket lag landing past the study
-                    // horizon stays sentinel — §W1, the water ring's dating is
-                    // unchanged by post-study stages (Terminal credit deferred).
-                    delivery_date: bucket_anchor_at(lag),
-                }
+                )
+                // Study-only dating (`bucket_anchor_at`, never the extended
+                // `delivery_anchor_at`): a bucket lag landing past the study
+                // horizon stays sentinel — §W1, the water ring's dating is
+                // unchanged by post-study stages (Terminal credit deferred).
+                .with_delivery_date(bucket_anchor_at(lag))
             }
             StateRegion::CommitmentHold => anticipated_slot(offset),
         };
@@ -413,12 +407,8 @@ pub fn reserve_boundary_inflow_lag_slots<S: std::hash::BuildHasher>(
     // shape build_stage_entity_manifest's Lag arm emits.
     let reserved_slots: Vec<EntitySlot> = (0..n)
         .flat_map(|lag| {
-            storage_slots.iter().map(move |storage| EntitySlot {
-                entity_type: StateFamily::HydroInflowLag.code(),
-                entity_id: storage.entity_id,
-                subindex: (lag + 1) as u32,
-                was_active: storage.was_active,
-                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            storage_slots.iter().map(move |storage| {
+                EntitySlot::inflow_lag(storage.entity_id, (lag + 1) as u32, storage.was_active)
             })
         })
         .collect();
@@ -694,8 +684,9 @@ fn sole_pool_owner_node_id(node_graph: &NodeGraph, pool: usize) -> i32 {
 /// each is indexed by the same pool index. `stage_manifests[t]` carries one slot
 /// per cut-state dimension of pool `t`. Each pool's `cost_scale_factor` is the
 /// study's single resolved factor, `graph_stage_id` is
-/// `study_stage_ids[node_graph.pool_stage[pool]]`, and `node_id` is the pool's
-/// sole owning node id (see [`sole_pool_owner_node_id`]).
+/// `study_stage_ids[node_graph.pool_stage[pool]]`, `node_id` is the pool's
+/// sole owning node id (see [`sole_pool_owner_node_id`]), and
+/// `priced_state_date` is always [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`].
 #[must_use]
 pub fn build_stage_cuts_payloads<'a>(
     fcf: &FutureCostFunction,
@@ -724,6 +715,7 @@ pub fn build_stage_cuts_payloads<'a>(
                 .get(node_graph.pool_stage[pool].0)
                 .copied()
                 .unwrap_or(STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL),
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         })
         .collect()
 }
@@ -2017,13 +2009,10 @@ mod tests {
     /// A one-slot manifest tagging `pool_id` into `entity_id`, so a payload's
     /// manifest can be traced back to the pool it came from.
     fn manifest_for_pool(pool_id: usize) -> Vec<EntitySlot> {
-        vec![EntitySlot {
-            entity_type: StateFamily::HydroStorage.code(),
-            entity_id: 100 + i32::try_from(pool_id).unwrap(),
-            subindex: 0,
-            was_active: true,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }]
+        vec![EntitySlot::storage(
+            100 + i32::try_from(pool_id).unwrap(),
+            true,
+        )]
     }
 
     /// On a branching graph, `archive.num_nodes() (7) > stage_manifests.len()
@@ -2177,24 +2166,8 @@ mod tests {
 
     // ── reserve_boundary_inflow_lag_slots ────────────────────────────────────
 
-    fn storage_slot(id: i32, was_active: bool) -> EntitySlot {
-        EntitySlot {
-            entity_type: StateFamily::HydroStorage.code(),
-            entity_id: id,
-            subindex: 0,
-            was_active,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
-    }
-
     fn anticipated_slot(id: i32, subindex: u32) -> EntitySlot {
-        EntitySlot {
-            entity_type: StateFamily::AnticipatedThermalState.code(),
-            entity_id: id,
-            subindex,
-            was_active: true,
-            delivery_date: 20260101,
-        }
+        EntitySlot::anticipated(id, subindex, true).with_delivery_date(20260101)
     }
 
     /// A depth-2 reservation over a 2-storage manifest inserts the lag block in
@@ -2205,8 +2178,8 @@ mod tests {
     fn reserve_inserts_canonical_lag_block_after_storage_and_places_coefficients() {
         // storage(h1), storage(h2), anticipated(t9)
         let manifest = vec![
-            storage_slot(1, true),
-            storage_slot(2, false),
+            EntitySlot::storage(1, true),
+            EntitySlot::storage(2, false),
             anticipated_slot(9, 0),
         ];
         // One cut: storage coeffs [s1, s2, a9]; lag coeffs keyed by hydro.
@@ -2266,7 +2239,7 @@ mod tests {
     /// deepest `HydroInflowLag` subindex equals the declared depth.
     #[test]
     fn reserve_self_describes_the_declared_depth() {
-        let manifest = vec![storage_slot(1, true), storage_slot(2, true)];
+        let manifest = vec![EntitySlot::storage(1, true), EntitySlot::storage(2, true)];
         let cut_coefficients = vec![vec![1.0, 2.0]];
         let cut_lag = vec![HashMap::new()];
 
@@ -2289,7 +2262,7 @@ mod tests {
     /// write fails rather than silently dropping the term.
     #[test]
     fn reserve_rejects_coefficient_for_unknown_hydro() {
-        let manifest = vec![storage_slot(1, true)];
+        let manifest = vec![EntitySlot::storage(1, true)];
         let cut_coefficients = vec![vec![1.0]];
         let mut keyed: HashMap<i32, Vec<f64>> = HashMap::new();
         keyed.insert(7, vec![0.5]); // hydro 7 has no storage slot
@@ -2306,7 +2279,7 @@ mod tests {
     /// A keyed coefficient vector deeper than the declared depth is unplaceable.
     #[test]
     fn reserve_rejects_depth_beyond_declared() {
-        let manifest = vec![storage_slot(1, true)];
+        let manifest = vec![EntitySlot::storage(1, true)];
         let cut_coefficients = vec![vec![1.0]];
         let mut keyed: HashMap<i32, Vec<f64>> = HashMap::new();
         keyed.insert(1, vec![0.1, 0.2, 0.3]); // depth 3 > N=2
@@ -2333,7 +2306,7 @@ mod tests {
     /// positionally aligned for insertion.
     #[test]
     fn reserve_rejects_coefficient_manifest_length_mismatch() {
-        let manifest = vec![storage_slot(1, true), storage_slot(2, true)];
+        let manifest = vec![EntitySlot::storage(1, true), EntitySlot::storage(2, true)];
         let cut_coefficients = vec![vec![1.0]]; // len 1, manifest len 2
         let cut_lag = vec![HashMap::new()];
 
@@ -2346,7 +2319,7 @@ mod tests {
     /// positive depth (the absent/zero case is the byte-identical no-op path).
     #[test]
     fn reserve_rejects_zero_depth() {
-        let manifest = vec![storage_slot(1, true)];
+        let manifest = vec![EntitySlot::storage(1, true)];
         let cut_coefficients = vec![vec![1.0]];
         let cut_lag = vec![HashMap::new()];
 

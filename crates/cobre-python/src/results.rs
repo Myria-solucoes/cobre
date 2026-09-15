@@ -1596,6 +1596,7 @@ pub fn load_simulation_arrow(
 ///             "cost_scale_factor": 2500000.0,
 ///             "node_id": 0,
 ///             "graph_stage_id": 0,
+///             "priced_state_date": -2147483648,
 ///             "entity_manifest": [
 ///                 {
 ///                     "entity_type": 0,
@@ -1603,6 +1604,9 @@ pub fn load_simulation_arrow(
 ///                     "subindex": 0,
 ///                     "was_active": True,
 ///                     "delivery_date": -1,
+///                     "reference_date": -1,
+///                     "interval_start": -1,
+///                     "interval_end": -1,
 ///                 },
 ///                 ...
 ///             ],
@@ -1691,6 +1695,7 @@ pub fn load_policy(
         sc_dict.set_item("cost_scale_factor", into_py(py, sc.cost_scale_factor)?)?;
         sc_dict.set_item("node_id", into_py(py, sc.node_id)?)?;
         sc_dict.set_item("graph_stage_id", into_py(py, sc.graph_stage_id)?)?;
+        sc_dict.set_item("priced_state_date", into_py(py, sc.priced_state_date)?)?;
 
         // Emit the per-slot entity manifest so a loaded checkpoint round-trips
         // through `write_policy_checkpoint` (whose binding already accepts this
@@ -1704,6 +1709,9 @@ pub fn load_policy(
             slot_dict.set_item("subindex", into_py(py, slot.subindex)?)?;
             slot_dict.set_item("was_active", PyBool::new(py, slot.was_active).to_owned())?;
             slot_dict.set_item("delivery_date", into_py(py, slot.delivery_date)?)?;
+            slot_dict.set_item("reference_date", into_py(py, slot.reference_date)?)?;
+            slot_dict.set_item("interval_start", into_py(py, slot.interval_start)?)?;
+            slot_dict.set_item("interval_end", into_py(py, slot.interval_end)?)?;
             manifest_list.append(slot_dict)?;
         }
         sc_dict.set_item("entity_manifest", manifest_list)?;

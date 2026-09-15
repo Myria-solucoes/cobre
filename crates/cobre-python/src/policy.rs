@@ -14,8 +14,9 @@ use pyo3::prelude::*;
 use cobre_io::{
     CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
     GraphManifest, ManifestEdge, ManifestNode, PolicyBasisRecord, PolicyCutRecord, ProducerBlock,
-    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL,
-    StageCutsPayload, StageStatesPayload,
+    STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL, STAGE_CUTS_NODE_ID_SENTINEL,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, STAGE_STATES_NODE_ID_SENTINEL, SeasonManifest,
+    StageCutsPayload, StageStatesPayload, StateFamily,
 };
 use cobre_sddp::{SddpError, reserve_boundary_inflow_lag_slots};
 
@@ -30,17 +31,42 @@ pub(crate) struct PyEntitySlot {
     was_active: bool,
     #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
     delivery_date: i32,
+    #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
+    reference_date: i32,
+    #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
+    interval_start: i32,
+    #[pyo3(default = ENTITY_SLOT_DELIVERY_DATE_SENTINEL)]
+    interval_end: i32,
 }
 
 impl From<&PyEntitySlot> for EntitySlot {
     fn from(slot: &PyEntitySlot) -> Self {
-        Self {
-            entity_type: slot.entity_type,
-            entity_id: slot.entity_id,
-            subindex: slot.subindex,
-            was_active: slot.was_active,
-            delivery_date: slot.delivery_date,
-        }
+        let converted = match StateFamily::from_code(slot.entity_type) {
+            Some(StateFamily::HydroStorage) => Self::storage(slot.entity_id, slot.was_active),
+            Some(StateFamily::HydroInflowLag) => {
+                Self::inflow_lag(slot.entity_id, slot.subindex, slot.was_active)
+            }
+            Some(StateFamily::HydroTransitBucket) => {
+                Self::transit_bucket(slot.entity_id, slot.subindex, slot.was_active)
+            }
+            Some(StateFamily::AnticipatedThermalState) => {
+                Self::anticipated(slot.entity_id, slot.subindex, slot.was_active)
+            }
+            None => Self {
+                entity_type: slot.entity_type,
+                entity_id: slot.entity_id,
+                subindex: slot.subindex,
+                was_active: slot.was_active,
+                delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+                interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            },
+        };
+        converted
+            .with_delivery_date(slot.delivery_date)
+            .with_reference_date(slot.reference_date)
+            .with_interval(slot.interval_start, slot.interval_end)
     }
 }
 
@@ -85,6 +111,8 @@ pub(crate) struct PyStageCutsPayload {
     node_id: i32,
     #[pyo3(default = STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL)]
     graph_stage_id: i32,
+    #[pyo3(default = STAGE_CUTS_PRICED_STATE_DATE_SENTINEL)]
+    priced_state_date: i32,
 }
 
 #[derive(Debug, FromPyObject)]
@@ -231,6 +259,8 @@ impl From<PyPolicyCheckpointMetadata> for CheckpointManifest {
                 .map(GraphManifest::from)
                 .unwrap_or_default(),
             producer: m.producer.into(),
+            // A Python author writing a checkpoint has no season data to supply.
+            season_manifest: SeasonManifest::default(),
         }
     }
 }
@@ -422,6 +452,7 @@ pub fn write_policy_checkpoint(
                     .unwrap_or(1_000_000.0),
                 node_id: sc.node_id,
                 graph_stage_id: sc.graph_stage_id,
+                priced_state_date: sc.priced_state_date,
             })
             .collect();
 
@@ -463,4 +494,34 @@ pub fn write_policy_checkpoint(
         )
     })
     .map_err(|e| convert_error(ErrorSource::Output(&e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EntitySlot, PyEntitySlot};
+
+    #[test]
+    fn py_entity_slot_unclassified_entity_type_round_trips() {
+        let slot = PyEntitySlot {
+            entity_type: 200,
+            entity_id: 7,
+            subindex: 3,
+            was_active: true,
+            delivery_date: 20_260_101,
+            reference_date: 20_260_102,
+            interval_start: 20_260_103,
+            interval_end: 20_260_104,
+        };
+
+        let converted = EntitySlot::from(&slot);
+
+        assert_eq!(converted.entity_type, 200);
+        assert_eq!(converted.entity_id, 7);
+        assert_eq!(converted.subindex, 3);
+        assert!(converted.was_active);
+        assert_eq!(converted.delivery_date, 20_260_101);
+        assert_eq!(converted.reference_date, 20_260_102);
+        assert_eq!(converted.interval_start, 20_260_103);
+        assert_eq!(converted.interval_end, 20_260_104);
+    }
 }

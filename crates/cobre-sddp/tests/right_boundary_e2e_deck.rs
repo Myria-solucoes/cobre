@@ -175,7 +175,8 @@ mod anticipated_fanout_readback {
     use chrono::NaiveDate;
     use cobre_io::{
         EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCutRecord, ProducerBlock,
-        StageCutsPayload, StateFamily, write_policy_checkpoint,
+        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, StateFamily,
+        write_policy_checkpoint,
     };
     use cobre_sddp::load_boundary_cuts;
 
@@ -221,13 +222,7 @@ mod anticipated_fanout_readback {
     }
 
     fn anticipated_source_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-        EntitySlot {
-            entity_type: StateFamily::AnticipatedThermalState.code(),
-            entity_id: thermal_id,
-            subindex: ring_slot,
-            was_active: true,
-            delivery_date,
-        }
+        EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
     }
 
     /// Mirrors `boundary_reconcile_defaults.rs`'s same-named helper: a single-stage,
@@ -257,6 +252,7 @@ mod anticipated_fanout_readback {
             cost_scale_factor: 1_000_000.0,
             node_id: 0,
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         };
         let metadata = cobre_sddp::test_support::checkpoint_metadata(
             1,

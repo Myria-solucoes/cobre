@@ -26,61 +26,31 @@
 
 use chrono::NaiveDate;
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestEdge, ManifestNode,
-    PolicyCutRecord, ProducerBlock, StageCutsPayload, StateFamily, write_policy_checkpoint,
+    EntitySlot, GraphManifest, ManifestEdge, ManifestNode, PolicyCutRecord, ProducerBlock,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
 };
 use cobre_sddp::{
     BoundaryInjection, FullFcf, PolicyStageManifest, load_boundary_cuts, validate_policy_load,
 };
 
 fn storage_slot(id: i32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::HydroStorage.code(),
-        entity_id: id,
-        subindex: 0,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
+    EntitySlot::storage(id, true)
 }
 
 fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::HydroInflowLag.code(),
-        entity_id: id,
-        subindex: lag_depth,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
+    EntitySlot::inflow_lag(id, lag_depth, true)
 }
 
 fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::HydroTransitBucket.code(),
-        entity_id: downstream_hydro_id,
-        subindex: lag,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
+    EntitySlot::transit_bucket(downstream_hydro_id, lag, true)
 }
 
 fn sentinel_anticipated_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::AnticipatedThermalState.code(),
-        entity_id: thermal_id,
-        subindex: ring_slot,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
+    EntitySlot::anticipated(thermal_id, ring_slot, true)
 }
 
 fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::AnticipatedThermalState.code(),
-        entity_id: thermal_id,
-        subindex: ring_slot,
-        was_active: true,
-        delivery_date,
-    }
+    EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
 }
 
 /// All-`None` delivery intervals aligned to `len` — for tests whose
@@ -149,6 +119,7 @@ fn write_checkpoint(dir: &std::path::Path, manifest: &[EntitySlot], coefficients
         cost_scale_factor: 1.0,
         node_id: 0,
         graph_stage_id: -1,
+        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
     };
     let metadata =
         cobre_sddp::test_support::checkpoint_metadata(1, single_stage_manifest(), producer_block());

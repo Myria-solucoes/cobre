@@ -10,19 +10,9 @@
 
 use cobre_io::{
     CheckpointManifest, ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, FORMAT_VERSION,
-    GraphManifest, ProducerBlock, StageCutsPayload, StateFamily, read_policy_checkpoint,
-    write_policy_checkpoint,
+    GraphManifest, ProducerBlock, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, SeasonManifest,
+    StageCutsPayload, read_policy_checkpoint, write_policy_checkpoint,
 };
-
-fn slot(entity_type: u8, entity_id: i32, subindex: u32, delivery_date: i32) -> EntitySlot {
-    EntitySlot {
-        entity_type,
-        entity_id,
-        subindex,
-        was_active: true,
-        delivery_date,
-    }
-}
 
 fn metadata() -> CheckpointManifest {
     CheckpointManifest {
@@ -45,6 +35,7 @@ fn metadata() -> CheckpointManifest {
             training_block_mode_per_stage: vec![],
             cost_scale_factor: None,
         },
+        season_manifest: SeasonManifest::default(),
     }
 }
 
@@ -62,6 +53,7 @@ fn write_fixture(dir: &std::path::Path, pool_id: u32, manifest: &[EntitySlot]) {
         cost_scale_factor: 1_000_000.0,
         node_id: -1,
         graph_stage_id: -1,
+        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
     };
     write_policy_checkpoint(dir, &[payload], &[], &metadata(), &[]).expect("fixture must write");
 }
@@ -71,12 +63,7 @@ fn write_fixture(dir: &std::path::Path, pool_id: u32, manifest: &[EntitySlot]) {
 #[test]
 fn malformed_month_delivery_date_rejected_naming_slot() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = [slot(
-        StateFamily::AnticipatedThermalState.code(),
-        7,
-        0,
-        20_261_305,
-    )];
+    let manifest = [EntitySlot::anticipated(7, 0, true).with_delivery_date(20_261_305)];
     write_fixture(dir.path(), 0, &manifest);
 
     let err = read_policy_checkpoint(dir.path()).expect_err("month-13 date must be rejected");
@@ -95,8 +82,8 @@ fn malformed_month_delivery_date_rejected_naming_slot() {
 fn hydro_transit_bucket_decreasing_dates_rejected_naming_pool_and_subindex() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [
-        slot(StateFamily::HydroTransitBucket.code(), 42, 0, 20_260_601),
-        slot(StateFamily::HydroTransitBucket.code(), 42, 1, 20_260_501),
+        EntitySlot::transit_bucket(42, 0, true).with_delivery_date(20_260_601),
+        EntitySlot::transit_bucket(42, 1, true).with_delivery_date(20_260_501),
     ];
     write_fixture(dir.path(), 3, &manifest);
 
@@ -116,14 +103,9 @@ fn hydro_transit_bucket_decreasing_dates_rejected_naming_pool_and_subindex() {
 fn well_formed_monotone_checkpoint_accepted_manifest_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [
-        slot(
-            StateFamily::HydroStorage.code(),
-            1,
-            0,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        ),
-        slot(StateFamily::HydroTransitBucket.code(), 42, 0, 20_260_501),
-        slot(StateFamily::HydroTransitBucket.code(), 42, 1, 20_260_601),
+        EntitySlot::storage(1, true),
+        EntitySlot::transit_bucket(42, 0, true).with_delivery_date(20_260_501),
+        EntitySlot::transit_bucket(42, 1, true).with_delivery_date(20_260_601),
     ];
     write_fixture(dir.path(), 1, &manifest);
 
@@ -145,30 +127,10 @@ fn well_formed_monotone_checkpoint_accepted_manifest_unchanged() {
 fn fully_sentinel_legacy_checkpoint_accepted() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = [
-        slot(
-            StateFamily::HydroStorage.code(),
-            1,
-            0,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        ),
-        slot(
-            StateFamily::AnticipatedThermalState.code(),
-            7,
-            0,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        ),
-        slot(
-            StateFamily::AnticipatedThermalState.code(),
-            7,
-            1,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        ),
-        slot(
-            StateFamily::HydroTransitBucket.code(),
-            42,
-            0,
-            ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        ),
+        EntitySlot::storage(1, true),
+        EntitySlot::anticipated(7, 0, true),
+        EntitySlot::anticipated(7, 1, true),
+        EntitySlot::transit_bucket(42, 0, true),
     ];
     write_fixture(dir.path(), 0, &manifest);
 
@@ -186,21 +148,143 @@ fn anticipated_thermal_state_non_monotone_dates_accepted() {
     // Rejecting this would be a false positive on real data — see
     // `StateFamily::HydroTransitBucket`'s doc in `checkpoint.rs`.
     let manifest = [
-        slot(
-            StateFamily::AnticipatedThermalState.code(),
-            1,
-            0,
-            20_260_601,
-        ),
-        slot(
-            StateFamily::AnticipatedThermalState.code(),
-            1,
-            1,
-            20_260_501,
-        ),
+        EntitySlot::anticipated(1, 0, true).with_delivery_date(20_260_601),
+        EntitySlot::anticipated(1, 1, true).with_delivery_date(20_260_501),
     ];
     write_fixture(dir.path(), 1, &manifest);
 
     read_policy_checkpoint(dir.path())
         .expect("a modular-residue subindex family must be exempt from ordering checks");
+}
+
+// ── a half-populated interval is rejected, naming the missing endpoint ──
+
+#[test]
+fn half_populated_interval_rejected_naming_slot_and_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = [EntitySlot::transit_bucket(42, 0, true)
+        .with_interval(20_320_101, ENTITY_SLOT_DELIVERY_DATE_SENTINEL)];
+    write_fixture(dir.path(), 0, &manifest);
+
+    let err =
+        read_policy_checkpoint(dir.path()).expect_err("a half-populated interval must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("pool 0"), "must name the pool: {msg}");
+    assert!(msg.contains("entity 42"), "must name the entity: {msg}");
+    assert!(msg.contains("subindex 0"), "must name the subindex: {msg}");
+    assert!(
+        msg.contains("interval_end"),
+        "must name the missing endpoint: {msg}"
+    );
+}
+
+// ── a reversed interval is rejected, naming both endpoint values ────────
+
+#[test]
+fn reversed_interval_rejected_naming_both_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = [EntitySlot::transit_bucket(42, 0, true).with_interval(20_320_101, 20_311_201)];
+    write_fixture(dir.path(), 0, &manifest);
+
+    let err = read_policy_checkpoint(dir.path()).expect_err("a reversed interval must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("pool 0"), "must name the pool: {msg}");
+    assert!(msg.contains("entity 42"), "must name the entity: {msg}");
+    assert!(msg.contains("20320101"), "must name interval_start: {msg}");
+    assert!(msg.contains("20311201"), "must name interval_end: {msg}");
+}
+
+// ── a degenerate zero-length interval (start == end) is rejected ────────
+
+#[test]
+fn degenerate_zero_length_interval_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = [EntitySlot::transit_bucket(42, 0, true).with_interval(20_320_101, 20_320_101)];
+    write_fixture(dir.path(), 0, &manifest);
+
+    read_policy_checkpoint(dir.path())
+        .expect_err("a zero-length interval (start == end) must be rejected");
+}
+
+// ── a storage slot with a live reference_date is rejected ───────────────
+
+#[test]
+fn storage_slot_with_live_reference_date_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = [EntitySlot::storage(1, true).with_reference_date(20_311_201)];
+    write_fixture(dir.path(), 0, &manifest);
+
+    let err = read_policy_checkpoint(dir.path())
+        .expect_err("a storage slot with a live reference_date must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("pool 0"), "must name the pool: {msg}");
+    assert!(msg.contains("entity 1"), "must name the entity: {msg}");
+    assert!(
+        msg.contains("no per-slot date"),
+        "must state that a storage slot carries no per-slot date: {msg}"
+    );
+}
+
+// ── an inflow-lag slot with a live interval is rejected ─────────────────
+
+#[test]
+fn inflow_lag_slot_with_live_interval_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = [EntitySlot::inflow_lag(5, 1, true).with_interval(20_320_101, 20_320_601)];
+    write_fixture(dir.path(), 0, &manifest);
+
+    let err = read_policy_checkpoint(dir.path())
+        .expect_err("an inflow-lag slot with a live interval must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("pool 0"), "must name the pool: {msg}");
+    assert!(msg.contains("entity 5"), "must name the entity: {msg}");
+}
+
+// ── a checkpoint with every slot's dates at the sentinel still reads ────
+
+#[test]
+fn fully_sentinel_dated_checkpoint_still_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = [
+        EntitySlot::storage(1, true),
+        EntitySlot::inflow_lag(1, 1, true),
+        EntitySlot::transit_bucket(42, 0, true).with_delivery_date(20_260_501),
+        EntitySlot::anticipated(7, 0, true),
+    ];
+    write_fixture(dir.path(), 0, &manifest);
+
+    read_policy_checkpoint(dir.path()).expect(
+        "a checkpoint whose reference_date/interval fields are all sentinel must be accepted",
+    );
+}
+
+// ── declaration order does not change the FIRST reported error, even with ──
+// ── two violating slots that would otherwise report in declaration order ───
+
+#[test]
+fn first_reported_error_identical_across_slot_declaration_order() {
+    let violation_10 =
+        || EntitySlot::transit_bucket(10, 0, true).with_interval(20_320_101, 20_311_201);
+    let violation_20 =
+        || EntitySlot::transit_bucket(20, 0, true).with_interval(20_330_101, 20_320_101);
+
+    let dir_a = tempfile::tempdir().unwrap();
+    write_fixture(dir_a.path(), 0, &[violation_10(), violation_20()]);
+
+    let dir_b = tempfile::tempdir().unwrap();
+    write_fixture(dir_b.path(), 0, &[violation_20(), violation_10()]);
+
+    let err_a =
+        read_policy_checkpoint(dir_a.path()).expect_err("a reversed interval must be rejected");
+    let err_b =
+        read_policy_checkpoint(dir_b.path()).expect_err("a reversed interval must be rejected");
+    assert_eq!(
+        err_a.to_string(),
+        err_b.to_string(),
+        "declaration order must not change the first reported error"
+    );
+    assert!(
+        err_a.to_string().contains("entity 10"),
+        "the canonically-first violating slot (entity 10) must be the one reported: {err_a}"
+    );
 }

@@ -789,62 +789,31 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::{
-        BoundaryReconciliationReport, FamilyTally, RebindOp, StateFamily, build_boundary_fold,
-        build_rebind, build_reconciliation_report, decode_month_anchor, dropped_source_positions,
-        rebind_cut,
+        BoundaryReconciliationReport, FamilyTally, RebindOp, build_boundary_fold, build_rebind,
+        build_reconciliation_report, decode_month_anchor, dropped_source_positions, rebind_cut,
     };
     use crate::SddpError;
     use cobre_core::{AnticipatedCommitmentHistory, EntityId};
-    use cobre_io::{ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, OwnedPolicyCutRecord};
+    use cobre_io::{EntitySlot, OwnedPolicyCutRecord};
 
     fn storage_slot(id: i32) -> EntitySlot {
-        EntitySlot {
-            entity_type: 0,
-            entity_id: id,
-            subindex: 0,
-            was_active: true,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        EntitySlot::storage(id, true)
     }
 
     fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-        EntitySlot {
-            entity_type: StateFamily::HydroInflowLag.code(),
-            entity_id: id,
-            subindex: lag_depth,
-            was_active: true,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        EntitySlot::inflow_lag(id, lag_depth, true)
     }
 
     fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
-        EntitySlot {
-            entity_type: StateFamily::HydroTransitBucket.code(),
-            entity_id: downstream_hydro_id,
-            subindex: lag,
-            was_active: true,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        EntitySlot::transit_bucket(downstream_hydro_id, lag, true)
     }
 
     fn anticipated_sentinel_slot(thermal_id: i32, ring_slot: u32) -> EntitySlot {
-        EntitySlot {
-            entity_type: StateFamily::AnticipatedThermalState.code(),
-            entity_id: thermal_id,
-            subindex: ring_slot,
-            was_active: true,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        EntitySlot::anticipated(thermal_id, ring_slot, true)
     }
 
     fn anticipated_dated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-        EntitySlot {
-            entity_type: StateFamily::AnticipatedThermalState.code(),
-            entity_id: thermal_id,
-            subindex: ring_slot,
-            was_active: true,
-            delivery_date,
-        }
+        EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
     }
 
     fn owned_cut(coefficients: Vec<f64>) -> OwnedPolicyCutRecord {

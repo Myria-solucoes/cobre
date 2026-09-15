@@ -805,6 +805,7 @@ mod tests {
             cost_scale_factor: None,
             node_id: -1,
             graph_stage_id: -1,
+            priced_state_date: cobre_io::STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         }
     }
 

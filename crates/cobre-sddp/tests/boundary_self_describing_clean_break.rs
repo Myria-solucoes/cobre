@@ -14,7 +14,7 @@ use std::process::Command;
 use chrono::NaiveDate;
 use cobre_io::{
     ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, PolicyCutRecord, ProducerBlock,
-    StageCutsPayload, StateFamily, write_policy_checkpoint,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
 };
 use cobre_sddp::{SddpError, load_boundary_cuts, resolve_boundary_source_stage};
 use serde_json::json;
@@ -52,13 +52,7 @@ fn producer_block() -> ProducerBlock {
 /// A single dated `AnticipatedThermalState` slot (`entity_type 2`), delivery
 /// anchored at `delivery_date` (`YYYYMM01`).
 fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::AnticipatedThermalState.code(),
-        entity_id: thermal_id,
-        subindex: ring_slot,
-        was_active: true,
-        delivery_date,
-    }
+    EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
 }
 
 /// The boundary load reads its source cost scale from the resolved pool's own
@@ -96,6 +90,7 @@ fn boundary_load_reads_cost_scale_from_bin() {
         cost_scale_factor: 500_000.0,
         node_id: 0,
         graph_stage_id: 0,
+        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
@@ -295,6 +290,7 @@ fn boundary_load_rejects_pre_self_describing_checkpoint() {
         cost_scale_factor: 1_000_000.0,
         node_id: 0,
         graph_stage_id: 0,
+        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
@@ -367,6 +363,7 @@ fn auto_resolver_rejects_sentinel_graph_stage_id() {
         cost_scale_factor: 1_000_000.0,
         node_id: -1,
         graph_stage_id: -1,
+        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,

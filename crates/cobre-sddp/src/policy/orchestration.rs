@@ -10,7 +10,7 @@ use std::path::Path;
 
 use cobre_io::EntitySlot;
 use cobre_io::output::policy::{
-    CheckpointManifest, FORMAT_VERSION, ProducerBlock, write_policy_checkpoint,
+    CheckpointManifest, FORMAT_VERSION, ProducerBlock, SeasonManifest, write_policy_checkpoint,
 };
 use cobre_io::output::{
     OutputError, write_correlation_json, write_fitting_report, write_inflow_annual_component,
@@ -188,6 +188,7 @@ pub fn write_checkpoint(
             training_block_mode_per_stage,
             cost_scale_factor: Some(setup.stage_data.stage_templates.cost_scale_factor),
         },
+        season_manifest: SeasonManifest::default(),
     };
 
     let stage_states = if params.export_states {

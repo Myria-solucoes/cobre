@@ -20,8 +20,8 @@
 use std::path::Path;
 
 use cobre_io::{
-    GraphManifest, PolicyCutRecord, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
-    write_policy_checkpoint,
+    GraphManifest, PolicyCutRecord, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
 };
 use cobre_sddp::setup::{NodeGraph, NodePos};
 use cobre_sddp::test_support::k_fan_setup;
@@ -91,6 +91,7 @@ fn write_synthetic_checkpoint(
         cost_scale_factor: 1_000_000.0,
         node_id,
         graph_stage_id,
+        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,

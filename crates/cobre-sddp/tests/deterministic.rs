@@ -21,7 +21,10 @@ use std::sync::mpsc;
 
 use cobre_core::scenario::ScenarioSource;
 use cobre_core::{BlockMode, EntityId};
-use cobre_io::{PolicyCutRecord, StageCutsPayload, write_policy_checkpoint};
+use cobre_io::{
+    PolicyCutRecord, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
+    write_policy_checkpoint,
+};
 use cobre_sddp::{
     SimulationWeighting, StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
     lead_time::resolve_spread, setup::prepare_stochastic,
@@ -1442,6 +1445,7 @@ fn d12_checkpoint_round_trip() {
             cost_scale_factor: 1_000_000.0,
             node_id: i32::try_from(stage_idx).unwrap_or(-1),
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         })
         .collect();
 
@@ -8192,7 +8196,9 @@ mod heterogeneous_visit_bound_resume {
     //! pre-fix scalar substitution (every resumed pool given `forward_passes`
     //! uniformly as its stride) silently broke.
 
-    use cobre_io::{STAGE_CUTS_NODE_ID_SENTINEL, StageCutsReadResult};
+    use cobre_io::{
+        STAGE_CUTS_NODE_ID_SENTINEL, STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsReadResult,
+    };
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::setup::NodeId;
     use cobre_sddp::test_support::{k_fan_setup, trivial_full_fcf_proof};
@@ -8272,6 +8278,7 @@ mod heterogeneous_visit_bound_resume {
                 cost_scale_factor: None,
                 node_id: pool_owner_node_id(p),
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             })
             .collect();
         let visit_bounds: Vec<u64> = cold_strides.iter().map(|&s| u64::from(s)).collect();
@@ -9278,8 +9285,9 @@ mod enumerated_checkpoint {
     use std::collections::HashSet;
 
     use cobre_io::{
-        GraphManifest, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL, StageCutsPayload,
-        read_policy_checkpoint, write_policy_checkpoint,
+        GraphManifest, ProducerBlock, STAGE_CUTS_NODE_ID_SENTINEL,
+        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, read_policy_checkpoint,
+        write_policy_checkpoint,
     };
     use cobre_sddp::policy_export::build_stage_cut_records;
     use cobre_sddp::setup::NodePos;
@@ -9418,6 +9426,7 @@ mod enumerated_checkpoint {
                 cost_scale_factor: 1_000_000.0,
                 node_id: pool_owner_node_id(pool_idx),
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             })
             .collect();
 
@@ -9524,7 +9533,7 @@ mod water_terminal_fcf_valuation {
     use cobre_core::temporal::StageStateConfig;
     use cobre_io::{
         BoundaryPolicy, GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
-        StageCutsPayload, write_policy_checkpoint,
+        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
     };
     use cobre_sddp::indexer::CutStateProjection;
     use cobre_sddp::setup::{NodeId, StageIdx};
@@ -9644,6 +9653,7 @@ mod water_terminal_fcf_valuation {
             cost_scale_factor: 1_000_000.0,
             node_id: 100,
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         };
         let metadata = cobre_sddp::test_support::checkpoint_metadata(
             1,

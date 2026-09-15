@@ -12,11 +12,14 @@
 /// [`CheckpointManifest::format_version`] must equal this;
 /// [`crate::read_policy_checkpoint`] rejects any other value — and absence —
 /// with a named error before parsing any payload, so a pre-marker artifact is
-/// cleanly rejected, never read positionally.
-pub const FORMAT_VERSION: u32 = 1;
+/// cleanly rejected, never read positionally. Version 2 is the first fully
+/// dated, self-describing format.
+pub const FORMAT_VERSION: u32 = 2;
 
-/// Sentinel [`EntitySlot::delivery_date`] value for a slot with no
-/// delivery/arrival calendar semantics; also the value a reader yields when the
+/// Sentinel [`EntitySlot`] date-field value — [`EntitySlot::delivery_date`],
+/// [`EntitySlot::reference_date`], [`EntitySlot::interval_start`], and
+/// [`EntitySlot::interval_end`] all default to it — for a slot whose family
+/// does not populate that field; also the value a reader yields when the
 /// field is absent from a pre-`id:5` buffer (forward-compatible default).
 pub const ENTITY_SLOT_DELIVERY_DATE_SENTINEL: i32 = i32::MIN;
 
@@ -41,6 +44,115 @@ pub struct EntitySlot {
     /// semantics. Which calendar date maps to a slot is the calling crate's
     /// responsibility, as with `subindex`.
     pub delivery_date: i32,
+    /// `HydroInflowLag`'s reference past stage's `start_date`, `YYYYMMDD`
+    /// encoded as [`delivery_date`](Self::delivery_date);
+    /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] for every other family.
+    pub reference_date: i32,
+    /// Half-open delivery/arrival interval's inclusive start, `YYYYMMDD`
+    /// encoded as [`delivery_date`](Self::delivery_date): `HydroTransitBucket`'s
+    /// `arrival_start` or `AnticipatedThermalState`'s `delivery_start`;
+    /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] for storage and inflow-lag.
+    pub interval_start: i32,
+    /// Half-open delivery/arrival interval's exclusive end, paired with
+    /// [`interval_start`](Self::interval_start);
+    /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] for storage and inflow-lag.
+    pub interval_end: i32,
+}
+
+impl EntitySlot {
+    /// Builds a [`StateFamily::HydroStorage`] slot; `subindex` is always `0`.
+    #[must_use]
+    pub fn storage(entity_id: i32, was_active: bool) -> Self {
+        Self {
+            entity_type: StateFamily::HydroStorage.code(),
+            entity_id,
+            subindex: 0,
+            was_active,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        }
+    }
+
+    /// Builds a [`StateFamily::HydroInflowLag`] slot; `subindex` is the
+    /// 1-based AR lag order.
+    #[must_use]
+    pub fn inflow_lag(entity_id: i32, lag_order: u32, was_active: bool) -> Self {
+        Self {
+            entity_type: StateFamily::HydroInflowLag.code(),
+            entity_id,
+            subindex: lag_order,
+            was_active,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        }
+    }
+
+    /// Builds a [`StateFamily::HydroTransitBucket`] slot; `entity_id` is the
+    /// downstream hydro, `subindex` the maturity lag.
+    #[must_use]
+    pub fn transit_bucket(downstream_entity_id: i32, maturity_lag: u32, was_active: bool) -> Self {
+        Self {
+            entity_type: StateFamily::HydroTransitBucket.code(),
+            entity_id: downstream_entity_id,
+            subindex: maturity_lag,
+            was_active,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        }
+    }
+
+    /// Builds a [`StateFamily::AnticipatedThermalState`] slot; `subindex` is
+    /// the ring-buffer slot.
+    #[must_use]
+    pub fn anticipated(entity_id: i32, ring_slot: u32, was_active: bool) -> Self {
+        Self {
+            entity_type: StateFamily::AnticipatedThermalState.code(),
+            entity_id,
+            subindex: ring_slot,
+            was_active,
+            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+            interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
+        }
+    }
+
+    /// Returns `self` with `delivery_date` replaced; every other field is
+    /// unchanged.
+    #[must_use]
+    pub fn with_delivery_date(self, delivery_date: i32) -> Self {
+        Self {
+            delivery_date,
+            ..self
+        }
+    }
+
+    /// Returns `self` with `reference_date` replaced; every other field is
+    /// unchanged.
+    #[must_use]
+    pub fn with_reference_date(self, reference_date: i32) -> Self {
+        Self {
+            reference_date,
+            ..self
+        }
+    }
+
+    /// Returns `self` with `interval_start` and `interval_end` replaced; every
+    /// other field is unchanged.
+    #[must_use]
+    pub fn with_interval(self, start: i32, end: i32) -> Self {
+        Self {
+            interval_start: start,
+            interval_end: end,
+            ..self
+        }
+    }
 }
 
 /// State-vector dimension class of an [`EntitySlot`] — the typed Rust view of
@@ -50,14 +162,13 @@ pub struct EntitySlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum StateFamily {
-    /// Reservoir storage volume (`subindex` is `0`).
+    /// Reservoir storage volume; see [`EntitySlot::storage`].
     HydroStorage = 0,
-    /// Hydro inflow AR lag (`subindex` is the 1-based AR lag order).
+    /// Hydro inflow AR lag; see [`EntitySlot::inflow_lag`].
     HydroInflowLag = 1,
-    /// Anticipated thermal commitment (`subindex` is the ring-buffer slot).
+    /// Anticipated thermal commitment; see [`EntitySlot::anticipated`].
     AnticipatedThermalState = 2,
-    /// Water in-transit bucket (`entity_id` is the downstream hydro, `subindex`
-    /// the maturity lag).
+    /// Water in-transit bucket; see [`EntitySlot::transit_bucket`].
     HydroTransitBucket = 3,
 }
 
@@ -147,6 +258,12 @@ pub const STAGE_CUTS_NODE_ID_SENTINEL: i32 = -1;
 /// (forward-compatible default).
 pub const STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL: i32 = -1;
 
+/// Sentinel [`StageCutsPayload::priced_state_date`]/[`StageCutsReadResult::priced_state_date`]
+/// value for a not-yet-recorded priced instant or a pre-`id:11` buffer
+/// (forward-compatible default). `i32::MIN` rather than `-1`, which is a
+/// decodable value in the `YYYYMMDD` space this field encodes.
+pub const STAGE_CUTS_PRICED_STATE_DATE_SENTINEL: i32 = i32::MIN;
+
 /// Payload for writing per-stage visited states to a value-function artifact.
 ///
 /// The `data` slice contains the flat state vectors (row-major, each of length
@@ -201,6 +318,10 @@ pub struct StageCutsPayload<'a> {
     /// Graph-stage id of the node(s) owning this pool — the boundary-resolution
     /// key; [`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL`] when unresolved.
     pub graph_stage_id: i32,
+    /// Owning stage's `end_date`, encoded `year * 10000 + month * 100 + day`
+    /// — the instant this pool's pieces price. [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`]
+    /// when not recorded.
+    pub priced_state_date: i32,
 }
 
 /// One node of the value-function artifact's graph manifest: its declared id,
@@ -244,6 +365,59 @@ pub struct GraphManifest {
     pub nodes: Vec<ManifestNode>,
     /// Every directed edge with its transition probability.
     pub edges: Vec<ManifestEdge>,
+}
+
+/// [`SeasonManifest::cycle_code`] discriminant: a monthly season cycle.
+pub const SEASON_CYCLE_CODE_MONTHLY: u8 = 0;
+/// [`SeasonManifest::cycle_code`] discriminant: a weekly season cycle.
+pub const SEASON_CYCLE_CODE_WEEKLY: u8 = 1;
+/// [`SeasonManifest::cycle_code`] discriminant: a custom (neither monthly nor
+/// weekly) season cycle.
+pub const SEASON_CYCLE_CODE_CUSTOM: u8 = 2;
+/// [`SeasonManifest::cycle_code`] discriminant: no season map declared — the
+/// value [`SeasonManifest::default`] carries and a reader yields for a
+/// pre-`id:19` buffer.
+pub const SEASON_CYCLE_CODE_ABSENT: u8 = 255;
+
+/// One hydro's per-season autoregressive order vector. Element type of
+/// [`SeasonManifest::hydro_orders`].
+#[derive(Debug, Clone)]
+pub struct HydroSeasonOrders {
+    /// Owning hydro's id.
+    pub hydro_id: i32,
+    /// Consecutive-lag AR order per dense season ordinal — a count, never a
+    /// lag set (PAR order selection returns a scalar and the coefficient
+    /// vector is dense). Length equals [`SeasonManifest::n_seasons`].
+    pub orders: Vec<u32>,
+}
+
+/// Study-global season cycle and per-hydro PAR-order descriptor carried on
+/// [`CheckpointManifest::season_manifest`]. The date-driven boundary gate
+/// compares two studies' descriptors to reject a source whose season
+/// definitions or per-season AR orders differ from the loading study's.
+#[derive(Debug, Clone)]
+pub struct SeasonManifest {
+    /// Season cycle discriminant; one of the `SEASON_CYCLE_CODE_*`
+    /// constants. A raw `u8`, never a `cobre-core` season type — the
+    /// crate-genericity rule forbids the algorithm-specific dependency here.
+    pub cycle_code: u8,
+    /// Number of distinct seasons in the cycle; the length of every
+    /// [`HydroSeasonOrders::orders`] vector.
+    pub n_seasons: u32,
+    /// Per-hydro AR order vectors, in canonical ascending `hydro_id` order.
+    pub hydro_orders: Vec<HydroSeasonOrders>,
+}
+
+impl Default for SeasonManifest {
+    /// The absent descriptor: [`SEASON_CYCLE_CODE_ABSENT`], zero seasons, no
+    /// hydros — what a pre-`id:19` buffer decodes to.
+    fn default() -> Self {
+        Self {
+            cycle_code: SEASON_CYCLE_CODE_ABSENT,
+            n_seasons: 0,
+            hydro_orders: Vec::new(),
+        }
+    }
 }
 
 /// Producer-namespaced metadata: everything specific to how the artifact was
@@ -322,6 +496,9 @@ pub struct CheckpointManifest {
     pub graph_manifest: GraphManifest,
     /// Producer-namespaced metadata (the training algorithm's own state).
     pub producer: ProducerBlock,
+    /// Study-global season cycle and per-hydro PAR-order descriptor; absent
+    /// ([`SEASON_CYCLE_CODE_ABSENT`]) for a pre-`id:19` buffer.
+    pub season_manifest: SeasonManifest,
 }
 
 // ── Owned output types for deserialization ───────────────────────────────────
@@ -395,6 +572,10 @@ pub struct StageCutsReadResult {
     /// Graph-stage id key; [`STAGE_CUTS_GRAPH_STAGE_ID_SENTINEL`] when unresolved
     /// or absent from a pre-`id:8` buffer.
     pub graph_stage_id: i32,
+    /// Owning stage's `end_date`, encoded `year * 10000 + month * 100 + day`;
+    /// [`STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`] when not recorded or absent
+    /// from a pre-`id:11` buffer.
+    pub priced_state_date: i32,
 }
 
 /// Owned version of [`StageStatesPayload`] returned by [`crate::deserialize_stage_states`].
@@ -458,13 +639,86 @@ mod tests {
 
     #[test]
     fn entity_slot_family_reads_the_raw_byte() {
-        let slot = EntitySlot {
-            entity_type: StateFamily::AnticipatedThermalState.code(),
-            entity_id: 7,
-            subindex: 0,
-            was_active: true,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        };
+        let slot = EntitySlot::anticipated(7, 0, true);
         assert_eq!(slot.family(), Some(StateFamily::AnticipatedThermalState));
+    }
+
+    #[test]
+    fn entity_slot_constructors_set_family_code_and_sentinel() {
+        let storage = EntitySlot::storage(7, true);
+        assert_eq!(storage.entity_type, StateFamily::HydroStorage.code());
+        assert_eq!(storage.entity_id, 7);
+        assert_eq!(storage.subindex, 0);
+        assert!(storage.was_active);
+        assert_eq!(storage.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+
+        let inflow_lag = EntitySlot::inflow_lag(2, 3, false);
+        assert_eq!(inflow_lag.entity_type, StateFamily::HydroInflowLag.code());
+        assert_eq!(inflow_lag.entity_id, 2);
+        assert_eq!(inflow_lag.subindex, 3);
+        assert!(!inflow_lag.was_active);
+        assert_eq!(inflow_lag.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+
+        let transit_bucket = EntitySlot::transit_bucket(4, 5, true);
+        assert_eq!(
+            transit_bucket.entity_type,
+            StateFamily::HydroTransitBucket.code()
+        );
+        assert_eq!(transit_bucket.entity_id, 4);
+        assert_eq!(transit_bucket.subindex, 5);
+        assert!(transit_bucket.was_active);
+        assert_eq!(
+            transit_bucket.delivery_date,
+            ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        );
+
+        let anticipated = EntitySlot::anticipated(6, 1, false);
+        assert_eq!(
+            anticipated.entity_type,
+            StateFamily::AnticipatedThermalState.code()
+        );
+        assert_eq!(anticipated.entity_id, 6);
+        assert_eq!(anticipated.subindex, 1);
+        assert!(!anticipated.was_active);
+        assert_eq!(
+            anticipated.delivery_date,
+            ENTITY_SLOT_DELIVERY_DATE_SENTINEL
+        );
+    }
+
+    #[test]
+    fn entity_slot_with_delivery_date_overrides_only_the_date() {
+        let dated = EntitySlot::anticipated(33, 1, true).with_delivery_date(20_320_101);
+        assert_eq!(
+            dated.entity_type,
+            StateFamily::AnticipatedThermalState.code()
+        );
+        assert_eq!(dated.entity_id, 33);
+        assert_eq!(dated.subindex, 1);
+        assert!(dated.was_active);
+        assert_eq!(dated.delivery_date, 20_320_101);
+    }
+
+    #[test]
+    fn entity_slot_constructors_leave_new_dates_at_sentinel() {
+        for slot in [
+            EntitySlot::storage(1, true),
+            EntitySlot::inflow_lag(1, 1, true),
+            EntitySlot::transit_bucket(1, 1, true),
+            EntitySlot::anticipated(1, 0, true),
+        ] {
+            assert_eq!(slot.reference_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+            assert_eq!(slot.interval_start, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+            assert_eq!(slot.interval_end, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+        }
+    }
+
+    #[test]
+    fn entity_slot_with_interval_sets_both_endpoints() {
+        let dated = EntitySlot::transit_bucket(9, 2, true).with_interval(20_311_201, 20_320_101);
+        assert_eq!(dated.interval_start, 20_311_201);
+        assert_eq!(dated.interval_end, 20_320_101);
+        assert_eq!(dated.reference_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
+        assert_eq!(dated.delivery_date, ENTITY_SLOT_DELIVERY_DATE_SENTINEL);
     }
 }

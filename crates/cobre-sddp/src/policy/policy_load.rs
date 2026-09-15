@@ -1173,7 +1173,8 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{AnticipatedCommitmentHistory, EntityId};
     use cobre_io::{
-        EntitySlot, GraphManifest, ManifestEdge, ManifestNode, ProducerBlock, StageCutsPayload,
+        EntitySlot, GraphManifest, ManifestEdge, ManifestNode, ProducerBlock,
+        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload,
     };
 
     use super::{
@@ -1331,6 +1332,7 @@ mod tests {
                 cost_scale_factor: 1_000_000.0,
                 node_id: s as i32,
                 graph_stage_id: -1,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             })
             .collect();
 
@@ -1375,6 +1377,7 @@ mod tests {
             cost_scale_factor: 1_000_000.0,
             node_id: i32::try_from(stage_id).unwrap_or(-1),
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         };
         let metadata = test_support::checkpoint_metadata(
             stage_id + 1,
@@ -1773,37 +1776,19 @@ mod tests {
 
     /// A single active `HydroStorage` slot (`entity_type 0`, `subindex 0`).
     fn storage_slot(id: i32) -> EntitySlot {
-        EntitySlot {
-            entity_type: 0,
-            entity_id: id,
-            subindex: 0,
-            was_active: true,
-            delivery_date: cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        EntitySlot::storage(id, true)
     }
 
     /// A single active `HydroTransitBucket` slot (`entity_type 3`): `id` is the
     /// downstream hydro, `lag` the maturity subindex.
     fn transit_bucket_slot(id: i32, lag: u32) -> EntitySlot {
-        EntitySlot {
-            entity_type: 3,
-            entity_id: id,
-            subindex: lag,
-            was_active: true,
-            delivery_date: cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        EntitySlot::transit_bucket(id, lag, true)
     }
 
     /// A single active `HydroInflowLag` slot (`entity_type 1`): `id` is the
     /// hydro, `lag_depth` the 1-based lag (as `build_stage_entity_manifest` emits).
     fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-        EntitySlot {
-            entity_type: 1,
-            entity_id: id,
-            subindex: lag_depth,
-            was_active: true,
-            delivery_date: cobre_io::ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        EntitySlot::inflow_lag(id, lag_depth, true)
     }
 
     /// A boundary cut at depth 12 reaching `load_boundary_cuts` with a reserved
@@ -2255,6 +2240,7 @@ mod tests {
                     cost_scale_factor: 1_000_000.0,
                     node_id: i32::try_from(*pool_id).unwrap_or(-1),
                     graph_stage_id: *graph_stage_id,
+                    priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
                 },
             )
             .collect();
@@ -2337,13 +2323,7 @@ mod tests {
     /// A single `AnticipatedThermalState` slot (`entity_type 2`), dated at
     /// `delivery_date` (`YYYYMM01`).
     fn anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-        EntitySlot {
-            entity_type: 2,
-            entity_id: thermal_id,
-            subindex: ring_slot,
-            was_active: true,
-            delivery_date,
-        }
+        EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
     }
 
     /// Write a checkpoint with one pool per `manifests` entry (pool id ==
@@ -2384,6 +2364,7 @@ mod tests {
                 cost_scale_factor: 1_000_000.0,
                 node_id: pool as i32,
                 graph_stage_id: pool as i32,
+                priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
             })
             .collect();
         let metadata =
@@ -2578,6 +2559,7 @@ mod tests {
                     cost_scale_factor: 1_000_000.0,
                     node_id: i32::try_from(*pool_id).unwrap_or(-1),
                     graph_stage_id: *graph_stage_id,
+                    priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
                 },
             )
             .collect();
@@ -3231,6 +3213,7 @@ mod tests {
             cost_scale_factor: None,
             node_id: -1,
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         }
     }
 
@@ -3503,6 +3486,7 @@ mod tests {
             cost_scale_factor: 1_000_000.0,
             node_id: 0,
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         };
         let metadata = test_support::checkpoint_metadata(
             1,

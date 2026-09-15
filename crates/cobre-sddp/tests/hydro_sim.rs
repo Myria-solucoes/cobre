@@ -2780,8 +2780,8 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
         TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use cobre_io::{
-        GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock, StageCutsPayload,
-        write_policy_checkpoint,
+        GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
+        STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, write_policy_checkpoint,
     };
     use cobre_sddp::indexer::{CutStateProjection, StateDim};
     use cobre_sddp::setup::{NodeId, StageIdx};
@@ -3205,6 +3205,7 @@ mod water_arc_and_post_study_anticipated_coexist_on_extended_layout {
             cost_scale_factor: 1_000_000.0,
             node_id: 100,
             graph_stage_id: -1,
+            priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
         };
         let metadata = cobre_sddp::test_support::checkpoint_metadata(
             1,

@@ -729,8 +729,8 @@ pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLo
 /// the three invariant fields (`format_version` = [`FORMAT_VERSION`],
 /// `cobre_version` matching the production writer, a fixed `created_at` no
 /// consumer reads) are filled here — the sole owner of the manifest literal for
-/// `cobre-sddp` tests — and `num_stages`/`graph_manifest`/`producer` are
-/// forwarded verbatim.
+/// `cobre-sddp` tests — `num_stages`/`graph_manifest`/`producer` are
+/// forwarded verbatim, and `season_manifest` stays the absent default.
 ///
 /// [`CheckpointManifest`]: cobre_io::CheckpointManifest
 /// [`FORMAT_VERSION`]: cobre_io::FORMAT_VERSION
@@ -747,6 +747,7 @@ pub fn checkpoint_metadata(
         num_stages,
         graph_manifest,
         producer,
+        season_manifest: cobre_io::SeasonManifest::default(),
     }
 }
 

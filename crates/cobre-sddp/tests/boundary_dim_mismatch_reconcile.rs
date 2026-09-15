@@ -43,8 +43,8 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_io::{
-    ENTITY_SLOT_DELIVERY_DATE_SENTINEL, EntitySlot, GraphManifest, ManifestNode, PolicyCutRecord,
-    ProducerBlock, StageCutsPayload, StateFamily, write_policy_checkpoint,
+    EntitySlot, GraphManifest, ManifestNode, PolicyCutRecord, ProducerBlock,
+    STAGE_CUTS_PRICED_STATE_DATE_SENTINEL, StageCutsPayload, StateFamily, write_policy_checkpoint,
 };
 use cobre_sddp::{inject_boundary_cuts, load_boundary_cuts};
 use cobre_solver::ActiveSolver;
@@ -63,43 +63,19 @@ fn ymd(year: i32, month: u32, day: u32) -> NaiveDate {
 }
 
 fn storage_slot(id: i32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::HydroStorage.code(),
-        entity_id: id,
-        subindex: 0,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
+    EntitySlot::storage(id, true)
 }
 
 fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::HydroInflowLag.code(),
-        entity_id: id,
-        subindex: lag_depth,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
+    EntitySlot::inflow_lag(id, lag_depth, true)
 }
 
 fn transit_bucket_slot(downstream_hydro_id: i32, lag: u32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::HydroTransitBucket.code(),
-        entity_id: downstream_hydro_id,
-        subindex: lag,
-        was_active: true,
-        delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-    }
+    EntitySlot::transit_bucket(downstream_hydro_id, lag, true)
 }
 
 fn dated_anticipated_slot(thermal_id: i32, ring_slot: u32, delivery_date: i32) -> EntitySlot {
-    EntitySlot {
-        entity_type: StateFamily::AnticipatedThermalState.code(),
-        entity_id: thermal_id,
-        subindex: ring_slot,
-        was_active: true,
-        delivery_date,
-    }
+    EntitySlot::anticipated(thermal_id, ring_slot, true).with_delivery_date(delivery_date)
 }
 
 fn producer_block() -> ProducerBlock {
@@ -165,6 +141,7 @@ fn write_source_checkpoint(
         cost_scale_factor: cost_scale_factor.unwrap_or(1_000_000.0),
         node_id: 0,
         graph_stage_id: -1,
+        priced_state_date: STAGE_CUTS_PRICED_STATE_DATE_SENTINEL,
     };
     let metadata = cobre_sddp::test_support::checkpoint_metadata(
         1,
