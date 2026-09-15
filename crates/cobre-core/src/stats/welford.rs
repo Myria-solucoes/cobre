@@ -77,8 +77,6 @@ impl Default for WelfordAccumulator {
 mod tests {
     use super::WelfordAccumulator;
 
-    /// Known dataset: `[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]`
-    /// Expected: mean=5.0, `sample_std_dev`=`sqrt(32/7)`.
     #[test]
     fn welford_known_dataset_mean_and_sample_std_dev() {
         let values = [2.0_f64, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];

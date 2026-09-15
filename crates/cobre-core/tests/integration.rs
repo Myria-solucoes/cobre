@@ -396,9 +396,6 @@ fn test_diversion_invalid_reference_rejected() {
 
 #[test]
 fn test_canonical_order_stable_under_name_changes() {
-    // Canonical order is (operational_start_date, id): renaming entities with ids
-    // and dates held constant must not change processing order — names are
-    // user-chosen and must not influence the layout.
     let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
     let mut hydro_a = sized_hydro(1, 1, None);
