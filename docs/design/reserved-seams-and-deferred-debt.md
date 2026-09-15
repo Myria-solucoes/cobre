@@ -1224,11 +1224,47 @@ local identity-correlation builders where the integration binaries share one.
 **Owner.** The `cobre-core`, `cobre-io` and `cobre-stochastic` owners (as executed).
 **Trigger.** None — done.
 
+### Fixed — documentation and rule-table drift (2026-09-15)
+
+- **The uniform entity-table stride has one owner.** The resolved-bounds table indexes every
+  non-thermal family through one private helper that carries the same stride assertion the
+  thermal helper already had, so a layout change is one edit rather than a fourteen-site sweep.
+- **The System wire payload serializes in content-determined order, stated once.** The last
+  unordered map on the payload (the per-stage discount-rate overrides) is key-ordered, the rule
+  lives on the `System` doc, and a test pins byte identity across insertion orders.
+- **The semantic rule tables match the code.** Two rules the parse layer already enforces are
+  retired from the semantic layer with their unreachable branches and tests; a ghost row for a
+  field that no longer exists is retired; seven checks that ran without a row are tabulated;
+  three drifted rows are reworded; and every dispatched check carries its rule number on its
+  first doc line so a row greps to its implementation.
+- **The bound-override family has one rule set.** Generic-constraint bounds join the per-family
+  descriptor table and so get the per-column duplicate rule and the same error kind as the other
+  six families (a deck-visible change recorded in the CHANGELOG); the referential module keeps
+  only dangling-id and non-family-shaped checks, and the two non-controllable-source value checks
+  that the parsers already enforced are gone.
+- **The dangling-reference message has one owner.** A descriptor and one emit helper carry the
+  same-shaped sites; the differently shaped ones stay explicit.
+- **Every output schema is declared in one module and listed once.** The registry drives the
+  axis-spelling gate, which now really covers the whole family, and the variables dictionary.
+- **Each simulation entity family is declared once**, with its declared-predicate and batch
+  adapter; directory creation and per-scenario writes iterate the same table, and the rule that a
+  declared family's directory exists from construction while a partition needs a non-empty
+  payload is stated once.
+- **Docs tell the truth about ownership and layering.** The result-writer entry point documents
+  what it writes and what the callers write; the stage lag-transition type no longer cites an
+  engine-private function; the PAR module docs describe their layout without engine phase names.
+
+**Not done here, by design.** The lag-transition type's crate home is a layering decision for the
+alignment station, and consolidating the output orchestration into one owner is its own entry.
+
+**Owner.** The `cobre-core`, `cobre-io` and `cobre-stochastic` owners (as executed).
+**Trigger.** None — done.
+
 ### Deprioritized (recorded, not scheduled)
 
-Setup-time performance items below the sweep threshold; doc and rule-table drift, one sweep; the
-generalization-alignment holds, which the alignment station adjudicates before any code; and the
-test-corpus sweep, which follows the fixture surface above.
+Setup-time performance items below the sweep threshold; the generalization-alignment holds, which
+the alignment station adjudicates before any code; and the test-corpus sweep, which follows the
+fixture surface above.
 
 ## Audit-evidence
 
