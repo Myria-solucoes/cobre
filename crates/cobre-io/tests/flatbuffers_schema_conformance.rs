@@ -214,7 +214,6 @@ fn assert_manifest_json_matches(manifest_json: &Value, expected: &[EntitySlot]) 
             slot.was_active,
             "slot {i} was_active"
         );
-        // flatc omits a scalar equal to its default (0); an absent field is 0.
         assert_eq!(
             i64_or(obj, "delivery_date", 0),
             i64::from(slot.delivery_date),
@@ -1007,7 +1006,6 @@ fn checkpoint_manifest_round_trip() {
         .expect("hand-rolled reader must consume its own buffer");
     assert_manifest_eq(&hand_rolled, &manifest);
 
-    // Hand-rolled bytes → flatc decode of the CheckpointManifest root.
     let json = flatc_decode(&buf, "CheckpointManifest");
     assert_eq!(as_u64(&json, "format_version"), u64::from(FORMAT_VERSION));
     assert_eq!(get(&json, "cobre_version").as_str().unwrap(), "9.9.9");
@@ -1072,7 +1070,6 @@ fn checkpoint_manifest_round_trip() {
         &json!([4, 4, 3, 3, 2, 2, 1, 1, 2, 2, 3, 3])
     );
 
-    // flatc-built buffer → hand-rolled reader.
     let document = json!({
         "format_version": FORMAT_VERSION,
         "cobre_version": "9.9.9",
@@ -1155,7 +1152,6 @@ fn season_manifest_round_trips_through_flatc() {
     assert_eq!(i64_or(&hydro_orders[1], "hydro_id", 0), 5);
     assert_eq!(get(&hydro_orders[1], "orders"), &json!([0, 1, 1, 2]));
 
-    // flatc reader's own JSON → flatc writer → hand-rolled reader ("...→ back").
     let flatc_buf = flatc_encode(&json, "CheckpointManifest");
     let from_flatc = deserialize_checkpoint_manifest(&flatc_buf)
         .expect("hand-rolled reader must consume flatc-built buffer");

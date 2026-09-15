@@ -58,8 +58,6 @@ fn write_fixture(dir: &std::path::Path, pool_id: u32, manifest: &[EntitySlot]) {
     write_policy_checkpoint(dir, &[payload], &[], &metadata(), &[]).expect("fixture must write");
 }
 
-// ── a malformed delivery_date is rejected, naming the slot ──────────────
-
 #[test]
 fn malformed_month_delivery_date_rejected_naming_slot() {
     let dir = tempfile::tempdir().unwrap();
@@ -75,8 +73,6 @@ fn malformed_month_delivery_date_rejected_naming_slot() {
         "must name the malformed date: {msg}"
     );
 }
-
-// ── decreasing HydroTransitBucket dates are rejected, naming pool+subindex ──
 
 #[test]
 fn hydro_transit_bucket_decreasing_dates_rejected_naming_pool_and_subindex() {
@@ -96,8 +92,6 @@ fn hydro_transit_bucket_decreasing_dates_rejected_naming_pool_and_subindex() {
         "must name the offending subindex: {msg}"
     );
 }
-
-// ── a well-formed, monotone checkpoint reads Ok with an unchanged manifest ──
 
 #[test]
 fn well_formed_monotone_checkpoint_accepted_manifest_unchanged() {
@@ -121,8 +115,6 @@ fn well_formed_monotone_checkpoint_accepted_manifest_unchanged() {
     }
 }
 
-// ── a fully sentinel-dated legacy checkpoint reads Ok ───────────────────
-
 #[test]
 fn fully_sentinel_legacy_checkpoint_accepted() {
     let dir = tempfile::tempdir().unwrap();
@@ -137,8 +129,6 @@ fn fully_sentinel_legacy_checkpoint_accepted() {
     read_policy_checkpoint(dir.path())
         .expect("a fully sentinel-dated legacy checkpoint must be accepted");
 }
-
-// ── Anti-false-reject guard: a modular-residue subindex sequence is exempt ──
 
 #[test]
 fn anticipated_thermal_state_non_monotone_dates_accepted() {
@@ -156,8 +146,6 @@ fn anticipated_thermal_state_non_monotone_dates_accepted() {
     read_policy_checkpoint(dir.path())
         .expect("a modular-residue subindex family must be exempt from ordering checks");
 }
-
-// ── a half-populated interval is rejected, naming the missing endpoint ──
 
 #[test]
 fn half_populated_interval_rejected_naming_slot_and_endpoint() {
@@ -178,8 +166,6 @@ fn half_populated_interval_rejected_naming_slot_and_endpoint() {
     );
 }
 
-// ── a reversed interval is rejected, naming both endpoint values ────────
-
 #[test]
 fn reversed_interval_rejected_naming_both_endpoints() {
     let dir = tempfile::tempdir().unwrap();
@@ -194,8 +180,6 @@ fn reversed_interval_rejected_naming_both_endpoints() {
     assert!(msg.contains("20311201"), "must name interval_end: {msg}");
 }
 
-// ── a degenerate zero-length interval (start == end) is rejected ────────
-
 #[test]
 fn degenerate_zero_length_interval_rejected() {
     let dir = tempfile::tempdir().unwrap();
@@ -205,8 +189,6 @@ fn degenerate_zero_length_interval_rejected() {
     read_policy_checkpoint(dir.path())
         .expect_err("a zero-length interval (start == end) must be rejected");
 }
-
-// ── a storage slot with a live reference_date is rejected ───────────────
 
 #[test]
 fn storage_slot_with_live_reference_date_rejected() {
@@ -225,7 +207,42 @@ fn storage_slot_with_live_reference_date_rejected() {
     );
 }
 
-// ── an inflow-lag slot with a live interval is rejected ─────────────────
+#[test]
+fn transit_bucket_slot_with_live_reference_date_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = [EntitySlot::transit_bucket(42, 0, true).with_reference_date(20_311_201)];
+    write_fixture(dir.path(), 0, &manifest);
+
+    let err = read_policy_checkpoint(dir.path())
+        .expect_err("a transit-bucket slot with a live reference_date must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("pool 0"), "must name the pool: {msg}");
+    assert!(msg.contains("entity 42"), "must name the entity: {msg}");
+    assert!(msg.contains("subindex 0"), "must name the subindex: {msg}");
+    assert!(
+        msg.contains("reference_date"),
+        "must mention reference_date: {msg}"
+    );
+}
+
+#[test]
+fn anticipated_slot_with_live_reference_date_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = [EntitySlot::anticipated(7, 0, true).with_reference_date(20_311_201)];
+    write_fixture(dir.path(), 0, &manifest);
+
+    let err = read_policy_checkpoint(dir.path()).expect_err(
+        "an anticipated-thermal-state slot with a live reference_date must be rejected",
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("pool 0"), "must name the pool: {msg}");
+    assert!(msg.contains("entity 7"), "must name the entity: {msg}");
+    assert!(msg.contains("subindex 0"), "must name the subindex: {msg}");
+    assert!(
+        msg.contains("reference_date"),
+        "must mention reference_date: {msg}"
+    );
+}
 
 #[test]
 fn inflow_lag_slot_with_live_interval_rejected() {
@@ -239,8 +256,6 @@ fn inflow_lag_slot_with_live_interval_rejected() {
     assert!(msg.contains("pool 0"), "must name the pool: {msg}");
     assert!(msg.contains("entity 5"), "must name the entity: {msg}");
 }
-
-// ── a checkpoint with every slot's dates at the sentinel still reads ────
 
 #[test]
 fn fully_sentinel_dated_checkpoint_still_accepted() {
@@ -257,9 +272,6 @@ fn fully_sentinel_dated_checkpoint_still_accepted() {
         "a checkpoint whose reference_date/interval fields are all sentinel must be accepted",
     );
 }
-
-// ── declaration order does not change the FIRST reported error, even with ──
-// ── two violating slots that would otherwise report in declaration order ───
 
 #[test]
 fn first_reported_error_identical_across_slot_declaration_order() {

@@ -19,8 +19,9 @@ pub const FORMAT_VERSION: u32 = 2;
 /// Sentinel [`EntitySlot`] date-field value — [`EntitySlot::delivery_date`],
 /// [`EntitySlot::reference_date`], [`EntitySlot::interval_start`], and
 /// [`EntitySlot::interval_end`] all default to it — for a slot whose family
-/// does not populate that field; also the value a reader yields when the
-/// field is absent from a pre-`id:5` buffer (forward-compatible default).
+/// does not populate that field; also the value a reader yields when a field
+/// is absent from a buffer older than that field's own id (see
+/// `schemas/policy.fbs` for each field's introducing id).
 pub const ENTITY_SLOT_DELIVERY_DATE_SENTINEL: i32 = i32::MIN;
 
 /// One per-slot entity-identity record for a state-vector dimension.
@@ -60,67 +61,67 @@ pub struct EntitySlot {
 }
 
 impl EntitySlot {
-    /// Builds a [`StateFamily::HydroStorage`] slot; `subindex` is always `0`.
-    #[must_use]
-    pub fn storage(entity_id: i32, was_active: bool) -> Self {
+    /// Builds a slot for `family` with every date field at
+    /// [`ENTITY_SLOT_DELIVERY_DATE_SENTINEL`] — the shared body of the four
+    /// per-family constructors below.
+    fn at_sentinel_dates(
+        family: StateFamily,
+        entity_id: i32,
+        subindex: u32,
+        was_active: bool,
+    ) -> Self {
         Self {
-            entity_type: StateFamily::HydroStorage.code(),
+            entity_type: family.code(),
             entity_id,
-            subindex: 0,
+            subindex,
             was_active,
             delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
             interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
         }
+    }
+
+    /// Builds a [`StateFamily::HydroStorage`] slot; `subindex` is always `0`.
+    #[must_use]
+    pub fn storage(entity_id: i32, was_active: bool) -> Self {
+        Self::at_sentinel_dates(StateFamily::HydroStorage, entity_id, 0, was_active)
     }
 
     /// Builds a [`StateFamily::HydroInflowLag`] slot; `subindex` is the
     /// 1-based AR lag order.
     #[must_use]
     pub fn inflow_lag(entity_id: i32, lag_order: u32, was_active: bool) -> Self {
-        Self {
-            entity_type: StateFamily::HydroInflowLag.code(),
+        Self::at_sentinel_dates(
+            StateFamily::HydroInflowLag,
             entity_id,
-            subindex: lag_order,
+            lag_order,
             was_active,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        )
     }
 
     /// Builds a [`StateFamily::HydroTransitBucket`] slot; `entity_id` is the
     /// downstream hydro, `subindex` the maturity lag.
     #[must_use]
     pub fn transit_bucket(downstream_entity_id: i32, maturity_lag: u32, was_active: bool) -> Self {
-        Self {
-            entity_type: StateFamily::HydroTransitBucket.code(),
-            entity_id: downstream_entity_id,
-            subindex: maturity_lag,
+        Self::at_sentinel_dates(
+            StateFamily::HydroTransitBucket,
+            downstream_entity_id,
+            maturity_lag,
             was_active,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        )
     }
 
     /// Builds a [`StateFamily::AnticipatedThermalState`] slot; `subindex` is
     /// the ring-buffer slot.
     #[must_use]
     pub fn anticipated(entity_id: i32, ring_slot: u32, was_active: bool) -> Self {
-        Self {
-            entity_type: StateFamily::AnticipatedThermalState.code(),
+        Self::at_sentinel_dates(
+            StateFamily::AnticipatedThermalState,
             entity_id,
-            subindex: ring_slot,
+            ring_slot,
             was_active,
-            delivery_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            reference_date: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            interval_start: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-            interval_end: ENTITY_SLOT_DELIVERY_DATE_SENTINEL,
-        }
+        )
     }
 
     /// Returns `self` with `delivery_date` replaced; every other field is

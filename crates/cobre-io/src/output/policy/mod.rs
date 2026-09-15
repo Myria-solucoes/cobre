@@ -482,6 +482,8 @@ mod tests {
         );
     }
 
+    // Root's read-only permission enforcement is unreliable, so callers that
+    // rely on read-only-directory failures skip the test in that case.
     #[cfg(unix)]
     fn is_root() -> bool {
         std::fs::read_to_string("/proc/self/status")
@@ -502,8 +504,6 @@ mod tests {
 
     #[test]
     fn write_policy_checkpoint_error_on_readonly_dir() {
-        // Skip this test on platforms where read-only enforcement is unreliable
-        // (e.g., when running as root).
         if is_root() {
             return;
         }
@@ -1231,8 +1231,6 @@ mod tests {
 
     #[test]
     fn interrupted_rewrite_never_pairs_an_old_manifest_with_new_payloads() {
-        // Skip this test on platforms where read-only enforcement is unreliable
-        // (e.g., when running as root).
         if is_root() {
             return;
         }

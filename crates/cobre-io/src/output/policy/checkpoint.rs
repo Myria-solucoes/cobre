@@ -104,9 +104,10 @@ fn check_interval_ordering(pool_id: u32, slot: &EntitySlot) -> Result<(), Output
 fn check_family_applicability(pool_id: u32, slot: &EntitySlot) -> Result<(), OutputError> {
     let interval_live = slot.interval_start != ENTITY_SLOT_DELIVERY_DATE_SENTINEL
         || slot.interval_end != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
+    let reference_live = slot.reference_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL;
     match slot.family() {
         Some(StateFamily::HydroStorage) => {
-            if slot.reference_date != ENTITY_SLOT_DELIVERY_DATE_SENTINEL {
+            if reference_live {
                 return Err(slot_date_error(
                     pool_id,
                     slot,
@@ -133,7 +134,25 @@ fn check_family_applicability(pool_id: u32, slot: &EntitySlot) -> Result<(), Out
                 ));
             }
         }
-        _ => {}
+        other => {
+            if reference_live {
+                let noun = match other {
+                    Some(StateFamily::HydroTransitBucket) => "a transit-bucket slot",
+                    Some(StateFamily::AnticipatedThermalState) => {
+                        "an anticipated-thermal-state slot"
+                    }
+                    _ => "a slot with no recognized family",
+                };
+                return Err(slot_date_error(
+                    pool_id,
+                    slot,
+                    &format!(
+                        "is {noun}, which carries no reference_date (only inflow-lag slots do), but carries a live reference_date {}",
+                        slot.reference_date
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }
