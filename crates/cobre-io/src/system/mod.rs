@@ -109,7 +109,6 @@ mod tests {
 
     // ── AC: optional file wrapper returns empty vec for None ──────────────────
 
-    /// `load_non_controllable_sources(None, ...)` returns `Ok(Vec::new())`.
     #[test]
     fn test_load_ncs_none_returns_empty() {
         let global = make_global();
@@ -120,7 +119,6 @@ mod tests {
         );
     }
 
-    /// `load_pumping_stations(None)` returns `Ok(Vec::new())`.
     #[test]
     fn test_load_pumping_stations_none_returns_empty() {
         let result = load_pumping_stations(None).unwrap();
@@ -130,7 +128,6 @@ mod tests {
         );
     }
 
-    /// `load_energy_contracts(None)` returns `Ok(Vec::new())`.
     #[test]
     fn test_load_energy_contracts_none_returns_empty() {
         let result = load_energy_contracts(None).unwrap();

@@ -657,20 +657,26 @@ pub fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
     stage
 }
 
+/// `HorizonGraph` shared by [`make_stages`] and [`make_stages_with_seasons`]:
+/// a finite-horizon graph with no discount-rate overrides or transitions.
+fn make_horizon_graph(season_map: Option<SeasonMap>) -> HorizonGraph {
+    HorizonGraph {
+        stage_discount_rate_overrides: std::collections::HashMap::new(),
+        graph_type: PolicyGraphType::FiniteHorizon,
+        annual_discount_rate: 0.06,
+        transitions: vec![],
+        nodes: Vec::new(),
+        season_map,
+    }
+}
+
 /// Build a minimal valid `StagesData` with the given stage IDs.
 #[must_use]
 pub fn make_stages(ids: Vec<i32>) -> StagesData {
     StagesData {
         openings_declared: std::collections::HashSet::new(),
         stages: ids.into_iter().map(make_stage).collect(),
-        policy_graph: HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
-            graph_type: PolicyGraphType::FiniteHorizon,
-            annual_discount_rate: 0.06,
-            transitions: vec![],
-            nodes: Vec::new(),
-            season_map: None,
-        },
+        policy_graph: make_horizon_graph(None),
     }
 }
 
@@ -745,6 +751,15 @@ fn base_bus() -> Vec<Bus> {
     }]
 }
 
+/// Sort every hydro's `unit_groups`, at the boundary each `make_data*` builder
+/// below sorts at (see `make_data`'s doc for why not inside `make_hydro`).
+#[cfg(test)]
+fn sort_hydros(hydros: &mut [Hydro]) {
+    for hydro in hydros {
+        hydro.sort_unit_groups();
+    }
+}
+
 /// Build a minimal `ParsedData` with the provided hydros, thermals, stages,
 /// geometry, and FPHA rows.  All other fields are empty/minimal.
 ///
@@ -762,9 +777,7 @@ pub(crate) fn make_data(
     hydro_geometry: Vec<HydroGeometryRow>,
     fpha_hyperplanes: Vec<FphaHyperplaneRow>,
 ) -> ParsedData {
-    for hydro in &mut hydros {
-        hydro.sort_unit_groups();
-    }
+    sort_hydros(&mut hydros);
     ParsedData {
         thermals,
         hydros,
@@ -791,9 +804,7 @@ pub(crate) fn make_data_5b(
     inflow_ar: Vec<InflowArCoefficientRow>,
     correlation: Option<CorrelationModel>,
 ) -> ParsedData {
-    for hydro in &mut hydros {
-        hydro.sort_unit_groups();
-    }
+    sort_hydros(&mut hydros);
     ParsedData {
         buses,
         hydros,
@@ -1158,14 +1169,7 @@ pub fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -> Stage
     StagesData {
         openings_declared: std::collections::HashSet::new(),
         stages,
-        policy_graph: HorizonGraph {
-            stage_discount_rate_overrides: std::collections::HashMap::new(),
-            graph_type: PolicyGraphType::FiniteHorizon,
-            annual_discount_rate: 0.06,
-            transitions: vec![],
-            nodes: Vec::new(),
-            season_map: with_season_map.then(make_monthly_season_map),
-        },
+        policy_graph: make_horizon_graph(with_season_map.then(make_monthly_season_map)),
     }
 }
 
@@ -1181,9 +1185,7 @@ pub(crate) fn make_data_estimation(
     stages: StagesData,
     inflow_history: Vec<InflowHistoryRow>,
 ) -> ParsedData {
-    for hydro in &mut hydros {
-        hydro.sort_unit_groups();
-    }
+    sort_hydros(&mut hydros);
     ParsedData {
         hydros,
         inflow_history,

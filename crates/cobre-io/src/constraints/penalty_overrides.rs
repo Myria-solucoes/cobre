@@ -74,7 +74,7 @@
 //! - Duplicate `(entity_id, stage_id)` pairs — deferred.
 //! - Semantic cross-validation (e.g., penalty ordering constraints) — deferred.
 
-use arrow::array::Array;
+use arrow::array::{Array, Float64Array};
 use cobre_core::EntityId;
 use std::path::Path;
 
@@ -82,6 +82,10 @@ use crate::LoadError;
 use crate::parquet_helpers::{
     extract_optional_float64, extract_required_int32, open_record_batch_reader,
 };
+
+fn optional_value(col: Option<&Float64Array>, row: usize) -> Option<f64> {
+    col.filter(|c| !c.is_null(row)).map(|c| c.value(row))
+}
 
 // ── Row types ─────────────────────────────────────────────────────────────────
 
@@ -338,9 +342,7 @@ pub fn parse_penalty_overrides_bus(path: &Path) -> Result<Vec<BusPenaltyOverride
             let bus_id = EntityId::from(bus_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let excess_cost = excess_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let excess_cost = optional_value(excess_cost_col, i);
 
             validate_optional_positive(
                 excess_cost,
@@ -417,9 +419,7 @@ pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverri
             let line_id = EntityId::from(line_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let exchange_cost = exchange_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let exchange_cost = optional_value(exchange_cost_col, i);
 
             validate_optional_positive(
                 exchange_cost,
@@ -530,54 +530,30 @@ pub fn parse_penalty_overrides_hydro(
             let hydro_id = EntityId::from(hydro_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let spillage_cost = spillage_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let turbined_cost = turbined_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let diversion_cost = diversion_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let storage_violation_below_cost = storage_violation_below_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let filling_target_violation_cost = filling_target_violation_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let turbined_violation_below_cost = turbined_violation_below_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let outflow_violation_below_cost = outflow_violation_below_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let outflow_violation_above_cost = outflow_violation_above_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let generation_violation_below_cost = generation_violation_below_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let evaporation_violation_cost = evaporation_violation_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let water_withdrawal_violation_cost = water_withdrawal_violation_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let water_withdrawal_violation_pos_cost = water_withdrawal_violation_pos_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let water_withdrawal_violation_neg_cost = water_withdrawal_violation_neg_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let evaporation_violation_pos_cost = evaporation_violation_pos_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let evaporation_violation_neg_cost = evaporation_violation_neg_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let inflow_nonnegativity_cost = inflow_nonnegativity_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let spillage_cost = optional_value(spillage_cost_col, i);
+            let turbined_cost = optional_value(turbined_cost_col, i);
+            let diversion_cost = optional_value(diversion_cost_col, i);
+            let storage_violation_below_cost = optional_value(storage_violation_below_cost_col, i);
+            let filling_target_violation_cost =
+                optional_value(filling_target_violation_cost_col, i);
+            let turbined_violation_below_cost =
+                optional_value(turbined_violation_below_cost_col, i);
+            let outflow_violation_below_cost = optional_value(outflow_violation_below_cost_col, i);
+            let outflow_violation_above_cost = optional_value(outflow_violation_above_cost_col, i);
+            let generation_violation_below_cost =
+                optional_value(generation_violation_below_cost_col, i);
+            let evaporation_violation_cost = optional_value(evaporation_violation_cost_col, i);
+            let water_withdrawal_violation_cost =
+                optional_value(water_withdrawal_violation_cost_col, i);
+            let water_withdrawal_violation_pos_cost =
+                optional_value(water_withdrawal_violation_pos_cost_col, i);
+            let water_withdrawal_violation_neg_cost =
+                optional_value(water_withdrawal_violation_neg_cost_col, i);
+            let evaporation_violation_pos_cost =
+                optional_value(evaporation_violation_pos_cost_col, i);
+            let evaporation_violation_neg_cost =
+                optional_value(evaporation_violation_neg_cost_col, i);
+            let inflow_nonnegativity_cost = optional_value(inflow_nonnegativity_cost_col, i);
 
             validate_optional_positive(
                 spillage_cost,
@@ -774,9 +750,7 @@ pub fn parse_penalty_overrides_ncs(path: &Path) -> Result<Vec<NcsPenaltyOverride
             let source_id = EntityId::from(source_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let curtailment_cost = curtailment_cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let curtailment_cost = optional_value(curtailment_cost_col, i);
 
             validate_optional_positive(
                 curtailment_cost,

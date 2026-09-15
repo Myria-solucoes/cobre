@@ -167,12 +167,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     // there are none to validate.
     let calendar = (!windows_by_id.is_empty()).then(|| StageCalendar::new(study_stages));
 
-    let anticipated_thermal_ids: HashSet<EntityId> = data
-        .thermals
-        .iter()
-        .filter(|t| t.anticipated_config.is_some())
-        .map(|t| t.id)
-        .collect();
+    let anticipated_thermal_ids: HashSet<EntityId> = collect_anticipated_thermal_ids(data);
 
     for thermal in &data.thermals {
         let Some(ref cfg) = thermal.anticipated_config else {
@@ -327,6 +322,18 @@ fn group_commitments_by_thermal(
             .push(history);
     }
     windows_by_id
+}
+
+/// The set of thermal ids with `anticipated_config: Some(_)`. Shared by
+/// [`check_anticipated_thermals`], [`check_anticipated_decision_target_is_anticipated`],
+/// and [`warn_thermal_generation_on_anticipated_thermal`] so the three never
+/// drift on which thermals count as anticipated.
+fn collect_anticipated_thermal_ids(data: &ParsedData) -> HashSet<EntityId> {
+    data.thermals
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .map(|t| t.id)
+        .collect()
 }
 
 /// Study-stage (`id >= 0`) durations in canonical (ascending `id`) order, each
@@ -885,12 +892,7 @@ pub(super) fn check_anticipated_decision_target_is_anticipated(
     data: &ParsedData,
     ctx: &mut ValidationContext,
 ) {
-    let anticipated_ids: HashSet<EntityId> = data
-        .thermals
-        .iter()
-        .filter(|t| t.anticipated_config.is_some())
-        .map(|t| t.id)
-        .collect();
+    let anticipated_ids: HashSet<EntityId> = collect_anticipated_thermal_ids(data);
 
     for constraint in &data.generic_constraints {
         for term in &constraint.expression.terms {
@@ -926,12 +928,7 @@ pub(super) fn warn_thermal_generation_on_anticipated_thermal(
     data: &ParsedData,
     ctx: &mut ValidationContext,
 ) {
-    let anticipated_ids: HashSet<EntityId> = data
-        .thermals
-        .iter()
-        .filter(|t| t.anticipated_config.is_some())
-        .map(|t| t.id)
-        .collect();
+    let anticipated_ids: HashSet<EntityId> = collect_anticipated_thermal_ids(data);
 
     if anticipated_ids.is_empty() {
         return;

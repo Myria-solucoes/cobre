@@ -181,12 +181,10 @@ pub fn discover_historical_windows(
     };
     candidate_years.sort_unstable();
 
-    let mut valid_windows: Vec<i32> = candidate_years
+    let valid_windows: Vec<i32> = candidate_years
         .into_iter()
         .filter(|&y| is_window_complete(y, &required_sequence, hydro_ids, &lookup))
         .collect();
-
-    valid_windows.sort_unstable();
 
     if valid_windows.is_empty() {
         return Err(StochasticError::InsufficientData {

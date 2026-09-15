@@ -2546,6 +2546,16 @@ fn id_to_position<T>(entities: &[T], id_of: impl Fn(&T) -> i32) -> HashMap<i32, 
         .collect()
 }
 
+/// The contiguous study-stage slice (`Stage::id >= 0`), found by position since
+/// study stages are a contiguous suffix of `System::stages()`. Empty when the
+/// system declares no study stages.
+fn study_stages_slice(system: &System) -> &[Stage] {
+    match system.stages().iter().position(|s| s.id >= 0) {
+        Some(idx) => &system.stages()[idx..],
+        None => &[],
+    }
+}
+
 /// Build the initial state vector from the system's initial conditions.
 ///
 /// Layout `[storage(0..N), lags(N..N*(1+L))]` (N hydros, L = max PAR order),
@@ -2601,11 +2611,7 @@ fn build_initial_state(
         );
         let thermals = system.thermals();
         let thermal_positions = id_to_position(thermals, |t: &Thermal| t.id.0);
-        let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
-            Some(idx) => &system.stages()[idx..],
-            None => &[],
-        };
-        let calendar = StageCalendar::new(study_stages);
+        let calendar = StageCalendar::new(study_stages_slice(system));
         for history in &ic.past_anticipated_commitments {
             let Some(&global_idx) = thermal_positions.get(&history.thermal_id.0) else {
                 // Defense-in-depth — the cobre-io validator rejects an unknown ID in
@@ -2699,11 +2705,7 @@ fn build_initial_transit_bucket_state(
         );
         return seed;
     };
-    let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
-        Some(idx) => &system.stages()[idx..],
-        None => &[],
-    };
-    let calendar = StageCalendar::new(study_stages);
+    let calendar = StageCalendar::new(study_stages_slice(system));
     let ic = system.initial_conditions();
     let hydros = system.hydros();
 

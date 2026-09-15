@@ -290,7 +290,7 @@ fn validate_matrix(
     if n_rows != n_entities {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
-            field: field_prefix.clone(),
+            field: field_prefix,
             message: format!("matrix row count ({n_rows}) must equal entity count ({n_entities})"),
         });
     }
@@ -299,7 +299,7 @@ fn validate_matrix(
         if row.len() != n_entities {
             return Err(LoadError::SchemaError {
                 path: path.to_path_buf(),
-                field: field_prefix.clone(),
+                field: field_prefix,
                 message: format!(
                     "matrix is not square: row {r} has {} columns but expected {n_entities}",
                     row.len()

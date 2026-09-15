@@ -759,7 +759,7 @@ fn convert_hydros(
                 max_turbined_m3s,
                 min_generation_mw,
                 max_generation_mw,
-            ) = convert_generation(raw_hydro.generation);
+            ) = convert_generation(&raw_hydro.generation);
 
             let tailrace = raw_hydro.tailrace.map(convert_tailrace);
 
@@ -854,49 +854,20 @@ fn convert_hydros(
 }
 
 /// Returns `(model, min_turbined_m3s, max_turbined_m3s, min_generation_mw, max_generation_mw)`.
-// Clippy flags this as needless_pass_by_value, but the function consumes its
-// argument by destructuring (moving fields out). Taking &RawGeneration would
-// require cloning the copied f64 fields, which is no improvement.
-#[allow(clippy::needless_pass_by_value)]
-fn convert_generation(raw: RawGeneration) -> (HydroGenerationModel, f64, f64, f64, f64) {
-    match raw {
-        RawGeneration::ConstantProductivity {
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        } => (
-            HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        ),
-        RawGeneration::LinearizedHead {
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        } => (
-            HydroGenerationModel::LinearizedHead,
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        ),
-        RawGeneration::Fpha {
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        } => (
-            HydroGenerationModel::Fpha,
-            min_turbined_m3s,
-            max_turbined_m3s,
-            min_generation_mw,
-            max_generation_mw,
-        ),
-    }
+fn convert_generation(raw: &RawGeneration) -> (HydroGenerationModel, f64, f64, f64, f64) {
+    let model = match raw {
+        RawGeneration::ConstantProductivity { .. } => HydroGenerationModel::ConstantProductivity,
+        RawGeneration::LinearizedHead { .. } => HydroGenerationModel::LinearizedHead,
+        RawGeneration::Fpha { .. } => HydroGenerationModel::Fpha,
+    };
+    let (min_turbined_m3s, max_turbined_m3s, min_generation_mw, max_generation_mw) = raw.bounds();
+    (
+        model,
+        min_turbined_m3s,
+        max_turbined_m3s,
+        min_generation_mw,
+        max_generation_mw,
+    )
 }
 
 fn convert_tailrace(raw: RawTailrace) -> TailraceModel {

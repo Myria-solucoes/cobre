@@ -7,8 +7,8 @@
 //! spec value overrides only the fields a fixture cares about, so a call site
 //! that needs nothing unusual writes `make_bus(BusSpec { id: 1, ..Default::default() })`.
 //! Each `make_<entity>` destructures its spec with no `..`, so a spec that gains
-//! a field forces every call site to decide that field's value rather than
-//! silently inheriting a stale default.
+//! a field is a compile error inside `make_<entity>` until that field is routed
+//! to the entity — no field is silently dropped between the spec and the entity.
 
 use chrono::NaiveDate;
 

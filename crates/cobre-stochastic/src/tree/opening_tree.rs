@@ -59,7 +59,6 @@ impl OpeningTree {
             stage_offsets[n_stages],
         );
 
-        // Solve order defaults to the identity permutation, stored stage-major.
         // `order_offsets` accumulates raw opening counts (not `dim`-scaled).
         let mut order_offsets = Vec::with_capacity(n_stages + 1);
         let mut order_offset = 0usize;

@@ -280,7 +280,6 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
     finish_csv_atomic(wtr, &file_path)
 }
 
-/// Map an Arrow `DataType` to the string representation used in `variables.csv`.
 fn arrow_type_str(dt: &DataType) -> &'static str {
     match dt {
         DataType::Int8 => "i8",
@@ -1333,7 +1332,6 @@ fn write_bounds_parquet(
     write_parquet_atomic(&parquet_path, &batch, config)
 }
 
-/// Build the Arrow schema for `bounds.parquet`.
 fn bounds_schema() -> Schema {
     Schema::new(vec![
         Field::new("entity_type_code", DataType::Int8, false),

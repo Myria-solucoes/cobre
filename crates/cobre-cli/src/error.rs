@@ -113,10 +113,6 @@ impl CliError {
         }
     }
 
-    /// Build the stderr diagnostic lines for a [`CliError::Validation`].
-    ///
-    /// Empty when `already_rendered`; otherwise the report line plus the
-    /// "run `cobre validate`" hint (see the `already_rendered` field).
     fn validation_lines(report: &str, already_rendered: bool) -> Vec<String> {
         if already_rendered {
             return Vec::new();

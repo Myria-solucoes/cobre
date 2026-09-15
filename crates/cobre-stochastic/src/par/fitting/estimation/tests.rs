@@ -23,15 +23,13 @@ fn apply_contribution_validation(
 
     if let Some(threshold) = max_coeff_magnitude {
         for est in estimates.iter_mut() {
-            let has_explosive = est.coefficients.iter().any(|c| c.abs() > threshold);
-            if has_explosive {
-                let original_order = est.coefficients.len();
+            if est.coefficients.iter().any(|c| c.abs() > threshold) {
                 all_reductions
                     .entry(est.hydro_id)
                     .or_default()
                     .push(ContributionReduction {
                         season_id: est.season_id,
-                        original_order,
+                        original_order: est.coefficients.len(),
                         reduced_order: 0,
                         contributions: Vec::new(),
                         reason: ReductionReason::MagnitudeBound,
@@ -43,13 +41,12 @@ fn apply_contribution_validation(
 
     for est in estimates.iter_mut() {
         if has_negative_phi1(&est.coefficients) {
-            let original_order = est.coefficients.len();
             all_reductions
                 .entry(est.hydro_id)
                 .or_default()
                 .push(ContributionReduction {
                     season_id: est.season_id,
-                    original_order,
+                    original_order: est.coefficients.len(),
                     reduced_order: 0,
                     contributions: Vec::new(),
                     reason: ReductionReason::Phi1Negative,
@@ -1023,16 +1020,12 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
 
     let mean_s0 = obs_s0.iter().sum::<f64>() / obs_s0.len() as f64;
     let mean_s1 = obs_s1.iter().sum::<f64>() / obs_s1.len() as f64;
-    let std_s0 = {
-        let v =
-            obs_s0.iter().map(|x| (x - mean_s0).powi(2)).sum::<f64>() / (obs_s0.len() - 1) as f64;
-        v.sqrt()
-    };
-    let std_s1 = {
-        let v =
-            obs_s1.iter().map(|x| (x - mean_s1).powi(2)).sum::<f64>() / (obs_s1.len() - 1) as f64;
-        v.sqrt()
-    };
+    let std_s0 = (obs_s0.iter().map(|x| (x - mean_s0).powi(2)).sum::<f64>()
+        / (obs_s0.len() - 1) as f64)
+        .sqrt();
+    let std_s1 = (obs_s1.iter().map(|x| (x - mean_s1).powi(2)).sum::<f64>()
+        / (obs_s1.len() - 1) as f64)
+        .sqrt();
 
     let stats_storage = vec![
         SeasonalStats {
@@ -1278,11 +1271,6 @@ fn roundtrip_estimation_two_season_par2_recovers_coefficients() {
 /// 30 years of synthetic monthly data (360 observations per hydro) gives
 /// enough rolling-window samples for `estimate_annual_seasonal_stats` to
 /// succeed and for the extended YW system to be well-conditioned.
-///
-/// Asserts:
-/// - 24 estimates returned (2 hydros × 12 seasons).
-/// - Every `estimate.annual.is_some()`.
-/// - Every `estimate.annual.as_ref().unwrap().std_m3s > 0.0`.
 #[test]
 fn estimate_ar_with_pacf_annual_two_hydros_twelve_seasons() {
     let h1 = EntityId(1);

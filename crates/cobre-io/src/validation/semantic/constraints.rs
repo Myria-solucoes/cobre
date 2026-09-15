@@ -4,7 +4,7 @@
 //! stage: interior storage boundaries (`HydroStorageInitial` / `HydroStorageFinal`)
 //! on parallel stages, and out-of-range block selectors on any per-block reference.
 
-use cobre_core::{VariableRef, temporal::BlockMode};
+use cobre_core::{GenericConstraint, VariableRef, temporal::BlockMode};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -73,11 +73,24 @@ enum StorageRef {
     Final(Option<usize>),
 }
 
+fn add_constraint_error(
+    ctx: &mut ValidationContext,
+    constraint: &GenericConstraint,
+    message: String,
+) {
+    ctx.add_error(
+        ErrorKind::BusinessRuleViolation,
+        "constraints/generic_constraints.json",
+        Some(format!("constraint[id={}]", constraint.id.0)),
+        message,
+    );
+}
+
 /// Dispatch a term to its per-block validity check. Storage boundaries get the
 /// full interior + out-of-range check; evaporation gets out-of-range only (its `K`
 /// per-block columns exist in both modes); every other variant is unrestricted.
 fn validate_block_ref(
-    constraint: &cobre_core::GenericConstraint,
+    constraint: &GenericConstraint,
     variable: &VariableRef,
     k: usize,
     stage_id: i32,
@@ -108,10 +121,9 @@ fn validate_block_ref(
         VariableRef::HydroEvaporation {
             block_id: Some(b), ..
         } if *b >= k => {
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "constraints/generic_constraints.json",
-                Some(format!("constraint[id={}]", constraint.id.0)),
+            add_constraint_error(
+                ctx,
+                constraint,
                 format!(
                     "Constraint \"{}\": per-block evaporation reference \
                      `hydro_evaporation({b})` at stage {stage_id} references block {b} \
@@ -123,10 +135,9 @@ fn validate_block_ref(
         VariableRef::HydroEvaporation { block_id: None, .. }
             if block_mode == BlockMode::Chronological && k > 1 =>
         {
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "constraints/generic_constraints.json",
-                Some(format!("constraint[id={}]", constraint.id.0)),
+            add_constraint_error(
+                ctx,
+                constraint,
                 format!(
                     "Constraint \"{}\": stage-level `hydro_evaporation` at chronological \
                      stage {stage_id} is ambiguous — evaporation is per-block there \
@@ -140,7 +151,7 @@ fn validate_block_ref(
 }
 
 fn validate_storage_ref(
-    constraint: &cobre_core::GenericConstraint,
+    constraint: &GenericConstraint,
     storage: StorageRef,
     k: usize,
     stage_id: i32,
@@ -155,10 +166,9 @@ fn validate_storage_ref(
     if let Some(b) = block_id
         && b >= k
     {
-        ctx.add_error(
-            ErrorKind::BusinessRuleViolation,
-            "constraints/generic_constraints.json",
-            Some(format!("constraint[id={}]", constraint.id.0)),
+        add_constraint_error(
+            ctx,
+            constraint,
             format!(
                 "Constraint \"{}\": per-block storage reference `{accessor}({b})` at \
                  stage {stage_id} references block {b} which does not exist at \
@@ -185,10 +195,9 @@ fn validate_storage_ref(
                     Some(b) => format!("{accessor}({b})"),
                     None => format!("{accessor}(all blocks)"),
                 };
-                ctx.add_error(
-                    ErrorKind::BusinessRuleViolation,
-                    "constraints/generic_constraints.json",
-                    Some(format!("constraint[id={}]", constraint.id.0)),
+                add_constraint_error(
+                    ctx,
+                    constraint,
                     format!(
                         "Constraint \"{}\": per-block storage reference `{block_label}` at \
                          stage {stage_id} resolves to an interior boundary, which requires \

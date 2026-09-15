@@ -2,6 +2,7 @@
 //! logic used by every Parquet parser in `cobre-io`.
 
 use arrow::array::{Array, Date32Array, Float64Array, Int32Array, UInt32Array};
+use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use std::fs::File;
@@ -21,6 +22,22 @@ pub(crate) fn open_record_batch_reader(path: &Path) -> Result<ParquetRecordBatch
         .map_err(|e| LoadError::parse(path, e.to_string()))
 }
 
+fn missing_column_error(name: &str, path: &Path) -> LoadError {
+    LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field: name.to_string(),
+        message: format!("missing required column \"{name}\""),
+    }
+}
+
+fn wrong_type_error(name: &str, path: &Path, actual: &DataType, expected: &str) -> LoadError {
+    LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field: name.to_string(),
+        message: format!("column \"{name}\" has type {actual} but {expected} is required"),
+    }
+}
+
 pub(crate) fn extract_required_int32<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -28,21 +45,10 @@ pub(crate) fn extract_required_int32<'a>(
 ) -> Result<&'a Int32Array, LoadError> {
     let col = batch
         .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing required column \"{name}\""),
-        })?;
+        .ok_or_else(|| missing_column_error(name, path))?;
     col.as_any()
         .downcast_ref::<Int32Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Int32 is required",
-                col.data_type()
-            ),
-        })
+        .ok_or_else(|| wrong_type_error(name, path, col.data_type(), "Int32"))
 }
 
 pub(crate) fn extract_required_float64<'a>(
@@ -52,21 +58,10 @@ pub(crate) fn extract_required_float64<'a>(
 ) -> Result<&'a Float64Array, LoadError> {
     let col = batch
         .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing required column \"{name}\""),
-        })?;
+        .ok_or_else(|| missing_column_error(name, path))?;
     col.as_any()
         .downcast_ref::<Float64Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Float64 is required",
-                col.data_type()
-            ),
-        })
+        .ok_or_else(|| wrong_type_error(name, path, col.data_type(), "Float64"))
 }
 
 pub(crate) fn extract_optional_int32<'a>(
@@ -80,14 +75,7 @@ pub(crate) fn extract_optional_int32<'a>(
     let arr = col
         .as_any()
         .downcast_ref::<Int32Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Int32 is required",
-                col.data_type()
-            ),
-        })?;
+        .ok_or_else(|| wrong_type_error(name, path, col.data_type(), "Int32"))?;
     Ok(Some(arr))
 }
 
@@ -99,17 +87,10 @@ pub(crate) fn extract_optional_float64<'a>(
     let Some(col) = batch.column_by_name(name) else {
         return Ok(None);
     };
-    let arr =
-        col.as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: name.to_string(),
-                message: format!(
-                    "column \"{name}\" has type {} but Float64 is required",
-                    col.data_type()
-                ),
-            })?;
+    let arr = col
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| wrong_type_error(name, path, col.data_type(), "Float64"))?;
     Ok(Some(arr))
 }
 
@@ -120,21 +101,10 @@ pub(crate) fn extract_required_uint32<'a>(
 ) -> Result<&'a UInt32Array, LoadError> {
     let col = batch
         .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing required column \"{name}\""),
-        })?;
+        .ok_or_else(|| missing_column_error(name, path))?;
     col.as_any()
         .downcast_ref::<UInt32Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but UInt32 is required",
-                col.data_type()
-            ),
-        })
+        .ok_or_else(|| wrong_type_error(name, path, col.data_type(), "UInt32"))
 }
 
 pub(crate) fn extract_required_date32<'a>(
@@ -144,21 +114,10 @@ pub(crate) fn extract_required_date32<'a>(
 ) -> Result<&'a Date32Array, LoadError> {
     let col = batch
         .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing required column \"{name}\""),
-        })?;
+        .ok_or_else(|| missing_column_error(name, path))?;
     col.as_any()
         .downcast_ref::<Date32Array>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Date32 is required",
-                col.data_type()
-            ),
-        })
+        .ok_or_else(|| wrong_type_error(name, path, col.data_type(), "Date32"))
 }
 
 #[cfg(test)]

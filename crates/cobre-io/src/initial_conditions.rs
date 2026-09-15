@@ -508,14 +508,13 @@ fn validate_past_defluences_non_negative(
 
 // ── Conversion ────────────────────────────────────────────────────────────────
 
-/// Convert validated raw data into [`InitialConditions`].
-///
-/// Precondition: [`validate_raw`] has returned `Ok(())` for this data.
-/// All arrays are sorted by `hydro_id` to satisfy the declaration-order
-/// invariance requirement.
-fn convert(raw: RawInitialConditions) -> InitialConditions {
-    let mut storage: Vec<HydroStorage> = raw
-        .storage
+fn parse_validated_date(date_str: &str) -> NaiveDate {
+    NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .unwrap_or_else(|_| unreachable!("date already validated"))
+}
+
+fn convert_storage(entries: Vec<RawHydroStorage>) -> Vec<HydroStorage> {
+    let mut storage: Vec<HydroStorage> = entries
         .into_iter()
         .map(|e| HydroStorage {
             hydro_id: EntityId(e.hydro_id),
@@ -523,26 +522,25 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         })
         .collect();
     storage.sort_by_key(|e| e.hydro_id.0);
+    storage
+}
 
-    let mut filling_storage: Vec<HydroStorage> = raw
-        .filling_storage
-        .into_iter()
-        .map(|e| HydroStorage {
-            hydro_id: EntityId(e.hydro_id),
-            value_hm3: e.value_hm3,
-        })
-        .collect();
-    filling_storage.sort_by_key(|e| e.hydro_id.0);
+/// Convert validated raw data into [`InitialConditions`].
+///
+/// Precondition: [`validate_raw`] has returned `Ok(())` for this data.
+/// All arrays are sorted by `hydro_id` to satisfy the declaration-order
+/// invariance requirement.
+fn convert(raw: RawInitialConditions) -> InitialConditions {
+    let storage = convert_storage(raw.storage);
+    let filling_storage = convert_storage(raw.filling_storage);
 
     let mut recent_observations: Vec<RecentObservation> = raw
         .recent_observations
         .into_iter()
         .map(|e| RecentObservation {
             hydro_id: EntityId(e.hydro_id),
-            start_date: NaiveDate::parse_from_str(&e.start_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("start_date already validated")),
-            end_date: NaiveDate::parse_from_str(&e.end_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("end_date already validated")),
+            start_date: parse_validated_date(&e.start_date),
+            end_date: parse_validated_date(&e.end_date),
             value_m3s: e.value_m3s,
         })
         .collect();
@@ -553,10 +551,8 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .into_iter()
         .map(|e| AnticipatedCommitmentHistory {
             thermal_id: EntityId(e.thermal_id),
-            start_date: NaiveDate::parse_from_str(&e.start_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("start_date already validated")),
-            end_date: NaiveDate::parse_from_str(&e.end_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("end_date already validated")),
+            start_date: parse_validated_date(&e.start_date),
+            end_date: parse_validated_date(&e.end_date),
             value_mw: e.value_mw,
         })
         .collect();
@@ -567,10 +563,8 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .into_iter()
         .map(|e| HydroPastDefluence {
             hydro_id: EntityId(e.hydro_id),
-            start_date: NaiveDate::parse_from_str(&e.start_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("start_date already validated")),
-            end_date: NaiveDate::parse_from_str(&e.end_date, "%Y-%m-%d")
-                .unwrap_or_else(|_| unreachable!("end_date already validated")),
+            start_date: parse_validated_date(&e.start_date),
+            end_date: parse_validated_date(&e.end_date),
             value_m3s: e.value_m3s,
         })
         .collect();

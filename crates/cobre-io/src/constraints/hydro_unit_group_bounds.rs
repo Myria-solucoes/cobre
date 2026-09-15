@@ -98,13 +98,13 @@ pub struct HydroUnitGroupBoundsRow {
     pub hydro_unit_group_id: EntityId,
     /// Stage ID.
     pub stage_id: i32,
-    /// Minimum turbined flow override (m³/s).
+    /// Minimum turbined flow (m³/s).
     pub min_turbined_m3s: Option<f64>,
-    /// Maximum turbined flow override (m³/s).
+    /// Maximum turbined flow (m³/s).
     pub max_turbined_m3s: Option<f64>,
-    /// Minimum generation override (MW).
+    /// Minimum generation (MW).
     pub min_generation_mw: Option<f64>,
-    /// Maximum generation override (MW).
+    /// Maximum generation (MW).
     pub max_generation_mw: Option<f64>,
     /// `None` applies at the stage level; `Some(b)` applies to block `b` only.
     pub block_id: Option<i32>,

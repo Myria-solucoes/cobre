@@ -130,8 +130,6 @@ fn build_cut_table(
     builder.end_table(tab)
 }
 
-/// Build one `EntitySlot` nested table. Has no inner vector, so — unlike
-/// [`build_cut_table`] — nothing precedes the `start_table`/`end_table` pair.
 fn build_entity_slot_table(
     builder: &mut FlatBufferBuilder<'_>,
     slot: &EntitySlot,
@@ -147,8 +145,6 @@ fn build_entity_slot_table(
     builder.end_table(tab)
 }
 
-/// Build one `ManifestNode` nested table. No inner vector, so nothing precedes
-/// the `start_table`/`end_table` pair.
 fn build_manifest_node_table(
     builder: &mut FlatBufferBuilder<'_>,
     node: &ManifestNode,

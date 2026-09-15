@@ -159,12 +159,6 @@ pub fn parse_hydro_energy_productivity(
 /// once, no matter how many files or batches carry the column.
 static STALE_REFERENCE_VOLUME_NOTICE: std::sync::Once = std::sync::Once::new();
 
-/// Emits a one-time deprecation notice when a batch still carries the retired
-/// `reference_volume_hm3` column, then returns so the caller ignores it.
-///
-/// Warn-and-ignore (not hard-error) keeps an older parquet loadable while
-/// surfacing the now-inert column; hard-erroring would break an old file over a
-/// purely structural removal.
 fn warn_on_stale_reference_volume_column(batch: &arrow::record_batch::RecordBatch) {
     if batch
         .schema()

@@ -106,14 +106,14 @@ pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext)
             && hydro.min_outflow_m3s > max_outflow
         {
             ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/hydros.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: min_outflow_m3s ({}) > max_outflow_m3s ({}); outflow bounds are inconsistent",
-                        hydro.min_outflow_m3s, max_outflow
-                    ),
-                );
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: min_outflow_m3s ({}) > max_outflow_m3s ({}); outflow bounds are inconsistent",
+                    hydro.min_outflow_m3s, max_outflow
+                ),
+            );
         }
 
         if hydro.min_generation_mw > hydro.max_generation_mw {

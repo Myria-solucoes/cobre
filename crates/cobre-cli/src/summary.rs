@@ -591,11 +591,8 @@ pub struct SimulationSummary {
     /// `total_time_ms`.
     pub total_solve_time_seconds: Option<f64>,
 
-    /// Effective parallelism = `n_ranks * n_workers_local`. Used to
-    /// normalize cumulative solve times into per-worker wall-time
-    /// equivalents for the time-split breakdown. `None` when the
-    /// summary was reconstructed from `metadata.json` and parallelism
-    /// is unknown.
+    /// Effective parallelism = `n_ranks * n_workers_local`. See
+    /// [`TrainingSummary::parallelism`].
     pub parallelism: Option<u32>,
 }
 

@@ -231,7 +231,6 @@ fn estimate_seasonal_stats_two_hydros_twelve_seasons() {
         estimate_seasonal_stats_with_season_map(&observations, &stages, &entity_ids, None).unwrap();
     assert_eq!(stats.len(), 24, "expected 2 hydros × 12 seasons = 24 rows");
 
-    // All rows must be for entity 1 or 2.
     for s in &stats {
         assert!(
             s.entity_id == EntityId::from(1) || s.entity_id == EntityId::from(2),
@@ -240,7 +239,6 @@ fn estimate_seasonal_stats_two_hydros_twelve_seasons() {
         );
     }
 
-    // Output must be sorted by (entity_id, stage_id).
     for w in stats.windows(2) {
         assert!(
             (w[0].entity_id.0, w[0].stage_id) <= (w[1].entity_id.0, w[1].stage_id),
@@ -1076,12 +1074,10 @@ fn estimate_correlation_multi_season_schedule_maps_stages_to_seasons() {
         assert_eq!(entry.profile_name, format!("season_{}", i % n_seasons));
     }
 
-    // Spot-check specific mappings
     assert_eq!(corr.schedule[0].profile_name, "season_0");
     assert_eq!(corr.schedule[1].profile_name, "season_1");
     assert_eq!(corr.schedule[4].profile_name, "season_0");
 
-    // All schedule entries reference valid stages
     let valid_ids: std::collections::HashSet<_> = stages.iter().map(|s| s.id).collect();
     for entry in &corr.schedule {
         assert!(valid_ids.contains(&entry.stage_id));

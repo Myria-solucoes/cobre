@@ -348,7 +348,7 @@ pub fn write_row_selection_records(
         Arc::new(active_after_budget_builder.finish()),
     ];
 
-    let batch = RecordBatch::try_new(Arc::clone(&schema), columns)
+    let batch = RecordBatch::try_new(schema, columns)
         .map_err(|e| OutputError::serialization("cut_selection", e.to_string()))?;
 
     write_parquet_atomic(&dir.join("iterations.parquet"), &batch, config)
@@ -468,7 +468,7 @@ mod tests {
         let records = vec![
             make_record(1, Some(10.0)),
             make_record(2, Some(5.0)),
-            make_record(3, None), // gap_percent is None for record 3 (index 2)
+            make_record(3, None),
         ];
         let batch = build_convergence_batch(&records, "statistical").expect("batch must be built");
 
@@ -648,7 +648,6 @@ mod tests {
         write_parquet_atomic(&path, &batch, &config).expect("write must succeed");
         assert!(path.exists(), "convergence.parquet must exist after write");
 
-        // Read back and verify row count + column values.
         let read_batch = read_first_batch(&path);
         assert_eq!(read_batch.num_rows(), 5, "must have 5 rows");
 
@@ -659,7 +658,6 @@ mod tests {
             "schema must match convergence_schema()"
         );
 
-        // Verify iteration column values [1, 2, 3, 4, 5] as Int32.
         let iteration_col = read_batch
             .column_by_name("iteration")
             .expect("iteration column must exist");
@@ -670,7 +668,6 @@ mod tests {
         let iteration_values: Vec<i32> = (0..5).map(|i| iteration_arr.value(i)).collect();
         assert_eq!(iteration_values, vec![1, 2, 3, 4, 5]);
 
-        // Verify lower_bound column.
         let lb_col = read_batch
             .column_by_name("lower_bound")
             .expect("lower_bound column must exist");
@@ -698,7 +695,6 @@ mod tests {
 
         write_parquet_atomic(&path, &batch, &config).expect("write must succeed");
 
-        // The .tmp file must not remain after a successful write.
         let tmp_path = path.with_extension("parquet.tmp");
         assert!(
             !tmp_path.exists(),
@@ -754,7 +750,6 @@ mod tests {
         let timing_path = tmp.path().join("training/timing/iterations.parquet");
         assert!(timing_path.exists(), "iterations.parquet must exist");
 
-        // Verify zero-row convergence file with correct schema.
         let file = std::fs::File::open(&conv_path).expect("file must open");
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("builder created");
         let schema = builder.schema().clone();
@@ -932,7 +927,6 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 10);
 
-        // Verify nullable columns: row 0 has Some values, row 1 has None.
         let budget_evicted_col = batch.column_by_name("budget_evicted").unwrap();
         assert!(
             !budget_evicted_col.is_null(0),
@@ -953,7 +947,6 @@ mod tests {
             "row 1: active_after_budget None must be null"
         );
 
-        // Verify the actual values for row 0.
         let budget_evicted_arr = budget_evicted_col
             .as_any()
             .downcast_ref::<arrow::array::Int32Array>()

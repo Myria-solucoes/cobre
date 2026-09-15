@@ -190,13 +190,7 @@ impl PrecomputedNormal {
     // Accessors
     // -----------------------------------------------------------------------
 
-    /// Stage-level mean for the given stage and entity indices.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `stage >= n_stages` or `entity >= n_entities`.
-    #[must_use]
-    pub fn mean(&self, stage: usize, entity: usize) -> f64 {
+    fn debug_assert_in_bounds(&self, stage: usize, entity: usize) {
         debug_assert!(
             stage < self.n_stages,
             "stage index {stage} is out of bounds (n_stages = {})",
@@ -207,6 +201,16 @@ impl PrecomputedNormal {
             "entity index {entity} is out of bounds (n_entities = {})",
             self.n_entities
         );
+    }
+
+    /// Stage-level mean for the given stage and entity indices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `stage >= n_stages` or `entity >= n_entities`.
+    #[must_use]
+    pub fn mean(&self, stage: usize, entity: usize) -> f64 {
+        self.debug_assert_in_bounds(stage, entity);
         self.mean[stage * self.n_entities + entity]
     }
 
@@ -217,16 +221,7 @@ impl PrecomputedNormal {
     /// Panics if `stage >= n_stages` or `entity >= n_entities`.
     #[must_use]
     pub fn std(&self, stage: usize, entity: usize) -> f64 {
-        debug_assert!(
-            stage < self.n_stages,
-            "stage index {stage} is out of bounds (n_stages = {})",
-            self.n_stages
-        );
-        debug_assert!(
-            entity < self.n_entities,
-            "entity index {entity} is out of bounds (n_entities = {})",
-            self.n_entities
-        );
+        self.debug_assert_in_bounds(stage, entity);
         self.std[stage * self.n_entities + entity]
     }
 
@@ -241,16 +236,7 @@ impl PrecomputedNormal {
     /// `block >= max_blocks`.
     #[must_use]
     pub fn block_factor(&self, stage: usize, entity: usize, block: usize) -> f64 {
-        debug_assert!(
-            stage < self.n_stages,
-            "stage index {stage} is out of bounds (n_stages = {})",
-            self.n_stages
-        );
-        debug_assert!(
-            entity < self.n_entities,
-            "entity index {entity} is out of bounds (n_entities = {})",
-            self.n_entities
-        );
+        self.debug_assert_in_bounds(stage, entity);
         debug_assert!(
             block < self.max_blocks,
             "block index {block} is out of bounds (max_blocks = {})",

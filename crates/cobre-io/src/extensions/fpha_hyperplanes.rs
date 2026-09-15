@@ -190,7 +190,6 @@ pub fn parse_fpha_hyperplanes(path: &Path) -> Result<Vec<FphaHyperplaneRow>, Loa
         }
     }
 
-    // Null stage_id sorts first (None < Some(_)).
     rows.sort_by(|a, b| {
         a.hydro_id
             .0

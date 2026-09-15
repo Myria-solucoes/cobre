@@ -216,7 +216,6 @@ impl ProgressRenderer {
     fn finish(&mut self) {
         match self {
             Self::Interactive(r) => r.finish(),
-            // Log mode keeps no transient state.
             Self::Log(_) => {}
         }
     }

@@ -45,7 +45,6 @@ use crate::model::PySystem;
 
 // ── Error conversion ──────────────────────────────────────────────────────────
 
-/// Map a [`LoadError`] variant to its `&'static str` kind name.
 fn load_error_kind(err: &LoadError) -> &'static str {
     match err {
         LoadError::IoError { .. } => "IoError",
@@ -80,8 +79,6 @@ fn load_validate_config(
     }
 }
 
-/// Convert a [`LoadError`] to the appropriate Python exception — a thin shim over
-/// the single [`crate::errors::convert_error`] mapping site.
 fn convert_load_error(err: &LoadError) -> PyErr {
     convert_error(Load(err))
 }

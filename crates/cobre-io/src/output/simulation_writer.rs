@@ -582,44 +582,39 @@ impl SimulationParquetWriter {
             .map(|l| (l.id.0, 1.0 - l.losses_percent / 100.0))
             .collect();
 
+        let create_subdir = |name: &str| -> Result<(), OutputError> {
+            let dir = sim_dir.join(name);
+            std::fs::create_dir_all(&dir).map_err(|e| OutputError::io(&dir, e))
+        };
+
         // costs is unconditional (every system has stages); siblings gate on count > 0.
-        std::fs::create_dir_all(sim_dir.join("costs"))
-            .map_err(|e| OutputError::io(sim_dir.join("costs"), e))?;
+        create_subdir("costs")?;
 
         if system.n_hydros() > 0 {
-            std::fs::create_dir_all(sim_dir.join("hydros"))
-                .map_err(|e| OutputError::io(sim_dir.join("hydros"), e))?;
+            create_subdir("hydros")?;
             // inflow_lags is gated on hydro count, not its own.
-            std::fs::create_dir_all(sim_dir.join("inflow_lags"))
-                .map_err(|e| OutputError::io(sim_dir.join("inflow_lags"), e))?;
+            create_subdir("inflow_lags")?;
             // Gated on hydro count, not a multi-bus predicate: every hydro
             // study emits this file, single-bus systems included.
-            std::fs::create_dir_all(sim_dir.join("hydro_bus_generation"))
-                .map_err(|e| OutputError::io(sim_dir.join("hydro_bus_generation"), e))?;
+            create_subdir("hydro_bus_generation")?;
         }
         if system.n_thermals() > 0 {
-            std::fs::create_dir_all(sim_dir.join("thermals"))
-                .map_err(|e| OutputError::io(sim_dir.join("thermals"), e))?;
+            create_subdir("thermals")?;
         }
         if system.n_lines() > 0 {
-            std::fs::create_dir_all(sim_dir.join("exchanges"))
-                .map_err(|e| OutputError::io(sim_dir.join("exchanges"), e))?;
+            create_subdir("exchanges")?;
         }
         if system.n_buses() > 0 {
-            std::fs::create_dir_all(sim_dir.join("buses"))
-                .map_err(|e| OutputError::io(sim_dir.join("buses"), e))?;
+            create_subdir("buses")?;
         }
         if system.n_pumping_stations() > 0 {
-            std::fs::create_dir_all(sim_dir.join("pumping_stations"))
-                .map_err(|e| OutputError::io(sim_dir.join("pumping_stations"), e))?;
+            create_subdir("pumping_stations")?;
         }
         if system.n_contracts() > 0 {
-            std::fs::create_dir_all(sim_dir.join("contracts"))
-                .map_err(|e| OutputError::io(sim_dir.join("contracts"), e))?;
+            create_subdir("contracts")?;
         }
         if system.n_non_controllable_sources() > 0 {
-            std::fs::create_dir_all(sim_dir.join("non_controllables"))
-                .map_err(|e| OutputError::io(sim_dir.join("non_controllables"), e))?;
+            create_subdir("non_controllables")?;
         }
         // Gate on a declared travel-time arc, not on hydro count: a non-travel-time
         // study must emit no `in_transit` directory (byte-neutral). Mirrors
@@ -630,14 +625,11 @@ impl SimulationParquetWriter {
             .iter()
             .any(|h| h.travel_time_hours.is_some_and(|t| t > 0.0) && h.downstream_id.is_some());
         if declares_travel_time {
-            std::fs::create_dir_all(sim_dir.join("in_transit"))
-                .map_err(|e| OutputError::io(sim_dir.join("in_transit"), e))?;
-            std::fs::create_dir_all(sim_dir.join("transit_seed"))
-                .map_err(|e| OutputError::io(sim_dir.join("transit_seed"), e))?;
+            create_subdir("in_transit")?;
+            create_subdir("transit_seed")?;
         }
         if !system.generic_constraints().is_empty() {
-            std::fs::create_dir_all(sim_dir.join("violations/generic"))
-                .map_err(|e| OutputError::io(sim_dir.join("violations/generic"), e))?;
+            create_subdir("violations/generic")?;
         }
         // Gate on declared post-study stages, not on thermal count: a study with
         // no post-study stages must emit no `anticipated_lanes` directory
@@ -646,8 +638,7 @@ impl SimulationParquetWriter {
             .post_study_stages()
             .is_some_and(|ps| !ps.stages.is_empty());
         if declares_post_study {
-            std::fs::create_dir_all(sim_dir.join("anticipated_lanes"))
-                .map_err(|e| OutputError::io(sim_dir.join("anticipated_lanes"), e))?;
+            create_subdir("anticipated_lanes")?;
         }
 
         Ok(Self {

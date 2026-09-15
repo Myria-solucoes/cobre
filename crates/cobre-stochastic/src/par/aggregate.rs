@@ -298,7 +298,6 @@ mod tests {
         // Representative date = Jan 15 (earliest in the group).
         assert_eq!(date, NaiveDate::from_ymd_opt(2020, 1, 15).unwrap());
 
-        // Duration-weighted average: (100*31 + 200*29 + 300*31) / (31+29+31)
         let expected = (v_jan * 31.0 + v_feb * 29.0 + v_mar * 31.0) / (31.0 + 29.0 + 31.0);
         assert!(
             (value - expected).abs() < 1e-10,
@@ -350,7 +349,6 @@ mod tests {
         let season_map = make_quarterly_season_map();
 
         let mut observations: Vec<(EntityId, NaiveDate, f64)> = Vec::new();
-        // Entity 1 and entity 2, all 12 months of 2020.
         for entity_id in [1, 2] {
             for month in 1u32..=12 {
                 observations.push(obs(entity_id, 2020, month, f64::from(month)));
@@ -524,8 +522,6 @@ mod tests {
             );
         }
 
-        // Directly verify the internal days_in_month calculation.
-        // Feb 2020 (leap year) = 29 days; Feb 2021 (non-leap) = 28 days.
         let feb_2020 = NaiveDate::from_ymd_opt(2020, 2, 15).unwrap();
         let feb_2021 = NaiveDate::from_ymd_opt(2021, 2, 15).unwrap();
         assert_eq!(

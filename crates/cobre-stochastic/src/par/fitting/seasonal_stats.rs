@@ -297,8 +297,6 @@ pub fn estimate_seasonal_stats_with_season_map(
         let variance = values.iter().map(|&v| (v - mean) * (v - mean)).sum::<f64>() / n as f64;
         let std = variance.sqrt();
 
-        // Degenerate buckets get the forced (constant, 0) override (see
-        // HistoryClass); Default keeps the empirical (mean, std) above.
         let (final_mean, final_std) = classify_history(&values)
             .stats_override()
             .unwrap_or((mean, std));

@@ -77,8 +77,8 @@ const MIN_CORRELATION_PAIRS: usize = 30;
 ///
 /// # Errors
 ///
-/// Returns [`StochasticError::InsufficientData`] when seasonal stats are
-/// empty but hydros are present, or when residual computation fails.
+/// Returns [`StochasticError::InsufficientData`] when `seasonal_stats` is empty
+/// but `hydro_ids` is non-empty (inconsistent inputs).
 ///
 /// # Examples
 ///

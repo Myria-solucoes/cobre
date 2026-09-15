@@ -981,8 +981,6 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    // ── Shared test helpers ───────────────────────────────────────────────────
-
     // ── ThermalBoundsRow tests ────────────────────────────────────────────────
 
     fn thermal_schema() -> Arc<Schema> {

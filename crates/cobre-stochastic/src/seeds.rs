@@ -363,8 +363,6 @@ mod tests {
         hydro_1_earlier.operational_start_date = d(2024, 1, 1);
         let mut hydro_0_later = make_hydro(0);
         hydro_0_later.operational_start_date = d(2025, 6, 1);
-        // Canonical order: hydro id=1 (earlier date) at position 0, hydro
-        // id=0 (later date) at position 1 — id-descending, not id-ascending.
         let hydros = vec![hydro_1_earlier, hydro_0_later];
 
         let record = vec![

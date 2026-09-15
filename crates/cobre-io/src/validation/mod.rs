@@ -137,9 +137,7 @@ impl ValidationContext {
     /// Creates an empty validation context with no diagnostics.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Adds an error diagnostic to the context.

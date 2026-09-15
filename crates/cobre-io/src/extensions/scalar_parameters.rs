@@ -358,8 +358,9 @@ fn convert_per_stage(
         }
     }
 
-    let dense: Vec<f64> = sorted.into_iter().map(|(_, v)| v).collect();
-    Ok(ParameterKind::PerStage { values: dense })
+    Ok(ParameterKind::PerStage {
+        values: sorted.into_iter().map(|(_, v)| v).collect(),
+    })
 }
 
 /// Build a `ParameterKind::Seasonal`, rejecting non-finite values and duplicate

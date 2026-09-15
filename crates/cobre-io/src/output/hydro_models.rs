@@ -676,14 +676,12 @@ mod tests {
         let parsed = parse_fpha_hyperplanes(&path).expect("parse must succeed");
         assert_eq!(parsed.len(), 5);
 
-        // First 3 rows: hydro_id=5, plane_id 0,1,2
         assert_eq!(parsed[0].hydro_id, EntityId::from(5));
         assert_eq!(parsed[0].plane_id, 0);
         assert_eq!(parsed[1].hydro_id, EntityId::from(5));
         assert_eq!(parsed[1].plane_id, 1);
         assert_eq!(parsed[2].hydro_id, EntityId::from(5));
         assert_eq!(parsed[2].plane_id, 2);
-        // Last 2 rows: hydro_id=10, plane_id 0,1
         assert_eq!(parsed[3].hydro_id, EntityId::from(10));
         assert_eq!(parsed[3].plane_id, 0);
         assert_eq!(parsed[4].hydro_id, EntityId::from(10));
@@ -702,7 +700,6 @@ mod tests {
             .join("hydro_models")
             .join("fpha_hyperplanes.parquet");
 
-        // Parent directories do not exist yet.
         assert!(
             !path.parent().unwrap().exists(),
             "parent dir must not exist before write"
